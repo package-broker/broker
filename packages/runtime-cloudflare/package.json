@@ -1,0 +1,27 @@
+{
+  "name": "@package-broker/runtime-cloudflare",
+  "version": "0.0.0",
+  "description": "Package Broker Cloudflare Workers runtime",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./entry": {
+      "types": "./dist/entry.d.ts",
+      "default": "./dist/entry.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "wrangler.toml",
+    "!dist/**/*.test.*"
+  ],
+  "dependencies": {
+    "@package-broker/core": "workspace:^"
+  }
+}

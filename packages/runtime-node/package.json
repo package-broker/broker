@@ -1,0 +1,26 @@
+{
+  "name": "@package-broker/runtime-node",
+  "version": "0.0.0",
+  "description": "Package Broker Node runtime",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./entry": {
+      "types": "./dist/entry.d.ts",
+      "default": "./dist/entry.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "dependencies": {
+    "@package-broker/core": "workspace:^"
+  }
+}

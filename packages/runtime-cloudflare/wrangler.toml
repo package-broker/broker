@@ -1,0 +1,12 @@
+name = "package-broker"
+main = "../../.pb/cloudflare/worker.js"
+compatibility_date = "2026-10-01"
+
+# Bindings are created by name at deploy time; no resource ids are committed.
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "<database-name>"
+#
+# [[r2_buckets]]
+# binding = "STORAGE"
+# bucket_name = "<bucket-name>"

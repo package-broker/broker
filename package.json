@@ -1,0 +1,37 @@
+{
+  "name": "package-broker-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.5.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -b && pnpm --filter @package-broker/ui run build",
+    "test": "vitest run",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc -b",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "pb": "node packages/cli/dist/bin.js",
+    "bundle": "pnpm pb build --config broker.config.ts --target cloudflare && pnpm pb build --config broker.config.ts --target node",
+    "check:treeshake": "node scripts/check-treeshake.mjs",
+    "client-matrix": "node scripts/client-matrix.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@package-broker/cli": "workspace:^",
+    "@package-broker/core": "workspace:^",
+    "@package-broker/plugin-github": "workspace:^",
+    "@package-broker/plugin-sso-oidc": "workspace:^",
+    "@package-broker/runtime-cloudflare": "workspace:^",
+    "@package-broker/runtime-node": "workspace:^",
+    "@types/node": "catalog:",
+    "eslint": "catalog:",
+    "globals": "catalog:",
+    "prettier": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.pb/
+*.tsbuildinfo
+.wrangler/
+.env
+.env.*
+!.env.op
+coverage/
+.DS_Store

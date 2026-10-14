@@ -1,0 +1,6 @@
+pnpm-lock.yaml
+LICENSE
+dist
+.pb
+.release-please-manifest.json
+CHANGELOG.md

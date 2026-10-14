@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/runtime-cloudflare" },
+    { "path": "packages/runtime-node" },
+    { "path": "packages/cli" },
+    { "path": "packages/ui" },
+    { "path": "packages/plugin-sso-oidc" },
+    { "path": "packages/plugin-github" }
+  ]
+}

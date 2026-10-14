@@ -1,0 +1,25 @@
+{
+  "name": "@package-broker/plugin-sso-oidc",
+  "version": "0.0.0",
+  "description": "Generic OIDC single sign-on plugin stub",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "peerDependencies": {
+    "@package-broker/core": "^0.0.0"
+  },
+  "devDependencies": {
+    "@package-broker/core": "workspace:^"
+  }
+}

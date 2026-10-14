@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "node",
+  "include-component-in-tag": true,
+  "tag-separator": "-",
+  "separate-pull-requests": false,
+  "plugins": [
+    { "type": "node-workspace" },
+    {
+      "type": "linked-versions",
+      "groupName": "product",
+      "components": ["core", "cli", "runtime-cloudflare", "runtime-node", "ui"]
+    }
+  ],
+  "packages": {
+    "packages/core": { "component": "core" },
+    "packages/cli": { "component": "cli" },
+    "packages/runtime-cloudflare": { "component": "runtime-cloudflare" },
+    "packages/runtime-node": { "component": "runtime-node" },
+    "packages/ui": { "component": "ui" },
+    "packages/plugin-sso-oidc": { "component": "plugin-sso-oidc" },
+    "packages/plugin-github": { "component": "plugin-github" }
+  }
+}

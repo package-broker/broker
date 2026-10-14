@@ -1,0 +1,9 @@
+{
+  "packages/core": "0.0.0",
+  "packages/cli": "0.0.0",
+  "packages/runtime-cloudflare": "0.0.0",
+  "packages/runtime-node": "0.0.0",
+  "packages/ui": "0.0.0",
+  "packages/plugin-sso-oidc": "0.0.0",
+  "packages/plugin-github": "0.0.0"
+}

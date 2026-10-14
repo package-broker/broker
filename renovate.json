@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:best-practices", ":semanticCommitTypeAll(chore)", "group:monorepos"],
+  "timezone": "Europe/Warsaw",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 8,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null
+  },
+  "lockFileMaintenance": { "enabled": true, "automerge": true },
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/**", "github/**"],
+      "pinDigests": false
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["!actions/**", "!github/**"],
+      "pinDigests": true,
+      "groupName": "third-party actions"
+    },
+    {
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
+    },
+    { "matchDepTypes": ["dependencies"], "matchUpdateTypes": ["patch"], "automerge": true },
+    {
+      "matchPackageNames": ["wrangler", "@cloudflare/**", "workerd", "miniflare"],
+      "groupName": "cloudflare toolchain"
+    },
+    { "matchPackageNames": ["vitest", "@vitest/**"], "groupName": "vitest" },
+    { "matchPackageNames": ["@playwright/test", "playwright"], "groupName": "playwright" },
+    {
+      "matchPackageNames": ["react", "react-dom", "@types/react", "@types/react-dom"],
+      "groupName": "react"
+    },
+    {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["node"],
+      "allowedVersions": "/^(24|26)\\./"
+    },
+    { "matchUpdateTypes": ["major"], "dependencyDashboardApproval": true }
+  ]
+}

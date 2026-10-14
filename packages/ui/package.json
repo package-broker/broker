@@ -1,0 +1,22 @@
+{
+  "name": "@package-broker/ui",
+  "version": "0.0.0",
+  "description": "Package Broker static UI assets",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "public",
+    "!dist/**/*.test.*"
+  ],
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

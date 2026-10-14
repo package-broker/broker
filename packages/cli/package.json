@@ -1,0 +1,27 @@
+{
+  "name": "@package-broker/cli",
+  "version": "0.0.0",
+  "description": "Package Broker CLI (pb)",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "pb": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "dependencies": {
+    "@package-broker/core": "workspace:^",
+    "@package-broker/runtime-cloudflare": "workspace:^",
+    "@package-broker/runtime-node": "workspace:^",
+    "esbuild": "catalog:"
+  }
+}

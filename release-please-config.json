@@ -5,7 +5,10 @@
   "tag-separator": "-",
   "separate-pull-requests": false,
   "plugins": [
-    { "type": "node-workspace" },
+    {
+      "type": "node-workspace",
+      "merge": false
+    },
     {
       "type": "linked-versions",
       "groupName": "product",
@@ -13,12 +16,43 @@
     }
   ],
   "packages": {
-    "packages/core": { "component": "core" },
-    "packages/cli": { "component": "cli" },
-    "packages/runtime-cloudflare": { "component": "runtime-cloudflare" },
-    "packages/runtime-node": { "component": "runtime-node" },
-    "packages/ui": { "component": "ui" },
-    "packages/plugin-sso-oidc": { "component": "plugin-sso-oidc" },
-    "packages/plugin-github": { "component": "plugin-github" }
-  }
+    "packages/core": {
+      "component": "core",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/cli": {
+      "component": "cli",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/runtime-cloudflare": {
+      "component": "runtime-cloudflare",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/runtime-node": {
+      "component": "runtime-node",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/ui": {
+      "component": "ui",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/plugin-sso-oidc": {
+      "component": "plugin-sso-oidc",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/plugin-github": {
+      "component": "plugin-github",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    }
+  },
+  "versioning": "prerelease",
+  "prerelease-type": "rc",
+  "prerelease": true
 }

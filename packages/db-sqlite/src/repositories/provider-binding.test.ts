@@ -10,7 +10,7 @@ import type {
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createLoginWriter, type LoginPlanWithAutoJoin } from './login.js';
-import { rebindProvider } from './provider-binding.js';
+import { readProviderBinding, rebindProvider } from './provider-binding.js';
 import { createUserRepository } from './user.js';
 
 const OLD = '2026-10-14T08:00:00.000Z';
@@ -171,6 +171,22 @@ function recording(inner: SqlExecutor): { executor: ScalarSqlExecutor; seen: Sca
       seen.push(...statements);
       return inner.batch(statements);
     },
+  };
+  return { executor, seen };
+}
+
+function recordingReads(inner: SqlExecutor): {
+  executor: ScalarSqlExecutor;
+  seen: ScalarStatement[];
+} {
+  const seen: ScalarStatement[] = [];
+  const executor: ScalarSqlExecutor = {
+    driver: inner.driver,
+    async all<R = Record<string, unknown>>(statement: ScalarStatement): Promise<R[]> {
+      seen.push(statement);
+      return inner.all<R>(statement);
+    },
+    batch: (statements) => inner.batch(statements),
   };
   return { executor, seen };
 }
@@ -628,4 +644,89 @@ describe('rebindProvider', () => {
       ]);
     });
   });
+});
+
+describe('readProviderBinding', () => {
+  function read(
+    ctx: OrgContext = a,
+    options: { readonly provider?: unknown; readonly exec?: ScalarSqlExecutor } = {},
+  ) {
+    const provider = 'provider' in options ? options.provider : DEX;
+    return readProviderBinding(options.exec ?? executor, ctx, provider as string);
+  }
+
+  it('returns the stored anchor and createdAt for the organization and provider', async () => {
+    await seed();
+    const stored = await rows<{ created_at: string }>(
+      'SELECT created_at FROM identity_provider_binding WHERE org_id = ? AND provider = ?',
+      a.orgId,
+      DEX,
+    );
+    expect(await read()).toEqual({ anchor: DEX_ANCHOR, createdAt: stored[0]?.created_at });
+  });
+
+  it('reads the other provider of the same organization', async () => {
+    await seed();
+    expect(await read(a, { provider: CF })).toEqual({
+      anchor: CF_ANCHOR,
+      createdAt: expect.any(String) as string,
+    });
+  });
+
+  it('returns null for a binding that exists only in another organization', async () => {
+    await exec([binding(b, DEX, DEX_ANCHOR)]);
+    expect(await read(a, { provider: DEX })).toBeNull();
+    expect(await read(b, { provider: DEX })).toEqual({
+      anchor: DEX_ANCHOR,
+      createdAt: expect.any(String) as string,
+    });
+  });
+
+  it('returns null for a provider with no binding even when identities exist', async () => {
+    await seed();
+    await exec([
+      identity(a, '01J0IDENTO00000000000000OO', USER_Y, 'orphan', 'sub-o', 'y@example.test'),
+    ]);
+    expect(await read(a, { provider: 'orphan' })).toBeNull();
+  });
+
+  it('uses one executor all call with scalar parameters and no literals', async () => {
+    await seed();
+    const counted = countCalls(executor);
+    const spy = recordingReads(counted.executor);
+    await read(a, { provider: DEX, exec: spy.executor });
+
+    expect(counted.counts()).toEqual({ all: 1, batch: 0 });
+    expect(spy.seen).toHaveLength(1);
+    const statement = spy.seen[0] as ScalarStatement;
+    for (const param of statement.params) {
+      expect(['string', 'number'].includes(typeof param) || param === null).toBe(true);
+    }
+    expect(statement.params).toContain(a.orgId);
+    expect(statement.params).toContain(DEX);
+    expect(statement.sql).not.toContain(DEX);
+    expect(statement.sql).not.toContain(a.orgId);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['upper case', 'Dex'],
+    ['space', 'de x'],
+    ['leading dash', '-dex'],
+    ['trailing dash', 'dex-'],
+    ['SQL-looking', "dex' OR '1'='1"],
+    ['too long', 'a'.repeat(65)],
+    ['reserved', 'local'],
+    ['number', 42],
+    ['null', null],
+    ['undefined', undefined],
+  ])(
+    'throws TypeError for a provider id that is %s, with no executor call',
+    async (_l, provider) => {
+      await seed();
+      const counted = countCalls(executor);
+      await expect(read(a, { provider, exec: counted.executor })).rejects.toBeInstanceOf(TypeError);
+      expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+    },
+  );
 });

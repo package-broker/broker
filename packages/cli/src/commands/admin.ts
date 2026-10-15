@@ -17,7 +17,10 @@ import {
   resetLocalLogin,
 } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
-import { rebindProvider } from '@package-broker/db-sqlite/repositories/provider-binding';
+import {
+  readProviderBinding,
+  rebindProvider,
+} from '@package-broker/db-sqlite/repositories/provider-binding';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import { createD1HttpExecutor } from '../cloudflare/d1-http-executor.js';
 
@@ -39,7 +42,8 @@ export interface AdminOptions {
   readonly stdoutIsTTY?: boolean;
 }
 
-type Command = 'admin bootstrap' | 'admin reset-local' | 'admin rebind-provider';
+type Command =
+  'admin bootstrap' | 'admin reset-local' | 'admin rebind-provider' | 'admin show-provider-binding';
 
 const SIGNALS = ['SIGINT', 'SIGTERM'] as const;
 const RESPONSE_READ_FAILED = 'd1 http response read failed';
@@ -412,6 +416,62 @@ export async function runAdminRebindProvider(o: RebindProviderOptions): Promise<
         command,
         'outcome unknown; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong',
       );
+      return 7;
+    }
+    say(command, `failed (${errorName(error)})`);
+    return 1;
+  } finally {
+    await opened?.close().catch(() => undefined);
+  }
+}
+
+export interface ShowProviderBindingOptions {
+  readonly provider: string;
+  readonly target: AdminTarget;
+}
+
+export async function runAdminShowProviderBinding(o: ShowProviderBindingOptions): Promise<number> {
+  const command = 'admin show-provider-binding';
+  if (
+    typeof o.provider !== 'string' ||
+    !isValidProviderId(o.provider) ||
+    isReservedProviderId(o.provider)
+  ) {
+    say(command, 'invalid_provider');
+    return 2;
+  }
+
+  let opened: Opened | null = null;
+  try {
+    opened = openTarget(command, o.target);
+    if (opened === null) return 2;
+
+    const organization = await createOrganizationBootstrap(opened.executor).findSingleton();
+    if (organization === null) {
+      say(command, 'organization not found; run pb bootstrap or pb cloudflare bootstrap first');
+      return 5;
+    }
+
+    const binding = await readProviderBinding(
+      opened.executor,
+      orgContext(organization.id),
+      o.provider,
+    );
+    if (binding === null) {
+      say(command, 'no_binding; nothing is bound for that provider');
+      return 6;
+    }
+    console.log(
+      JSON.stringify({
+        provider: o.provider,
+        anchor: binding.anchor,
+        createdAt: binding.createdAt,
+      }),
+    );
+    return 0;
+  } catch (error) {
+    if (lostResponse(error)) {
+      say(command, 'outcome unknown; re-running is safe');
       return 7;
     }
     say(command, `failed (${errorName(error)})`);

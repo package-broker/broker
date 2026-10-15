@@ -97,3 +97,29 @@ export async function rebindProvider(
     sessions: results[SESSIONS]?.changes ?? 0,
   };
 }
+
+export interface ProviderBinding {
+  readonly anchor: string;
+  readonly createdAt: string;
+}
+
+/** The trust anchor stored for one provider, or null when nothing is bound. Read-only. */
+export async function readProviderBinding(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  provider: string,
+): Promise<ProviderBinding | null> {
+  providerId(provider);
+
+  const statement = compile(
+    db
+      .selectFrom('identity_provider_binding')
+      .select(['identity_provider_binding.anchor', 'identity_provider_binding.created_at'])
+      .where('identity_provider_binding.org_id', '=', ctx.orgId)
+      .where('identity_provider_binding.provider', '=', provider),
+  ) as ScalarStatement;
+
+  const rows = await executor.all<{ anchor: string; created_at: string }>(statement);
+  const row = rows[0];
+  return row === undefined ? null : { anchor: row.anchor, createdAt: row.created_at };
+}

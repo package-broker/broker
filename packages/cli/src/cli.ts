@@ -6,6 +6,7 @@ import {
   runAdminBootstrap,
   runAdminRebindProvider,
   runAdminResetLocal,
+  runAdminShowProviderBinding,
   runGenerateMasterKey,
   type AdminTarget,
 } from './commands/admin.js';
@@ -22,10 +23,12 @@ const USAGE =
   '       pb admin bootstrap --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin reset-local --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
+  '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage or invalid slug; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 response lost, re-running is safe); 8 admin_role_missing (reset-local)\n' +
-  'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)';
+  'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)\n' +
+  'Exit codes for pb admin show-provider-binding: 0 success; 1 error; 2 usage or invalid provider; 5 organization not bootstrapped; 6 no_binding; nothing is bound for that provider; 7 outcome unknown (D1 response lost, re-running is safe)';
 
 function parseCliArgs(argv: string[]) {
   try {
@@ -74,6 +77,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'cloudflare',
     'database-id',
   ],
+  'admin show-provider-binding': ['provider', 'sqlite', 'cloudflare', 'database-id'],
   version: [],
 };
 
@@ -158,6 +162,14 @@ export async function run(argv: readonly string[]): Promise<number> {
       newAnchor !== undefined
     ) {
       return runAdminRebindProvider({ provider, confirm, expectedAnchor, newAnchor, target });
+    }
+  }
+
+  if (command === 'admin' && subcommand === 'show-provider-binding') {
+    const target = adminTarget(values);
+    const { provider } = values;
+    if (target !== null && provider !== undefined) {
+      return runAdminShowProviderBinding({ provider, target });
     }
   }
 

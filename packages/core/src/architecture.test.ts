@@ -42,7 +42,7 @@ const GENERATED_ALIAS_PACKAGES = ['runtime-node', 'runtime-cloudflare'];
 const ws = (...names: string[]): string[] => names.map((name) => `${WORKSPACE_PREFIX}${name}`);
 
 const RULES: Readonly<Record<string, Rule>> = {
-  core: { allow: ['hono'], testOnly: ['node', 'typescript', 'vitest'] },
+  core: { allow: ['hono'], testOnly: ['eslint', 'node', 'typescript', 'vitest'] },
   'db-sqlite': {
     allow: [...ws('core'), 'kysely'],
     testOnly: [],

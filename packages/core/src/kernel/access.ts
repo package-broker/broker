@@ -6,14 +6,14 @@ export type HookErrorHandler = (event: {
 }) => void;
 
 export interface AccessCheckOptions {
-  /** A hook whose promise has not settled by then counts as hook_error. Default 1000. */
+  /** Hook deadline in ms: a safe integer in 1..600000, otherwise 1000. Expiry is hook_error. */
   readonly hookTimeoutMs?: number;
 }
 
 type AccessDenial = { readonly deny: true; readonly reason: string };
 
 const DEFAULT_HOOK_TIMEOUT_MS = 1000;
-const MAX_HOOK_TIMEOUT_MS = 2_147_483_647;
+const MAX_HOOK_TIMEOUT_MS = 600_000;
 const MAX_REASON_LENGTH = 200;
 const RESERVED_REASONS: ReadonlySet<string> = new Set(['hook_error', 'invalid_hook_result']);
 
@@ -106,11 +106,10 @@ async function settle(pending: Promise<unknown>, timeoutMs: number): Promise<unk
 
 function hookTimeout(options: AccessCheckOptions): number {
   const value: unknown = options.hookTimeoutMs;
-  return typeof value === 'number' &&
-    Number.isFinite(value) &&
-    value >= 1 &&
-    value <= MAX_HOOK_TIMEOUT_MS
-    ? value
+  return Number.isSafeInteger(value) &&
+    (value as number) >= 1 &&
+    (value as number) <= MAX_HOOK_TIMEOUT_MS
+    ? (value as number)
     : DEFAULT_HOOK_TIMEOUT_MS;
 }
 
@@ -122,7 +121,11 @@ function isNativePromise(value: unknown): value is Promise<unknown> {
   }
 }
 
-function report(onHookError: HookErrorHandler | undefined, plugin: string, error: unknown): void {
+export function reportHookError(
+  onHookError: HookErrorHandler | undefined,
+  plugin: string,
+  error: unknown,
+): void {
   if (onHookError === undefined) return;
   try {
     const pending = (onHookError as (event: { plugin: string; error: unknown }) => unknown)({
@@ -161,7 +164,7 @@ export async function runAccessChecks(
     try {
       result = handler(frozenCopy(snapshot));
     } catch (error) {
-      report(onHookError, plugin, error);
+      reportHookError(onHookError, plugin, error);
       return HOOK_ERROR;
     }
 
@@ -169,7 +172,7 @@ export async function runAccessChecks(
       try {
         result = await settle(result, timeoutMs);
       } catch (error) {
-        report(onHookError, plugin, error);
+        reportHookError(onHookError, plugin, error);
         return HOOK_ERROR;
       }
     }

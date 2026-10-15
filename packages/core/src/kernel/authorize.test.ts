@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { EngineTimeoutError, authorizeRoute, denyAllEngine } from './authorize.js';
+import { EngineTimeoutError, INPUT_PLUGIN, authorizeRoute, denyAllEngine } from './authorize.js';
 import type { AuthorizationEngine, AuthorizationRequest, DenyLogger } from './authorize.js';
 import type { HookErrorHandler } from './access.js';
 import { orgContext } from '../db/port.js';
 import type { AccessCheckInput, HookMap } from '../plugin.js';
 
 type Handler = HookMap['access.check'];
+type AccessHooks = Parameters<typeof authorizeRoute>[2];
 
 const request: AuthorizationRequest = {
   request: new Request('https://broker.test/p/items/42'),
@@ -266,6 +267,24 @@ describe('authorizeRoute', () => {
     expectMalformedReport(onHookError);
   });
 
+  it.each(['\u200b', '\u2028', '\u2029'])(
+    'rejects invisible identifier character %j in principal and project ids',
+    async (character) => {
+      for (const decision of [
+        { allow: true, principal: { ...principal, id: `user${character}1` }, projectId: null },
+        { allow: true, principal, projectId: `project${character}1` },
+      ]) {
+        const onHookError = vi.fn<HookErrorHandler>();
+        const handler = vi.fn<Handler>();
+        await expect(
+          authorizeRoute(request, engineResolving(decision), [hook('a', handler)], onHookError),
+        ).resolves.toEqual({ allow: false, status: 403 });
+        expectMalformedReport(onHookError);
+        expect(handler).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('denies with 403 when allow is an accessor', async () => {
     const decision = { principal, projectId: null };
     Object.defineProperty(decision, 'allow', { enumerable: true, get: () => true });
@@ -353,19 +372,75 @@ describe('authorizeRoute', () => {
       });
     });
 
-    it('denies with 403 and reports when the request cannot be read', async () => {
+    it.each([
+      ['non-string permission', () => ({ ...request, route: { ...request.route, permission: 7 } })],
+      ['empty permission', () => ({ ...request, route: { ...request.route, permission: '' } })],
+      [
+        'whitespace-only permission',
+        () => ({ ...request, route: { ...request.route, permission: '   ' } }),
+      ],
+      [
+        'permission with a zero-width space',
+        () => ({ ...request, route: { ...request.route, permission: 'package\u200bread' } }),
+      ],
+      [
+        'permission with a line separator',
+        () => ({ ...request, route: { ...request.route, permission: 'package\u2028read' } }),
+      ],
+      [
+        'unreadable request',
+        () =>
+          Object.defineProperty({ ...request }, 'org', {
+            get() {
+              throw new Error('org');
+            },
+          }),
+      ],
+    ])('reports %s as input failure before running the engine', async (_name, makeRequest) => {
       const onHookError = vi.fn<HookErrorHandler>();
       const authorize = vi.fn<AuthorizationEngine['authorize']>();
-      const broken = { ...request, route: { ...request.route, permission: 7 } };
+      const handler = vi.fn<Handler>();
 
       await expect(
-        authorizeRoute(broken as unknown as AuthorizationRequest, { authorize }, [], onHookError),
+        authorizeRoute(
+          makeRequest() as AuthorizationRequest,
+          { authorize },
+          [hook('a', handler)],
+          onHookError,
+        ),
       ).resolves.toEqual({ allow: false, status: 403 });
       expect(authorize).not.toHaveBeenCalled();
-      expect(onHookError).toHaveBeenCalledWith(
-        expect.objectContaining({ plugin: 'core:authorization' }),
+      expect(handler).not.toHaveBeenCalled();
+      expect(onHookError).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ plugin: INPUT_PLUGIN, error: expect.any(Error) }),
       );
     });
+
+    it.each(['hooks', 'engineTimeoutMs', 'hookTimeoutMs', 'onDeny'] as const)(
+      'reports a throwing %s getter as an input failure',
+      async (property) => {
+        const error = new Error('getter');
+        const getter = {
+          get() {
+            throw error;
+          },
+        };
+        const hooks =
+          property === 'hooks' ? (Object.defineProperty([], 'map', getter) as AccessHooks) : [];
+        const options = property === 'hooks' ? {} : Object.defineProperty({}, property, getter);
+        const authorize = vi.fn<AuthorizationEngine['authorize']>();
+        const onHookError = vi.fn<HookErrorHandler>();
+
+        await expect(
+          authorizeRoute(request, { authorize }, hooks, onHookError, options),
+        ).resolves.toEqual({ allow: false, status: 403 });
+        expect(authorize).not.toHaveBeenCalled();
+        expect(onHookError).toHaveBeenCalledExactlyOnceWith({
+          plugin: INPUT_PLUGIN,
+          error,
+        });
+      },
+    );
   });
 
   describe('onDeny', () => {
@@ -410,6 +485,71 @@ describe('authorizeRoute', () => {
 
       expect(onDeny).toHaveBeenCalledWith({ plugin: 'a', reason: 'hook_error' });
     });
+
+    it.each([
+      [
+        'throws',
+        () => {
+          throw new Error('logger down');
+        },
+      ],
+      ['is not callable', null as unknown as HookErrorHandler],
+    ])(
+      'still reports hook_error to onDeny when onHookError %s',
+      async (_name: string, onHookError: HookErrorHandler) => {
+        const onDeny = vi.fn<DenyLogger>();
+
+        await expect(
+          authorizeRoute(
+            request,
+            allowEngine,
+            [
+              hook('a', () => {
+                throw new Error('hook down');
+              }),
+            ],
+            onHookError,
+            { onDeny },
+          ),
+        ).resolves.toEqual({ allow: false, status: 403 });
+        expect(onDeny).toHaveBeenCalledExactlyOnceWith({ plugin: 'a', reason: 'hook_error' });
+      },
+    );
+
+    it.each(['throw', 'reject', 'timeout'] as const)(
+      'reports a hook %s once through onHookError without onDeny',
+      async (failure) => {
+        vi.useFakeTimers();
+        try {
+          const error = new Error('hook down');
+          const onHookError = vi.fn<HookErrorHandler>();
+          const onDeny = vi.fn<DenyLogger>();
+          const later = vi.fn<Handler>();
+          const handler: Handler = () => {
+            if (failure === 'throw') throw error;
+            if (failure === 'reject') return Promise.reject(error);
+            return new Promise<undefined>(() => undefined);
+          };
+          const pending = authorizeRoute(
+            request,
+            allowEngine,
+            [hook('a', handler), hook('b', later)],
+            onHookError,
+            { onDeny, hookTimeoutMs: 5 },
+          );
+          await vi.advanceTimersByTimeAsync(5);
+          await expect(pending).resolves.toEqual({ allow: false, status: 403 });
+          expect(onHookError).toHaveBeenCalledExactlyOnceWith({
+            plugin: 'a',
+            error: failure === 'timeout' ? expect.any(Error) : error,
+          });
+          expect(onDeny).not.toHaveBeenCalled();
+          expect(later).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it('is not called when every hook passes', async () => {
       const onDeny = vi.fn<DenyLogger>();
@@ -464,34 +604,17 @@ describe('authorizeRoute', () => {
       }
     });
 
-    it.each([undefined, 0, -1, 1.5, 600_001, Number.NaN, '10'])(
-      'falls back to 2000 ms for engineTimeoutMs %s',
-      async (engineTimeoutMs) => {
-        vi.useFakeTimers();
-        try {
-          let settled = false;
-          const pending = authorizeRoute(
-            request,
-            { authorize: () => new Promise<never>(() => undefined) },
-            [],
-            undefined,
-            { engineTimeoutMs: engineTimeoutMs as number },
-          ).then((result) => {
-            settled = true;
-            return result;
-          });
-
-          await vi.advanceTimersByTimeAsync(1999);
-          expect(settled).toBe(false);
-          await vi.advanceTimersByTimeAsync(1);
-          await expect(pending).resolves.toEqual({ allow: false, status: 403 });
-        } finally {
-          vi.useRealTimers();
-        }
-      },
-    );
-
-    it('accepts the 600000 ms upper bound', async () => {
+    it.each([
+      undefined,
+      0,
+      -1,
+      1.5,
+      600_001,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      '10',
+    ])('falls back to 2000 ms for engineTimeoutMs %s', async (engineTimeoutMs) => {
       vi.useFakeTimers();
       try {
         let settled = false;
@@ -500,15 +623,39 @@ describe('authorizeRoute', () => {
           { authorize: () => new Promise<never>(() => undefined) },
           [],
           undefined,
-          { engineTimeoutMs: 600_000 },
+          { engineTimeoutMs: engineTimeoutMs as number },
         ).then((result) => {
           settled = true;
           return result;
         });
 
-        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(1999);
         expect(settled).toBe(false);
-        await vi.advanceTimersByTimeAsync(598_000);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).resolves.toEqual({ allow: false, status: 403 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([1, 600_000])('accepts the timeout boundary %i', async (engineTimeoutMs) => {
+      vi.useFakeTimers();
+      try {
+        let settled = false;
+        const pending = authorizeRoute(
+          request,
+          { authorize: () => new Promise<never>(() => undefined) },
+          [],
+          undefined,
+          { engineTimeoutMs },
+        ).then((result) => {
+          settled = true;
+          return result;
+        });
+
+        await vi.advanceTimersByTimeAsync(engineTimeoutMs - 1);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
         await expect(pending).resolves.toEqual({ allow: false, status: 403 });
       } finally {
         vi.useRealTimers();

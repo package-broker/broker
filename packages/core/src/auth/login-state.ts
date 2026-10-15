@@ -95,7 +95,13 @@ function parseState(value: unknown): LoginState | null {
 }
 
 export async function sealLoginState(cipher: SecretCipher, state: LoginState): Promise<string> {
-  const checked = parseState(JSON.parse(JSON.stringify(state)) as unknown);
+  let snapshot: unknown;
+  try {
+    snapshot = JSON.parse(JSON.stringify(state)) as unknown;
+  } catch {
+    throw new TypeError('login state is not valid');
+  }
+  const checked = parseState(snapshot);
   if (checked === null) {
     throw new TypeError('login state is not valid');
   }
@@ -182,13 +188,15 @@ export async function openLoginState(
   if (state.issuedAt < nowMs - MAX_AGE_MS || state.issuedAt > nowMs + MAX_FUTURE_SKEW_MS) {
     return null;
   }
-  if (
-    state.purpose === 'reauth' &&
-    (expected.sessionId === null ||
+  if (state.purpose === 'reauth') {
+    if (
+      typeof expected.sessionId !== 'string' ||
+      expected.sessionId.length === 0 ||
       state.sessionId === null ||
-      !constantTimeEqual(state.sessionId, expected.sessionId))
-  ) {
-    return null;
+      !constantTimeEqual(state.sessionId, expected.sessionId)
+    ) {
+      return null;
+    }
   }
   return state;
 }

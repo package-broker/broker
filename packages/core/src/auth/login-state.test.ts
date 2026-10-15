@@ -26,6 +26,7 @@ function cipherFor(...keys: MasterKey[]) {
 }
 
 const ONLY_V1 = (): ReturnType<typeof cipherFor> => cipherFor(masterKey(1, 0x00));
+const ONLY_V2 = (): ReturnType<typeof cipherFor> => cipherFor(masterKey(2, 0x20));
 const V2_THEN_V1 = (): ReturnType<typeof cipherFor> =>
   cipherFor(masterKey(2, 0x20), masterKey(1, 0x00));
 
@@ -175,6 +176,20 @@ describe('sealLoginState', () => {
       await expect(sealLoginState(cipher, loginState(overrides))).rejects.toBeInstanceOf(TypeError);
     }
   });
+
+  it('throws a TypeError for a state that cannot be serialised', async () => {
+    const state = loginState({ data: { big: 1n as unknown as string } });
+    await expect(sealLoginState(ONLY_V1(), state)).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it('rejects every refused returnTo category with a TypeError', async () => {
+    const refused = ['/a\\b', '//evil.example', '/a/../b', '/é'];
+    for (const returnTo of refused) {
+      await expect(sealLoginState(ONLY_V1(), loginState({ returnTo }))).rejects.toBeInstanceOf(
+        TypeError,
+      );
+    }
+  });
 });
 
 describe('openLoginState', () => {
@@ -204,6 +219,11 @@ describe('openLoginState', () => {
   it('returns null for an unloaded key version', async () => {
     const { request } = await sealed(loginState(), V2_THEN_V1());
     expect(await openLoginState(ONLY_V1(), request, EXPECT_DEX, NOW)).toBeNull();
+  });
+
+  it('returns null when the opener ring does not load the sealed version', async () => {
+    const { request } = await sealed(loginState(), ONLY_V1());
+    expect(await openLoginState(ONLY_V2(), request, EXPECT_DEX, NOW)).toBeNull();
   });
 
   it('returns null when the envelope version is rewritten to another loaded version', async () => {
@@ -332,6 +352,18 @@ describe('openLoginState', () => {
         expect(
           await openLoginState(ONLY_V1(), request, { provider: 'dex', sessionId }, NOW),
         ).toBeNull();
+      }
+    });
+
+    it('returns null unless the expected session id is a non-empty string', async () => {
+      const { request } = await sealed(reauth());
+      const refused: unknown[] = [undefined, null, '', 7];
+      for (const sessionId of refused) {
+        const expected = { provider: 'dex', sessionId } as unknown as {
+          provider: string;
+          sessionId: string | null;
+        };
+        expect(await openLoginState(ONLY_V1(), request, expected, NOW)).toBeNull();
       }
     });
 

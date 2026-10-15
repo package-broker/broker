@@ -22,7 +22,8 @@
   },
   "files": [
     "dist",
-    "!dist/**/*.test.*"
+    "!dist/**/*.test.*",
+    "!dist/**/testing/**"
   ],
   "dependencies": {
     "@hono/node-server": "catalog:",

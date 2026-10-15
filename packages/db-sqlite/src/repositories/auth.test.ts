@@ -741,7 +741,7 @@ describe('hooks', () => {
     expect(harness.logs).toContainEqual({
       level: 'warn',
       event: 'auth.hook.error',
-      plugin: 'hook-0',
+      pluginId: 'hook-0',
       error: 'TypeError',
     });
     expect(logged(harness)).not.toContain('boom');
@@ -758,7 +758,7 @@ describe('hooks', () => {
     expect(harness.logs).toContainEqual({
       level: 'warn',
       event: 'auth.hook.error',
-      plugin: 'hook-0',
+      pluginId: 'hook-0',
       error: 'Error',
     });
     expect(logged(harness)).not.toContain('abc123');
@@ -792,7 +792,7 @@ describe('hooks', () => {
     expect(harness.logs).toContainEqual({
       level: 'warn',
       event: 'auth.hook.error',
-      plugin: 'hook-0',
+      pluginId: 'hook-0',
       error: 'RangeError',
     });
     expect(harness.logs).toContainEqual(
@@ -800,6 +800,64 @@ describe('hooks', () => {
     );
     expect(await rows('SELECT reauth_at FROM session')).toEqual(before);
     expect(logged(harness)).not.toContain('hook down');
+  });
+
+  it.each([
+    ['denied', () => ({ deny: true, reason: 'free text ada@example.test token=abc123' })],
+    ['invalid_hook_result', () => ({ deny: 'yes', note: 'secret text abc123' })],
+    [
+      'hook_error',
+      () => {
+        throw new Error('free text ada@example.test token=abc123');
+      },
+    ],
+  ])('logs only the plugin id and %s code for a refused login', async (code, hook) => {
+    const harness = await build({ hooks: [hook as ResolveIdentityHook] });
+    await harness.call('POST', '/_pb/auth/sso/dex/start', { body: { purpose: 'login' } });
+    const callback = await harness.call('GET', '/_pb/auth/sso/dex/callback?code=good');
+
+    expect(callback.status).toBe(401);
+    expect(await callback.json()).toMatchObject({ error: { code: 'login_failed' } });
+    expect(deniedEvents(harness)).toEqual([
+      { level: 'warn', event: 'auth.hook.denied', pluginId: 'hook-0', code },
+    ]);
+    expect(harness.logs).toContainEqual(
+      expect.objectContaining({ event: 'auth.login.refused', reason: 'hook_denied' }),
+    );
+    if (code === 'hook_error') {
+      expect(harness.logs).toContainEqual(
+        expect.objectContaining({ level: 'warn', event: 'auth.hook.error', pluginId: 'hook-0' }),
+      );
+      expect(harness.logs.filter((entry) => 'plugin' in entry)).toEqual([]);
+    }
+    expect(logged(harness)).not.toContain('free text');
+    expect(logged(harness)).not.toContain('secret text');
+    expect(logged(harness)).not.toContain('abc123');
+    expect(logged(harness)).not.toContain(SSO_EMAIL);
+    expect(await rows('SELECT id FROM session')).toHaveLength(0);
+  });
+
+  it('attributes the denial to the second hook and keeps the hook text out of every log line', async () => {
+    const harness = await build({
+      hooks: [
+        () => undefined,
+        (() => ({
+          deny: true,
+          reason: 'free text ada@example.test token=abc123',
+        })) as ResolveIdentityHook,
+      ],
+    });
+    await harness.call('POST', '/_pb/auth/sso/dex/start', { body: { purpose: 'login' } });
+    const callback = await harness.call('GET', '/_pb/auth/sso/dex/callback?code=good');
+
+    expect(callback.status).toBe(401);
+    expect(deniedEvents(harness)).toEqual([
+      { level: 'warn', event: 'auth.hook.denied', pluginId: 'hook-1', code: 'denied' },
+    ]);
+    expect(logged(harness)).not.toContain('free text');
+    expect(logged(harness)).not.toContain('abc123');
+    expect(logged(harness)).not.toContain(SSO_EMAIL);
+    expect(await rows('SELECT id FROM session')).toHaveLength(0);
   });
 
   async function reauthWithHook(result: unknown): Promise<Harness> {

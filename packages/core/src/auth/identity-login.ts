@@ -1,5 +1,6 @@
 import { SESSION_ABSOLUTE_MS, newSessionSecrets } from './session.js';
 import type { SessionMeta, SessionService } from './session.js';
+import type { IdentityReauthDeps } from './identity-reauth.js';
 import type { OrgContext } from '../db/port.js';
 import type { LoginLookup, LoginPlan, LoginWriter, UserRepository } from '../db/users.js';
 import type { Clock } from '../ids.js';
@@ -55,6 +56,7 @@ export interface IdentityLoginDeps {
   readonly clock: Clock;
   readonly ids: { ulid(): string };
   readonly onHookError?: HookErrorHandler;
+  readonly onDenied?: IdentityReauthDeps['onDenied'];
 }
 
 type PlanWithAutoJoin = LoginPlan & { readonly autoJoin: boolean };
@@ -281,7 +283,16 @@ async function attempt(
     },
     deps.onHookError,
   );
-  if (denial !== undefined) return refuse('hook_denied');
+  if (denial !== undefined) {
+    const onDenied = deps.onDenied;
+    if (onDenied !== undefined) {
+      const report = { plugin: denial.plugin, code: denial.code };
+      void Promise.resolve()
+        .then(() => onDenied(report))
+        .catch(() => undefined);
+    }
+    return refuse('hook_denied');
+  }
 
   const secrets = await newSessionSecrets();
   const now = deps.clock.now();

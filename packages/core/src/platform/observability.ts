@@ -1,0 +1,388 @@
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface LogRecord {
+  readonly level: LogLevel;
+  readonly event: string;
+  readonly [field: string]: unknown;
+}
+
+export interface MetricLabels {
+  readonly [key: string]: string;
+}
+
+export interface Observability {
+  log(record: LogRecord): void;
+  counter(name: string, labels?: MetricLabels, value?: number): void;
+  histogram(name: string, value: number, labels?: MetricLabels): void;
+}
+
+export type ObsRuntime = 'cloudflare' | 'node';
+
+export interface SafeLogRecord {
+  readonly level: LogLevel;
+  readonly event: string;
+  readonly timestamp?: string;
+  readonly service?: 'package-broker';
+  readonly deployment_id?: string;
+  readonly runtime?: ObsRuntime;
+  readonly request_id?: string | null;
+  readonly trace_id?: string;
+  readonly span_id?: string;
+  readonly plugin?: string;
+  readonly route?: string;
+  readonly method?: string;
+  readonly status?: number;
+  readonly duration_ms?: number;
+  readonly project_id?: string | null;
+  readonly token_id?: string | null;
+  readonly job_id?: string;
+  readonly attempt?: number;
+  readonly error_name?: ErrorName;
+  readonly reason_code?: string;
+}
+
+export type ObsRecord =
+  | { readonly kind: 'log'; readonly record: SafeLogRecord }
+  | {
+      readonly kind: 'counter';
+      readonly name: string;
+      readonly labels: MetricLabels;
+      readonly value: number;
+    }
+  | {
+      readonly kind: 'histogram';
+      readonly name: string;
+      readonly value: number;
+      readonly labels: MetricLabels;
+    };
+
+export interface ObsRecordSink {
+  emit(record: ObsRecord): void;
+}
+
+export interface ObservabilityScope {
+  readonly deploymentId: string;
+  readonly runtime: ObsRuntime;
+  readonly requestId: string | null;
+  readonly traceId?: string;
+  readonly spanId?: string;
+  readonly plugin?: string;
+  readonly route?: string;
+  readonly method?: string;
+  readonly projectId?: string | null;
+  readonly tokenId?: string | null;
+  readonly jobId?: string;
+  readonly attempt?: number;
+}
+
+export const MAX_RECORD_BYTES = 8192;
+export const DROPPED_COUNTER = 'pb.obs.dropped';
+
+export const APPROVED_ERROR_NAMES = [
+  'Error',
+  'TypeError',
+  'RangeError',
+  'DbError',
+  'SecretsConfigError',
+  'KernelConfigError',
+  'BlobRangeError',
+  'StaleFenceError',
+  'PlatformUnavailableError',
+  'UnknownJobType',
+] as const;
+
+export type ErrorName = (typeof APPROVED_ERROR_NAMES)[number];
+
+const APPROVED = new Set<string>(APPROVED_ERROR_NAMES);
+const LEVELS = new Set<string>(['debug', 'info', 'warn', 'error']);
+const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+const RUNTIMES = new Set<string>(['cloudflare', 'node']);
+
+const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
+const PLUGIN_ID = /^[a-z][a-z0-9_.-]{0,63}$/;
+const DEPLOYMENT_ID = /^[A-Za-z0-9_.-]{1,64}$/;
+const ENTITY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TRACE_ID = /^[0-9a-f]{32}$/;
+const SPAN_ID = /^[0-9a-f]{16}$/;
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ROUTE = /^\/[A-Za-z0-9_\-./:{}*]{0,199}$/;
+const LABEL_TOKEN = /^[a-z0-9_]{1,32}$/;
+const LABEL_SLUG = /^[a-z0-9_-]{1,32}$/;
+const STATUS_CLASS = /^[1-5]xx$/;
+const MAX_LABELS = 8;
+const LABEL_KEYS = new Set([
+  'method',
+  'route',
+  'status_class',
+  'runtime',
+  'signal',
+  'outcome',
+  'kind',
+  'adapter',
+  'provider',
+]);
+const ENCODER = new TextEncoder();
+const MAX_PROTOTYPE_STEPS = 32;
+
+export interface ObsRegistry {
+  readonly events: ReadonlySet<string>;
+  readonly reasonCodes: ReadonlySet<string>;
+}
+
+const isString = (v: unknown): v is string => typeof v === 'string';
+const isInt = (v: unknown, min: number, max: number): v is number =>
+  typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+const matches =
+  (re: RegExp) =>
+  (v: unknown): boolean =>
+    isString(v) && re.test(v);
+const nullable =
+  (check: (v: unknown) => boolean) =>
+  (v: unknown): boolean =>
+    v === null || check(v);
+
+const FIELD_CHECKS: Readonly<Record<string, (v: unknown) => boolean>> = {
+  timestamp: matches(TIMESTAMP),
+  service: (v) => v === 'package-broker',
+  deployment_id: matches(DEPLOYMENT_ID),
+  runtime: (v) => isString(v) && RUNTIMES.has(v),
+  request_id: nullable(matches(UUID)),
+  trace_id: matches(TRACE_ID),
+  span_id: matches(SPAN_ID),
+  plugin: matches(PLUGIN_ID),
+  route: matches(ROUTE),
+  method: (v) => isString(v) && METHODS.has(v),
+  status: (v) => isInt(v, 100, 599),
+  duration_ms: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
+  project_id: nullable(matches(ENTITY_ID)),
+  token_id: nullable(matches(ENTITY_ID)),
+  job_id: matches(ENTITY_ID),
+  attempt: (v) => isInt(v, 0, 1000),
+  reason_code: matches(CODE),
+};
+
+const SCOPE_ONLY = [
+  'timestamp',
+  'service',
+  'deployment_id',
+  'runtime',
+  'request_id',
+  'trace_id',
+  'span_id',
+  'plugin',
+  'project_id',
+  'token_id',
+  'job_id',
+  'attempt',
+] as const;
+
+export function safeErrorName(error: unknown): ErrorName {
+  try {
+    if (!(error instanceof Error)) return 'Error';
+    let current: object | null = error;
+    for (let step = 0; step < MAX_PROTOTYPE_STEPS && current !== null; step += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'name');
+      if (descriptor !== undefined) {
+        const name: unknown = 'value' in descriptor ? descriptor.value : undefined;
+        return isString(name) && APPROVED.has(name) ? (name as ErrorName) : 'Error';
+      }
+      current = Object.getPrototypeOf(current) as object | null;
+    }
+  } catch {
+    return 'Error';
+  }
+  return 'Error';
+}
+
+export function safeRecord(record: unknown): SafeLogRecord | null {
+  if (typeof record !== 'object' || record === null || Array.isArray(record)) return null;
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(record);
+    const read = (key: string): unknown => {
+      const descriptor = descriptors[key];
+      return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+    };
+    const level = read('level');
+    const event = read('event');
+    if (!isString(level) || !LEVELS.has(level)) return null;
+    if (!isString(event) || !CODE.test(event)) return null;
+
+    let inputBytes = 0;
+    for (const key of Object.keys(FIELD_CHECKS).concat('error_name')) {
+      const value = read(key);
+      if (isString(value)) inputBytes += value.length;
+    }
+    if (inputBytes > MAX_RECORD_BYTES) return null;
+
+    const out: Record<string, unknown> = { level, event };
+    for (const [key, check] of Object.entries(FIELD_CHECKS)) {
+      const value = read(key);
+      if (value !== undefined && check(value)) out[key] = value;
+    }
+    const errorName = read('error_name');
+    if (isString(errorName)) out.error_name = APPROVED.has(errorName) ? errorName : 'Error';
+
+    const serialized = JSON.stringify(out);
+    if (ENCODER.encode(serialized).length > MAX_RECORD_BYTES) return null;
+    return out as unknown as SafeLogRecord;
+  } catch {
+    return null;
+  }
+}
+
+function safeLabels(labels: unknown, scope: ObservabilityScope): MetricLabels | null {
+  if (labels === undefined) return {};
+  if (typeof labels !== 'object' || labels === null || Array.isArray(labels)) return null;
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(labels);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.length > MAX_LABELS) return null;
+    const out: Record<string, string> = {};
+    for (const key of keys) {
+      if (!isString(key) || !LABEL_KEYS.has(key)) return null;
+      const descriptor = descriptors[key];
+      if (descriptor === undefined || !('value' in descriptor)) return null;
+      const value: unknown = descriptor.value;
+      if (!isString(value) || !labelValueAllowed(key, value, scope)) return null;
+      out[key] = value;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function labelValueAllowed(key: string, value: string, scope: ObservabilityScope): boolean {
+  switch (key) {
+    case 'method':
+      return METHODS.has(value);
+    case 'route':
+      return scope.route !== undefined && value === scope.route;
+    case 'status_class':
+      return STATUS_CLASS.test(value);
+    case 'runtime':
+      return RUNTIMES.has(value);
+    case 'adapter':
+    case 'provider':
+      return LABEL_SLUG.test(value);
+    default:
+      return LABEL_TOKEN.test(value);
+  }
+}
+
+function scopeFields(scope: ObservabilityScope): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    service: 'package-broker',
+    deployment_id: scope.deploymentId,
+    runtime: scope.runtime,
+    request_id: scope.requestId,
+  };
+  const optional: Record<string, unknown> = {
+    trace_id: scope.traceId,
+    span_id: scope.spanId,
+    plugin: scope.plugin,
+    route: scope.route,
+    method: scope.method,
+    project_id: scope.projectId,
+    token_id: scope.tokenId,
+    job_id: scope.jobId,
+    attempt: scope.attempt,
+  };
+  for (const [key, value] of Object.entries(optional)) {
+    if (value !== undefined) fields[key] = value;
+  }
+  return fields;
+}
+
+function assertScope(scope: ObservabilityScope): void {
+  if (typeof scope !== 'object' || scope === null)
+    throw new RangeError('Invalid observability scope');
+  const fields = scopeFields(scope);
+  for (const [key, value] of Object.entries(fields)) {
+    const check = FIELD_CHECKS[key];
+    if (check === undefined || !check(value)) {
+      throw new RangeError(`Invalid observability scope field: ${key}`);
+    }
+  }
+  if (scope.plugin !== undefined && !PLUGIN_ID.test(scope.plugin)) {
+    throw new RangeError('Invalid observability scope field: plugin');
+  }
+}
+
+export function createObservability(
+  backend: ObsRecordSink,
+  scope: ObservabilityScope,
+  registry: ObsRegistry,
+): Observability {
+  const snapshot: ObservabilityScope = Object.freeze({ ...scope });
+  assertScope(snapshot);
+  const frozen = scopeFields(snapshot);
+  const events = new Set(registry.events);
+  const reasonCodes = new Set(registry.reasonCodes);
+
+  const emit = (record: ObsRecord): void => {
+    try {
+      backend.emit(record);
+    } catch {
+      return;
+    }
+  };
+  const dropped = (signal: 'log' | 'counter' | 'histogram' | 'unregistered'): void =>
+    emit({ kind: 'counter', name: DROPPED_COUNTER, labels: { signal }, value: 1 });
+  const validName = (name: unknown): name is string => isString(name) && CODE.test(name);
+
+  return Object.freeze({
+    log(record: LogRecord): void {
+      const caller = safeRecord(record);
+      if (caller === null) return dropped('log');
+      if (
+        !events.has(caller.event) ||
+        (caller.reason_code !== undefined && !reasonCodes.has(caller.reason_code))
+      ) {
+        return dropped('unregistered');
+      }
+      const merged: Record<string, unknown> = { ...caller };
+      for (const key of [...SCOPE_ONLY, 'route']) delete merged[key];
+      Object.assign(merged, frozen, { timestamp: new Date().toISOString() });
+      const safe = safeRecord(merged);
+      if (safe === null) return dropped('log');
+      emit({ kind: 'log', record: Object.freeze(safe) });
+    },
+    counter(name: string, labels?: MetricLabels, value = 1): void {
+      const safe = safeLabels(labels, snapshot);
+      if (!validName(name) || typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        return dropped('counter');
+      }
+      if (safe === null) return dropped('counter');
+      emit({ kind: 'counter', name, labels: safe, value });
+    },
+    histogram(name: string, value: number, labels?: MetricLabels): void {
+      const safe = safeLabels(labels, snapshot);
+      if (!validName(name) || typeof value !== 'number' || !Number.isFinite(value)) {
+        return dropped('histogram');
+      }
+      if (safe === null) return dropped('histogram');
+      emit({ kind: 'histogram', name, value, labels: safe });
+    },
+  });
+}
+
+// Plugins receive only the scoped port returned here, never the backend sink.
+export function forPlugin(
+  backend: ObsRecordSink,
+  scope: ObservabilityScope,
+  pluginId: string,
+  registry: ObsRegistry,
+): Observability {
+  if (!isString(pluginId) || !PLUGIN_ID.test(pluginId)) {
+    throw new RangeError('Invalid observability scope field: plugin');
+  }
+  return createObservability(backend, { ...scope, plugin: pluginId }, registry);
+}
+
+export const noopObservability: Observability = Object.freeze({
+  log(): void {},
+  counter(): void {},
+  histogram(): void {},
+});

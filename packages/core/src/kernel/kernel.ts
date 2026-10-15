@@ -18,7 +18,8 @@ import { reportableErrorName } from './error-name.js';
 import { liveResponse, readyResponse } from './health.js';
 import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './registry.js';
 import type { Registration } from './registry.js';
-import { routePathProblem, routesConflict } from './routes.js';
+import type { PackageVisibilityResolver } from './routes.js';
+import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
 
 export interface KernelOptions {
   readonly platform: Platform;
@@ -30,6 +31,8 @@ export interface KernelOptions {
   readonly health: () => Promise<boolean>;
   /** Routes under `/_pb/`, registered before plugin routes and served through the same pipeline. */
   readonly coreRoutes?: readonly RouteDefinition[];
+  /** Package-visibility resolver bound by the package-visibility feature; required by project:packages:* routes. */
+  readonly packageResolver?: PackageVisibilityResolver;
   /** Default denyAllEngine. */
   readonly authorization?: AuthorizationEngine;
   /** Default defaultLog. */
@@ -72,7 +75,10 @@ function withRequestId(response: Response, requestId: string): Response {
   return copy;
 }
 
-function validateCoreRoutes(routes: readonly RouteDefinition[]): readonly string[] {
+function validateCoreRoutes(
+  routes: readonly RouteDefinition[],
+  packageResolver: PackageVisibilityResolver | undefined,
+): readonly string[] {
   const problems: string[] = [];
   const eligible: RouteDefinition[] = [];
   for (const route of routes) {
@@ -102,9 +108,12 @@ function validateCoreRoutes(routes: readonly RouteDefinition[]): readonly string
       problems.push(`${label}: method must be one of ${[...ROUTE_METHODS].join(', ')}`);
       placeable = false;
     }
-    if (route.needsOrg === false && route.permission !== null) {
-      problems.push(`${label}: a route without organization context must be public`);
-    }
+    problems.push(
+      ...routeBoundaryProblems(route, label, {
+        allowSelf: true,
+        ...(packageResolver === undefined ? {} : { packageResolver }),
+      }),
+    );
     if (placeable) eligible.push(route);
   }
   for (let i = 0; i < eligible.length; i++) {
@@ -123,10 +132,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const coreRoutes = Object.freeze(
     (options.coreRoutes ?? []).map((route) => Object.freeze({ ...route })),
   );
-  const coreProblems = validateCoreRoutes(coreRoutes);
+  const coreProblems = validateCoreRoutes(coreRoutes, options.packageResolver);
   let registration: Registration;
   try {
-    registration = options.registration ?? collectRegistrations(options.plugins);
+    registration =
+      options.registration ??
+      collectRegistrations(
+        options.plugins,
+        options.packageResolver === undefined ? {} : { packageResolver: options.packageResolver },
+      );
   } catch (error) {
     if (error instanceof KernelConfigError) {
       throw new KernelConfigError([...error.problems, ...coreProblems]);
@@ -169,6 +183,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   async function serve(route: RegisteredRoute, c: Context<KernelEnv>): Promise<Response> {
     const requestId = c.env.requestId;
     const permission = route.permission;
+    if (route.boundary === 'self') {
+      return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
+    }
     if (permission === null) {
       const org = route.needsOrg === false ? null : await resolveOrg();
       return invoke(route, c, org, null, null);
@@ -190,7 +207,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       {
         request: c.req.raw,
         org,
-        route: { plugin: route.plugin, method: route.method, path: route.path, permission },
+        route: {
+          plugin: route.plugin,
+          method: route.method,
+          path: route.path,
+          permission,
+          ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
+        },
         params: Object.freeze({ ...c.req.param() }),
       },
       engine,

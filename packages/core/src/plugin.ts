@@ -5,7 +5,7 @@ import type { Clock } from './ids.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
-export const SUPPORTED_PLUGIN_API = [2, 2] as const;
+export const SUPPORTED_PLUGIN_API = [2, 3] as const;
 
 export type Platform = 'cloudflare' | 'node';
 
@@ -49,12 +49,19 @@ export interface PluginRegistry {
   hook<K extends keyof HookMap>(name: K, handler: HookMap[K]): void;
 }
 
+export type RouteBoundary = 'none' | 'organization' | 'project' | 'self' | 'package';
+
 export interface RouteDefinition {
   /** HEAD is served by GET routes, same authorization. */
   readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   readonly path: string;
   /** null = public. */
   readonly permission: string | null;
+  /**
+   * Required when permission is set; omitted means 'none' on a public route. 'self' is an
+   * authenticated-session route with no permission. 'package' is reserved.
+   */
+  readonly boundary?: RouteBoundary;
   /** Default true; false requires permission null. */
   readonly needsOrg?: boolean;
   readonly handler: (ctx: RequestContext) => Promise<Response> | Response;

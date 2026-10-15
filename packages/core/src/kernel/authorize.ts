@@ -2,7 +2,7 @@ import { reportHookError, runAccessChecks } from './access.js';
 import type { AccessCheckOptions, HookErrorHandler } from './access.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
-import type { HookMap, Principal } from '../plugin.js';
+import type { HookMap, Principal, RouteBoundary } from '../plugin.js';
 
 export interface AuthorizationRequest {
   readonly request: Request;
@@ -12,6 +12,7 @@ export interface AuthorizationRequest {
     readonly method: string;
     readonly path: string;
     readonly permission: string;
+    readonly boundary?: RouteBoundary;
   };
   readonly params: Readonly<Record<string, string>>;
 }

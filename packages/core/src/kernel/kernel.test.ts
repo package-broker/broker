@@ -75,7 +75,7 @@ function plugin(
   return {
     id,
     package: `@test/${id}`,
-    apiVersion: SUPPORTED_PLUGIN_API[0],
+    apiVersion: SUPPORTED_PLUGIN_API[1],
     platforms: ['node'],
     register(registry) {
       for (const route of routes) registry.route(route);
@@ -103,7 +103,8 @@ const publicItem: RouteDefinition = {
 const protectedItem: RouteDefinition = {
   method: 'GET',
   path: '/secure/:id',
-  permission: 'items.read',
+  permission: 'org:read',
+  boundary: 'organization',
   handler: echo,
 };
 

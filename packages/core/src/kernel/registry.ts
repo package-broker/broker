@@ -8,7 +8,8 @@ import {
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
 import { reportableErrorName } from './error-name.js';
-import { routePathProblem, routesConflict } from './routes.js';
+import type { PackageVisibilityResolver } from './routes.js';
+import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
 
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
 
@@ -22,6 +23,10 @@ export interface Registration {
   };
   readonly bindings: ReadonlyMap<PortName, string>;
   readonly identityFactory: IdentityProviderFactory | null;
+}
+
+export interface RegistrationOptions {
+  readonly packageResolver?: PackageVisibilityResolver;
 }
 
 export class KernelConfigError extends Error {
@@ -88,7 +93,10 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
-export function collectRegistrations(plugins: readonly PluginDefinition[]): Registration {
+export function collectRegistrations(
+  plugins: readonly PluginDefinition[],
+  options: RegistrationOptions = {},
+): Registration {
   const problems: string[] = [];
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
@@ -197,12 +205,13 @@ export function collectRegistrations(plugins: readonly PluginDefinition[]): Regi
           `plugin "${id}" route ${String(route.method)} ${route.path}: method must be one of ${[...ROUTE_METHODS].join(', ')}`,
         );
       }
-      if (route.needsOrg === false && route.permission !== null) {
-        problems.push(
-          `plugin "${id}" route ${route.method} ${route.path}: a route without organization context must be public`,
-        );
-      }
-      if (pathProblem === null && methodAllowed) {
+      const boundaryProblems = routeBoundaryProblems(
+        route,
+        `plugin "${id}" route ${route.method} ${route.path}`,
+        { ...options, apiVersion: plugin.apiVersion },
+      );
+      problems.push(...boundaryProblems);
+      if (pathProblem === null && methodAllowed && boundaryProblems.length === 0) {
         routes.push({ ...route, plugin: id });
       }
     }

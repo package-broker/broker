@@ -70,7 +70,7 @@ describe('createKernel coreRoutes', () => {
 
   it('denies a permissioned core route with the default engine', async () => {
     const kernel = await createKernel(
-      options([route('/_pb/secret', { permission: 'core.secret' })]),
+      options([route('/_pb/secret', { permission: 'org:read', boundary: 'organization' })]),
     );
 
     const response = await kernel.fetch(new Request(`${BASE}/_pb/secret`));
@@ -82,7 +82,7 @@ describe('createKernel coreRoutes', () => {
   it('hands a permissioned core route to the engine under the plugin label core', async () => {
     const seen: Array<Readonly<Record<string, unknown>>> = [];
     const kernel = await createKernel({
-      ...options([route('/_pb/secret', { permission: 'core.secret' })]),
+      ...options([route('/_pb/secret', { permission: 'org:read', boundary: 'organization' })]),
       authorization: {
         authorize: (request) => {
           seen.push(request.route);
@@ -99,7 +99,13 @@ describe('createKernel coreRoutes', () => {
 
     expect(response.status).toBe(200);
     expect(seen).toEqual([
-      { plugin: 'core', method: 'GET', path: '/_pb/secret', permission: 'core.secret' },
+      {
+        plugin: 'core',
+        method: 'GET',
+        path: '/_pb/secret',
+        permission: 'org:read',
+        boundary: 'organization',
+      },
     ]);
   });
 
@@ -338,7 +344,7 @@ describe('createKernel coreRoutes', () => {
 
     it('rejects needsOrg false on a permissioned route', async () => {
       const problems = await problemsOf([
-        route('/_pb/x', { needsOrg: false, permission: 'core.x' }),
+        route('/_pb/x', { needsOrg: false, permission: 'org:read', boundary: 'organization' }),
       ]);
 
       expect(problems).toHaveLength(1);
@@ -380,7 +386,7 @@ describe('createKernel coreRoutes', () => {
     it('checks conflicts for a route that also lacks a public permission', async () => {
       const problems = await problemsOf([
         route('/_pb/x'),
-        route('/_pb/x', { needsOrg: false, permission: 'core.x' }),
+        route('/_pb/x', { needsOrg: false, permission: 'org:read', boundary: 'organization' }),
       ]);
 
       expect(problems).toHaveLength(2);

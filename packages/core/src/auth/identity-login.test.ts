@@ -8,6 +8,7 @@ import { orgContext } from '../db/port.js';
 import type { LoginLookup, LoginPlan, LoginWriter, UserRepository } from '../db/users.js';
 import { fixedClock } from '../ids.js';
 import type { IdentityProvider, VerifiedIdentity } from '../identity/port.js';
+import type { HookMap } from '../plugin.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 const ISSUED_AT = '2026-10-15T11:59:00.000Z';
@@ -25,6 +26,9 @@ const meta: SessionMeta = {
   userAgent: 'test-agent',
   previousSecretHash: 'c'.repeat(64),
 };
+
+type ResolveIdentityHandler = HookMap['auth.resolveIdentity'];
+type MapGroupsHandler = HookMap['auth.mapGroups'];
 
 function provider(overrides: Partial<IdentityProvider> = {}): IdentityProvider {
   return {
@@ -86,8 +90,8 @@ interface Harness {
   readonly lookupForLogin: Mock<UserRepository['lookupForLogin']>;
   readonly commit: Mock<LoginWriter['commit']>;
   readonly setCookies: ReturnType<typeof vi.fn>;
-  readonly resolveHandler: ReturnType<typeof vi.fn>;
-  readonly mapHandler: ReturnType<typeof vi.fn>;
+  readonly resolveHandler: Mock<ResolveIdentityHandler>;
+  readonly mapHandler: Mock<MapGroupsHandler>;
   readonly onHookError: ReturnType<typeof vi.fn>;
   plans(): LoginPlan[];
 }
@@ -117,13 +121,13 @@ function harness(
     '__Host-pb_session=s; Path=/',
     '__Host-pb_csrf=c; Path=/',
   ]);
-  const resolveHandler = vi.fn((input: unknown) => {
+  const resolveHandler = vi.fn<ResolveIdentityHandler>((input) => {
     events.push('resolveIdentity');
-    return options.resolve?.(input);
+    return options.resolve?.(input) as ReturnType<ResolveIdentityHandler>;
   });
-  const mapHandler = vi.fn((input: unknown) => {
+  const mapHandler = vi.fn<MapGroupsHandler>((input) => {
     events.push('mapGroups');
-    return options.map?.(input);
+    return options.map?.(input) as ReturnType<MapGroupsHandler>;
   });
   const onHookError = vi.fn();
 
@@ -141,8 +145,8 @@ function harness(
     writer,
     sessions,
     hooks: {
-      'auth.resolveIdentity': [{ plugin: 'p-resolve', handler: resolveHandler as never }],
-      'auth.mapGroups': [{ plugin: 'p-map', handler: mapHandler as never }],
+      'auth.resolveIdentity': [{ plugin: 'p-resolve', handler: resolveHandler }],
+      'auth.mapGroups': [{ plugin: 'p-map', handler: mapHandler }],
     },
     clock: fixedClock(NOW),
     ids: {
@@ -942,7 +946,7 @@ describe('completeIdentityLogin: groups', () => {
   it('removes duplicate groups before the hooks and keeps the order', async () => {
     const h = harness({ lookups: [knownLookup()] });
     await login(h, identity({ groups: ['b', 'a', 'b'] }));
-    expect((h.mapHandler.mock.calls[0]?.[0] as { groups: string[] }).groups).toEqual(['b', 'a']);
+    expect(h.mapHandler.mock.calls[0]?.[0]?.groups).toEqual(['b', 'a']);
     expect(h.plans()[0]?.groups).toEqual(['b', 'a']);
   });
 
@@ -1171,3 +1175,151 @@ describe('completeIdentityLogin: lost write race', () => {
 function firstPlan(harnessValue: Harness): LoginPlan & { autoJoin: boolean } {
   return harnessValue.plans()[0] as LoginPlan & { autoJoin: boolean };
 }
+
+describe('completeIdentityLogin: denial attribution', () => {
+  it.each([
+    ['denied', () => ({ deny: true, reason: 'free text ada@example.test token=abc123' })],
+    ['invalid_hook_result', () => ({ deny: 'yes', note: 'secret abc123' })],
+    [
+      'hook_error',
+      () => {
+        throw new Error('secret ada@example.test token=abc123');
+      },
+    ],
+  ])('reports only the plugin id and %s code', async (code, resolve) => {
+    const h = harness({ lookups: [knownLookup()], resolve });
+    const onDenied = vi.fn();
+    const outcome = await completeIdentityLogin(
+      { ...h.deps, onDenied },
+      ctx,
+      provider(),
+      identity(),
+      meta,
+    );
+
+    expect(outcome).toEqual({ ok: false, reason: 'hook_denied' });
+    expect(onDenied.mock.calls).toEqual([[{ plugin: 'p-resolve', code }]]);
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.setCookies).not.toHaveBeenCalled();
+  });
+
+  it('attributes the denial to the second hook when the first hook approves', async () => {
+    const h = harness({ lookups: [knownLookup()] });
+    const first = vi.fn<ResolveIdentityHandler>(() => undefined);
+    const second = vi.fn<ResolveIdentityHandler>(() => ({
+      deny: true as const,
+      reason: HOOK_REASON_TEXT,
+    }));
+    const onDenied = vi.fn();
+    const deps: IdentityLoginDeps = {
+      ...h.deps,
+      hooks: {
+        ...h.deps.hooks,
+        'auth.resolveIdentity': [
+          { plugin: 'p-first', handler: first },
+          { plugin: 'p-second', handler: second },
+        ],
+      },
+      onDenied,
+    };
+
+    expect(await completeIdentityLogin(deps, ctx, provider(), identity(), meta)).toEqual({
+      ok: false,
+      reason: 'hook_denied',
+    });
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(onDenied.mock.calls).toEqual([[{ plugin: 'p-second', code: 'denied' }]]);
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.setCookies).not.toHaveBeenCalled();
+  });
+
+  it('reports only the first hook when it denies and a later hook would deny too', async () => {
+    const h = harness({ lookups: [knownLookup()] });
+    const first = vi.fn<ResolveIdentityHandler>(() => ({
+      deny: true as const,
+      reason: HOOK_REASON_TEXT,
+    }));
+    const second = vi.fn<ResolveIdentityHandler>(() => ({
+      deny: true as const,
+      reason: HOOK_REASON_TEXT,
+    }));
+    const onDenied = vi.fn();
+    const deps: IdentityLoginDeps = {
+      ...h.deps,
+      hooks: {
+        ...h.deps.hooks,
+        'auth.resolveIdentity': [
+          { plugin: 'p-first', handler: first },
+          { plugin: 'p-second', handler: second },
+        ],
+      },
+      onDenied,
+    };
+
+    expect(await completeIdentityLogin(deps, ctx, provider(), identity(), meta)).toEqual({
+      ok: false,
+      reason: 'hook_denied',
+    });
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+    expect(onDenied.mock.calls).toEqual([[{ plugin: 'p-first', code: 'denied' }]]);
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.setCookies).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['not invited', 'not_invited', () => harness()],
+    [
+      'provider rebound',
+      'provider_rebound',
+      () =>
+        harness({
+          lookups: [knownLookup({ boundAnchor: 'oidc:https://other.example.test' })],
+        }),
+    ],
+    [
+      'missing identity user',
+      'invalid_identity',
+      () => harness({ lookups: [knownLookup({ identityUser: null })] }),
+    ],
+  ])('does not report a denial for the non-hook refusal %s', async (_name, reason, make) => {
+    const h = make();
+    const onDenied = vi.fn();
+    const outcome = await completeIdentityLogin(
+      { ...h.deps, onDenied },
+      ctx,
+      provider(),
+      identity(),
+      meta,
+    );
+
+    expect(outcome).toEqual({ ok: false, reason });
+    expect(onDenied).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    () => {
+      throw new Error('reporter failed');
+    },
+    () => Promise.reject(new Error('reporter failed')),
+  ])('reports the denial and preserves the refusal when the reporter fails', async (failure) => {
+    const h = harness({ lookups: [knownLookup()], resolve: () => ({ deny: true }) });
+    const onDenied = vi.fn(failure as () => void);
+    expect(
+      await completeIdentityLogin({ ...h.deps, onDenied }, ctx, provider(), identity(), meta),
+    ).toEqual({ ok: false, reason: 'hook_denied' });
+    expect(onDenied).toHaveBeenCalledWith({ plugin: 'p-resolve', code: 'denied' });
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.setCookies).not.toHaveBeenCalled();
+  });
+
+  it('does not report a denial for a successful login', async () => {
+    const h = harness({ lookups: [knownLookup()] });
+    const onDenied = vi.fn();
+    expect(
+      await completeIdentityLogin({ ...h.deps, onDenied }, ctx, provider(), identity(), meta),
+    ).toMatchObject({ ok: true });
+    expect(onDenied).not.toHaveBeenCalled();
+  });
+});

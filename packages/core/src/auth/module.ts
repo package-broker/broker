@@ -119,8 +119,17 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     log({
       level: 'warn',
       event: 'auth.hook.error',
-      plugin: event.plugin,
+      pluginId: event.plugin,
       error: errorName(event.error),
+    });
+  };
+
+  const onDenied: NonNullable<IdentityLoginDeps['onDenied']> = (denial) => {
+    log({
+      level: 'warn',
+      event: 'auth.hook.denied',
+      pluginId: denial.plugin,
+      code: denial.code,
     });
   };
 
@@ -195,6 +204,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     clock,
     ids,
     onHookError,
+    onDenied,
   };
   const reauthDeps: IdentityReauthDeps = {
     users: repositories.users,
@@ -202,14 +212,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     clock,
     hooks,
     onHookError,
-    onDenied: (denial) => {
-      log({
-        level: 'warn',
-        event: 'auth.hook.denied',
-        pluginId: denial.plugin,
-        code: denial.code,
-      });
-    },
+    onDenied,
   };
 
   const localService = createLocalLoginService({

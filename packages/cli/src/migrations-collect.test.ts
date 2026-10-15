@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,14 +92,21 @@ describe('collectMigrations', () => {
 });
 
 describe('defaultResolvePackageDir', () => {
-  it('collects the real core migration with its checksum', async () => {
+  it('collects the real core migrations in order with their checksums', async () => {
     const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
     const plan = await collectMigrations([], defaultResolvePackageDir(repoRoot));
-    const real = await readFile(
-      path.join(repoRoot, 'packages/db-sqlite/migrations/0001_init.sql'),
-      'utf8',
-    );
-    expect(plan.map((source) => source.id)).toEqual(['core:0001_init']);
-    expect(plan[0]?.checksum).toBe(await sha256Hex(real.replace(/\r\n/g, '\n')));
+    const files = (await readdir(path.join(repoRoot, 'packages/db-sqlite/migrations')))
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    const ids = files.map((file) => `core:${file.slice(0, -'.sql'.length)}`);
+    expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
+    expect(plan.map((source) => source.id)).toEqual(ids);
+    for (const [index, file] of files.entries()) {
+      const real = await readFile(
+        path.join(repoRoot, 'packages/db-sqlite/migrations', file),
+        'utf8',
+      );
+      expect(plan[index]?.checksum).toBe(await sha256Hex(real.replace(/\r\n/g, '\n')));
+    }
   });
 });

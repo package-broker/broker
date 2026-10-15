@@ -15,7 +15,9 @@ const DEPENDENCY_FIELDS = [
 const UNRESOLVED_RANGE = /^(?:workspace|catalog|link|file):/;
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
-const REQUIRED_FILES = { 'db-sqlite': ['migrations/0001_init.sql'] };
+const REQUIRED_FILES = {
+  'db-sqlite': ['migrations/0001_init.sql', 'migrations/0002_local_login.sql'],
+};
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };
 
 function readPackageJson(name) {

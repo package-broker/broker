@@ -11,6 +11,7 @@ import {
   renderBuildInfo,
   renderBuildManifest,
   renderNodePackageJson,
+  toManifestMigrations,
   writeOutputPackageJson,
 } from './build-artifacts.js';
 import { orderPlugins, renderManifestJson, validatePlugins } from './manifest.js';
@@ -116,7 +117,14 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   );
   await writeFile(
     manifestJson,
-    `${JSON.stringify(renderManifestJson(plugins, versions, target, { migrations: sources, registration }), null, 2)}\n`,
+    `${JSON.stringify(
+      renderManifestJson(plugins, versions, target, {
+        migrations: toManifestMigrations(sources),
+        registration,
+      }),
+      null,
+      2,
+    )}\n`,
   );
 
   const packageJson = path.join(outDir, 'package.json');

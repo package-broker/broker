@@ -110,7 +110,13 @@ describe('startNode', () => {
     const broker = await startNode({
       plugins: [healthyPlugin()],
       migrations: [await initSource()],
-      env: { PB_SQLITE_PATH: path, PB_ORG_SLUG: 'acme', PB_ORG_NAME: 'Acme' },
+      env: {
+        PB_SQLITE_PATH: path,
+        PB_ORG_SLUG: 'acme',
+        PB_ORG_NAME: 'Acme',
+        PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+        PB_PUBLIC_URL: 'http://127.0.0.1',
+      },
       log: (event) => {
         recorded.events.push(event);
       },
@@ -137,7 +143,12 @@ describe('startNode', () => {
     const broker = await startNode({
       plugins: [healthyPlugin()],
       migrations: [],
-      env: { PB_SQLITE_PATH: path, PB_MIGRATE: 'off' },
+      env: {
+        PB_SQLITE_PATH: path,
+        PB_MIGRATE: 'off',
+        PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+        PB_PUBLIC_URL: 'http://127.0.0.1',
+      },
     });
 
     const base = await listen(broker);
@@ -151,14 +162,28 @@ describe('startNode', () => {
     const first = await startNode({
       plugins: [],
       migrations: [await initSource()],
-      env: { PB_SQLITE_PATH: path, PB_ORG_SLUG: 'acme', PB_ORG_NAME: 'Acme' },
+      env: {
+        PB_SQLITE_PATH: path,
+        PB_ORG_SLUG: 'acme',
+        PB_ORG_NAME: 'Acme',
+        PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+        PB_PUBLIC_URL: 'http://127.0.0.1',
+      },
     });
     await first.close();
     recorded.closes.length = 0;
 
     const edited = await initSource(`${(await initSource()).sql}\n-- edited\n`);
     const failure = await rejection(
-      startNode({ plugins: [], migrations: [edited], env: { PB_SQLITE_PATH: path } }),
+      startNode({
+        plugins: [],
+        migrations: [edited],
+        env: {
+          PB_SQLITE_PATH: path,
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'http://127.0.0.1',
+        },
+      }),
     );
 
     expect(failure).toBeInstanceOf(MigrationChecksumError);
@@ -171,7 +196,13 @@ describe('startNode', () => {
     const first = await startNode({
       plugins: [],
       migrations: [await initSource()],
-      env: { PB_SQLITE_PATH: path, PB_ORG_SLUG: 'acme', PB_ORG_NAME: 'Acme' },
+      env: {
+        PB_SQLITE_PATH: path,
+        PB_ORG_SLUG: 'acme',
+        PB_ORG_NAME: 'Acme',
+        PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+        PB_PUBLIC_URL: 'http://127.0.0.1',
+      },
     });
     await first.close();
     recorded.closes.length = 0;
@@ -180,7 +211,13 @@ describe('startNode', () => {
       startNode({
         plugins: [],
         migrations: [await initSource()],
-        env: { PB_SQLITE_PATH: path, PB_ORG_SLUG: 'other', PB_ORG_NAME: 'Other' },
+        env: {
+          PB_SQLITE_PATH: path,
+          PB_ORG_SLUG: 'other',
+          PB_ORG_NAME: 'Other',
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'http://127.0.0.1',
+        },
       }),
     );
 
@@ -207,7 +244,13 @@ describe('startNode', () => {
         startNode({
           plugins: [broken],
           migrations: [await initSource()],
-          env: { PB_SQLITE_PATH: path, PB_ORG_SLUG: 'acme', PB_ORG_NAME: 'Acme' },
+          env: {
+            PB_SQLITE_PATH: path,
+            PB_ORG_SLUG: 'acme',
+            PB_ORG_NAME: 'Acme',
+            PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+            PB_PUBLIC_URL: 'http://127.0.0.1',
+          },
         }),
       );
 
@@ -227,7 +270,12 @@ describe('startNode', () => {
       startNode({
         plugins: [],
         migrations: [await initSource()],
-        env: { PB_SQLITE_PATH: path, PB_ORG_SLUG: 'acme' },
+        env: {
+          PB_SQLITE_PATH: path,
+          PB_ORG_SLUG: 'acme',
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'http://127.0.0.1',
+        },
       }),
     );
 

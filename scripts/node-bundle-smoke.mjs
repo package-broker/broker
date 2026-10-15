@@ -148,8 +148,14 @@ async function run() {
     PB_SQLITE_PATH: join(copy, 'data', 'db.sqlite'),
     PB_ORG_SLUG: 'smoke',
     PB_ORG_NAME: 'Smoke',
+    PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+    PB_PUBLIC_URL: 'http://127.0.0.1',
   };
   delete env['NODE_PATH'];
+  delete env['PB_MASTER_KEY_FILE'];
+  for (const name of Object.keys(env)) {
+    if (name.startsWith('PB_MASTER_KEY_PREVIOUS')) delete env[name];
+  }
   child = spawn(nodeBin, ['server.js'], {
     cwd: copy,
     env,

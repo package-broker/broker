@@ -10,7 +10,7 @@ export interface OpenedPair extends OpenedExecutor {
 }
 
 const COUNT_TABLES =
-  "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'";
+  "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf\\_%' ESCAPE '\\'";
 
 async function withPair(
   open: () => Promise<OpenedPair>,

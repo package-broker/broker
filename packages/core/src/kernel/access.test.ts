@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HookTimeoutError, runAccessChecks } from './access.js';
+import { HookTimeoutError, reportHookError, runAccessChecks } from './access.js';
 import type { HookErrorHandler } from './access.js';
 import { orgContext } from '../db/port.js';
 import type { AccessCheckInput, HookMap } from '../plugin.js';
@@ -26,6 +26,27 @@ function returning(value: unknown): Handler {
 class DenyResult {
   readonly deny = true;
 }
+
+describe('reportHookError', () => {
+  it('reports the supplied plugin and error and accepts an absent handler', () => {
+    const onHookError = vi.fn<HookErrorHandler>();
+    const error = new Error('failure');
+
+    reportHookError(onHookError, 'core:authorize-input', error);
+    expect(onHookError).toHaveBeenCalledExactlyOnceWith({ plugin: 'core:authorize-input', error });
+    expect(() => reportHookError(undefined, 'core:authorize-input', error)).not.toThrow();
+  });
+
+  it.each(['throw', 'reject'] as const)('swallows a reporter %s', async (failure) => {
+    const onHookError: HookErrorHandler = () => {
+      if (failure === 'throw') throw new Error('logger down');
+      return Promise.reject(new Error('logger down'));
+    };
+
+    expect(() => reportHookError(onHookError, 'plugin', new Error('failure'))).not.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+});
 
 describe('runAccessChecks', () => {
   it('returns undefined when there are no hooks', async () => {
@@ -411,6 +432,9 @@ describe('runAccessChecks', () => {
       ['0', 0],
       ['a negative value', -1],
       ['a fraction below 1', 0.5],
+      ['a fraction above 1', 1.5],
+      ['above the upper bound', 600_001],
+      ['an unsafe integer', Number.MAX_SAFE_INTEGER + 1],
       ['NaN', Number.NaN],
       ['Infinity', Number.POSITIVE_INFINITY],
       ['2147483648', 2_147_483_648],
@@ -434,21 +458,22 @@ describe('runAccessChecks', () => {
       await expect(pending).resolves.toEqual({ deny: true, reason: 'hook_error' });
     });
 
-    it('accepts the largest timer delay 2147483647', async () => {
+    it.each([1, 600_000])('accepts the timeout boundary %i', async (hookTimeoutMs) => {
       vi.useFakeTimers();
       let settled = false;
-
-      void runAccessChecks(
+      const pending = runAccessChecks(
         [hook('stuck', () => new Promise<undefined>(() => undefined))],
         input,
         undefined,
-        { hookTimeoutMs: 2_147_483_647 },
+        { hookTimeoutMs },
       ).finally(() => {
         settled = true;
       });
-      await vi.advanceTimersByTimeAsync(60_000);
-
+      await vi.advanceTimersByTimeAsync(hookTimeoutMs - 1);
       expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ deny: true, reason: 'hook_error' });
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     it('reports the timeout as a HookTimeoutError carrying timeoutMs as an own field', async () => {

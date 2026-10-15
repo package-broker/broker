@@ -1,4 +1,4 @@
-import { runAccessChecks } from './access.js';
+import { reportHookError, runAccessChecks } from './access.js';
 import type { AccessCheckOptions, HookErrorHandler } from './access.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
@@ -27,7 +27,7 @@ export interface AuthorizationEngine {
 export type DenyLogger = (entry: { readonly plugin: string; readonly reason: string }) => void;
 
 export interface AuthorizeRouteOptions extends AccessCheckOptions {
-  /** An engine whose promise has not settled by then denies with 403. Default 2000. */
+  /** Engine deadline in ms: a safe integer in 1..600000, otherwise 2000. Expiry denies with 403. */
   readonly engineTimeoutMs?: number;
   /** Told which plugin denied and why, for logs only. */
   readonly onDeny?: DenyLogger;
@@ -39,6 +39,8 @@ type AccessCheckHooks = ReadonlyArray<{
 }>;
 
 const ENGINE_PLUGIN = 'core:authorization';
+/** Label for failures raised before the engine decision is used, such as input validation. */
+export const INPUT_PLUGIN = 'core:authorize-input';
 const DEFAULT_ENGINE_TIMEOUT_MS = 2000;
 const MAX_ENGINE_TIMEOUT_MS = 600_000;
 const PRINCIPAL_KINDS = {
@@ -46,7 +48,7 @@ const PRINCIPAL_KINDS = {
   service: true,
   customer: true,
 } as const satisfies Record<Principal['kind'], true>;
-const CONTROL_CHARACTER = /\p{Cc}/u;
+const CONTROL_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 const FORBIDDEN: AuthorizationDecision = Object.freeze({ allow: false, status: 403 });
 const UNAUTHORIZED: AuthorizationDecision = Object.freeze({ allow: false, status: 401 });
@@ -139,16 +141,6 @@ function swallow(call: () => unknown): void {
   }
 }
 
-function reportEngineError(onHookError: HookErrorHandler | undefined, error: unknown): void {
-  if (onHookError === undefined) return;
-  swallow(() =>
-    (onHookError as (event: { plugin: string; error: unknown }) => unknown)({
-      plugin: ENGINE_PLUGIN,
-      error,
-    }),
-  );
-}
-
 function engineTimeout(options: AuthorizeRouteOptions): number {
   const value: unknown = options.engineTimeoutMs;
   return Number.isSafeInteger(value) &&
@@ -180,7 +172,8 @@ async function decide(
 /**
  * The engine decides first; access.check hooks run only after it allows and can only add a
  * deny, which becomes a 403. Every failure denies with 403. Hook reasons go to onDeny only and
- * never into the returned decision.
+ * never into the returned decision. A hook_error is sent to onDeny unless onHookError delivered it
+ * without throwing; a missing, non-callable or throwing onHookError still reaches onDeny.
  */
 export async function authorizeRoute(
   request: AuthorizationRequest,
@@ -198,14 +191,15 @@ export async function authorizeRoute(
   try {
     org = orgContext(request.org.orgId);
     permission = request.route.permission;
-    if (typeof permission !== 'string') throw new TypeError('route permission must be a string');
+    if (!isIdentifier(permission))
+      throw new TypeError('route permission must be a non-empty, control-character-free string');
     chain = hooks.map(({ plugin, handler }) => ({ plugin, handler }));
     timeoutMs = engineTimeout(options);
     onDeny = options.onDeny;
     const hookTimeoutMs = options.hookTimeoutMs;
     accessOptions = Object.freeze(hookTimeoutMs === undefined ? {} : { hookTimeoutMs });
   } catch (error) {
-    reportEngineError(onHookError, error);
+    reportHookError(onHookError, INPUT_PLUGIN, error);
     return FORBIDDEN;
   }
 
@@ -213,13 +207,13 @@ export async function authorizeRoute(
   try {
     raw = await decide(engine, request, timeoutMs);
   } catch (error) {
-    reportEngineError(onHookError, error);
+    reportHookError(onHookError, ENGINE_PLUGIN, error);
     return FORBIDDEN;
   }
 
   const decision = validDecision(raw);
   if (decision === undefined) {
-    reportEngineError(onHookError, new TypeError('malformed authorization decision'));
+    reportHookError(onHookError, ENGINE_PLUGIN, new TypeError('malformed authorization decision'));
     return FORBIDDEN;
   }
   if (!decision.allow) return decision;
@@ -232,14 +226,24 @@ export async function authorizeRoute(
   };
   for (const hook of chain) {
     let denial: { readonly reason: string } | undefined;
+    let reported = false;
+    const onError: HookErrorHandler | undefined =
+      onHookError === undefined
+        ? undefined
+        : (event) => {
+            const pending = onHookError(event);
+            reported = true;
+            return pending;
+          };
     try {
-      denial = await runAccessChecks([hook], input, onHookError, accessOptions);
+      denial = await runAccessChecks([hook], input, onError, accessOptions);
     } catch {
       denial = { reason: 'hook_error' };
     }
     if (denial !== undefined) {
       const entry = Object.freeze({ plugin: hook.plugin, reason: denial.reason });
-      if (onDeny !== undefined) swallow(() => onDeny(entry));
+      if (onDeny !== undefined && !(denial.reason === 'hook_error' && reported))
+        swallow(() => onDeny(entry));
       return FORBIDDEN;
     }
   }

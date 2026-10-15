@@ -6,11 +6,7 @@ import { systemClock, ulid } from '@package-broker/core/ids';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
-import {
-  readMasterKeys,
-  SecretsConfigError,
-  type MasterKeyVariable,
-} from '@package-broker/core/secrets/master-key';
+import { readMasterKeys, SecretsConfigError } from '@package-broker/core/secrets/master-key';
 import { migrate, type MigrateLogEvent } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
@@ -128,9 +124,11 @@ async function readKeyring(env: Env): Promise<Keyring> {
       error.variable === 'PB_MASTER_KEY'
         ? current.fromFile
         : error.variable === 'PB_MASTER_KEY_PREVIOUS' && previous.fromFile;
-    throw fromFile
-      ? new SecretsConfigError(error.problem, `${error.variable}_FILE` as MasterKeyVariable)
-      : error;
+    if (!fromFile) throw error;
+    throw new SecretsConfigError(
+      error.problem,
+      error.variable === 'PB_MASTER_KEY' ? 'PB_MASTER_KEY_FILE' : 'PB_MASTER_KEY_PREVIOUS_FILE',
+    );
   }
 }
 

@@ -42,7 +42,11 @@
       "types": "./dist/ids.d.ts",
       "default": "./dist/ids.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./authz/*": {
+      "types": "./dist/authz/*.d.ts",
+      "default": "./dist/authz/*.js"
+    }
   },
   "files": [
     "dist",

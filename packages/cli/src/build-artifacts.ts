@@ -68,6 +68,18 @@ export async function writeOutputPackageJson(
   await writeFile(packageJsonPath, contents);
 }
 
+/**
+ * A collected migration source carries the file stem in `name` (for example
+ * `0001_init`), while the built migrations directory stores it as
+ * `migrations/<owner>/<name>.sql` and `loadBuiltMigrations` validates that file
+ * name. Widen the name to the file name before rendering the JSON manifest.
+ */
+export function toManifestMigrations(
+  migrations: readonly MigrationSource[],
+): readonly MigrationSource[] {
+  return migrations.map((source) => ({ ...source, name: `${source.name}.sql` }));
+}
+
 export function renderBuildManifest(
   configPath: string,
   migrations?: readonly MigrationSource[],

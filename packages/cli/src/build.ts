@@ -4,9 +4,17 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import type { Platform } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
-import { orderPlugins, renderManifestJson, renderManifestTs, validatePlugins } from './manifest.js';
+import {
+  renderBuildInfo,
+  renderBuildManifest,
+  renderNodePackageJson,
+  writeOutputPackageJson,
+} from './build-artifacts.js';
+import { orderPlugins, renderManifestJson, validatePlugins } from './manifest.js';
+import { collectMigrations, defaultResolvePackageDir } from './migrations-collect.js';
 
 export interface BuildOptions {
   configPath: string;
@@ -20,6 +28,8 @@ export interface BuildResult {
   manifestJson: string;
   manifestTs: string;
   bundle: string;
+  migrations: string;
+  buildInfo: string;
   metafile: Metafile;
 }
 
@@ -57,6 +67,18 @@ async function readVersion(packageName: string, cwd: string): Promise<string> {
   return pkg.version;
 }
 
+export async function readNodeDriverVersion(
+  cliRequire: NodeJS.Require = createRequire(import.meta.url),
+): Promise<string> {
+  const runtimeRequire = createRequire(
+    cliRequire.resolve('@package-broker/runtime-node/package.json'),
+  );
+  const driver = JSON.parse(
+    await readFile(runtimeRequire.resolve('better-sqlite3/package.json'), 'utf8'),
+  ) as { version: string };
+  return driver.version;
+}
+
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const cwd = options.cwd ?? process.cwd();
   const configPath = path.resolve(cwd, options.configPath);
@@ -66,10 +88,21 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const errors = validatePlugins(config.plugins, target);
   if (errors.length > 0) throw new Error(`invalid broker config:\n${errors.join('\n')}`);
   const plugins = orderPlugins(config.plugins);
+  const registration = collectRegistrations(plugins);
+  const sources = await collectMigrations(plugins, defaultResolvePackageDir(cwd));
 
   const outDir = path.resolve(cwd, options.outDir ?? path.join('.pb', target));
   const generated = path.join(outDir, 'generated');
   await mkdir(generated, { recursive: true });
+
+  const migrations = path.join(outDir, 'migrations');
+  await rm(migrations, { recursive: true, force: true });
+  await mkdir(migrations, { recursive: true });
+  for (const source of sources) {
+    const ownerDir = path.join(migrations, source.owner);
+    await mkdir(ownerDir, { recursive: true });
+    await writeFile(path.join(ownerDir, `${source.name}.sql`), source.sql);
+  }
 
   const versions = new Map<string, string>();
   for (const plugin of plugins)
@@ -77,10 +110,40 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
   const manifestTs = path.join(generated, 'manifest.ts');
   const manifestJson = path.join(generated, 'manifest.json');
-  await writeFile(manifestTs, renderManifestTs(plugins));
+  await writeFile(
+    manifestTs,
+    renderBuildManifest(configPath, target === 'node' ? sources : undefined),
+  );
   await writeFile(
     manifestJson,
-    `${JSON.stringify(renderManifestJson(plugins, versions, target), null, 2)}\n`,
+    `${JSON.stringify(renderManifestJson(plugins, versions, target, { migrations: sources, registration }), null, 2)}\n`,
+  );
+
+  const packageJson = path.join(outDir, 'package.json');
+  await writeOutputPackageJson(
+    packageJson,
+    target === 'node' ? renderNodePackageJson(await readNodeDriverVersion()) : null,
+  );
+
+  let lockfileSha256: string | null = null;
+  try {
+    lockfileSha256 = createHash('sha256')
+      .update(await readFile(path.join(cwd, 'pnpm-lock.yaml')))
+      .digest('hex');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const buildInfo = path.join(outDir, 'build-info.json');
+  await writeFile(
+    buildInfo,
+    renderBuildInfo({
+      schemaVersion: 1,
+      target,
+      core: await readVersion('@package-broker/core', cwd),
+      plugins: Object.fromEntries(versions),
+      lockfileSha256,
+      gitSha: process.env.GITHUB_SHA ?? null,
+    }),
   );
 
   const runtime = target === 'cloudflare' ? 'runtime-cloudflare' : 'runtime-node';
@@ -94,7 +157,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     target: 'es2022',
     platform: target === 'cloudflare' ? 'neutral' : 'node',
     conditions: target === 'cloudflare' ? ['workerd', 'worker', 'browser'] : [],
-    external: target === 'cloudflare' ? ['cloudflare:*'] : [],
+    external: target === 'cloudflare' ? ['cloudflare:*'] : ['better-sqlite3'],
     alias: { '#pb-manifest': manifestTs },
     nodePaths: [path.join(cwd, 'node_modules')],
     absWorkingDir: cwd,
@@ -104,5 +167,13 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   });
   await writeFile(path.join(outDir, 'metafile.json'), JSON.stringify(result.metafile));
 
-  return { outDir, manifestJson, manifestTs, bundle, metafile: result.metafile };
+  return {
+    outDir,
+    manifestJson,
+    manifestTs,
+    bundle,
+    migrations,
+    buildInfo,
+    metafile: result.metafile,
+  };
 }

@@ -1,19 +1,99 @@
+import type { OrganizationRepository } from './db/organization.js';
+import type { OrgContext } from './db/port.js';
+import type { Clock } from './ids.js';
+
 export const SUPPORTED_PLUGIN_API = [1, 1] as const;
 
 export type Platform = 'cloudflare' | 'node';
+
+export type PortName =
+  | 'database'
+  | 'blob'
+  | 'cache'
+  | 'job'
+  | 'session'
+  | 'identity'
+  | 'secrets'
+  | 'observability'
+  | 'source';
+
+export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
 
 export interface PluginApi {
   readonly apiVersion: number;
 }
 
 export interface PluginDefinition extends PluginApi {
+  /** Not 'core'. */
   readonly id: string;
   readonly package: string;
   readonly platforms: readonly Platform[];
   readonly dependsOn?: readonly string[];
   readonly capabilities?: readonly string[];
+  /** Metadata in step 3: runtime-owned ports cannot be bound. */
+  readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
+  readonly migrations?: { readonly dir: string };
+  /** Synchronous and pure: declares routes and hooks. Runs in pb build and at kernel boot. */
+  readonly register?: (registry: PluginRegistry) => void;
+  /** Runs once per kernel after every plugin registered. Receives ports, never adapters. */
+  readonly init?: (ports: PluginPorts) => void | Promise<void>;
 }
 
-export function definePlugin<T extends PluginDefinition>(definition: T): T {
+export interface PluginRegistry {
+  route(route: RouteDefinition): void;
+  hook<K extends keyof HookMap>(name: K, handler: HookMap[K]): void;
+}
+
+export interface RouteDefinition {
+  /** HEAD is served by GET routes, same authorization. */
+  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  readonly path: string;
+  /** null = public. */
+  readonly permission: string | null;
+  /** Default true; false requires permission null. */
+  readonly needsOrg?: boolean;
+  readonly handler: (ctx: RequestContext) => Promise<Response> | Response;
+}
+
+export interface Principal {
+  readonly kind: 'user' | 'service' | 'customer';
+  readonly id: string;
+}
+
+export interface RequestContext {
+  readonly request: Request;
+  readonly requestId: string;
+  /** null only when needsOrg is false. */
+  readonly org: OrgContext | null;
+  /** null on public routes. */
+  readonly principal: Principal | null;
+  readonly projectId: string | null;
+  readonly params: Readonly<Record<string, string>>;
+  readonly ports: PluginPorts;
+}
+
+export interface PluginPorts {
+  readonly organizations: OrganizationRepository;
+  readonly clock: Clock;
+  readonly ids: { ulid(): string };
+}
+
+export interface AccessCheckInput {
+  readonly org: OrgContext;
+  readonly principal: Principal;
+  readonly permission: string;
+  readonly projectId: string | null;
+}
+
+/** Deny-only (ADR-004): there is no allow value; undefined passes. */
+export type AccessCheckResult = { readonly deny: true; readonly reason?: string } | undefined;
+
+export interface HookMap {
+  'access.check': (input: AccessCheckInput) => AccessCheckResult | Promise<AccessCheckResult>;
+}
+
+export function definePlugin<const T extends PluginDefinition>(
+  definition: T & Record<Exclude<keyof T, keyof PluginDefinition>, never>,
+): T {
   return definition;
 }

@@ -18,10 +18,6 @@
       "types": "./dist/sql/scan.d.ts",
       "default": "./dist/sql/scan.js"
     },
-    "./sql/inline": {
-      "types": "./dist/sql/inline.d.ts",
-      "default": "./dist/sql/inline.js"
-    },
     "./migrations/split": {
       "types": "./dist/migrations/split.d.ts",
       "default": "./dist/migrations/split.js"

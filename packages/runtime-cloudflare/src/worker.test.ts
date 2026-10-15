@@ -65,6 +65,14 @@ async function bootstrap(db: D1DatabaseLike): Promise<string> {
   return id;
 }
 
+function env(db: D1DatabaseLike) {
+  return {
+    DB: db,
+    PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+    PB_PUBLIC_URL: 'https://broker.test',
+  };
+}
+
 function request(path: string): Request {
   return new Request(`https://broker.invalid${path}`);
 }
@@ -117,17 +125,17 @@ describe('createWorker', () => {
     const db = await migratedDatabase();
     const worker = createWorker([whoamiPlugin()]);
 
-    const before = await worker.fetch(request('/whoami'), { DB: db });
+    const before = await worker.fetch(request('/whoami'), env(db));
     expect(before.status).toBe(503);
     expect(await errorCode(before)).toBe('not_bootstrapped');
 
     const id = await bootstrap(db);
 
-    const after = await worker.fetch(request('/whoami'), { DB: db });
+    const after = await worker.fetch(request('/whoami'), env(db));
     expect(after.status).toBe(200);
     expect(((await after.json()) as { orgId: string }).orgId).toBe(id);
 
-    const ready = await worker.fetch(request('/health/ready'), { DB: db });
+    const ready = await worker.fetch(request('/health/ready'), env(db));
     expect(ready.status).toBe(200);
   });
 
@@ -136,14 +144,14 @@ describe('createWorker', () => {
     await bootstrap(db);
     const worker = createWorker([]);
 
-    const first = await worker.fetch(request('/health/ready'), { DB: db });
+    const first = await worker.fetch(request('/health/ready'), env(db));
     expect(first.status).toBe(200);
 
     const executor = createD1Executor(db);
     await executor.batch([{ sql: 'PRAGMA defer_foreign_keys = on', params: [] }]);
     await executor.all({ sql: 'DROP TABLE organization', params: [] });
 
-    const second = await worker.fetch(request('/health/ready'), { DB: db });
+    const second = await worker.fetch(request('/health/ready'), env(db));
     expect(second.status).toBe(503);
   });
 
@@ -155,10 +163,10 @@ describe('createWorker', () => {
     const withoutBinding = await worker.fetch(request('/health/ready'));
     expect(withoutBinding.status).toBe(503);
 
-    const withBinding = await worker.fetch(request('/health/ready'), { DB: db });
+    const withBinding = await worker.fetch(request('/health/ready'), env(db));
     expect(withBinding.status).toBe(200);
 
-    const again = await worker.fetch(request('/health/ready'), { DB: db });
+    const again = await worker.fetch(request('/health/ready'), env(db));
     expect(again.status).toBe(200);
   });
 
@@ -218,11 +226,11 @@ describe('createWorker', () => {
     });
     const worker = createWorker([plugin]);
 
-    const first = await worker.fetch(request('/flaky-binding'), { DB: db });
+    const first = await worker.fetch(request('/flaky-binding'), env(db));
     expect(first.status).toBe(500);
     expect(await errorCode(first)).toBe('internal');
 
-    const second = await worker.fetch(request('/flaky-binding'), { DB: db });
+    const second = await worker.fetch(request('/flaky-binding'), env(db));
     expect(second.status).toBe(200);
     expect(attempts).toBe(2);
   });
@@ -232,8 +240,8 @@ describe('createWorker', () => {
     let inits = 0;
     const worker = createWorker([pingPlugin(() => (inits += 1))]);
 
-    await worker.fetch(request('/ping'), { DB: db });
-    await worker.fetch(request('/ping'), { DB: db });
+    await worker.fetch(request('/ping'), env(db));
+    await worker.fetch(request('/ping'), env(db));
 
     expect(inits).toBe(1);
   });
@@ -247,7 +255,7 @@ describe('createWorker', () => {
       }),
     ]);
 
-    await worker.fetch(request('/ping'), { DB: db });
+    await worker.fetch(request('/ping'), env(db));
 
     if (received === null) throw new Error('init did not run');
     const organizations = (received as PluginPorts).organizations as unknown as Record<

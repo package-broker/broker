@@ -1,9 +1,14 @@
 import { execFileSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
+import { DEFAULT_ROLES } from '@package-broker/core/authz/permissions';
+import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
+import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { planMigrations } from '@package-broker/db-sqlite/migrations/plan';
@@ -13,6 +18,13 @@ import { createD1Executor } from '@package-broker/runtime-cloudflare/db/d1-execu
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEADLINE_MS = 60_000;
 const DISPOSE_GRACE_MS = 5_000;
+const PUBLIC_ORIGIN = 'https://broker.test';
+const MASTER_KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+const ADMIN_EMAIL = 'admin@example.test';
+// Design note section 2.6: v1 password-pepper, salt 0xa0..0xaf, 100000 iterations.
+const VECTOR_PASSWORD = 'correct horse battery staple';
+const VECTOR_PASSWORD_HASH =
+  'pbkdf2-sha256$i=100000$v=1$oKGio6SlpqeoqaqrrK2urw$K7MuJuKUZ7oO7dy0yZlMHaJS4zt5QunqAXSi_Zf584U';
 
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
 const outDir = join(repoRoot, '.pb', 'cloudflare');
@@ -120,6 +132,40 @@ async function dispatch(path, limitMs) {
   }
 }
 
+async function send(path, limitMs, { method = 'GET', json, cookie } = {}) {
+  const url = `http://broker.test${path}`;
+  const headers = {};
+  if (json !== undefined) {
+    headers['content-type'] = 'application/json';
+    headers.origin = PUBLIC_ORIGIN;
+  }
+  if (cookie !== undefined) headers.cookie = cookie;
+  try {
+    return await mf.dispatchFetch(url, {
+      method,
+      headers,
+      ...(json === undefined ? {} : { body: JSON.stringify(json) }),
+      signal: AbortSignal.timeout(limitMs),
+    });
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      throw new Error(`${method} ${path}: no response within ${limitMs}ms`, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function cookiesOf(response) {
+  return response.headers
+    .getSetCookie()
+    .map((line) => line.split(';')[0])
+    .join('; ');
+}
+
+function totpStep(offset = 0) {
+  return Math.floor(Date.now() / 30_000) + offset;
+}
+
 async function body(response) {
   return response.text().catch(() => '<unreadable body>');
 }
@@ -163,6 +209,7 @@ async function run() {
         scriptPath: basename(workerScript),
         compatibilityDate: '2026-10-01',
         d1Databases: ['DB'],
+        bindings: { PB_MASTER_KEY: MASTER_KEY, PB_PUBLIC_URL: PUBLIC_ORIGIN },
       }),
     );
 
@@ -173,12 +220,32 @@ async function run() {
     await migrate(executor, migrations, { holder: 'smoke' });
 
     step = 'bootstrapping the organization';
+    const orgId = ulid();
+    const now = new Date();
     await createOrganizationBootstrap(executor).bootstrap({
-      id: ulid(),
+      id: orgId,
       slug: 'smoke',
       name: 'Smoke',
-      now: new Date().toISOString(),
+      now: now.toISOString(),
     });
+
+    step = 'bootstrapping the admin';
+    const adminId = ulid();
+    const setupToken = randomBytes(32).toString('base64url');
+    const roleIds = Object.fromEntries(DEFAULT_ROLES.map(({ key }) => [key, ulid()]));
+    const bootstrapped = await bootstrapAdmin(executor, orgContext(orgId), {
+      email: ADMIN_EMAIL,
+      userId: adminId,
+      setupHash: createHash('sha256').update(setupToken).digest('hex'),
+      setupExpiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+      grantId: ulid(),
+      roleIds,
+      opId: ulid(),
+      now: now.toISOString(),
+    });
+    if (bootstrapped !== 'created') {
+      throw new Error(`admin bootstrap: expected "created", got ${bootstrapped}`);
+    }
 
     step = 'GET /health/ready';
     await expectStatus('/health/ready', await dispatch('/health/ready', limitMs), 200);
@@ -193,6 +260,57 @@ async function run() {
     if (envelope?.error?.code !== 'not_found') {
       throw new Error(`/nope: expected error.code "not_found", got ${JSON.stringify(envelope)}`);
     }
+
+    step = 'POST /_pb/auth/local/setup/start';
+    const started = await send('/_pb/auth/local/setup/start', limitMs, {
+      method: 'POST',
+      json: { token: setupToken },
+    });
+    await expectStatus('local setup start', started, 200);
+    const totpSecret = base32Decode((await started.json()).secret);
+    console.log('smoke:cloudflare workerd: local setup start ok');
+
+    step = 'POST /_pb/auth/local/setup/finish';
+    const finished = await send('/_pb/auth/local/setup/finish', limitMs, {
+      method: 'POST',
+      json: {
+        token: setupToken,
+        password: VECTOR_PASSWORD,
+        code: await totpCode(totpSecret, totpStep()),
+      },
+    });
+    await expectStatus('local setup finish', finished, 204);
+    console.log('smoke:cloudflare workerd: local setup finish ok');
+
+    step = 'GET /_pb/session after setup';
+    const afterSetup = await send('/_pb/session', limitMs, { cookie: cookiesOf(finished) });
+    await expectStatus('/_pb/session after setup', afterSetup, 200);
+    console.log('smoke:cloudflare workerd: session after setup ok');
+
+    step = 'storing the section 2.6 password vector';
+    await executor.all({
+      sql: 'UPDATE local_login SET password_hash = ? WHERE user_id = ?',
+      params: [VECTOR_PASSWORD_HASH, adminId],
+    });
+
+    step = 'POST /_pb/auth/local/login';
+    const loggedIn = await send('/_pb/auth/local/login', limitMs, {
+      method: 'POST',
+      json: {
+        email: ADMIN_EMAIL,
+        password: VECTOR_PASSWORD,
+        code: await totpCode(totpSecret, totpStep(1)),
+      },
+    });
+    await expectStatus('local login against the section 2.6 password hash', loggedIn, 204);
+    console.log(
+      'smoke:cloudflare workerd: local login ok (HKDF keys match the section 2.6 vector)',
+    );
+
+    step = 'GET /_pb/session after login';
+    const afterLogin = await send('/_pb/session', limitMs, { cookie: cookiesOf(loggedIn) });
+    await expectStatus('/_pb/session after login', afterLogin, 200);
+    console.log('smoke:cloudflare workerd: session after login ok');
 
     step = 'done';
     console.log('smoke:cloudflare ok');

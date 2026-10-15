@@ -3,6 +3,8 @@ import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
 import type { KernelLog } from './errors.js';
 import { liveResponse, readyResponse } from './health.js';
 import { NotBootstrappedError } from './org.js';
+import { KernelConfigError } from './registry.js';
+import { SecretsConfigError } from '../secrets/master-key.js';
 import { DbError } from '../db/errors.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
@@ -406,5 +408,34 @@ describe('readyResponse timeout', () => {
 
     expect(response.status).toBe(200);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('errorResponse configuration errors', () => {
+  const VECTOR = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+  const BODY = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+
+  it.each([
+    ['SecretsConfigError', () => new SecretsConfigError('malformed', 'PB_MASTER_KEY')],
+    ['KernelConfigError', () => new KernelConfigError([`bad value ${VECTOR}`])],
+  ])('maps %s to 503 misconfigured without key text', async (name, make) => {
+    const { log, entries } = recorder();
+    const error = make();
+    error.message = `${error.message} ${VECTOR}`;
+
+    const response = errorResponse(error, 'req-70', log);
+    const text = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('req-70');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(JSON.parse(text)).toEqual({
+      error: { code: 'misconfigured', message: 'Server is not configured', requestId: 'req-70' },
+    });
+    expect(text).not.toContain(BODY);
+    expect(entries).toEqual([
+      { level: 'error', requestId: 'req-70', error: name, kind: undefined },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(BODY);
   });
 });

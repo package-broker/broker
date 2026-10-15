@@ -104,6 +104,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm pb build --config broker.config.ts --target ${{ matrix.target }}
+      - run: pnpm smoke:${{ matrix.target }}
 
   treeshake:
     needs: install
@@ -119,6 +120,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm check:treeshake
+      - run: pnpm check:pack
 
   client-matrix:
     needs: install

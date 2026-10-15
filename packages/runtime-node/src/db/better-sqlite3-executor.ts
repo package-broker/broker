@@ -9,10 +9,20 @@ import type {
 
 export interface BetterSqliteOptions {
   readonly busyTimeoutMs?: number;
+  readonly statementCacheSize?: number;
 }
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5000;
+const DEFAULT_STATEMENT_CACHE_SIZE = 256;
 const RETURNING = /\breturning\b/i;
+
+function resolveStatementCacheSize(value: number | undefined): number {
+  const size = value ?? DEFAULT_STATEMENT_CACHE_SIZE;
+  if (!Number.isInteger(size) || size < 1) {
+    throw new RangeError('statementCacheSize must be an integer greater than or equal to 1');
+  }
+  return size;
+}
 
 function assertParam(value: unknown, index: number): void {
   if (value === null || typeof value === 'string' || value instanceof Uint8Array) return;
@@ -72,14 +82,23 @@ export function openBetterSqliteExecutor(
   path: string,
   options: BetterSqliteOptions = {},
 ): { readonly executor: SqlExecutor; close(): Promise<void> } {
+  const cacheLimit = resolveStatementCacheSize(options.statementCacheSize);
   const database = openDatabase(path, options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS);
 
   const cache = new Map<string, Database.Statement>();
   const prepare = (sql: string): Database.Statement => {
     const cached = cache.get(sql);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      cache.delete(sql);
+      cache.set(sql, cached);
+      return cached;
+    }
     const statement = database.prepare(sql);
     cache.set(sql, statement);
+    if (cache.size > cacheLimit) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
     return statement;
   };
 

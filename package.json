@@ -18,7 +18,8 @@
     "check:pack": "node scripts/check-pack.mjs",
     "check:treeshake": "node scripts/check-treeshake.mjs",
     "client-matrix": "node scripts/client-matrix.mjs",
-    "smoke:cloudflare": "pnpm --filter @package-broker/runtime-cloudflare exec node scripts/worker-smoke.mjs"
+    "smoke:cloudflare": "pnpm --filter @package-broker/runtime-cloudflare exec node scripts/worker-smoke.mjs",
+    "smoke:node": "node scripts/node-bundle-smoke.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

@@ -26,6 +26,10 @@
       "types": "./dist/db/*.d.ts",
       "default": "./dist/db/*.js"
     },
+    "./platform/*": {
+      "types": "./dist/platform/*.d.ts",
+      "default": "./dist/platform/*.js"
+    },
     "./secrets/*": {
       "types": "./dist/secrets/*.d.ts",
       "default": "./dist/secrets/*.js"

@@ -15,7 +15,7 @@ export interface StatementResult<R = Record<string, unknown>> {
 
 /** Executor restricted to scalar parameters. The migration runner and bootstrap accept this type. */
 export interface ScalarSqlExecutor {
-  readonly driver: 'd1' | 'd1-http' | 'better-sqlite3' | 'node-sqlite';
+  readonly driver: 'd1' | 'd1-http' | 'better-sqlite3' | 'node-sqlite' | 'none';
   all<R = Record<string, unknown>>(statement: ScalarStatement): Promise<R[]>;
   batch(statements: readonly ScalarStatement[]): Promise<StatementResult[]>;
 }

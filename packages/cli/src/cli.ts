@@ -4,6 +4,7 @@ import type { Platform } from '@package-broker/core/plugin';
 import { build } from './build.js';
 import {
   runAdminBootstrap,
+  runAdminRebindProvider,
   runAdminResetLocal,
   runGenerateMasterKey,
   type AdminTarget,
@@ -20,9 +21,11 @@ const USAGE =
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
   '       pb admin bootstrap --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin reset-local --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
+  '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage or invalid slug; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
-  'Exit codes for pb admin: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 response lost, re-running is safe); 8 admin_role_missing (reset-local)';
+  'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 response lost, re-running is safe); 8 admin_role_missing (reset-local)\n' +
+  'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)';
 
 function parseCliArgs(argv: string[]) {
   try {
@@ -38,6 +41,10 @@ function parseCliArgs(argv: string[]) {
         name: { type: 'string' },
         'database-id': { type: 'string' },
         email: { type: 'string' },
+        provider: { type: 'string' },
+        confirm: { type: 'string' },
+        'expected-anchor': { type: 'string' },
+        'new-anchor': { type: 'string' },
         cloudflare: { type: 'boolean' },
         'token-file': { type: 'string' },
         'key-version': { type: 'string' },
@@ -58,6 +65,15 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   'secrets generate-master-key': ['key-version'],
   'admin bootstrap': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
   'admin reset-local': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
+  'admin rebind-provider': [
+    'provider',
+    'confirm',
+    'expected-anchor',
+    'new-anchor',
+    'sqlite',
+    'cloudflare',
+    'database-id',
+  ],
   version: [],
 };
 
@@ -126,6 +142,22 @@ export async function run(argv: readonly string[]): Promise<number> {
     if (values.email !== undefined && target !== null) {
       const options = { email: values.email, target, tokenFile: values['token-file'] };
       return subcommand === 'bootstrap' ? runAdminBootstrap(options) : runAdminResetLocal(options);
+    }
+  }
+
+  if (command === 'admin' && subcommand === 'rebind-provider') {
+    const target = adminTarget(values);
+    const { provider, confirm } = values;
+    const expectedAnchor = values['expected-anchor'];
+    const newAnchor = values['new-anchor'];
+    if (
+      target !== null &&
+      provider !== undefined &&
+      confirm !== undefined &&
+      expectedAnchor !== undefined &&
+      newAnchor !== undefined
+    ) {
+      return runAdminRebindProvider({ provider, confirm, expectedAnchor, newAnchor, target });
     }
   }
 

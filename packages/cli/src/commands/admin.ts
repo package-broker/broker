@@ -5,6 +5,11 @@ import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/p
 import { DbError } from '@package-broker/core/db/errors';
 import { orgContext, type ScalarSqlExecutor } from '@package-broker/core/db/port';
 import { isoTimestamp, systemClock, ulid } from '@package-broker/core/ids';
+import {
+  isReservedProviderId,
+  isValidProviderId,
+  isValidTrustAnchor,
+} from '@package-broker/core/identity/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
 import { formatMasterKey, generateMasterKey } from '@package-broker/core/secrets/master-key';
 import {
@@ -12,6 +17,7 @@ import {
   resetLocalLogin,
 } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { rebindProvider } from '@package-broker/db-sqlite/repositories/provider-binding';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import { createD1HttpExecutor } from '../cloudflare/d1-http-executor.js';
 
@@ -33,7 +39,7 @@ export interface AdminOptions {
   readonly stdoutIsTTY?: boolean;
 }
 
-type Command = 'admin bootstrap' | 'admin reset-local';
+type Command = 'admin bootstrap' | 'admin reset-local' | 'admin rebind-provider';
 
 const SIGNALS = ['SIGINT', 'SIGTERM'] as const;
 const RESPONSE_READ_FAILED = 'd1 http response read failed';
@@ -337,4 +343,80 @@ export function runAdminBootstrap(o: AdminOptions): Promise<number> {
 
 export function runAdminResetLocal(o: AdminOptions): Promise<number> {
   return issue('admin reset-local', o);
+}
+
+export interface RebindProviderOptions {
+  readonly provider: string;
+  readonly confirm: string;
+  readonly expectedAnchor: string;
+  readonly newAnchor: string;
+  readonly target: AdminTarget;
+}
+
+function rebindUsageError(o: RebindProviderOptions): string | null {
+  if (typeof o.provider !== 'string' || o.confirm !== o.provider) return 'confirm_mismatch';
+  if (!isValidProviderId(o.provider) || isReservedProviderId(o.provider)) {
+    return 'invalid_provider';
+  }
+  for (const anchor of [o.expectedAnchor, o.newAnchor]) {
+    if (typeof anchor !== 'string' || !isValidTrustAnchor(anchor)) return 'invalid_anchor';
+  }
+  return o.expectedAnchor === o.newAnchor ? 'anchors_equal' : null;
+}
+
+export async function runAdminRebindProvider(o: RebindProviderOptions): Promise<number> {
+  const command = 'admin rebind-provider';
+  const usageError = rebindUsageError(o);
+  if (usageError !== null) {
+    say(command, usageError);
+    return 2;
+  }
+
+  let opened: Opened | null = null;
+  try {
+    opened = openTarget(command, o.target);
+    if (opened === null) return 2;
+
+    const organization = await createOrganizationBootstrap(opened.executor).findSingleton();
+    if (organization === null) {
+      say(command, 'organization not found; run pb bootstrap or pb cloudflare bootstrap first');
+      return 5;
+    }
+
+    const result = await rebindProvider(
+      opened.executor,
+      orgContext(organization.id),
+      o.provider,
+      o.expectedAnchor,
+      o.newAnchor,
+      isoTimestamp(systemClock.now()),
+    );
+    if (!result.swapped) {
+      say(
+        command,
+        'anchor_mismatch; no binding with that provider and expected anchor; nothing changed',
+      );
+      return 6;
+    }
+    console.log(
+      JSON.stringify({
+        provider: o.provider,
+        identities: result.identities,
+        sessions: result.sessions,
+      }),
+    );
+    return 0;
+  } catch (error) {
+    if (lostResponse(error)) {
+      say(
+        command,
+        'outcome unknown; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong',
+      );
+      return 7;
+    }
+    say(command, `failed (${errorName(error)})`);
+    return 1;
+  } finally {
+    await opened?.close().catch(() => undefined);
+  }
 }

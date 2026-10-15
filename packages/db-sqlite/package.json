@@ -38,9 +38,9 @@
       "types": "./dist/migrations/runner.d.ts",
       "default": "./dist/migrations/runner.js"
     },
-    "./repositories/organization": {
-      "types": "./dist/repositories/organization.d.ts",
-      "default": "./dist/repositories/organization.js"
+    "./repositories/*": {
+      "types": "./dist/repositories/*.d.ts",
+      "default": "./dist/repositories/*.js"
     },
     "./contract/count-calls": {
       "types": "./dist/contract/count-calls.d.ts",
@@ -61,6 +61,10 @@
     "./contract/two-organizations": {
       "types": "./dist/contract/two-organizations.d.ts",
       "default": "./dist/contract/two-organizations.js"
+    },
+    "./testing/migrated-database": {
+      "types": "./dist/testing/migrated-database.d.ts",
+      "default": "./dist/testing/migrated-database.js"
     },
     "./testing/node-sqlite-executor": {
       "types": "./dist/testing/node-sqlite-executor.d.ts",

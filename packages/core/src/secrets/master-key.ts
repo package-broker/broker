@@ -8,7 +8,11 @@ export interface MasterKey {
 export type SecretsConfigProblem = 'missing' | 'malformed' | 'weak' | 'version_order' | 'too_many';
 
 export type MasterKeyVariable =
-  'PB_MASTER_KEY' | 'PB_MASTER_KEY_PREVIOUS' | 'PB_MASTER_KEY_FILE' | 'PB_MASTER_KEY_PREVIOUS_FILE';
+  | 'PB_MASTER_KEY'
+  | 'PB_MASTER_KEY_PREVIOUS'
+  | 'PB_MASTER_KEY_FILE'
+  | 'PB_MASTER_KEY_PREVIOUS_FILE'
+  | 'PASSWORD_ITERATIONS';
 
 export class SecretsConfigError extends Error {
   readonly problem: SecretsConfigProblem;

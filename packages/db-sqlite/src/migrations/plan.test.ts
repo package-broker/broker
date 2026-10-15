@@ -125,3 +125,17 @@ test('planMigrations and assertPlannedSources agree on the planned list', async 
 
   await expect(assertPlannedSources(planned)).resolves.toBeUndefined();
 });
+
+test('planMigrations rejects non-finite and non-integer sequences naming the id', async () => {
+  for (const sequence of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+    const bad = await make('core', sequence, 'bad');
+    await expect(planMigrations([await init(), bad], ['core'])).rejects.toThrow(bad.id);
+  }
+});
+
+test('assertPlannedSources rejects non-finite and non-integer sequences naming the id', async () => {
+  for (const sequence of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+    const bad = await make('core', sequence, 'bad');
+    await expect(assertPlannedSources([await init(), bad])).rejects.toThrow(bad.id);
+  }
+});

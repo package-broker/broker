@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { compile, db } from './kysely.js';
+import type { Insertable } from 'kysely';
+import { compile, db, existsGuard } from './kysely.js';
+import type { Database } from './kysely.js';
 
 describe('identity table types', () => {
   it('compiles a select of every user_account column', () => {
@@ -243,5 +245,235 @@ describe('identity table types', () => {
     const query = db.insertInto('local_login').values({ org_id: 'org' });
 
     expect(query).toBeDefined();
+  });
+});
+
+describe('0003 access-model table types', () => {
+  it('compiles a select of every service_principal_permission column', () => {
+    const statement = compile(
+      db
+        .selectFrom('service_principal_permission')
+        .select(['org_id', 'service_principal_id', 'permission']),
+    );
+
+    expect(statement.sql).toBe(
+      'select "org_id", "service_principal_id", "permission" from "service_principal_permission"',
+    );
+  });
+
+  it('compiles a select of every identity_block column', () => {
+    const statement = compile(
+      db
+        .selectFrom('identity_block')
+        .select(['org_id', 'provider', 'issuer', 'subject', 'blocked_at', 'blocked_by_user_id']),
+    );
+
+    expect(statement.sql).toBe(
+      'select "org_id", "provider", "issuer", "subject", "blocked_at", "blocked_by_user_id" from "identity_block"',
+    );
+  });
+
+  it('compiles a select of every access_mutation_guard column', () => {
+    const statement = compile(db.selectFrom('access_mutation_guard').select('key'));
+
+    expect(statement.sql).toBe('select "key" from "access_mutation_guard"');
+  });
+
+  it('compiles a select of every service_principal column', () => {
+    const statement = compile(
+      db
+        .selectFrom('service_principal')
+        .select([
+          'id',
+          'org_id',
+          'name',
+          'project_id',
+          'created_by_user_id',
+          'status',
+          'created_at',
+          'updated_at',
+          'revision',
+          'last_op_id',
+        ]),
+    );
+
+    expect(statement.sql).toBe(
+      'select "id", "org_id", "name", "project_id", "created_by_user_id", "status", "created_at", "updated_at", "revision", "last_op_id" from "service_principal"',
+    );
+  });
+
+  it('compiles a select of every token column', () => {
+    const statement = compile(
+      db
+        .selectFrom('token')
+        .select([
+          'id',
+          'org_id',
+          'kind',
+          'selector',
+          'hash',
+          'pepper_version',
+          'name',
+          'scopes_json',
+          'read_only',
+          'user_id',
+          'service_principal_id',
+          'customer_id',
+          'project_id',
+          'created_by_user_id',
+          'expires_at',
+          'revoked_at',
+          'last_used_at',
+          'created_at',
+          'project_mode',
+          'validation_kind',
+          'validation_identity_id',
+          'last_op_id',
+        ]),
+    );
+
+    expect(statement.sql).toBe(
+      'select "id", "org_id", "kind", "selector", "hash", "pepper_version", "name", "scopes_json", "read_only", "user_id", "service_principal_id", "customer_id", "project_id", "created_by_user_id", "expires_at", "revoked_at", "last_used_at", "created_at", "project_mode", "validation_kind", "validation_identity_id", "last_op_id" from "token"',
+    );
+  });
+
+  it('compiles the revision and last_op_id columns added by 0003', () => {
+    expect(compile(db.selectFrom('role').select(['revision', 'last_op_id'])).sql).toBe(
+      'select "revision", "last_op_id" from "role"',
+    );
+    expect(compile(db.selectFrom('access_grant').select(['revision', 'last_op_id'])).sql).toBe(
+      'select "revision", "last_op_id" from "access_grant"',
+    );
+    expect(compile(db.selectFrom('project').select(['revision', 'last_op_id'])).sql).toBe(
+      'select "revision", "last_op_id" from "project"',
+    );
+    expect(compile(db.selectFrom('service_principal').select(['revision', 'last_op_id'])).sql).toBe(
+      'select "revision", "last_op_id" from "service_principal"',
+    );
+  });
+
+  it('accepts inserts that omit the generated revision column', () => {
+    expect(
+      db
+        .insertInto('role')
+        .values({ id: 'role', org_id: 'org', key: 'key', name: 'name', scope: 'organization' }),
+    ).toBeDefined();
+    expect(
+      db.insertInto('access_grant').values({
+        id: 'grant',
+        org_id: 'org',
+        subject_type: 'email',
+        subject_value: 'a@example.test',
+        scope: 'organization',
+        role_id: 'role',
+      }),
+    ).toBeDefined();
+    expect(
+      db
+        .insertInto('project')
+        .values({ id: 'project', org_id: 'org', slug: 'alpha', name: 'Alpha' }),
+    ).toBeDefined();
+    expect(
+      db.insertInto('service_principal').values({
+        id: 'principal',
+        org_id: 'org',
+        name: 'principal',
+        created_by_user_id: 'user',
+      }),
+    ).toBeDefined();
+  });
+
+  it('accepts a null last_op_id and a null blocked_by_user_id', () => {
+    expect(
+      db.insertInto('identity_block').values({
+        org_id: 'org',
+        provider: 'oidc',
+        issuer: 'https://issuer.example.test',
+        subject: 'sub-1',
+        blocked_by_user_id: null,
+      }),
+    ).toBeDefined();
+    expect(
+      db.insertInto('access_grant').values({
+        id: 'grant',
+        org_id: 'org',
+        subject_type: 'email',
+        subject_value: 'a',
+        scope: 'organization',
+        role_id: 'role',
+        last_op_id: null,
+      }),
+    ).toBeDefined();
+  });
+
+  it('requires every service_principal_permission column', () => {
+    expect(
+      db.insertInto('service_principal_permission').values({
+        org_id: 'org',
+        service_principal_id: 'principal',
+        permission: 'project:read',
+      }),
+    ).toBeDefined();
+    // @ts-expect-error service_principal_id is required
+    const missing: Insertable<Database['service_principal_permission']> = {
+      org_id: 'org',
+      permission: 'p',
+    };
+
+    expect(missing).toBeDefined();
+  });
+
+  it('requires project_mode on a token insert', () => {
+    // @ts-expect-error project_mode is required on a token insert
+    const missing: Insertable<Database['token']> = {
+      id: 't',
+      org_id: 'org',
+      kind: 'pat',
+      selector: '000000000000',
+      hash: 'h',
+      pepper_version: 1,
+      name: 'n',
+      scopes_json: '[]',
+    };
+
+    expect(missing).toBeDefined();
+  });
+
+  it('rejects a null project_mode and a null access_mutation_guard key', () => {
+    const token = db.insertInto('token').values({
+      id: 't',
+      org_id: 'org',
+      kind: 'pat',
+      selector: '000000000000',
+      hash: 'h',
+      pepper_version: 1,
+      name: 'n',
+      scopes_json: '[]',
+      // @ts-expect-error project_mode is not nullable
+      project_mode: null,
+    });
+    const guardKey = db.insertInto('access_mutation_guard').values({
+      // @ts-expect-error key is not nullable
+      key: null,
+    });
+
+    expect(token).toBeDefined();
+    expect(guardKey).toBeDefined();
+  });
+
+  it('accepts the new tables through the existsGuard helper', () => {
+    const guards = [
+      existsGuard((builder) =>
+        builder.selectFrom('service_principal_permission').select('permission'),
+      ),
+      existsGuard((builder) => builder.selectFrom('identity_block').select('subject')),
+      existsGuard((builder) => builder.selectFrom('access_mutation_guard').select('key')),
+    ];
+
+    for (const guard of guards) {
+      expect(compile(db.selectFrom('organization').select('id').where(guard)).sql).toContain(
+        'exists',
+      );
+    }
   });
 });

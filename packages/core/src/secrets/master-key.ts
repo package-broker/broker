@@ -12,7 +12,8 @@ export type MasterKeyVariable =
   | 'PB_MASTER_KEY_PREVIOUS'
   | 'PB_MASTER_KEY_FILE'
   | 'PB_MASTER_KEY_PREVIOUS_FILE'
-  | 'PASSWORD_ITERATIONS';
+  | 'PASSWORD_ITERATIONS'
+  | 'PB_PUBLIC_URL';
 
 export class SecretsConfigError extends Error {
   readonly problem: SecretsConfigProblem;

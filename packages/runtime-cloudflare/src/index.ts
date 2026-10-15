@@ -16,7 +16,6 @@ import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
-import type { MasterKeyVariable } from '@package-broker/core/secrets/master-key';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
 import {
   createOrganizationBootstrap,
@@ -54,7 +53,7 @@ export function unboundExecutor(): ScalarSqlExecutor {
   };
 }
 
-const PUBLIC_URL_VARIABLE = 'PB_PUBLIC_URL' as MasterKeyVariable;
+const PUBLIC_URL_VARIABLE = 'PB_PUBLIC_URL';
 const IDENTITY_FETCH_TIMEOUT_MS = 5000;
 
 export function publicOriginOf(raw: string | undefined): string {

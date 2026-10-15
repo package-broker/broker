@@ -18,6 +18,10 @@
       "types": "./dist/config.d.ts",
       "default": "./dist/config.js"
     },
+    "./auth/*": {
+      "types": "./dist/auth/*.d.ts",
+      "default": "./dist/auth/*.js"
+    },
     "./db/*": {
       "types": "./dist/db/*.d.ts",
       "default": "./dist/db/*.js"

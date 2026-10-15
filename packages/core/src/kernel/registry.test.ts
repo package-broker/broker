@@ -50,6 +50,7 @@ describe('collectRegistrations', () => {
     });
     const b = plugin('beta', {
       binds: ['identity'],
+      identityProviders: () => [],
       register(registry) {
         registry.route({ method: 'POST', path: '/b', permission: null, handler });
         registry.hook('access.check', second);
@@ -109,7 +110,11 @@ describe('collectRegistrations', () => {
   });
 
   it.each(['source', 'identity'] as const)('accepts binds: [%s]', (port) => {
-    expect(collectRegistrations([plugin('p', { binds: [port] })]).bindings.get(port)).toBe('p');
+    const definition = plugin('p', {
+      binds: [port],
+      ...(port === 'identity' ? { identityProviders: () => [] } : {}),
+    });
+    expect(collectRegistrations([definition]).bindings.get(port)).toBe('p');
   });
 
   it('rejects binds: [database]', () => {
@@ -133,7 +138,7 @@ describe('collectRegistrations', () => {
         throw new Error('nope');
       },
     });
-    expect(problemsOf([boom])).toEqual(['plugin "boom" register failed: nope']);
+    expect(problemsOf([boom])).toEqual(['plugin "boom" register threw Error']);
   });
 
   it('reports a register that throws a non-Error value', () => {
@@ -142,7 +147,7 @@ describe('collectRegistrations', () => {
         throw 'text';
       },
     });
-    expect(problemsOf([boom])).toEqual(['plugin "boom" register failed: text']);
+    expect(problemsOf([boom])).toEqual(['plugin "boom" register threw NonError']);
   });
 
   it('reports a route path problem', () => {
@@ -207,7 +212,7 @@ describe('collectRegistrations', () => {
       },
     });
     expect(problemsOf([bad])).toEqual([
-      'plugin "p" register failed: late',
+      'plugin "p" register threw Error',
       'plugin "p": route path "x" must start with "/"',
     ]);
   });

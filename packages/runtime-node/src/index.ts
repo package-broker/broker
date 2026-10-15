@@ -1,6 +1,8 @@
 import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
+import { createAuthModule } from '@package-broker/core/auth/module';
 import type { SqlExecutor } from '@package-broker/core/db/port';
+import { scopedEnv, buildIdentityProviders } from '@package-broker/core/identity/providers';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
@@ -8,14 +10,24 @@ import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
-import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import type { PluginDefinition, PluginPorts, RouteDefinition } from '@package-broker/core/plugin';
+import type { Keyring } from '@package-broker/core/secrets/keyring';
+import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
 } from '@package-broker/db-sqlite/repositories/organization';
 
+export interface NodeAuthOptions {
+  readonly keyring: Keyring;
+  readonly publicOrigin: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}
+
 export interface NodeServerOptions {
   readonly executor?: SqlExecutor;
+  readonly auth?: NodeAuthOptions;
   readonly closeDatabase?: () => Promise<void>;
   readonly log?: KernelLog;
   readonly authorization?: AuthorizationEngine;
@@ -34,6 +46,30 @@ function rejectingExecutor(): SqlExecutor {
   return { driver: 'node-sqlite', all: unavailable, batch: unavailable };
 }
 
+function authRoutes(
+  plugins: readonly PluginDefinition[],
+  auth: NodeAuthOptions,
+  executor: SqlExecutor,
+  log: KernelLog,
+): readonly RouteDefinition[] {
+  const registration = collectRegistrations(plugins);
+  const providers = buildIdentityProviders(registration, plugins, {
+    fetch: (request) => fetch(request),
+    clock: systemClock,
+    env: scopedEnv(auth.env),
+  });
+  return createAuthModule({
+    repositories: createAuthRepositories(executor),
+    keyring: auth.keyring,
+    clock: systemClock,
+    ids: { ulid },
+    publicOrigin: auth.publicOrigin,
+    providers,
+    hooks: registration.hooks,
+    log,
+  }).coreRoutes;
+}
+
 export function createNodeServer(
   plugins: readonly PluginDefinition[],
   options: NodeServerOptions = {},
@@ -50,22 +86,28 @@ export function createNodeServer(
     ids: { ulid },
   });
 
-  const kernel = createKernel({
-    platform: 'node',
-    plugins,
-    ports,
-    resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
-    health: async () => (await bootstrap.findSingleton()) !== null,
-    log,
-    ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
-  });
+  const { auth } = options;
+  const kernel = (async () =>
+    createKernel({
+      platform: 'node',
+      plugins,
+      ports,
+      resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
+      health: async () => (await bootstrap.findSingleton()) !== null,
+      log,
+      ...(auth === undefined ? {} : { coreRoutes: authRoutes(plugins, auth, executor, log) }),
+      ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
+    }))();
   kernel.catch(() => undefined);
 
   const server = createServer(
     getRequestListener((request) =>
       kernel.then(
         (ready) => ready.fetch(request),
-        (error: unknown) => errorResponse(error, crypto.randomUUID(), log),
+        (error: unknown) => {
+          const response = errorResponse(error, crypto.randomUUID(), log);
+          return request.method === 'HEAD' ? new Response(null, response) : response;
+        },
       ),
     ),
   );

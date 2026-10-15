@@ -150,6 +150,15 @@ describe('collectRegistrations', () => {
     expect(problemsOf([bad])).toEqual(['plugin "p": route path "items" must start with "/"']);
   });
 
+  it('rejects a route method outside the supported set', () => {
+    const bad = withRoutes('p', [
+      { method: 'HEAD' as never, path: '/x', permission: null, handler },
+    ]);
+    expect(problemsOf([bad])).toEqual([
+      'plugin "p" route HEAD /x: method must be one of GET, POST, PUT, PATCH, DELETE',
+    ]);
+  });
+
   it('rejects needsOrg: false with a permission', () => {
     const bad = withRoutes('p', [
       { method: 'GET', path: '/x', permission: 'x.read', needsOrg: false, handler },

@@ -93,6 +93,8 @@ export interface RoleTable {
   protects_last_holder: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+  revision: Generated<number>;
+  last_op_id: string | null;
 }
 
 /** Mirrors `role_permission` in `migrations/0001_init.sql`. */
@@ -115,6 +117,8 @@ export interface AccessGrantTable {
   created_by: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+  revision: Generated<number>;
+  last_op_id: string | null;
 }
 
 /** Mirrors `project` in `migrations/0001_init.sql`. */
@@ -128,6 +132,8 @@ export interface ProjectTable {
   require_publish_approval: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+  revision: Generated<number>;
+  last_op_id: string | null;
 }
 
 /** Mirrors `credential` in `migrations/0001_init.sql`. */
@@ -172,6 +178,68 @@ export interface IdentityProviderBindingTable {
   created_at: Generated<string>;
 }
 
+/** Mirrors `service_principal` in `migrations/0001_init.sql` and `migrations/0003_access_model.sql`. */
+export interface ServicePrincipalTable {
+  id: string;
+  org_id: string;
+  name: string;
+  project_id: string | null;
+  created_by_user_id: string;
+  status: Generated<string>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  revision: Generated<number>;
+  last_op_id: string | null;
+}
+
+/** Mirrors `token` in `migrations/0001_init.sql` and `migrations/0003_access_model.sql`. */
+export interface TokenTable {
+  id: string;
+  org_id: string;
+  kind: string;
+  selector: string;
+  hash: string;
+  pepper_version: number;
+  name: string;
+  scopes_json: string;
+  read_only: Generated<number>;
+  user_id: string | null;
+  service_principal_id: string | null;
+  customer_id: string | null;
+  project_id: string | null;
+  created_by_user_id: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_at: Generated<string>;
+  project_mode: string;
+  validation_kind: string | null;
+  validation_identity_id: string | null;
+  last_op_id: string | null;
+}
+
+/** Mirrors `service_principal_permission` in `migrations/0003_access_model.sql`. */
+export interface ServicePrincipalPermissionTable {
+  org_id: string;
+  service_principal_id: string;
+  permission: string;
+}
+
+/** Mirrors `identity_block` in `migrations/0003_access_model.sql`. */
+export interface IdentityBlockTable {
+  org_id: string;
+  provider: string;
+  issuer: string;
+  subject: string;
+  blocked_at: Generated<string>;
+  blocked_by_user_id: string | null;
+}
+
+/** Mirrors `access_mutation_guard` in `migrations/0003_access_model.sql`. */
+export interface AccessMutationGuardTable {
+  key: string;
+}
+
 export interface Database {
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
@@ -187,4 +255,9 @@ export interface Database {
   credential: CredentialTable;
   local_login: LocalLoginTable;
   identity_provider_binding: IdentityProviderBindingTable;
+  service_principal: ServicePrincipalTable;
+  token: TokenTable;
+  service_principal_permission: ServicePrincipalPermissionTable;
+  identity_block: IdentityBlockTable;
+  access_mutation_guard: AccessMutationGuardTable;
 }

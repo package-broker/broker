@@ -147,7 +147,7 @@ describe('collectRegistrations', () => {
         throw 'text';
       },
     });
-    expect(problemsOf([boom])).toEqual(['plugin "boom" register threw NonError']);
+    expect(problemsOf([boom])).toEqual(['plugin "boom" register threw Error']);
   });
 
   it('reports a route path problem', () => {

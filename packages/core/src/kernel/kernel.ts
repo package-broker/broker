@@ -14,6 +14,7 @@ import { authorizeRoute, denyAllEngine } from './authorize.js';
 import type { AuthorizationEngine, DenyLogger } from './authorize.js';
 import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
 import type { KernelLog } from './errors.js';
+import { reportableErrorName } from './error-name.js';
 import { liveResponse, readyResponse } from './health.js';
 import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './registry.js';
 import type { Registration } from './registry.js';
@@ -54,12 +55,6 @@ const CORE_PREFIX = '/_pb/';
 const RESERVED_ROOTS = ['/health', '/_pb'] as const;
 
 const REQUEST_ID_HEADER = 'x-request-id';
-const SAFE_ERROR_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
-
-function errorName(error: unknown): string {
-  if (!(error instanceof Error)) return typeof error;
-  return SAFE_ERROR_NAME.test(error.name) ? error.name : 'Error';
-}
 
 function guardedLog(sink: KernelLog): KernelLog {
   return (entry) => {
@@ -181,7 +176,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
     const org = await resolveOrg();
     const onHookError: HookErrorHandler = (event) => {
-      log({ level: 'warn', requestId, plugin: event.plugin, error: errorName(event.error) });
+      log({
+        level: 'warn',
+        requestId,
+        plugin: event.plugin,
+        error: reportableErrorName(event.error),
+      });
     };
     const onDeny: DenyLogger = (entry) => {
       log({ level: 'warn', requestId, plugin: entry.plugin, reason: entry.reason });

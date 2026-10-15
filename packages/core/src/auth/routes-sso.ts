@@ -16,6 +16,7 @@ import type {
   LoginStateData,
   VerifiedIdentity,
 } from '../identity/port.js';
+import { reportableErrorName } from '../kernel/error-name.js';
 import { envelopeResponse, errorResponse } from '../kernel/errors.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { RequestContext, RouteDefinition } from '../plugin.js';
@@ -48,17 +49,6 @@ export interface SsoRouteDeps {
 }
 
 const MAX_BODY_BYTES = 8192;
-const REPORTABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
-  'Error',
-  'TypeError',
-  'RangeError',
-  'SyntaxError',
-  'ReferenceError',
-  'AggregateError',
-  'DOMException',
-  'OidcProviderError',
-  'NonError',
-]);
 const START_FAILURE_DETAILS: ReadonlySet<string> = new Set([
   'secret_missing',
   'callback_invalid',
@@ -116,16 +106,6 @@ type Verified =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function errorName(error: unknown): string {
-  try {
-    if (!(error instanceof Error)) return 'NonError';
-    const name: unknown = error.name;
-    return typeof name === 'string' && REPORTABLE_ERROR_NAMES.has(name) ? name : 'Error';
-  } catch {
-    return 'NonError';
-  }
 }
 
 function startFailureDetail(error: unknown): string | null {
@@ -263,7 +243,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       requestId,
       provider,
       reason,
-      ...(error === undefined ? {} : { error: errorName(error) }),
+      ...(error === undefined ? {} : { error: reportableErrorName(error) }),
       ...(startPath ? { detail: startFailureDetail(error) } : {}),
     });
   }

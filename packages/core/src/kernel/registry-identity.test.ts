@@ -278,7 +278,7 @@ describe('hook registration hardening', () => {
   it.each([
     [new Error('secret text'), 'Error'],
     [new TypeError('secret text'), 'TypeError'],
-    ['secret text', 'NonError'],
+    ['secret text', 'Error'],
     [Object.assign(new Error('x'), { name: 'bad\nname' }), 'Error'],
   ])('reports a throwing register by error name only (%#)', (thrown, name) => {
     const boom = plugin('boom', {

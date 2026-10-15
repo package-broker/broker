@@ -22,6 +22,7 @@ import type { LoginWriter, UserRepository } from '../db/users.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import type { HookErrorHandler } from '../kernel/access.js';
+import { reportableErrorName } from '../kernel/error-name.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { Registration } from '../kernel/registry.js';
 import type { RouteDefinition } from '../plugin.js';
@@ -70,28 +71,6 @@ const ROUTE_NEEDS_ORG: Readonly<Record<string, boolean>> = Object.freeze({
   'GET /_pb/session': true,
 });
 
-const REPORTABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
-  'Error',
-  'TypeError',
-  'RangeError',
-  'SyntaxError',
-  'ReferenceError',
-  'EvalError',
-  'URIError',
-  'AggregateError',
-  'DOMException',
-]);
-
-function errorName(error: unknown): string {
-  try {
-    if (!(error instanceof Error)) return 'NonError';
-    const name: unknown = error.name;
-    return typeof name === 'string' && REPORTABLE_ERROR_NAMES.has(name) ? name : 'Error';
-  } catch {
-    return 'NonError';
-  }
-}
-
 interface LockScope {
   lockedUserId: string | null;
 }
@@ -120,7 +99,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
       level: 'warn',
       event: 'auth.hook.error',
       pluginId: event.plugin,
-      error: errorName(event.error),
+      error: reportableErrorName(event.error),
     });
   };
 

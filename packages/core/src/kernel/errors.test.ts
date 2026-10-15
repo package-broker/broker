@@ -135,7 +135,7 @@ describe('errorResponse', () => {
     expect(response.status).toBe(500);
     expect(text).not.toContain('secret');
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-5', error: 'string', kind: undefined },
+      { level: 'error', requestId: 'req-5', error: 'Error', kind: undefined },
     ]);
     expect(JSON.stringify(entries)).not.toContain('secret');
   });
@@ -248,7 +248,7 @@ describe('errorResponse log safety', () => {
     });
   });
 
-  it('logs a well-formed custom error name as is', () => {
+  it('logs Error for a well-formed custom error name outside the allowlist', () => {
     const { log, entries } = recorder();
     const error = new Error('boom');
     error.name = `$Custom_${'a'.repeat(56)}`;
@@ -256,7 +256,7 @@ describe('errorResponse log safety', () => {
     errorResponse(error, 'req-31', log);
 
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-31', error: error.name, kind: undefined },
+      { level: 'error', requestId: 'req-31', error: 'Error', kind: undefined },
     ]);
   });
 

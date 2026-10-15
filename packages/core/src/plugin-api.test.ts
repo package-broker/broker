@@ -34,6 +34,7 @@ function recordingRegistry(): {
 const ports: PluginPorts = {
   organizations: {
     get: () => Promise.resolve(null),
+    // @ts-expect-error a plugin organization port is read-only
     updateSettings: () => Promise.resolve(null),
   },
   clock: fixedClock('2026-10-15T08:00:00.000Z'),
@@ -42,7 +43,7 @@ const ports: PluginPorts = {
 
 describe('plugin contract', () => {
   it('keeps the supported API range and the identity definePlugin', () => {
-    expect(SUPPORTED_PLUGIN_API).toEqual([1, 1]);
+    expect(SUPPORTED_PLUGIN_API).toEqual([2, 2]);
     const definition = {
       id: 'x',
       package: '@package-broker/plugin-x',

@@ -2,7 +2,9 @@ import type { OrganizationRepository } from './db/organization.js';
 import type { OrgContext } from './db/port.js';
 import type { Clock } from './ids.js';
 
-export const SUPPORTED_PLUGIN_API = [1, 1] as const;
+export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
+
+export const SUPPORTED_PLUGIN_API = [2, 2] as const;
 
 export type Platform = 'cloudflare' | 'node';
 
@@ -73,7 +75,7 @@ export interface RequestContext {
 }
 
 export interface PluginPorts {
-  readonly organizations: OrganizationRepository;
+  readonly organizations: OrganizationReader;
   readonly clock: Clock;
   readonly ids: { ulid(): string };
 }

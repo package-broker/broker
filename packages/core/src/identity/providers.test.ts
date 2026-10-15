@@ -758,7 +758,7 @@ describe('buildIdentityProviders', () => {
         problemsOf(() => {
           throw 'secret-SENTINEL-123';
         }),
-      ).toEqual(['plugin "sso" identity factory threw NonError']);
+      ).toEqual(['plugin "sso" identity factory threw Error']);
     });
 
     it('survives a thrown value whose prototype lookup throws', () => {
@@ -773,7 +773,7 @@ describe('buildIdentityProviders', () => {
       const problems = problemsOf(() => {
         throw trap;
       });
-      expect(problems).toEqual(['plugin "sso" identity factory threw NonError']);
+      expect(problems).toEqual(['plugin "sso" identity factory threw Error']);
     });
 
     it('survives an error whose name getter throws', () => {
@@ -787,7 +787,7 @@ describe('buildIdentityProviders', () => {
         problemsOf(() => {
           throw error;
         }),
-      ).toEqual(['plugin "sso" identity factory threw NonError']);
+      ).toEqual(['plugin "sso" identity factory threw Error']);
     });
 
     it('swallows the rejection of an asynchronous factory', async () => {

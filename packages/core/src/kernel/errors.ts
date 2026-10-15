@@ -2,6 +2,7 @@ import { DbError } from '../db/errors.js';
 import type { DbErrorKind } from '../db/errors.js';
 import { errorEnvelope } from '../envelope.js';
 import { SecretsConfigError } from '../secrets/master-key.js';
+import { reportableErrorName } from './error-name.js';
 import { NotBootstrappedError } from './org.js';
 import { KernelConfigError } from './registry.js';
 
@@ -46,13 +47,6 @@ function mappingOf(error: unknown): Mapping {
   return { status: 500, code: 'internal', message: 'Internal error' };
 }
 
-const SAFE_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
-
-function nameOf(error: unknown): string {
-  if (!(error instanceof Error)) return typeof error;
-  return SAFE_NAME.test(error.name) ? error.name : 'Error';
-}
-
 function kindOf(error: unknown): DbErrorKind | undefined {
   return error instanceof DbError ? error.kind : undefined;
 }
@@ -60,7 +54,7 @@ function kindOf(error: unknown): DbErrorKind | undefined {
 // The thrown message is never logged or echoed: a message may carry SQL or secrets.
 export function logError(log: KernelLog, requestId: string, error: unknown): void {
   try {
-    log({ level: 'error', requestId, error: nameOf(error), kind: kindOf(error) });
+    log({ level: 'error', requestId, error: reportableErrorName(error), kind: kindOf(error) });
   } catch {
     // A failing log sink must not replace the response being built.
   }

@@ -7,6 +7,7 @@ import {
   type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
+import { reportableErrorName } from './error-name.js';
 import { routePathProblem, routesConflict } from './routes.js';
 
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
@@ -66,7 +67,6 @@ const HOOK_NAME_KEYS = {
 const HOOK_NAMES: ReadonlySet<string> = new Set(Object.keys(HOOK_NAME_KEYS));
 
 const MAX_NAME_LENGTH = 80;
-const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 function isHookName(name: unknown): name is keyof HookMap {
   return typeof name === 'string' && HOOK_NAMES.has(name);
@@ -77,18 +77,6 @@ function quoted(value: unknown): string {
     return JSON.stringify(String(value).slice(0, MAX_NAME_LENGTH));
   } catch {
     return '"?"';
-  }
-}
-
-function errorName(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return 'NonError';
-  }
-  try {
-    const name: unknown = error.name;
-    return typeof name === 'string' && SAFE_ERROR_NAME.test(name) ? name : 'Error';
-  } catch {
-    return 'Error';
   }
 }
 
@@ -193,7 +181,7 @@ export function collectRegistrations(plugins: readonly PluginDefinition[]): Regi
         returned.then(undefined, () => undefined);
       }
     } catch (error) {
-      problems.push(`plugin "${id}" register threw ${errorName(error)}`);
+      problems.push(`plugin "${id}" register threw ${reportableErrorName(error)}`);
     } finally {
       sealed = true;
     }

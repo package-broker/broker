@@ -1,3 +1,4 @@
+import { reportableErrorName } from '../kernel/error-name.js';
 import { KernelConfigError, type Registration } from '../kernel/registry.js';
 import type { PluginDefinition } from '../plugin.js';
 import { domainPolicyProblems } from './policy.js';
@@ -14,16 +15,6 @@ const ENV_PREFIX = 'PB_IDP_';
 export const PROVIDER_SECRET_SUFFIXES: readonly string[] = Object.freeze([
   'CLIENT_ID',
   'CLIENT_SECRET',
-]);
-const REPORTABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
-  'Error',
-  'TypeError',
-  'RangeError',
-  'SyntaxError',
-  'ReferenceError',
-  'AggregateError',
-  'DOMException',
-  'NonError',
 ]);
 const UNSAFE_DISPLAY_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
@@ -78,18 +69,6 @@ export function providerSecretName(providerId: string, suffix: string): string {
 
 function quoted(value: string): string {
   return JSON.stringify(value.slice(0, MAX_QUOTED_LENGTH));
-}
-
-function errorName(error: unknown): string {
-  try {
-    if (!(error instanceof Error)) {
-      return 'NonError';
-    }
-    const name: unknown = error.name;
-    return typeof name === 'string' && REPORTABLE_ERROR_NAMES.has(name) ? name : 'Error';
-  } catch {
-    return 'NonError';
-  }
 }
 
 function canonicalAnchor(anchor: string): string {
@@ -199,7 +178,7 @@ function collectResult(
     const items = copyIndexed(list, length);
     return { items };
   } catch (error) {
-    return { problem: `${prefix} identity factory ${phase} ${errorName(error)}` };
+    return { problem: `${prefix} identity factory ${phase} ${reportableErrorName(error)}` };
   }
 }
 
@@ -365,7 +344,7 @@ export function buildIdentityProviders(
         );
       }
     } catch (error) {
-      problems.push(`${label} threw ${errorName(error)}`);
+      problems.push(`${label} threw ${reportableErrorName(error)}`);
     }
   });
 

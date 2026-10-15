@@ -6,6 +6,7 @@ import { sha256Hex } from './primitives.js';
 import { createLocalRoutes } from './routes-local.js';
 import { createSessionService } from './session.js';
 import type { SessionService } from './session.js';
+import { DbError } from '../db/errors.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { fixedClock } from '../ids.js';
@@ -741,16 +742,14 @@ describe('createLocalRoutes', () => {
     it('does not log service errors beyond the kernel error name', async () => {
       const h = await harness();
       h.login.mockRejectedValueOnce(
-        Object.assign(new Error(`failure for ${SENTINEL.email} ${SENTINEL.password}`), {
-          name: 'StoreFailure',
-        }),
+        new DbError('unknown', `failure for ${SENTINEL.email} ${SENTINEL.password}`),
       );
 
       const response = await h.fetch(post(LOGIN, loginBody));
 
       expect(response.status).toBe(500);
       assertNoSentinels(h.entries);
-      expect(h.entries.some((entry) => entry['error'] === 'StoreFailure')).toBe(true);
+      expect(h.entries.some((entry) => entry['error'] === 'DbError')).toBe(true);
     });
 
     it('survives a throwing log sink', async () => {

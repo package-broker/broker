@@ -6,7 +6,10 @@ import {
   SUPPORTED_PLUGIN_API,
   definePlugin,
   type AccessCheckResult,
+  type AuthMapGroupsInput,
+  type AuthResolveIdentityInput,
   type HookMap,
+  type MapGroupsResult,
   type PluginDefinition,
   type PluginPorts,
   type PluginRegistry,
@@ -17,14 +20,14 @@ import {
 function recordingRegistry(): {
   registry: PluginRegistry;
   routes: RouteDefinition[];
-  hooks: Array<{ name: keyof HookMap; handler: HookMap[keyof HookMap] }>;
+  hooks: Array<{ name: keyof HookMap; handler: HookMap['access.check'] }>;
 } {
   const routes: RouteDefinition[] = [];
-  const hooks: Array<{ name: keyof HookMap; handler: HookMap[keyof HookMap] }> = [];
+  const hooks: Array<{ name: keyof HookMap; handler: HookMap['access.check'] }> = [];
   return {
     registry: {
       route: (route) => routes.push(route),
-      hook: (name, handler) => hooks.push({ name, handler }),
+      hook: (name, handler) => hooks.push({ name, handler: handler as HookMap['access.check'] }),
     },
     routes,
     hooks,
@@ -127,6 +130,32 @@ describe('plugin contract', () => {
     >();
     expect(recorded.hooks.map((hook) => hook.name)).toEqual(['access.check', 'access.check']);
     expect(recorded.routes).toHaveLength(1);
+  });
+
+  it('rejects allow results from auth hooks and unknown hook names at compile time', () => {
+    const recorded = recordingRegistry();
+
+    // @ts-expect-error an identity hook cannot allow
+    recorded.registry.hook('auth.resolveIdentity', () => ({ allow: true }));
+    // @ts-expect-error deny must be the literal true
+    recorded.registry.hook('auth.resolveIdentity', () => ({ deny: false }));
+    // @ts-expect-error mapGroups can only narrow, never add groups
+    recorded.registry.hook('auth.mapGroups', () => ({ add: ['admins'] }));
+    // @ts-expect-error mapGroups cannot grant
+    recorded.registry.hook('auth.mapGroups', () => ({ allow: true }));
+    // @ts-expect-error auth.unknown is not a hook name
+    recorded.registry.hook('auth.unknown', () => undefined);
+
+    expectTypeOf<ReturnType<HookMap['auth.resolveIdentity']>>().toEqualTypeOf<
+      AccessCheckResult | Promise<AccessCheckResult>
+    >();
+    expectTypeOf<MapGroupsResult>().toEqualTypeOf<
+      { readonly keep: readonly string[] } | undefined
+    >();
+    expectTypeOf<Parameters<HookMap['auth.mapGroups']>[0]>().toEqualTypeOf<AuthMapGroupsInput>();
+    expectTypeOf<
+      Parameters<HookMap['auth.resolveIdentity']>[0]
+    >().toEqualTypeOf<AuthResolveIdentityInput>();
   });
 
   it('rejects unknown port names at compile time', () => {

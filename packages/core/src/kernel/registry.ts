@@ -6,6 +6,7 @@ import {
   type PortName,
   type RouteDefinition,
 } from '../plugin.js';
+import type { IdentityProviderFactory } from '../identity/port.js';
 import { routePathProblem, routesConflict } from './routes.js';
 
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
@@ -19,6 +20,7 @@ export interface Registration {
     }>;
   };
   readonly bindings: ReadonlyMap<PortName, string>;
+  readonly identityFactory: IdentityProviderFactory | null;
 }
 
 export class KernelConfigError extends Error {
@@ -39,6 +41,7 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'dependsOn',
   'capabilities',
   'binds',
+  'identityProviders',
   'migrations',
   'register',
   'init',
@@ -54,11 +57,59 @@ export const ROUTE_METHODS: ReadonlySet<string> = new Set([
   'DELETE',
 ]);
 
+const HOOK_NAME_KEYS = {
+  'access.check': true,
+  'auth.resolveIdentity': true,
+  'auth.mapGroups': true,
+} satisfies Record<keyof HookMap, true>;
+
+const HOOK_NAMES: ReadonlySet<string> = new Set(Object.keys(HOOK_NAME_KEYS));
+
+const MAX_NAME_LENGTH = 80;
+const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+function isHookName(name: unknown): name is keyof HookMap {
+  return typeof name === 'string' && HOOK_NAMES.has(name);
+}
+
+function quoted(value: unknown): string {
+  try {
+    return JSON.stringify(String(value).slice(0, MAX_NAME_LENGTH));
+  } catch {
+    return '"?"';
+  }
+}
+
+function errorName(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return 'NonError';
+  }
+  try {
+    const name: unknown = error.name;
+    return typeof name === 'string' && SAFE_ERROR_NAME.test(name) ? name : 'Error';
+  } catch {
+    return 'Error';
+  }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
 export function collectRegistrations(plugins: readonly PluginDefinition[]): Registration {
   const problems: string[] = [];
   const routes: RegisteredRoute[] = [];
-  const accessChecks: Array<{ plugin: string; handler: HookMap['access.check'] }> = [];
+  const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
+    'access.check': [],
+    'auth.resolveIdentity': [],
+    'auth.mapGroups': [],
+  };
   const bindings = new Map<PortName, string>();
+  let identityFactory: IdentityProviderFactory | null = null;
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 
   for (const plugin of plugins) {
@@ -78,7 +129,8 @@ export function collectRegistrations(plugins: readonly PluginDefinition[]): Regi
       }
     }
 
-    for (const port of plugin.binds ?? []) {
+    const binds = plugin.binds ?? [];
+    for (const port of binds) {
       if (!BINDABLE.includes(port)) {
         problems.push(`plugin "${id}" cannot bind port "${port}": provided by the runtime`);
         continue;
@@ -91,25 +143,59 @@ export function collectRegistrations(plugins: readonly PluginDefinition[]): Regi
       }
     }
 
+    const bindsIdentity = binds.includes('identity');
+    const factory: unknown = plugin.identityProviders;
+    if (factory !== undefined && typeof factory !== 'function') {
+      problems.push(`plugin "${id}" identityProviders must be a function`);
+    }
+    if (bindsIdentity && factory === undefined) {
+      problems.push(`plugin "${id}" binds identity but has no identityProviders`);
+    }
+    if (!bindsIdentity && factory !== undefined) {
+      problems.push(`plugin "${id}" has identityProviders but does not bind identity`);
+    }
+    if (bindsIdentity && typeof factory === 'function' && bindings.get('identity') === id) {
+      identityFactory = factory as IdentityProviderFactory;
+    }
+
     if (plugin.register === undefined) {
       continue;
     }
     const own: RouteDefinition[] = [];
+    let sealed = false;
+    const assertOpen = (): void => {
+      if (sealed) {
+        throw new Error('registry is sealed: register has returned');
+      }
+    };
     try {
-      plugin.register({
+      const returned: unknown = plugin.register({
         route: (route) => {
+          assertOpen();
           own.push(route);
         },
         hook: (name, handler) => {
-          if (name === 'access.check') {
-            accessChecks.push({ plugin: id, handler: handler as HookMap['access.check'] });
+          assertOpen();
+          if (!isHookName(name)) {
+            problems.push(`plugin "${id}" registered unknown hook ${quoted(name)}`);
+          } else if (typeof handler !== 'function') {
+            problems.push(`plugin "${id}" hook ${quoted(name)} handler must be a function`);
+          } else {
+            (hooks[name] as Array<{ plugin: string; handler: unknown }>).push({
+              plugin: id,
+              handler,
+            });
           }
         },
       });
+      if (isThenable(returned)) {
+        problems.push(`plugin "${id}" register must be synchronous`);
+        returned.then(undefined, () => undefined);
+      }
     } catch (error) {
-      problems.push(
-        `plugin "${id}" register failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      problems.push(`plugin "${id}" register threw ${errorName(error)}`);
+    } finally {
+      sealed = true;
     }
 
     for (const route of own) {
@@ -150,5 +236,8 @@ export function collectRegistrations(plugins: readonly PluginDefinition[]): Regi
     throw new KernelConfigError(problems);
   }
 
-  return { routes, hooks: { 'access.check': accessChecks }, bindings };
+  for (const list of Object.values(hooks)) {
+    Object.freeze(list);
+  }
+  return { routes, hooks: Object.freeze(hooks), bindings, identityFactory };
 }

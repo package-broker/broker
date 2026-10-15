@@ -1,5 +1,6 @@
 import type { OrganizationRepository } from './db/organization.js';
 import type { OrgContext } from './db/port.js';
+import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.js';
 import type { Clock } from './ids.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
@@ -32,8 +33,10 @@ export interface PluginDefinition extends PluginApi {
   readonly platforms: readonly Platform[];
   readonly dependsOn?: readonly string[];
   readonly capabilities?: readonly string[];
-  /** Metadata in step 3: runtime-owned ports cannot be bound. */
+  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders. */
   readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
+  /** Required when `binds` contains 'identity', rejected otherwise. */
+  readonly identityProviders?: IdentityProviderFactory;
   readonly migrations?: { readonly dir: string };
   /** Synchronous and pure: declares routes and hooks. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;
@@ -90,8 +93,27 @@ export interface AccessCheckInput {
 /** Deny-only (ADR-004): there is no allow value; undefined passes. */
 export type AccessCheckResult = { readonly deny: true; readonly reason?: string } | undefined;
 
+export interface AuthResolveIdentityInput {
+  readonly org: OrgContext;
+  readonly identity: VerifiedIdentity;
+  readonly userId: string | null;
+}
+
+export interface AuthMapGroupsInput {
+  readonly org: OrgContext;
+  readonly provider: string;
+  readonly groups: readonly string[];
+}
+
+/** Narrow-only: `keep` must be a subset of the groups passed in; undefined keeps them all. */
+export type MapGroupsResult = { readonly keep: readonly string[] } | undefined;
+
 export interface HookMap {
   'access.check': (input: AccessCheckInput) => AccessCheckResult | Promise<AccessCheckResult>;
+  'auth.resolveIdentity': (
+    input: AuthResolveIdentityInput,
+  ) => AccessCheckResult | Promise<AccessCheckResult>;
+  'auth.mapGroups': (input: AuthMapGroupsInput) => MapGroupsResult | Promise<MapGroupsResult>;
 }
 
 export function definePlugin<const T extends PluginDefinition>(

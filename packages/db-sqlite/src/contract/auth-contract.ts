@@ -364,6 +364,10 @@ async function snapshotOf(executor: SqlExecutor, a: OrgContext): Promise<LocalLo
   return found;
 }
 
+const UPGRADE_PRINCIPAL = '01J0000000000000000000SVCP';
+const UPGRADE_PAT = '01J00000000000000000000PAT';
+const UPGRADE_SVC = '01J00000000000000000000SVC';
+
 const upgrade: Case = async (open) => {
   await withDatabase(open, async ({ executor }) => {
     const [init, ...rest] = await loadSources();
@@ -413,6 +417,29 @@ const upgrade: Case = async (open) => {
         hash('csrf'),
         FUTURE,
       ),
+      st(
+        'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+        UPGRADE_PRINCIPAL,
+        org,
+        'ci',
+        ADMIN,
+      ),
+      st(
+        "INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, user_id, expires_at) VALUES (?, ?, 'pat', 'patselector1', ?, 1, 'pat', '[]', ?, ?)",
+        UPGRADE_PAT,
+        org,
+        hash('pat'),
+        ADMIN,
+        FUTURE,
+      ),
+      st(
+        "INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, service_principal_id, expires_at) VALUES (?, ?, 'svc', 'svcselector1', ?, 1, 'svc', '[]', ?, ?)",
+        UPGRADE_SVC,
+        org,
+        hash('svc'),
+        UPGRADE_PRINCIPAL,
+        FUTURE,
+      ),
     ]);
     const queries = [
       'SELECT id, slug, name FROM organization ORDER BY id',
@@ -436,7 +463,23 @@ const upgrade: Case = async (open) => {
         executor,
         "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
       ),
-    ).toBe(39);
+    ).toBe(42);
+    expect(
+      await rowsOf(
+        executor,
+        'SELECT id, project_mode, validation_kind, validation_identity_id FROM token ORDER BY id',
+      ),
+    ).toEqual(
+      [UPGRADE_PAT, UPGRADE_SVC].sort().map((id) => ({
+        id,
+        project_mode: 'selected',
+        validation_kind: null,
+        validation_identity_id: null,
+      })),
+    );
+    expect(await countOf(executor, 'SELECT count(*) AS n FROM service_principal_permission')).toBe(
+      0,
+    );
     expect(await rowsOf(executor, 'SELECT validated_at FROM identity')).toEqual([
       { validated_at: null },
     ]);
@@ -1247,7 +1290,7 @@ export const authContractCases = {
 
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
-    it('1. upgrade: 0001 with populated rows then 0002 keeps the rows and has 39 tables', () =>
+    it('1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 42 tables', () =>
       authContractCases.upgrade(open));
     it('2. reset deletes the TOTP credential and clears its reference and enabled time together', () =>
       authContractCases.resetCleanup(open));

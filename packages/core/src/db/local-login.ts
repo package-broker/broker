@@ -1,4 +1,5 @@
-import type { OrgContext, Statement } from './port.js';
+import type { CredentialRecord } from './credentials.js';
+import type { OrgContext } from './port.js';
 import type { NewSession } from './sessions.js';
 
 export type TotpState = 'none' | 'enabled' | 'setup_required';
@@ -59,17 +60,35 @@ export interface LocalLoginReader {
 }
 
 export interface LocalLoginSetupWriter {
+  /**
+   * One batch. `credential` is the pending TOTP credential row (the writer validates it like
+   * `CredentialRepository.insertStatement`); its id becomes `totp_credential_id`. True when the
+   * batch staged it: the setup hash matched an unexpired setup of a user whose TOTP is not enabled,
+   * the previous pending credential is deleted and every later statement was guarded by the
+   * operation marker. The writer mints that marker itself for every call and ignores `opId`: a
+   * caller-chosen marker could match an earlier operation. TypeError unless `setupHash` is 64
+   * lowercase hexadecimal characters, `now` and `credential.now` are the same
+   * `YYYY-MM-DDTHH:MM:SS.mmmZ` instant, and `credential` is an organization-level (`projectId`
+   * null) credential of kind `totp`.
+   */
   stagePendingTotp(
     ctx: OrgContext,
     input: {
       readonly userId: string;
       readonly setupHash: string;
-      readonly credential: Statement;
-      readonly credentialId: string;
+      readonly credential: CredentialRecord & { readonly now: string };
       readonly opId: string;
       readonly now: string;
     },
   ): Promise<boolean>;
+  /**
+   * One batch. True when the session row exists afterwards; false when a precondition no longer
+   * holds. Like `stagePendingTotp` it mints its own operation marker and ignores `opId`. TypeError
+   * unless `session.userId` is `userId`, `session.identityId` is null, `session.now` equals `now`,
+   * the hashes are 64 lowercase hexadecimal characters, `passwordHash` starts with
+   * `pbkdf2-sha256$` and the timestamps are `YYYY-MM-DDTHH:MM:SS.mmmZ`;
+   * RangeError unless `step` and `credentialRev` are non-negative safe integers.
+   */
   completeSetup(
     ctx: OrgContext,
     input: {

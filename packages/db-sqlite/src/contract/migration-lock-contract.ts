@@ -227,7 +227,7 @@ export function describeMigrationLockContract(
           ).toEqual([{ id: init.id }]);
           expect(
             await executor.all({
-              sql: "SELECT name FROM sqlite_master WHERE type = 'table'",
+              sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf\\_%' ESCAPE '\\'",
               params: [],
             }),
           ).toHaveLength(37);

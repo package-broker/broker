@@ -2,6 +2,16 @@ import { MigrationSourceError, sha256Hex, type MigrationSource } from './source.
 
 const INIT_ID = 'core:0001_init';
 
+function assertSequences(sources: readonly MigrationSource[]): void {
+  for (const source of sources) {
+    if (!Number.isInteger(source.sequence) || source.sequence < 0) {
+      throw new MigrationSourceError(
+        `${source.id}: sequence must be a finite non-negative integer, got ${source.sequence}`,
+      );
+    }
+  }
+}
+
 function assertUnique(sources: readonly MigrationSource[]): void {
   const ids = new Set<string>();
   const positions = new Set<string>();
@@ -49,6 +59,7 @@ export async function planMigrations(
       );
     }
   }
+  assertSequences(sources);
   assertUnique(sources);
   await assertChecksums(sources);
   if (!sources.some((source) => source.id === INIT_ID)) {
@@ -72,6 +83,7 @@ export async function assertPlannedSources(sources: readonly MigrationSource[]):
   if (first.id !== INIT_ID) {
     throw new MigrationSourceError(`${first.id}: first migration must be ${INIT_ID}`);
   }
+  assertSequences(sources);
   assertUnique(sources);
 
   const finished = new Set<string>();

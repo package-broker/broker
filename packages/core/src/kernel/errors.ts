@@ -1,7 +1,9 @@
 import { DbError } from '../db/errors.js';
 import type { DbErrorKind } from '../db/errors.js';
 import { errorEnvelope } from '../envelope.js';
+import { SecretsConfigError } from '../secrets/master-key.js';
 import { NotBootstrappedError } from './org.js';
+import { KernelConfigError } from './registry.js';
 
 export type KernelLog = (entry: Readonly<Record<string, unknown>>) => void;
 
@@ -34,6 +36,9 @@ interface Mapping {
 function mappingOf(error: unknown): Mapping {
   if (error instanceof NotBootstrappedError) {
     return { status: 503, code: 'not_bootstrapped', message: 'Organization is not bootstrapped' };
+  }
+  if (error instanceof SecretsConfigError || error instanceof KernelConfigError) {
+    return { status: 503, code: 'misconfigured', message: 'Server is not configured' };
   }
   if (error instanceof DbError && error.kind === 'busy') {
     return { status: 503, code: 'unavailable', message: 'Try again later' };

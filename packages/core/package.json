@@ -22,6 +22,10 @@
       "types": "./dist/db/*.d.ts",
       "default": "./dist/db/*.js"
     },
+    "./secrets/*": {
+      "types": "./dist/secrets/*.d.ts",
+      "default": "./dist/secrets/*.js"
+    },
     "./kernel/*": {
       "types": "./dist/kernel/*.d.ts",
       "default": "./dist/kernel/*.js"

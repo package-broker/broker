@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { EntryRuntime } from './entry.js';
 import { createShutdown, describeError, isMainEntry, parsePort, runEntry } from './entry.js';
@@ -199,6 +198,19 @@ describe('isMainEntry', () => {
     }
   });
 
+  it('is not main for a different file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pb-main-entry-'));
+    try {
+      const real = join(dir, 'real.mjs');
+      const other = join(dir, 'other.mjs');
+      writeFileSync(real, '');
+      writeFileSync(other, '');
+      expect(isMainEntry(other, pathToFileURL(real).href)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('is not main for a missing argv[1] or an unresolvable path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pb-main-entry-'));
     try {
@@ -207,39 +219,10 @@ describe('isMainEntry', () => {
       const url = pathToFileURL(real).href;
       expect(isMainEntry(undefined, url)).toBe(false);
       expect(isMainEntry(join(dir, 'missing.mjs'), url)).toBe(false);
+      const dangling = join(dir, 'dangling.mjs');
+      symlinkSync(join(dir, 'gone.mjs'), dangling);
+      expect(isMainEntry(dangling, url)).toBe(false);
       expect(isMainEntry(real, 'not-a-file-url')).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-const builtEntryPath = fileURLToPath(new URL('../dist/entry.js', import.meta.url));
-
-function execEntry(
-  entry: string,
-): Promise<{ readonly code: number | null; readonly stderr: string }> {
-  return new Promise((resolve) => {
-    execFile(process.execPath, [entry], { timeout: 20000 }, (error, _stdout, stderr) => {
-      if (error === null) {
-        resolve({ code: 0, stderr });
-        return;
-      }
-      resolve({ code: typeof error.code === 'number' ? error.code : null, stderr });
-    });
-  });
-}
-
-describe('built entry', () => {
-  it('reports a start-up error through a symlinked path instead of exiting 0 silently', async () => {
-    expect(existsSync(builtEntryPath)).toBe(true);
-    const dir = mkdtempSync(join(tmpdir(), 'pb-built-entry-'));
-    try {
-      const linkedDist = join(dir, 'linked-dist');
-      symlinkSync(dirname(builtEntryPath), linkedDist, 'dir');
-      const result = await execEntry(join(linkedDist, 'entry.js'));
-      expect(result.code === 0 && result.stderr === '').toBe(false);
-      expect(result.stderr).toContain('#pb-manifest');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

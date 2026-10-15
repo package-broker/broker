@@ -46,7 +46,13 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
 
 const BINDABLE: readonly string[] = PLUGIN_BINDABLE_PORTS;
 
-const ROUTE_METHODS: ReadonlySet<string> = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+export const ROUTE_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+]);
 
 export function collectRegistrations(plugins: readonly PluginDefinition[]): Registration {
   const problems: string[] = [];

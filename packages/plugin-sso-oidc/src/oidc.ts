@@ -1,4 +1,9 @@
-import { base64urlEncode, randomToken, sha256Hex } from '@package-broker/core/auth/primitives';
+import {
+  base64urlEncode,
+  constantTimeEqual,
+  randomToken,
+  sha256Hex,
+} from '@package-broker/core/auth/primitives';
 import { domainPolicyProblems } from '@package-broker/core/identity/policy';
 import {
   isReservedProviderId,
@@ -6,6 +11,7 @@ import {
   isValidTrustAnchor,
   type DomainPolicy,
   type IdentityContext,
+  type IdentityFailure,
   type IdentityProvider,
   type IdentityResult,
   type LoginStateData,
@@ -13,6 +19,8 @@ import {
 } from '@package-broker/core/identity/port';
 import { providerSecretName } from '@package-broker/core/identity/providers';
 import { BoundedFetchError, fetchBounded, type BoundedFetchFailure } from './http.js';
+import { createJwksCache } from './jwks.js';
+import { JwtError, verifyJwt, type KeySource, type VerifiedClaims } from './jwt.js';
 
 export interface OidcConfig {
   readonly id: string;
@@ -32,6 +40,7 @@ export type OidcFailureDetail =
   | 'purpose_invalid'
   | 'discovery_invalid'
   | 'discovery_failed'
+  | 'token_response_invalid'
   | `discovery_${BoundedFetchFailure}`;
 
 export class OidcProviderError extends Error {
@@ -47,6 +56,8 @@ export class OidcProviderError extends Error {
 
 const DISCOVERY_MAX_BYTES = 64 * 1024;
 const DISCOVERY_TIMEOUT_MS = 5000;
+const TOKEN_MAX_BYTES = 64 * 1024;
+const TOKEN_TIMEOUT_MS = 5000;
 const DEFAULT_SCOPES: readonly string[] = ['openid', 'email', 'profile', 'groups'];
 const POLICY_KEYS: ReadonlySet<string> = new Set(['verifiedDomains', 'autoJoin']);
 const OWNED_AUTHORIZATION_PARAMETERS: readonly string[] = [
@@ -272,6 +283,8 @@ export function oidcProblems(config: unknown): string[] {
 
 interface Endpoints {
   readonly authorization: string;
+  readonly token: string;
+  readonly jwks: string;
 }
 
 function endpointOf(value: unknown, issuer: URL, trusted: ReadonlySet<string>): URL | null {
@@ -319,7 +332,7 @@ function parseDiscovery(
   if (methods !== undefined && !(Array.isArray(methods) && methods.includes('S256'))) {
     throw new OidcProviderError('discovery_invalid');
   }
-  return { authorization: authorization.href };
+  return { authorization: authorization.href, token: token.href, jwks: jwks.href };
 }
 
 function effectiveScopes(configured: readonly string[] | undefined): string {
@@ -337,6 +350,55 @@ function hexToBytes(hex: string): Uint8Array {
 
 async function codeChallenge(verifier: string): Promise<string> {
   return base64urlEncode(hexToBytes(await sha256Hex(verifier)));
+}
+
+function formEncode(value: string): string {
+  return new URLSearchParams({ v: value }).toString().slice(2);
+}
+
+function basicAuthorization(clientId: string, secret: string): string {
+  return `Basic ${btoa(`${formEncode(clientId)}:${formEncode(secret)}`)}`;
+}
+
+interface StoredLogin {
+  readonly state: string;
+  readonly nonce: string;
+  readonly verifier: string;
+}
+
+function readLoginState(data: LoginStateData | null): StoredLogin | null {
+  if (data === null) {
+    return null;
+  }
+  const { state, nonce, verifier } = data;
+  if (
+    typeof state !== 'string' ||
+    typeof nonce !== 'string' ||
+    typeof verifier !== 'string' ||
+    state === '' ||
+    nonce === '' ||
+    verifier === ''
+  ) {
+    return null;
+  }
+  return { state, nonce, verifier };
+}
+
+function refuse(reason: IdentityFailure): IdentityResult {
+  return { ok: false, reason };
+}
+
+function groupsOf(value: unknown): readonly string[] | null {
+  if (value === undefined) {
+    return [];
+  }
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry): entry is string => typeof entry === 'string')
+  ) {
+    return null;
+  }
+  return Object.freeze([...value]);
 }
 
 function checkCallbackUrl(callbackUrl: string): void {
@@ -377,6 +439,9 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
   const scope = effectiveScopes(source['scopes'] as readonly string[] | undefined);
   const trusted: ReadonlySet<string> = new Set(
     (source['trustedEndpointOrigins'] as readonly string[] | undefined) ?? [],
+  );
+  const trustedAudiences: ReadonlySet<string> = new Set(
+    (source['trustedAudiences'] as readonly string[] | undefined) ?? [],
   );
   const secretName = providerSecretName(id, 'CLIENT_SECRET');
   const discoveryUrl = `${issuer}/.well-known/openid-configuration`;
@@ -426,7 +491,7 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
     return discovery;
   }
 
-  function requireSecret(): void {
+  function readSecret(): string {
     let value: unknown;
     try {
       value = ctx.env(secretName);
@@ -436,6 +501,88 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
     if (typeof value !== 'string' || value === '') {
       throw new OidcProviderError('secret_missing');
     }
+    return value;
+  }
+
+  let keys: KeySource | null = null;
+
+  async function exchangeCode(
+    code: string,
+    login: StoredLogin,
+    callbackUrl: string,
+  ): Promise<{ readonly idToken: string; readonly keys: KeySource }> {
+    checkCallbackUrl(callbackUrl);
+    const secret = readSecret();
+    const endpoints = await discover();
+    if (new URL(endpoints.token).origin !== issuerUrl.origin) {
+      throw new OidcProviderError('discovery_invalid');
+    }
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: callbackUrl,
+      code_verifier: login.verifier,
+    });
+    const { json } = await fetchBounded(
+      ctx,
+      new Request(endpoints.token, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/x-www-form-urlencoded',
+          authorization: basicAuthorization(clientId, secret),
+        },
+        body: body.toString(),
+      }),
+      { maxBytes: TOKEN_MAX_BYTES, timeoutMs: TOKEN_TIMEOUT_MS },
+    );
+    const idToken = isPlainContainer(json) ? (json as Record<string, unknown>)['id_token'] : null;
+    if (typeof idToken !== 'string' || idToken === '') {
+      throw new OidcProviderError('token_response_invalid');
+    }
+    keys ??= createJwksCache({ url: endpoints.jwks, ctx });
+    return { idToken, keys };
+  }
+
+  function audienceAccepted(claims: VerifiedClaims): boolean {
+    const azp = claims.raw['azp'];
+    if (azp !== undefined ? azp !== clientId : claims.aud.length > 1) {
+      return false;
+    }
+    return claims.aud.every((entry) => entry === clientId || trustedAudiences.has(entry));
+  }
+
+  function identityOf(claims: VerifiedClaims, login: StoredLogin): IdentityResult {
+    if (!audienceAccepted(claims)) {
+      return refuse('invalid_token');
+    }
+    if (claims.nonce === undefined || !constantTimeEqual(claims.nonce, login.nonce)) {
+      return refuse('invalid_token');
+    }
+    const { email, email_verified: emailVerified, name } = claims.raw;
+    if (typeof email !== 'string' || email === '') {
+      return refuse('email_missing');
+    }
+    if (emailVerified !== undefined && typeof emailVerified !== 'boolean') {
+      return refuse('invalid_token');
+    }
+    const groups = groupsOf(claims.raw['groups']);
+    if (groups === null) {
+      return refuse('invalid_token');
+    }
+    return {
+      ok: true,
+      identity: {
+        provider: id,
+        subject: claims.sub,
+        email,
+        emailVerified: emailVerified === true,
+        displayName: typeof name === 'string' && name !== '' ? name : null,
+        groups,
+        issuedAt: new Date(claims.iat * 1000).toISOString(),
+        authTime: claims.authTime === null ? null : new Date(claims.authTime * 1000).toISOString(),
+      },
+    };
   }
 
   return Object.freeze({
@@ -456,7 +603,7 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
       if (input.purpose !== 'login' && input.purpose !== 'reauth') {
         throw new OidcProviderError('purpose_invalid');
       }
-      requireSecret();
+      readSecret();
       checkCallbackUrl(input.callbackUrl);
       const endpoints = await discover();
       const state = randomToken();
@@ -483,8 +630,46 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
       return { kind: 'redirect', location: url.toString(), state: loginState };
     },
 
-    finish(): Promise<IdentityResult> {
-      return Promise.resolve({ ok: false, reason: 'provider_error' });
+    async finish(input: {
+      readonly request: Request;
+      readonly state: LoginStateData | null;
+      readonly callbackUrl: string;
+    }): Promise<IdentityResult> {
+      const login = readLoginState(input.state);
+      if (login === null) {
+        return refuse('state_mismatch');
+      }
+      const params = new URL(input.request.url).searchParams;
+      const returned = params.getAll('state');
+      if (returned.length !== 1 || !constantTimeEqual(returned[0] as string, login.state)) {
+        return refuse('state_mismatch');
+      }
+      if (params.has('error')) {
+        return refuse('provider_error');
+      }
+      const codes = params.getAll('code');
+      if (codes.length !== 1 || codes[0] === '') {
+        return refuse('missing_credentials');
+      }
+      let exchanged: { readonly idToken: string; readonly keys: KeySource };
+      try {
+        exchanged = await exchangeCode(codes[0] as string, login, input.callbackUrl);
+      } catch {
+        return refuse('provider_error');
+      }
+      let claims: VerifiedClaims;
+      try {
+        claims = await verifyJwt(exchanged.idToken, {
+          keys: exchanged.keys,
+          issuer,
+          audience: clientId,
+          clock: ctx.clock,
+        });
+      } catch (error) {
+        const tokenFault = error instanceof JwtError && error.failure !== 'jwks_unavailable';
+        return refuse(tokenFault ? 'invalid_token' : 'provider_error');
+      }
+      return identityOf(claims, login);
     },
   });
 }

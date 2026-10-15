@@ -627,7 +627,7 @@ describe('client secret', () => {
 });
 
 describe('finish', () => {
-  it('returns provider_error until the token exchange exists', async () => {
+  it('refuses a token response without an id_token', async () => {
     const h = harness();
     const p = provider(h);
     const { state } = await redirectOf(start(p));
@@ -637,15 +637,19 @@ describe('finish', () => {
       callbackUrl: CALLBACK,
     });
     expect(result).toEqual({ ok: false, reason: 'provider_error' });
-    expect(
-      await p.finish({ request: new Request(CALLBACK), state: null, callbackUrl: CALLBACK }),
-    ).toEqual({
-      ok: false,
-      reason: 'provider_error',
-    });
   });
 
-  it('does not contact the issuer', async () => {
+  it('refuses a missing login state with state_mismatch', async () => {
+    const h = harness();
+    const result = await provider(h).finish({
+      request: new Request(`${CALLBACK}?code=abc&state=x`),
+      state: null,
+      callbackUrl: CALLBACK,
+    });
+    expect(result).toEqual({ ok: false, reason: 'state_mismatch' });
+  });
+
+  it('does not contact the issuer without a login state', async () => {
     const h = harness();
     await provider(h).finish({
       request: new Request(CALLBACK),

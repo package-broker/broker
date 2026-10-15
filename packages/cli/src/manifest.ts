@@ -1,5 +1,11 @@
 import type { Platform, PluginDefinition } from '@package-broker/core/plugin';
 import { SUPPORTED_PLUGIN_API } from '@package-broker/core/plugin';
+import {
+  KernelConfigError,
+  collectRegistrations,
+  type Registration,
+} from '@package-broker/core/kernel/registry';
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
 export function validatePlugins(plugins: readonly PluginDefinition[], target: Platform): string[] {
   const errors: string[] = [];
@@ -27,6 +33,14 @@ export function validatePlugins(plugins: readonly PluginDefinition[], target: Pl
       if (!ids.has(dependency)) {
         errors.push(`plugin "${plugin.id}" depends on missing plugin "${dependency}"`);
       }
+    }
+  }
+  if (errors.length === 0) {
+    try {
+      collectRegistrations(plugins);
+    } catch (error) {
+      if (!(error instanceof KernelConfigError)) throw error;
+      errors.push(...error.problems);
     }
   }
   return errors;
@@ -60,6 +74,23 @@ export function renderManifestTs(plugins: readonly PluginDefinition[]): string {
   return [...imports, '', `export const plugins = [${list.join(', ')}];`, ''].join('\n');
 }
 
+export function renderManifestFromConfig(
+  configImportPath: string,
+  migrations?: readonly MigrationSource[],
+): string {
+  if (configImportPath.includes("'") || /[\r\n]/.test(configImportPath)) {
+    throw new Error('config import path must not contain a quote or a newline');
+  }
+  const lines = [
+    `import config from '${configImportPath}';`,
+    'export const plugins = config.plugins;',
+  ];
+  if (migrations !== undefined) {
+    lines.push(`export const migrations = ${JSON.stringify(migrations, null, 2)};`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 export interface ManifestPlugin {
   id: string;
   package: string;
@@ -68,21 +99,45 @@ export interface ManifestPlugin {
   platforms: readonly Platform[];
   dependsOn: readonly string[];
   capabilities: readonly string[];
+  binds: readonly string[];
+}
+
+export interface ManifestBinding {
+  port: string;
+  plugin: string;
+}
+
+export interface ManifestRoute {
+  method: string;
+  path: string;
+  plugin: string;
+  permission: string | null;
+}
+
+export interface ManifestMigration {
+  id: string;
+  name: string;
+  checksum: string;
+  phase: 'expand' | 'contract';
 }
 
 export interface Manifest {
   schemaVersion: 1;
   platform: Platform;
   plugins: ManifestPlugin[];
-  bindings: never[];
-  migrations: never[];
-  routes: never[];
+  bindings: ManifestBinding[];
+  migrations: ManifestMigration[];
+  routes: ManifestRoute[];
 }
 
 export function renderManifestJson(
   plugins: readonly PluginDefinition[],
   versions: ReadonlyMap<string, string>,
   platform: Platform,
+  extra: {
+    migrations?: readonly MigrationSource[];
+    registration?: Registration;
+  } = {},
 ): Manifest {
   return {
     schemaVersion: 1,
@@ -95,9 +150,20 @@ export function renderManifestJson(
       platforms: plugin.platforms,
       dependsOn: plugin.dependsOn ?? [],
       capabilities: plugin.capabilities ?? [],
+      binds: plugin.binds ?? [],
     })),
-    bindings: [],
-    migrations: [],
-    routes: [],
+    bindings: [...(extra.registration?.bindings ?? [])].map(([port, plugin]) => ({ port, plugin })),
+    migrations: (extra.migrations ?? []).map(({ id, name, checksum, phase }) => ({
+      id,
+      name,
+      checksum,
+      phase,
+    })),
+    routes: (extra.registration?.routes ?? []).map(({ method, path, plugin, permission }) => ({
+      method,
+      path,
+      plugin,
+      permission,
+    })),
   };
 }

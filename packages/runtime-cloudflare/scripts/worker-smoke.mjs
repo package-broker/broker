@@ -101,7 +101,7 @@ async function readMigrations() {
   for (const entry of manifest.migrations) {
     const owner = entry.id.slice(0, entry.id.indexOf(':'));
     if (!owners.includes(owner)) owners.push(owner);
-    const name = `${entry.name}.sql`;
+    const name = entry.name;
     const sql = await readFile(join(outDir, 'migrations', owner, name), 'utf8');
     sources.push(await loadMigrationSource(owner, name, sql));
   }

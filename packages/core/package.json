@@ -18,10 +18,25 @@
       "types": "./dist/config.d.ts",
       "default": "./dist/config.js"
     },
+    "./db/*": {
+      "types": "./dist/db/*.d.ts",
+      "default": "./dist/db/*.js"
+    },
+    "./kernel/*": {
+      "types": "./dist/kernel/*.d.ts",
+      "default": "./dist/kernel/*.js"
+    },
+    "./ids": {
+      "types": "./dist/ids.d.ts",
+      "default": "./dist/ids.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "!dist/**/*.test.*"
-  ]
+  ],
+  "dependencies": {
+    "hono": "catalog:"
+  }
 }

@@ -5,10 +5,16 @@ catalogMode: strict
 
 catalog:
   '@eslint/js': 10.0.1
+  '@hono/node-server': 2.1.4
+  '@types/better-sqlite3': 9.6.0
   '@types/node': 24.19.2
+  better-sqlite3: 13.0.3
   esbuild: 0.28.2
   eslint: 10.12.0
   globals: 17.13.0
+  hono: 4.13.13
+  kysely: 0.29.6
+  miniflare: 5.20261006.1-alpha
   prettier: 3.9.10
   typescript: 6.0.3
   typescript-eslint: 8.71.1
@@ -17,4 +23,6 @@ catalog:
 minimumReleaseAge: 4320
 trustPolicy: no-downgrade
 allowBuilds:
+  better-sqlite3: false
   esbuild: true
+  workerd: true

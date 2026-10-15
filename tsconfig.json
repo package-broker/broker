@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/core" },
+    { "path": "packages/db-sqlite" },
     { "path": "packages/runtime-cloudflare" },
     { "path": "packages/runtime-node" },
     { "path": "packages/cli" },

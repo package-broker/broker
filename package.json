@@ -22,6 +22,7 @@
     "@eslint/js": "catalog:",
     "@package-broker/cli": "workspace:^",
     "@package-broker/core": "workspace:^",
+    "@package-broker/db-sqlite": "workspace:^",
     "@package-broker/plugin-github": "workspace:^",
     "@package-broker/plugin-sso-oidc": "workspace:^",
     "@package-broker/runtime-cloudflare": "workspace:^",

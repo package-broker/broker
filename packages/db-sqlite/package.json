@@ -1,0 +1,92 @@
+{
+  "name": "@package-broker/db-sqlite",
+  "version": "2.0.0-rc.0",
+  "description": "Package Broker SQLite data layer",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./kysely": {
+      "types": "./dist/kysely.d.ts",
+      "default": "./dist/kysely.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "default": "./dist/schema.js"
+    },
+    "./sql/scan": {
+      "types": "./dist/sql/scan.d.ts",
+      "default": "./dist/sql/scan.js"
+    },
+    "./sql/inline": {
+      "types": "./dist/sql/inline.d.ts",
+      "default": "./dist/sql/inline.js"
+    },
+    "./migrations/split": {
+      "types": "./dist/migrations/split.d.ts",
+      "default": "./dist/migrations/split.js"
+    },
+    "./migrations/source": {
+      "types": "./dist/migrations/source.d.ts",
+      "default": "./dist/migrations/source.js"
+    },
+    "./migrations/plan": {
+      "types": "./dist/migrations/plan.d.ts",
+      "default": "./dist/migrations/plan.js"
+    },
+    "./migrations/lock": {
+      "types": "./dist/migrations/lock.d.ts",
+      "default": "./dist/migrations/lock.js"
+    },
+    "./migrations/runner": {
+      "types": "./dist/migrations/runner.d.ts",
+      "default": "./dist/migrations/runner.js"
+    },
+    "./repositories/organization": {
+      "types": "./dist/repositories/organization.d.ts",
+      "default": "./dist/repositories/organization.js"
+    },
+    "./contract/count-calls": {
+      "types": "./dist/contract/count-calls.d.ts",
+      "default": "./dist/contract/count-calls.js"
+    },
+    "./contract/executor-contract": {
+      "types": "./dist/contract/executor-contract.d.ts",
+      "default": "./dist/contract/executor-contract.js"
+    },
+    "./contract/migration-contract": {
+      "types": "./dist/contract/migration-contract.d.ts",
+      "default": "./dist/contract/migration-contract.js"
+    },
+    "./contract/migration-lock-contract": {
+      "types": "./dist/contract/migration-lock-contract.d.ts",
+      "default": "./dist/contract/migration-lock-contract.js"
+    },
+    "./contract/two-organizations": {
+      "types": "./dist/contract/two-organizations.d.ts",
+      "default": "./dist/contract/two-organizations.js"
+    },
+    "./testing/node-sqlite-executor": {
+      "types": "./dist/testing/node-sqlite-executor.d.ts",
+      "default": "./dist/testing/node-sqlite-executor.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "!dist/**/*.test.*"
+  ],
+  "dependencies": {
+    "@package-broker/core": "workspace:^",
+    "kysely": "catalog:"
+  },
+  "peerDependencies": {
+    "vitest": "catalog:"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  }
+}

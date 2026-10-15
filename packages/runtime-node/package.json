@@ -14,6 +14,10 @@
       "types": "./dist/entry.d.ts",
       "default": "./dist/entry.js"
     },
+    "./db/*": {
+      "types": "./dist/db/*.d.ts",
+      "default": "./dist/db/*.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -21,6 +25,13 @@
     "!dist/**/*.test.*"
   ],
   "dependencies": {
-    "@package-broker/core": "workspace:^"
+    "@hono/node-server": "catalog:",
+    "@package-broker/core": "workspace:^",
+    "@package-broker/db-sqlite": "workspace:^",
+    "better-sqlite3": "catalog:",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "catalog:"
   }
 }

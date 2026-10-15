@@ -1,7 +1,8 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { describeExecutorContract } from '@package-broker/db-sqlite/contract/executor-contract';
 import { openBetterSqliteExecutor } from './better-sqlite3-executor.js';
 
@@ -60,5 +61,103 @@ describe('openBetterSqliteExecutor', () => {
     const opened = openBetterSqliteExecutor(':memory:');
     await opened.close();
     await expect(opened.executor.all({ sql: 'SELECT 1', params: [] })).rejects.toBeDefined();
+  });
+});
+
+describe('openBetterSqliteExecutor statement cache', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('re-prepares the least-recently-used statement when the cache is full', async () => {
+    const spy = vi.spyOn(Database.prototype, 'prepare');
+    const opened = openBetterSqliteExecutor(':memory:', { statementCacheSize: 2 });
+    try {
+      const first = 'SELECT 1 AS v';
+      const statements = [first, 'SELECT 2 AS v', 'SELECT 3 AS v'];
+      for (const sql of statements) {
+        await opened.executor.all({ sql, params: [] });
+      }
+      await opened.executor.all({ sql: first, params: [] });
+
+      const prepared = spy.mock.calls.map((call) => call[0] as string);
+      expect(prepared.filter((sql) => sql === first)).toHaveLength(2);
+      expect(prepared).toHaveLength(4);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('refreshes recency on a hit so the least-recently-used entry is evicted', async () => {
+    const spy = vi.spyOn(Database.prototype, 'prepare');
+    const opened = openBetterSqliteExecutor(':memory:', { statementCacheSize: 2 });
+    try {
+      const a = 'SELECT 1 AS v';
+      const b = 'SELECT 2 AS v';
+      const c = 'SELECT 3 AS v';
+      // A, B, A, C: the second A is a hit and moves A ahead of B, so C evicts B.
+      for (const sql of [a, b, a, c]) {
+        await opened.executor.all({ sql, params: [] });
+      }
+      const prepared = (): string[] => spy.mock.calls.map((call) => call[0] as string);
+      expect(prepared().filter((sql) => sql === a)).toHaveLength(1);
+
+      const afterFill = spy.mock.calls.length;
+      await opened.executor.all({ sql: a, params: [] });
+      expect(spy.mock.calls.length).toBe(afterFill);
+
+      await opened.executor.all({ sql: b, params: [] });
+      expect(spy.mock.calls.length).toBe(afterFill + 1);
+      expect(prepared().filter((sql) => sql === b)).toHaveLength(2);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('prepares a repeated statement once', async () => {
+    const spy = vi.spyOn(Database.prototype, 'prepare');
+    const opened = openBetterSqliteExecutor(':memory:', { statementCacheSize: 2 });
+    try {
+      await opened.executor.all({ sql: 'SELECT 1 AS v', params: [] });
+      await opened.executor.all({ sql: 'SELECT 1 AS v', params: [] });
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('bounds the default cache at exactly the newest 256 statements', async () => {
+    const spy = vi.spyOn(Database.prototype, 'prepare');
+    const opened = openBetterSqliteExecutor(':memory:');
+    try {
+      const sqlAt = (index: number): string => `SELECT ${index} AS v`;
+      for (let index = 0; index < 10_000; index += 1) {
+        await opened.executor.all({ sql: sqlAt(index), params: [] });
+      }
+      expect(spy).toHaveBeenCalledTimes(10_000);
+
+      // The 256 most recently used statements (9 744..9 999) are still cached,
+      // so touching them again prepares nothing.
+      for (let index = 9_744; index < 10_000; index += 1) {
+        await opened.executor.all({ sql: sqlAt(index), params: [] });
+      }
+      expect(spy).toHaveBeenCalledTimes(10_000);
+
+      // The 257th most recent (index 9 743) was evicted and is prepared again.
+      await opened.executor.all({ sql: sqlAt(9_743), params: [] });
+      expect(spy).toHaveBeenCalledTimes(10_001);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('rejects a non-positive or fractional statementCacheSize', () => {
+    expect(() => openBetterSqliteExecutor(':memory:', { statementCacheSize: 0 })).toThrow(
+      RangeError,
+    );
+    expect(() => openBetterSqliteExecutor(':memory:', { statementCacheSize: 1.5 })).toThrow(
+      RangeError,
+    );
   });
 });

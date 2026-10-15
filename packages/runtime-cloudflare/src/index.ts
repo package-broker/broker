@@ -29,12 +29,12 @@ export interface Worker {
   fetch(request: Request, env?: Env): Promise<Response>;
 }
 
-function unboundExecutor(): ScalarSqlExecutor {
+export function unboundExecutor(): ScalarSqlExecutor {
   const reject = (): Promise<never> =>
     Promise.reject(new DbError('unknown', 'no DB binding', { cause: null }));
 
   return {
-    driver: 'd1',
+    driver: 'none',
     all: reject,
     batch: reject,
   };
@@ -94,7 +94,11 @@ export function createWorker(
       } catch (error) {
         return errorResponse(error, requestId, log);
       }
-      return kernel.fetch(request);
+      try {
+        return await kernel.fetch(request);
+      } catch (error) {
+        return errorResponse(error, requestId, log);
+      }
     },
   };
 }

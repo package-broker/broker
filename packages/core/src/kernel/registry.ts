@@ -46,6 +46,8 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
 
 const BINDABLE: readonly string[] = PLUGIN_BINDABLE_PORTS;
 
+const ROUTE_METHODS: ReadonlySet<string> = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+
 export function collectRegistrations(plugins: readonly PluginDefinition[]): Registration {
   const problems: string[] = [];
   const routes: RegisteredRoute[] = [];
@@ -109,12 +111,18 @@ export function collectRegistrations(plugins: readonly PluginDefinition[]): Regi
       if (pathProblem !== null) {
         problems.push(`plugin "${id}": ${pathProblem}`);
       }
+      const methodAllowed = ROUTE_METHODS.has(route.method);
+      if (!methodAllowed) {
+        problems.push(
+          `plugin "${id}" route ${String(route.method)} ${route.path}: method must be one of ${[...ROUTE_METHODS].join(', ')}`,
+        );
+      }
       if (route.needsOrg === false && route.permission !== null) {
         problems.push(
           `plugin "${id}" route ${route.method} ${route.path}: a route without organization context must be public`,
         );
       }
-      if (pathProblem === null) {
+      if (pathProblem === null && methodAllowed) {
         routes.push({ ...route, plugin: id });
       }
     }

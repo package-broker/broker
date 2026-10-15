@@ -194,6 +194,39 @@ describe('createWorker', () => {
     expect(attempts).toBe(2);
   });
 
+  it('retries kernel creation after a failed init for a binding', async () => {
+    const db = await migratedDatabase();
+    let attempts = 0;
+    const plugin = definePlugin({
+      id: 'flaky-binding',
+      package: 'test/flaky-binding',
+      platforms: ['cloudflare'],
+      apiVersion: 2,
+      register(registry) {
+        registry.route({
+          method: 'GET',
+          path: '/flaky-binding',
+          permission: null,
+          needsOrg: false,
+          handler: () => Response.json({ ok: true }),
+        });
+      },
+      init() {
+        attempts += 1;
+        if (attempts === 1) throw new Error('init failed');
+      },
+    });
+    const worker = createWorker([plugin]);
+
+    const first = await worker.fetch(request('/flaky-binding'), { DB: db });
+    expect(first.status).toBe(500);
+    expect(await errorCode(first)).toBe('internal');
+
+    const second = await worker.fetch(request('/flaky-binding'), { DB: db });
+    expect(second.status).toBe(200);
+    expect(attempts).toBe(2);
+  });
+
   it('initializes once per binding', async () => {
     const db = await migratedDatabase();
     let inits = 0;

@@ -12,6 +12,7 @@ import type { Kernel } from '@package-broker/core/kernel/kernel';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
@@ -82,7 +83,7 @@ async function buildAuth(
   plugins: readonly PluginDefinition[],
   env: Env,
   log: KernelLog,
-): Promise<AuthModule> {
+): Promise<{ auth: AuthModule; registration: Registration }> {
   const keyring = createKeyring(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
   );
@@ -97,7 +98,7 @@ async function buildAuth(
     clock: systemClock,
     env: scopedEnv(env),
   });
-  return createAuthModule({
+  const auth = createAuthModule({
     repositories: createAuthRepositories(executor),
     keyring,
     clock: systemClock,
@@ -107,6 +108,7 @@ async function buildAuth(
     hooks: registration.hooks,
     log,
   });
+  return { auth, registration };
 }
 
 function withoutBodyForHead(request: Request, response: Response): Response {
@@ -131,11 +133,14 @@ export function createWorker(
       ids: { ulid },
     };
 
-    const auth = db === undefined ? undefined : await buildAuth(executor, plugins, env ?? {}, log);
+    const built = db === undefined ? undefined : await buildAuth(executor, plugins, env ?? {}, log);
+    const registration = built?.registration ?? collectRegistrations(plugins);
+    const auth = built?.auth;
 
     return createKernel({
       platform: 'cloudflare',
       plugins,
+      registration,
       ports,
       resolveOrg: createOrgResolver(bootstrap),
       health: async () => (await bootstrap.findSingleton()) !== null,

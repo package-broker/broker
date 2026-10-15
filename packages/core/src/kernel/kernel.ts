@@ -22,6 +22,7 @@ import { routePathProblem, routesConflict } from './routes.js';
 export interface KernelOptions {
   readonly platform: Platform;
   readonly plugins: readonly PluginDefinition[];
+  readonly registration?: Registration;
   readonly ports: PluginPorts;
   readonly resolveOrg: () => Promise<OrgContext>;
   /** Uncached database probe, called on every readiness request. */
@@ -130,7 +131,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const coreProblems = validateCoreRoutes(coreRoutes);
   let registration: Registration;
   try {
-    registration = collectRegistrations(options.plugins);
+    registration = options.registration ?? collectRegistrations(options.plugins);
   } catch (error) {
     if (error instanceof KernelConfigError) {
       throw new KernelConfigError([...error.problems, ...coreProblems]);

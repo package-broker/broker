@@ -13,6 +13,7 @@ import type { AuthorizationDecision, AuthorizationEngine } from './authorize.js'
 import { createKernel } from './kernel.js';
 import type { KernelOptions } from './kernel.js';
 import { NotBootstrappedError } from './org.js';
+import { collectRegistrations, KernelConfigError } from './registry.js';
 
 const ORG = orgContext('org-1');
 const BASE = 'http://broker.test';
@@ -126,6 +127,78 @@ async function envelope(
 }
 
 describe('createKernel', () => {
+  it('uses a prebuilt registration as-is without calling register again', async () => {
+    let calls = 0;
+    const registered = plugin('alpha', [], {
+      register(registry) {
+        calls++;
+        registry.route(publicItem);
+        registry.hook('access.check', () => undefined);
+      },
+    });
+    const registration = collectRegistrations([registered]);
+    const h = harness([registered]);
+    const kernel = await createKernel({ ...h.options, registration });
+
+    expect(calls).toBe(1);
+    expect(kernel.registration).toBe(registration);
+    expect((await kernel.fetch(new Request(`${BASE}/items/1`))).status).toBe(200);
+  });
+
+  it('validates core routes when given a prebuilt registration', async () => {
+    const h = harness([]);
+    await expect(
+      createKernel({
+        ...h.options,
+        registration: collectRegistrations([]),
+        coreRoutes: [publicItem],
+      }),
+    ).rejects.toMatchObject({
+      name: 'KernelConfigError',
+      problems: [expect.stringContaining('must start with "/_pb/"')],
+    });
+  });
+
+  it('merges a throwing register failure with core-route problems', async () => {
+    let calls = 0;
+    const h = harness([
+      plugin('alpha', [], {
+        register() {
+          calls += 1;
+          throw new TypeError();
+        },
+      }),
+    ]);
+    const failure: unknown = await createKernel({ ...h.options, coreRoutes: [publicItem] }).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(KernelConfigError);
+    const problems = (failure as KernelConfigError).problems;
+    expect(problems).toContain('plugin "alpha" register threw TypeError');
+    expect(problems).toEqual(
+      expect.arrayContaining([expect.stringContaining('must start with "/_pb/"')]),
+    );
+    expect(problems).toHaveLength(2);
+    expect(calls).toBe(1);
+  });
+
+  it('does not collect registrations when a prebuilt registration is passed', async () => {
+    let calls = 0;
+    const h = harness([
+      plugin('alpha', [], {
+        register() {
+          calls += 1;
+          throw new TypeError();
+        },
+      }),
+    ]);
+    const kernel = await createKernel({ ...h.options, registration: collectRegistrations([]) });
+
+    expect(calls).toBe(0);
+    expect((await kernel.fetch(new Request(`${BASE}/health/live`))).status).toBe(200);
+  });
+
   it('answers an unknown route with a 404 envelope without touching the resolver or the database', async () => {
     const h = harness([plugin('alpha', [publicItem])]);
     const kernel = await createKernel(h.options);

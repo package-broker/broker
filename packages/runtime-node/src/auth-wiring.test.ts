@@ -11,6 +11,7 @@ import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
+import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import {
@@ -162,6 +163,58 @@ describe('node auth wiring', () => {
   afterEach(async () => {
     for (const broker of running.splice(0)) await broker.close();
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it('calls register once per server build with auth', async () => {
+    const register = vi.fn((registry: Parameters<NonNullable<PluginDefinition['register']>>[0]) => {
+      registry.route({
+        method: 'GET',
+        path: '/registered',
+        permission: null,
+        needsOrg: false,
+        handler: () => new Response('ok'),
+      });
+    });
+    const broker = createNodeServer([plugin({ register })], {
+      auth: {
+        keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
+        publicOrigin: 'http://127.0.0.1',
+        env: {},
+      },
+    });
+    running.push(broker);
+    const kernel = await broker.ready();
+
+    expect(register).toHaveBeenCalledTimes(1);
+    expect((await kernel.fetch(new Request('http://127.0.0.1/registered'))).status).toBe(200);
+    expect((await kernel.fetch(new Request('http://127.0.0.1/_pb/auth/providers'))).status).toBe(
+      200,
+    );
+  });
+
+  it('refuses to start when a plugin register throws, calling it once', async () => {
+    let calls = 0;
+    const listenSpy = vi.spyOn(Server.prototype, 'listen');
+    try {
+      const failure = await rejection(
+        start({}, [
+          plugin({
+            register() {
+              calls += 1;
+              throw new Error(SENTINEL);
+            },
+          }),
+        ]),
+      );
+
+      expect(failure).toBeInstanceOf(KernelConfigError);
+      expect(calls).toBe(1);
+      expect(String(failure)).not.toContain(SENTINEL);
+      expect(listenSpy).not.toHaveBeenCalled();
+      expect(recorded.closes).toEqual([path]);
+    } finally {
+      listenSpy.mockRestore();
+    }
   });
 
   function env(overrides: Record<string, string | undefined> = {}) {

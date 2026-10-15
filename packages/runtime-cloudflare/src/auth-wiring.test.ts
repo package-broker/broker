@@ -30,6 +30,7 @@ const PUBLIC_URL = 'https://broker.test';
 const ADMIN_EMAIL = 'admin@example.test';
 const PASSWORD = 'correct horse battery staple';
 const FACTORY_SENTINEL = 'factory-sentinel-7f3a91';
+const REGISTER_SENTINEL = 'register-sentinel-5c2b40';
 
 const bindings = Array.from({ length: 16 }, (_, index) => `AWDB${index}`);
 
@@ -177,6 +178,104 @@ function idpPlugin(): PluginDefinition {
 }
 
 describe('auth wiring on Miniflare D1', () => {
+  it('calls register once per worker kernel build with auth', async () => {
+    const register = vi.fn((registry: Parameters<NonNullable<PluginDefinition['register']>>[0]) => {
+      registry.route({
+        method: 'GET',
+        path: '/registered',
+        permission: null,
+        needsOrg: false,
+        handler: () => new Response('ok'),
+      });
+    });
+    const worker = createWorker([
+      definePlugin({
+        id: 'counted',
+        package: 'test/counted',
+        platforms: ['cloudflare'],
+        apiVersion: 2,
+        register,
+      }),
+    ]);
+    const db: D1DatabaseLike = {
+      prepare: vi.fn(() => {
+        throw new Error('unexpected database query');
+      }),
+      batch: vi.fn(() => Promise.resolve([])),
+    };
+    const environment = env(db);
+
+    expect((await worker.fetch(get('/registered'), environment)).status).toBe(200);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect((await worker.fetch(get('/_pb/auth/providers'), environment)).status).toBe(200);
+    expect(register).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 503 misconfigured without leaking when a plugin register throws', async () => {
+    let calls = 0;
+    const failing = definePlugin({
+      id: 'register-throws',
+      package: 'test/register-throws',
+      platforms: ['cloudflare'],
+      apiVersion: 2,
+      register() {
+        calls += 1;
+        throw new Error(REGISTER_SENTINEL);
+      },
+    });
+    const db: D1DatabaseLike = {
+      prepare: vi.fn(() => {
+        throw new Error('unexpected database query');
+      }),
+      batch: vi.fn(() => Promise.resolve([])),
+    };
+    const sink = collectLog();
+
+    const response = await createWorker([failing], { log: sink.log }).fetch(
+      get('/_pb/auth/providers'),
+      env(db),
+    );
+
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect((JSON.parse(text) as { error: { code: string } }).error.code).toBe('misconfigured');
+    expect(leaks(text, [REGISTER_SENTINEL])).toEqual([]);
+    expect(leaks(sink.entries.join('\n'), [REGISTER_SENTINEL])).toEqual([]);
+    expect(calls).toBe(1);
+  });
+
+  it('checks the auth configuration before collecting registrations', async () => {
+    let calls = 0;
+    const failing = definePlugin({
+      id: 'register-throws',
+      package: 'test/register-throws',
+      platforms: ['cloudflare'],
+      apiVersion: 2,
+      register() {
+        calls += 1;
+        throw new Error(REGISTER_SENTINEL);
+      },
+    });
+    const db: D1DatabaseLike = {
+      prepare: vi.fn(() => {
+        throw new Error('unexpected database query');
+      }),
+      batch: vi.fn(() => Promise.resolve([])),
+    };
+    const sink = collectLog();
+
+    const response = await createWorker([failing], { log: sink.log }).fetch(
+      get('/_pb/auth/providers'),
+      env(db, { PB_MASTER_KEY: undefined }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(calls).toBe(0);
+    const logged = sink.entries.join('\n');
+    expect(logged).toContain('SecretsConfigError');
+    expect(logged).not.toContain('KernelConfigError');
+  });
+
   it('runs local setup and login through worker.fetch and serves the session', async () => {
     const { db, token } = await bootstrappedDatabase();
     const worker = createWorker([]);
@@ -621,6 +720,42 @@ describe('plugin hooks and identity fetch', () => {
     expect(response.headers.getSetCookie()).toEqual([]);
     const body = (await response.json()) as { error: { code: string } };
     expect(body.error.code).toBe('login_failed');
+  });
+
+  it('shares one registration between the auth module and the kernel', async () => {
+    const { db } = await bootstrappedDatabase();
+    const shared = definePlugin({
+      id: 'shared-registration',
+      package: 'test/shared-registration',
+      platforms: ['cloudflare'],
+      apiVersion: 2,
+      binds: ['identity'],
+      identityProviders: () => [accessProvider()],
+      register(registry) {
+        let runs = 0;
+        registry.hook('auth.resolveIdentity', () => {
+          runs += 1;
+          return undefined;
+        });
+        registry.route({
+          method: 'GET',
+          path: '/hook-runs',
+          permission: null,
+          needsOrg: false,
+          handler: () => Response.json({ runs }),
+        });
+      },
+    });
+    const worker = createWorker([shared], { log: () => undefined });
+
+    const before = await worker.fetch(get('/hook-runs'), env(db));
+    expect(await before.json()).toEqual({ runs: 0 });
+
+    const login = await worker.fetch(startLogin(), env(db));
+    expect(login.status).toBe(303);
+
+    const after = await worker.fetch(get('/hook-runs'), env(db));
+    expect(((await after.json()) as { runs: number }).runs).toBeGreaterThanOrEqual(1);
   });
 
   async function identityFetchOf(

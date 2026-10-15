@@ -11,6 +11,7 @@ import { createKernel } from '@package-broker/core/kernel/kernel';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts, RouteDefinition } from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
@@ -47,12 +48,12 @@ function rejectingExecutor(): SqlExecutor {
 }
 
 function authRoutes(
+  registration: Registration,
   plugins: readonly PluginDefinition[],
   auth: NodeAuthOptions,
   executor: SqlExecutor,
   log: KernelLog,
 ): readonly RouteDefinition[] {
-  const registration = collectRegistrations(plugins);
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) => fetch(request),
     clock: systemClock,
@@ -87,17 +88,22 @@ export function createNodeServer(
   });
 
   const { auth } = options;
-  const kernel = (async () =>
-    createKernel({
+  const kernel = (async () => {
+    const registration = collectRegistrations(plugins);
+    return createKernel({
       platform: 'node',
       plugins,
+      registration,
       ports,
       resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
       health: async () => (await bootstrap.findSingleton()) !== null,
       log,
-      ...(auth === undefined ? {} : { coreRoutes: authRoutes(plugins, auth, executor, log) }),
+      ...(auth === undefined
+        ? {}
+        : { coreRoutes: authRoutes(registration, plugins, auth, executor, log) }),
       ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
-    }))();
+    });
+  })();
   kernel.catch(() => undefined);
 
   const server = createServer(

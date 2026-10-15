@@ -20,6 +20,7 @@
   ],
   "dependencies": {
     "@package-broker/core": "workspace:^",
+    "@package-broker/db-sqlite": "workspace:^",
     "@package-broker/runtime-cloudflare": "workspace:^",
     "@package-broker/runtime-node": "workspace:^",
     "esbuild": "catalog:"

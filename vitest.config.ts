@@ -1,17 +1,20 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-const src = (pkg: string, file: string) =>
-  fileURLToPath(new URL(`./packages/${pkg}/src/${file}`, import.meta.url));
-
-const alias = {
-  '@package-broker/core/plugin': src('core', 'plugin.ts'),
-  '@package-broker/core/config': src('core', 'config.ts'),
-  '@package-broker/core': src('core', 'index.ts'),
-};
+const alias = [
+  {
+    find: /^@package-broker\/([a-z0-9-]+)\/(?!package\.json$)(.+)$/,
+    replacement: fileURLToPath(new URL('./packages/$1/src/$2.ts', import.meta.url)),
+  },
+  {
+    find: /^@package-broker\/([a-z0-9-]+)$/,
+    replacement: fileURLToPath(new URL('./packages/$1/src/index.ts', import.meta.url)),
+  },
+];
 
 const packages = [
   'core',
+  'db-sqlite',
   'runtime-cloudflare',
   'runtime-node',
   'cli',

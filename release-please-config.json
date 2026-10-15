@@ -12,7 +12,7 @@
     {
       "type": "linked-versions",
       "groupName": "product",
-      "components": ["core", "cli", "runtime-cloudflare", "runtime-node", "ui"]
+      "components": ["core", "db-sqlite", "cli", "runtime-cloudflare", "runtime-node", "ui"]
     }
   ],
   "packages": {
@@ -48,6 +48,11 @@
     },
     "packages/plugin-github": {
       "component": "plugin-github",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/db-sqlite": {
+      "component": "db-sqlite",
       "prerelease": true,
       "prerelease-type": "rc"
     }

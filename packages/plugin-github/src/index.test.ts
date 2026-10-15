@@ -5,6 +5,6 @@ describe('plugin-github', () => {
   it('declares its plugin definition', () => {
     const plugin = github();
     expect(plugin.id).toBe('github');
-    expect(plugin.apiVersion).toBe(1);
+    expect(plugin.apiVersion).toBe(2);
   });
 });

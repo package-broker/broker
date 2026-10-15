@@ -4,7 +4,7 @@ export default function ssoOidc() {
   return definePlugin({
     id: 'sso-oidc',
     package: '@package-broker/plugin-sso-oidc',
-    apiVersion: 1,
+    apiVersion: 2,
     platforms: ['cloudflare', 'node'],
     capabilities: ['sso'],
   });

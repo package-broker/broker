@@ -113,7 +113,7 @@ async function migrateAll(): Promise<void> {
 }
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 39 tables, expand phase for 0002', async () => {
+  it('1: a fresh database gets every core migration: 42 tables, expand phase for 0002', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
@@ -121,7 +121,8 @@ describe('core migrations', () => {
 
     expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
     expect(result.applied).toEqual(ids);
-    expect(await countTables()).toBe(39);
+    // 37 from 0001, +2 from 0002, +3 from 0003: service_principal_permission, identity_block, access_mutation_guard
+    expect(await countTables()).toBe(42);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -153,7 +154,8 @@ describe('core migrations', () => {
 
     expect(result.applied).toEqual(sources.slice(1).map((source) => source.id));
     expect(result.skipped).toEqual(['core:0001_init']);
-    expect(await countTables()).toBe(39);
+    // 0002 and 0003 add 5 tables to the 37 of 0001
+    expect(await countTables()).toBe(42);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );

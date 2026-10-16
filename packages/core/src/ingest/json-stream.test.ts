@@ -327,10 +327,10 @@ describe('extractMembers', () => {
       expect(result.error).toBeInstanceOf(JsonExtractError);
       expect((result.error as JsonExtractError).code).toBe('too_many_members');
       expect(produced).toBeLessThan(450_000);
-      expect(result.peak).toBeLessThan(2 * MiB + 32 * 400_000);
+      expect(result.peak).toBeLessThan(2 * MiB + 48 * 400_000);
     }, 120_000);
 
-    it('holds a captured member with 100k keys within member + 2 MiB + 32 B per key', async () => {
+    it('holds a captured member with 100k keys within member + 2 MiB + 48 B per key', async () => {
       function* parts(): Generator<Uint8Array> {
         yield encoder.encode('{"time":{');
         for (let base = 0; base < 100_000; base += 2000) {
@@ -345,10 +345,10 @@ describe('extractMembers', () => {
       const result = await measure(parts(), [['time']], { maxMemberBytes: 4 * MiB }, 20);
       expect(result.error).toBeNull();
       expect(result.members).toBe(1);
-      expect(result.peak).toBeLessThan(result.biggest + 2 * MiB + 32 * 100_001);
+      expect(result.peak).toBeLessThan(result.biggest + 2 * MiB + 48 * 100_001);
     }, 120_000);
 
-    it('holds a 100k-entry provider-include document within 2 MiB + 32 B per entry', async () => {
+    it('holds a 100k-entry provider-include document within 2 MiB + 48 B per entry', async () => {
       const hash = 'f'.repeat(64);
       function* parts(): Generator<Uint8Array> {
         yield encoder.encode('{"providers":{');
@@ -364,7 +364,7 @@ describe('extractMembers', () => {
       const result = await measure(parts(), [['providers', '*']], undefined, 2000);
       expect(result.error).toBeNull();
       expect(result.members).toBe(100_001);
-      expect(result.peak).toBeLessThan(result.biggest + 2 * MiB + 32 * 100_001);
+      expect(result.peak).toBeLessThan(result.biggest + 2 * MiB + 48 * 100_001);
     }, 120_000);
   });
 

@@ -10,6 +10,8 @@ import {
   opGuard,
   ownsIdentity,
   protectedHolder,
+  type ProtectedHolderExclusion,
+  type ProtectedHolderInput,
 } from './kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from './testing/migrated-database.js';
 
@@ -132,13 +134,14 @@ function identity(
   email: string,
 ): Statement {
   return insert(
-    'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
     id,
     org.orgId,
     userId,
     provider,
     subject,
     email,
+    new Date().toISOString(),
   );
 }
 
@@ -153,6 +156,52 @@ async function holds(guard: Expression<SqlBool>, org: OrgContext = fixture.a): P
   return rows.length === 1;
 }
 
+const HOLDER_PROVIDERS = ['oidc', 'access'] as const;
+const HOLDER_ANCHOR = 'https://idp.example.test';
+
+function holderInput(exclude?: ProtectedHolderExclusion): ProtectedHolderInput {
+  const providers = HOLDER_PROVIDERS.map((provider) => ({
+    provider,
+    anchor: HOLDER_ANCHOR,
+    emailAuthoritative: true,
+  }));
+  const now = new Date().toISOString();
+  return exclude === undefined
+    ? { kind: 'fresh', now, providers }
+    : { kind: 'fresh', now, providers, exclude };
+}
+
+function holderBindings(org: OrgContext): Statement[] {
+  return HOLDER_PROVIDERS.map((provider) =>
+    insert(
+      'INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+      org.orgId,
+      provider,
+      HOLDER_ANCHOR,
+    ),
+  );
+}
+
+function holderIdentities(
+  org: OrgContext,
+  users: readonly (readonly [string, string])[],
+): Statement[] {
+  return users.flatMap(([userId, email]) =>
+    HOLDER_PROVIDERS.map((provider) =>
+      insert(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        `HID-${provider}-${userId}`,
+        org.orgId,
+        userId,
+        provider,
+        `${provider}-${userId}`,
+        email,
+        new Date().toISOString(),
+      ),
+    ),
+  );
+}
+
 async function holders(
   org: OrgContext,
   exclude?: { readonly grantId?: string; readonly userId?: string },
@@ -163,7 +212,7 @@ async function holders(
         .selectFrom('user_account as u')
         .select('u.id')
         .where('u.org_id', '=', org.orgId)
-        .where((eb) => protectedHolder(org, eb.ref('u.id'), exclude))
+        .where((eb) => protectedHolder(org, eb.ref('u.id'), holderInput(exclude)))
         .orderBy('u.id'),
     ),
   );
@@ -467,6 +516,16 @@ describe('protectedHolder', () => {
       membership(fixture.a, SUSPENDED, 'oidc', 'admins'),
       membership(fixture.a, VIEWER, 'oidc', 'readers'),
       membership(fixture.a, OTHER_PROVIDER, 'access', 'admins'),
+      ...holderBindings(fixture.a),
+      ...holderIdentities(fixture.a, [
+        [EMAIL_HOLDER, 'email@example.test'],
+        [GROUP_HOLDER, 'group@example.test'],
+        [BOTH, 'both@example.test'],
+        [SUSPENDED, 'suspended@example.test'],
+        [VIEWER, 'viewer@example.test'],
+        [PROJECT_ONLY, 'project@example.test'],
+        [OTHER_PROVIDER, 'other@example.test'],
+      ]),
     ]);
   });
 
@@ -516,7 +575,7 @@ describe('protectedHolder', () => {
             .selectFrom('user_account as u')
             .select('u.id')
             .where('u.org_id', '=', fixture.a.orgId)
-            .where((eb) => protectedHolder(fixture.a, eb.ref('u.id'), { grantId }))
+            .where((eb) => protectedHolder(fixture.a, eb.ref('u.id'), holderInput({ grantId })))
             .limit(1),
         ),
       );
@@ -531,19 +590,23 @@ describe('protectedHolder', () => {
     expect(await remaining(G_PROJECT)).toBe(true);
   });
 
-  it('compiles to a union of two branches without an OR', () => {
+  it('compiles to a union of three branches without an OR', () => {
     const statement = compile(
       db
         .selectFrom('user_account as u')
         .select('u.id')
         .where((eb) =>
-          protectedHolder(fixture.a, eb.ref('u.id'), { grantId: G_EMAIL, userId: BOTH }),
+          protectedHolder(
+            fixture.a,
+            eb.ref('u.id'),
+            holderInput({ grantId: G_EMAIL, userId: BOTH }),
+          ),
         ),
     );
 
     expect(statement.sql).toMatch(/union all/i);
     expect(statement.sql).not.toMatch(/\bor\b/i);
-    expect(statement.sql.match(/union all/gi)).toHaveLength(1);
+    expect(statement.sql.match(/union all/gi)).toHaveLength(2);
   });
 });
 
@@ -594,6 +657,7 @@ describe('protectedHolder at spike scale', () => {
       role(org, ROLE_VIEW, 'viewer', 'organization', 0),
       role(org, ROLE_PROJECT, 'project_admin', 'project', 1),
       project(org, PROJECT_ID, 'alpha'),
+      ...holderBindings(org),
     ];
     const emailOf = new Map<string, string>();
     const activeUsers = new Set<string>();
@@ -604,6 +668,7 @@ describe('protectedHolder at spike scale', () => {
       emailOf.set(id, email);
       if (!suspended) activeUsers.add(id);
       statements.push(user(org, id, email, suspended ? 'suspended' : 'active'));
+      statements.push(...holderIdentities(org, [[id, email]]));
     }
 
     const groupsOf = new Map<string, Set<string>>();
@@ -765,6 +830,7 @@ describe('correlation with the calling query', () => {
       identity(fixture.a, '01J0IDENT000000000000000A1', U1, 'oidc', 'sub-1', 'u1@example.test'),
       identity(fixture.a, '01J0IDENT000000000000000A2', U2, 'oidc', 'sub-2', 'u2@example.test'),
       insert('INSERT INTO local_login (user_id, org_id) VALUES (?, ?)', ATTACKER, fixture.a.orgId),
+      ...holderBindings(fixture.a),
     ]);
   });
 
@@ -783,12 +849,14 @@ describe('correlation with the calling query', () => {
 
     expect(query).toThrow(TypeError);
     expect(() => adminEligibility(fixture.a, sql.ref<string>('user_id'))).toThrow(TypeError);
-    expect(() => protectedHolder(fixture.a, sql.ref<string>('user_id'))).toThrow(TypeError);
+    expect(() => protectedHolder(fixture.a, sql.ref<string>('user_id'), holderInput())).toThrow(
+      TypeError,
+    );
   });
 
   it('refuses an expression that is not a column reference', () => {
     expect(() => adminEligibility(fixture.a, sql<string>`'x'`)).toThrow(TypeError);
-    expect(() => protectedHolder(fixture.a, sql<string>`'x'`)).toThrow(TypeError);
+    expect(() => protectedHolder(fixture.a, sql<string>`'x'`, holderInput())).toThrow(TypeError);
   });
 
   it('answers per outer row for a qualified column of a table the guard also reads', async () => {
@@ -816,7 +884,7 @@ describe('correlation with the calling query', () => {
         db
           .selectFrom('user_group')
           .select('user_group.user_id')
-          .where((eb) => protectedHolder(fixture.a, eb.ref('user_group.user_id'))),
+          .where((eb) => protectedHolder(fixture.a, eb.ref('user_group.user_id'), holderInput())),
       ),
     );
 
@@ -829,7 +897,7 @@ describe('correlation with the calling query', () => {
         db
           .selectFrom('user_account')
           .select('user_account.id')
-          .where((eb) => protectedHolder(fixture.a, eb.ref('user_account.id'))),
+          .where((eb) => protectedHolder(fixture.a, eb.ref('user_account.id'), holderInput())),
       ),
     );
 
@@ -876,7 +944,11 @@ describe('correlation with the calling query', () => {
               .selectFrom(`user_account as ${alias}` as 'user_account')
               .select(`${alias}.id` as 'user_account.id')
               .where((eb) =>
-                protectedHolder(fixture.a, eb.ref(`${alias}.id` as 'user_account.id')),
+                protectedHolder(
+                  fixture.a,
+                  eb.ref(`${alias}.id` as 'user_account.id'),
+                  holderInput(),
+                ),
               ),
           ),
         );
@@ -893,7 +965,11 @@ describe('correlation with the calling query', () => {
             .selectFrom(`user_group as ${alias}` as 'user_group')
             .select(`${alias}.user_id` as 'user_group.user_id')
             .where((eb) =>
-              protectedHolder(fixture.a, eb.ref(`${alias}.user_id` as 'user_group.user_id')),
+              protectedHolder(
+                fixture.a,
+                eb.ref(`${alias}.user_id` as 'user_group.user_id'),
+                holderInput(),
+              ),
             ),
         ),
       );
@@ -919,14 +995,18 @@ describe('correlation with the calling query', () => {
             .selectFrom('user_account as x')
             .select('x.id')
             .where((eb) =>
-              protectedHolder(fixture.a, eb.ref('x.id'), { grantId: 'g', userId: 'u' }),
+              protectedHolder(
+                fixture.a,
+                eb.ref('x.id'),
+                holderInput({ grantId: 'g', userId: 'u' }),
+              ),
             ),
         ).sql,
         compile(
           db
             .selectFrom('user_account as GUARD_USER')
             .select('GUARD_USER.id')
-            .where((eb) => protectedHolder(fixture.a, eb.ref('GUARD_USER.id'))),
+            .where((eb) => protectedHolder(fixture.a, eb.ref('GUARD_USER.id'), holderInput())),
         ).sql,
       );
       return sqls;
@@ -940,13 +1020,13 @@ describe('correlation with the calling query', () => {
       db
         .selectFrom('user_account as x')
         .select('x.id')
-        .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'))),
+        .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'), holderInput())),
     ).sql;
     const collided = compile(
       db
         .selectFrom('user_account as Guard_User')
         .select('Guard_User.id')
-        .where((eb) => protectedHolder(fixture.a, eb.ref('Guard_User.id'))),
+        .where((eb) => protectedHolder(fixture.a, eb.ref('Guard_User.id'), holderInput())),
     ).sql;
 
     expect(plain).toContain('guard_user');
@@ -991,7 +1071,9 @@ describe('correlation with the calling query', () => {
           db
             .selectFrom(from)
             .select(ref)
-            .where((eb) => protectedHolder(fixture.a, eb.ref(ref), { grantId: 'g', userId: 'u' })),
+            .where((eb) =>
+              protectedHolder(fixture.a, eb.ref(ref), holderInput({ grantId: 'g', userId: 'u' })),
+            ),
         ),
         compile(
           db
@@ -1074,6 +1156,8 @@ describe('organization predicates', () => {
       emailGrant(fixture.b, '01J0GRANT000000000000000B1', 'admin@example.test', B_ADMIN),
       membership(fixture.b, B_USER, 'oidc', 'admins'),
       groupGrant(fixture.b, '01J0GRANT000000000000000B2', 'oidc', 'admins', B_ADMIN),
+      ...holderBindings(fixture.b),
+      ...holderIdentities(fixture.b, [[B_USER, 'admin@example.test']]),
     ]);
 
     expect(await holders(fixture.b)).toEqual([B_USER]);
@@ -1087,7 +1171,7 @@ describe('organization predicates', () => {
           .selectFrom('user_account as x')
           .select('x.id')
           .where('x.id', '=', B_USER)
-          .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'))),
+          .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'), holderInput())),
       ),
     );
     expect(crossOrganization).toEqual([]);
@@ -1106,7 +1190,7 @@ describe('organization predicates', () => {
           .selectFrom('user_account as x')
           .select('x.id')
           .where('x.id', '=', B_USER)
-          .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'))),
+          .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'), holderInput())),
       ),
     );
     expect(rows).toEqual([]);
@@ -1132,7 +1216,7 @@ describe('organization predicates', () => {
           .selectFrom('user_account as x')
           .select('x.id')
           .where('x.id', '=', A_USER)
-          .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'))),
+          .where((eb) => protectedHolder(fixture.a, eb.ref('x.id'), holderInput())),
       ),
     );
     expect(rows).toEqual([]);

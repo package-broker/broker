@@ -42,6 +42,10 @@
       "types": "./dist/identity/*.d.ts",
       "default": "./dist/identity/*.js"
     },
+    "./catalogue/*": {
+      "types": "./dist/catalogue/*.d.ts",
+      "default": "./dist/catalogue/*.js"
+    },
     "./ids": {
       "types": "./dist/ids.d.ts",
       "default": "./dist/ids.js"

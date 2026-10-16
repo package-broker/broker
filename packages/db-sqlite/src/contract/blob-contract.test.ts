@@ -55,7 +55,7 @@ function hex(bytes: ArrayBuffer): string {
 }
 
 async function sqliteFixture(): Promise<BlobLifecycleFixture> {
-  const database = await openMigratedDatabase();
+  const database = await openMigratedDatabase({ d1PatternLimit: true });
   open.push(database);
   const executor: SqlExecutor = database.executor;
   const repository = createBlobRepository(executor);

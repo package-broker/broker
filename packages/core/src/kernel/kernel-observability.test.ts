@@ -132,13 +132,14 @@ describe('kernel completion record', () => {
       health: () => Promise.resolve(healthy),
     });
 
-    const cases: Array<[string, number, string | undefined, string | undefined, boolean]> = [
-      ['/items/42', 200, undefined, '/items/:id', false],
-      ['/nowhere', 404, 'route.not_found', undefined, true],
-      ['/health/live', 200, undefined, '/health/live', false],
-      ['/health/ready', 503, 'health.not_ready', '/health/ready', true],
-    ];
-    for (const [path, status, reason, route, hasEnvelope] of cases) {
+    const cases: Array<[string, number, string | undefined, string | undefined, boolean, string]> =
+      [
+        ['/items/42', 200, undefined, '/items/:id', false, 'info'],
+        ['/nowhere', 404, 'route.not_found', undefined, true, 'info'],
+        ['/health/live', 200, undefined, '/health/live', false, 'debug'],
+        ['/health/ready', 503, 'health.not_ready', '/health/ready', true, 'warn'],
+      ];
+    for (const [path, status, reason, route, hasEnvelope, level] of cases) {
       logs.length = 0;
       healthy = path !== '/health/ready';
       const response = await kernel.fetch(new Request(`${BASE}${path}`));
@@ -156,7 +157,7 @@ describe('kernel completion record', () => {
       expect(record['span_id']).toMatch(SPAN_ID);
       expect(record['reason_code']).toBe(reason);
       expect(record['route']).toBe(route);
-      expect(record['level']).toBe(status >= 500 ? 'error' : 'info');
+      expect(record['level']).toBe(level);
     }
   });
 

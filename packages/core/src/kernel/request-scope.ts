@@ -61,6 +61,8 @@ export interface CompletionGuard {
   complete(status: number): void;
 }
 
+export const HEALTH_ROUTES: ReadonlySet<string> = new Set(['/health/live', '/health/ready']);
+
 const FIELD_PROBE = { level: 'debug', event: 'probe' } as const;
 
 function valid(field: string, value: unknown): boolean {
@@ -183,9 +185,12 @@ function validStatus(status: unknown): status is number {
   return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599;
 }
 
-function levelFor(outcome: HttpOutcome): LogLevel {
+function levelFor(outcome: HttpOutcome, route: string | undefined): LogLevel {
   if (outcome === 'aborted') return 'warn';
   if (outcome === 'invalid_status') return 'error';
+  if (route !== undefined && HEALTH_ROUTES.has(route)) {
+    return outcome >= 200 && outcome < 300 ? 'debug' : 'warn';
+  }
   return outcome >= 500 ? 'error' : 'info';
 }
 
@@ -214,7 +219,7 @@ export function createCompletionGuard(
     const durationMs = Number.isFinite(elapsed) ? Math.max(0, Math.floor(elapsed)) : 0;
     const code = reasonFor(outcome, reasonCode);
     scope.obs().log({
-      level: levelFor(outcome),
+      level: levelFor(outcome, scope.fields().route),
       event: HTTP_REQUEST_EVENT,
       duration_ms: durationMs,
       ...(typeof outcome === 'number' ? { status: outcome } : {}),

@@ -45,7 +45,16 @@ function droppedSignals(records: readonly ObsRecord[]): string[] {
   );
 }
 
-export function describeObservabilityContract(name: string, make: Make): void {
+export interface ObservabilityContractOptions {
+  readonly unsupported?: readonly string[];
+}
+
+export function describeObservabilityContract(
+  name: string,
+  make: Make,
+  options: ObservabilityContractOptions = {},
+): void {
+  const unsupported = new Set(options.unsupported);
   describe(`Observability contract: ${name}`, () => {
     it('1. drops an unknown field and keeps the allowlisted ones', async () => {
       const { observability, records } = await make();
@@ -156,32 +165,35 @@ export function describeObservabilityContract(name: string, make: Make): void {
       expect(record?.error_name).toBe('Error');
     });
 
-    it('7. plugin-scope and service fields cannot be replaced by attributes', async () => {
-      const { observability, records, scope } = await make();
-      observability.log({
-        level: 'info',
-        event: CONTRACT_EVENT,
-        plugin: 'evil',
-        service: 'evil',
-        deployment_id: 'evil',
-        runtime: scope.runtime === 'node' ? 'cloudflare' : 'node',
-        request_id: FORGED_UUID,
-        trace_id: 'f'.repeat(32),
-        span_id: 'e'.repeat(16),
-      });
+    (unsupported.has('7') ? it.skip : it)(
+      '7. plugin-scope and service fields cannot be replaced by attributes',
+      async () => {
+        const { observability, records, scope } = await make();
+        observability.log({
+          level: 'info',
+          event: CONTRACT_EVENT,
+          plugin: 'evil',
+          service: 'evil',
+          deployment_id: 'evil',
+          runtime: scope.runtime === 'node' ? 'cloudflare' : 'node',
+          request_id: FORGED_UUID,
+          trace_id: 'f'.repeat(32),
+          span_id: 'e'.repeat(16),
+        });
 
-      expect(records()).toHaveLength(1);
-      const [record] = logsOf(records());
-      expect(record?.service).toBe('package-broker');
-      expect(record?.deployment_id).toBe(scope.deploymentId);
-      expect(record?.runtime).toBe(scope.runtime);
-      expect(record?.request_id).toBe(scope.requestId);
-      expect(record?.plugin).toBe(scope.plugin);
-      expect(record?.trace_id).toBe(scope.traceId);
-      expect(record?.span_id).toBe(scope.spanId);
-      const emitted = records()[0];
-      expect(emitted?.kind === 'log' && Object.isFrozen(emitted.record)).toBe(true);
-    });
+        expect(records()).toHaveLength(1);
+        const [record] = logsOf(records());
+        expect(record?.service).toBe('package-broker');
+        expect(record?.deployment_id).toBe(scope.deploymentId);
+        expect(record?.runtime).toBe(scope.runtime);
+        expect(record?.request_id).toBe(scope.requestId);
+        expect(record?.plugin).toBe(scope.plugin);
+        expect(record?.trace_id).toBe(scope.traceId);
+        expect(record?.span_id).toBe(scope.spanId);
+        const emitted = records()[0];
+        expect(emitted?.kind === 'log' && Object.isFrozen(emitted.record)).toBe(true);
+      },
+    );
 
     it('8. project, token and job ids come only from validated context', async () => {
       const { observability, records, scope } = await make();

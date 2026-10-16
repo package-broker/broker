@@ -633,13 +633,8 @@ export function assertCheck(condition: Guard): readonly Statement[] {
 
 const guardOrgs = new WeakMap<object, string>();
 
-/**
- * The fence guard: three statements. The check from assertCheck, then the organization's cache_epoch
- * version replaced, then a failure unless exactly one row was replaced, so a missing cache_epoch row
- * fails the whole batch. Exactly one assertGuard belongs in a batch; it is the only statement that
- * bumps the epoch.
- */
-export function assertGuard(condition: Guard, ctx: OrgContext): FenceGuard {
+/** Replaces the organization's cache_epoch version, then fails the batch unless exactly one row changed. */
+export function cacheEpochBumpStatements(ctx: OrgContext): readonly Statement[] {
   const ctes = db as unknown as Kysely<GuardCtes & Database>;
   const bump = ctes
     .updateTable('cache_epoch')
@@ -657,7 +652,17 @@ export function assertGuard(condition: Guard, ctx: OrgContext): FenceGuard {
         .select(sql<string>`${newOpId()}`.as('key'))
         .where(sql<boolean>`changes() <> 1`),
     );
-  const guard = fenceGuard([...assertCheck(condition), compile(bump), compile(bumpedOnce)]);
+  return [compile(bump), compile(bumpedOnce)];
+}
+
+/**
+ * The fence guard: three statements. The check from assertCheck, then the organization's cache_epoch
+ * version replaced, then a failure unless exactly one row was replaced, so a missing cache_epoch row
+ * fails the whole batch. Exactly one assertGuard belongs in a batch; it is the only statement that
+ * bumps the epoch.
+ */
+export function assertGuard(condition: Guard, ctx: OrgContext): FenceGuard {
+  const guard = fenceGuard([...assertCheck(condition), ...cacheEpochBumpStatements(ctx)]);
   guardOrgs.set(guard, ctx.orgId);
   return guard;
 }

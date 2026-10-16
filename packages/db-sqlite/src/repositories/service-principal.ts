@@ -1,13 +1,12 @@
 import { sql, type Compilable } from 'kysely';
 import { PERMISSIONS, isPermission } from '@package-broker/core/authz/permissions';
 import {
-  runFenced,
   type FailureProbes,
   type FenceGuard,
   type MutationFence,
 } from '@package-broker/core/authz/fence';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
-import { assertGuard, compile, db, existsGuard } from '../kysely.js';
+import { assertCheck, compile, db, existsGuard, runOrgFenced } from '../kysely.js';
 
 export const SERVICE_PRINCIPAL_NAME_MAX_LENGTH = 100;
 
@@ -318,8 +317,9 @@ export function createServicePrincipalRepository(
           ),
       );
 
-      const outcome = await runFenced(
+      const outcome = await runOrgFenced(
         executor,
+        ctx,
         fence,
         guard,
         [scalar(principal), permissions],
@@ -397,7 +397,7 @@ export function createServicePrincipalRepository(
             .where('id', '=', id),
         );
       const probes: FailureProbes = { authority: revision('='), conflict: revision('<>') };
-      const cas = assertGuard(
+      const cas = assertCheck(
         existsGuard((database) =>
           database
             .selectFrom('service_principal')
@@ -408,8 +408,9 @@ export function createServicePrincipalRepository(
         ),
       );
 
-      const outcome = await runFenced(
+      const outcome = await runOrgFenced(
         executor,
+        ctx,
         fence,
         guard,
         [
@@ -468,8 +469,9 @@ export function createServicePrincipalRepository(
     requireNonEmpty(id, 'id');
     requireNonEmpty(opId, 'opId');
     const stamp = timestamp(now);
-    const outcome = await runFenced(
+    const outcome = await runOrgFenced(
       executor,
+      ctx,
       fence,
       guard,
       [

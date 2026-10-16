@@ -4,10 +4,13 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
+import { validatePlatformPorts } from '@package-broker/core/platform/port-config';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import type { Platform } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
 import {
+  credentialProblems,
+  describePlatformPorts,
   renderBuildInfo,
   renderBuildManifest,
   renderNodePackageJson,
@@ -22,6 +25,7 @@ export interface BuildOptions {
   target?: Platform;
   outDir?: string;
   cwd?: string;
+  runtimeEntry?: string;
 }
 
 export interface BuildResult {
@@ -87,9 +91,23 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const target = options.target ?? config.platform;
 
   const errors = validatePlugins(config.plugins, target);
+  errors.push(...validatePlatformPorts(config.platformPorts, target));
+  const stanza =
+    typeof config.platformPorts === 'object' &&
+    config.platformPorts !== null &&
+    Object.hasOwn(config.platformPorts, target)
+      ? config.platformPorts[target]
+      : undefined;
+  const platformPorts = describePlatformPorts(stanza);
+  errors.push(...credentialProblems(platformPorts, target));
   if (errors.length > 0) throw new Error(`invalid broker config:\n${errors.join('\n')}`);
   const plugins = orderPlugins(config.plugins);
   const registration = collectRegistrations(plugins);
+  if (registration.jobs.length > 0 && platformPorts === null) {
+    throw new Error(
+      `invalid broker config:\njobs: registered but platformPorts.${target} is not configured`,
+    );
+  }
   const sources = await collectMigrations(plugins, defaultResolvePackageDir(cwd));
 
   const outDir = path.resolve(cwd, options.outDir ?? path.join('.pb', target));
@@ -113,15 +131,23 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const manifestJson = path.join(generated, 'manifest.json');
   await writeFile(
     manifestTs,
-    renderBuildManifest(configPath, target === 'node' ? sources : undefined),
+    renderBuildManifest(
+      configPath,
+      target === 'node' ? sources : undefined,
+      process.platform,
+      platformPorts,
+    ),
   );
   await writeFile(
     manifestJson,
     `${JSON.stringify(
-      renderManifestJson(plugins, versions, target, {
-        migrations: toManifestMigrations(sources),
-        registration,
-      }),
+      {
+        ...renderManifestJson(plugins, versions, target, {
+          migrations: toManifestMigrations(sources),
+          registration,
+        }),
+        platformPorts,
+      },
       null,
       2,
     )}\n`,
@@ -155,7 +181,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   );
 
   const runtime = target === 'cloudflare' ? 'runtime-cloudflare' : 'runtime-node';
-  const entry = createRequire(import.meta.url).resolve(`@package-broker/${runtime}/entry`);
+  const entry =
+    options.runtimeEntry ??
+    createRequire(import.meta.url).resolve(`@package-broker/${runtime}/entry`);
   const bundle = path.join(outDir, target === 'cloudflare' ? 'worker.js' : 'server.js');
   const result = await esbuild({
     entryPoints: [entry],

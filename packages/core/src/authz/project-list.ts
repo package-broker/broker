@@ -22,6 +22,24 @@ export interface ProjectListSource {
   ): Promise<readonly ProjectListEntry[]>;
 }
 
+export interface ReadableProjectPage {
+  readonly afterId?: string;
+  readonly limit: number;
+  readonly status: ProjectStatus;
+}
+
+/**
+ * Returns, in id order and at most `limit` rows, only projects of `status` after `afterId` on which
+ * the actor holds `project:read` through its organization or project grants. One read per page.
+ */
+export interface ReadableProjectSource {
+  listReadableProjects(
+    ctx: OrgContext,
+    actor: Pick<ActorContext, 'userId'>,
+    page: ReadableProjectPage,
+  ): Promise<readonly ProjectListEntry[]>;
+}
+
 /**
  * Project-scoped grants only; the lister unions them with the `project:` subset of the actor's
  * organization permissions, as the access engine does. An id missing from the map has no grant.
@@ -46,7 +64,12 @@ export interface ProjectListPage {
 }
 
 export type ProjectListError =
-  'forbidden' | 'invalid_limit' | 'invalid_cursor' | 'invalid_status' | 'scan_incomplete';
+  | 'forbidden'
+  | 'invalid_limit'
+  | 'invalid_cursor'
+  | 'invalid_status'
+  | 'scan_incomplete'
+  | 'source_invalid';
 
 export type ProjectListResult =
   | { readonly ok: true; readonly value: ProjectListPage }
@@ -62,7 +85,14 @@ export interface ProjectLister {
 
 export interface ProjectListerDeps {
   readonly source: ProjectListSource;
-  readonly access: ProjectReadAccess;
+  /**
+   * Required when `readable` is absent and ignored when it is wired. Without `readable`, a caller
+   * lacking organization `project:read` gets at most ten source reads per page and may see
+   * `scan_incomplete`.
+   */
+  readonly access?: ProjectReadAccess;
+  /** Lists project-grant readable projects for a caller lacking organization `project:read`. */
+  readonly readable?: ReadableProjectSource;
 }
 
 function fail(error: ProjectListError): ProjectListResult {
@@ -70,14 +100,17 @@ function fail(error: ProjectListError): ProjectListResult {
 }
 
 export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
-  const { source, access } = deps as Partial<ProjectListerDeps>;
+  const { source, access, readable } = deps as Partial<ProjectListerDeps>;
   if (
     source === undefined ||
     typeof source.list !== 'function' ||
-    access === undefined ||
-    typeof access.permissionsFor !== 'function'
+    (readable !== undefined
+      ? typeof readable.listReadableProjects !== 'function'
+      : access === undefined || typeof access.permissionsFor !== 'function')
   ) {
-    throw new TypeError('project lister requires a source and a read-access port');
+    throw new TypeError(
+      'project lister requires a source and a readable source or read-access port',
+    );
   }
 
   return {
@@ -101,12 +134,31 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       const orgPermissions =
         actor.permissions instanceof Set ? actor.permissions : new Set<string>();
       const inheritsAll = orgPermissions.has('project:read');
+
+      if (!inheritsAll && readable !== undefined) {
+        const rows = await readable.listReadableProjects(
+          ctx,
+          { userId },
+          { ...(afterId === undefined ? {} : { afterId }), limit, status },
+        );
+        const items: ProjectListEntry[] = [];
+        let previous = afterId;
+        for (const row of rows.slice(0, limit)) {
+          if (row.status !== status || (previous !== undefined && row.id <= previous)) continue;
+          items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
+          previous = row.id;
+        }
+        if (rows.length < limit) return { ok: true, value: { items, nextAfterId: null } };
+        const last = items[items.length - 1];
+        if (last === undefined) return fail('source_invalid');
+        return { ok: true, value: { items, nextAfterId: last.id } };
+      }
+
       const batch = inheritsAll ? limit : PROJECT_LIST_MAX_LIMIT;
 
       const items: ProjectListEntry[] = [];
       let cursor = afterId;
       let exhausted = false;
-      let lastRowId: string | undefined;
       for (
         let reads = 0;
         items.length < limit && !exhausted && reads < MAX_SOURCE_READS;
@@ -120,7 +172,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         const granted =
           inheritsAll || rows.length === 0
             ? null
-            : await access.permissionsFor(
+            : await (access as ProjectReadAccess).permissionsFor(
                 ctx,
                 userId,
                 rows.map((row) => row.id),
@@ -132,8 +184,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
           items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
         }
         exhausted = rows.length < batch;
-        lastRowId = rows[rows.length - 1]?.id;
-        cursor = lastRowId;
+        cursor = rows[rows.length - 1]?.id;
       }
 
       const lastItem = items[items.length - 1];
@@ -142,7 +193,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
           ? { ok: true, value: { items, nextAfterId: null } }
           : fail('scan_incomplete');
       }
-      const drained = exhausted && lastItem.id === lastRowId;
+      const drained = exhausted && items.length < limit;
       return { ok: true, value: { items, nextAfterId: drained ? null : lastItem.id } };
     },
   };

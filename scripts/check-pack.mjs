@@ -16,7 +16,13 @@ const UNRESOLVED_RANGE = /^(?:workspace|catalog|link|file):/;
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const REQUIRED_FILES = {
-  'db-sqlite': ['migrations/0001_init.sql', 'migrations/0002_local_login.sql'],
+  'db-sqlite': [
+    'migrations/0001_init.sql',
+    'migrations/0002_local_login.sql',
+    'migrations/0003_access_model.sql',
+    'migrations/0004_cache_epoch.sql',
+    'migrations/0005_admin_permission_topup.sql',
+  ],
 };
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };
 

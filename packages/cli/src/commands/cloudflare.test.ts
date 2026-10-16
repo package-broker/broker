@@ -92,19 +92,19 @@ async function realInit(): Promise<string> {
   return readFile(new URL('../../../db-sqlite/migrations/0001_init.sql', import.meta.url), 'utf8');
 }
 
-async function epochSql(): Promise<string> {
-  return readFile(
-    new URL('../../../db-sqlite/migrations/0004_cache_epoch.sql', import.meta.url),
-    'utf8',
-  );
+const LATER = ['0003_access_model', '0004_cache_epoch', '0005_admin_permission_topup'] as const;
+
+async function laterSql(name: string): Promise<string> {
+  return readFile(new URL(`../../../db-sqlite/migrations/${name}.sql`, import.meta.url), 'utf8');
 }
 
 async function writeBuiltInit(root: string, sql: string): Promise<void> {
-  const epoch = await epochSql();
   await mkdir(join(root, 'generated'), { recursive: true });
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
-  await writeFile(join(root, 'migrations', 'core', '0004_cache_epoch.sql'), epoch);
+  for (const name of LATER) {
+    await writeFile(join(root, 'migrations', 'core', `${name}.sql`), await laterSql(name));
+  }
   await writeFile(
     join(root, 'generated', 'manifest.json'),
     JSON.stringify({
@@ -116,12 +116,14 @@ async function writeBuiltInit(root: string, sql: string): Promise<void> {
           checksum: await sha256Hex(sql),
           phase: 'expand',
         },
-        {
-          id: 'core:0004_cache_epoch',
-          name: '0004_cache_epoch.sql',
-          checksum: await sha256Hex(epoch),
-          phase: 'expand',
-        },
+        ...(await Promise.all(
+          LATER.map(async (name) => ({
+            id: `core:${name}`,
+            name: `${name}.sql`,
+            checksum: await sha256Hex(await laterSql(name)),
+            phase: 'expand',
+          })),
+        )),
       ],
     }),
   );
@@ -161,7 +163,12 @@ it('1. applies core:0001_init once and skips it on the second run', async () => 
     expect(await migrate(harness.fetch)).toBe(0);
     expect(console.log).toHaveBeenLastCalledWith(
       JSON.stringify({
-        applied: ['core:0001_init', 'core:0004_cache_epoch'],
+        applied: [
+          'core:0001_init',
+          'core:0003_access_model',
+          'core:0004_cache_epoch',
+          'core:0005_admin_permission_topup',
+        ],
         skipped: [],
         unknown: [],
         pending: [],
@@ -171,7 +178,12 @@ it('1. applies core:0001_init once and skips it on the second run', async () => 
     expect(console.log).toHaveBeenLastCalledWith(
       JSON.stringify({
         applied: [],
-        skipped: ['core:0001_init', 'core:0004_cache_epoch'],
+        skipped: [
+          'core:0001_init',
+          'core:0003_access_model',
+          'core:0004_cache_epoch',
+          'core:0005_admin_permission_topup',
+        ],
         unknown: [],
         pending: [],
       }),
@@ -284,7 +296,12 @@ it('7. dry run sends one SELECT and reports the migration as pending', async () 
         applied: [],
         skipped: [],
         unknown: [],
-        pending: ['core:0001_init', 'core:0004_cache_epoch'],
+        pending: [
+          'core:0001_init',
+          'core:0003_access_model',
+          'core:0004_cache_epoch',
+          'core:0005_admin_permission_topup',
+        ],
       }),
     );
   } finally {

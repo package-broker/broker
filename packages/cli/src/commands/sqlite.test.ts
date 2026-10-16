@@ -21,11 +21,15 @@ async function writeBuiltOutput(root: string): Promise<void> {
   await mkdir(join(root, 'generated'), { recursive: true });
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
-  const epoch = await readFile(
-    new URL('../../../db-sqlite/migrations/0004_cache_epoch.sql', import.meta.url),
-    'utf8',
-  );
-  await writeFile(join(root, 'migrations', 'core', '0004_cache_epoch.sql'), epoch);
+  const later: { name: string; sql: string }[] = [];
+  for (const name of ['0003_access_model', '0004_cache_epoch', '0005_admin_permission_topup']) {
+    const text = await readFile(
+      new URL(`../../../db-sqlite/migrations/${name}.sql`, import.meta.url),
+      'utf8',
+    );
+    await writeFile(join(root, 'migrations', 'core', `${name}.sql`), text);
+    later.push({ name, sql: text });
+  }
   await writeFile(
     join(root, 'generated', 'manifest.json'),
     JSON.stringify({
@@ -37,12 +41,14 @@ async function writeBuiltOutput(root: string): Promise<void> {
           checksum: await sha256Hex(sql),
           phase: 'expand',
         },
-        {
-          id: 'core:0004_cache_epoch',
-          name: '0004_cache_epoch.sql',
-          checksum: await sha256Hex(epoch),
-          phase: 'expand',
-        },
+        ...(await Promise.all(
+          later.map(async ({ name, sql: text }) => ({
+            id: `core:${name}`,
+            name: `${name}.sql`,
+            checksum: await sha256Hex(text),
+            phase: 'expand',
+          })),
+        )),
       ],
     }),
   );
@@ -67,7 +73,12 @@ it('applies a migration once and skips it on the second run', async () => {
   expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(0);
   expect(console.log).toHaveBeenLastCalledWith(
     JSON.stringify({
-      applied: ['core:0001_init', 'core:0004_cache_epoch'],
+      applied: [
+        'core:0001_init',
+        'core:0003_access_model',
+        'core:0004_cache_epoch',
+        'core:0005_admin_permission_topup',
+      ],
       skipped: [],
       unknown: [],
       pending: [],
@@ -77,7 +88,12 @@ it('applies a migration once and skips it on the second run', async () => {
   expect(console.log).toHaveBeenLastCalledWith(
     JSON.stringify({
       applied: [],
-      skipped: ['core:0001_init', 'core:0004_cache_epoch'],
+      skipped: [
+        'core:0001_init',
+        'core:0003_access_model',
+        'core:0004_cache_epoch',
+        'core:0005_admin_permission_topup',
+      ],
       unknown: [],
       pending: [],
     }),
@@ -101,7 +117,12 @@ it('lists pending migrations without creating tables for a dry run', async () =>
       applied: [],
       skipped: [],
       unknown: [],
-      pending: ['core:0001_init', 'core:0004_cache_epoch'],
+      pending: [
+        'core:0001_init',
+        'core:0003_access_model',
+        'core:0004_cache_epoch',
+        'core:0005_admin_permission_topup',
+      ],
     }),
   );
   const opened = openBetterSqliteExecutor(file);
@@ -200,7 +221,12 @@ it('falls back to .pb/node when --out is empty', async () => {
       applied: [],
       skipped: [],
       unknown: [],
-      pending: ['core:0001_init', 'core:0004_cache_epoch'],
+      pending: [
+        'core:0001_init',
+        'core:0003_access_model',
+        'core:0004_cache_epoch',
+        'core:0005_admin_permission_topup',
+      ],
     }),
   );
 });

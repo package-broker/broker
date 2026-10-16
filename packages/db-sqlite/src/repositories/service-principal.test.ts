@@ -10,6 +10,7 @@ import {
   type SqlExecutor,
   type Statement,
 } from '@package-broker/core/db/port';
+import type { ServicePrincipalStore } from '@package-broker/core/authz/service-principal-service';
 import { assertGuard, existsGuard } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
@@ -292,6 +293,11 @@ describe('creator independence', () => {
   });
 });
 
+it('is assignable to the service port', () => {
+  const port: ServicePrincipalStore = createServicePrincipalRepository(executor);
+  expect(port).toBeDefined();
+});
+
 describe('suspend and restore', () => {
   const stop = (ctx: OrgContext = a, guard: FenceGuard = actorGuard(), now = LATER) =>
     principals.suspend(ctx, NO_REVISION(), guard, SP1, now, 'op-stop');
@@ -317,7 +323,7 @@ describe('suspend and restore', () => {
     expect(await resume()).toBe('not_suspended');
     await stop();
     const before = await snapshot();
-    expect(await stop(a, actorGuard(), '2026-10-15T14:00:00.000Z')).toBe('suspended');
+    expect(await stop(a, actorGuard(), '2026-10-15T14:00:00.000Z')).toBe('unchanged');
     expect(await snapshot()).toBe(before);
   });
 

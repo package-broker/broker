@@ -1,0 +1,335 @@
+import { catalogueTokenEligible } from './catalogue.js';
+import { assertCsrfToken, assertSameOrigin, UNSAFE_METHODS } from '../auth/csrf.js';
+import { SESSION_COOKIE, readCookie } from '../auth/cookies.js';
+import { parseAuthorization } from '../auth/credential-parser.js';
+import { sha256Hex } from '../auth/primitives.js';
+import type { OrgContext } from '../db/port.js';
+import type {
+  AuthorizationDecision,
+  AuthorizationEngine,
+  AuthorizationRequest,
+} from '../kernel/authorize.js';
+import type { Principal } from '../plugin.js';
+import { decidePatValidation } from './pat-validation.js';
+import type { PatValidationDecision, PatValidationView } from './pat-validation.js';
+import { isValidProjectSlug } from './project-path.js';
+import { authenticateToken } from './token-use.js';
+import type { TokenAccessView, TokenUseDeps } from './token-use.js';
+
+export interface EngineProviderAnchor {
+  readonly provider: string;
+  readonly anchor: string;
+  readonly emailAuthoritative: boolean;
+}
+
+interface EngineAccessCommon {
+  readonly project: { readonly id: string } | null;
+  readonly organizationPermissions: readonly string[];
+  readonly projectPermissions: readonly string[];
+}
+
+export interface EngineSessionAccess extends EngineAccessCommon {
+  readonly session: { readonly id: string; readonly csrfHash: string };
+  readonly user: { readonly id: string };
+}
+
+export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, PatValidationView {
+  readonly token: TokenAccessView['token'] & {
+    readonly userId: string | null;
+    readonly servicePrincipalId: string | null;
+  };
+}
+
+export type EngineBoundary = 'organization' | 'project';
+
+export interface EngineLookupInput {
+  readonly boundary: EngineBoundary;
+  readonly projectSlug: string | null;
+  readonly providerAnchors: readonly EngineProviderAnchor[];
+}
+
+/** Every method is one primary-consistent read; nothing here may be served from a replica or a cache. */
+export interface EngineAccessPort {
+  lookupSession(
+    ctx: OrgContext,
+    input: EngineLookupInput & { readonly secretHash: string },
+  ): Promise<EngineSessionAccess | null>;
+  touchSession(ctx: OrgContext, sessionId: string): Promise<boolean>;
+  touchToken(ctx: OrgContext, tokenId: string, kind: 'pat' | 'svc'): Promise<boolean>;
+  lookupToken(
+    ctx: OrgContext,
+    input: EngineLookupInput & { readonly selector: string },
+  ): Promise<EngineTokenAccess | null>;
+}
+
+export interface PatValidationGate {
+  readonly decide: (access: PatValidationView) => PatValidationDecision;
+}
+
+export const patValidationGate: PatValidationGate = Object.freeze({ decide: decidePatValidation });
+
+export interface AuthorizationEngineDeps {
+  readonly access: EngineAccessPort;
+  readonly tokenUse: Omit<TokenUseDeps, 'touch'>;
+  readonly patValidation: PatValidationGate;
+  readonly publicOrigin: string;
+  /** Read on every request so a provider rebind takes effect on the next lookup. */
+  readonly providerAnchors: (ctx: OrgContext) => Promise<readonly EngineProviderAnchor[]>;
+}
+
+const FORBIDDEN: AuthorizationDecision = Object.freeze({ allow: false, status: 403 });
+const NOT_FOUND: AuthorizationDecision = Object.freeze({ allow: false, status: 404 });
+const UNAUTHORIZED: AuthorizationDecision = Object.freeze({ allow: false, status: 401 });
+const SESSION_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+function isFunction(value: unknown): boolean {
+  return typeof value === 'function';
+}
+
+function requireWired(deps: AuthorizationEngineDeps): void {
+  const { access, tokenUse, patValidation } = deps as Partial<AuthorizationEngineDeps>;
+  if (
+    access === undefined ||
+    !isFunction(access.lookupSession) ||
+    !isFunction(access.lookupToken) ||
+    !isFunction(access.touchSession) ||
+    !isFunction(access.touchToken)
+  ) {
+    throw new TypeError('authorization engine requires an access port');
+  }
+  if (
+    tokenUse === undefined ||
+    tokenUse.keyring === undefined ||
+    !isFunction(tokenUse.nowMs) ||
+    !isFunction(tokenUse.dispatch) ||
+    !isFunction(tokenUse.log)
+  ) {
+    throw new TypeError('authorization engine requires the token-use gate');
+  }
+  if (patValidation === undefined || !isFunction(patValidation.decide)) {
+    throw new TypeError('authorization engine requires the PAT validation gate');
+  }
+  if (!isFunction(deps.providerAnchors)) {
+    throw new TypeError('authorization engine requires provider anchors');
+  }
+  if (deps.publicOrigin === 'null' || new URL(deps.publicOrigin).origin !== deps.publicOrigin) {
+    throw new TypeError('publicOrigin must be a canonical origin');
+  }
+  probePatGate(patValidation);
+}
+
+function probePatGate(gate: PatValidationGate): void {
+  const stale: PatValidationView = {
+    token: { kind: 'pat' },
+    validation: { kind: 'local', identityId: null, fresh: false, evidenceAt: null },
+  };
+  const fresh: PatValidationView = {
+    token: { kind: 'pat' },
+    validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
+  };
+  const none: PatValidationView = { token: { kind: 'pat' }, validation: null };
+  if (
+    gate.decide(stale).allowed !== false ||
+    gate.decide(none).allowed !== false ||
+    gate.decide(fresh).allowed !== true
+  ) {
+    throw new TypeError('authorization engine PAT validation gate fails to refuse stale tokens');
+  }
+}
+
+function principalOf(access: EngineTokenAccess): Principal | undefined {
+  const { token } = access;
+  if (token.kind === 'svc') {
+    return token.servicePrincipalId === null
+      ? undefined
+      : { kind: 'service', id: token.servicePrincipalId };
+  }
+  return token.userId === null ? undefined : { kind: 'user', id: token.userId };
+}
+
+interface Authenticated {
+  readonly principal: Principal;
+  readonly project: { readonly id: string } | null;
+  readonly effective: ReadonlySet<string>;
+}
+
+function projectOnly(names: readonly string[]): string[] {
+  return names.filter((name) => name.startsWith('project:'));
+}
+
+function sessionEffective(found: EngineSessionAccess, boundary: EngineBoundary): Set<string> {
+  return boundary === 'organization'
+    ? new Set(found.organizationPermissions)
+    : new Set([...found.projectPermissions, ...projectOnly(found.organizationPermissions)]);
+}
+
+function tokenEffective(found: EngineTokenAccess, boundary: EngineBoundary): Set<string> {
+  return new Set(
+    boundary === 'organization' ? found.organizationPermissions : found.projectPermissions,
+  );
+}
+
+function decideFrom(
+  found: Authenticated,
+  permission: string,
+  boundary: EngineBoundary,
+  slugValid: boolean,
+): AuthorizationDecision {
+  if (boundary === 'organization') {
+    return found.effective.has(permission)
+      ? { allow: true, principal: found.principal, projectId: null }
+      : FORBIDDEN;
+  }
+  if (!slugValid || found.project === null || found.effective.size === 0) return NOT_FOUND;
+  return found.effective.has(permission)
+    ? { allow: true, principal: found.principal, projectId: found.project.id }
+    : FORBIDDEN;
+}
+
+export function createAuthorizationEngine(deps: AuthorizationEngineDeps): AuthorizationEngine {
+  requireWired(deps);
+  const { access, tokenUse, patValidation, publicOrigin } = deps;
+
+  function logTouchFailure(): void {
+    try {
+      tokenUse.log('token_touch_failed');
+    } catch {
+      return;
+    }
+  }
+
+  function dispatchSafely(run: () => Promise<void>): void {
+    try {
+      tokenUse.dispatch(run);
+    } catch {
+      logTouchFailure();
+    }
+  }
+
+  async function sessionDecision(
+    request: AuthorizationRequest,
+    secret: string,
+    input: EngineLookupInput,
+    permission: string,
+    slugValid: boolean,
+  ): Promise<AuthorizationDecision> {
+    const found = await access.lookupSession(request.org, {
+      ...input,
+      secretHash: await sha256Hex(secret),
+    });
+    if (found === null) return UNAUTHORIZED;
+    if (UNSAFE_METHODS.has(request.request.method.toUpperCase())) {
+      try {
+        assertSameOrigin(request.request, publicOrigin);
+        await assertCsrfToken(request.request, found.session.csrfHash);
+      } catch {
+        return FORBIDDEN;
+      }
+    }
+    const decision = decideFrom(
+      {
+        principal: { kind: 'user', id: found.user.id },
+        project: found.project,
+        effective: sessionEffective(found, input.boundary),
+      },
+      permission,
+      input.boundary,
+      slugValid,
+    );
+    if (decision.allow) {
+      dispatchSafely(async () => {
+        try {
+          await access.touchSession(request.org, found.session.id);
+        } catch {
+          logTouchFailure();
+        }
+      });
+    }
+    return decision;
+  }
+
+  async function tokenDecision(
+    request: AuthorizationRequest,
+    token: { readonly canonical: string; readonly selector: string },
+    scheme: 'bearer' | 'basic',
+    input: EngineLookupInput,
+    permission: string,
+    slugValid: boolean,
+  ): Promise<AuthorizationDecision> {
+    if (scheme === 'basic' && UNSAFE_METHODS.has(request.request.method.toUpperCase())) {
+      try {
+        assertSameOrigin(request.request, publicOrigin);
+      } catch {
+        return UNAUTHORIZED;
+      }
+    }
+    const deferred: (() => Promise<void>)[] = [];
+    const gate: TokenUseDeps = {
+      ...tokenUse,
+      touch: (tokenId, kind) => access.touchToken(request.org, tokenId, kind),
+      log: logTouchFailure,
+      dispatch: (run) => {
+        deferred.push(run);
+      },
+    };
+    const result = await authenticateToken(
+      gate,
+      token.canonical,
+      (selector) => access.lookupToken(request.org, { ...input, selector }),
+      (found) => patValidation.decide(found).allowed,
+    );
+    if (!result.ok) return UNAUTHORIZED;
+    const found = result.access;
+    const principal = principalOf(found);
+    if (principal === undefined) return UNAUTHORIZED;
+    const decision = decideFrom(
+      {
+        principal,
+        project: found.project,
+        effective: tokenEffective(found, input.boundary),
+      },
+      permission,
+      input.boundary,
+      slugValid,
+    );
+    if (!decision.allow) return decision;
+    if (!catalogueTokenEligible(permission)) return FORBIDDEN;
+    for (const run of deferred) dispatchSafely(run);
+    return decision;
+  }
+
+  return Object.freeze({
+    async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
+      const { permission, boundary } = request.route;
+      if (boundary !== 'organization' && boundary !== 'project') return FORBIDDEN;
+      const slug = boundary === 'project' ? request.params['project'] : undefined;
+      const slugValid = boundary === 'organization' || isValidProjectSlug(slug);
+      const credential = parseAuthorization(request.request.headers.get('authorization'));
+      if (credential.outcome === 'invalid') return UNAUTHORIZED;
+      const secret =
+        credential.outcome === 'none' ? readCookie(request.request, SESSION_COOKIE) : null;
+      if (
+        credential.outcome === 'none' &&
+        (secret === null || !SESSION_SECRET_PATTERN.test(secret))
+      ) {
+        return UNAUTHORIZED;
+      }
+      const input: EngineLookupInput = {
+        boundary,
+        projectSlug: boundary === 'project' && isValidProjectSlug(slug) ? slug : null,
+        providerAnchors: await deps.providerAnchors(request.org),
+      };
+      if (credential.outcome === 'token') {
+        return tokenDecision(
+          request,
+          credential.token,
+          credential.scheme,
+          input,
+          permission,
+          slugValid,
+        );
+      }
+      return sessionDecision(request, secret ?? '', input, permission, slugValid);
+    },
+  });
+}

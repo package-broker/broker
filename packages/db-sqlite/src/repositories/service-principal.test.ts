@@ -4,7 +4,12 @@ import {
   type AuthenticatedActor,
   type FenceGuard,
 } from '@package-broker/core/authz/fence';
-import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import {
+  orgContext,
+  type OrgContext,
+  type SqlExecutor,
+  type Statement,
+} from '@package-broker/core/db/port';
 import { assertGuard, existsGuard } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
@@ -64,6 +69,7 @@ function setGuard(principalId: string, expectedRevision: number, userId = U1): F
         .where('sp.revision', '=', expectedRevision)
         .where('actor.status', '=', 'active'),
     ),
+    a,
   );
 }
 
@@ -77,6 +83,7 @@ function actorGuard(userId = U1, orgId = a.orgId): FenceGuard {
         .where('id', '=', userId)
         .where('status', '=', 'active'),
     ),
+    orgContext(orgId),
   );
 }
 
@@ -619,5 +626,100 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     await principals.setPermissions(a, fence, setGuard(SP1, 1), SP1, [], LATER, 'op-1');
     expect((await principals.get(a, SP1))?.projectId).toBe(PROJECT);
+  });
+});
+
+describe('cache_epoch', () => {
+  const epoch = async (ctx: OrgContext): Promise<string | undefined> =>
+    (
+      (await rows('SELECT version FROM cache_epoch WHERE org_id = ?', ctx.orgId)) as {
+        version: string;
+      }[]
+    )[0]?.version;
+
+  async function versions(): Promise<[string | undefined, string | undefined]> {
+    return [await epoch(a), await epoch(b)];
+  }
+
+  it('changes only the ctx organization epoch after a committed create', async () => {
+    const [beforeA, beforeB] = await versions();
+    expect(await create()).toBe('created');
+    const [afterA, afterB] = await versions();
+    expect(afterA).not.toBe(beforeA);
+    expect(afterB).toBe(beforeB);
+  });
+
+  it('changes the epoch after committed setPermissions and suspend', async () => {
+    await create();
+    const created = await epoch(a);
+    const fence = mutationFence(actor(), { service_principal: 1 });
+    await principals.setPermissions(a, fence, setGuard(SP1, 1), SP1, [], LATER, 'op-1');
+    const updated = await epoch(a);
+    expect(updated).not.toBe(created);
+    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    expect(await epoch(a)).not.toBe(updated);
+  });
+
+  it('leaves the epoch unchanged on authority and conflict refusals', async () => {
+    await create();
+    const before = await versions();
+    const outsider = actorGuard('01J0USER0000000000000000ZZ');
+    expect(await principals.suspend(a, NO_REVISION(), outsider, SP1, LATER, 'op-x')).toBe(
+      'authority',
+    );
+    const stale = mutationFence(actor(), { service_principal: 9 });
+    expect(await principals.setPermissions(a, stale, actorGuard(), SP1, [], LATER, 'op-y')).toBe(
+      'conflict',
+    );
+    expect(await versions()).toEqual(before);
+  });
+
+  it('bumps exactly once in a setPermissions batch', async () => {
+    await create();
+    const batches: (readonly Statement[])[] = [];
+    const spy = new Proxy(executor, {
+      get(target, property, receiver) {
+        if (property === 'batch') {
+          return (statements: readonly Statement[]) => {
+            batches.push(statements);
+            return target.batch(statements);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const repository = createServicePrincipalRepository(spy);
+    const fence = mutationFence(actor(), { service_principal: 1 });
+    expect(
+      await repository.setPermissions(a, fence, setGuard(SP1, 1), SP1, [], LATER, 'op-1'),
+    ).toBe('updated');
+    const bumps = (batches[0] ?? []).filter((s) => s.sql.startsWith('update "cache_epoch"'));
+    expect(bumps).toHaveLength(1);
+  });
+
+  it('refuses a guard built for another organization and stores nothing', async () => {
+    const before = await snapshot();
+    const epochs = await versions();
+    const foreign = actorGuard(UB, b.orgId);
+    await expect(
+      principals.create(a, NO_REVISION(), foreign, {
+        opId: 'op-create',
+        id: SP1,
+        name: 'ci',
+        projectId: PROJECT,
+        createdByUserId: U1,
+        permissions: ['project:packages:read'],
+        now: NOW,
+      }),
+    ).rejects.toThrow(TypeError);
+    expect(await snapshot()).toBe(before);
+    expect(await versions()).toEqual(epochs);
+  });
+
+  it('throws a deployment fault, not authority, when the epoch row is missing', async () => {
+    await executor.batch([stmt('DELETE FROM cache_epoch WHERE org_id = ?', a.orgId)]);
+    await expect(create()).rejects.toThrow(/cache_epoch/);
+    expect(await rows('SELECT id FROM service_principal')).toEqual([]);
   });
 });

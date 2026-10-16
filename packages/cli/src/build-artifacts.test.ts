@@ -284,8 +284,7 @@ describe('build with platformPorts', () => {
     const file = path.join(project, 'broker.config.ts');
     await writeFile(
       file,
-      `import { defineConfig } from '@package-broker/core/config';
-export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${plugins}, platformPorts: ${JSON.stringify(ports)} } as never);
+      `export default { platform: ${JSON.stringify(platform)}, plugins: ${plugins}, platformPorts: ${JSON.stringify(ports)} } as never;
 `,
     );
     return file;
@@ -339,10 +338,7 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
 
   it('builds without a stanza and records no description', async () => {
     const file = path.join(project, 'broker.config.ts');
-    await writeFile(
-      file,
-      "import { defineConfig } from '@package-broker/core/config';\nexport default defineConfig({ platform: 'node', plugins: [] });\n",
-    );
+    await writeFile(file, "export default { platform: 'node', plugins: [] };\n");
     const result = await build({ configPath: file, target: 'node', cwd: project, runtimeEntry });
     expect((await readManifest(result.outDir)).platformPorts).toBeNull();
   }, 60_000);
@@ -448,9 +444,8 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
     const config = path.join(project, 'broker.config.ts');
     await writeFile(
       config,
-      `import { defineConfig } from '@package-broker/core/config';
-const plugin = { id: 'jobby', package: '@test/jobby', apiVersion: 3, platforms: ['node'], register: (r) => r.job({ name: 'tick', version: 1, validate: (x) => x, handler: async () => {} }) };
-export default defineConfig({ platform: 'node', plugins: [plugin] } as never);
+      `const plugin = { id: 'jobby', package: '@test/jobby', apiVersion: 3, platforms: ['node'], register: (r) => r.job({ name: 'tick', version: 1, validate: (x) => x, handler: async () => {} }) };
+export default { platform: 'node', plugins: [plugin] };
 `,
     );
     await expect(
@@ -462,9 +457,8 @@ export default defineConfig({ platform: 'node', plugins: [plugin] } as never);
     const config = path.join(project, 'broker.config.ts');
     await writeFile(
       config,
-      `import { defineConfig } from '@package-broker/core/config';
-const plugin = { id: 'bad', package: '@test/bad', apiVersion: 3, platforms: ['node'], binds: ['blob'] };
-export default defineConfig({ platform: 'node', plugins: [plugin] } as never);
+      `const plugin = { id: 'bad', package: '@test/bad', apiVersion: 3, platforms: ['node'], binds: ['blob'] };
+export default { platform: 'node', plugins: [plugin] };
 `,
     );
     await expect(

@@ -17,7 +17,7 @@
     "!dist/**/*.test.*"
   ],
   "peerDependencies": {
-    "@package-broker/core": "^0.0.0"
+    "@package-broker/core": "workspace:^"
   },
   "devDependencies": {
     "@package-broker/core": "workspace:^"

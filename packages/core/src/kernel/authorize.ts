@@ -18,7 +18,13 @@ export interface AuthorizationRequest {
 }
 
 export type AuthorizationDecision =
-  | { readonly allow: true; readonly principal: Principal; readonly projectId: string | null }
+  | {
+      readonly allow: true;
+      readonly principal: Principal;
+      readonly projectId: string | null;
+      /** Verified token row id when the engine authenticated a token; absent or null otherwise. */
+      readonly tokenId?: string | null;
+    }
   | { readonly allow: false; readonly status: 401 | 403 | 404 };
 
 export interface AuthorizationEngine {
@@ -39,7 +45,7 @@ type AccessCheckHooks = ReadonlyArray<{
   readonly handler: HookMap['access.check'];
 }>;
 
-const ENGINE_PLUGIN = 'core:authorization';
+export const ENGINE_PLUGIN = 'core:authorization';
 /** Label for failures raised before the engine decision is used, such as input validation. */
 export const INPUT_PLUGIN = 'core:authorize-input';
 const DEFAULT_ENGINE_TIMEOUT_MS = 2000;
@@ -49,6 +55,7 @@ const PRINCIPAL_KINDS = {
   service: true,
   customer: true,
 } as const satisfies Record<Principal['kind'], true>;
+const TOKEN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const CONTROL_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 const FORBIDDEN: AuthorizationDecision = Object.freeze({ allow: false, status: 403 });
@@ -123,14 +130,20 @@ function validDecision(value: unknown): AuthorizationDecision | undefined {
       return undefined;
     }
 
-    if (allow !== true || !hasExactKeys(value, ['allow', 'principal', 'projectId']))
-      return undefined;
+    if (allow !== true) return undefined;
+    const withToken = hasExactKeys(value, ['allow', 'principal', 'projectId', 'tokenId']);
+    if (!withToken && !hasExactKeys(value, ['allow', 'principal', 'projectId'])) return undefined;
     const principal = principalOf(dataValue(value, 'principal'));
     const projectId = dataValue(value, 'projectId');
     if (principal === undefined || (projectId !== null && !isIdentifier(projectId))) {
       return undefined;
     }
-    return Object.freeze({ allow: true, principal, projectId });
+    if (!withToken) return Object.freeze({ allow: true, principal, projectId });
+    const tokenId = dataValue(value, 'tokenId');
+    if (tokenId !== null && !(typeof tokenId === 'string' && TOKEN_ID.test(tokenId))) {
+      return undefined;
+    }
+    return Object.freeze({ allow: true, principal, projectId, tokenId });
   } catch {
     return undefined;
   }

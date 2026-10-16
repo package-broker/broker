@@ -245,8 +245,8 @@ describe('createKernel', () => {
     expect(h.logs).toHaveLength(1);
     expect(h.logs[0]).toMatchObject({
       level: 'error',
-      requestId: response.headers.get('x-request-id'),
-      error: 'ProbeFailedError',
+      request_id: response.headers.get('x-request-id'),
+      error_name: 'ProbeFailedError',
     });
   });
 

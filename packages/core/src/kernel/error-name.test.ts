@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DbError } from '../db/errors.js';
 import { KernelConfigError } from './registry.js';
+import { APPROVED_ERROR_NAMES } from '../platform/observability.js';
 import { reportableErrorName } from './error-name.js';
 
 describe('reportableErrorName', () => {
@@ -117,5 +118,21 @@ describe('reportableErrorName', () => {
     const cyclic: object = new Proxy({}, { getPrototypeOf: (): object => cyclic });
 
     expect(reportableErrorName(cyclic)).toBe('Error');
+  });
+});
+
+describe('reportableErrorName shares the platform list', () => {
+  it.each([...APPROVED_ERROR_NAMES])('returns the approved name %s', (name) => {
+    const error = new Error('x');
+    error.name = name;
+
+    expect(reportableErrorName(error)).toBe(name);
+  });
+
+  it('maps a name outside the platform list to Error', () => {
+    const error = new Error('x');
+    error.name = 'NotAKernelError';
+
+    expect(reportableErrorName(error)).toBe('Error');
   });
 });

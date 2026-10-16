@@ -32,6 +32,7 @@ function scope(extra: Partial<ObservabilityScope> = {}): ObservabilityScope {
 const REGISTRY: ObsRegistry = {
   events: new Set(['http.request', 'e', 'failed', 'startup']),
   reasonCodes: new Set(['denied', 'stale_fence']),
+  routeTemplates: new Set(['/p/{id}']),
 };
 
 function logs(records: readonly ObsRecord[]): Record<string, unknown>[] {
@@ -373,6 +374,19 @@ describe('createObservability', () => {
     expect(records.slice(1).every((r) => r.kind === 'counter' && r.name === 'pb.obs.dropped')).toBe(
       true,
     );
+  });
+
+  it('accepts a metric route label only when it is a declared route template', () => {
+    const { sink, records } = collector();
+    const obs = createObservability(sink, scope({ route: '/other' }), REGISTRY);
+    obs.counter('pb.ok', { route: '/other' });
+    obs.counter('pb.ok', { route: '/p/{id}' });
+    obs.counter('pb.ok', { outcome: '01arz3ndektsv4rrffq69g5fav' });
+    expect(records.map((r) => (r.kind === 'counter' ? r.name : r.kind))).toEqual([
+      'pb.obs.dropped',
+      'pb.ok',
+      'pb.obs.dropped',
+    ]);
   });
 
   it('uses a frozen snapshot of the scope', () => {

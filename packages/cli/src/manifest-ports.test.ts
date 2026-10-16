@@ -12,7 +12,7 @@ function plugin(id: string, overrides: Partial<PluginDefinition> = {}): PluginDe
   return {
     id,
     package: `@test/${id}`,
-    apiVersion: 2,
+    apiVersion: 3,
     platforms: ['node'],
     ...overrides,
   };
@@ -64,7 +64,14 @@ describe('renderManifestJson', () => {
     const plugins = [
       plugin('a', {
         binds: ['source'],
-        register: (r) => r.route({ method: 'GET', path: '/a', permission: 'a.read', handler }),
+        register: (r) =>
+          r.route({
+            method: 'GET',
+            path: '/a',
+            permission: 'org:read',
+            boundary: 'organization',
+            handler,
+          }),
       }),
     ];
     const registration = collectRegistrations(plugins);
@@ -85,7 +92,7 @@ describe('renderManifestJson', () => {
     expect(manifest.plugins[0]?.binds).toEqual(['source']);
     expect(manifest.bindings).toEqual([{ port: 'source', plugin: 'a' }]);
     expect(manifest.routes).toEqual([
-      { method: 'GET', path: '/a', plugin: 'a', permission: 'a.read' },
+      { method: 'GET', path: '/a', plugin: 'a', permission: 'org:read' },
     ]);
     expect(manifest.migrations).toEqual([
       { id: 'core/0001_init', name: '0001_init.sql', checksum: 'abc', phase: 'expand' },

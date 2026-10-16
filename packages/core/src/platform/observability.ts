@@ -107,10 +107,10 @@ const TRACE_ID = /^[0-9a-f]{32}$/;
 const SPAN_ID = /^[0-9a-f]{16}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ROUTE = /^\/[A-Za-z0-9_\-./:{}*]{0,199}$/;
-const LABEL_TOKEN = /^[a-z0-9_]{1,32}$/;
+const LABEL_TOKEN = /^[a-z0-9_]{1,24}$/;
 const LABEL_SLUG = /^[a-z0-9_-]{1,32}$/;
 const STATUS_CLASS = /^[1-5]xx$/;
-const MAX_LABELS = 8;
+export const MAX_METRIC_LABELS = 8;
 const LABEL_KEYS = new Set([
   'method',
   'route',
@@ -128,6 +128,7 @@ const MAX_PROTOTYPE_STEPS = 32;
 export interface ObsRegistry {
   readonly events: ReadonlySet<string>;
   readonly reasonCodes: ReadonlySet<string>;
+  readonly routeTemplates: ReadonlySet<string>;
 }
 
 const isString = (v: unknown): v is string => typeof v === 'string';
@@ -231,20 +232,20 @@ export function safeRecord(record: unknown): SafeLogRecord | null {
   }
 }
 
-function safeLabels(labels: unknown, scope: ObservabilityScope): MetricLabels | null {
+function safeLabels(labels: unknown, routeTemplates: ReadonlySet<string>): MetricLabels | null {
   if (labels === undefined) return {};
   if (typeof labels !== 'object' || labels === null || Array.isArray(labels)) return null;
   try {
     const descriptors = Object.getOwnPropertyDescriptors(labels);
     const keys = Reflect.ownKeys(descriptors);
-    if (keys.length > MAX_LABELS) return null;
+    if (keys.length > MAX_METRIC_LABELS) return null;
     const out: Record<string, string> = {};
     for (const key of keys) {
       if (!isString(key) || !LABEL_KEYS.has(key)) return null;
       const descriptor = descriptors[key];
       if (descriptor === undefined || !('value' in descriptor)) return null;
       const value: unknown = descriptor.value;
-      if (!isString(value) || !labelValueAllowed(key, value, scope)) return null;
+      if (!isString(value) || !metricLabelValueAllowed(key, value, routeTemplates)) return null;
       out[key] = value;
     }
     return out;
@@ -253,12 +254,16 @@ function safeLabels(labels: unknown, scope: ObservabilityScope): MetricLabels | 
   }
 }
 
-function labelValueAllowed(key: string, value: string, scope: ObservabilityScope): boolean {
+export function metricLabelValueAllowed(
+  key: string,
+  value: string,
+  routeTemplates: ReadonlySet<string>,
+): boolean {
   switch (key) {
     case 'method':
       return METHODS.has(value);
     case 'route':
-      return scope.route !== undefined && value === scope.route;
+      return routeTemplates.has(value);
     case 'status_class':
       return STATUS_CLASS.test(value);
     case 'runtime':
@@ -320,6 +325,7 @@ export function createObservability(
   const frozen = scopeFields(snapshot);
   const events = new Set(registry.events);
   const reasonCodes = new Set(registry.reasonCodes);
+  const routeTemplates = new Set(registry.routeTemplates);
 
   const emit = (record: ObsRecord): void => {
     try {
@@ -350,7 +356,7 @@ export function createObservability(
       emit({ kind: 'log', record: Object.freeze(safe) });
     },
     counter(name: string, labels?: MetricLabels, value = 1): void {
-      const safe = safeLabels(labels, snapshot);
+      const safe = safeLabels(labels, routeTemplates);
       if (!validName(name) || typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
         return dropped('counter');
       }
@@ -358,7 +364,7 @@ export function createObservability(
       emit({ kind: 'counter', name, labels: safe, value });
     },
     histogram(name: string, value: number, labels?: MetricLabels): void {
-      const safe = safeLabels(labels, snapshot);
+      const safe = safeLabels(labels, routeTemplates);
       if (!validName(name) || typeof value !== 'number' || !Number.isFinite(value)) {
         return dropped('histogram');
       }

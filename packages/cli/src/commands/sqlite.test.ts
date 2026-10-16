@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sha256Hex } from '@package-broker/db-sqlite/migrations/source';
+import { loadMigrationSource, sha256Hex } from '@package-broker/db-sqlite/migrations/source';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { run } from '../cli.js';
@@ -22,7 +22,12 @@ async function writeBuiltOutput(root: string): Promise<void> {
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
   const later: { name: string; sql: string }[] = [];
-  for (const name of ['0003_access_model', '0004_cache_epoch', '0005_admin_permission_topup']) {
+  for (const name of [
+    '0003_access_model',
+    '0004_cache_epoch',
+    '0005_admin_permission_topup',
+    '0006_ports',
+  ]) {
     const text = await readFile(
       new URL(`../../../db-sqlite/migrations/${name}.sql`, import.meta.url),
       'utf8',
@@ -46,7 +51,7 @@ async function writeBuiltOutput(root: string): Promise<void> {
             id: `core:${name}`,
             name: `${name}.sql`,
             checksum: await sha256Hex(text),
-            phase: 'expand',
+            phase: (await loadMigrationSource('core', `${name}.sql`, text)).phase,
           })),
         )),
       ],
@@ -78,6 +83,7 @@ it('applies a migration once and skips it on the second run', async () => {
         'core:0003_access_model',
         'core:0004_cache_epoch',
         'core:0005_admin_permission_topup',
+        'core:0006_ports',
       ],
       skipped: [],
       unknown: [],
@@ -93,6 +99,7 @@ it('applies a migration once and skips it on the second run', async () => {
         'core:0003_access_model',
         'core:0004_cache_epoch',
         'core:0005_admin_permission_topup',
+        'core:0006_ports',
       ],
       unknown: [],
       pending: [],
@@ -122,6 +129,7 @@ it('lists pending migrations without creating tables for a dry run', async () =>
         'core:0003_access_model',
         'core:0004_cache_epoch',
         'core:0005_admin_permission_topup',
+        'core:0006_ports',
       ],
     }),
   );
@@ -226,6 +234,7 @@ it('falls back to .pb/node when --out is empty', async () => {
         'core:0003_access_model',
         'core:0004_cache_epoch',
         'core:0005_admin_permission_topup',
+        'core:0006_ports',
       ],
     }),
   );

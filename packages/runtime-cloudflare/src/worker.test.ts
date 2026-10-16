@@ -38,9 +38,13 @@ let init: MigrationSource | undefined;
 
 async function epochSources(): Promise<MigrationSource[]> {
   return Promise.all(
-    ['0003_access_model.sql', '0004_cache_epoch.sql', '0005_admin_permission_topup.sql'].map(
-      async (name) =>
-        loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
+    [
+      '0003_access_model.sql',
+      '0004_cache_epoch.sql',
+      '0005_admin_permission_topup.sql',
+      '0006_ports.sql',
+    ].map(async (name) =>
+      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),
   );
 }

@@ -169,12 +169,12 @@ async function migrateTo(upTo: string | null): Promise<void> {
 }
 
 describe.each([
-  ['a fresh database', async () => migrateTo(null)],
+  ['a fresh database', async () => migrateTo('0008_')],
   [
     'a database migrated to 0006',
     async () => {
       await migrateTo('0007_');
-      await migrateTo(null);
+      await migrateTo('0008_');
     },
   ],
 ])('migration 0007 on %s', (_label, prepare) => {

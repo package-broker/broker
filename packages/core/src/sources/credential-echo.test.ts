@@ -341,3 +341,68 @@ describe('stripCredentialEcho', () => {
     expect(stripCredentialEcho(text, probe).refused).toBe(true);
   });
 });
+
+describe('stripCredentialEcho with a secret at an offset inside a base64 blob', () => {
+  const LONG = 'Zk3pQ9vL2xT7mW4nB8cR5yH1dJ6sA0eG';
+  const refused = { refused: true, reason: 'credential_echo' };
+  const bearerProbe = (token: string) =>
+    credentialEchoProbe(parseCredentialMaterial('bearer', JSON.stringify({ token })));
+  const document = (offset: number, secret: string): string =>
+    `${'x'.repeat(offset)}${secret}${'y'.repeat(37)}`;
+
+  it.each(
+    [0, 1, 2, 3, 4, 5].flatMap(
+      (offset) =>
+        [
+          [offset, 'base64'],
+          [offset, 'base64url'],
+        ] as const,
+    ),
+  )('refuses a 32-byte secret at byte offset %i in a %s document', (offset, encoding) => {
+    const blob = Buffer.from(document(offset, LONG), 'utf8').toString(encoding);
+    expect(stripCredentialEcho({ description: blob }, bearerProbe(LONG))).toEqual(refused);
+  });
+
+  it('refuses a blob whose standard base64 core carries plus and slash characters', () => {
+    const secret = '~~~???>>>~~~???>>>~~~???>>>~~~???';
+    for (const offset of [0, 1, 2]) {
+      for (const encoding of ['base64', 'base64url'] as const) {
+        const blob = Buffer.from(document(offset, secret), 'utf8').toString(encoding);
+        expect(stripCredentialEcho({ description: blob }, bearerProbe(secret))).toEqual(refused);
+      }
+    }
+  });
+
+  it('does not refuse 1 MiB of unrelated base64 for 20 random secrets', () => {
+    const blob = Buffer.from(
+      Array.from({ length: 1 << 20 }, (_, i) => (i * 2654435761) % 251),
+    ).toString('base64');
+    for (let n = 0; n < 20; n += 1) {
+      const secret = Array.from({ length: 32 }, (_, i) =>
+        'abcdefghijklmnopqrstuvwxyz0123456789'.charAt(((n + 3) * 7919 * (i + 11)) % 36),
+      ).join('');
+      const result = stripCredentialEcho({ description: blob }, bearerProbe(secret));
+      expect(result.refused).toBe(false);
+    }
+  });
+
+  const wholeForms = (text: string): string[] => {
+    const padded = Buffer.from(text, 'utf8').toString('base64');
+    return [
+      text,
+      padded,
+      padded.replace(/=+$/, ''),
+      Buffer.from(text, 'utf8').toString('base64url'),
+    ];
+  };
+
+  it('emits no offset cores for a 10-byte secret', () => {
+    expect(new Set(bearerProbe('Zk3pQ9vL2x').secrets)).toEqual(new Set(wholeForms('Zk3pQ9vL2x')));
+  });
+
+  it('emits at most six strings beyond the whole-string forms for a 32-byte secret', () => {
+    const extra = bearerProbe(LONG).secrets.filter((value) => !wholeForms(LONG).includes(value));
+    expect(extra.length).toBeGreaterThan(0);
+    expect(extra.length).toBeLessThanOrEqual(6);
+  });
+});

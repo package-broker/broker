@@ -1,5 +1,10 @@
 import { sql, type Compilable } from 'kysely';
-import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import type {
+  OrgContext,
+  ScalarStatement,
+  SqlExecutor,
+  Statement,
+} from '@package-broker/core/db/port';
 import type {
   ActiveSession,
   NewSession,
@@ -149,26 +154,28 @@ export function revokePreviousStatement(
   previousSecretHash: string,
   newSessionId: string,
   now: string,
-): Statement {
+  guards: readonly Guard[] = [],
+): ScalarStatement {
   timestamp('now', now);
   secretHashOf(previousSecretHash);
-  return compile(
-    db
-      .updateTable('session')
-      .set({ revoked_at: now })
-      .where('org_id', '=', ctx.orgId)
-      .where('secret_hash', '=', previousSecretHash)
-      .where('revoked_at', 'is', null)
-      .where((eb) =>
-        eb.exists(
-          eb
-            .selectFrom('session as created')
-            .select('created.id')
-            .where('created.id', '=', newSessionId)
-            .where('created.org_id', '=', ctx.orgId),
-        ),
+  let update = db
+    .updateTable('session')
+    .set({ revoked_at: now })
+    .where('session.org_id', '=', ctx.orgId)
+    .where('session.secret_hash', '=', previousSecretHash)
+    .where('session.revoked_at', 'is', null)
+    .where('session.id', '<>', newSessionId)
+    .where((eb) =>
+      eb.exists(
+        eb
+          .selectFrom('session as created')
+          .select('created.id')
+          .where('created.id', '=', newSessionId)
+          .where('created.org_id', '=', ctx.orgId),
       ),
-  );
+    );
+  for (const guard of guards) update = update.where(guard);
+  return compile(update) as ScalarStatement;
 }
 
 export function revokeAllForUserStatement(

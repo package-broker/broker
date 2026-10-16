@@ -536,9 +536,9 @@ describe('built plugin order round trip', () => {
       `export default {
         platform: 'node',
         plugins: [
-          { id: 'b', package: '@package-broker/core', apiVersion: 2,
+          { id: 'b', package: '@package-broker/core', apiVersion: 3,
             platforms: ['node', 'cloudflare'], dependsOn: ['a'] },
-          { id: 'a', package: '@package-broker/core', apiVersion: 2,
+          { id: 'a', package: '@package-broker/core', apiVersion: 3,
             platforms: ['node', 'cloudflare'], dependsOn: ${JSON.stringify(cycle ? ['b'] : [])} }
         ]
       };`,

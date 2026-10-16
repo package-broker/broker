@@ -1,0 +1,45 @@
+{
+  "scenario": "github-renamed-repository-401",
+  "note": "jakub-onderka/PHP-Parallel-Lint was renamed to php-parallel-lint/PHP-Parallel-Lint.",
+  "recordedAt": "2026-10-16T13:27:37.769Z",
+  "call": {
+    "repoUrl": "https://github.com/jakub-onderka/PHP-Parallel-Lint",
+    "refs": [
+      {
+        "name": "refs/tags/v0.0.0",
+        "oid": "1234567890abcdef1234567890abcdef12345678"
+      }
+    ],
+    "path": "composer.json",
+    "filterCacheIndex": null
+  },
+  "outcome": {
+    "kind": "error",
+    "name": "UpstreamError",
+    "code": "http_status",
+    "status": 401,
+    "message": "upstream http_status"
+  },
+  "exchanges": [
+    {
+      "request": {
+        "url": "https://github.com/jakub-onderka/PHP-Parallel-Lint/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2NzgKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZToxCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "text/plain; charset=UTF-8",
+          "www-authenticate": "Basic realm=\"GitHub\""
+        },
+        "bodyBase64": "UmVwb3NpdG9yeSBub3QgZm91bmQu"
+      }
+    }
+  ]
+}

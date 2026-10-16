@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import { isUlid } from '@package-broker/core/ids';
@@ -416,5 +417,73 @@ describe('catalogue fixture', () => {
       }
     }
     expect(stars / names).toBeLessThan(0.1);
+  });
+
+  it('15: forged configurations seed with their derived rows for seeds 1 to 200', async () => {
+    let remaining = 0;
+    for (const size of [6, 12]) {
+      for (let seed = 1; seed <= 200; seed += 1) {
+        const config = randomCatalogueConfig(seed, size, { forged: true });
+        const orgOf = new Map(config.projects.map((p) => [p.id, p.orgId]));
+        remaining += config.explicit.filter((e) => orgOf.get(e.projectId) !== e.orgId).length;
+        const database = await openMigratedDatabase();
+        try {
+          await seedCatalogue(database.executor, config);
+          await seedDerivedRows(database.executor, config);
+        } finally {
+          await database.close();
+        }
+      }
+    }
+    expect(remaining).toBeGreaterThan(0);
+  }, 60_000);
+
+  it('16: configurations without forged rows are unchanged', () => {
+    const hash = createHash('sha256');
+    for (const size of [6, 12]) {
+      for (let seed = 1; seed <= 200; seed += 1) {
+        hash.update(JSON.stringify(randomCatalogueConfig(seed, size)));
+      }
+    }
+    expect(hash.digest('hex')).toBe(
+      '38665e53e18e8e7f8860fd0a26a54aa02d4d747258dad308eceedced3802231a',
+    );
+  });
+
+  it('17: seedDerivedRows refuses a configuration whose explicit row holds a derived slot', async () => {
+    const config = randomCatalogueConfig(1, 6);
+    const derived = deriveVisibility(toVisibilityInputs(config)).find(
+      (r) => r.origin !== 'explicit',
+    );
+    expect(derived).toBeDefined();
+    const orgOf = new Map(config.projects.map((p) => [p.id, p.orgId]));
+    const otherOrg = config.organizations.find((o) => o.id !== orgOf.get(derived!.projectId)) as {
+      id: string;
+    };
+    const clash: CatalogueConfig = {
+      ...config,
+      explicit: [
+        ...config.explicit,
+        {
+          orgId: otherOrg.id,
+          projectId: derived!.projectId,
+          packageId: derived!.packageId,
+        },
+      ],
+    };
+    let calls = 0;
+    const executor = {
+      all: async () => {
+        calls += 1;
+        return [];
+      },
+      batch: async () => {
+        calls += 1;
+        return [];
+      },
+    } as unknown as SqlExecutor;
+    await expect(seedDerivedRows(executor as never, clash)).rejects.toThrow(RangeError);
+    await expect(seedDerivedRows(executor as never, clash)).rejects.toThrow(derived!.packageId);
+    expect(calls).toBe(0);
   });
 });

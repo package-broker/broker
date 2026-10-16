@@ -1,5 +1,10 @@
 import { METRIC_LABEL_KEYS } from './metrics.js';
-import { APPROVED_ERROR_NAMES, DROPPED_COUNTER, metricLabelValueAllowed } from './observability.js';
+import {
+  APPROVED_ERROR_NAMES,
+  DROPPED_COUNTER,
+  type DroppedSignal,
+  metricLabelValueAllowed,
+} from './observability.js';
 import type { FetchLike } from './tracing.js';
 
 export type OtlpSignal = 'logs' | 'metrics' | 'traces';
@@ -746,7 +751,15 @@ export function createOtlpExporter(input: OtlpExporterInput): OtlpExporter {
       return;
     }
   };
-  const drop = (signal: string, value = 1): void => count(DROPPED_COUNTER, signal, value);
+  const drop = (signal: DroppedSignal, value = 1): void => count(DROPPED_COUNTER, signal, value);
+  const dropSignal = (signal: OtlpSignal, body?: unknown): void => {
+    if (signal === 'logs') return drop('log');
+    if (signal === 'metrics') {
+      const kind = (body as { kind?: unknown } | null)?.kind;
+      return drop(kind === 'histogram' ? 'histogram' : 'counter');
+    }
+    drop('export');
+  };
   const fail = (signal: OtlpSignal): void => count(EXPORT_FAILURES_COUNTER, signal);
 
   const send = async (signal: OtlpSignal, body: string): Promise<void> => {
@@ -824,9 +837,9 @@ export function createOtlpExporter(input: OtlpExporterInput): OtlpExporter {
   return {
     export(signal: OtlpSignal, body: unknown): void {
       try {
-        if (!SIGNALS.includes(signal)) return drop('unknown');
+        if (!SIGNALS.includes(signal)) return drop('export');
         const encoded = CODECS[signal].item(body, ctx);
-        if (encoded === null) return drop(signal);
+        if (encoded === null) return dropSignal(signal, body);
         const item =
           signal === 'metrics'
             ? withWindow(encoded, WINDOW_PLACEHOLDER, WINDOW_PLACEHOLDER)
@@ -837,9 +850,10 @@ export function createOtlpExporter(input: OtlpExporterInput): OtlpExporter {
           const existing = key === null ? undefined : metricIndex.get(key);
           if (existing !== undefined) {
             const merged = mergeSeries(existing.item, item);
-            if (merged === null) return drop(signal);
+            if (merged === null) return dropSignal(signal, body);
             const mergedBytes = byteLength(merged);
-            if (totals[signal] - existing.bytes + mergedBytes > maxBytes) return drop(signal);
+            if (totals[signal] - existing.bytes + mergedBytes > maxBytes)
+              return dropSignal(signal, body);
             totals[signal] += mergedBytes - existing.bytes;
             existing.item = merged;
             existing.bytes = mergedBytes;
@@ -849,7 +863,7 @@ export function createOtlpExporter(input: OtlpExporterInput): OtlpExporter {
         const bytes = byteLength(item);
         const separator = buffers[signal].length > 0 ? 1 : 0;
         if (buffers[signal].length >= maxRecords || totals[signal] + bytes + separator > maxBytes) {
-          return drop(signal);
+          return dropSignal(signal, body);
         }
         totals[signal] += bytes + separator;
         const entry: Buffered = { item, bytes };
@@ -859,7 +873,7 @@ export function createOtlpExporter(input: OtlpExporterInput): OtlpExporter {
           if (key !== null) metricIndex.set(key, entry);
         }
       } catch {
-        drop('unknown');
+        drop('export');
       }
     },
     flush(): Promise<void> {

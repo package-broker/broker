@@ -130,8 +130,7 @@ export function createOrganizationBootstrap(executor: ScalarSqlExecutor): Organi
         throw new TypeError(`invalid organization slug ${JSON.stringify(input.slug)}`);
       }
 
-      const rows = await run<IdentityRow>(
-        executor,
+      const insertOrganization = compile(
         db
           .insertInto('organization')
           .values({
@@ -143,7 +142,21 @@ export function createOrganizationBootstrap(executor: ScalarSqlExecutor): Organi
           })
           .onConflict((conflict) => conflict.column('singleton').doNothing())
           .returning(['id', 'slug', 'name']),
-      );
+      ) as ScalarStatement;
+      const seedEpoch = compile(
+        db
+          .insertInto('cache_epoch')
+          .columns(['org_id', 'version'])
+          .expression((eb) =>
+            eb
+              .selectFrom('organization')
+              .select(['id', sql<string>`hex(randomblob(16))`.as('version')])
+              .where('singleton', '=', sql.lit(1)),
+          )
+          .onConflict((conflict) => conflict.column('org_id').doNothing()),
+      ) as ScalarStatement;
+      const results = await executor.batch([insertOrganization, seedEpoch]);
+      const rows = (results[0]?.rows ?? []) as unknown as IdentityRow[];
       const row = rows[0];
       if (row !== undefined) return { created: true, ...identity(row) };
 

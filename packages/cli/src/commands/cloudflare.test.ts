@@ -92,10 +92,19 @@ async function realInit(): Promise<string> {
   return readFile(new URL('../../../db-sqlite/migrations/0001_init.sql', import.meta.url), 'utf8');
 }
 
+async function epochSql(): Promise<string> {
+  return readFile(
+    new URL('../../../db-sqlite/migrations/0004_cache_epoch.sql', import.meta.url),
+    'utf8',
+  );
+}
+
 async function writeBuiltInit(root: string, sql: string): Promise<void> {
+  const epoch = await epochSql();
   await mkdir(join(root, 'generated'), { recursive: true });
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
+  await writeFile(join(root, 'migrations', 'core', '0004_cache_epoch.sql'), epoch);
   await writeFile(
     join(root, 'generated', 'manifest.json'),
     JSON.stringify({
@@ -105,6 +114,12 @@ async function writeBuiltInit(root: string, sql: string): Promise<void> {
           id: 'core:0001_init',
           name: '0001_init.sql',
           checksum: await sha256Hex(sql),
+          phase: 'expand',
+        },
+        {
+          id: 'core:0004_cache_epoch',
+          name: '0004_cache_epoch.sql',
+          checksum: await sha256Hex(epoch),
           phase: 'expand',
         },
       ],
@@ -145,11 +160,21 @@ it('1. applies core:0001_init once and skips it on the second run', async () => 
   try {
     expect(await migrate(harness.fetch)).toBe(0);
     expect(console.log).toHaveBeenLastCalledWith(
-      JSON.stringify({ applied: ['core:0001_init'], skipped: [], unknown: [], pending: [] }),
+      JSON.stringify({
+        applied: ['core:0001_init', 'core:0004_cache_epoch'],
+        skipped: [],
+        unknown: [],
+        pending: [],
+      }),
     );
     expect(await migrate(harness.fetch)).toBe(0);
     expect(console.log).toHaveBeenLastCalledWith(
-      JSON.stringify({ applied: [], skipped: ['core:0001_init'], unknown: [], pending: [] }),
+      JSON.stringify({
+        applied: [],
+        skipped: ['core:0001_init', 'core:0004_cache_epoch'],
+        unknown: [],
+        pending: [],
+      }),
     );
   } finally {
     await close();
@@ -255,7 +280,12 @@ it('7. dry run sends one SELECT and reports the migration as pending', async () 
     expect(only?.batch).toBeUndefined();
     expect(only?.sql).toMatch(/^\s*SELECT/i);
     expect(console.log).toHaveBeenLastCalledWith(
-      JSON.stringify({ applied: [], skipped: [], unknown: [], pending: ['core:0001_init'] }),
+      JSON.stringify({
+        applied: [],
+        skipped: [],
+        unknown: [],
+        pending: ['core:0001_init', 'core:0004_cache_epoch'],
+      }),
     );
   } finally {
     await close();

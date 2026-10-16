@@ -15,6 +15,10 @@ import { createOrganizationBootstrap, createOrganizationRepository } from './org
 
 const initUrl = new URL('../../migrations/0001_init.sql', import.meta.url);
 const initText = readFileSync(initUrl, 'utf8');
+const epochText = readFileSync(
+  new URL('../../migrations/0004_cache_epoch.sql', import.meta.url),
+  'utf8',
+);
 
 const FIRST = {
   id: '01J0ACME000000000000000000',
@@ -65,11 +69,13 @@ function recordingExecutor(executor: ScalarSqlExecutor): Recording {
 
 let opened: OpenedExecutor;
 let init: MigrationSource;
+let epoch: MigrationSource;
 
 beforeEach(async () => {
   opened = openNodeSqliteExecutor();
   init = await loadMigrationSource('core', '0001_init.sql', initText);
-  await migrate(opened.executor, [init], { holder: 't99' });
+  epoch = await loadMigrationSource('core', '0004_cache_epoch.sql', epochText);
+  await migrate(opened.executor, [init, epoch], { holder: 't99' });
 });
 
 afterEach(async () => {
@@ -105,6 +111,58 @@ describe('createOrganizationBootstrap', () => {
     );
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
     expect(await countOrganizations()).toBe(0);
+  });
+});
+
+describe('cache_epoch seeding', () => {
+  async function epochRows(): Promise<{ org_id: string; version: string }[]> {
+    return opened.executor.all({
+      sql: 'SELECT org_id, version FROM cache_epoch ORDER BY org_id',
+      params: [],
+    });
+  }
+
+  it('3a: a created organization gets exactly one random cache_epoch row', async () => {
+    const bootstrap = createOrganizationBootstrap(opened.executor);
+
+    await bootstrap.bootstrap(FIRST);
+
+    const found = await epochRows();
+    expect(found).toHaveLength(1);
+    expect(found[0]?.org_id).toBe(FIRST.id);
+    expect(found[0]?.version).toMatch(/^[0-9A-F]{32}$/);
+  });
+
+  it('3b: a sequential repeat with the same or another id keeps the one row and its version', async () => {
+    const bootstrap = createOrganizationBootstrap(opened.executor);
+    await bootstrap.bootstrap(FIRST);
+    const [before] = await epochRows();
+
+    const again = await bootstrap.bootstrap(FIRST);
+    const other = await bootstrap.bootstrap(SECOND);
+
+    expect(again.created).toBe(false);
+    expect(other).toMatchObject({ created: false, id: FIRST.id });
+    expect(await epochRows()).toEqual([before]);
+  });
+
+  it('3c: an organization that exists without a row gets one when bootstrap runs again', async () => {
+    await opened.executor.all({
+      sql: 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)',
+      params: [FIRST.id, FIRST.slug, FIRST.name],
+    });
+    await opened.executor.all({ sql: 'DELETE FROM cache_epoch', params: [] });
+    expect(await epochRows()).toEqual([]);
+
+    const result = await createOrganizationBootstrap(opened.executor).bootstrap({
+      ...FIRST,
+      id: SECOND.id,
+    });
+
+    expect(result).toMatchObject({ created: false, id: FIRST.id });
+    const found = await epochRows();
+    expect(found).toHaveLength(1);
+    expect(found[0]?.org_id).toBe(FIRST.id);
   });
 });
 
@@ -158,9 +216,10 @@ describe('executor calls', () => {
     const bootstrap = createOrganizationBootstrap(counted.executor);
     const ctx = orgContext(FIRST.id);
 
-    const created = counted.counts().all;
+    const created = counted.counts();
     await bootstrap.bootstrap(FIRST);
-    expect(counted.counts().all - created).toBe(1);
+    expect(counted.counts().batch - created.batch).toBe(1);
+    expect(counted.counts().all - created.all).toBe(0);
 
     const read = counted.counts().all;
     await repository.get(ctx);
@@ -173,7 +232,7 @@ describe('executor calls', () => {
     const found = counted.counts().all;
     await bootstrap.findSingleton();
     expect(counted.counts().all - found).toBe(1);
-    expect(counted.counts().batch).toBe(0);
+    expect(counted.counts().batch).toBe(1);
 
     const singleton = recorded.statements.at(-1);
     expect(singleton?.sql).toContain('"singleton" = 1');

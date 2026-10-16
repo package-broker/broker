@@ -47,24 +47,22 @@ export function validatePlugins(plugins: readonly PluginDefinition[], target: Pl
 }
 
 export function orderPlugins(plugins: readonly PluginDefinition[]): PluginDefinition[] {
-  const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]));
+  const ids = new Set(plugins.map((plugin) => plugin.id));
   const ordered: PluginDefinition[] = [];
-  const state = new Map<string, 'visiting' | 'done'>();
-
-  const visit = (plugin: PluginDefinition): void => {
-    const current = state.get(plugin.id);
-    if (current === 'done') return;
-    if (current === 'visiting') throw new Error(`dependency cycle at plugin "${plugin.id}"`);
-    state.set(plugin.id, 'visiting');
-    for (const dependency of plugin.dependsOn ?? []) {
-      const resolved = byId.get(dependency);
-      if (resolved) visit(resolved);
+  const emitted = new Set<string>();
+  const remaining = new Set(plugins);
+  while (remaining.size > 0) {
+    const next = [...remaining].find((plugin) =>
+      (plugin.dependsOn ?? []).every((id) => !ids.has(id) || emitted.has(id)),
+    );
+    if (next === undefined) {
+      const [first] = remaining;
+      throw new Error(`dependency cycle at plugin "${first?.id}"`);
     }
-    state.set(plugin.id, 'done');
-    ordered.push(plugin);
-  };
-
-  plugins.forEach(visit);
+    ordered.push(next);
+    emitted.add(next.id);
+    remaining.delete(next);
+  }
   return ordered;
 }
 

@@ -64,6 +64,7 @@ describe('renderManifestJson', () => {
     const plugins = [
       plugin('a', {
         binds: ['source'],
+        sourceProviders: () => [],
         register: (r) =>
           r.route({
             method: 'GET',

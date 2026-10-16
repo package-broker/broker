@@ -3,9 +3,11 @@ import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { JsonStreamError } from './json-tokenizer.js';
 import {
+  ARRAY_ELEMENTS,
   extractMembers,
   JsonExtractError,
   type ExtractLimits,
+  type ExtractOptions,
   type ExtractedMember,
   type MemberSelector,
 } from './json-stream.js';
@@ -583,5 +585,293 @@ describe('extractMembers', () => {
       const deep = `{"time":${'['.repeat(65)}${']'.repeat(65)}}`;
       expect(await codeOf(run(deep, [['time']]))).toBe('depth_exceeded');
     });
+  });
+});
+
+describe('extractMembers array elements', () => {
+  const PACKAGES: MemberSelector[] = [['packages', '*', ARRAY_ELEMENTS], ['minified']];
+
+  interface Expected {
+    path: string[];
+    value: Json;
+    index?: number;
+    end?: true;
+    count?: number;
+  }
+
+  function elementReference(doc: Json, selectors: readonly MemberSelector[]): Expected[] {
+    const plain = selectors.filter((selector) => selector.at(-1) !== ARRAY_ELEMENTS);
+    const arrays = selectors
+      .filter((selector) => selector.at(-1) === ARRAY_ELEMENTS)
+      .map((selector) => selector.slice(0, -1));
+    const out: Expected[] = [];
+    const walk = (node: Json, path: string[]): void => {
+      if (node === null || typeof node !== 'object' || Array.isArray(node)) {
+        return;
+      }
+      for (const [key, value] of Object.entries(node)) {
+        const next = [...path, key];
+        if (plain.some((selector) => matches(selector, next, true))) {
+          out.push({ path: next, value });
+        } else if (arrays.some((selector) => matches(selector, next, true))) {
+          if (!Array.isArray(value)) {
+            throw new Error('fixture must hold arrays at element paths');
+          }
+          value.forEach((element, index) => {
+            out.push({ path: [...next, String(index)], value: element, index });
+          });
+          out.push({ path: next, value: [], end: true, count: value.length });
+        } else if ([...plain, ...arrays].some((selector) => matches(selector, next, false))) {
+          walk(value, next);
+        }
+      }
+    };
+    walk(doc, []);
+    return out;
+  }
+
+  const shape = (members: ExtractedMember[]): Expected[] =>
+    members.map((member) => ({
+      path: [...member.path],
+      value: JSON.parse(member.raw) as Json,
+      ...(member.index === undefined ? {} : { index: member.index }),
+      ...(member.end === true ? { end: true as const, count: member.count } : {}),
+    }));
+
+  function p2Document(count: number, pad: number): Json {
+    return {
+      packages: {
+        'acme/a': Array.from({ length: count }, (_, index) => version(index, pad)),
+        'ünï"cödé\\key': [1, 's', null, true, -0.5, [1, [2, []]], { a: [], '[]': {} }, []],
+        empty: [],
+        'acme/b': [[], [[]], {}, 'tail'],
+      },
+      other: { packages: { x: [1] } },
+      minified: 'composer/2.0',
+    };
+  }
+
+  const documents = [
+    { name: 'minified', text: JSON.stringify(p2Document(40, 100)) },
+    { name: 'pretty', text: JSON.stringify(p2Document(40, 100), null, 2) },
+    {
+      name: 'escaped keys',
+      text: '{"pack\\u0061ges":{"\\u0061cme/\\"q\\"":[ {"k\\u00e9":"v"} , "\\ud83d\\ude00" ,1e3 ],"z":[]}}',
+    },
+  ];
+
+  it.each(documents)(
+    'equals a JSON.parse reference for $name in 1, 7 and 4093-byte chunks',
+    async ({ text }) => {
+      const bytes = encoder.encode(text);
+      const expected = elementReference(JSON.parse(text) as Json, PACKAGES);
+      expect(expected.filter((entry) => entry.end === true).length).toBeGreaterThan(0);
+      for (const size of [1, 7, 4093]) {
+        const actual = await collect(streamOf(bytes, size), PACKAGES);
+        expect(shape(actual), `chunk ${size}`).toEqual(expected);
+        for (const member of actual) {
+          expect(member.raw).toBe(member.raw.trim());
+          expect(member.raw.startsWith(',')).toBe(false);
+        }
+      }
+    },
+    60_000,
+  );
+
+  it('yields the element path, index and an end record carrying the count', async () => {
+    const members = await collect(
+      streamOf(encoder.encode('{"packages":{"acme/a":[ {"v":1} , 2 ],"acme/e":[]}}'), 3),
+      [['packages', '*', ARRAY_ELEMENTS]],
+    );
+    expect(members).toEqual([
+      { path: ['packages', 'acme/a', '0'], raw: '{"v":1}', index: 0 },
+      { path: ['packages', 'acme/a', '1'], raw: '2', index: 1 },
+      { path: ['packages', 'acme/a'], raw: '[]', end: true, count: 2 },
+      { path: ['packages', 'acme/e'], raw: '[]', end: true, count: 0 },
+    ]);
+  });
+
+  it('does not match an object key spelled [] with ARRAY_ELEMENTS', async () => {
+    const json = '{"a":{"[]":[1,2],"b":[3]}}';
+    const literal = await failure(
+      collect(streamOf(encoder.encode('{"a":{"[]":1}}'), 2), [['a', ARRAY_ELEMENTS]]),
+    );
+    expect((literal as JsonExtractError).code).toBe('not_array');
+    const members = await collect(streamOf(encoder.encode(json), 2), [['a', '*', ARRAY_ELEMENTS]]);
+    expect(members.map((member) => member.path)).toEqual([
+      ['a', '[]', '0'],
+      ['a', '[]', '1'],
+      ['a', '[]'],
+      ['a', 'b', '0'],
+      ['a', 'b'],
+    ]);
+  });
+
+  it('never lets * match array elements', async () => {
+    expect(
+      await collect(streamOf(encoder.encode('{"packages":{"a":[{"x":1}]}}'), 4), [
+        ['packages', '*', '*'],
+      ]),
+    ).toEqual([]);
+  });
+
+  it('retains one version, not the array, across a 2,000-version document', async () => {
+    const doc = p2Document(2000, 200) as { packages: Record<string, Json[]> };
+    const largest = Math.max(
+      ...Object.values(doc.packages).flatMap((list) =>
+        list.map((element) => encoder.encode(JSON.stringify(element)).length),
+      ),
+    );
+    const bytes = encoder.encode(JSON.stringify(doc));
+    expect(bytes.length).toBeGreaterThan(400 * largest);
+    const limits = { maxMemberBytes: largest + 1 };
+    const members = await collect(streamOf(bytes, 65_536), PACKAGES, limits);
+    expect(
+      members.filter((member) => member.path[1] === 'acme/a' && member.end !== true),
+    ).toHaveLength(2000);
+    const error = await failure(
+      collect(streamOf(bytes, 65_536), [['packages', '*'], ['minified']], limits),
+    );
+    expect((error as JsonExtractError).code).toBe('member_too_large');
+  }, 60_000);
+
+  describe('negative cases', () => {
+    const run = (json: string, selectors: MemberSelector[], limits?: ExtractLimits) =>
+      failure(collect(streamOf(encoder.encode(json), 5), selectors, limits));
+    const codeOf = async (error: Promise<unknown>): Promise<string | null> => {
+      const caught = await error;
+      return caught instanceof JsonExtractError || caught instanceof JsonStreamError
+        ? caught.code
+        : null;
+    };
+
+    it('throws member_too_large for an element over maxMemberBytes', async () => {
+      const json = `{"packages":{"a":[1,"${'x'.repeat(200)}",2]}}`;
+      expect(await run(json, PACKAGES, { maxMemberBytes: 210 })).toBeNull();
+      expect(await codeOf(run(json, PACKAGES, { maxMemberBytes: 100 }))).toBe('member_too_large');
+      const nested = `{"packages":{"a":[{"k":"${'x'.repeat(200)}"}]}}`;
+      expect(await codeOf(run(nested, PACKAGES, { maxMemberBytes: 100 }))).toBe('member_too_large');
+    });
+
+    it('throws too_many_members for more elements than maxMembersPerLevel', async () => {
+      const many = (n: number): string =>
+        `{"packages":{"a":[${Array.from({ length: n }, (_, index) => `${index}`).join(',')}]}}`;
+      expect(await run(many(5), PACKAGES, { maxMembersPerLevel: 5 })).toBeNull();
+      expect(await codeOf(run(many(6), PACKAGES, { maxMembersPerLevel: 5 }))).toBe(
+        'too_many_members',
+      );
+    });
+
+    it('throws not_array for a non-array at the element path', async () => {
+      for (const value of ['{}', '{"0":1}', '"s"', '1', 'null', 'true']) {
+        expect(await codeOf(run(`{"packages":{"a":${value}}}`, PACKAGES)), value).toBe('not_array');
+      }
+    });
+
+    it('throws duplicate_key for a duplicate key inside one element', async () => {
+      expect(await codeOf(run('{"packages":{"a":[{"v":1,"\\u0076":2}]}}', PACKAGES))).toBe(
+        'duplicate_key',
+      );
+      expect(await run('{"packages":{"a":[{"v":1},{"v":2}]}}', PACKAGES)).toBeNull();
+    });
+
+    it('throws duplicate_key for a duplicated array key', async () => {
+      expect(await codeOf(run('{"packages":{"a":[],"a":[]}}', PACKAGES))).toBe('duplicate_key');
+    });
+
+    it('throws TypeError when ARRAY_ELEMENTS is not last or appears twice', () => {
+      const source = streamOf(encoder.encode('{}'), 2);
+      expect(() => extractMembers(source, [['packages', ARRAY_ELEMENTS, 'x']])).toThrow(TypeError);
+      expect(() => extractMembers(source, [['a', ARRAY_ELEMENTS, ARRAY_ELEMENTS]])).toThrow(
+        TypeError,
+      );
+      expect(() => extractMembers(source, [[ARRAY_ELEMENTS]])).toThrow(TypeError);
+    });
+
+    it('throws TypeError for overlap with the whole-member selector', () => {
+      const source = streamOf(encoder.encode('{}'), 2);
+      expect(() =>
+        extractMembers(source, [
+          ['packages', '*'],
+          ['packages', '*', ARRAY_ELEMENTS],
+        ]),
+      ).toThrow(TypeError);
+      expect(() =>
+        extractMembers(source, [
+          ['packages', 'a', 'b'],
+          ['packages', 'a', ARRAY_ELEMENTS],
+        ]),
+      ).toThrow(TypeError);
+    });
+  });
+});
+
+describe('extractMembers array element boundaries and non-arrays', () => {
+  const PACKAGES: MemberSelector[] = [['packages', '*', ARRAY_ELEMENTS]];
+  const all = (json: string, size: number, limits?: ExtractOptions) =>
+    collect(streamOf(encoder.encode(json), size), PACKAGES, limits);
+
+  it('does not count separators or whitespace towards maxMemberBytes', async () => {
+    for (const size of [1, 3, 4093]) {
+      const members = await all('{"packages":{"a":[12345,12345]}}', size, { maxMemberBytes: 5 });
+      expect(members.map((member) => member.raw)).toEqual(['12345', '12345', '[]']);
+      const error = await failure(
+        all('{"packages":{"a":[12345,12345]}}', size, { maxMemberBytes: 4 }),
+      );
+      expect((error as JsonExtractError).code).toBe('member_too_large');
+    }
+  });
+
+  it('ignores padding before an element and before the closing bracket', async () => {
+    const pad = ' \n\t'.repeat(400);
+    const json = `{"packages":{"a":[${pad}1${pad},${pad}"x"${pad}]}}`;
+    for (const size of [1, 7, 4093]) {
+      const members = await all(json, size, { maxMemberBytes: 3 });
+      expect(members).toEqual([
+        { path: ['packages', 'a', '0'], raw: '1', index: 0 },
+        { path: ['packages', 'a', '1'], raw: '"x"', index: 1 },
+        { path: ['packages', 'a'], raw: '[]', end: true, count: 2 },
+      ]);
+    }
+  });
+
+  it('names the offending path on not_array', async () => {
+    const error = await failure(all('{"packages":{"a":[],"b":{}}}', 3));
+    expect((error as JsonExtractError).code).toBe('not_array');
+    expect((error as JsonExtractError).path).toEqual(['packages', 'b']);
+    expect((error as JsonExtractError).message).not.toContain('packages');
+  });
+
+  it('reports a non-array without retaining it when nonArray is report', async () => {
+    const long = 'x'.repeat(2 * 1024 * 1024);
+    const json = `{"packages":{"a":{"x":["y",{"z":1}]},"b":[1],"c":"${long}","d":[],"e":null}}`;
+    for (const size of [1, 7, 4093]) {
+      const text = size === 4093 ? json : json.replace(long, 'x'.repeat(5000));
+      expect(await all(text, size, { nonArray: 'report', maxMemberBytes: 3 })).toEqual([
+        { path: ['packages', 'a'], raw: '', notArray: true },
+        { path: ['packages', 'b', '0'], raw: '1', index: 0 },
+        { path: ['packages', 'b'], raw: '[]', end: true, count: 1 },
+        { path: ['packages', 'c'], raw: '', notArray: true },
+        { path: ['packages', 'd'], raw: '[]', end: true, count: 0 },
+        { path: ['packages', 'e'], raw: '', notArray: true },
+      ]);
+    }
+  }, 60_000);
+
+  it('does not count whitespace between the key and [ towards maxMemberBytes', async () => {
+    const json = `{"packages":{"a":${' '.repeat(30)}[1]}}`;
+    for (const nonArray of ['throw', 'report'] as const) {
+      expect(await all(json, 1, { nonArray, maxMemberBytes: 3 })).toEqual([
+        { path: ['packages', 'a', '0'], raw: '1', index: 0 },
+        { path: ['packages', 'a'], raw: '[]', end: true, count: 1 },
+      ]);
+    }
+  });
+
+  it('rejects an unknown nonArray mode at call time', () => {
+    const source = streamOf(encoder.encode('{}'), 2);
+    expect(() =>
+      extractMembers(source, PACKAGES, { nonArray: 'skip' as unknown as 'throw' }),
+    ).toThrow(TypeError);
   });
 });

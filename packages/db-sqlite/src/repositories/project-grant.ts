@@ -16,6 +16,7 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
+import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_GROUP_LENGTH = 256;
@@ -109,13 +110,6 @@ function timestamp(value: string): string {
   return value;
 }
 
-function requireIdleSeconds(value: number): number {
-  if (!Number.isInteger(value) || value < 60 || value > 86400) {
-    throw new RangeError('idleSeconds must be an integer from 60 to 86400');
-  }
-  return value;
-}
-
 function requireSubject(
   subject: GrantSubject,
   providerAnchors: readonly ProtectedHolderProvider[],
@@ -167,9 +161,7 @@ function actorIsLive(ctx: OrgContext, fence: MutationFence, idleSeconds: number)
     join session as actor_session on actor_session.user_id = actor.id and actor_session.org_id = actor.org_id
     where actor.id = ${fence.userId} and actor.org_id = ${ctx.orgId} and actor.status = 'active'
       and actor_session.id = ${fence.sessionId}
-      and actor_session.revoked_at is null
-      and unixepoch(actor_session.expires_at, 'subsec') > unixepoch('now', 'subsec')
-      and unixepoch(coalesce(actor_session.last_seen_at, actor_session.created_at), 'subsec') > unixepoch('now', 'subsec') - ${idleSeconds}
+      and ${liveSessionCondition('actor_session', idleSeconds)}
   )`;
 }
 

@@ -84,6 +84,34 @@ describe('collectRegistrations', () => {
     ]);
   });
 
+  it('registers plugins and hooks in the array order it is given', () => {
+    const calls: string[] = [];
+    const aHook = () => undefined;
+    const bHook = () => undefined;
+    const a = plugin('a', {
+      register(registry) {
+        calls.push('a');
+        registry.hook('access.check', aHook);
+      },
+    });
+    const b = plugin('b', {
+      dependsOn: ['a'],
+      register(registry) {
+        calls.push('b');
+        registry.hook('access.check', bHook);
+      },
+    });
+    const manifest = { plugins: [b, a] };
+
+    const registration = collectRegistrations(manifest.plugins);
+
+    expect(calls).toEqual(['b', 'a']);
+    expect(registration.hooks['access.check']).toEqual([
+      { plugin: 'b', handler: bHook },
+      { plugin: 'a', handler: aHook },
+    ]);
+  });
+
   it('accepts plugins without register or binds', () => {
     const result = collectRegistrations([plugin('quiet')]);
     expect(result.routes).toEqual([]);

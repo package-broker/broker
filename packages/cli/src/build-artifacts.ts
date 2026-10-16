@@ -1,5 +1,6 @@
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import type { Platform } from '@package-broker/core/plugin';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
 export const GENERATED_PACKAGE_MARKER = 'pbGenerated';
@@ -80,18 +81,108 @@ export function toManifestMigrations(
   return migrations.map((source) => ({ ...source, name: `${source.name}.sql` }));
 }
 
+const DESCRIBED_KEYS: Record<keyof PlatformPortConfig, readonly string[]> = {
+  blob: [
+    'adapter',
+    'binding',
+    'rootEnv',
+    'endpointEnv',
+    'regionEnv',
+    'bucketEnv',
+    'accessKeyIdEnv',
+    'secretAccessKeyEnv',
+    'sessionTokenEnv',
+    'pathStyle',
+    'maxBytes',
+  ],
+  cache: ['adapter', 'namespace', 'maxBytes'],
+  jobs: ['adapter', 'binding', 'maxRunning'],
+  observability: ['adapter', 'analyticsBinding', 'deploymentIdEnv', 'endpointEnv', 'headersEnv'],
+};
+
+const ACCESS_KEY_ID = /^(AKIA|ASIA)[A-Z0-9]{16}$/;
+const BASE32_RUN = /^(?=[A-Z2-7]*[2-7])[A-Z2-7]{16,}$/;
+const HEX_RUN = /^[0-9A-F]{16,}$/;
+const VOWEL = /[AEIOU]/i;
+
+function looksLikeCredential(value: string): boolean {
+  const upper = value.toUpperCase();
+  if (ACCESS_KEY_ID.test(upper)) return true;
+  let mixed = 0;
+  for (const word of upper.split(/[_.-]/)) {
+    if (BASE32_RUN.test(word) || HEX_RUN.test(word)) return true;
+    if (word.length >= 24) return true;
+    if (word.length >= 8 && !VOWEL.test(word)) return true;
+  }
+  for (const word of value.split(/[_.-]/)) {
+    if (word.length >= 20 && /[0-9]/.test(word) && /[A-Z]/.test(word)) return true;
+    if (word.length >= 4 && /[0-9]/.test(word) && /[A-Z]/.test(word)) mixed += 1;
+  }
+  return mixed >= 2;
+}
+
+export function credentialProblems(
+  described: PlatformPortConfig | null,
+  target: Platform,
+): string[] {
+  if (described === null) return [];
+  const problems: string[] = [];
+  for (const [port, section] of Object.entries(described)) {
+    for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+      if (typeof value === 'string' && looksLikeCredential(value)) {
+        problems.push(`${target}.${port}.${key}: looks like a credential value`);
+      }
+    }
+  }
+  return problems;
+}
+
+export function describePlatformPorts(
+  ports: PlatformPortConfig | undefined,
+): PlatformPortConfig | null {
+  if (typeof ports !== 'object' || ports === null) return null;
+  const described: Record<string, Record<string, string | number | boolean>> = {};
+  for (const [port, keys] of Object.entries(DESCRIBED_KEYS)) {
+    const section: Record<string, string | number | boolean> = {};
+    const source = (ports as unknown as Record<string, unknown>)[port];
+    if (typeof source !== 'object' || source === null) continue;
+    for (const key of keys) {
+      const value = Object.hasOwn(source, key)
+        ? (source as Record<string, unknown>)[key]
+        : undefined;
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        section[key] = value;
+      }
+    }
+    described[port] = section;
+  }
+  return described as unknown as PlatformPortConfig;
+}
+
 export function renderBuildManifest(
   configPath: string,
+  orderedPluginIds: readonly string[],
   migrations?: readonly MigrationSource[],
   platform: NodeJS.Platform = process.platform,
+  platformPorts?: PlatformPortConfig | null,
 ): string {
   const specifier = platform === 'win32' ? configPath.replaceAll('\\', '/') : configPath;
   const lines = [
     `import config from ${JSON.stringify(specifier)};`,
-    'export const plugins = config.plugins;',
+    `const orderedPluginIds = ${JSON.stringify(orderedPluginIds)};`,
+    'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
+    'export const plugins = orderedPluginIds.map((id) => {',
+    '  const plugin = pluginsById.get(id);',
+    '  if (plugin === undefined) throw new Error(`plugin "${id}" is missing from config.plugins`);',
+    '  return plugin;',
+    '});',
+    'if (plugins.length !== config.plugins.length) {',
+    '  throw new Error(`config.plugins has ${config.plugins.length} plugins, expected ${plugins.length}`);',
+    '}',
   ];
   if (migrations !== undefined) {
     lines.push(`export const migrations = ${JSON.stringify(migrations, null, 2)};`);
   }
+  lines.push(`export const platformPorts = ${JSON.stringify(platformPorts ?? null, null, 2)};`);
   return `${lines.join('\n')}\n`;
 }

@@ -62,6 +62,10 @@
       "types": "./dist/contract/executor-contract.d.ts",
       "default": "./dist/contract/executor-contract.js"
     },
+    "./contract/job-contract": {
+      "types": "./dist/contract/job-contract.d.ts",
+      "default": "./dist/contract/job-contract.js"
+    },
     "./contract/migration-contract": {
       "types": "./dist/contract/migration-contract.d.ts",
       "default": "./dist/contract/migration-contract.js"

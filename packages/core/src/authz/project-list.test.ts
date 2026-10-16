@@ -11,6 +11,7 @@ import {
   type ProjectListEntry,
   type ProjectListSource,
   type ProjectReadAccess,
+  type ReadableProjectSource,
 } from './project-list.js';
 
 const ctx = orgContext('org-a');
@@ -396,4 +397,187 @@ describe('item shape and wiring', () => {
   it('refuses to be built without its ports', () => {
     expect(() => createProjectLister({} as never)).toThrow(TypeError);
   });
+});
+
+function readableSetup(w: World) {
+  const base = setup(w);
+  const listReadableProjects = vi.fn<ReadableProjectSource['listReadableProjects']>(
+    async (_ctx, _actor, page) =>
+      w.projects
+        .filter((p) => (page.afterId === undefined ? true : p.id > page.afterId))
+        .filter((p) => p.status === page.status)
+        .filter((p) => (w.projectPermissions[p.id] ?? []).includes('project:read'))
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .slice(0, page.limit),
+  );
+  const readable: ReadableProjectSource = { listReadableProjects };
+  return {
+    ...base,
+    listReadableProjects,
+    lister: createProjectLister({ source: base.source, readable }),
+  };
+}
+
+describe('readable-projects source', () => {
+  it('finds a readable project behind 10,050 hidden ones with one read and no scan', async () => {
+    const total = 10_051;
+    const w = world({ projects: range(total), projectPermissions: readable([10_041]) });
+    const { lister, list, permissionsFor, listReadableProjects } = readableSetup(w);
+    const result = await lister.list(ctx, actorOf(w), { limit: 1 });
+    expect(result).toEqual({
+      ok: true,
+      value: { items: [entry(10_041)], nextAfterId: idOf(10_041) },
+    });
+    expect(listReadableProjects).toHaveBeenCalledTimes(1);
+    expect(listReadableProjects.mock.calls[0]?.[1]).toEqual({ userId: 'u1' });
+    expect(listReadableProjects.mock.calls[0]?.[2]).toEqual({ limit: 1, status: 'active' });
+    expect(list).not.toHaveBeenCalled();
+    expect(permissionsFor).not.toHaveBeenCalled();
+    const next = await lister.list(ctx, actorOf(w), { limit: 1, afterId: idOf(10_041) });
+    expect(next).toEqual({ ok: true, value: { items: [], nextAfterId: null } });
+  });
+
+  it.each([
+    [
+      'project grants only',
+      { projectPermissions: { ...readable([2, 5]), [idOf(3)]: ['project:write'] } },
+    ],
+    ['an organization grant without project:read', { organizationPermissions: ['org:read'] }],
+    [
+      'organization project:write plus one project:read',
+      { organizationPermissions: ['project:write'], projectPermissions: readable([4]) },
+    ],
+    ['no grants', {}],
+  ] as [string, Partial<World>][])(
+    'matches the engine per project with %s',
+    async (_name, extra) => {
+      const w = world({ projects: [...range(6), entry(7, 'archived')], ...extra });
+      const expected: string[] = [];
+      for (const p of w.projects) if (await engineAllows(w, p.slug)) expected.push(p.id);
+      expect(await ids(readableSetup(w).lister, actorOf(w), { limit: 50 })).toEqual(expected);
+    },
+  );
+
+  it('keeps the plain source when project:read is inherited from the organization', async () => {
+    const w = world({ projects: range(3), organizationPermissions: ['project:read'] });
+    const { lister, list, listReadableProjects } = readableSetup(w);
+    expect(await ids(lister, actorOf(w), { limit: 10 })).toEqual([1, 2, 3].map(idOf));
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(listReadableProjects).not.toHaveBeenCalled();
+  });
+
+  it('pages with the cursor and ends with a null cursor', async () => {
+    const w = world({ projects: range(10), projectPermissions: readable([2, 4, 6, 8, 10]) });
+    const { lister, listReadableProjects } = readableSetup(w);
+    const seen: string[] = [];
+    let afterId: string | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      const result = await lister.list(ctx, actorOf(w), {
+        limit: 2,
+        ...(afterId === undefined ? {} : { afterId }),
+      });
+      if (!result.ok) throw new Error(result.error);
+      seen.push(...result.value.items.map((p) => p.id));
+      if (result.value.nextAfterId === null) break;
+      afterId = result.value.nextAfterId;
+    }
+    expect(seen).toEqual([2, 4, 6, 8, 10].map(idOf));
+    expect(listReadableProjects.mock.calls[1]?.[2]).toEqual({
+      afterId: idOf(4),
+      limit: 2,
+      status: 'active',
+    });
+  });
+
+  it('passes archived to the source for an admin', async () => {
+    const w = world({
+      projects: [entry(1), entry(2, 'archived')],
+      organizationPermissions: ['org:projects:archive'],
+      projectPermissions: readable([1, 2]),
+    });
+    expect(
+      await ids(readableSetup(w).lister, actorOf(w, true), { limit: 10, status: 'archived' }),
+    ).toEqual([idOf(2)]);
+  });
+
+  it('drops rows of another status, out of order or past the limit', async () => {
+    const w = world({ projects: range(4) });
+    const { source } = setup(w);
+    const lister = createProjectLister({
+      source,
+      readable: {
+        listReadableProjects: async () => [entry(2), entry(1), entry(3, 'archived'), entry(4)],
+      },
+    });
+    expect(await ids(lister, actorOf(w), { limit: 3, afterId: idOf(1) })).toEqual([idOf(2)]);
+  });
+
+  it('refuses a full page of which no row survives instead of ending the listing', async () => {
+    const w = world({ projects: range(4) });
+    const { source } = setup(w);
+    const lister = createProjectLister({
+      source,
+      readable: { listReadableProjects: async () => [entry(1, 'archived'), entry(2, 'archived')] },
+    });
+    expect(await lister.list(ctx, actorOf(w), { limit: 2 })).toEqual({
+      ok: false,
+      error: 'source_invalid',
+    });
+  });
+
+  it('refuses a readable source without its method', () => {
+    const { source } = setup(world({ projects: range(1) }));
+    expect(() => createProjectLister({ source, readable: {} as never })).toThrow(TypeError);
+    expect(() => createProjectLister({ source })).toThrow(TypeError);
+  });
+});
+
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+describe('capped fallback and readable source agree', () => {
+  it.each(Array.from({ length: 40 }, (_, i) => i + 1))(
+    'returns equal pages and cursors for random world %i',
+    async (seed) => {
+      const random = mulberry32(seed * 104_729);
+      const count = 1 + Math.floor(random() * 30);
+      const projects = Array.from({ length: count }, (_, i) =>
+        entry(i + 1, random() < 0.2 ? 'archived' : 'active'),
+      );
+      const projectPermissions: Record<string, string[]> = {};
+      for (const p of projects) {
+        const roll = random();
+        if (roll < 0.35) projectPermissions[p.id] = ['project:read'];
+        else if (roll < 0.5) projectPermissions[p.id] = ['project:write'];
+      }
+      const w = world({
+        projects,
+        organizationPermissions: random() < 0.5 ? ['org:read'] : [],
+        projectPermissions,
+      });
+      const fallback = setup(w).lister;
+      const viaReadable = readableSetup(w).lister;
+      for (const status of ['active', 'archived'] as const) {
+        const limit = 1 + Math.floor(random() * 5);
+        const actor = actorOf(w, status === 'archived');
+        let afterId: string | undefined;
+        for (let page = 0; page < 40; page += 1) {
+          const request = { limit, status, ...(afterId === undefined ? {} : { afterId }) };
+          const left = await fallback.list(ctx, actor, request);
+          const right = await viaReadable.list(ctx, actor, request);
+          expect(right).toEqual(left);
+          if (!left.ok || left.value.nextAfterId === null) break;
+          afterId = left.value.nextAfterId;
+        }
+      }
+    },
+  );
 });

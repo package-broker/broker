@@ -20,10 +20,11 @@ const matrix = [
   ['org:grants:read', 'organization', '011000'],
   ['org:grants:write', 'organization', '110000'],
   ['org:projects:create', 'organization', '110000'],
+  ['org:projects:archive', 'organization', '110000'],
   ['org:sources:read', 'organization', '011000'],
   ['org:sources:write', 'organization', '110000'],
-  ['org:tokens:read', 'organization', '011000'],
-  ['org:tokens:revoke', 'organization', '010000'],
+  ['org:tokens:read', 'organization', '111000'],
+  ['org:tokens:revoke', 'organization', '110000'],
   ['org:service-principals:write', 'organization', '110000'],
   ['org:audit:read', 'organization', '011000'],
   ['project:read', 'project', '011111'],
@@ -35,9 +36,10 @@ const matrix = [
   ['project:packages:manage', 'project', '110100'],
   ['project:sources:read', 'project', '011111'],
   ['project:sources:write', 'project', '110100'],
+  ['project:service-principals:write', 'project', '110100'],
   ['project:tokens:create', 'project', '110110'],
-  ['project:tokens:read', 'project', '011101'],
-  ['project:tokens:revoke', 'project', '010100'],
+  ['project:tokens:read', 'project', '111101'],
+  ['project:tokens:revoke', 'project', '110100'],
   ['project:audit:read', 'project', '011101'],
 ] as const;
 
@@ -52,9 +54,9 @@ const roles = [
 describe('permission catalogue', () => {
   it('matches every catalogue and default-role matrix cell', () => {
     expect(PERMISSIONS.map(({ name }) => name)).toEqual(matrix.map(([name]) => name));
-    expect(PERMISSIONS).toHaveLength(28);
-    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(15);
-    expect(PERMISSIONS.filter(({ scope }) => scope === 'project')).toHaveLength(13);
+    expect(PERMISSIONS).toHaveLength(30);
+    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(16);
+    expect(PERMISSIONS.filter(({ scope }) => scope === 'project')).toHaveLength(14);
     expect(DEFAULT_ROLES).toHaveLength(5);
     for (const [index, [key, name, scope]] of roles.entries()) {
       const role = DEFAULT_ROLES[index]!;
@@ -64,7 +66,7 @@ describe('permission catalogue', () => {
       );
       expect(rolePermissionProblems(scope, role.permissions)).toEqual([]);
     }
-    expect(DEFAULT_ROLES[2]!.permissions).toHaveLength(13);
+    expect(DEFAULT_ROLES[2]!.permissions).toHaveLength(14);
     for (const [index, [name, scope, cells]] of matrix.entries()) {
       expect(PERMISSIONS[index]).toMatchObject({
         name,
@@ -75,8 +77,8 @@ describe('permission catalogue', () => {
       expect(name).toMatch(PERMISSION_PATTERN);
       expect(isPermission(name)).toBe(true);
     }
-    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(28);
-    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(28);
+    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(30);
+    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(30);
   });
 
   it('validates unknown names, project scope violations and duplicates', () => {
@@ -215,8 +217,8 @@ describe('permission catalogue', () => {
     expect(problems).toHaveLength(2);
     const missing = missingCatalogue([]);
     expect(() => missing.push('extra')).not.toThrow();
-    expect(missing).toHaveLength(29);
-    expect(missingCatalogue([])).toHaveLength(28);
+    expect(missing).toHaveLength(31);
+    expect(missingCatalogue([])).toHaveLength(30);
     expect(rolePermissionProblems('project', ['bogus'])).toHaveLength(1);
   });
 

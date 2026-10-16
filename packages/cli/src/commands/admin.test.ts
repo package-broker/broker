@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
@@ -530,9 +530,9 @@ it('14. error text from the executor and the token never reach stdout or stderr'
       target: cloudflareTarget(throwing),
       stdoutIsTTY: true,
     }),
-  ).toBe(1);
+  ).toBe(7);
   expect(output().stderr).not.toContain(SENTINEL);
-  expect(output().stderr).toMatch(/^admin reset-local: [a-z_]+ \(\w+\)$/m);
+  expect(output().stderr).toMatch(/^admin reset-local: outcome unknown; re-running is safe$/m);
   expect(console.log).not.toHaveBeenCalled();
 });
 
@@ -864,4 +864,253 @@ it('29. already_set_up leaves user_account and access_grant unchanged', async ()
     await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
   ).toBe(6);
   expect(await snapshot()).toEqual(before);
+});
+
+it('30. a fetch rejection after the request was handed over exits 7 and removes the token file', async () => {
+  const tokenFile = join(dir, 'rejected.token');
+  const harness = await createHarness({
+    override: (call) => {
+      if (call === 2) throw new TypeError(`fetch failed ${SENTINEL}`);
+      return undefined;
+    },
+  });
+  try {
+    expect(
+      await runAdminBootstrap({
+        email: EMAIL,
+        target: cloudflareTarget(harness.fetch),
+        tokenFile,
+        stdoutIsTTY: true,
+      }),
+    ).toBe(7);
+    expect(output().stderr).toBe('admin bootstrap: outcome unknown; re-running is safe');
+    expect(existsSync(tokenFile)).toBe(false);
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('31. a bad API token exits 2 before anything is sent', async () => {
+  const harness = await createHarness();
+  try {
+    const code = await runAdminBootstrap({
+      email: EMAIL,
+      target: {
+        kind: 'cloudflare',
+        databaseId: DATABASE_ID,
+        env: { ...ENV, CLOUDFLARE_API_TOKEN: 'bad token' },
+        fetch: harness.fetch,
+      },
+      stdoutIsTTY: true,
+    });
+    expect(code).toBe(2);
+    expect(output().stderr).not.toContain('outcome unknown');
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('32. cleanup leaves a token file that was replaced by another inode', async () => {
+  const tokenFile = join(dir, 'replaced.token');
+  const other = join(dir, 'other.token');
+  writeFileSync(other, 'replacement');
+  const harness = await createHarness({
+    override: (call) => {
+      if (call === 2) {
+        renameSync(other, tokenFile);
+        return d1Failure('boom');
+      }
+      return undefined;
+    },
+  });
+  try {
+    expect(
+      await runAdminBootstrap({
+        email: EMAIL,
+        target: cloudflareTarget(harness.fetch),
+        tokenFile,
+        stdoutIsTTY: true,
+      }),
+    ).toBe(1);
+    expect(await readFile(tokenFile, 'utf8')).toBe('replacement');
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('33. cleanup removes the token file whose device and inode still match', async () => {
+  const tokenFile = join(dir, 'matching.token');
+  const harness = await createHarness({
+    override: (call) => (call === 2 ? d1Failure('boom') : undefined),
+  });
+  try {
+    expect(
+      await runAdminBootstrap({
+        email: EMAIL,
+        target: cloudflareTarget(harness.fetch),
+        tokenFile,
+        stdoutIsTTY: true,
+      }),
+    ).toBe(1);
+    expect(existsSync(tokenFile)).toBe(false);
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('34. the token file and its parent directory are both fsynced', async () => {
+  const probe = await open(join(dir, 'probe'), 'w');
+  const prototype = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+  await probe.close();
+  const original = prototype.sync;
+  const kinds: string[] = [];
+  vi.spyOn(prototype, 'sync').mockImplementation(async function (this: {
+    stat: () => Promise<{ isDirectory: () => boolean }>;
+  }) {
+    kinds.push((await this.stat()).isDirectory() ? 'directory' : 'file');
+    return original.call(this);
+  });
+  const tokenFile = join(dir, 'synced.token');
+  const harness = await createHarness();
+  try {
+    expect(
+      await runAdminBootstrap({
+        email: EMAIL,
+        target: cloudflareTarget(harness.fetch),
+        tokenFile,
+        stdoutIsTTY: true,
+      }),
+    ).toBe(0);
+    expect(kinds).toEqual(['file', 'directory']);
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('35. a signal during the operation is deferred: the file is removed at once and the signal is re-raised only after the operation returns', async () => {
+  const tokenFile = join(dir, 'deferred.token');
+  const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  const known = new Set(process.listeners('SIGINT'));
+  let killedDuring: boolean | null = null;
+  let fileDuring: boolean | null = null;
+  let handlers = 0;
+  const harness = await createHarness({
+    override: (call) => {
+      if (call === 2) {
+        const added = process.listeners('SIGINT').filter((listener) => !known.has(listener));
+        handlers = added.length;
+        (added[0] as (signal: NodeJS.Signals) => void)('SIGINT');
+        killedDuring = kill.mock.calls.length > 0;
+        fileDuring = existsSync(tokenFile);
+      }
+      return undefined;
+    },
+  });
+  try {
+    const code = await runAdminBootstrap({
+      email: EMAIL,
+      target: cloudflareTarget(harness.fetch),
+      tokenFile,
+      stdoutIsTTY: true,
+    });
+    expect(code).toBe(7);
+    expect(handlers).toBe(1);
+    expect(killedDuring).toBe(false);
+    expect(fileDuring).toBe(false);
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGINT');
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('36. a second signal re-raises at once', async () => {
+  const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  const known = new Set(process.listeners('SIGINT'));
+  let killsDuring = -1;
+  const harness = await createHarness({
+    override: (call) => {
+      if (call === 2) {
+        const [handler] = process.listeners('SIGINT').filter((listener) => !known.has(listener));
+        (handler as (signal: NodeJS.Signals) => void)('SIGINT');
+        (handler as (signal: NodeJS.Signals) => void)('SIGINT');
+        killsDuring = kill.mock.calls.length;
+      }
+      return undefined;
+    },
+  });
+  try {
+    await runAdminBootstrap({
+      email: EMAIL,
+      target: cloudflareTarget(harness.fetch),
+      tokenFile: join(dir, 'twice.token'),
+      stdoutIsTTY: true,
+    });
+    expect(killsDuring).toBe(1);
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('37. a signal that arrived before the operation skips the operation', async () => {
+  const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  const known = new Set(process.listeners('SIGTERM'));
+  let calls = 0;
+  const harness = await createHarness({
+    override: (call) => {
+      calls = call;
+      if (call === 1) {
+        const [handler] = process.listeners('SIGTERM').filter((listener) => !known.has(listener));
+        (handler as (signal: NodeJS.Signals) => void)('SIGTERM');
+      }
+      return undefined;
+    },
+  });
+  try {
+    const code = await runAdminBootstrap({
+      email: EMAIL,
+      target: cloudflareTarget(harness.fetch),
+      tokenFile: join(dir, 'early-signal.token'),
+      stdoutIsTTY: true,
+    });
+    expect(code).toBe(7);
+    expect(calls).toBe(1);
+    expect(existsSync(join(dir, 'early-signal.token'))).toBe(false);
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+  } finally {
+    await harness.database.close();
+  }
+});
+
+it('38. fetch throwing synchronously is not sent: exit 1, not 7', async () => {
+  const throwing = (() => {
+    throw new TypeError(SENTINEL);
+  }) as unknown as typeof fetch;
+  const code = await runAdminBootstrap({
+    email: EMAIL,
+    target: cloudflareTarget(throwing),
+    stdoutIsTTY: true,
+  });
+  expect(code).toBe(1);
+  expect(output().stderr).toMatch(/^admin bootstrap: failed \(\w+\)$/);
+  expect(output().stderr).not.toContain(SENTINEL);
+});
+
+it('39. a non-lost executor error exits 1 with the error name only', async () => {
+  const failing = await createHarness({
+    override: (call) => (call === 2 ? d1Failure(`near "${SENTINEL}": syntax error`) : undefined),
+  });
+  try {
+    expect(
+      await runAdminBootstrap({
+        email: EMAIL,
+        target: cloudflareTarget(failing.fetch),
+        stdoutIsTTY: true,
+      }),
+    ).toBe(1);
+    expect(output().stderr).toMatch(/^admin bootstrap: failed \(\w+\)$/);
+    expect(output().stderr).not.toContain(SENTINEL);
+  } finally {
+    await failing.database.close();
+  }
 });

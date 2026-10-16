@@ -420,7 +420,26 @@ const MINTERS: Readonly<Record<string, readonly string[]>> = {
   'packages/core/src/catalogue/version-rules': ['completeSourceListing', 'completeVersionListing'],
   'packages/core/src/authz/fence': ['fenceGuard'],
 };
-const MINT_ALLOWED_ROOT = 'packages/db-sqlite/src/';
+interface ImportRule {
+  readonly modules: Readonly<Record<string, readonly string[]>>;
+  readonly allowedRoots: readonly string[];
+}
+
+const MINT_RULE: ImportRule = { modules: MINTERS, allowedRoots: ['packages/db-sqlite/src/'] };
+const ACCESS_CONTEXT_RULE: ImportRule = {
+  modules: {
+    'packages/core/src/authz/access-context': [
+      'setAccessContext',
+      'accessContextOf',
+      'organizationActorOf',
+    ],
+  },
+  allowedRoots: [
+    'packages/core/src/',
+    'packages/runtime-node/src/',
+    'packages/runtime-cloudflare/src/',
+  ],
+};
 const LITERAL_LOADS_ONLY = ['core', 'runtime-node', 'runtime-cloudflare'];
 const MODULE_EXTENSION = /\.(?:d\.ts|[cm]?ts|[cm]?js)$/;
 
@@ -468,10 +487,12 @@ function findMintViolations(
   relativePath: string,
   text: string,
   imports: PackageImports = {},
+  rule: ImportRule = MINT_RULE,
 ): string[] {
   if (relativePath.endsWith('.test.ts')) return [];
-  const allowed = relativePath.startsWith(MINT_ALLOWED_ROOT);
-  const literalLoadsOnly = LITERAL_LOADS_ONLY.includes(relativePath.split('/')[1] ?? '');
+  const allowed = rule.allowedRoots.some((root) => relativePath.startsWith(root));
+  const literalLoadsOnly =
+    rule === MINT_RULE && LITERAL_LOADS_ONLY.includes(relativePath.split('/')[1] ?? '');
   const requireAliases = new Set<string>();
   const sourceFile = ts.createSourceFile(relativePath, text, ts.ScriptTarget.Latest, true);
   const found: string[] = [];
@@ -482,8 +503,10 @@ function findMintViolations(
   };
   const mintNames = (specifier: ts.Node | undefined): readonly string[] | undefined => {
     if (!specifier || !ts.isStringLiteralLike(specifier)) return undefined;
-    const target = moduleIds(relativePath, specifier.text, imports).find((id) => id in MINTERS);
-    return target === undefined ? undefined : MINTERS[target];
+    const target = moduleIds(relativePath, specifier.text, imports).find(
+      (id) => id in rule.modules,
+    );
+    return target === undefined ? undefined : rule.modules[target];
   };
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) {
@@ -755,6 +778,68 @@ describe('minting modules', () => {
           readFileSync(path.join(REPO_ROOT, file), 'utf8'),
           manifest.imports,
         ),
+      );
+      expect(violations).toEqual([]);
+    });
+  }
+});
+
+describe('core-only access context', () => {
+  const check = (file: string, text: string, imports: PackageImports = {}): string[] =>
+    findMintViolations(file, text, imports, ACCESS_CONTEXT_RULE);
+
+  it('flags plugin imports of the setter and readers by any route', () => {
+    const file = 'packages/plugin-x/src/a.ts';
+    expect(
+      check(
+        file,
+        [
+          "import { setAccessContext } from '@package-broker/core/authz/access-context';",
+          "import { accessContextOf as read } from '@package-broker/core/authz/access-context.js';",
+          "import * as access from '@package-broker/core/authz/access-context';",
+          "const m = await import('@package-broker/core/authz/access-context');",
+          "export { organizationActorOf } from '@package-broker/core/authz/access-context';",
+          "import type { AccessContextSnapshot } from '@package-broker/core/authz/access-context';",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${file}:1: setAccessContext`,
+      `${file}:2: accessContextOf`,
+      `${file}:3: namespace import of a minting module`,
+      `${file}:4: dynamic load of a minting module`,
+      `${file}:5: re-export organizationActorOf`,
+    ]);
+  });
+
+  it('allows core and the runtimes to import but not to re-export them', () => {
+    const text =
+      "import { setAccessContext, accessContextOf } from '@package-broker/core/authz/access-context';";
+    for (const file of [
+      'packages/core/src/kernel/kernel.ts',
+      'packages/runtime-node/src/a.ts',
+      'packages/runtime-cloudflare/src/a.ts',
+    ]) {
+      expect(check(file, text)).toEqual([]);
+    }
+    expect(
+      check(
+        'packages/core/src/index.ts',
+        "export { setAccessContext } from './authz/access-context.js';",
+      ),
+    ).toEqual(['packages/core/src/index.ts:1: re-export setAccessContext']);
+    expect(check('packages/db-sqlite/src/a.ts', text)).toEqual([
+      'packages/db-sqlite/src/a.ts:1: setAccessContext',
+      'packages/db-sqlite/src/a.ts:1: accessContextOf',
+    ]);
+  });
+
+  for (const pkg of packageNames()) {
+    it(`${pkg} reaches the access context only from core and the runtimes`, () => {
+      const manifest = JSON.parse(
+        readFileSync(path.join(REPO_ROOT, 'packages', pkg, 'package.json'), 'utf8'),
+      ) as { imports?: PackageImports };
+      const violations = sourceFiles(pkg).flatMap((file) =>
+        check(file, readFileSync(path.join(REPO_ROOT, file), 'utf8'), manifest.imports),
       );
       expect(violations).toEqual([]);
     });

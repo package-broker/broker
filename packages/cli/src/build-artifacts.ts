@@ -84,11 +84,17 @@ export function renderBuildManifest(
   configPath: string,
   migrations?: readonly MigrationSource[],
   platform: NodeJS.Platform = process.platform,
+  orderedPluginIds?: readonly string[],
 ): string {
   const specifier = platform === 'win32' ? configPath.replaceAll('\\', '/') : configPath;
   const lines = [
     `import config from ${JSON.stringify(specifier)};`,
-    'export const plugins = config.plugins;',
+    ...(orderedPluginIds === undefined
+      ? ['export const plugins = config.plugins;']
+      : [
+          'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
+          `export const plugins = ${JSON.stringify(orderedPluginIds)}.map((id) => pluginsById.get(id)!);`,
+        ]),
   ];
   if (migrations !== undefined) {
     lines.push(`export const migrations = ${JSON.stringify(migrations, null, 2)};`);

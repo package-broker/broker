@@ -61,10 +61,21 @@ export function orderPlugins(plugins: readonly PluginDefinition[]): PluginDefini
       if (resolved) visit(resolved);
     }
     state.set(plugin.id, 'done');
-    ordered.push(plugin);
   };
 
   plugins.forEach(visit);
+
+  const remaining = new Set(plugins);
+  const emitted = new Set<string>();
+  while (remaining.size > 0) {
+    for (const plugin of remaining) {
+      if ((plugin.dependsOn ?? []).some((id) => byId.has(id) && !emitted.has(id))) continue;
+      ordered.push(plugin);
+      emitted.add(plugin.id);
+      remaining.delete(plugin);
+      break;
+    }
+  }
   return ordered;
 }
 

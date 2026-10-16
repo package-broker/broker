@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build as bundle } from 'esbuild';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -11,7 +11,7 @@ import {
   renderNodePackageJson,
   writeOutputPackageJson,
 } from './build-artifacts.js';
-import { readNodeDriverVersion } from './build.js';
+import { build, readNodeDriverVersion } from './build.js';
 
 describe('renderBuildInfo', () => {
   it('renders the complete build metadata with indentation and a trailing newline', () => {
@@ -193,5 +193,63 @@ describe('readNodeDriverVersion', () => {
       path.join(project, 'node_modules', '@package-broker', 'cli', 'src', 'build.ts'),
     );
     await expect(readNodeDriverVersion(linkedCliRequire)).resolves.toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe('built plugin order round trip', () => {
+  let project: string;
+
+  beforeEach(async () => {
+    project = await mkdtemp(path.join(tmpdir(), 'pb-plugin-order-'));
+  });
+
+  afterEach(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+
+  async function config(cycle = false): Promise<string> {
+    const configPath = path.join(project, 'broker.config.ts');
+    await writeFile(
+      configPath,
+      `export default {
+        platform: 'node',
+        plugins: [
+          { id: 'b', package: '@package-broker/core', apiVersion: 2,
+            platforms: ['node', 'cloudflare'], dependsOn: ['a'] },
+          { id: 'a', package: '@package-broker/core', apiVersion: 2,
+            platforms: ['node', 'cloudflare'], dependsOn: ${JSON.stringify(cycle ? ['b'] : [])} }
+        ]
+      };`,
+    );
+    return configPath;
+  }
+
+  it.each(['node', 'cloudflare'] as const)(
+    'exports dependencies before dependants from the %s build manifest',
+    async (target) => {
+      const result = await build({
+        configPath: await config(),
+        target,
+        outDir: path.join(project, target),
+      });
+      const outfile = path.join(project, 'manifest.mjs');
+      await bundle({
+        entryPoints: [result.manifestTs],
+        outfile,
+        bundle: true,
+        format: 'esm',
+        platform: 'node',
+      });
+      const manifest = (await import(pathToFileURL(outfile).href)) as {
+        plugins: { id: string }[];
+      };
+      expect(manifest.plugins.map(({ id }) => id)).toEqual(['a', 'b']);
+    },
+  );
+
+  it('rejects a cycle with the existing validation message', async () => {
+    await expect(
+      build({ configPath: await config(true), outDir: path.join(project, 'cycle') }),
+    ).rejects.toThrow('dependency cycle at plugin "b"');
   });
 });

@@ -113,7 +113,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const manifestJson = path.join(generated, 'manifest.json');
   await writeFile(
     manifestTs,
-    renderBuildManifest(configPath, target === 'node' ? sources : undefined),
+    renderBuildManifest(
+      configPath,
+      target === 'node' ? sources : undefined,
+      undefined,
+      plugins.map((plugin) => plugin.id),
+    ),
   );
   await writeFile(
     manifestJson,

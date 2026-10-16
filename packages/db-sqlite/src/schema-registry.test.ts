@@ -71,6 +71,8 @@ const declared: { [T in RegistryTableName]: ExpectedNotNull<T> } = {
     form: 1,
     validator: 1,
     last_modified: 1,
+    rev: 1,
+    package_id: 1,
   },
 };
 
@@ -109,7 +111,7 @@ describe('registry table types match the migrated database', () => {
     expect(Object.keys(declared.ingest_session)).toHaveLength(20);
     expect(Object.keys(declared.upstream_state)).toHaveLength(10);
     expect(Object.keys(declared.fetch_lease)).toHaveLength(6);
-    expect(Object.keys(declared.representation_clock)).toHaveLength(6);
+    expect(Object.keys(declared.representation_clock)).toHaveLength(8);
   });
 });
 

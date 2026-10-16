@@ -226,9 +226,9 @@ describe('plugin api version and boundary', () => {
     ).toThrow(KernelConfigError);
   });
 
-  it('accepts an API 2 public route without a boundary', () => {
+  it('accepts an API 3 public route without a boundary', () => {
     expect(() =>
-      collectRegistrations([pluginWith([route({ permission: null })], 2)]),
+      collectRegistrations([pluginWith([route({ permission: null })], 3)]),
     ).not.toThrow();
   });
 

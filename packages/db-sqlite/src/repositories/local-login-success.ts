@@ -10,7 +10,7 @@ import {
   type Database,
   type Guard,
 } from '../kysely.js';
-import { sessionInsertStatement } from './session.js';
+import { revokePreviousStatement, sessionInsertStatement } from './session.js';
 
 type SucceedInput = Parameters<LocalLoginSuccessWriter['succeed']>[1];
 
@@ -133,33 +133,6 @@ function updateLocalLoginStatement(
   return compile(update);
 }
 
-function revokePreviousStatement(
-  ctx: OrgContext,
-  previousSecretHash: string,
-  newSessionId: string,
-  now: string,
-  guard: Guard,
-): Statement {
-  return compile(
-    db
-      .updateTable('session')
-      .set({ revoked_at: now })
-      .where('session.org_id', '=', ctx.orgId)
-      .where('session.secret_hash', '=', previousSecretHash)
-      .where('session.revoked_at', 'is', null)
-      .where((eb) =>
-        eb.exists(
-          eb
-            .selectFrom('session as created')
-            .select('created.id')
-            .where('created.id', '=', newSessionId)
-            .where('created.org_id', '=', ctx.orgId),
-        ),
-      )
-      .where(guard),
-  );
-}
-
 function reauthStatement(
   ctx: OrgContext,
   input: SucceedInput,
@@ -216,7 +189,9 @@ export function createLocalLoginSuccessWriter(executor: SqlExecutor): LocalLogin
         }
         const statements = [update, sessionInsertStatement(ctx, session, [guard])];
         if (previousSecretHash !== null) {
-          statements.push(revokePreviousStatement(ctx, previousSecretHash, session.id, now, guard));
+          statements.push(
+            revokePreviousStatement(ctx, previousSecretHash, session.id, now, [guard]),
+          );
         }
         const results = await executor.batch(statements);
         return (results[1]?.rows.length ?? 0) === 1;

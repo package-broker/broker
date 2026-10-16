@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DbError } from '@package-broker/core/db/errors';
 import type { CredentialRecord } from '@package-broker/core/db/credentials';
 import type { LocalLoginSetupWriter } from '@package-broker/core/db/local-login';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -480,10 +481,13 @@ describe('stagePendingTotp', () => {
     await seedPending();
     const admin = await loginRow();
     const plain = await loginRow(PLAIN);
-    const outcome = await writer
-      .stagePendingTotp(a, stageInput(THIRD_CREDENTIAL))
-      .catch(() => 'rejected');
-    expect([false, 'rejected']).toContain(outcome);
+    const failure = await writer.stagePendingTotp(a, stageInput(THIRD_CREDENTIAL)).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(DbError);
+    expect((failure as DbError).kind).toBe('unique');
+    expect((failure as DbError).constraint).toBe('credential.id');
     expect(await credentialIds()).toEqual([OLD_CREDENTIAL, THIRD_CREDENTIAL].sort());
     expect(await loginRow()).toEqual(admin);
     expect(await loginRow(PLAIN)).toEqual(plain);
@@ -790,7 +794,7 @@ describe('two connections', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it('4d: two completions of the same setup produce one session', async () => {
+  it('4d: a second completion after the first is refused and leaves one new session', async () => {
     const other = createLocalLoginSetupWriter(await database.second());
     const results = await Promise.all([
       writer.completeSetup(a, completeInput()),
@@ -807,7 +811,7 @@ describe('two connections', () => {
     expect(await sessionRows()).toHaveLength(2);
   });
 
-  it('4e: a completion and a restage racing: exactly one of them wins', async () => {
+  it('4e: a restage and a completion issued together on two connections: exactly one applies', async () => {
     const other = createLocalLoginSetupWriter(await database.second());
     const [completed, staged] = await Promise.all([
       writer.completeSetup(a, completeInput()),

@@ -391,3 +391,349 @@ describe('dependency edges', () => {
     });
   }
 });
+
+const MINTERS: Readonly<Record<string, readonly string[]>> = {
+  'packages/core/src/db/catalogue': ['catalogueWriteGuard'],
+  'packages/core/src/catalogue/version-rules': ['completeSourceListing', 'completeVersionListing'],
+  'packages/core/src/authz/fence': ['fenceGuard'],
+};
+const MINT_ALLOWED_ROOT = 'packages/db-sqlite/src/';
+const LITERAL_LOADS_ONLY = ['core', 'runtime-node', 'runtime-cloudflare'];
+const MODULE_EXTENSION = /\.(?:d\.ts|[cm]?ts|[cm]?js)$/;
+
+const WORKSPACE_DIRS = new Map(
+  packageNames().map((dir) => [
+    (
+      JSON.parse(readFileSync(path.join(REPO_ROOT, 'packages', dir, 'package.json'), 'utf8')) as {
+        name: string;
+      }
+    ).name,
+    dir,
+  ]),
+);
+
+function moduleIds(fromFile: string, specifier: string, imports: PackageImports): string[] {
+  const packageDir = path.posix.join('packages', fromFile.split('/')[1] ?? '');
+  const strip = (target: string): string =>
+    target.replace(MODULE_EXTENSION, '').replace(/^(packages\/[^/]+)\/dist\//, '$1/src/');
+  if (specifier.startsWith('#')) {
+    return (aliasTargets(imports, specifier) ?? []).flatMap((target) =>
+      target.startsWith('.')
+        ? [strip(path.posix.normalize(path.posix.join(packageDir, target)))]
+        : moduleIds(fromFile, target, {}),
+    );
+  }
+  if (specifier.startsWith('.')) {
+    return [strip(path.posix.normalize(path.posix.join(path.posix.dirname(fromFile), specifier)))];
+  }
+  const parts = specifier.split('/');
+  const dir = WORKSPACE_DIRS.get(parts.slice(0, 2).join('/'));
+  if (!dir || parts.length < 3) return [];
+  return [strip(`packages/${dir}/src/${parts.slice(2).join('/')}`)];
+}
+
+function isCreateRequire(node: ts.Node): boolean {
+  if (!ts.isCallExpression(node)) return false;
+  const callee = node.expression;
+  return (
+    (ts.isIdentifier(callee) && callee.text === 'createRequire') ||
+    (ts.isPropertyAccessExpression(callee) && callee.name.text === 'createRequire')
+  );
+}
+
+function findMintViolations(
+  relativePath: string,
+  text: string,
+  imports: PackageImports = {},
+): string[] {
+  if (relativePath.endsWith('.test.ts')) return [];
+  const allowed = relativePath.startsWith(MINT_ALLOWED_ROOT);
+  const literalLoadsOnly = LITERAL_LOADS_ONLY.includes(relativePath.split('/')[1] ?? '');
+  const requireAliases = new Set<string>();
+  const sourceFile = ts.createSourceFile(relativePath, text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const mintedLocals = new Set<string>();
+  const report = (node: ts.Node, what: string): void => {
+    const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+    found.push(`${relativePath}:${line}: ${what}`);
+  };
+  const mintNames = (specifier: ts.Node | undefined): readonly string[] | undefined => {
+    if (!specifier || !ts.isStringLiteralLike(specifier)) return undefined;
+    const target = moduleIds(relativePath, specifier.text, imports).find((id) => id in MINTERS);
+    return target === undefined ? undefined : MINTERS[target];
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      const names = mintNames(node.moduleSpecifier);
+      const bindings = node.importClause?.namedBindings;
+      if (names && bindings && ts.isNamespaceImport(bindings) && !allowed) {
+        report(node, 'namespace import of a minting module');
+      } else if (names && bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          const imported = (element.propertyName ?? element.name).text;
+          if (!names.includes(imported)) continue;
+          if (allowed) mintedLocals.add(element.name.text);
+          else report(element, imported);
+        }
+      }
+    } else if (ts.isExportDeclaration(node)) {
+      const names = mintNames(node.moduleSpecifier);
+      const clause = node.exportClause;
+      if (names && !clause) report(node, 'export * of a minting module');
+      else if (names && clause && ts.isNamespaceExport(clause)) {
+        report(node, 'export * as of a minting module');
+      } else if (clause && ts.isNamedExports(clause)) {
+        for (const element of clause.elements) {
+          const exported = (element.propertyName ?? element.name).text;
+          if (names ? names.includes(exported) : mintedLocals.has(exported)) {
+            report(element, `re-export ${exported}`);
+          }
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(node) && !allowed) {
+      const reference = node.moduleReference;
+      if (ts.isExternalModuleReference(reference) && mintNames(reference.expression)) {
+        report(node, 'import-equals of a minting module');
+      }
+    } else if (ts.isExportAssignment(node) && allowed) {
+      if (ts.isIdentifier(node.expression) && mintedLocals.has(node.expression.text)) {
+        report(node, `re-export ${node.expression.text}`);
+      }
+    } else if (ts.isVariableStatement(node)) {
+      const exported = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      for (const declaration of node.declarationList.declarations) {
+        const init = declaration.initializer;
+        if (init && isCreateRequire(init) && ts.isIdentifier(declaration.name)) {
+          requireAliases.add(declaration.name.text);
+        }
+        if (allowed && exported && init && ts.isIdentifier(init) && mintedLocals.has(init.text)) {
+          report(declaration, `re-export ${init.text}`);
+        }
+      }
+    } else if (ts.isCallExpression(node) && !allowed) {
+      const callee = node.expression;
+      const isLoader =
+        callee.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(callee) &&
+          (callee.text === 'require' || requireAliases.has(callee.text))) ||
+        isCreateRequire(callee);
+      const argument = node.arguments[0];
+      if (isLoader && literalLoadsOnly && !(argument && ts.isStringLiteral(argument))) {
+        report(node, 'dynamic load with a computed specifier');
+      } else if (isLoader && mintNames(argument)) {
+        report(node, 'dynamic load of a minting module');
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+describe('minting modules', () => {
+  const leak = 'packages/core/src/catalogue/leak.ts';
+
+  it('flags named imports of a mint, also renamed and by package specifier', () => {
+    expect(
+      findMintViolations(
+        leak,
+        [
+          "import { catalogueWriteGuard } from '../db/catalogue.js';",
+          "import { completeSourceListing as c, completeVersionListing } from './version-rules.js';",
+          "import { fenceGuard } from '../authz/fence';",
+          "import { catalogueWriteGuard as w } from '@package-broker/core/db/catalogue';",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${leak}:1: catalogueWriteGuard`,
+      `${leak}:2: completeSourceListing`,
+      `${leak}:2: completeVersionListing`,
+      `${leak}:3: fenceGuard`,
+      `${leak}:4: catalogueWriteGuard`,
+    ]);
+  });
+
+  it('allows named imports of the other exports', () => {
+    const text = [
+      "import { versionTransition, type VersionStatus } from './version-rules.js';",
+      "import { validateLimit, type CatalogueReader } from '../db/catalogue.js';",
+      "import { mutationFence } from '@package-broker/core/authz/fence';",
+      "import * as names from './names.js';",
+    ].join('\n');
+    expect(findMintViolations(leak, text)).toEqual([]);
+  });
+
+  it('flags namespace imports by relative and package specifiers', () => {
+    expect(
+      findMintViolations(
+        leak,
+        "import * as rules from './version-rules.ts';\nimport type * as c from '../db/catalogue';",
+      ),
+    ).toEqual([
+      `${leak}:1: namespace import of a minting module`,
+      `${leak}:2: namespace import of a minting module`,
+    ]);
+    expect(
+      findMintViolations(
+        'packages/runtime-node/src/a.ts',
+        "import * as fence from '@package-broker/core/authz/fence';",
+      ),
+    ).toEqual(['packages/runtime-node/src/a.ts:1: namespace import of a minting module']);
+  });
+
+  it('flags export *, export * as and named re-exports', () => {
+    const file = 'packages/plugin-x/src/index.ts';
+    expect(
+      findMintViolations(
+        file,
+        [
+          "export * from '@package-broker/core/catalogue/version-rules.js';",
+          "export * as c from '@package-broker/core/db/catalogue';",
+          "export { fenceGuard as g } from '@package-broker/core/authz/fence';",
+          "export { mutationFence } from '@package-broker/core/authz/fence';",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${file}:1: export * of a minting module`,
+      `${file}:2: export * as of a minting module`,
+      `${file}:3: re-export fenceGuard`,
+    ]);
+  });
+
+  it('flags dynamic import, require and import-equals', () => {
+    const text = [
+      "const a = await import('../db/catalogue.js');",
+      "const c = require('../authz/fence.js');",
+      "import d = require('./version-rules');",
+      "const e = createRequire(import.meta.url)('./version-rules.js');",
+    ].join('\n');
+    expect(findMintViolations(leak, text)).toEqual([
+      `${leak}:1: dynamic load of a minting module`,
+      `${leak}:2: dynamic load of a minting module`,
+      `${leak}:3: import-equals of a minting module`,
+      `${leak}:4: dynamic load of a minting module`,
+    ]);
+  });
+
+  it('flags loads with a computed specifier in core and runtime sources', () => {
+    const text = [
+      "const name = '../db/catalogue.js';",
+      'const a = await import(name);',
+      'const b = await import(`./version-rules.js`);',
+      'const c = await import(`../${name}`);',
+      'const d = require(name);',
+      'const req = createRequire(import.meta.url);',
+      'const e = req(name);',
+      'const f = module.createRequire(import.meta.url)(name);',
+      "const g = await import('./names.js');",
+    ].join('\n');
+    const computed = [2, 3, 4, 5, 7, 8].map(
+      (line) => `${leak}:${line}: dynamic load with a computed specifier`,
+    );
+    expect(findMintViolations(leak, text)).toEqual(computed);
+    expect(findMintViolations('packages/runtime-node/src/a.ts', 'await import(name);')).toEqual([
+      'packages/runtime-node/src/a.ts:1: dynamic load with a computed specifier',
+    ]);
+    expect(findMintViolations('packages/runtime-cloudflare/src/a.ts', 'require(`x`);')).toEqual([
+      'packages/runtime-cloudflare/src/a.ts:1: dynamic load with a computed specifier',
+    ]);
+  });
+
+  it('checks literal loads elsewhere and leaves computed ones to the boundary rule', () => {
+    const file = 'packages/cli/src/a.ts';
+    expect(
+      findMintViolations(
+        file,
+        'await import(outfile);\nawait import(`@package-broker/core/authz/fence`);',
+      ),
+    ).toEqual([`${file}:2: dynamic load of a minting module`]);
+  });
+
+  it('resolves package import aliases', () => {
+    const imports = {
+      '#rules': './src/catalogue/version-rules.js',
+      '#core/*': '@package-broker/core/*',
+    };
+    expect(
+      findMintViolations(
+        'packages/core/src/x.ts',
+        "import * as r from '#rules';\nimport { fenceGuard } from '#core/authz/fence';",
+        imports,
+      ),
+    ).toEqual([
+      'packages/core/src/x.ts:1: namespace import of a minting module',
+      'packages/core/src/x.ts:2: fenceGuard',
+    ]);
+  });
+
+  it('allows db-sqlite sources to import but not to re-export a mint', () => {
+    const file = 'packages/db-sqlite/src/repositories/w.ts';
+    expect(
+      findMintViolations(
+        file,
+        [
+          "import { catalogueWriteGuard } from '@package-broker/core/db/catalogue';",
+          "import * as rules from '@package-broker/core/catalogue/version-rules';",
+          "const m = await import('@package-broker/core/authz/fence');",
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+    expect(
+      findMintViolations(
+        file,
+        [
+          "import { completeSourceListing as c } from '@package-broker/core/catalogue/version-rules';",
+          'export { c };',
+          "export * from '@package-broker/core/db/catalogue';",
+        ].join('\n'),
+      ),
+    ).toEqual([`${file}:2: re-export c`, `${file}:3: export * of a minting module`]);
+    expect(
+      findMintViolations(
+        file,
+        [
+          "import { catalogueWriteGuard as g, validateLimit } from '@package-broker/core/db/catalogue';",
+          'export default g;',
+          'export const h = g;',
+          'export const v = validateLimit;',
+          'const local = g;',
+        ].join('\n'),
+      ),
+    ).toEqual([`${file}:2: re-export g`, `${file}:3: re-export g`]);
+  });
+
+  it("exempts tests; defining modules may not re-export another module's mints", () => {
+    const text = "import * as c from '../db/catalogue.js';\nexport * from './version-rules.js';";
+    expect(findMintViolations('packages/core/src/catalogue/x.test.ts', text)).toEqual([]);
+    const fence = 'packages/core/src/authz/fence.ts';
+    expect(
+      findMintViolations(
+        fence,
+        [
+          'export function fenceGuard() {}',
+          "export { catalogueWriteGuard } from '../db/catalogue.js';",
+          "export * from '../catalogue/version-rules.js';",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${fence}:2: re-export catalogueWriteGuard`,
+      `${fence}:3: export * of a minting module`,
+    ]);
+  });
+
+  for (const pkg of packageNames()) {
+    it(`${pkg} does not reach write guards or proofs outside db-sqlite`, () => {
+      const manifest = JSON.parse(
+        readFileSync(path.join(REPO_ROOT, 'packages', pkg, 'package.json'), 'utf8'),
+      ) as { imports?: PackageImports };
+      const violations = sourceFiles(pkg).flatMap((file) =>
+        findMintViolations(
+          file,
+          readFileSync(path.join(REPO_ROOT, file), 'utf8'),
+          manifest.imports,
+        ),
+      );
+      expect(violations).toEqual([]);
+    });
+  }
+});

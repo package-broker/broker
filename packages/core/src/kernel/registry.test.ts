@@ -282,6 +282,20 @@ describe('collectRegistrations', () => {
     ]);
   });
 
+  it('refuses an API 2 plugin and registers the same plugin at API 3', () => {
+    let thrown: unknown;
+    try {
+      collectRegistrations([plugin('legacy', { apiVersion: 2 })]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(KernelConfigError);
+    expect((thrown as KernelConfigError).problems).toEqual([
+      'plugin "legacy" has apiVersion 2, core supports 3 to 3',
+    ]);
+    expect(() => collectRegistrations([plugin('legacy', { apiVersion: 3 })])).not.toThrow();
+  });
+
   it('collects three problems from one set', () => {
     const a = plugin('a', { apiVersion: 99, binds: ['source'], sourceProviders: () => [] });
     const b = withRoutes(

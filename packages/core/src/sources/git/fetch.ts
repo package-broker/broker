@@ -59,7 +59,9 @@ const LIMITS = {
   docker: { packBytes: 64 * MIB, retainedBytes: 96 * MIB, maxObjects: 200_000 },
   cloudflare: { packBytes: 16 * MIB, retainedBytes: 24 * MIB, maxObjects: 50_000 },
 } as const;
-const MAX_OBJECT_BYTES = 8 * MIB;
+export const MAX_OBJECT_BYTES = 8 * MIB;
+export const MAX_BLOB_BATCH = 256;
+const BODY_CHUNK = 64 * 1024;
 
 type Filter = string | undefined;
 const MANIFEST_STRATEGIES: readonly Filter[] = ['tree:1', 'tree:0', 'blob:none', undefined];
@@ -163,8 +165,16 @@ interface StoredObject {
   readonly data: Uint8Array;
 }
 
+export interface GitFetchLimits {
+  readonly packBytes: number;
+  readonly retainedBytes: number;
+  readonly maxObjects: number;
+  readonly maxObjectBytes: number;
+}
+
 interface Session {
   readonly ctx: GitFetchContext;
+  readonly limits: GitFetchLimits;
   readonly url: string;
   readonly host: string;
   readonly store: Map<string, StoredObject>;
@@ -198,21 +208,30 @@ function repository(repoUrl: string): { url: string; host: string } {
   };
 }
 
-function packLimits(ctx: GitFetchContext, reserved = 0): PackLimits {
+function runtimeLimits(ctx: GitFetchContext): GitFetchLimits {
+  return { ...LIMITS[ctx.runtime], maxObjectBytes: MAX_OBJECT_BYTES };
+}
+
+function packLimits(limits: GitFetchLimits, reserved = 0): PackLimits {
   return {
-    maxObjects: LIMITS[ctx.runtime].maxObjects,
-    maxRetainedBytes: Math.max(0, LIMITS[ctx.runtime].retainedBytes - reserved),
-    maxObjectBytes: MAX_OBJECT_BYTES,
+    maxObjects: limits.maxObjects,
+    maxRetainedBytes: Math.max(0, limits.retainedBytes - reserved),
+    maxObjectBytes: limits.maxObjectBytes,
   };
 }
 
-function session(ctx: GitFetchContext, repoUrl: string): Session {
+function session(
+  ctx: GitFetchContext,
+  repoUrl: string,
+  limits: GitFetchLimits = runtimeLimits(ctx),
+): Session {
   const { url, host } = repository(repoUrl);
-  return { ctx, url, host, budget: new PackBudget(packLimits(ctx)), store: new Map(), held: 0 };
+  const budget = new PackBudget(packLimits(limits));
+  return { ctx, url, host, limits, budget, store: new Map(), held: 0 };
 }
 
 function rebudget(s: Session): void {
-  s.budget = new PackBudget(packLimits(s.ctx, s.held));
+  s.budget = new PackBudget(packLimits(s.limits, s.held));
 }
 
 function concat(parts: Uint8Array[], total: number): Uint8Array {
@@ -327,7 +346,7 @@ async function fetchChunk(
   deepen: boolean,
   filter: Filter,
 ): Promise<void> {
-  const limit = LIMITS[s.ctx.runtime].packBytes;
+  const limit = s.limits.packBytes;
   let pack: Uint8Array;
   try {
     const response = await s.ctx.policyFetch({
@@ -714,4 +733,144 @@ export async function readTreeAtCommit(
   } catch (error) {
     return mapFailure(error);
   }
+}
+
+export interface GitBlobReader {
+  read(
+    oid: string,
+    maxBytes: number,
+  ): Promise<{ readonly size: number; readonly body: ReadableStream<Uint8Array> }>;
+}
+
+function drop(s: Session, oid: string): void {
+  const object = s.store.get(oid);
+  if (object === undefined) return;
+  s.store.delete(oid);
+  s.held -= object.data.length;
+}
+
+function chunked(data: Uint8Array): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= data.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(data.slice(offset, offset + BODY_CHUNK));
+      offset += BODY_CHUNK;
+    },
+  });
+}
+
+/**
+ * Reads blobs of `plan` by oid, prefetching up to MAX_BLOB_BATCH not-yet-read plan oids per
+ * request. Returned objects leave the session store, so a repeated read refetches. The retained
+ * budget charges both the raw pack and the inflated objects; when a batch overflows it, or the
+ * batch exhausts the bisection request budget of fetchBlobs, the store is cleared and the batch
+ * window halves for the rest of the reader's life.
+ */
+export interface GitBlobReaderOptions {
+  /** Each value is capped at the runtime default; a limit can only be lowered. */
+  readonly limits?: Partial<GitFetchLimits>;
+}
+
+function lowered(ctx: GitFetchContext, wanted: Partial<GitFetchLimits> = {}): GitFetchLimits {
+  const base = runtimeLimits(ctx);
+  const pick = (key: keyof GitFetchLimits): number => {
+    const value = wanted[key];
+    if (value === undefined) return base[key];
+    if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${key} must be positive`);
+    return Math.min(value, base[key]);
+  };
+  return {
+    packBytes: pick('packBytes'),
+    retainedBytes: pick('retainedBytes'),
+    maxObjects: pick('maxObjects'),
+    maxObjectBytes: pick('maxObjectBytes'),
+  };
+}
+
+export function createGitBlobReader(
+  ctx: GitFetchContext,
+  repoUrl: string,
+  plan: readonly string[],
+  options: GitBlobReaderOptions = {},
+): GitBlobReader {
+  if (ctx.runtime === 'cloudflare') throw new GitFetchError('git_archive_requires_docker');
+  for (const oid of plan) if (!OID.test(oid)) throw new GitFetchError('bad_ref');
+  const s = session(ctx, repoUrl, lowered(ctx, options.limits));
+  const order = unique(plan);
+  const position = new Map(order.map((oid, n) => [oid, n]));
+  const returned = new Set<string>();
+  const oversize = new Set<string>();
+  let window = MAX_BLOB_BATCH;
+
+  const batchFrom = (oid: string, at: number): string[] => {
+    const batch = [oid];
+    for (let n = at + 1; n < order.length && batch.length < window; n++) {
+      const next = order[n] as string;
+      if (!returned.has(next) && !oversize.has(next)) batch.push(next);
+    }
+    return batch;
+  };
+
+  const settle = (oid: string, found: Set<string>): void => {
+    for (const big of found) oversize.add(big);
+    for (const key of [...s.store.keys()]) {
+      if (key !== oid && (!position.has(key) || returned.has(key))) drop(s, key);
+    }
+  };
+
+  const load = async (oid: string, at: number): Promise<void> => {
+    for (;;) {
+      const batch = batchFrom(oid, at);
+      try {
+        settle(oid, await fetchBlobs(s, batch));
+        return;
+      } catch (error) {
+        const overflow =
+          (error instanceof PackBudgetError && error.code === 'retained_bytes') ||
+          (error instanceof GitFetchError && error.code === 'too_large');
+        if (!overflow || batch.length === 1) throw error;
+        for (const key of [...s.store.keys()]) drop(s, key);
+        window = batch.length >> 1;
+      }
+    }
+  };
+
+  const take = async (oid: string, maxBytes: number) => {
+    const at = position.get(oid);
+    if (at === undefined) throw new GitFetchError('missing_object');
+    if (oversize.has(oid)) throw new GitFetchError('too_large');
+    try {
+      if (!s.store.has(oid)) await load(oid, at);
+    } catch (error) {
+      return mapFailure(error);
+    }
+    if (oversize.has(oid)) throw new GitFetchError('too_large');
+    const object = s.store.get(oid);
+    if (object === undefined) throw new GitFetchError('missing_object');
+    if (object.type !== 'blob' || object.data.length > maxBytes) {
+      drop(s, oid);
+      rebudget(s);
+      throw new GitFetchError(object.type !== 'blob' ? 'bad_object' : 'too_large');
+    }
+    drop(s, oid);
+    rebudget(s);
+    returned.add(oid);
+    return { size: object.data.length, body: chunked(object.data) };
+  };
+
+  let queue: Promise<unknown> = Promise.resolve();
+  return {
+    read(oid, maxBytes) {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+        return Promise.reject(new TypeError('maxBytes must be a non-negative safe integer'));
+      }
+      const result = queue.then(() => take(oid, maxBytes));
+      queue = result.catch(() => undefined);
+      return result;
+    },
+  };
 }

@@ -1,50 +1,6 @@
-/**
- * The only names that may leave the process in a log line. A name outside this set is replaced by
- * "Error" so that plugin-supplied text can never travel further.
- */
-const REPORTABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
-  'Error',
-  'TypeError',
-  'RangeError',
-  'SyntaxError',
-  'ReferenceError',
-  'EvalError',
-  'URIError',
-  'AggregateError',
-  'DOMException',
-  'AbortError',
-  'TimeoutError',
-  'NonError',
-  'NotBootstrappedError',
-  'KernelConfigError',
-  'SecretsConfigError',
-  'DbError',
-  'CsrfError',
-  'CredentialNotFoundError',
-  'UnknownKeyVersionError',
-  'SecretDecryptError',
-  'HookTimeoutError',
-  'EngineTimeoutError',
-  'ProbeFailedError',
-  'ReadinessTimeoutError',
-  'BadBodyError',
-  'OidcProviderError',
-  'JwtError',
-  'BoundedFetchError',
-  'AlreadyBootstrappedError',
-  'StartupConfigError',
-  'SqlScanError',
-  'MigrationSourceError',
-  'MigrationLockedError',
-  'MigrationSyntaxError',
-  'MigrationChecksumError',
-  'MigrationApplyError',
-  'MigrationOrderError',
-  'MigrationStateError',
-  'BuiltManifestError',
-  'JobError',
-  'JsonStreamError',
-]);
+import { APPROVED_ERROR_NAMES } from '../platform/observability.js';
+
+const REPORTABLE_ERROR_NAMES: ReadonlySet<string> = new Set(APPROVED_ERROR_NAMES);
 
 const MAX_PROTOTYPE_STEPS = 32;
 

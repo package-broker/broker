@@ -15,11 +15,13 @@ const NOW = '2026-10-15T08:00:00.000Z';
 const PROJECT = 'project-1';
 
 const actor: ActorContext = {
+  kind: 'organization',
   userId: 'actor-1',
   permissions: new Set(['org:read']),
   isOrganizationAdmin: false,
 };
 const admin: ActorContext = {
+  kind: 'organization',
   userId: 'actor-1',
   permissions: new Set(['org:service-principals:write', 'org:read']),
   isOrganizationAdmin: true,
@@ -611,5 +613,40 @@ describe('creatorOffboarded', () => {
     await expect(
       service.creatorOffboarded(ctx, { userId: 'creator-1', cause: 'membership_removed' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('the actor must be organization-kind', () => {
+  const untaggedActor = {
+    userId: 'actor-1',
+    permissions: new Set(['org:service-principals:write']),
+    isOrganizationAdmin: true,
+  } as unknown as ActorContext;
+  const projectActor = {
+    ...untaggedActor,
+    kind: 'project',
+    projectId: PROJECT,
+  } as unknown as ActorContext;
+
+  it.each([
+    ['an untagged actor', untaggedActor],
+    ['a project-kind actor', projectActor],
+  ])('%s is refused before any store call, with one denial', async (_name, bad) => {
+    const { service, principals, authority, log } = setup();
+    const fence = fenceOf();
+    const results = [
+      await service.create(ctx, bad, fence, { name: 'ci', projectId: null }),
+      await service.setPermissions(ctx, bad, fence, 'sp-1', []),
+      await service.suspend(ctx, bad, fence, 'sp-1'),
+      await service.restore(ctx, bad, fence, 'sp-1'),
+    ];
+    for (const result of results) expect(result).toEqual({ ok: false, error: 'forbidden' });
+    for (const call of Object.values(principals)) expect(call).not.toHaveBeenCalled();
+    expect(authority.livePermissions).not.toHaveBeenCalled();
+    expect(authority.guard).not.toHaveBeenCalled();
+    expect(events(log, 'admin.denied')).toHaveLength(4);
+    for (const entry of events(log, 'admin.denied')) {
+      expect(entry).toMatchObject({ orgId: 'org-a', actorUserId: null });
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
+import { defaultLog, envelopeResponse, errorResponse, logError } from './errors.js';
 import type { KernelLog } from './errors.js';
 import { liveResponse, readyResponse } from './health.js';
 import { NotBootstrappedError } from './org.js';
@@ -65,7 +65,7 @@ describe('errorResponse', () => {
     expect(text).not.toContain('secret');
     expect(text).not.toContain('SELECT');
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-1', error: 'Error', kind: undefined },
+      { level: 'error', event: 'http.error', request_id: 'req-1', error_name: 'Error' },
     ]);
     const logged = JSON.stringify(entries);
     expect(logged).not.toContain('secret');
@@ -86,7 +86,12 @@ describe('errorResponse', () => {
       requestId: 'req-2',
     });
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-2', error: 'NotBootstrappedError', kind: undefined },
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-2',
+        error_name: 'NotBootstrappedError',
+      },
     ]);
   });
 
@@ -104,7 +109,13 @@ describe('errorResponse', () => {
       requestId: 'req-3',
     });
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-3', error: 'DbError', kind: 'busy' },
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-3',
+        error_name: 'DbError',
+        reason_code: 'db.busy',
+      },
     ]);
     expect(JSON.stringify(entries)).not.toContain('token');
   });
@@ -122,7 +133,13 @@ describe('errorResponse', () => {
     expect(response.status).toBe(500);
     expect(text).not.toContain('secret');
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-4', error: 'DbError', kind: 'unique' },
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-4',
+        error_name: 'DbError',
+        reason_code: 'db.unique',
+      },
     ]);
   });
 
@@ -135,7 +152,7 @@ describe('errorResponse', () => {
     expect(response.status).toBe(500);
     expect(text).not.toContain('secret');
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-5', error: 'Error', kind: undefined },
+      { level: 'error', event: 'http.error', request_id: 'req-5', error_name: 'Error' },
     ]);
     expect(JSON.stringify(entries)).not.toContain('secret');
   });
@@ -256,7 +273,7 @@ describe('errorResponse log safety', () => {
     errorResponse(error, 'req-31', log);
 
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-31', error: 'Error', kind: undefined },
+      { level: 'error', event: 'http.error', request_id: 'req-31', error_name: 'Error' },
     ]);
   });
 
@@ -273,7 +290,7 @@ describe('errorResponse log safety', () => {
     errorResponse(error, 'req-32', log);
 
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-32', error: 'Error', kind: undefined },
+      { level: 'error', event: 'http.error', request_id: 'req-32', error_name: 'Error' },
     ]);
   });
 });
@@ -285,7 +302,7 @@ describe('readyResponse logging', () => {
     await readyResponse(() => Promise.resolve(false), org, 'req-40', { log });
 
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-40', error: 'ProbeFailedError', kind: undefined },
+      { level: 'error', event: 'http.error', request_id: 'req-40', error_name: 'ProbeFailedError' },
     ]);
   });
 
@@ -300,7 +317,13 @@ describe('readyResponse logging', () => {
     );
 
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-41', error: 'DbError', kind: 'busy' },
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-41',
+        error_name: 'DbError',
+        reason_code: 'db.busy',
+      },
     ]);
     expect(JSON.stringify(entries)).not.toContain('secret');
   });
@@ -316,7 +339,12 @@ describe('readyResponse logging', () => {
     );
 
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-42', error: 'NotBootstrappedError', kind: undefined },
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-42',
+        error_name: 'NotBootstrappedError',
+      },
     ]);
   });
 
@@ -385,7 +413,12 @@ describe('readyResponse timeout', () => {
       error: { code: 'not_ready', message: 'Not ready', requestId: 'req-60' },
     });
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-60', error: 'ReadinessTimeoutError', kind: undefined },
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-60',
+        error_name: 'ReadinessTimeoutError',
+      },
     ]);
   });
 
@@ -434,8 +467,56 @@ describe('errorResponse configuration errors', () => {
     });
     expect(text).not.toContain(BODY);
     expect(entries).toEqual([
-      { level: 'error', requestId: 'req-70', error: name, kind: undefined },
+      { level: 'error', event: 'http.error', request_id: 'req-70', error_name: name },
     ]);
     expect(JSON.stringify(entries)).not.toContain(BODY);
+  });
+});
+
+describe('logError', () => {
+  it('emits the http.error record for a plain error', () => {
+    const { log, entries } = recorder();
+
+    logError(log, 'req-80', new TypeError('boom'));
+
+    expect(entries).toEqual([
+      { level: 'error', event: 'http.error', request_id: 'req-80', error_name: 'TypeError' },
+    ]);
+    expect(Object.keys(entries[0] ?? {})).not.toContain('reason_code');
+  });
+
+  it('adds reason_code db.<kind> for a DbError and no kind or message', () => {
+    const { log, entries } = recorder();
+
+    logError(
+      log,
+      'req-81',
+      new DbError('foreign_key', 'foreign_key: FOREIGN KEY constraint failed'),
+    );
+
+    expect(entries).toEqual([
+      {
+        level: 'error',
+        event: 'http.error',
+        request_id: 'req-81',
+        error_name: 'DbError',
+        reason_code: 'db.foreign_key',
+      },
+    ]);
+    expect(Object.keys(entries[0] ?? {})).not.toContain('kind');
+    expect(Object.keys(entries[0] ?? {})).not.toContain('message');
+  });
+
+  it('leaves a secret-looking message out of the record', () => {
+    const { log, entries } = recorder();
+    const error = new Error('token=pbt_live_s3cr3tvalue');
+
+    logError(log, 'req-82', error);
+
+    expect(JSON.stringify(entries)).not.toContain('s3cr3t');
+  });
+
+  it('does not throw when the log throws', () => {
+    expect(() => logError(throwingLog(), 'req-83', new Error('x'))).not.toThrow();
   });
 });

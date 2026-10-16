@@ -1,17 +1,10 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { describeMigrationContract } from '@package-broker/db-sqlite/contract/migration-contract';
 import { describeMigrationLockContract } from '@package-broker/db-sqlite/contract/migration-lock-contract';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { openBetterSqliteExecutor } from './better-sqlite3-executor.js';
-
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
 
 async function openPair() {
   const directory = await mkdtemp(join(tmpdir(), 'pb-better-sqlite3-migration-'));
@@ -43,13 +36,11 @@ async function openPair() {
   }
 }
 
-async function core0001() {
-  return loadMigrationSource(
-    'core',
-    '0001_init.sql',
-    await readFile(join(migrationsDirectory, '0001_init.sql'), 'utf8'),
-  );
+async function firstCoreMigration() {
+  const [first] = await discoveredMigrations();
+  if (first === undefined) throw new Error('no core migrations were discovered');
+  return first;
 }
 
-describeMigrationContract('better-sqlite3', openPair, core0001);
-describeMigrationLockContract('better-sqlite3', openPair, core0001);
+describeMigrationContract('better-sqlite3', openPair, firstCoreMigration);
+describeMigrationLockContract('better-sqlite3', openPair, firstCoreMigration);

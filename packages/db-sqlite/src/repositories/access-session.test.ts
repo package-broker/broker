@@ -627,7 +627,8 @@ describe('evidence rules', () => {
   });
 });
 
-const ALLOWED_SCAN = /^SCAN (CONSTANT ROW|pr|guard_role)$/;
+const ALLOWED_SCAN =
+  /^SCAN (CONSTANT ROW|pr|guard_role|guard_values|json_each VIRTUAL TABLE INDEX \d+:)$/;
 
 function unindexedScans(details: readonly string[]): string[] {
   return details.filter((detail) => /^SCAN /.test(detail) && !ALLOWED_SCAN.test(detail));
@@ -694,10 +695,23 @@ describe('one indexed read', () => {
     it(`searches by index only ${phase}`, async () => {
       await populate();
       if (phase === 'after ANALYZE') await database.analyze();
-      for (const boundary of ['project', 'organization'] as const) {
+      const eightAnchors: ProtectedHolderProvider[] = [
+        OIDC,
+        ...Array.from({ length: 7 }, (_, index) => ({
+          provider: `idp${index}`,
+          anchor: `https://idp${index}.example.test`,
+          emailAuthoritative: index % 2 === 0,
+        })),
+      ];
+      for (const [boundary, providerAnchors] of [
+        ['project', [OIDC]],
+        ['organization', [OIDC]],
+        ['project', eightAnchors],
+        ['organization', eightAnchors],
+      ] as const) {
         const statement = lookupSessionStatement(
           a,
-          input('bulk17', { boundary, projectSlug: 'bulk-17' }),
+          input('bulk17', { boundary, projectSlug: 'bulk-17', providerAnchors }),
         );
         const plan = await executor.all<{ detail: string }>({
           sql: `EXPLAIN QUERY PLAN ${statement.sql}`,

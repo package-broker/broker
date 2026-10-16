@@ -106,7 +106,7 @@ function setup(
     deleteOrganization: vi.fn(async () => 'deleted'),
     changeRole: vi.fn(async () => 'updated'),
     suspendUser: vi.fn(async () => 'suspended'),
-    reactivateUser: vi.fn(async () => true),
+    reactivateUser: vi.fn(async () => 'reactivated'),
     countProtectedHolders: vi.fn(async () => 1),
     ...overrides.grants,
   };
@@ -1044,11 +1044,11 @@ describe('grant changes and user status', () => {
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.suspendUser(ctx, grantsWriter, 'u1')).toEqual({
+    expect(await admin.suspendUser(ctx, grantsWriter, fenceFor(grantsWriter), 'u1')).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.reactivateUser(ctx, grantsWriter, 'u1')).toEqual({
+    expect(await admin.reactivateUser(ctx, grantsWriter, fenceFor(grantsWriter), 'u1')).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -1057,26 +1057,37 @@ describe('grant changes and user status', () => {
 
   it('4: suspendUser surfaces last_holder and not_found', async () => {
     const ok = setup();
-    expect(await ok.admin.suspendUser(ctx, usersWriter, 'u1')).toEqual({ ok: true, value: null });
-    expect(ok.grants.suspendUser).toHaveBeenCalledExactlyOnceWith(ctx, 'u1', NOW);
+    expect(await ok.admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(ok.grants.suspendUser).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      heldBy('actor-1'),
+      'u1',
+      NOW,
+    );
     for (const repo of ['last_holder', 'not_found'] as const) {
       const { admin, log } = setup({ grants: { suspendUser: vi.fn(async () => repo) } });
-      expect(await admin.suspendUser(ctx, usersWriter, 'u1')).toEqual({ ok: false, error: repo });
+      expect(await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
+        ok: false,
+        error: repo,
+      });
       expect(log).not.toHaveBeenCalled();
     }
   });
 
   it('5: an unknown user and an empty id are not_found before the repository', async () => {
     const { admin, grants } = setup({ users: { get: vi.fn(async () => null) } });
-    expect(await admin.suspendUser(ctx, usersWriter, 'u9')).toEqual({
+    expect(await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u9')).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await admin.suspendUser(ctx, usersWriter, '')).toEqual({
+    expect(await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), '')).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await admin.reactivateUser(ctx, usersWriter, 'u9')).toEqual({
+    expect(await admin.reactivateUser(ctx, usersWriter, fenceFor(usersWriter), 'u9')).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -1084,17 +1095,22 @@ describe('grant changes and user status', () => {
     expect(grants.reactivateUser).not.toHaveBeenCalled();
   });
 
-  it('reactivateUser answers not_found when nothing was suspended', async () => {
+  it('reactivateUser answers ok without an event when nothing was suspended', async () => {
     const ok = setup({ users: { get: vi.fn(async () => userOf({ status: 'suspended' })) } });
-    expect(await ok.admin.reactivateUser(ctx, usersWriter, 'u1')).toEqual({
+    expect(await ok.admin.reactivateUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
       ok: true,
       value: null,
     });
-    expect(ok.grants.reactivateUser).toHaveBeenCalledExactlyOnceWith(ctx, 'u1', NOW);
-    const none = setup({ grants: { reactivateUser: vi.fn(async () => false) } });
-    expect(await none.admin.reactivateUser(ctx, usersWriter, 'u1')).toEqual({
-      ok: false,
-      error: 'not_found',
+    expect(ok.grants.reactivateUser).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      heldBy('actor-1'),
+      'u1',
+      NOW,
+    );
+    const none = setup({ grants: { reactivateUser: vi.fn(async () => 'unchanged') } });
+    expect(await none.admin.reactivateUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
+      ok: true,
+      value: null,
     });
     expect(none.log).not.toHaveBeenCalled();
   });
@@ -1103,17 +1119,21 @@ describe('grant changes and user status', () => {
     const byEmail = setup({
       storedGrants: [grantOf('g-admin', 'role-admin', 'target@example.com')],
     });
-    expect(await byEmail.admin.suspendUser(ctx, usersWriter, 'u1')).toEqual({
+    expect(await byEmail.admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await byEmail.admin.reactivateUser(ctx, usersWriter, 'u1')).toEqual({
+    expect(
+      await byEmail.admin.reactivateUser(ctx, usersWriter, fenceFor(usersWriter), 'u1'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(byEmail.grants.suspendUser).not.toHaveBeenCalled();
     expect(byEmail.grants.reactivateUser).not.toHaveBeenCalled();
-    expect((await byEmail.admin.suspendUser(ctx, administrator, 'u1')).ok).toBe(true);
+    expect(
+      (await byEmail.admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).ok,
+    ).toBe(true);
 
     const byGroup = setup({
       storedGrants: [
@@ -1123,7 +1143,7 @@ describe('grant changes and user status', () => {
         },
       ],
     });
-    expect(await byGroup.admin.suspendUser(ctx, usersWriter, 'u1')).toEqual({
+    expect(await byGroup.admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -1137,20 +1157,23 @@ describe('grant changes and user status', () => {
         grantOf('g1', 'role-1'),
       ],
     });
-    expect((await admin.suspendUser(ctx, usersWriter, 'u1')).ok).toBe(true);
+    expect((await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).ok).toBe(true);
   });
 
   it('5: suspending an already suspended user logs nothing; a fresh suspension and a reactivation log', async () => {
-    const already = setup({ users: { get: vi.fn(async () => userOf({ status: 'suspended' })) } });
-    expect(await already.admin.suspendUser(ctx, usersWriter, 'u1')).toEqual({
+    const already = setup({
+      users: { get: vi.fn(async () => userOf({ status: 'suspended' })) },
+      grants: { suspendUser: vi.fn(async () => 'unchanged') },
+    });
+    expect(await already.admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
       ok: true,
       value: null,
     });
     expect(already.log).not.toHaveBeenCalled();
 
     const { admin, log } = setup();
-    await admin.suspendUser(ctx, administrator, 'u1');
-    await admin.reactivateUser(ctx, administrator, 'u1');
+    await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1');
+    await admin.reactivateUser(ctx, administrator, fenceFor(administrator), 'u1');
     expect(log.mock.calls.map(([entry]) => entry)).toEqual([
       {
         level: 'info',
@@ -1382,8 +1405,8 @@ describe('the actor is validated and the admin flag must be exactly true', () =>
       }),
       admin.revokeOrganizationGrant(ctx, bad, fenceFor(bad), 'g1'),
       admin.changeGrantRole(ctx, bad, fenceFor(bad), 'g1', 'role-1'),
-      admin.suspendUser(ctx, bad, 'u1'),
-      admin.reactivateUser(ctx, bad, 'u1'),
+      admin.suspendUser(ctx, bad, fenceFor(bad), 'u1'),
+      admin.reactivateUser(ctx, bad, fenceFor(bad), 'u1'),
     ]);
     for (const result of results) expect(result).toEqual({ ok: false, error: 'forbidden' });
     for (const call of mutatingCalls(grants, roles)) expect(call).not.toHaveBeenCalled();
@@ -1433,7 +1456,7 @@ describe('admin.denied', () => {
       roleId: 'role-admin',
     });
     await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g-admin');
-    await admin.suspendUser(ctx, usersWriter, 'u1');
+    await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1');
     expect(log.mock.calls.map(([entry]) => entry)).toEqual([
       {
         level: 'info',
@@ -1500,7 +1523,10 @@ describe('privilege escalation by a user with only org:grants:write', () => {
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.suspendUser(ctx, attacker, 'u1')).toEqual({ ok: false, error: 'forbidden' });
+    expect(await admin.suspendUser(ctx, attacker, fenceFor(attacker), 'u1')).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
     expect(
       await admin.setRolePermissions(ctx, attacker, fenceFor(attacker), 'role-1', ALL),
     ).toEqual({
@@ -1523,7 +1549,10 @@ describe('privilege escalation by a user with only org:grants:write', () => {
     const { admin, grants } = setup({
       storedGrants: [grantOf('g-admin', 'role-admin', 'target@example.com')],
     });
-    expect(await admin.suspendUser(ctx, attacker, 'u1')).toEqual({ ok: false, error: 'forbidden' });
+    expect(await admin.suspendUser(ctx, attacker, fenceFor(attacker), 'u1')).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
     expect(grants.suspendUser).not.toHaveBeenCalled();
   });
 });
@@ -1603,7 +1632,7 @@ describe('repository contract: invalid input is answered, never thrown', () => {
       deleteOrganization: async () => 'deleted',
       changeRole: async () => 'updated',
       suspendUser: async () => 'suspended',
-      reactivateUser: async () => true,
+      reactivateUser: async () => 'reactivated',
       countProtectedHolders: async () => 1,
     };
     return setup({ roles, grants });

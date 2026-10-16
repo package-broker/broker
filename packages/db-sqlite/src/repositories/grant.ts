@@ -7,6 +7,7 @@ import type {
   OrganizationGrant,
 } from '@package-broker/core/db/grants';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import { DbError } from '@package-broker/core/db/errors';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import {
@@ -178,12 +179,17 @@ interface ReachScope {
   readonly subset: boolean;
 }
 
-function grantAuthority(
+interface ActorEvidence {
+  readonly isAdmin: Guard;
+  readonly livePermissions: Compilable;
+  readonly live: (permission: string) => Guard;
+}
+
+function actorEvidence(
   ctx: OrgContext,
   fence: MutationFence,
   providers: readonly ProtectedHolderProvider[],
-  scope: ReachScope,
-): GrantAuthority {
+): ActorEvidence {
   const org = ctx.orgId;
   const localAdmin = sql<SqlBool>`exists ${loose
     .selectFrom('session as la_session')
@@ -196,10 +202,39 @@ function grantAuthority(
     loose.selectFrom(
       permissionRows(ctx, fence.userId, null, providers, { localAdmin }).as('lr') as never,
     );
-  const isAdmin = sql<SqlBool>`exists ${rows()
-    .select(sql.lit(1).as('one'))
-    .where(sql<SqlBool>`lr.protects = 1`)}`;
-  const livePermissions = rows().select(sql<string>`lr.permission`.as('permission'));
+  return {
+    isAdmin: sql<SqlBool>`exists ${rows()
+      .select(sql.lit(1).as('one'))
+      .where(sql<SqlBool>`lr.protects = 1`)}`,
+    livePermissions: rows().select(sql<string>`lr.permission`.as('permission')),
+    live: (permission) => sql<SqlBool>`(
+    exists (
+      select 1 from user_account au
+      join session s on s.org_id = au.org_id and s.user_id = au.id
+      where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
+        and s.id = ${fence.sessionId} and s.revoked_at is null
+        and s.expires_at > ${DB_TIME}
+        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
+        and coalesce(s.last_seen_at, s.created_at) > ${dbTimeAgo(SESSION_IDLE_MS)})
+    and ${holdsPermission(ctx, {
+      userId: fence.userId,
+      permission,
+      projectId: null,
+      providerAnchors: providers,
+      projectState: 'any',
+      session: fence.sessionId,
+    })})`,
+  };
+}
+
+function grantAuthority(
+  ctx: OrgContext,
+  fence: MutationFence,
+  providers: readonly ProtectedHolderProvider[],
+  scope: ReachScope,
+): GrantAuthority {
+  const org = ctx.orgId;
+  const { isAdmin, livePermissions, live } = actorEvidence(ctx, fence, providers);
   const grantRole = sql`(select g.role_id from access_grant g where g.org_id = ${org} and g.id = ${scope.grantId ?? null})`;
   const involved = sql`(${sql.join(
     [
@@ -220,25 +255,8 @@ function grantAuthority(
   const withinActor = scope.subset
     ? sql<SqlBool>`not exists (select 1 from (${wanted}) wanted where wanted.permission not in ${livePermissions})`
     : sql<SqlBool>`1`;
-  const live = sql<SqlBool>`(
-    exists (
-      select 1 from user_account au
-      join session s on s.org_id = au.org_id and s.user_id = au.id
-      where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
-        and s.id = ${fence.sessionId} and s.revoked_at is null
-        and s.expires_at > ${DB_TIME}
-        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
-        and coalesce(s.last_seen_at, s.created_at) > ${dbTimeAgo(SESSION_IDLE_MS)})
-    and ${holdsPermission(ctx, {
-      userId: fence.userId,
-      permission: 'org:grants:write',
-      projectId: null,
-      providerAnchors: providers,
-      projectState: 'any',
-      session: fence.sessionId,
-    })})`;
   return {
-    live,
+    live: live('org:grants:write'),
     reach: sql<SqlBool>`(${isAdmin} or (not ${touchesProtected} and ${withinActor}))`,
   };
 }
@@ -344,6 +362,77 @@ function organizationGrantExists(ctx: OrgContext, id: string) {
     .where('access_grant.id', '=', id)
     .where('access_grant.org_id', '=', ctx.orgId)
     .where('access_grant.scope', '=', 'organization');
+}
+
+function userHasStatus(ctx: OrgContext, userId: string, status: 'active' | 'suspended'): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('user_account')
+      .select(sql.lit(1).as('one'))
+      .where('user_account.id', '=', userId)
+      .where('user_account.org_id', '=', ctx.orgId)
+      .where('user_account.status', '=', status),
+  );
+}
+
+function holdsProtectedRole(
+  ctx: OrgContext,
+  userId: string,
+  input: ProtectedHolderInput,
+  options: { readonly includeSuspended?: boolean } = {},
+): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('user_account as target')
+      .select(sql.lit(1).as('one'))
+      .where('target.id', '=', userId)
+      .where('target.org_id', '=', ctx.orgId)
+      .where((eb) => protectedHolder(ctx, eb.ref('target.id'), input, options)),
+  );
+}
+
+async function statusOfUser(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  userId: string,
+): Promise<string | undefined> {
+  const found = await executor.all<StatusRow>(
+    scalar(
+      db
+        .selectFrom('user_account')
+        .select('user_account.status')
+        .where('user_account.id', '=', userId)
+        .where('user_account.org_id', '=', ctx.orgId),
+    ),
+  );
+  return found[0]?.status;
+}
+
+function observingErrors(executor: ScalarSqlExecutor) {
+  let last: DbError | undefined;
+  const observed: ScalarSqlExecutor = {
+    driver: executor.driver,
+    all: (statement) => executor.all(statement),
+    batch: async (statements) => {
+      try {
+        return await executor.batch(statements);
+      } catch (error) {
+        if (error instanceof DbError) last = error;
+        throw error;
+      }
+    },
+  };
+  return { observed, failure: () => last };
+}
+
+function statusRefusal(
+  outcome: { readonly reason: string },
+  label: string,
+  failure: DbError | undefined,
+): RefusedBy {
+  if (outcome.reason !== 'unclassified') return refusedBy(outcome, label);
+  if (failure?.kind === 'too_big') throw failure;
+  return 'conflict';
 }
 
 export function createGrantRepository(
@@ -578,61 +667,101 @@ export function createGrantRepository(
       return row.role_ok === 1 ? 'last_holder' : 'role_scope_mismatch';
     },
 
-    async suspendUser(ctx, userId, now) {
+    async suspendUser(ctx, fence, userId, now) {
       const stamp = timestamp(now);
+      requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
-      const suspended = existsGuard((database) =>
-        database
-          .selectFrom('user_account')
-          .select(sql.lit(1).as('one'))
+      const evidence = actorEvidence(ctx, fence, providersOf(holders));
+      const live = evidence.live('org:users:write');
+      const targetHolds = holdsProtectedRole(ctx, userId, holders);
+      const reach = sql<SqlBool>`(${evidence.isAdmin} or not ${targetHolds})`;
+      const active = userHasStatus(ctx, userId, 'active');
+      const lastHolder = sql<SqlBool>`(not ${targetHolds} or ${anotherHolder(ctx, holders, { userId })})`;
+      const guard = assertGuard(live, ctx);
+      const { observed, failure } = observingErrors(executor);
+      const checks = [...assertCheck(reach), ...assertCheck(active)];
+      const update = scalar(
+        db
+          .updateTable('user_account')
+          .set({ status: 'suspended', updated_at: stamp })
           .where('user_account.id', '=', userId)
           .where('user_account.org_id', '=', ctx.orgId)
-          .where('user_account.status', '=', 'suspended'),
+          .where('user_account.status', '=', 'active')
+          .where(lastHolder)
+          .returning('id'),
       );
-      const [changed, , remaining] = await executor.batch([
-        scalar(
-          db
-            .updateTable('user_account')
-            .set({ status: 'suspended', updated_at: stamp })
-            .where('user_account.id', '=', userId)
-            .where('user_account.org_id', '=', ctx.orgId)
-            .where('user_account.status', '=', 'active')
-            .where((eb) =>
-              eb.or([
-                anotherHolder(ctx, holders, { userId }),
-                eb.not(protectedHolder(ctx, eb.ref('user_account.id'), holders)),
-              ]),
-            )
-            .returning('id'),
-        ),
-        revokeAllForUserStatement(ctx, userId, stamp, [suspended]) as ScalarStatement,
-        scalar(
-          db
-            .selectFrom('user_account')
-            .select('user_account.status')
-            .where('user_account.id', '=', userId)
-            .where('user_account.org_id', '=', ctx.orgId),
-        ),
-      ]);
-      if ((changed?.rows.length ?? 0) > 0) return 'suspended';
-      const current = remaining?.rows[0] as StatusRow | undefined;
+      const updateAt = guard.length + checks.length;
+      const outcome = await runOrgFenced(
+        observed,
+        ctx,
+        fence,
+        guard,
+        [
+          ...checks,
+          update,
+          ...assertCheck(sql<SqlBool>`changes() = 1`),
+          revokeAllForUserStatement(ctx, userId, stamp, [userHasStatus(ctx, userId, 'suspended')]),
+        ],
+        {
+          authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
+          collision: probe(sql<SqlBool>`(${active} and ${lastHolder}) is not 1`),
+        },
+      );
+      if (outcome.ok) {
+        if ((outcome.results[updateAt]?.rows.length ?? 0) > 0) return 'suspended';
+        throw new Error('user suspension matched no row after its guards held');
+      }
+      const reason = statusRefusal(outcome, 'user suspension', failure());
+      if (reason !== 'collision') return reason;
+      const current = await statusOfUser(executor, ctx, userId);
       if (current === undefined) return 'not_found';
-      return current.status === 'suspended' ? 'suspended' : 'last_holder';
+      return current === 'suspended' ? 'unchanged' : 'last_holder';
     },
 
-    async reactivateUser(ctx, userId, now) {
-      const rows = await executor.all<IdRow>(
-        scalar(
-          db
-            .updateTable('user_account')
-            .set({ status: 'active', updated_at: timestamp(now) })
-            .where('user_account.id', '=', userId)
-            .where('user_account.org_id', '=', ctx.orgId)
-            .where('user_account.status', '=', 'suspended')
-            .returning('id'),
-        ),
+    async reactivateUser(ctx, fence, userId, now) {
+      const stamp = timestamp(now);
+      requireNonEmpty(userId, 'userId');
+      const holders = await options.holderInput(ctx);
+      const evidence = actorEvidence(ctx, fence, providersOf(holders));
+      const live = evidence.live('org:users:write');
+      const wouldHold = holdsProtectedRole(ctx, userId, holders, { includeSuspended: true });
+      const reach = sql<SqlBool>`(${evidence.isAdmin} or not ${wouldHold})`;
+      const suspended = userHasStatus(ctx, userId, 'suspended');
+      const guard = assertGuard(live, ctx);
+      const { observed, failure } = observingErrors(executor);
+      const checks = [...assertCheck(reach), ...assertCheck(suspended)];
+      const updateAt = guard.length + checks.length;
+      const outcome = await runOrgFenced(
+        observed,
+        ctx,
+        fence,
+        guard,
+        [
+          ...checks,
+          scalar(
+            db
+              .updateTable('user_account')
+              .set({ status: 'active', updated_at: stamp })
+              .where('user_account.id', '=', userId)
+              .where('user_account.org_id', '=', ctx.orgId)
+              .where('user_account.status', '=', 'suspended')
+              .returning('id'),
+          ),
+        ],
+        {
+          authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
+          collision: probe(sql<SqlBool>`${suspended} is not 1`),
+        },
       );
-      return rows.length > 0;
+      if (outcome.ok) {
+        if ((outcome.results[updateAt]?.rows.length ?? 0) > 0) return 'reactivated';
+        throw new Error('user reactivation matched no row after its guards held');
+      }
+      const reason = statusRefusal(outcome, 'user reactivation', failure());
+      if (reason !== 'collision') return reason;
+      const current = await statusOfUser(executor, ctx, userId);
+      if (current === undefined) return 'not_found';
+      return current === 'active' ? 'unchanged' : 'conflict';
     },
 
     async countProtectedHolders(ctx) {

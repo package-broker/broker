@@ -430,6 +430,140 @@ async function probeNewConstraints(executor: ScalarSqlExecutor): Promise<void> {
   expect(await count(executor, 'SELECT count(*) AS n FROM service_principal_permission')).toBe(0);
 }
 
+const TOPUP_PERMISSIONS = ['org:projects:archive', 'project:service-principals:write'];
+const ORG_B = '01J0ACME000000000000000002';
+const ORG_C = '01J0ACME000000000000000003';
+const ADMIN_B = '01J0ROLE000000000000000020';
+const ADMIN_C = '01J0ROLE000000000000000021';
+const STALE = '2026-01-01T00:00:00.000Z';
+const OWNER_ROLE = '01J0ROLE000000000000000022';
+
+async function loadThrough(last: string): Promise<MigrationSource[]> {
+  const names = [
+    '0001_init.sql',
+    '0002_local_login.sql',
+    '0003_access_model.sql',
+    '0004_cache_epoch.sql',
+    '0005_admin_permission_topup.sql',
+  ].filter((name) => name <= last);
+  return Promise.all(
+    names.map(async (name) =>
+      loadMigrationSource('core', name, await readFile(new URL(name, migrationsUrl), 'utf8')),
+    ),
+  );
+}
+
+async function seedRole(
+  executor: ScalarSqlExecutor,
+  role: {
+    readonly id: string;
+    readonly org: string;
+    readonly key: string;
+    readonly scope: string;
+    readonly isSystem: number;
+    readonly protects: number;
+    readonly permissions: readonly string[];
+  },
+): Promise<void> {
+  await run(
+    executor,
+    'INSERT INTO role (id, org_id, key, name, scope, is_system, protects_last_holder) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [role.id, role.org, role.key, role.key, role.scope, role.isSystem, role.protects],
+  );
+  for (const permission of role.permissions) {
+    await run(
+      executor,
+      'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      [role.org, role.id, permission],
+    );
+  }
+}
+
+async function seedTopupOrganizations(executor: ScalarSqlExecutor): Promise<void> {
+  await seedPopulated(executor);
+  await run(executor, 'DROP INDEX organization_singleton');
+  for (const [id, slug] of [
+    [ORG_B, 'beta'],
+    [ORG_C, 'gamma'],
+  ] as const) {
+    await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+      id,
+      slug,
+      slug,
+    ]);
+  }
+  await seedRole(executor, {
+    id: ADMIN_B,
+    org: ORG_B,
+    key: 'organization_admin',
+    scope: 'organization',
+    isSystem: 1,
+    protects: 1,
+    permissions: [...PRE_0003_ADMIN_PERMISSIONS, ...TOPUP_PERMISSIONS],
+  });
+  await seedRole(executor, {
+    id: ADMIN_C,
+    org: ORG_C,
+    key: 'organization_admin',
+    scope: 'organization',
+    isSystem: 1,
+    protects: 0,
+    permissions: PRE_0003_ADMIN_PERMISSIONS,
+  });
+  await seedRole(executor, {
+    id: OWNER_ROLE,
+    org: ORG,
+    key: 'project_owner',
+    scope: 'project',
+    isSystem: 1,
+    protects: 0,
+    permissions: ['project:read'],
+  });
+  await run(executor, 'UPDATE role SET updated_at = ?', [STALE]);
+  for (const org of [ORG, ORG_B, ORG_C]) {
+    await run(executor, 'INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [org, 'v0']);
+  }
+}
+
+async function roleState(executor: ScalarSqlExecutor): Promise<unknown[]> {
+  const found = await rows<{
+    org_id: string;
+    id: string;
+    revision: number;
+    updated_at: string;
+    permission: string | null;
+  }>(
+    executor,
+    `SELECT r.org_id, r.id, r.revision, r.updated_at, p.permission
+     FROM role r LEFT JOIN role_permission p ON p.org_id = r.org_id AND p.role_id = r.id`,
+  );
+  const roles = new Map<
+    string,
+    { id: string; revision: number; updatedAt: string; permissions: string[] }
+  >();
+  for (const row of found) {
+    const role = roles.get(row.id) ?? {
+      id: row.id,
+      revision: row.revision,
+      updatedAt: row.updated_at,
+      permissions: [],
+    };
+    if (row.permission !== null) role.permissions.push(row.permission);
+    roles.set(row.id, role);
+  }
+  return [...roles.values()]
+    .map((role) => ({ ...role, permissions: role.permissions.sort() }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+async function epochVersions(executor: ScalarSqlExecutor): Promise<Record<string, string>> {
+  const found = await rows<{ org_id: string; version: string }>(
+    executor,
+    'SELECT org_id, version FROM cache_epoch',
+  );
+  return Object.fromEntries(found.map((row) => [row.org_id, row.version]));
+}
+
 export function describeMigrationContract(
   name: string,
   open: () => Promise<OpenedPair>,
@@ -771,6 +905,95 @@ export function describeMigrationContract(
         expect(
           await count(executor, 'SELECT count(*) AS n FROM service_principal_permission'),
         ).toBe(0);
+      });
+    });
+
+    it('14. 0005 tops up only a protected system Organization Admin that lacks the new permissions and bumps its revision once', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadThrough('0004_z'), { holder: 'contract-populated' });
+        await seedTopupOrganizations(executor);
+        const before = (await roleState(executor)) as { id: string }[];
+        const untouched = (id: string) => before.filter((row) => row.id === id);
+        const permissionsBefore = await count(
+          executor,
+          'SELECT count(*) AS n FROM role_permission',
+        );
+
+        const result = await migrate(executor, await loadThrough('0005_z'), {
+          holder: 'contract-topup',
+        });
+
+        expect(result.applied).toEqual(['core:0005_admin_permission_topup']);
+        expect(await permissionsOf(executor, ROLE_IDS.organization_admin)).toEqual(
+          [...PRE_0003_ADMIN_PERMISSIONS, ...TOPUP_PERMISSIONS].sort(),
+        );
+        const [toppedRole] = await rows<{ updated_at: string }>(
+          executor,
+          'SELECT updated_at FROM role WHERE id = ?',
+          [ROLE_IDS.organization_admin],
+        );
+        expect(toppedRole?.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+        expect(toppedRole?.updated_at).not.toBe(STALE);
+        const epochs = await epochVersions(executor);
+        expect(epochs[ORG]).toMatch(/^[0-9A-F]{32}$/);
+        expect(epochs[ORG_B]).toBe('v0');
+        expect(epochs[ORG_C]).toBe('v0');
+        expect(
+          await rows(executor, 'SELECT revision FROM role WHERE id = ?', [
+            ROLE_IDS.organization_admin,
+          ]),
+        ).toEqual([{ revision: 2 }]);
+        const after = (await roleState(executor)) as { id: string }[];
+        for (const id of [ADMIN_B, ADMIN_C, OWNER_ROLE, READER_ROLE]) {
+          expect(
+            after.filter((row) => row.id === id),
+            id,
+          ).toEqual(untouched(id));
+        }
+        expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(
+          permissionsBefore + TOPUP_PERMISSIONS.length,
+        );
+        expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        expect(await lockHolder(executor)).toBeNull();
+      });
+    });
+
+    it('15. 0005 adds only the missing permission and still bumps the revision once', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadThrough('0004_z'), { holder: 'contract-populated' });
+        await seedPopulated(executor);
+        await run(
+          executor,
+          'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+          [ORG, ROLE_IDS.organization_admin, 'org:projects:archive'],
+        );
+
+        await migrate(executor, await loadThrough('0005_z'), { holder: 'contract-topup' });
+
+        expect(await permissionsOf(executor, ROLE_IDS.organization_admin)).toEqual(
+          [...PRE_0003_ADMIN_PERMISSIONS, ...TOPUP_PERMISSIONS].sort(),
+        );
+        expect(
+          await rows(executor, 'SELECT revision FROM role WHERE id = ?', [
+            ROLE_IDS.organization_admin,
+          ]),
+        ).toEqual([{ revision: 2 }]);
+      });
+    });
+
+    it('16. 0005 on a fresh database creates no role and no permission row', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+
+        const result = await migrate(executor, await loadThrough('0005_z'), {
+          holder: 'contract-fresh',
+        });
+
+        expect(result.applied.at(-1)).toBe('core:0005_admin_permission_topup');
+        expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
+        expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
       });
     });
   });

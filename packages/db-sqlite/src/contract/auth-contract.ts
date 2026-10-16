@@ -12,7 +12,7 @@ import { credentialAad } from '@package-broker/core/secrets/cipher';
 import { migrate } from '../migrations/runner.js';
 import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
 import { bootstrapAdmin, resetLocalLogin } from '../repositories/admin-bootstrap.js';
-import { createGrantRepository } from '../repositories/grant.js';
+import { createGrantRepository, type ProtectedHolderInput } from '../repositories/grant.js';
 import { createLocalLoginReader } from '../repositories/local-login.js';
 import { createLocalLoginSetupWriter } from '../repositories/local-login-setup.js';
 import { createLocalLoginSuccessWriter } from '../repositories/local-login-success.js';
@@ -231,6 +231,39 @@ async function clearWorld({ pair, a }: World): Promise<void> {
       'user_account',
     ].map((table) => st(`DELETE FROM ${table} WHERE org_id = ?`, a.orgId)),
   );
+}
+
+const HOLDER_PROVIDER = 'oidc';
+
+function currentHolderInput(): ProtectedHolderInput {
+  return {
+    kind: 'fresh',
+    now: new Date().toISOString(),
+    providers: [{ provider: HOLDER_PROVIDER, anchor: ANCHOR, emailAuthoritative: true }],
+  };
+}
+
+function holderEvidence(a: OrgContext, users: readonly (readonly [string, string])[]): Statement[] {
+  return [
+    st(
+      'INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+      a.orgId,
+      HOLDER_PROVIDER,
+      ANCHOR,
+    ),
+    ...users.map(([userId, email], index) =>
+      st(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        mint(),
+        a.orgId,
+        userId,
+        HOLDER_PROVIDER,
+        `holder-${index}`,
+        email,
+        new Date().toISOString(),
+      ),
+    ),
+  ];
 }
 
 function userRow(a: OrgContext, id: string, email: string, status = 'active'): Statement {
@@ -1000,13 +1033,18 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
         await pair.executor.batch([
           userRow(a, U1, 'u1@example.test'),
           userRow(a, U2, 'u2@example.test'),
+          ...holderEvidence(a, [
+            [U1, 'u1@example.test'],
+            [U2, 'u2@example.test'],
+          ]),
           ...scenario.seed(run),
         ]);
         const beforeLeft = await rowOf(scenario.left);
         const beforeRight = await rowOf(scenario.right);
         const [firstExecutor, secondExecutor] = gatedPair(pair.executor, other);
-        const first = createGrantRepository(wrap(firstExecutor));
-        const second = createGrantRepository(wrap(secondExecutor));
+        const options = { holderInput: currentHolderInput };
+        const first = createGrantRepository(wrap(firstExecutor), options);
+        const second = createGrantRepository(wrap(secondExecutor), options);
 
         const outcomes = await race(
           run,

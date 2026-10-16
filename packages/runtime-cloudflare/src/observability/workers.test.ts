@@ -162,7 +162,11 @@ describe('createWorkersSink', () => {
   it('relies on core rejecting label text containing , or =', () => {
     const seen: ObsRecord[] = [];
     const scope = { deploymentId: 'dep-1', runtime: 'cloudflare' as const, requestId: null };
-    const registry = { events: new Set<string>(), reasonCodes: new Set<string>() };
+    const registry = {
+      events: new Set<string>(),
+      reasonCodes: new Set<string>(),
+      routeTemplates: new Set<string>(),
+    };
     const obs = createObservability({ emit: (r) => void seen.push(r) }, scope, registry);
     obs.counter('pb.x', { adapter: 'a,b' });
     obs.counter('pb.x', { adapter: 'a=b' });

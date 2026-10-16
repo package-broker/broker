@@ -5,9 +5,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 const read = (relative: string): string =>
-  stripTypeScriptTypes(readFileSync(new URL(relative, import.meta.url), 'utf8'), {
-    mode: 'transform',
-  });
+  stripTypeScriptTypes(readFileSync(new URL(relative, import.meta.url), 'utf8'));
 
 const adapter = read('./workers-codec.ts').replaceAll(
   "'@package-broker/core/platform/codec'",

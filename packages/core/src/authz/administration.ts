@@ -80,16 +80,19 @@ export interface Administration {
   grantOrganization(
     ctx: OrgContext,
     actor: ActorContext,
+    fence: MutationFence,
     input: { readonly subject: GrantSubject; readonly roleId: string },
   ): Promise<AdminResult<OrganizationGrant>>;
   revokeOrganizationGrant(
     ctx: OrgContext,
     actor: ActorContext,
+    fence: MutationFence,
     id: string,
   ): Promise<AdminResult<null>>;
   changeGrantRole(
     ctx: OrgContext,
     actor: ActorContext,
+    fence: MutationFence,
     id: string,
     roleId: string,
   ): Promise<AdminResult<null>>;
@@ -228,8 +231,8 @@ export function createAdministration(deps: AdministrationDeps): Administration {
     return fence;
   }
 
-  function expectsRevision(fence: MutationFence): boolean {
-    return Number.isSafeInteger(fence.expected['role']);
+  function expectsRevision(fence: MutationFence, key: 'role' | 'grant' = 'role'): boolean {
+    return Number.isSafeInteger(fence.expected[key]);
   }
 
   function fencedFailure(
@@ -433,9 +436,10 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    async grantOrganization(ctx, rawActor, input) {
+    async grantOrganization(ctx, rawActor, fence, input) {
       const actor = authorize(ctx, rawActor, 'granted', 'org:grants:write');
       if (actor === null) return fail('forbidden');
+      const held = requireFence(actor, fence);
       const normalized = normalizeSubject(input.subject);
       if (!normalized.ok) return fail(normalized.error);
       if (!isId(input.roleId)) return fail('role_scope_mismatch');
@@ -446,13 +450,17 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if ((await users.get(ctx, actor.userId)) === null) return deny(ctx, actor, 'granted');
       const id = ids.ulid();
       const createdAt = now();
-      const result = await grants.createOrganization(ctx, {
+      const result = await grants.createOrganization(ctx, held, {
         id,
         subject: normalized.subject,
         roleId: role.id,
         createdBy: actor.userId,
         now: createdAt,
+        opId: ids.ulid(),
       });
+      if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
+        return fencedFailure(ctx, actor, 'granted', result);
+      }
       if (result !== 'created') return fail(result);
       grantEvent(ctx, actor, 'granted', id, role.id);
       return {
@@ -463,31 +471,37 @@ export function createAdministration(deps: AdministrationDeps): Administration {
           roleId: role.id,
           createdBy: actor.userId,
           createdAt,
+          revision: 1,
         },
       };
     },
 
-    async revokeOrganizationGrant(ctx, rawActor, id) {
+    async revokeOrganizationGrant(ctx, rawActor, fence, id) {
       const actor = authorize(ctx, rawActor, 'revoked', 'org:grants:write');
       if (actor === null) return fail('forbidden');
+      const held = requireFence(actor, fence);
+      if (!expectsRevision(held, 'grant')) return fail('invalid_revision');
       if (!isId(id)) return fail('not_found');
       const grant = await findGrant(ctx, id);
       if (grant === null) return fail('not_found');
       if (!actor.isAdmin) {
         const role = await roles.get(ctx, grant.roleId);
-        if (role === null || role.protectsLastHolder || !withinActor(actor, role.permissions)) {
-          return deny(ctx, actor, 'revoked');
-        }
+        if (role === null || role.protectsLastHolder) return deny(ctx, actor, 'revoked');
       }
-      const result = await grants.deleteOrganization(ctx, id);
+      const result = await grants.deleteOrganization(ctx, held, id, ids.ulid());
+      if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
+        return fencedFailure(ctx, actor, 'revoked', result);
+      }
       if (result !== 'deleted') return fail(result);
       grantEvent(ctx, actor, 'revoked', id, grant.roleId);
       return OK;
     },
 
-    async changeGrantRole(ctx, rawActor, id, roleId) {
+    async changeGrantRole(ctx, rawActor, fence, id, roleId) {
       const actor = authorize(ctx, rawActor, 'role_changed', 'org:grants:write');
       if (actor === null) return fail('forbidden');
+      const held = requireFence(actor, fence);
+      if (!expectsRevision(held, 'grant')) return fail('invalid_revision');
       if (!isId(id)) return fail('not_found');
       const grant = await findGrant(ctx, id);
       if (grant === null) return fail('not_found');
@@ -506,7 +520,10 @@ export function createAdministration(deps: AdministrationDeps): Administration {
           return deny(ctx, actor, 'role_changed');
         }
       }
-      const result = await grants.changeRole(ctx, id, roleId, now());
+      const result = await grants.changeRole(ctx, held, id, roleId, now(), ids.ulid());
+      if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
+        return fencedFailure(ctx, actor, 'role_changed', result);
+      }
       if (result !== 'updated') return fail(result);
       grantEvent(ctx, actor, 'role_changed', id, roleId, grant.roleId);
       return OK;

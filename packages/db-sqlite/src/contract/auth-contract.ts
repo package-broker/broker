@@ -9,6 +9,7 @@ import type { NewSession } from '@package-broker/core/db/sessions';
 import type { LoginPlan } from '@package-broker/core/db/users';
 import { classifySqliteError } from '@package-broker/core/db/errors';
 import type { GrantRepository } from '@package-broker/core/db/grants';
+import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import { credentialAad } from '@package-broker/core/secrets/cipher';
 import { migrate } from '../migrations/runner.js';
 import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
@@ -243,7 +244,46 @@ function currentHolderInput(): ProtectedHolderInput {
     kind: 'fresh',
     now: new Date().toISOString(),
     providers: [{ provider: HOLDER_PROVIDER, anchor: ANCHOR, emailAuthoritative: true }],
+    exclude: { identityId: ACTOR_IDENTITY },
   };
+}
+
+const ACTOR_USER = '01J0ACTORUSER00000000000AA';
+const ACTOR_IDENTITY = '01J0ACTORIDEN00000000000AA';
+const ACTOR_SESSION = '01J0ACTORSESS00000000000AA';
+const ACTOR_GRANT = '01J0ACTORGRNT00000000000AA';
+
+function actorRows(a: OrgContext, roleId: string): Statement[] {
+  const hash = 'ac'.repeat(32);
+  return [
+    st(
+      'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+      ACTOR_USER,
+      a.orgId,
+      'actor@actor.test',
+    ),
+    st(
+      'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      ACTOR_IDENTITY,
+      a.orgId,
+      ACTOR_USER,
+      HOLDER_PROVIDER,
+      'holder-actor',
+      'actor@actor.test',
+      new Date().toISOString(),
+    ),
+    emailGrant(a, ACTOR_GRANT, 'actor@actor.test', roleId),
+    st(
+      'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ACTOR_SESSION,
+      a.orgId,
+      ACTOR_USER,
+      hash,
+      hash,
+      new Date().toISOString(),
+      new Date(Date.now() + 3_600_000).toISOString(),
+    ),
+  ];
 }
 
 function holderEvidence(a: OrgContext, users: readonly (readonly [string, string])[]): Statement[] {
@@ -997,10 +1037,26 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       },
     ];
 
-    const perform = (repository: GrantRepository, operation: GrantOperation): Promise<string> => {
-      if (operation.kind === 'delete') return repository.deleteOrganization(a, operation.target);
-      if (operation.kind === 'suspend') return repository.suspendUser(a, operation.target, LATER);
-      return repository.changeRole(a, operation.target, auditor, LATER);
+    const fenceFor = async (target: string) => {
+      const found = await pair.executor.all<{ revision: number }>(
+        st('SELECT revision FROM access_grant WHERE id = ?', target),
+      );
+      return mutationFence(
+        { userId: ACTOR_USER, sessionId: ACTOR_SESSION } as unknown as AuthenticatedActor,
+        { grant: found[0]?.revision ?? 1 },
+      );
+    };
+    const perform = async (
+      repository: GrantRepository,
+      operation: GrantOperation,
+    ): Promise<string> => {
+      if (operation.kind === 'suspend') {
+        return repository.suspendUser(a, operation.target, LATER);
+      }
+      const fence = await fenceFor(operation.target);
+      return operation.kind === 'delete'
+        ? repository.deleteOrganization(a, fence, operation.target, newOpId())
+        : repository.changeRole(a, fence, operation.target, auditor, LATER, newOpId());
     };
     const rowOf = (operation: GrantOperation) =>
       rowsOf(
@@ -1040,6 +1096,7 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
             [U1, 'u1@example.test'],
             [U2, 'u2@example.test'],
           ]),
+          ...actorRows(a, admin),
           ...scenario.seed(run),
         ]);
         const beforeLeft = await rowOf(scenario.left);

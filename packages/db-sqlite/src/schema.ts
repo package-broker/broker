@@ -246,6 +246,55 @@ export interface CacheEpochTable {
   version: string;
 }
 
+/** Mirrors `job` in `migrations/0001_init.sql` and `migrations/0006_ports.sql`. */
+export interface JobTable {
+  id: string;
+  org_id: string;
+  type: string;
+  payload_json: Generated<string>;
+  resource_key: string | null;
+  idempotency_key: string | null;
+  state: Generated<string>;
+  attempts: Generated<number>;
+  max_attempts: Generated<number>;
+  lease_owner: string | null;
+  lease_until: string | null;
+  fence: Generated<number>;
+  run_at: Generated<string>;
+  last_error: string | null;
+  finished_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  project_id: string | null;
+  initiator_token_id: string | null;
+}
+
+/** Mirrors `job_attempt` in `migrations/0006_ports.sql`. */
+export interface JobAttemptTable {
+  id: string;
+  org_id: string;
+  job_id: string;
+  attempt: number;
+  fence: number;
+  worker: string;
+  outcome: Generated<string>;
+  error: string | null;
+  started_at: Generated<string>;
+  finished_at: string | null;
+  next_run_at: string | null;
+}
+
+/** Mirrors `job_schedule` in `migrations/0001_init.sql`. */
+export interface JobScheduleTable {
+  org_id: string;
+  name: string;
+  every_seconds: number | null;
+  cron: string | null;
+  next_run_at: string;
+  last_slot: string | null;
+  enabled: Generated<number>;
+}
+
 /** Mirrors `blob` in `migrations/0001_init.sql` and `migrations/0006_ports.sql`. */
 export interface BlobTable {
   id: string;
@@ -286,5 +335,8 @@ export interface Database {
   identity_block: IdentityBlockTable;
   access_mutation_guard: AccessMutationGuardTable;
   cache_epoch: CacheEpochTable;
+  job: JobTable;
+  job_attempt: JobAttemptTable;
+  job_schedule: JobScheduleTable;
   blob: BlobTable;
 }

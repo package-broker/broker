@@ -23,6 +23,15 @@ describe('manifest', () => {
     expect(orderPlugins(plugins).map((p) => p.id)).toEqual(['c', 'a', 'b']);
   });
 
+  it('throws a cycle error naming a plugin that cannot be placed', () => {
+    const plugins = [
+      plugin('c'),
+      plugin('b', { dependsOn: ['a'] }),
+      plugin('a', { dependsOn: ['b'] }),
+    ];
+    expect(() => orderPlugins(plugins)).toThrow('dependency cycle at plugin "b"');
+  });
+
   it('keeps config order without dependencies', () => {
     const plugins = [plugin('c'), plugin('b'), plugin('a')];
     expect(orderPlugins(plugins)).toEqual(plugins);

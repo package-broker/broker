@@ -161,20 +161,24 @@ export function describePlatformPorts(
 
 export function renderBuildManifest(
   configPath: string,
+  orderedPluginIds: readonly string[],
   migrations?: readonly MigrationSource[],
   platform: NodeJS.Platform = process.platform,
   platformPorts?: PlatformPortConfig | null,
-  orderedPluginIds?: readonly string[],
 ): string {
   const specifier = platform === 'win32' ? configPath.replaceAll('\\', '/') : configPath;
   const lines = [
     `import config from ${JSON.stringify(specifier)};`,
-    ...(orderedPluginIds === undefined
-      ? ['export const plugins = config.plugins;']
-      : [
-          'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
-          `export const plugins = ${JSON.stringify(orderedPluginIds)}.map((id) => pluginsById.get(id)!);`,
-        ]),
+    `const orderedPluginIds = ${JSON.stringify(orderedPluginIds)};`,
+    'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
+    'export const plugins = orderedPluginIds.map((id) => {',
+    '  const plugin = pluginsById.get(id);',
+    '  if (plugin === undefined) throw new Error(`plugin "${id}" is missing from config.plugins`);',
+    '  return plugin;',
+    '});',
+    'if (plugins.length !== config.plugins.length) {',
+    '  throw new Error(`config.plugins has ${config.plugins.length} plugins, expected ${plugins.length}`);',
+    '}',
   ];
   if (migrations !== undefined) {
     lines.push(`export const migrations = ${JSON.stringify(migrations, null, 2)};`);

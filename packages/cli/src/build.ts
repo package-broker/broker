@@ -133,10 +133,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     manifestTs,
     renderBuildManifest(
       configPath,
+      plugins.map((plugin) => plugin.id),
       target === 'node' ? sources : undefined,
       process.platform,
       platformPorts,
-      plugins.map((plugin) => plugin.id),
     ),
   );
   await writeFile(

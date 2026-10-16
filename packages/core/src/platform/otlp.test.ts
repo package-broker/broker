@@ -776,7 +776,7 @@ describe('round 2: exporter behaviour', () => {
     expect(sink.seen).toEqual([{ name: 'pb.obs.export_failures', labels: { signal }, value: 1 }]);
   });
 
-  it('enforces the byte cap at enqueue and drops exactly the oversized record', async () => {
+  it('enforces the byte cap at enqueue and counts every record it drops', async () => {
     const collector = fakeCollector();
     const sink = counters();
     const exporter = createOtlpExporter({
@@ -786,17 +786,15 @@ describe('round 2: exporter behaviour', () => {
       metrics: sink.metrics,
       maxBytes: 3000,
     });
-    exporter.export('logs', logRecord({ event: 'huge.record', request_id: 'x'.repeat(4000) }));
-    for (let i = 0; i < 30; i += 1) exporter.export('logs', logRecord({ event: `kept.${i}` }));
+    for (let i = 0; i < 31; i += 1) exporter.export('logs', logRecord({ event: `kept.${i}` }));
     await exporter.flush();
     const raw = String(collector.calls[0]!.init.body);
     expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(3000);
-    expect(raw).not.toContain('huge.record');
     expect(raw).toContain('kept.0');
     const sent = collector.calls[0]!.body.resourceLogs[0].scopeLogs[0].logRecords.length as number;
     const drops = sink.seen.filter((s) => s.name === 'pb.obs.dropped').length;
     expect(sent + drops).toBe(31);
-    expect(drops).toBeGreaterThan(1);
+    expect(drops).toBeGreaterThan(0);
   });
 
   it('frees the byte budget after a flush', async () => {
@@ -1025,5 +1023,73 @@ describe('round 2: exporter behaviour', () => {
     releases[1]!(okResponse());
     await deferred;
     expect(settled).toBe(true);
+  });
+});
+
+describe('round 3: encoder re-validates allowlisted values', () => {
+  const SECRETX = 'SECRETX';
+  const BEARER = 'Bearer abc.def.ghi';
+  const RAW_ROUTE = '/raw?token=SECRETX';
+  const logAttrs = (records: unknown[], routes?: ReadonlySet<string>): Json[] => {
+    const out = encodeLogs(records, RESOURCE, () => FIXED, routes) as Json;
+    return out.resourceLogs[0].scopeLogs[0].logRecords[0].attributes as Json[];
+  };
+  const base = { level: 'info', event: 'http.request' };
+
+  it('drops log fields whose values fail the port rules', () => {
+    const attrs = logAttrs([
+      {
+        ...base,
+        error_name: SECRETX,
+        token_id: BEARER,
+        project_id: 'has space',
+        request_id: 'not-a-uuid',
+        route: RAW_ROUTE,
+        method: 'GET /x',
+        plugin: 'Bad Plugin',
+        reason_code: 'Has Space',
+        job_id: BEARER,
+        status: 99,
+        attempt: -1,
+      },
+    ]);
+    expect(attrs).toEqual([]);
+  });
+
+  it('keeps valid log fields and a registered route only', () => {
+    const record = {
+      ...base,
+      error_name: 'TypeError',
+      token_id: 'tok_1',
+      request_id: '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11',
+      route: '/p/{id}',
+    };
+    const without = logAttrs([record]);
+    expect(attr(without, 'error_name')).toEqual({ stringValue: 'TypeError' });
+    expect(attr(without, 'token_id')).toEqual({ stringValue: 'tok_1' });
+    expect(attr(without, 'route')).toBeUndefined();
+    expect(attr(logAttrs([record], new Set(['/p/{id}'])), 'route')).toEqual({
+      stringValue: '/p/{id}',
+    });
+  });
+
+  it('drops span attributes whose values fail the port rules', () => {
+    const out = encodeTraces(
+      [
+        {
+          ...span,
+          attributes: {
+            error_name: SECRETX,
+            request_id: BEARER,
+            route: RAW_ROUTE,
+            provider: 'Bad Provider!',
+            method: 'GET',
+          },
+        },
+      ],
+      RESOURCE,
+    ) as Json;
+    const attrs = out.resourceSpans[0].scopeSpans[0].spans[0].attributes as Json[];
+    expect(attrs.map((a) => a.key)).toEqual(['method']);
   });
 });

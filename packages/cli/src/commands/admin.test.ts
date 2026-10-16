@@ -251,6 +251,64 @@ it('4. bootstrap refreshes a pending setup and exits 6 without changes once the 
   expect(await sqliteQuery(file, 'SELECT * FROM local_login')).toEqual(before);
 });
 
+it('4a. a first-time bootstrap seeds the admin role without reporting a top-up', async () => {
+  const file = await sqliteFile();
+  expect(
+    await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
+  ).toBe(0);
+  expect(output().stderr).not.toContain('topped up');
+});
+
+it('4b. bootstrap on a set-up organization reports the admin permissions it topped up and exits 0', async () => {
+  const file = await sqliteFile();
+  const tokenFile = join(dir, 'setup.token');
+  expect(
+    await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
+  ).toBe(0);
+  const opened = openBetterSqliteExecutor(file);
+  await opened.executor.batch([
+    {
+      sql: 'UPDATE local_login SET password_hash = ?, setup_hash = NULL, setup_expires_at = NULL',
+      params: [PASSWORD_HASH],
+    },
+    {
+      sql: "DELETE FROM role_permission WHERE permission IN ('org:projects:archive', 'project:service-principals:write') AND role_id IN (SELECT id FROM role WHERE key = 'organization_admin')",
+      params: [],
+    },
+  ]);
+  await opened.close();
+  const loginBefore = await sqliteQuery(file, 'SELECT * FROM local_login');
+  vi.mocked(console.log).mockClear();
+  vi.mocked(console.error).mockClear();
+
+  expect(
+    await runAdminBootstrap({
+      email: EMAIL,
+      target: sqliteTarget(file),
+      tokenFile,
+      stdoutIsTTY: true,
+    }),
+  ).toBe(0);
+
+  expect(output().stderr).toContain('topped up 2 organization_admin permissions');
+  expect(output().stderr).not.toContain('nothing changed');
+  expect(lastJson()).toEqual({ result: 'already_set_up', toppedUp: 2 });
+  expect(output().stdout).not.toContain('setupToken');
+  expect(existsSync(tokenFile)).toBe(false);
+  expect(await sqliteQuery(file, 'SELECT * FROM local_login')).toEqual(loginBefore);
+  const restored = await sqliteQuery<{ n: number }>(
+    file,
+    "SELECT count(*) AS n FROM role_permission p JOIN role r ON r.id = p.role_id WHERE r.key = 'organization_admin' AND p.permission IN ('org:projects:archive', 'project:service-principals:write')",
+  );
+  expect(restored[0]?.n).toBe(2);
+
+  vi.mocked(console.error).mockClear();
+  expect(
+    await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
+  ).toBe(6);
+  expect(output().stderr).toContain('nothing changed');
+});
+
 it('5. --token-file writes a 0600 file with the token and keeps it out of stdout and stderr', async () => {
   const file = await sqliteFile();
   const tokenFile = join(dir, 'setup.token');

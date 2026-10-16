@@ -16,10 +16,13 @@ concurrency:
 
 jobs:
   install:
+    name: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -28,6 +31,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
   pr-meta:
+    name: pr meta
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -41,11 +45,14 @@ jobs:
             echo "PR title must follow Conventional Commits"; exit 1; }
 
   typecheck:
+    name: typecheck
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -55,11 +62,14 @@ jobs:
       - run: pnpm typecheck
 
   lint:
+    name: lint
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -69,6 +79,7 @@ jobs:
       - run: pnpm lint
 
   unit:
+    name: unit
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -78,6 +89,8 @@ jobs:
         node: [24, 26]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -87,6 +100,7 @@ jobs:
       - run: pnpm test
 
   build:
+    name: build
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -96,6 +110,8 @@ jobs:
         target: [cloudflare, node]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -103,15 +119,22 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm pb build --config broker.config.ts --target ${{ matrix.target }}
-      - run: pnpm smoke:${{ matrix.target }}
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: pnpm pb build --config broker.config.ts --target "$TARGET"
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: pnpm smoke:"$TARGET"
 
   treeshake:
+    name: treeshake
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -123,6 +146,7 @@ jobs:
       - run: pnpm check:pack
 
   client-matrix:
+    name: client matrix
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -140,6 +164,8 @@ jobs:
             version: '4'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v7
         with:
@@ -151,9 +177,34 @@ jobs:
           CLIENT: ${{ matrix.client }}
           CLIENT_VERSION: ${{ matrix.version }}
 
+  dco:
+    name: dco
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a Signed-off-by trailer on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          for sha in $(git rev-list --no-merges "$base".."$HEAD_SHA"); do
+            if ! git log -1 --format=%B "$sha" | grep -Eq '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "missing Signed-off-by: $(git log -1 --format='%h %s' "$sha")"; missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "add the trailer with: git commit -s (or git rebase --signoff)"; exit 1; }
+
   commit-gate:
+    name: commit gate
     if: always()
-    needs: [install, pr-meta, typecheck, lint, unit, build, treeshake, client-matrix]
+    needs: [install, pr-meta, dco, typecheck, lint, unit, build, treeshake, client-matrix]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

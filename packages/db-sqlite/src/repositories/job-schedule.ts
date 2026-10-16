@@ -15,8 +15,9 @@ const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
 const NOW = sql.raw(`strftime('${FORMAT}','now')`);
 const DUE_PAGE_LIMIT = 100;
 const SLOT_LENGTH = 24;
-const SLOT_GLOB =
-  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z';
+const SLOT_DATE_LENGTH = 11;
+const SLOT_DATE_GLOB = '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T';
+const SLOT_TIME_GLOB = '[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z';
 const KEY_PREFIX = 'schedule:';
 const MAX_NAME = MAX_IDEMPOTENCY_KEY_LENGTH - KEY_PREFIX.length - 1 - SLOT_LENGTH;
 const MINUTE_MS = 60_000;
@@ -250,7 +251,8 @@ export function createJobScheduleRepository(executor: SqlExecutor): JobScheduleR
               WHERE org_id = ${ctx.orgId} AND type = ${name} AND idempotency_key >= ${prefix}
                 AND idempotency_key < ${`${KEY_PREFIX}${name};`}
                 AND length(idempotency_key) = ${prefix.length + SLOT_LENGTH}
-                AND substr(idempotency_key, ${prefix.length + 1}) GLOB ${SLOT_GLOB}) AS newest
+                AND substr(idempotency_key, ${prefix.length + 1}, ${SLOT_DATE_LENGTH}) GLOB ${SLOT_DATE_GLOB}
+                AND substr(idempotency_key, ${prefix.length + 1 + SLOT_DATE_LENGTH}) GLOB ${SLOT_TIME_GLOB}) AS newest
             WHERE job_schedule.org_id = ${ctx.orgId} AND job_schedule.name = ${name}
               AND job_schedule.enabled = 1 AND job_schedule.every_seconds IS NOT NULL
               AND newest.slot >= job_schedule.next_run_at AND newest.slot <= ${NOW}`),

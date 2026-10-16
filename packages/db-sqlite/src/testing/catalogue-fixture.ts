@@ -395,7 +395,7 @@ export function randomCatalogueConfig(
     }
   }
 
-  return {
+  const config: CatalogueConfig = {
     organizations: ORGANIZATIONS,
     projects,
     sources,
@@ -405,6 +405,21 @@ export function randomCatalogueConfig(
     explicit,
     registeredNames,
     versions,
+  };
+  if (options.forged !== true) return config;
+  const derivedSlots = new Set(
+    deriveVisibility(toVisibilityInputs(config))
+      .filter((r) => r.origin !== 'explicit')
+      .map((r) => `${r.projectId}\0${r.packageId}`),
+  );
+  const projectOrg = new Map(projects.map((p) => [p.id, p.orgId]));
+  return {
+    ...config,
+    explicit: explicit.filter(
+      (e) =>
+        projectOrg.get(e.projectId) === e.orgId ||
+        !derivedSlots.has(`${e.projectId}\0${e.packageId}`),
+    ),
   };
 }
 
@@ -544,6 +559,13 @@ export async function seedDerivedRows(
 ): Promise<void> {
   const orgOf = new Map(config.packages.map((p) => [p.id, p.orgId]));
   const rows = deriveVisibility(toVisibilityInputs(config)).filter((r) => r.origin !== 'explicit');
+  const held = new Set(config.explicit.map((e) => `${e.projectId}\0${e.packageId}`));
+  const clash = rows.find((r) => held.has(`${r.projectId}\0${r.packageId}`));
+  if (clash !== undefined) {
+    throw new RangeError(
+      `an explicit row already holds project ${clash.projectId}, package ${clash.packageId}`,
+    );
+  }
   const all: ScalarStatement[] = rows.map((r) => ({
     sql: 'INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
     params: [orgOf.get(r.packageId) as string, r.projectId, r.packageId, r.origin],

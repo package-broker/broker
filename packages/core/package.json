@@ -58,6 +58,14 @@
     "./authz/*": {
       "types": "./dist/authz/*.d.ts",
       "default": "./dist/authz/*.js"
+    },
+    "./sources/*": {
+      "types": "./dist/sources/*.d.ts",
+      "default": "./dist/sources/*.js"
+    },
+    "./registry/*": {
+      "types": "./dist/registry/*.d.ts",
+      "default": "./dist/registry/*.js"
     }
   },
   "files": [

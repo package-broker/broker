@@ -15,6 +15,7 @@ import {
 import type { OrgContext, SqlValue, Statement } from '@package-broker/core/db/port';
 import { fenceGuard, type FenceGuard } from '@package-broker/core/authz/fence';
 import { ulid } from '@package-broker/core/ids';
+import { isValidProviderId } from '@package-broker/core/identity/port';
 import type { Database } from './schema.js';
 
 export type { Database } from './schema.js';
@@ -201,52 +202,255 @@ export function adminEligibility(ctx: OrgContext, userId: UserIdOperand): Guard 
   return existsOf(emailBranch(loose, ctx, userId, alias));
 }
 
-/** `userIdColumn` follows the same rule as `UserIdOperand`: a table-qualified column reference. */
+export interface ProtectedHolderProvider {
+  readonly provider: string;
+  readonly anchor: string;
+  readonly emailAuthoritative: boolean;
+}
+
+export interface ProtectedHolderExclusion {
+  readonly grantId?: string;
+  readonly userId?: string;
+  readonly identityId?: string;
+  readonly membership?: {
+    readonly userId: string;
+    readonly provider: string;
+    readonly groupName: string;
+  };
+}
+
+interface ProtectedHolderCommon {
+  readonly exclude?: ProtectedHolderExclusion;
+}
+
+export type ProtectedHolderInput =
+  | (ProtectedHolderCommon & {
+      readonly kind: 'fresh';
+      readonly now: string;
+      readonly providers: readonly ProtectedHolderProvider[];
+    })
+  | (ProtectedHolderCommon & { readonly kind: 'local_recovery' });
+
+const EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const EVIDENCE_FUTURE_SKEW_MS = 60 * 1000;
+
+function evidenceWithin(column: string, lowerMs: number, upperMs: number) {
+  const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
+  return sql<SqlBool>`${ms} >= ${lowerMs} and ${ms} <= ${upperMs}`;
+}
+
+type HolderAlias = Record<
+  'user' | 'grant' | 'role' | 'member' | 'identity' | 'binding' | 'login' | 'credential',
+  string
+>;
+
+function usableLocalLogin(ctx: OrgContext, alias: HolderAlias) {
+  return loose
+    .selectFrom(`local_login as ${alias.login}`)
+    .select(sql.lit(1).as('one'))
+    .where(`${alias.login}.org_id`, '=', ctx.orgId)
+    .whereRef(`${alias.login}.user_id`, '=', `${alias.user}.id`)
+    .where(`${alias.login}.password_hash`, 'is not', null)
+    .where(`${alias.login}.totp_enabled_at`, 'is not', null)
+    .where((eb) =>
+      eb.exists(
+        loose
+          .selectFrom(`credential as ${alias.credential}`)
+          .select(sql.lit(1).as('one'))
+          .where(`${alias.credential}.org_id`, '=', ctx.orgId)
+          .whereRef(`${alias.credential}.id`, '=', `${alias.login}.totp_credential_id`),
+      ),
+    );
+}
+
+function verifiedIdentity(
+  ctx: OrgContext,
+  alias: HolderAlias,
+  providers: readonly ProtectedHolderProvider[],
+  exclude: ProtectedHolderExclusion | undefined,
+) {
+  let query = loose
+    .selectFrom(`identity as ${alias.identity}`)
+    .select(sql.lit(1).as('one'))
+    .where(`${alias.identity}.org_id`, '=', ctx.orgId)
+    .whereRef(`${alias.identity}.user_id`, '=', `${alias.user}.id`)
+    .whereRef(`${alias.identity}.email`, '=', `${alias.user}.email`)
+    .where(`${alias.identity}.email_verified`, '=', 1)
+    .where((eb) =>
+      eb.exists(
+        loose
+          .selectFrom(`identity_provider_binding as ${alias.binding}`)
+          .select(sql.lit(1).as('one'))
+          .where(`${alias.binding}.org_id`, '=', ctx.orgId)
+          .whereRef(`${alias.binding}.provider`, '=', `${alias.identity}.provider`)
+          .where((inner) =>
+            inner(
+              inner.refTuple(`${alias.binding}.provider`, `${alias.binding}.anchor`),
+              'in',
+              providers.map((entry) => inner.tuple(entry.provider, entry.anchor)),
+            ),
+          ),
+      ),
+    );
+  if (exclude?.identityId !== undefined) {
+    query = query.where(`${alias.identity}.id`, '<>', exclude.identityId);
+  }
+  return query;
+}
+
+const HOLDER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
+  if (typeof input !== 'object' || input === null) {
+    throw new TypeError('protected holder input is required');
+  }
+  if (input.kind === 'local_recovery') return;
+  if (input.kind !== 'fresh' || !Array.isArray(input.providers)) {
+    throw new TypeError('protected holder input must be a freshness descriptor or LocalRecovery');
+  }
+  const parsed = typeof input.now === 'string' ? new Date(input.now) : new Date(Number.NaN);
+  if (
+    !HOLDER_TIMESTAMP.test(input.now) ||
+    Number.isNaN(parsed.getTime()) ||
+    parsed.toISOString() !== input.now
+  ) {
+    throw new TypeError('now must be a UTC timestamp with millisecond precision');
+  }
+  for (const entry of input.providers) {
+    if (
+      typeof entry.provider !== 'string' ||
+      !isValidProviderId(entry.provider) ||
+      typeof entry.anchor !== 'string' ||
+      entry.anchor === '' ||
+      typeof entry.emailAuthoritative !== 'boolean'
+    ) {
+      throw new TypeError('protected holder provider must have a provider id and an anchor');
+    }
+  }
+}
+
+/**
+ * Whether the user holds a role with `protects_last_holder` through an organization-scope grant.
+ * `fresh` counts an e-mail grant backed by a verified identity of an e-mail authoritative provider
+ * with a current trust anchor, a group membership backed by an identity of the same provider with
+ * membership and identity evidence no older than 24 h (and not dated more than 60 s ahead), and
+ * local-admin eligibility. `local_recovery` counts local-admin eligibility only. Local-admin
+ * eligibility is an active user with an e-mail grant and a `local_login` row holding a password
+ * and an enabled TOTP.
+ *
+ * `userIdColumn` follows the same rule as `UserIdOperand`: a table-qualified column reference.
+ */
 export function protectedHolder(
   ctx: OrgContext,
   userIdColumn: Expression<string>,
-  exclude?: { readonly grantId?: string; readonly userId?: string },
+  input: ProtectedHolderInput,
 ): Guard {
+  requireProtectedHolderInput(input);
   const outer = referencedTable(userIdColumn);
-  const alias = guardAliases(['user', 'grant', 'role', 'member'], outer);
-  const excludedGrant = exclude?.grantId;
-  const excludedUser = exclude?.userId;
+  const alias = guardAliases(
+    ['user', 'grant', 'role', 'member', 'identity', 'binding', 'login', 'credential'],
+    outer,
+  );
+  const exclude = input.exclude;
 
-  let byEmail = emailBranch(loose, ctx, userIdColumn, alias);
+  const emailGrants = () => {
+    let query = loose
+      .selectFrom(`user_account as ${alias.user}`)
+      .innerJoin(`access_grant as ${alias.grant}`, (join) =>
+        join
+          .onRef(`${alias.grant}.org_id`, '=', `${alias.user}.org_id`)
+          .on(`${alias.grant}.subject_type`, '=', 'email')
+          .onRef(`${alias.grant}.subject_value`, '=', `${alias.user}.email`)
+          .on(`${alias.grant}.scope`, '=', 'organization'),
+      )
+      .innerJoin(`role as ${alias.role}`, (join) =>
+        join
+          .onRef(`${alias.role}.id`, '=', `${alias.grant}.role_id`)
+          .onRef(`${alias.role}.org_id`, '=', `${alias.grant}.org_id`)
+          .on(`${alias.role}.protects_last_holder`, '=', 1),
+      )
+      .select(sql.lit(1).as('one'))
+      .where(`${alias.user}.org_id`, '=', ctx.orgId)
+      .where(`${alias.user}.id`, '=', userIdColumn)
+      .where(`${alias.user}.status`, '=', 'active');
+    if (exclude?.grantId !== undefined) {
+      query = query.where(`${alias.grant}.id`, '<>', exclude.grantId);
+    }
+    if (exclude?.userId !== undefined) {
+      query = query.where(`${alias.user}.id`, '<>', exclude.userId);
+    }
+    return query;
+  };
 
-  let byGroup = loose
-    .selectFrom(`user_group as ${alias.member}`)
-    .innerJoin(`user_account as ${alias.user}`, `${alias.user}.id`, `${alias.member}.user_id`)
-    .innerJoin(`access_grant as ${alias.grant}`, (join) =>
-      join
-        .onRef(`${alias.grant}.org_id`, '=', `${alias.member}.org_id`)
-        .on(`${alias.grant}.subject_type`, '=', 'group')
-        .onRef(`${alias.grant}.subject_provider`, '=', `${alias.member}.provider`)
-        .onRef(`${alias.grant}.subject_value`, '=', `${alias.member}.group_name`)
-        .on(`${alias.grant}.scope`, '=', 'organization'),
-    )
-    .innerJoin(`role as ${alias.role}`, (join) =>
-      join
-        .onRef(`${alias.role}.id`, '=', `${alias.grant}.role_id`)
-        .onRef(`${alias.role}.org_id`, '=', `${alias.grant}.org_id`)
-        .on(`${alias.role}.protects_last_holder`, '=', 1),
-    )
-    .select(sql.lit(1).as('one'))
-    .where(`${alias.member}.org_id`, '=', ctx.orgId)
-    .where(`${alias.user}.org_id`, '=', ctx.orgId)
-    .where(`${alias.user}.id`, '=', userIdColumn)
-    .where(`${alias.user}.status`, '=', 'active');
+  const localAdmin = emailGrants().where((eb) => eb.exists(usableLocalLogin(ctx, alias)));
+  if (input.kind === 'local_recovery') return existsOf(localAdmin);
 
-  if (excludedGrant !== undefined) {
-    byEmail = byEmail.where(`${alias.grant}.id`, '<>', excludedGrant);
-    byGroup = byGroup.where(`${alias.grant}.id`, '<>', excludedGrant);
+  const nowMs = Date.parse(input.now);
+  const lowerMs = nowMs - EVIDENCE_MAX_AGE_MS;
+  const upperMs = nowMs + EVIDENCE_FUTURE_SKEW_MS;
+
+  const branches: (typeof localAdmin)[] = [];
+
+  const emailProviders = input.providers.filter((entry) => entry.emailAuthoritative);
+  if (emailProviders.length > 0) {
+    branches.push(
+      emailGrants().where((eb) => eb.exists(verifiedIdentity(ctx, alias, emailProviders, exclude))),
+    );
   }
-  if (excludedUser !== undefined) {
-    byEmail = byEmail.where(`${alias.user}.id`, '<>', excludedUser);
-    byGroup = byGroup.where(`${alias.user}.id`, '<>', excludedUser);
+
+  if (input.providers.length > 0) {
+    let byGroup = loose
+      .selectFrom(`user_group as ${alias.member}`)
+      .innerJoin(`user_account as ${alias.user}`, `${alias.user}.id`, `${alias.member}.user_id`)
+      .innerJoin(`access_grant as ${alias.grant}`, (join) =>
+        join
+          .onRef(`${alias.grant}.org_id`, '=', `${alias.member}.org_id`)
+          .on(`${alias.grant}.subject_type`, '=', 'group')
+          .onRef(`${alias.grant}.subject_provider`, '=', `${alias.member}.provider`)
+          .onRef(`${alias.grant}.subject_value`, '=', `${alias.member}.group_name`)
+          .on(`${alias.grant}.scope`, '=', 'organization'),
+      )
+      .innerJoin(`role as ${alias.role}`, (join) =>
+        join
+          .onRef(`${alias.role}.id`, '=', `${alias.grant}.role_id`)
+          .onRef(`${alias.role}.org_id`, '=', `${alias.grant}.org_id`)
+          .on(`${alias.role}.protects_last_holder`, '=', 1),
+      )
+      .select(sql.lit(1).as('one'))
+      .where(`${alias.member}.org_id`, '=', ctx.orgId)
+      .where(`${alias.user}.org_id`, '=', ctx.orgId)
+      .where(`${alias.user}.id`, '=', userIdColumn)
+      .where(`${alias.user}.status`, '=', 'active')
+      .where(evidenceWithin(`${alias.member}.refreshed_at`, lowerMs, upperMs))
+      .where((eb) =>
+        eb.exists(
+          verifiedIdentity(ctx, alias, input.providers, exclude)
+            .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
+            .where(evidenceWithin(`${alias.identity}.validated_at`, lowerMs, upperMs)),
+        ),
+      );
+    if (exclude?.grantId !== undefined) {
+      byGroup = byGroup.where(`${alias.grant}.id`, '<>', exclude.grantId);
+    }
+    if (exclude?.userId !== undefined) {
+      byGroup = byGroup.where(`${alias.user}.id`, '<>', exclude.userId);
+    }
+    const membership = exclude?.membership;
+    if (membership !== undefined) {
+      byGroup = byGroup.where((eb) =>
+        eb.not(
+          eb.and([
+            eb(`${alias.member}.user_id`, '=', membership.userId),
+            eb(`${alias.member}.provider`, '=', membership.provider),
+            eb(`${alias.member}.group_name`, '=', membership.groupName),
+          ]),
+        ),
+      );
+    }
+    branches.push(byGroup);
   }
 
-  return existsOf(byEmail.unionAll(byGroup));
+  return existsOf(branches.reduce((all, branch) => all.unionAll(branch), localAdmin));
 }
 
 interface GuardCtes {

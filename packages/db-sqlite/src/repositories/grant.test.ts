@@ -7,7 +7,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import { countCalls } from '../contract/count-calls.js';
 import { compile, db, protectedHolder } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createGrantRepository } from './grant.js';
+import { createGrantRepository, type ProtectedHolderInput } from './grant.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 const LATER = '2026-10-15T13:00:00.000Z';
@@ -28,6 +28,53 @@ const G1 = '01J0GRANT000000000000000A1';
 const G2 = '01J0GRANT000000000000000A2';
 const G3 = '01J0GRANT000000000000000A3';
 const GB = '01J0GRANT000000000000000B1';
+
+const ANCHOR = 'https://idp.example.test';
+const HOLDER_PROVIDERS = ['oidc', 'access'] as const;
+
+function holderInput(): ProtectedHolderInput {
+  return {
+    kind: 'fresh',
+    now: new Date().toISOString(),
+    providers: HOLDER_PROVIDERS.map((provider) => ({
+      provider,
+      anchor: ANCHOR,
+      emailAuthoritative: true,
+    })),
+  };
+}
+
+function bindings(org: OrgContext): Statement[] {
+  return HOLDER_PROVIDERS.map((provider) =>
+    stmt(
+      'INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+      org.orgId,
+      provider,
+      ANCHOR,
+    ),
+  );
+}
+
+function identities(
+  org: OrgContext,
+  users: readonly (readonly [string, string])[],
+  providers: readonly string[] = HOLDER_PROVIDERS,
+): Statement[] {
+  return users.flatMap(([userId, email]) =>
+    providers.map((provider) =>
+      stmt(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        `ID-${provider}-${userId}`,
+        org.orgId,
+        userId,
+        provider,
+        `${provider}-${userId}`,
+        email,
+        new Date().toISOString(),
+      ),
+    ),
+  );
+}
 
 let database: MigratedDatabase;
 let a: OrgContext;
@@ -165,7 +212,7 @@ beforeEach(async () => {
   if (database.orgs === null) throw new Error('two organizations were not seeded');
   ({ a, b } = database.orgs);
   executor = database.executor;
-  grants = createGrantRepository(executor);
+  grants = createGrantRepository(executor, { holderInput });
   await seed([
     ...rolesFor(a, ADMIN, true),
     ...rolesFor(b, ADMIN_B, false),
@@ -173,6 +220,14 @@ beforeEach(async () => {
     user(a, U2, 'u2@example.test'),
     user(a, U3, 'u3@example.test'),
     user(b, UB, 'b@example.test'),
+    ...bindings(a),
+    ...bindings(b),
+    ...identities(b, [[UB, 'b@example.test']]),
+    ...identities(a, [
+      [U1, 'u1@example.test'],
+      [U2, 'u2@example.test'],
+      [U3, 'u3@example.test'],
+    ]),
   ]);
 });
 
@@ -376,7 +431,7 @@ describe('listOrganization', () => {
 
   it('is one statement', async () => {
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor).listOrganization(a);
+    await createGrantRepository(counted.executor, { holderInput }).listOrganization(a);
     expect(counted.counts()).toEqual({ all: 1, batch: 0 });
   });
 });
@@ -496,7 +551,7 @@ describe('createOrganization', () => {
 
   it('rejects malformed input before any SQL', async () => {
     const counted = countCalls(executor);
-    const repository = createGrantRepository(counted.executor);
+    const repository = createGrantRepository(counted.executor, { holderInput });
     await expect(repository.createOrganization(a, email(G1, 'Upper@example.test'))).rejects.toThrow(
       TypeError,
     );
@@ -606,7 +661,7 @@ describe('createOrganization', () => {
 
   it('is one statement', async () => {
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor).createOrganization(
+    await createGrantRepository(counted.executor, { holderInput }).createOrganization(
       a,
       email(G1, 'x@example.test'),
     );
@@ -671,7 +726,7 @@ describe('deleteOrganization', () => {
   it('is one batch', async () => {
     await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor).deleteOrganization(a, G1);
+    await createGrantRepository(counted.executor, { holderInput }).deleteOrganization(a, G1);
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
   });
 });
@@ -766,7 +821,7 @@ describe('changeRole', () => {
   it('is one batch', async () => {
     await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor).changeRole(a, G1, ADMIN, LATER);
+    await createGrantRepository(counted.executor, { holderInput }).changeRole(a, G1, ADMIN, LATER);
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
   });
 });
@@ -786,9 +841,9 @@ describe('suspendUser and reactivateUser', () => {
       ),
     );
     const counted = countCalls(executor);
-    expect(await createGrantRepository(counted.executor).suspendUser(a, U2, LATER)).toBe(
-      'suspended',
-    );
+    expect(
+      await createGrantRepository(counted.executor, { holderInput }).suspendUser(a, U2, LATER),
+    ).toBe('suspended');
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
     expect(await statusOf(U2)).toBe('suspended');
     expect(await rows('SELECT id, revoked_at FROM session ORDER BY id')).toEqual([
@@ -838,6 +893,7 @@ describe('suspendUser and reactivateUser', () => {
     await seed([
       emailGrant(a, G1, 'u1@example.test', ADMIN),
       user(b, '01J0USER00000000000000000C', 'u1@example.test'),
+      ...identities(b, [['01J0USER00000000000000000C', 'u1@example.test']]),
       emailGrant(b, GB, 'u1@example.test', ADMIN_B),
       emailGrant(b, '01J0GRANT000000000000000B2', 'b@example.test', ADMIN_B),
       groupGrant(b, '01J0GRANT000000000000000B3', 'oidc', 'admins', ADMIN_B),
@@ -865,7 +921,9 @@ describe('suspendUser and reactivateUser', () => {
 
   it('reactivateUser is false for an active user and one statement', async () => {
     const counted = countCalls(executor);
-    expect(await createGrantRepository(counted.executor).reactivateUser(a, U1, LATER)).toBe(false);
+    expect(
+      await createGrantRepository(counted.executor, { holderInput }).reactivateUser(a, U1, LATER),
+    ).toBe(false);
     expect(counted.counts().all + counted.counts().batch).toBe(1);
   });
 
@@ -881,6 +939,8 @@ describe('two organizations', () => {
       emailGrant(a, G1, 'shared@example.test', ADMIN),
       user(a, '01J0USER000000000000000009', 'shared@example.test'),
       user(b, '01J0USER00000000000000000C', 'shared@example.test'),
+      ...identities(a, [['01J0USER000000000000000009', 'shared@example.test']]),
+      ...identities(b, [['01J0USER00000000000000000C', 'shared@example.test']]),
       emailGrant(b, GB, 'shared@example.test', ADMIN_B),
       groupGrant(b, '01J0GRANT000000000000000B2', 'oidc', 'admins', ADMIN_B),
       membership(a, U1, 'oidc', 'admins'),
@@ -912,9 +972,9 @@ describe('concurrent guarded operations on one file database', () => {
     });
     if (shared.orgs === null) throw new Error('two organizations expected');
     org = shared.orgs.a;
-    await shared.executor.batch(rolesFor(org, ADMIN, true));
-    first = createGrantRepository(shared.executor);
-    second = createGrantRepository(await shared.second());
+    await shared.executor.batch([...rolesFor(org, ADMIN, true), ...bindings(org)]);
+    first = createGrantRepository(shared.executor, { holderInput });
+    second = createGrantRepository(await shared.second(), { holderInput });
   });
 
   afterEach(async () => {
@@ -927,9 +987,14 @@ describe('concurrent guarded operations on one file database', () => {
       stmt('DELETE FROM session'),
       stmt('DELETE FROM user_group'),
       stmt('DELETE FROM access_grant'),
+      stmt('DELETE FROM identity'),
       stmt('DELETE FROM user_account'),
       user(org, U1, 'u1@example.test'),
       user(org, U2, 'u2@example.test'),
+      ...identities(org, [
+        [U1, 'u1@example.test'],
+        [U2, 'u2@example.test'],
+      ]),
       ...statements,
     ]);
   }
@@ -1108,6 +1173,7 @@ describe('spike scale', () => {
       emails.set(id, `user${i}@example.test`);
       if (!suspended) active.add(id);
       statements.push(user(a, id, `user${i}@example.test`, suspended ? 'suspended' : 'active'));
+      statements.push(...identities(a, [[id, `user${i}@example.test`]]));
     }
     const groupsOf = new Map<string, Set<string>>();
     const seen = new Set<string>();
@@ -1198,7 +1264,7 @@ describe('spike scale', () => {
           .selectFrom('user_account as holder')
           .select('holder.id')
           .where('holder.org_id', '=', org.orgId)
-          .where((eb) => protectedHolder(org, eb.ref('holder.id')))
+          .where((eb) => protectedHolder(org, eb.ref('holder.id'), holderInput()))
           .orderBy('holder.id'),
       ),
     );

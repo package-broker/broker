@@ -96,10 +96,43 @@ interface Obj {
   type: 'commit' | 'tree' | 'blob';
   data: Uint8Array;
   oid: string;
+  stored?: boolean;
 }
 
-function makeObj(type: Obj['type'], data: Uint8Array): Obj {
-  return { type, data, oid: sha1(enc.encode(`${type} ${data.length}\0`), data).toString('hex') };
+function makeObj(type: Obj['type'], data: Uint8Array, stored = false): Obj {
+  return {
+    type,
+    data,
+    oid: sha1(enc.encode(`${type} ${data.length}\0`), data).toString('hex'),
+    ...(stored ? { stored } : {}),
+  };
+}
+
+function once<T>(build: () => T): () => T {
+  let value: T | undefined;
+  return () => (value ??= build());
+}
+
+const MIB = 1024 * 1024;
+const bigBlob = once(() => makeObj('blob', new Uint8Array(9 * MIB).fill(0x61)));
+const incompressibleBlob = once(() => makeObj('blob', new Uint8Array(randomBytes(17 * MIB)), true));
+const manifestBlobs = new Map<number, Obj>();
+function manifestBlob(n: number): Obj {
+  let blob = manifestBlobs.get(n);
+  if (!blob) {
+    blob = makeObj('blob', enc.encode(String.fromCharCode(65 + n).repeat(900 * 1024)));
+    manifestBlobs.set(n, blob);
+  }
+  return blob;
+}
+const bigBlobsByFill = new Map<number, Obj>();
+function bigBlobFilled(fill: number): Obj {
+  let blob = bigBlobsByFill.get(fill);
+  if (!blob) {
+    blob = makeObj('blob', new Uint8Array(9 * MIB).fill(fill));
+    bigBlobsByFill.set(fill, blob);
+  }
+  return blob;
 }
 
 interface TreeItem {
@@ -144,6 +177,16 @@ function packHeader(type: number, size: number): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+const deflated = new WeakMap<Obj, Uint8Array>();
+function deflateObj(o: Obj): Uint8Array {
+  let out = deflated.get(o);
+  if (!out) {
+    out = new Uint8Array(deflateSync(o.data, o.stored ? { level: 0 } : {}));
+    deflated.set(o, out);
+  }
+  return out;
+}
+
 function buildPack(objects: Obj[]): Uint8Array {
   const header = new Uint8Array(12);
   header.set(enc.encode('PACK'));
@@ -152,18 +195,20 @@ function buildPack(objects: Obj[]): Uint8Array {
   dv.setUint32(8, objects.length);
   const body = concat([
     header,
-    ...objects.flatMap((o) => [
-      packHeader(TYPE_CODE[o.type], o.data.length),
-      new Uint8Array(deflateSync(o.data)),
-    ]),
+    ...objects.flatMap((o) => [packHeader(TYPE_CODE[o.type], o.data.length), deflateObj(o)]),
   ]);
   return concat([body, new Uint8Array(sha1(body))]);
 }
 
+const SMALL_BAND = 97;
+const LARGE_BAND = 65_000;
+const LARGE_PACK = 256 * 1024;
+
 function fetchResponse(pack: Uint8Array): Uint8Array {
   const bands: Uint8Array[] = [];
-  for (let at = 0; at < pack.length; at += 97) {
-    bands.push(encodePkt(concat([Uint8Array.of(1), pack.subarray(at, at + 97)])));
+  const step = pack.length > LARGE_PACK ? LARGE_BAND : SMALL_BAND;
+  for (let at = 0; at < pack.length; at += step) {
+    bands.push(encodePkt(concat([Uint8Array.of(1), pack.subarray(at, at + step)])));
   }
   return concat([
     encodePkt('shallow-info\n'),
@@ -318,12 +363,25 @@ function seedReleases(fake: FakeGit, count: number, shared = 0): Release[] {
 
 function manifests(fake: FakeGit, count: number) {
   return Array.from({ length: count }, (_, n) => {
-    const blob = fake.add(
-      makeObj('blob', enc.encode(String.fromCharCode(65 + n).repeat(900 * 1024))),
-    );
+    const blob = fake.add(manifestBlob(n));
     const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
     return { name: `refs/tags/v${n}`, oid: fake.add(makeCommit(tree.oid)).oid };
   });
+}
+
+const wideFixture = once(() => {
+  const blob = makeObj('blob', enc.encode('{}'));
+  const tree = makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]);
+  const commits = Array.from({ length: MAX_WANTS_PER_REQUEST + 1 }, (_, n) =>
+    makeCommit(tree.oid, 1_000_000 + n),
+  );
+  return { objects: [blob, tree, ...commits], commits };
+});
+
+function wideRefs(fake: FakeGit) {
+  const { objects, commits } = wideFixture();
+  for (const o of objects) fake.add(o);
+  return commits.map((c, n) => ({ name: `refs/tags/v${n}`, oid: c.oid }));
 }
 
 describe('readFileAtRefs', () => {
@@ -846,7 +904,7 @@ describe('readFileAtRefs', () => {
   it('isolates oversize blobs by bisection within the request cap', async () => {
     const fake = new FakeGit();
     const host = 'bisect.example.com';
-    const big = fake.add(makeObj('blob', new Uint8Array(9 * 1024 * 1024).fill(0x61)));
+    const big = fake.add(bigBlob());
     const small = Array.from({ length: 8 }, (_, n) =>
       fake.add(makeObj('blob', enc.encode(`{"n":${n}}`))),
     );
@@ -871,10 +929,9 @@ describe('readFileAtRefs', () => {
     const host = 'threebig.example.com';
     const bigs = [3, 17, 33].map((n) => n);
     const refs = Array.from({ length: 41 }, (_, n) => {
-      const body = bigs.includes(n)
-        ? new Uint8Array(9 * 1024 * 1024).fill(65 + n)
-        : enc.encode(`{"n":${n}}`);
-      const blob = fake.add(makeObj('blob', body));
+      const blob = fake.add(
+        bigs.includes(n) ? bigBlobFilled(65 + n) : makeObj('blob', enc.encode(`{"n":${n}}`)),
+      );
       const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
       return { name: `refs/tags/v${n}`, oid: fake.add(makeCommit(tree.oid, 1_000 + n)).oid };
     });
@@ -886,7 +943,7 @@ describe('readFileAtRefs', () => {
   it('treats a pack over the response cap like an oversize blob', async () => {
     const fake = new FakeGit();
     const host = 'packcap.example.com';
-    const big = fake.add(makeObj('blob', new Uint8Array(randomBytes(17 * 1024 * 1024))));
+    const big = fake.add(incompressibleBlob());
     const small = fake.add(makeObj('blob', enc.encode('{}')));
     const mk = (name: string, blob: Obj) => ({
       name,
@@ -908,23 +965,23 @@ describe('readFileAtRefs', () => {
     ]);
   });
 
-  it('refetches only the failing chunk when a filter is rejected mid-way', async () => {
-    const fake = new FakeGit();
-    fake.rejected.add('tree:1');
-    const host = 'chunkfallback.example.com';
-    const blob = fake.add(makeObj('blob', enc.encode('{}')));
-    const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
-    const refs = Array.from({ length: MAX_WANTS_PER_REQUEST + 1 }, (_, n) => ({
-      name: `refs/tags/v${n}`,
-      oid: fake.add(makeCommit(tree.oid, 1_000_000 + n)).oid,
-    }));
-    await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
-    expect(fake.requests.slice(0, 3).map((r) => [r.filter, r.wants.length])).toEqual([
-      ['tree:1', MAX_WANTS_PER_REQUEST],
-      ['tree:0', MAX_WANTS_PER_REQUEST],
-      ['tree:0', 1],
-    ]);
-  });
+  // Inflating 10,001 distinct commits is the boundary under test and cannot shrink; the budget absorbs a loaded CI host.
+  it(
+    'refetches only the failing chunk when a filter is rejected mid-way',
+    { timeout: 20_000 },
+    async () => {
+      const fake = new FakeGit();
+      fake.rejected.add('tree:1');
+      const host = 'chunkfallback.example.com';
+      const refs = wideRefs(fake);
+      await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
+      expect(fake.requests.slice(0, 3).map((r) => [r.filter, r.wants.length])).toEqual([
+        ['tree:1', MAX_WANTS_PER_REQUEST],
+        ['tree:0', MAX_WANTS_PER_REQUEST],
+        ['tree:0', 1],
+      ]);
+    },
+  );
 
   it('treats an ERR that does not mention the filter as a plain remote error', async () => {
     const fake = new FakeGit();
@@ -941,7 +998,7 @@ describe('readFileAtRefs', () => {
   it('marks a single blob over the object cap too_large and keeps the others', async () => {
     const fake = new FakeGit();
     const host = 'bigblob.example.com';
-    const big = fake.add(makeObj('blob', new Uint8Array(9 * 1024 * 1024).fill(0x61)));
+    const big = fake.add(bigBlob());
     const small = fake.add(makeObj('blob', enc.encode('{}')));
     const mk = (name: string, blob: Obj) => ({
       name,
@@ -967,9 +1024,7 @@ describe('readFileAtRefs', () => {
     const fake = new FakeGit();
     const host = 'commitbudget.example.com';
     const refs = Array.from({ length: 30 }, (_, n) => {
-      const blob = fake.add(
-        makeObj('blob', enc.encode(String.fromCharCode(65 + n).repeat(900 * 1024))),
-      );
+      const blob = fake.add(manifestBlob(n));
       const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
       return { name: `refs/tags/v${n}`, oid: fake.add(makeCommit(tree.oid)).oid };
     });
@@ -1000,24 +1055,24 @@ describe('readFileAtRefs', () => {
     ).rejects.toMatchObject({ code: 'bad_response' });
   });
 
-  it('splits more than 10,000 wants over several requests under the body cap', async () => {
-    const fake = new FakeGit();
-    const host = 'many.example.com';
-    const blob = fake.add(makeObj('blob', enc.encode('{}')));
-    const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
-    const refs = Array.from({ length: MAX_WANTS_PER_REQUEST + 1 }, (_, n) => ({
-      name: `refs/tags/v${n}`,
-      oid: fake.add(makeCommit(tree.oid, 1_000_000 + n)).oid,
-    }));
-    const result = await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
-    expect(result).toHaveLength(MAX_WANTS_PER_REQUEST + 1);
-    expect(result.every((r) => r.text === '{}')).toBe(true);
-    expect(fake.requests.slice(0, 2).map((r) => r.wants.length)).toEqual([
-      MAX_WANTS_PER_REQUEST,
-      1,
-    ]);
-    expect(fake.seen.every((r) => (r.body?.length ?? 0) < 1024 * 1024)).toBe(true);
-  });
+  // Inflating 10,001 distinct commits is the boundary under test and cannot shrink; the budget absorbs a loaded CI host.
+  it(
+    'splits more than 10,000 wants over several requests under the body cap',
+    { timeout: 20_000 },
+    async () => {
+      const fake = new FakeGit();
+      const host = 'many.example.com';
+      const refs = wideRefs(fake);
+      const result = await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
+      expect(result).toHaveLength(MAX_WANTS_PER_REQUEST + 1);
+      expect(result.every((r) => r.text === '{}')).toBe(true);
+      expect(fake.requests.slice(0, 2).map((r) => r.wants.length)).toEqual([
+        MAX_WANTS_PER_REQUEST,
+        1,
+      ]);
+      expect(fake.seen.every((r) => (r.body?.length ?? 0) < 1024 * 1024)).toBe(true);
+    },
+  );
 
   it('never puts the committer e-mail in an error', async () => {
     const fake = new FakeGit();

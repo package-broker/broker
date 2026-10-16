@@ -257,7 +257,11 @@ function errText(head: Uint8Array): string {
   return looseDecoder.decode(head.subarray(8, end));
 }
 
-async function readPack(response: UpstreamResponse, limit: number): Promise<Uint8Array> {
+async function readPack(
+  response: UpstreamResponse,
+  limit: number,
+  filtered: boolean,
+): Promise<Uint8Array> {
   const reader = response.body?.getReader();
   let head: Uint8Array = new Uint8Array(0);
   async function* source(): AsyncGenerator<Uint8Array> {
@@ -311,6 +315,7 @@ async function readPack(response: UpstreamResponse, limit: number): Promise<Uint
         }
       }
     }
+    if (filtered && head.length === 0) throw new FilterRejected();
     if (!complete || section !== 'packfile' || total === 0) {
       throw new GitFetchError('bad_response');
     }
@@ -348,7 +353,7 @@ async function fetchChunk(
       void response.body?.cancel().catch(() => undefined);
       throw new GitFetchError('bad_response');
     }
-    pack = await readPack(response, limit);
+    pack = await readPack(response, limit, filter !== undefined);
   } catch (error) {
     if (error instanceof UpstreamError && error.code === 'too_large') {
       throw new GitFetchError('too_large');

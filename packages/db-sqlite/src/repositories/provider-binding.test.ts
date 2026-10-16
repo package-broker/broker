@@ -315,15 +315,17 @@ describe('rebindProvider', () => {
     ]);
   });
 
-  it('uses one executor call with one batch of four scalar statements, the binding update last', async () => {
+  it('uses one executor call with one batch of six scalar statements, the binding update last', async () => {
     await seed();
     const counted = countCalls(executor);
     const spy = recording(counted.executor);
     await rebind(a, { exec: spy.executor });
 
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
-    expect(spy.seen).toHaveLength(4);
+    expect(spy.seen).toHaveLength(6);
     expect(spy.seen.map((statement) => /^\w+/.exec(statement.sql)?.[0])).toEqual([
+      'insert',
+      'update',
       'delete',
       'delete',
       'delete',

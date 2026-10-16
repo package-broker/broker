@@ -702,3 +702,47 @@ describe('JsonTokenizer', () => {
     );
   });
 });
+
+describe('JsonTokenizer structureOnlyNext', () => {
+  const run = (text: string, chunk: number): JsonToken[] =>
+    tokenize(encoder.encode(text), chunk, undefined, (token, tokenizer) => {
+      if (token.type === 'key' && token.value === 'a') {
+        tokenizer.structureOnlyNext();
+      }
+    });
+
+  it.each([1, 3, 1000])('emits structure and empty strings with chunk size %i', (chunk) => {
+    const tokens = run('{"a":{"k\\u0041":"x\\ud800y","n":[1,"z"]},"b":"w"}', chunk);
+    expect(tokens.map((token) => [token.type, 'value' in token ? token.value : null])).toEqual([
+      ['beginObject', null],
+      ['key', 'a'],
+      ['beginObject', null],
+      ['key', 'kA'],
+      ['string', ''],
+      ['key', 'n'],
+      ['beginArray', null],
+      ['number', null],
+      ['string', ''],
+      ['endArray', null],
+      ['endObject', null],
+      ['key', 'b'],
+      ['string', 'w'],
+      ['endObject', null],
+    ]);
+  });
+
+  it('still validates escapes and UTF-8 inside the value', () => {
+    expect(() => run('{"a":"\\x"}', 2)).toThrow(JsonStreamError);
+    expect(() => run('{"a":"\\ud800\\u12"}', 2)).toThrow(JsonStreamError);
+    expect(() =>
+      tokenize(
+        new Uint8Array([...encoder.encode('{"a":"'), 0xff, 0x22, 0x7d]),
+        2,
+        undefined,
+        (token, tokenizer) => {
+          if (token.type === 'key') tokenizer.structureOnlyNext();
+        },
+      ),
+    ).toThrow(JsonStreamError);
+  });
+});

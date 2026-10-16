@@ -350,7 +350,12 @@ describe('lookupToken personal access tokens', () => {
       revoked: false,
     });
     expect(result?.project?.slug).toBe('alpha');
-    expect(result?.validation).toEqual({ kind: 'sso', identityId: IDENTITY_U1, fresh: true });
+    expect(result?.validation).toEqual({
+      kind: 'sso',
+      identityId: IDENTITY_U1,
+      fresh: true,
+      evidenceAt: expect.any(String),
+    });
     expect(result?.principalStatus).toBe('active');
     expect(result?.projectPermissions).toEqual([
       'project:packages:read',
@@ -510,11 +515,15 @@ describe('lookupToken personal access tokens', () => {
 
     await seed(pat('pat-fresh'));
     expect((await lookup('pat-fresh'))?.validation?.fresh).toBe(true);
-    await seed(
-      stmt('UPDATE identity SET validated_at = ? WHERE id = ?', at(-30 * HOUR), IDENTITY_U1),
-    );
+    const staleAt = at(-30 * HOUR);
+    await seed(stmt('UPDATE identity SET validated_at = ? WHERE id = ?', staleAt, IDENTITY_U1));
     const stale = await lookup('pat-fresh');
-    expect(stale?.validation).toEqual({ kind: 'sso', identityId: IDENTITY_U1, fresh: false });
+    expect(stale?.validation).toEqual({
+      kind: 'sso',
+      identityId: IDENTITY_U1,
+      fresh: false,
+      evidenceAt: staleAt,
+    });
     expect(stale?.projectPermissions).toEqual([]);
   });
 });
@@ -750,7 +759,12 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
 
       const result = await lookup('pat-local');
 
-      expect(result?.validation).toEqual({ kind: 'local', identityId: null, fresh: true });
+      expect(result?.validation).toEqual({
+        kind: 'local',
+        identityId: null,
+        fresh: true,
+        evidenceAt: expect.any(String),
+      });
       expect(result?.projectPermissions).toEqual(['project:read']);
       expect(result?.protectedHolder).toBe(true);
     });
@@ -789,6 +803,7 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
     });
 
     it('does not let a local login freshen an SSO PAT', async () => {
+      const staleAt = at(-30 * HOUR);
       await seed(
         stmt(
           'DELETE FROM access_grant WHERE subject_value = ? AND scope = ?',
@@ -807,13 +822,18 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
           at(-HOUR),
           at(-HOUR),
         ),
-        stmt('UPDATE identity SET validated_at = ? WHERE id = ?', at(-30 * HOUR), IDENTITY_U1),
+        stmt('UPDATE identity SET validated_at = ? WHERE id = ?', staleAt, IDENTITY_U1),
         pat('pat-sso'),
       );
 
       const result = await lookup('pat-sso');
 
-      expect(result?.validation).toEqual({ kind: 'sso', identityId: IDENTITY_U1, fresh: false });
+      expect(result?.validation).toEqual({
+        kind: 'sso',
+        identityId: IDENTITY_U1,
+        fresh: false,
+        evidenceAt: staleAt,
+      });
       expect(result?.projectPermissions).toEqual([]);
     });
   });

@@ -1,0 +1,553 @@
+import { createHash } from 'node:crypto';
+import { describe, expect, it } from 'vitest';
+import { orgContext } from '../../db/port.js';
+import {
+  createBlobStore,
+  createBlobUploadAdmission,
+  type BlobMetadataPort,
+  type BlobInfo,
+  type ByteStore,
+} from '../../platform/blob.js';
+import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
+import { npmVersionInput, type NpmVersionResult } from '../../registry/npm/version-object.js';
+import {
+  UpstreamError,
+  type PolicyFetch,
+  type UpstreamRequest,
+} from '../../sources/policy-fetch.js';
+import type {
+  DescribeOptions,
+  PackageDescription,
+  SnapshotRef,
+  VersionCandidate,
+} from '../../sources/provider.js';
+import { SnapshotCorruptError } from '../snapshot.js';
+import {
+  NPM_INLINE_PARSE_BYTES,
+  NpmPackumentError,
+  describeNpmPackument,
+  versionChunks,
+  type NpmDescribeResult,
+  type NpmPackumentDeps,
+} from './packument.js';
+
+const ctx = orgContext('01J0ACME000000000000000000');
+const enc = new TextEncoder();
+const URL_ = 'https://registry.example.test/example';
+const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+const origin = {
+  probe: { secrets: [], queryParams: [] },
+  importedAt: '2026-10-16T00:00:00.000Z',
+};
+
+type Json = Record<string, unknown>;
+
+const codecs: Pick<Codecs, 'digestTap'> = {
+  digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
+    const hashes = algs.map((alg) => [alg, createHash(alg)] as const);
+    let settle!: { resolve(v: never): void; reject(e: unknown): void };
+    const digests = new Promise<Record<A, Uint8Array>>((resolve, reject) => {
+      settle = { resolve: resolve as (v: never) => void, reject };
+    });
+    digests.catch(() => undefined);
+    const transform = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        for (const [, h] of hashes) h.update(chunk);
+        controller.enqueue(chunk);
+      },
+      flush() {
+        settle.resolve(
+          Object.fromEntries(hashes.map(([alg, h]) => [alg, new Uint8Array(h.digest())])) as never,
+        );
+      },
+      cancel(reason) {
+        settle.reject(reason);
+      },
+    });
+    return { transform, digests };
+  },
+};
+
+function streamOf(bytes: Uint8Array, chunk = 65_536): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= bytes.length) controller.close();
+      else {
+        controller.enqueue(bytes.slice(offset, offset + chunk));
+        offset += chunk;
+      }
+    },
+  });
+}
+
+function memoryStore() {
+  const objects = new Map<string, Uint8Array>();
+  const rows = new Map<string, BlobInfo>();
+  const byteStore: ByteStore = {
+    async putVerified(key, body, input) {
+      const bytes = new Uint8Array(await new Response(body).arrayBuffer());
+      if (bytes.length !== input.size || sha256(bytes) !== input.sha256) throw new Error('verify');
+      objects.set(key, bytes);
+      return { size: bytes.length, mediaType: input.mediaType };
+    },
+    async get(key) {
+      const bytes = objects.get(key);
+      if (bytes === undefined) return null;
+      return {
+        size: bytes.length,
+        mediaType: 'application/json',
+        range: null,
+        body: streamOf(bytes),
+      };
+    },
+    async head(key) {
+      const bytes = objects.get(key);
+      return bytes ? { size: bytes.length, mediaType: 'application/json' } : null;
+    },
+    async remove(key) {
+      objects.delete(key);
+    },
+  };
+  const metadata: BlobMetadataPort = {
+    reserve: async () => '1' as never,
+    publish: async (c, i) => {
+      const info = { sha256: i.sha256, size: i.size, mediaType: i.mediaType, purgeAfter: null };
+      rows.set(`${c.orgId}:${i.sha256}`, info);
+      return info;
+    },
+    find: async (c, key) => rows.get(`${c.orgId}:${key}`) ?? null,
+    narrowRefetchable: async () => null,
+    inspect: async () => null,
+  };
+  const store = createBlobStore(byteStore, metadata, { admission: createBlobUploadAdmission() });
+  return { store, objects };
+}
+
+interface Reply {
+  status?: number;
+  body?: Uint8Array | string | null;
+  headers?: Record<string, string>;
+}
+
+function fakeFetch(reply: (request: UpstreamRequest, call: number) => Reply) {
+  const requests: UpstreamRequest[] = [];
+  const fetch: PolicyFetch = async (request) => {
+    requests.push(request);
+    const r = reply(request, requests.length);
+    const body =
+      r.body === null
+        ? null
+        : streamOf(typeof r.body === 'string' ? enc.encode(r.body) : (r.body ?? new Uint8Array()));
+    return { status: r.status ?? 200, headers: new Headers(r.headers ?? {}), body };
+  };
+  return { fetch, requests };
+}
+
+function setup(
+  reply: (request: UpstreamRequest, call: number) => Reply,
+  extra: Pick<NpmPackumentDeps, 'onUpstreamBytes' | 'signal'> = {},
+) {
+  const { store, objects } = memoryStore();
+  const { fetch, requests } = fakeFetch(reply);
+  const deps: NpmPackumentDeps = { ctx, fetch, store, codecs, ...extra };
+  const describeWith = (options: DescribeOptions = {}): Promise<NpmDescribeResult> =>
+    describeNpmPackument(deps, { name: 'example', url: URL_ }, options);
+  return { describeWith, requests, objects };
+}
+
+function manifest(key: string, index: number, pad: number, extra: Json = {}): Json {
+  return {
+    name: 'example',
+    version: key,
+    description: `release ${index} ${'d'.repeat(pad)}`,
+    license: 'MIT',
+    dependencies: { left: `^${index % 9}.0.0` },
+    dist: {
+      tarball: `https://registry.example.test/example/-/example-${key}.tgz`,
+      shasum: createHash('sha1').update(key).digest('hex'),
+    },
+    ...extra,
+  };
+}
+
+function packument(
+  count: number,
+  pad: number,
+  key: (index: number) => string,
+  options: { timeFirst?: boolean; mismatchEvery?: number; unicode?: boolean } = {},
+): Json {
+  const versions: Json = {};
+  const time: Json = { created: '2020-01-01T00:00:00.000Z', modified: '2024-01-01T00:00:00.000Z' };
+  for (let index = 0; index < count; index += 1) {
+    const k = key(index);
+    const mismatch = options.mismatchEvery !== undefined && index % options.mismatchEvery === 3;
+    versions[k] = manifest(mismatch ? `9.9.${index}` : k, index, pad, {
+      ...(options.unicode === true ? { readme: `zażółć ${index} \u{1F600}` } : {}),
+    });
+    if (index % 5 !== 0) time[k] = `2021-0${(index % 9) + 1}-02T03:04:05.${index % 1000}Z`;
+  }
+  const head = { _id: 'example', name: 'example', 'dist-tags': { latest: key(0), next: key(1) } };
+  return options.timeFirst === true
+    ? { ...head, time, versions, readme: 'r' }
+    : { ...head, versions, time, readme: 'r' };
+}
+
+const fixtures: { name: string; text: string; headers: Record<string, string> }[] = [
+  {
+    name: 'minified, strong ETag',
+    text: JSON.stringify(packument(900, 1500, (i) => `1.${i % 17}.${i}`)),
+    headers: { etag: '"strong-1"' },
+  },
+  {
+    name: 'pretty, no validators',
+    text: JSON.stringify(
+      packument(600, 1800, (i) => `2.0.${i}`),
+      null,
+      2,
+    ),
+    headers: {},
+  },
+  {
+    name: 'time before versions, weak ETag, mismatched keys',
+    text: JSON.stringify(
+      packument(1000, 1300, (i) => `0.${i}.0-beta.${i % 3}`, { timeFirst: true, mismatchEvery: 7 }),
+    ),
+    headers: { etag: 'W/"weak"', 'last-modified': 'Mon, 01 Jan 2024 00:00:00 GMT' },
+  },
+  {
+    name: 'unicode, lying Content-Length',
+    text: JSON.stringify(
+      packument(800, 1600, (i) => `3.${i}.1`, { unicode: true }),
+      null,
+      1,
+    ),
+    headers: { 'content-length': '100' },
+  },
+];
+
+function wholeParse(text: string): NpmVersionResult[] {
+  const doc = JSON.parse(text) as { versions: Record<string, Json>; time: Json };
+  return Object.entries(doc.versions)
+    .filter(([key, value]) => value.version === key)
+    .map(([, value]) => npmVersionInput('example', value, doc.time, origin));
+}
+
+async function drain(description: PackageDescription): Promise<VersionCandidate[]> {
+  const out: VersionCandidate[] = [];
+  for await (const member of description.members) out.push(member);
+  return out;
+}
+
+function inputsOf(members: readonly VersionCandidate[]): NpmVersionResult[] {
+  return members.map((m) =>
+    npmVersionInput(
+      'example',
+      JSON.parse(m.raw),
+      m.upstreamTime === undefined ? {} : { [m.version]: m.upstreamTime },
+      origin,
+    ),
+  );
+}
+
+function described(result: NpmDescribeResult): PackageDescription {
+  if (result.kind !== 'found') throw new Error(`expected found, got ${result.kind}`);
+  return result.description;
+}
+
+describe('describeNpmPackument: large packuments', () => {
+  describe.each(fixtures)('$name', ({ text, headers }) => {
+    it('stages the body and yields the whole-parse version inputs', async () => {
+      const bytes = enc.encode(text);
+      expect(bytes.length).toBeGreaterThan(NPM_INLINE_PARSE_BYTES);
+      const { describeWith, requests, objects } = setup(() => ({ body: bytes, headers }));
+      const description = described(await describeWith());
+      expect(description.snapshot.stagedBlob).toBe(sha256(bytes));
+      expect(objects.size).toBe(1);
+      expect(requests).toHaveLength(3);
+      const expected = wholeParse(text);
+      const members = await drain(description);
+      expect(inputsOf(members)).toEqual(expected);
+      expect(expected.filter((r) => !r.ok)).toEqual([]);
+      expect(description.upstreamComplete).toBe(true);
+      const doc = JSON.parse(text) as { 'dist-tags': Json };
+      expect(description.distTags).toEqual(doc['dist-tags']);
+
+      const continued = described(await describeWith({ snapshot: description.snapshot }));
+      expect(requests).toHaveLength(3);
+      expect(continued.snapshot).toEqual(description.snapshot);
+      expect(inputsOf(await drain(continued))).toEqual(expected);
+      expect(
+        (await drain(described(await describeWith({ snapshot: continued.snapshot })))).map(
+          (m) => m.ordinal,
+        ),
+      ).toEqual(members.map((m) => m.ordinal));
+    }, 60_000);
+  });
+
+  it('keeps document ordinals and skips manifests whose version differs from the key', async () => {
+    const text = fixtures[2]?.text as string;
+    const { describeWith } = setup(() => ({ body: text }));
+    const members = await drain(described(await describeWith()));
+    const keys = Object.keys((JSON.parse(text) as { versions: Json }).versions);
+    expect(members.length).toBeLessThan(keys.length);
+    for (const member of members) expect(keys[member.ordinal]).toBe(member.version);
+    expect(members.some((m) => m.upstreamTime === undefined)).toBe(true);
+  });
+
+  it('uses the strong ETag as the snapshot id and sha256 otherwise', async () => {
+    const a = setup(() => ({ body: fixtures[0]?.text as string, headers: { etag: '"strong-1"' } }));
+    expect(described(await a.describeWith()).snapshot.id).toBe('"strong-1"');
+    const bytes = enc.encode(fixtures[2]?.text as string);
+    const b = setup(() => ({ body: bytes, headers: { etag: 'W/"weak"' } }));
+    expect(described(await b.describeWith()).snapshot.id).toBe(`sha256:${sha256(bytes)}`);
+  });
+
+  it('refuses a staging response whose ETag changed', async () => {
+    const { describeWith } = setup((_, call) => ({
+      body: fixtures[0]?.text as string,
+      headers: { etag: call === 1 ? '"a"' : '"b"' },
+    }));
+    await expect(describeWith()).rejects.toBeInstanceOf(NpmPackumentError);
+  });
+
+  it('answers restart when the staged blob is gone', async () => {
+    const { describeWith, objects } = setup(() => ({ body: fixtures[1]?.text as string }));
+    const description = described(await describeWith());
+    objects.clear();
+    expect(await describeWith({ snapshot: description.snapshot })).toEqual({ kind: 'restart' });
+  });
+
+  it('fails the pass and leaves the description incomplete when staged bytes are corrupt', async () => {
+    const { describeWith, objects } = setup(() => ({ body: fixtures[1]?.text as string }));
+    const description = described(await describeWith());
+    const corrupt = (): void => {
+      for (const bytes of objects.values()) {
+        const at = bytes.lastIndexOf(0x72);
+        bytes[at] = 0x73;
+      }
+    };
+    corrupt();
+    await expect(drain(description)).rejects.toBeInstanceOf(SnapshotCorruptError);
+    expect(description.upstreamComplete).toBe(false);
+    await expect(describeWith({ snapshot: description.snapshot })).rejects.toBeInstanceOf(
+      SnapshotCorruptError,
+    );
+  });
+});
+
+describe('describeNpmPackument: inline packuments', () => {
+  const small = JSON.stringify(packument(20, 10, (i) => `1.0.${i}`, { mismatchEvery: 7 }));
+
+  it('parses a body up to 1 MiB once with a sha256 id that continuations repeat', async () => {
+    const { describeWith, requests, objects } = setup(() => ({ body: small }));
+    const description = described(await describeWith());
+    expect(description.snapshot).toEqual({ id: `sha256:${sha256(enc.encode(small))}` });
+    expect(objects.size).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.headers).toEqual({ accept: 'application/json' });
+    expect(inputsOf(await drain(description))).toEqual(wholeParse(small));
+    expect(description.upstreamComplete).toBe(true);
+    expect(description.validators).toEqual({ 'npm-full': {} });
+    const continued = described(await describeWith({ snapshot: description.snapshot }));
+    expect(continued.snapshot.id).toBe(description.snapshot.id);
+  });
+
+  it('sends validators and answers not_modified on 304', async () => {
+    const { describeWith, requests } = setup(() => ({ status: 304, body: null }));
+    const result = await describeWith({
+      validators: { 'npm-full': { etag: '"e"', lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT' } },
+    });
+    expect(result).toEqual({ kind: 'not_modified' });
+    expect(requests[0]?.headers).toMatchObject({
+      'if-none-match': '"e"',
+      'if-modified-since': 'Mon, 01 Jan 2024 00:00:00 GMT',
+    });
+  });
+
+  it('treats a 304 to an unconditional request as an error', async () => {
+    const { describeWith } = setup(() => ({ status: 304, body: null }));
+    await expect(describeWith()).rejects.toBeInstanceOf(NpmPackumentError);
+    await expect(
+      describeWith({ snapshot: { id: `sha256:${'0'.repeat(64)}` } }),
+    ).rejects.toBeInstanceOf(NpmPackumentError);
+  });
+
+  it('is definitive only for a 404 with a JSON body', async () => {
+    const json = setup(() => ({ status: 404, body: '{"error":"Not found"}' }));
+    expect(await json.describeWith()).toEqual({ kind: 'not_found', definitive: true });
+    const html = setup(() => ({ status: 404, body: '<html>nope</html>' }));
+    expect(await html.describeWith()).toEqual({ kind: 'not_found', definitive: false });
+    const empty = setup(() => ({ status: 404, body: null }));
+    expect(await empty.describeWith()).toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it.each([401, 403, 410, 500, 503])('throws on status %i', async (status) => {
+    const { describeWith } = setup(() => ({ status, body: '{}' }));
+    await expect(describeWith()).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  it('rejects a document that is not an object or has duplicate keys', async () => {
+    for (const body of ['[]', '{"versions":{"1.0.0":{},"1.0.0":{}}}', '{"versions":']) {
+      const { describeWith } = setup(() => ({ body }));
+      await expect(describeWith()).rejects.toThrow();
+    }
+  });
+});
+
+describe('describeNpmPackument: round 2', () => {
+  const large = (): string => fixtures[1]?.text as string;
+
+  it('reports the staging validators, not those of the cancelled first response', async () => {
+    const { describeWith } = setup((_, call) => ({
+      body: large(),
+      headers: {
+        etag: call === 1 ? '"same"' : 'W/"same"',
+        'last-modified':
+          call === 1 ? 'Mon, 01 Jan 2024 00:00:00 GMT' : 'Tue, 02 Jan 2024 00:00:00 GMT',
+      },
+    }));
+    const description = described(await describeWith());
+    expect(description.snapshot.id).toBe(`sha256:${sha256(enc.encode(large()))}`);
+    expect(description.validators).toEqual({
+      'npm-full': { etag: 'W/"same"', lastModified: 'Tue, 02 Jan 2024 00:00:00 GMT' },
+    });
+  });
+
+  it('fails unstable when the staging passes disagree on validators', async () => {
+    const { describeWith } = setup((_, call) => ({
+      body: large(),
+      headers: { 'last-modified': `Mon, 0${call} Jan 2024 00:00:00 GMT` },
+    }));
+    await expect(describeWith()).rejects.toMatchObject({ code: 'unstable' });
+  });
+
+  it.each([
+    ['too long', `"${'a'.repeat(255)}"`],
+    ['not printable ASCII', '"caf\u00e9"'],
+  ])('falls back to sha256 when the strong ETag is %s', async (_, etag) => {
+    const bytes = enc.encode(JSON.stringify(packument(3, 1, (i) => `1.0.${i}`)));
+    const { describeWith } = setup(() => ({ body: bytes, headers: { etag } }));
+    expect(described(await describeWith()).snapshot.id).toBe(`sha256:${sha256(bytes)}`);
+  });
+
+  it('counts every upstream byte, including the cancelled first read and 404 bodies', async () => {
+    const counted = (): { add(value?: number): void; total: number } => {
+      const counter = {
+        total: 0,
+        add(value = 1) {
+          counter.total += value;
+        },
+      };
+      return counter;
+    };
+    const inline = JSON.stringify(packument(3, 1, (i) => `1.0.${i}`));
+    const a = counted();
+    await setup(() => ({ body: inline }), { onUpstreamBytes: a }).describeWith();
+    expect(a.total).toBe(enc.encode(inline).length);
+    const b = counted();
+    await setup(() => ({ status: 404, body: '{"error":"x"}' }), {
+      onUpstreamBytes: b,
+    }).describeWith();
+    expect(b.total).toBe(13);
+    const c = counted();
+    const size = enc.encode(large()).length;
+    await setup(() => ({ body: large() }), { onUpstreamBytes: c }).describeWith();
+    expect(c.total).toBeGreaterThan(2 * size + NPM_INLINE_PARSE_BYTES);
+  });
+
+  it.each(['null', '[]', '"text"', '1'])(
+    'treats a 404 with JSON %s as not definitive',
+    async (body) => {
+      const { describeWith } = setup(() => ({ status: 404, body }));
+      expect(await describeWith()).toEqual({ kind: 'not_found', definitive: false });
+    },
+  );
+
+  it('keeps a __proto__ dist-tag', async () => {
+    const body = '{"dist-tags":{"__proto__":"1.0.0","latest":"1.0.0"},"versions":{}}';
+    const { describeWith } = setup(() => ({ body }));
+    const tags = described(await describeWith()).distTags ?? {};
+    expect(Object.hasOwn(tags, '__proto__')).toBe(true);
+    expect(tags['__proto__']).toBe('1.0.0');
+  });
+
+  it('stops a staged pass when the signal aborts between members', async () => {
+    const controller = new AbortController();
+    const { describeWith } = setup(() => ({ body: large() }), { signal: controller.signal });
+    const description = described(await describeWith());
+    const seen: VersionCandidate[] = [];
+    await expect(
+      (async () => {
+        for await (const member of description.members) {
+          seen.push(member);
+          controller.abort();
+        }
+      })(),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(seen).toHaveLength(1);
+    expect(description.upstreamComplete).toBe(false);
+  });
+});
+
+describe('describeNpmPackument: round 3', () => {
+  it('reads a time map over 1 MiB from a staged document', async () => {
+    const doc = packument(30, 10, (i) => `1.0.${i}`) as { time: Json };
+    for (let index = 0; index < 40_000; index += 1) {
+      doc.time[`0.0.${index}-padding.${index}`] = '2020-01-02T00:00:00.000Z';
+    }
+    const text = JSON.stringify(doc);
+    expect(JSON.stringify(doc.time).length).toBeGreaterThan(NPM_INLINE_PARSE_BYTES);
+    const { describeWith } = setup(() => ({ body: text }));
+    const description = described(await describeWith());
+    expect(description.snapshot.stagedBlob).toBeDefined();
+    const members = await drain(description);
+    expect(members.every((m) => m.upstreamTime !== undefined || m.ordinal % 5 === 0)).toBe(true);
+    expect(inputsOf(members)).toEqual(wholeParse(text));
+  });
+
+  it('falls back to sha256 of the staged body when staging turns the strong ETag weak', async () => {
+    const before = fixtures[1]?.text as string;
+    const after = enc.encode(fixtures[0]?.text as string);
+    const { describeWith } = setup((_, call) =>
+      call === 1
+        ? { body: before, headers: { etag: '"a"' } }
+        : { body: after, headers: { etag: 'W/"a"' } },
+    );
+    const description = described(await describeWith());
+    expect(description.snapshot.id).toBe(`sha256:${sha256(after)}`);
+    expect(description.snapshot.stagedBlob).toBe(sha256(after));
+    expect(inputsOf(await drain(description))).toEqual(wholeParse(fixtures[0]?.text as string));
+  });
+
+  it('reports the staged validators again on a continuation', async () => {
+    const headers = { etag: '"strong-1"', 'last-modified': 'Mon, 01 Jan 2024 00:00:00 GMT' };
+    const { describeWith, requests } = setup(() => ({
+      body: fixtures[0]?.text as string,
+      headers,
+    }));
+    const description = described(await describeWith());
+    expect(description.snapshot.id).toBe('"strong-1"');
+    const expected = {
+      'npm-full': { etag: '"strong-1"', lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT' },
+    };
+    expect(description.validators).toEqual(expected);
+    const persisted = JSON.parse(JSON.stringify(description.snapshot)) as SnapshotRef;
+    const continued = described(await describeWith({ snapshot: persisted }));
+    expect(requests).toHaveLength(3);
+    expect(continued.validators).toEqual(expected);
+    expect(continued.snapshot.id).toBe(description.snapshot.id);
+  });
+});
+
+describe('versionChunks', () => {
+  it('groups members into chunks of at most 50', async () => {
+    const text = JSON.stringify(packument(120, 1, (i) => `1.0.${i}`));
+    const { describeWith } = setup(() => ({ body: text }));
+    const sizes: number[] = [];
+    for await (const chunk of versionChunks(described(await describeWith()).members)) {
+      sizes.push(chunk.length);
+    }
+    expect(sizes).toEqual([50, 50, 20]);
+  });
+});

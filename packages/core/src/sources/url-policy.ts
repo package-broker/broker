@@ -137,8 +137,20 @@ function effectivePort(url: URL): string {
   return url.port !== '' ? url.port : url.protocol === 'https:' ? '443' : '80';
 }
 
+const AUTHORITY = /^[a-z][a-z0-9+.-]*:[/\\]*([^/?#\\]*)([\s\S]*)$/i;
+
+const isTrimmed = (char: string): boolean => char <= ' ' || /\s/.test(char);
+
+function urlText(input: string): string {
+  let start = 0;
+  let end = input.length;
+  while (start < end && isTrimmed(input.charAt(start))) start += 1;
+  while (end > start && isTrimmed(input.charAt(end - 1))) end -= 1;
+  return input.slice(start, end).replace(/[\t\n\r]/g, '');
+}
+
 function rawAuthority(input: string): string {
-  return /^[a-z][a-z0-9+.-]*:\/\/([^/?#\\]*)/i.exec(input)?.[1] ?? '';
+  return AUTHORITY.exec(urlText(input))?.[1] ?? '';
 }
 
 interface SelfOrigin {
@@ -147,7 +159,8 @@ interface SelfOrigin {
 }
 
 function normalizeSelfOrigin(raw: string): SelfOrigin {
-  const input = raw.trim();
+  const input = urlText(raw);
+  const rest = AUTHORITY.exec(input)?.[2];
   let url: URL;
   try {
     url = new URL(input);
@@ -158,7 +171,11 @@ function normalizeSelfOrigin(raw: string): SelfOrigin {
   if (
     (url.protocol !== 'https:' && url.protocol !== 'http:') ||
     host === null ||
-    rawAuthority(input).includes('@')
+    rawAuthority(input).includes('@') ||
+    url.pathname !== '/' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    (rest !== '' && rest !== '/')
   ) {
     throw new Error('selfOrigins entries must be absolute http(s) origins');
   }
@@ -192,7 +209,7 @@ export function createOutboundPolicy(policy: OutboundPolicy): OutboundPolicy {
 }
 
 export function classifyUrl(input: string, policy: OutboundPolicy): OutboundVerdict {
-  const text = input.trim();
+  const text = urlText(input);
   if (/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*\[[^\]]*%/i.test(text)) return refuse('zone_id');
   let url: URL;
   try {

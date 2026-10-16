@@ -275,6 +275,28 @@ describe('expiry', () => {
   });
 });
 
+describe('staleUntil earlier than freshUntil', () => {
+  const inverted = (): CacheEnvelope =>
+    envelope(8, 7, {
+      freshUntil: new Date(T0 + 60_000).toISOString(),
+      staleUntil: new Date(T0 + 30_000).toISOString(),
+    });
+
+  it('stays fresh until freshUntil', async () => {
+    const cache = createLruCache();
+    await cache.set(ctx, keyOf(1), inverted());
+    vi.setSystemTime(T0 + 45_000);
+    expect((await cache.get(ctx, keyOf(1)))?.state).toBe('fresh');
+  });
+
+  it('is gone after freshUntil', async () => {
+    const cache = createLruCache();
+    await cache.set(ctx, keyOf(1), inverted());
+    vi.setSystemTime(T0 + 61_000);
+    expect(await cache.get(ctx, keyOf(1))).toBeNull();
+  });
+});
+
 describe('oversized entries', () => {
   it('refuses an entry above maxEntryBytes', async () => {
     const cache = createLruCache({ maxEntryBytes: 1_024 });

@@ -1,0 +1,52 @@
+{
+  "scenario": "local-git-http-backend-no-filter",
+  "note": "Same server with the caller reporting capabilities.filter=false (git version 2.54.0).",
+  "recordedAt": "2026-10-16T13:30:27.849Z",
+  "call": {
+    "repoUrl": "https://git.example.test/lib.git",
+    "refs": [
+      {
+        "name": "refs/tags/v1.0.0",
+        "oid": "91fede8b81f411b38642d05137392a751f4e0f4d"
+      }
+    ],
+    "path": "composer.json",
+    "filterCacheIndex": null,
+    "capabilities": {
+      "filter": false
+    }
+  },
+  "outcome": {
+    "kind": "result",
+    "value": [
+      {
+        "ref": "refs/tags/v1.0.0",
+        "commit": "91fede8b81f411b38642d05137392a751f4e0f4d",
+        "committedAt": "2026-10-16T13:30:25.000Z",
+        "text": "{\"name\":\"acme/lib\"}\n"
+      }
+    ]
+  },
+  "exchanges": [
+    {
+      "request": {
+        "url": "https://git.example.test/lib.git/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDkxZmVkZThiODFmNDExYjM4NjQyZDA1MTM3MzkyYTc1MWY0ZTBmNGQKMDAwZGRlZXBlbiAxCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAxMXNoYWxsb3ctaW5mbwowMDM0c2hhbGxvdyA5MWZlZGU4YjgxZjQxMWIzODY0MmQwNTEzNzM5MmE3NTFmNGUwZjRkMDAwMTAwMGRwYWNrZmlsZQowMGVlAVBBQ0sAAAACAAAAA54KeJydy0sKAjEQRdF5VpG5INWl+YGII/dRVr9gILElpqWXr+AOvKMzuaMDVmkGBS/ITJrgmZ2TG0dJMWuIGhKp1wMZWcd96fZatrF22FP+4YJN2rNiXx5vqWU+2ykknlw4srM7+mZ0aa2Mgb9m01EhL5gP4B02rqkCeJwzNDAwMzFRSM7PLcgvTi3SyyrOz2P4v6KU52r/1DABDn7ntN/u5+qlHs4GACsgEAy0AXicq1bKS8xNVbJSSkzOTdXPyUxSquUCAEVaBmIoL8bHtv9FNUcGuNsMsx8W6iEuMDAwNgE7MDAwMA=="
+      }
+    }
+  ]
+}

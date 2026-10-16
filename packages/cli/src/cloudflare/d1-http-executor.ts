@@ -32,6 +32,19 @@ const MAX_SQL_BYTES = 100_000;
 
 const encoder = new TextEncoder();
 
+export class D1LostResponseError extends DbError {
+  readonly lostResponse = true;
+}
+
+export function isLostResponse(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    if (current instanceof D1LostResponseError) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 function typeLabel(value: unknown): string {
   if (typeof value !== 'object' || value === null) return typeof value;
   try {
@@ -146,10 +159,15 @@ function timeoutOf(value: number | undefined): number {
  * `ScalarSqlExecutor` over the D1 HTTP query API: `all()` sends `{ sql, params }`, `batch()` sends
  * the atomic `batch` form. Values are only ever bound, never written into SQL text.
  *
- * Transport failures reject with `DbError` kind `unknown` and one of two fixed messages:
+ * Argument validation fails with a `TypeError`, and a synchronous throw from `fetch` fails with a
+ * plain `DbError`; in both cases nothing was sent. Every asynchronous transport failure after the
+ * request was handed to `fetch` rejects with `D1LostResponseError` (a `DbError` of kind
+ * `unknown`; test it with `isLostResponse`) and one of two fixed messages:
  * - `d1 http request failed`: no response arrived (connection error, redirect, timeout, abort).
- * - `d1 http response read failed`: a response started but its body could not be read. The
- *   statement or batch may have committed, so callers must not retry it automatically.
+ *   `fetch` cannot say whether the body reached D1, so the outcome is unknown.
+ * - `d1 http response read failed`: a response started but its body could not be read.
+ *
+ * The statement or batch may have committed, so callers must not retry it automatically.
  */
 export function createD1HttpExecutor(options: D1HttpOptions): ScalarSqlExecutor {
   const { accountId, databaseId, apiToken } = options;
@@ -169,9 +187,9 @@ export function createD1HttpExecutor(options: D1HttpOptions): ScalarSqlExecutor 
   const secrets = [apiToken, accountId, databaseId];
 
   async function post(body: unknown, expectedResults: number): Promise<StatementResult[]> {
-    let response: Response;
+    let pending: Promise<Response>;
     try {
-      response = await send(url, {
+      pending = send(url, {
         method: 'POST',
         headers: { authorization: `Bearer ${apiToken}`, 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -181,11 +199,17 @@ export function createD1HttpExecutor(options: D1HttpOptions): ScalarSqlExecutor 
     } catch {
       throw new DbError('unknown', 'd1 http request failed', { cause: null });
     }
+    let response: Response;
+    try {
+      response = await pending;
+    } catch {
+      throw new D1LostResponseError('unknown', 'd1 http request failed', { cause: null });
+    }
     let text: string;
     try {
       text = await response.text();
     } catch {
-      throw new DbError('unknown', 'd1 http response read failed', { cause: null });
+      throw new D1LostResponseError('unknown', 'd1 http response read failed', { cause: null });
     }
     return parseD1Response(response.status, text, expectedResults, secrets);
   }

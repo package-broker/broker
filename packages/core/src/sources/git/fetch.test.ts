@@ -1633,17 +1633,127 @@ describe('recorded exchanges', () => {
     expect(settled).toMatchObject({ error: expect.any(UpstreamError) });
   });
 
-  it('replays stock git-http-backend answering a filter request with an empty 200', async () => {
+  it('falls back past every filter when stock git-http-backend answers each with an empty 200', async () => {
     const recorded = loadRecorded('local-git-http-backend');
+    const full = loadRecorded('local-git-http-backend-no-filter').exchanges[0]!;
     expect(recorded.exchanges).toHaveLength(1);
     expect(recorded.exchanges[0]!.response.status).toBe(200);
     expect(recorded.exchanges[0]!.response.bodyBase64).toBe('');
 
-    const { sent, settled } = await replayCall(recorded);
+    const sent: Wire[] = [];
+    const cache = createFilterStrategyCache();
+    const policyFetch = createPolicyFetch({
+      policy,
+      userAgent: 'package-broker-test',
+      fetchImpl: async (_input, init) => {
+        const wire = parseRequest(init?.body as Uint8Array);
+        sent.push(wire);
+        const exchange = wire.filter === undefined ? full : recorded.exchanges[0]!;
+        return new Response(fromBase64(exchange.response.bodyBase64), {
+          status: exchange.response.status,
+          headers: exchange.response.headers,
+        });
+      },
+    });
+    const { repoUrl, refs, path } = recorded.call;
+    const value = await readFileAtRefs(
+      { policyFetch, codecs, runtime: 'docker', filterCache: cache },
+      repoUrl,
+      refs,
+      path,
+    );
 
-    expectRecordedOutcome(recorded, settled);
-    expect(sent[0]?.filter).toBe('tree:1');
-    expect(settled).toMatchObject({ error: expect.objectContaining({ code: 'bad_response' }) });
+    expect(sent.map((w) => w.filter)).toEqual(['tree:1', 'tree:0', 'blob:none', undefined]);
+    expect(value[0]?.text).toContain('acme/lib');
+    expect(cache.get(new URL(repoUrl).host)).toBe(3);
+  });
+
+  describe('a filtered response that is not a clean empty body', () => {
+    const run = async (body: ReadableStream<Uint8Array>) => {
+      const recorded = loadRecorded('local-git-http-backend');
+      const sent: Wire[] = [];
+      const policyFetch = createPolicyFetch({
+        policy,
+        userAgent: 'package-broker-test',
+        fetchImpl: async (_input, init) => {
+          sent.push(parseRequest(init?.body as Uint8Array));
+          return new Response(body, { status: 200, headers: { 'content-type': RESULT } });
+        },
+      });
+      const { repoUrl, refs, path } = recorded.call;
+      const error = await readFileAtRefs(
+        { policyFetch, codecs, runtime: 'docker', filterCache: createFilterStrategyCache() },
+        repoUrl,
+        refs,
+        path,
+      ).catch((e: unknown) => e);
+      return { error, sent };
+    };
+
+    it('does not fall back when the connection resets before any byte', async () => {
+      const { error, sent } = await run(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new Error('reset'));
+          },
+        }),
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(sent).toHaveLength(1);
+    });
+
+    it('does not fall back when a stalled stream sends only empty chunks', async () => {
+      let n = 0;
+      const { error, sent } = await run(
+        new ReadableStream({
+          pull(controller) {
+            if (n++ < 2000) controller.enqueue(new Uint8Array(0));
+            else controller.close();
+          },
+        }),
+      );
+      expect(error).toMatchObject({ code: 'bad_response' });
+      expect(sent).toHaveLength(1);
+    });
+
+    it('does not fall back when the body is truncated', async () => {
+      const { error, sent } = await run(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(enc.encode('0014'));
+            controller.close();
+          },
+        }),
+      );
+      expect(error).toMatchObject({ code: 'bad_response' });
+      expect(sent).toHaveLength(1);
+    });
+  });
+
+  it('keeps an empty 200 to an unfiltered request a bad_response', async () => {
+    const recorded = loadRecorded('local-git-http-backend');
+    const sent: Wire[] = [];
+    const policyFetch = createPolicyFetch({
+      policy,
+      userAgent: 'package-broker-test',
+      fetchImpl: async (_input, init) => {
+        sent.push(parseRequest(init?.body as Uint8Array));
+        return new Response(new Uint8Array(0), {
+          status: 200,
+          headers: { 'content-type': RESULT },
+        });
+      },
+    });
+    const { repoUrl, refs, path } = recorded.call;
+    const error = await readFileAtRefs(
+      { policyFetch, codecs, runtime: 'docker', capabilities: { filter: false } },
+      repoUrl,
+      refs,
+      path,
+    ).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ code: 'bad_response' });
+    expect(sent.map((w) => w.filter)).toEqual([undefined]);
   });
 
   it('replays stock git-http-backend when the caller knows the filter is not advertised', async () => {

@@ -9,7 +9,11 @@ import { fixedClock, type Clock } from '../ids.js';
 import type { ActorAccessSnapshot } from './actor.js';
 import { mutationFence, type AuthenticatedActor, type MutationFence } from './fence.js';
 import {
+  createUnblockService,
   createUnlinkService,
+  type IdentityBlockStore,
+  type UnblockIdentityRequest,
+  type UnblockStoreOutcome,
   type IdentityUnlinkStore,
   type UnlinkIdentityRequest,
   type UnlinkStoreInput,
@@ -483,5 +487,365 @@ describe('unlinkIdentity refusals', () => {
   it('does not expose an unblock operation', () => {
     const { service } = setup();
     expect('unblockIdentity' in service).toBe(false);
+  });
+});
+
+const UNBLOCK: UnblockIdentityRequest = { provider: PROVIDER, issuer: ANCHOR, subject: SUBJECT };
+
+function setupUnblock(
+  options: {
+    outcome?: UnblockStoreOutcome;
+    now?: string;
+    clock?: Clock;
+    store?: IdentityBlockStore['unblock'];
+  } = {},
+) {
+  const clock = options.clock ?? fixedClock(options.now ?? NOW);
+  const sessions = createSessionService({
+    sessions: {} as never,
+    clock,
+    publicOrigin: 'https://broker.example.test',
+  });
+  const calls: { fence: MutationFence; request: UnblockIdentityRequest }[] = [];
+  const blocks: IdentityBlockStore = {
+    unblock: (c, f, request) => {
+      calls.push({ fence: f, request });
+      return options.store
+        ? options.store(c, f, request)
+        : Promise.resolve(options.outcome ?? 'unblocked');
+    },
+  };
+  const log = vi.fn();
+  const service = createUnblockService({ blocks, sessions, log });
+  return { service, calls, log };
+}
+
+function expectNoBlockLeak(value: unknown): void {
+  const text = serialized(value);
+  expect(text).not.toContain(SUBJECT);
+  expect(text).not.toContain(ANCHOR);
+}
+
+function expectOneUnblockDenied(
+  log: ReturnType<typeof vi.fn>,
+  actorUserId: string | null,
+  provider: string | null,
+): void {
+  expect(log.mock.calls).toEqual([
+    [{ level: 'warn', event: 'identity.unblock_denied', orgId: 'org-a', actorUserId, provider }],
+  ]);
+  expectNoBlockLeak(log.mock.calls);
+  if (provider === null) expectNoLeak(log.mock.calls);
+}
+
+describe('unblockIdentity success', () => {
+  it('unblocks through the fence with the validated request', async () => {
+    const { service, calls } = setupUnblock();
+    const f = fence();
+    const result = await service.unblockIdentity(ctx, authenticated(), snapshot(), f, UNBLOCK);
+    expect(result).toEqual({ ok: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.fence).toBe(f);
+    expect(calls[0]?.request).toEqual(UNBLOCK);
+  });
+
+  it('emits exactly one info event with ids only', async () => {
+    const { service, log } = setupUnblock();
+    await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK);
+    expect(log.mock.calls).toEqual([
+      [
+        {
+          level: 'info',
+          event: 'identity.unblocked',
+          orgId: 'org-a',
+          actorUserId: 'admin-1',
+          provider: PROVIDER,
+        },
+      ],
+    ]);
+    expectNoBlockLeak(log.mock.calls);
+  });
+
+  it('accepts reauth exactly at the window edge and refuses one millisecond past it', async () => {
+    const reauthAt = new Date(Date.parse(NOW) - REAUTH_WINDOW_MS).toISOString();
+    const edge = setupUnblock();
+    expect(
+      await edge.service.unblockIdentity(
+        ctx,
+        authenticated({ reauthAt }),
+        snapshot(),
+        fence(),
+        UNBLOCK,
+      ),
+    ).toEqual({ ok: true });
+    const late = setupUnblock({ now: new Date(Date.parse(NOW) + 1).toISOString() });
+    expect(
+      await late.service.unblockIdentity(
+        ctx,
+        authenticated({ reauthAt }),
+        snapshot(),
+        fence(),
+        UNBLOCK,
+      ),
+    ).toEqual({ ok: false, error: 'reauth_required' });
+    expect(late.calls).toHaveLength(0);
+  });
+
+  it('keeps a successful unblock successful when the log sink throws', async () => {
+    const { service, log } = setupUnblock();
+    log.mockImplementation(() => {
+      throw new Error('sink down');
+    });
+    expect(
+      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+    ).toEqual({ ok: true });
+  });
+
+  it('is a separate service from unlink', () => {
+    const { service } = setupUnblock();
+    expect('unlinkIdentity' in service).toBe(false);
+  });
+});
+
+describe('unblockIdentity snapshots its inputs once', () => {
+  it('validates and stores the first read of each request field', async () => {
+    const { service, calls } = setupUnblock();
+    const reads: Record<string, number> = {};
+    const first: Record<string, string> = { ...UNBLOCK };
+    const later: Record<string, string> = {
+      provider: 'other',
+      issuer: 'not-an-anchor',
+      subject: 'a\u0000b',
+    };
+    const request = {} as Record<string, string>;
+    for (const key of Object.keys(first)) {
+      Object.defineProperty(request, key, {
+        enumerable: true,
+        get() {
+          reads[key] = (reads[key] ?? 0) + 1;
+          return reads[key] === 1 ? first[key] : later[key];
+        },
+      });
+    }
+    const result = await service.unblockIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      fence(),
+      request as unknown as UnblockIdentityRequest,
+    );
+    expect(result).toEqual({ ok: true });
+    expect(calls[0]?.request).toEqual(UNBLOCK);
+    expect(Object.values(reads)).toEqual([1, 1, 1]);
+  });
+
+  it('reads the session reauth time once', async () => {
+    const { service, calls } = setupUnblock();
+    const auth = authenticated();
+    let reads = 0;
+    Object.defineProperty(auth.session, 'reauthAt', {
+      get() {
+        reads += 1;
+        return reads === 1 ? NOW : null;
+      },
+    });
+    expect(await service.unblockIdentity(ctx, auth, snapshot(), fence(), UNBLOCK)).toEqual({
+      ok: true,
+    });
+    expect(reads).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('unblockIdentity refusals', () => {
+  it('refuses a session that never reauthenticated, with no event', async () => {
+    const { service, calls, log } = setupUnblock();
+    expect(
+      await service.unblockIdentity(
+        ctx,
+        authenticated({ reauthAt: null }),
+        snapshot(),
+        fence(),
+        UNBLOCK,
+      ),
+    ).toEqual({ ok: false, error: 'reauth_required' });
+    expect(calls).toHaveLength(0);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('refuses a protected holder without org:users:write before reauth or input checks', async () => {
+    const { service, calls, log } = setupUnblock();
+    expect(
+      await service.unblockIdentity(
+        ctx,
+        authenticated({ reauthAt: null }),
+        snapshot({ organizationPermissions: ['org:users:read'] }),
+        fence(),
+        { ...UNBLOCK, subject: '' },
+      ),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    expect(calls).toHaveLength(0);
+    expectOneUnblockDenied(log, 'admin-1', null);
+  });
+
+  it('refuses a non-admin holding org:users:write, even with a fresh session', async () => {
+    const { service, calls, log } = setupUnblock();
+    expect(
+      await service.unblockIdentity(
+        ctx,
+        authenticated(),
+        snapshot({ protectedHolder: false }),
+        fence(),
+        UNBLOCK,
+      ),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    expect(calls).toHaveLength(0);
+    expectOneUnblockDenied(log, 'admin-1', null);
+  });
+
+  it('gives project-scoped org-looking permissions no authority', async () => {
+    const { service, calls } = setupUnblock();
+    expect(
+      await service.unblockIdentity(
+        ctx,
+        authenticated(),
+        snapshot({
+          organizationPermissions: [],
+          projectPermissions: ['org:users:write', 'org:*'],
+          protectedHolder: false,
+        }),
+        fence(),
+        UNBLOCK,
+      ),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(['service', 'customer'])('refuses a %s token principal', async (kind) => {
+    const { service, calls, log } = setupUnblock();
+    expect(
+      await service.unblockIdentity(
+        ctx,
+        authenticated({ principal: { kind, id: 'admin-1' } }),
+        snapshot(),
+        fence(),
+        UNBLOCK,
+      ),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    expect(calls).toHaveLength(0);
+    expectOneUnblockDenied(log, 'admin-1', null);
+  });
+
+  it('refuses a missing session, a foreign snapshot or a foreign fence before any write', async () => {
+    const cases: [AuthenticatedSession, ActorAccessSnapshot | null, MutationFence][] = [
+      [null as unknown as AuthenticatedSession, snapshot(), fence()],
+      [authenticated({ sessionId: '' }), snapshot(), fence()],
+      [authenticated(), snapshot({ session: { id: 'session-2', userId: 'admin-1' } }), fence()],
+      [authenticated(), null, fence()],
+      [authenticated(), snapshot(), fence('admin-2')],
+      [authenticated(), snapshot(), fence('admin-1', 'session-2')],
+    ];
+    for (const [auth, snap, f] of cases) {
+      const { service, calls, log } = setupUnblock();
+      expect(
+        await service.unblockIdentity(ctx, auth, snap as ActorAccessSnapshot, f, UNBLOCK),
+      ).toEqual({ ok: false, error: 'forbidden' });
+      expect(calls).toHaveLength(0);
+      expect(log).toHaveBeenCalledTimes(1);
+      expectNoLeak(log.mock.calls);
+    }
+  });
+
+  it('requires a mutation fence', async () => {
+    const { service, calls } = setupUnblock();
+    for (const f of [null, undefined, {}]) {
+      await expect(
+        service.unblockIdentity(ctx, authenticated(), snapshot(), f as never, UNBLOCK),
+      ).rejects.toThrow('identity unblock requires a mutation fence');
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses invalid input with one code and no detail', async () => {
+    const { service, calls, log } = setupUnblock();
+    const bad: UnblockIdentityRequest[] = [
+      { ...UNBLOCK, provider: 'Bad Provider!' },
+      { ...UNBLOCK, issuer: 'not-an-anchor' },
+      { ...UNBLOCK, issuer: 7 as unknown as string },
+      { ...UNBLOCK, subject: '' },
+      { ...UNBLOCK, subject: 'a\u0000b' },
+      null as unknown as UnblockIdentityRequest,
+    ];
+    for (const input of bad) {
+      expect(
+        await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), input),
+      ).toEqual({ ok: false, error: 'invalid_input' });
+    }
+    expect(calls).toHaveLength(0);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['not_found', 'not_found'],
+    ['indeterminate', 'indeterminate'],
+  ] as const)('maps a %s outcome to %s with no event', async (outcome, error) => {
+    const { service, log } = setupUnblock({ outcome });
+    const result = await service.unblockIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      fence(),
+      UNBLOCK,
+    );
+    expect(result).toEqual({ ok: false, error });
+    expectNoLeak(result);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('maps a batch authority refusal to forbidden with one warn event and no leak', async () => {
+    const { service, log } = setupUnblock({ outcome: 'authority' });
+    const result = await service.unblockIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      fence(),
+      UNBLOCK,
+    );
+    expect(result).toEqual({ ok: false, error: 'forbidden' });
+    expectNoLeak(result);
+    expectOneUnblockDenied(log, 'admin-1', PROVIDER);
+  });
+
+  function reauthCheckingStore(advanceMs: number) {
+    let now = Date.parse(NOW);
+    const clock = { now: () => new Date(now) };
+    const store: IdentityBlockStore['unblock'] = () => {
+      now += advanceMs;
+      const fresh = now - Date.parse(NOW) <= REAUTH_WINDOW_MS;
+      return Promise.resolve(fresh ? 'unblocked' : 'authority');
+    };
+    return { clock, store };
+  }
+
+  it('reports reauth_required when the window closes between the service check and the batch', async () => {
+    const { service, log } = setupUnblock(reauthCheckingStore(REAUTH_WINDOW_MS + 1));
+    expect(
+      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+    ).toEqual({ ok: false, error: 'reauth_required' });
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('unblocks when the window is still open at the batch', async () => {
+    const { service } = setupUnblock(reauthCheckingStore(REAUTH_WINDOW_MS));
+    expect(
+      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+    ).toEqual({ ok: true });
+  });
+
+  it('throws on an outcome the store must never answer', async () => {
+    const { service } = setupUnblock({ outcome: 'conflict' as unknown as UnblockStoreOutcome });
+    await expect(
+      service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+    ).rejects.toThrow('identity unblock answered an unknown outcome');
   });
 });

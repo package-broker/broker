@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { LoginPlan } from '@package-broker/core/db/users';
 import type {
   OrgContext,
   ScalarSqlExecutor,
@@ -7,7 +8,7 @@ import type {
   Statement,
 } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createLoginWriter, type LoginPlanWithAutoJoin } from './login.js';
+import { createLoginWriter } from './login.js';
 
 const EVIDENCE = '2026-10-15T11:59:00.000Z';
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -135,7 +136,7 @@ async function seedReturning(): Promise<void> {
   ]);
 }
 
-function plan(overrides: Partial<LoginPlanWithAutoJoin> = {}): LoginPlanWithAutoJoin {
+function plan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   const userId = overrides.userId ?? USER_NEW;
   const identityId = overrides.identityId ?? IDENTITY_NEW;
   return {
@@ -168,7 +169,7 @@ function plan(overrides: Partial<LoginPlanWithAutoJoin> = {}): LoginPlanWithAuto
   };
 }
 
-function returningPlan(overrides: Partial<LoginPlanWithAutoJoin> = {}): LoginPlanWithAutoJoin {
+function returningPlan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   return plan({
     userId: USER_X,
     createUser: false,

@@ -147,8 +147,8 @@ describe('plugin route boundary contract', () => {
 describe('plugin api transition', () => {
   const protectedRoute = route({ permission: 'org:read', boundary: 'organization' });
 
-  it('supports exactly API 2 and 3', () => {
-    expect(SUPPORTED_PLUGIN_API).toEqual([2, 3]);
+  it('supports exactly API 3', () => {
+    expect(SUPPORTED_PLUGIN_API).toEqual([3, 3]);
   });
 
   it('accepts a bounded protected route on API 3', () => {
@@ -165,8 +165,14 @@ describe('plugin api transition', () => {
     expect(problems.join('\n')).toContain('thirdparty');
   });
 
-  it('accepts an API 2 public route without a boundary', () => {
-    expect(problemsOf([route({ permission: null })], undefined, 2)).toEqual([]);
+  it('accepts an API 3 public route without a boundary', () => {
+    expect(problemsOf([route({ permission: null })], undefined, 3)).toEqual([]);
+  });
+
+  it('accepts an API 2 public route without a boundary at the route check', () => {
+    expect(
+      routeBoundaryProblems(route({ permission: null }), 'thirdparty GET /x', { apiVersion: 2 }),
+    ).toEqual([]);
   });
 
   it.each([1, 4])('refuses API %i', (version) => {

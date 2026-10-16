@@ -37,6 +37,22 @@ export const METRIC_NAMES = [
   'pb.obs.export_failures',
 ] as const;
 
+export type MetricName = (typeof METRIC_NAMES)[number];
+
+type HistogramMetricName = Extract<MetricName, `${string}_ms`>;
+
+const DURATION_BOUNDS_MS: readonly number[] = Object.freeze([
+  5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000,
+]);
+
+export const HISTOGRAM_BOUNDS: Readonly<Record<HistogramMetricName, readonly number[]>> =
+  Object.freeze({
+    'pb.http.duration_ms': DURATION_BOUNDS_MS,
+    'pb.jobs.duration_ms': DURATION_BOUNDS_MS,
+    'pb.jobs.queue_delay_ms': DURATION_BOUNDS_MS,
+    'pb.upstream.duration_ms': DURATION_BOUNDS_MS,
+  });
+
 export type MetricSink = Pick<Observability, 'counter' | 'histogram'>;
 
 export interface Counter {

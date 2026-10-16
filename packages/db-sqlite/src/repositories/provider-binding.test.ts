@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { LoginPlan } from '@package-broker/core/db/users';
 import type {
   OrgContext,
   ScalarSqlExecutor,
@@ -9,7 +10,7 @@ import type {
 } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createLoginWriter, type LoginPlanWithAutoJoin } from './login.js';
+import { createLoginWriter } from './login.js';
 import { readProviderBinding, rebindProvider } from './provider-binding.js';
 import { createUserRepository } from './user.js';
 
@@ -460,7 +461,7 @@ describe('rebindProvider', () => {
       groups: ['new-group'],
     };
 
-    function loginPlan(overrides: Partial<LoginPlanWithAutoJoin> = {}): LoginPlanWithAutoJoin {
+    function loginPlan(overrides: Partial<LoginPlan> = {}): LoginPlan {
       return {
         userId: USER_X,
         createUser: false,
@@ -486,6 +487,7 @@ describe('rebindProvider', () => {
         },
         previousSecretHash: null,
         now: NOW,
+        autoJoin: false,
         ...overrides,
       };
     }

@@ -1688,6 +1688,7 @@ describe('concurrent guarded operations on one file database', () => {
         }),
       );
       const admin = {
+        kind: 'organization' as const,
         userId: actorOf(org).user,
         permissions: new Set(['org:users:write']),
         isOrganizationAdmin: true,
@@ -2496,6 +2497,7 @@ describe('fenced grant mutators', () => {
       role: '01J0ACTORRSTALE0000000AA',
     };
     const staleActor = {
+      kind: 'organization' as const,
       userId: actorIds.user,
       permissions: new Set(['org:grants:write', 'org:read', 'org:users:write']),
       isOrganizationAdmin: false,

@@ -18,6 +18,25 @@ describe('manifest', () => {
     expect(orderPlugins(plugins).map((p) => p.id)).toEqual(['a', 'b']);
   });
 
+  it('keeps config order when multiple plugins are ready', () => {
+    const plugins = [plugin('b', { dependsOn: ['a'] }), plugin('c'), plugin('a')];
+    expect(orderPlugins(plugins).map((p) => p.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('throws a cycle error naming a plugin that cannot be placed', () => {
+    const plugins = [
+      plugin('c'),
+      plugin('b', { dependsOn: ['a'] }),
+      plugin('a', { dependsOn: ['b'] }),
+    ];
+    expect(() => orderPlugins(plugins)).toThrow('dependency cycle at plugin "b"');
+  });
+
+  it('keeps config order without dependencies', () => {
+    const plugins = [plugin('c'), plugin('b'), plugin('a')];
+    expect(orderPlugins(plugins)).toEqual(plugins);
+  });
+
   it('reports duplicate ids, unsupported targets, api range and missing dependencies', () => {
     const errors = validatePlugins(
       [plugin('a'), plugin('a'), plugin('c', { apiVersion: 4, dependsOn: ['zz'] })],

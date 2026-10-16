@@ -25,6 +25,7 @@ export interface BuildOptions {
   target?: Platform;
   outDir?: string;
   cwd?: string;
+  runtimeEntry?: string;
 }
 
 export interface BuildResult {
@@ -180,7 +181,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   );
 
   const runtime = target === 'cloudflare' ? 'runtime-cloudflare' : 'runtime-node';
-  const entry = createRequire(import.meta.url).resolve(`@package-broker/${runtime}/entry`);
+  const entry =
+    options.runtimeEntry ??
+    createRequire(import.meta.url).resolve(`@package-broker/${runtime}/entry`);
   const bundle = path.join(outDir, target === 'cloudflare' ? 'worker.js' : 'server.js');
   const result = await esbuild({
     entryPoints: [entry],

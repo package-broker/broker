@@ -264,9 +264,15 @@ describe('renderBuildManifest platformPorts', () => {
 describe('build with platformPorts', () => {
   const cliRoot = fileURLToPath(new URL('..', import.meta.url));
   let project: string;
+  let runtimeEntry: string;
 
   beforeEach(async () => {
     project = await mkdtemp(path.join(tmpdir(), 'pb-ports-'));
+    runtimeEntry = path.join(project, 'runtime-entry.ts');
+    await writeFile(
+      runtimeEntry,
+      "import { plugins, platformPorts } from '#pb-manifest';\nexport default { plugins, platformPorts };\n",
+    );
     await symlink(path.join(cliRoot, 'node_modules'), path.join(project, 'node_modules'), 'dir');
   });
 
@@ -293,7 +299,7 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
     'builds --target %s from a config with both stanzas and records references only',
     async (target) => {
       const config = await writeConfig(target, { node: NODE_PORTS, cloudflare: CLOUDFLARE_PORTS });
-      const result = await build({ configPath: config, target, cwd: project });
+      const result = await build({ configPath: config, target, cwd: project, runtimeEntry });
 
       const manifest = await readManifest(result.outDir);
       expect(manifest.platformPorts).toEqual(target === 'node' ? NODE_PORTS : CLOUDFLARE_PORTS);
@@ -323,9 +329,9 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
     const config = await writeConfig('node', {
       node: { ...NODE_PORTS, blob: { ...NODE_PORTS.blob, rootEnv: 'AKIAABCDEFGHIJKLMNOP' } },
     });
-    await expect(build({ configPath: config, target: 'node', cwd: project })).rejects.toThrow(
-      /looks like a credential/,
-    );
+    await expect(
+      build({ configPath: config, target: 'node', cwd: project, runtimeEntry }),
+    ).rejects.toThrow(/looks like a credential/);
     await expect(
       readFile(path.join(project, '.pb', 'node', 'generated', 'manifest.json')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
@@ -337,7 +343,7 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
       file,
       "import { defineConfig } from '@package-broker/core/config';\nexport default defineConfig({ platform: 'node', plugins: [] });\n",
     );
-    const result = await build({ configPath: file, target: 'node', cwd: project });
+    const result = await build({ configPath: file, target: 'node', cwd: project, runtimeEntry });
     expect((await readManifest(result.outDir)).platformPorts).toBeNull();
   }, 60_000);
 
@@ -388,7 +394,9 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
     'fails the build for %s with a named problem',
     async (_name, ports, problem, target) => {
       const config = await writeConfig(target, ports);
-      await expect(build({ configPath: config, target, cwd: project })).rejects.toThrow(problem);
+      await expect(
+        build({ configPath: config, target, cwd: project, runtimeEntry }),
+      ).rejects.toThrow(problem);
     },
   );
 
@@ -428,9 +436,9 @@ export default defineConfig({ platform: ${JSON.stringify(platform)}, plugins: ${
     ],
   ])('refuses %s that looks like a credential', async (_name, ports, problem) => {
     const config = await writeConfig('cloudflare', ports);
-    await expect(build({ configPath: config, target: 'cloudflare', cwd: project })).rejects.toThrow(
-      problem,
-    );
+    await expect(
+      build({ configPath: config, target: 'cloudflare', cwd: project, runtimeEntry }),
+    ).rejects.toThrow(problem);
     await expect(
       readFile(path.join(project, '.pb', 'cloudflare', 'generated', 'manifest.json')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
@@ -445,9 +453,9 @@ const plugin = { id: 'jobby', package: '@test/jobby', apiVersion: 3, platforms: 
 export default defineConfig({ platform: 'node', plugins: [plugin] } as never);
 `,
     );
-    await expect(build({ configPath: config, target: 'node', cwd: project })).rejects.toThrow(
-      'jobs: registered but platformPorts.node is not configured',
-    );
+    await expect(
+      build({ configPath: config, target: 'node', cwd: project, runtimeEntry }),
+    ).rejects.toThrow('jobs: registered but platformPorts.node is not configured');
   });
 
   it('still rejects a plugin that binds a platform port', async () => {
@@ -459,8 +467,8 @@ const plugin = { id: 'bad', package: '@test/bad', apiVersion: 3, platforms: ['no
 export default defineConfig({ platform: 'node', plugins: [plugin] } as never);
 `,
     );
-    await expect(build({ configPath: config, target: 'node', cwd: project })).rejects.toThrow(
-      /cannot bind port "blob"/,
-    );
+    await expect(
+      build({ configPath: config, target: 'node', cwd: project, runtimeEntry }),
+    ).rejects.toThrow(/cannot bind port "blob"/);
   });
 });

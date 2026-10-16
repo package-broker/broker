@@ -30,6 +30,10 @@
       "types": "./dist/platform/*.d.ts",
       "default": "./dist/platform/*.js"
     },
+    "./ingest/*": {
+      "types": "./dist/ingest/*.d.ts",
+      "default": "./dist/ingest/*.js"
+    },
     "./secrets/*": {
       "types": "./dist/secrets/*.d.ts",
       "default": "./dist/secrets/*.js"

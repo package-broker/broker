@@ -314,6 +314,105 @@ export interface BlobTable {
   purge_lease_until: string | null;
 }
 
+export type Ecosystem = 'composer' | 'npm';
+export type SourceType =
+  'vcs' | 'composer_repository' | 'npm_registry' | 'packagist_proxy' | 'npmjs_proxy' | 'hosted';
+export type ProtocolMode = 'v2' | 'v1-providers' | 'v1-lazy' | 'v1-includes' | 'npm-packument';
+export type RemovalPolicy = 'flag' | 'exclude';
+export type SourceStatus = 'active' | 'degraded' | 'failing' | 'paused';
+export type PackageStatus = 'active' | 'removed_upstream';
+export type ProjectPackageOrigin = 'subscription' | 'explicit' | 'pattern';
+export type PatternEffect = 'include' | 'exclude';
+
+/** Mirrors `source` in `migrations/0001_init.sql`. */
+export interface SourceTable {
+  id: string;
+  org_id: string;
+  project_id: string | null;
+  name: string;
+  ecosystem: Ecosystem;
+  type: SourceType;
+  url: string | null;
+  credential_id: string | null;
+  config_json: Generated<string>;
+  protocol_mode: ProtocolMode | null;
+  has_available_packages: Generated<number>;
+  user_agent: string | null;
+  default_visible_to_new_projects: Generated<number>;
+  removal_policy: Generated<RemovalPolicy>;
+  retention_days_override: number | null;
+  status: Generated<SourceStatus>;
+  poll_interval_seconds: Generated<number>;
+  next_poll_at: string | null;
+  last_polled_at: string | null;
+  last_success_at: string | null;
+  poll_etag: string | null;
+  poll_last_modified: string | null;
+  root_hash: string | null;
+  listing_hash: string | null;
+  consecutive_failures: Generated<number>;
+  last_error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+/** Mirrors `registered_name` in `migrations/0001_init.sql`. */
+export interface RegisteredNameTable {
+  id: string;
+  org_id: string;
+  source_id: string;
+  ecosystem: Ecosystem;
+  pattern: string;
+  created_at: Generated<string>;
+}
+
+/** Mirrors `package` in `migrations/0001_init.sql`. */
+export interface PackageTable {
+  id: string;
+  org_id: string;
+  source_id: string;
+  ecosystem: Ecosystem;
+  name: string;
+  description: string | null;
+  visible_to_new_projects: Generated<number>;
+  status: Generated<PackageStatus>;
+  removed_upstream_at: string | null;
+  rev: Generated<number>;
+  modified_at: Generated<string>;
+  last_synced_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+/** Mirrors `project_source` in `migrations/0001_init.sql`. */
+export interface ProjectSourceTable {
+  org_id: string;
+  project_id: string;
+  source_id: string;
+  precedence: Generated<number>;
+  created_at: Generated<string>;
+}
+
+/** Mirrors `project_package` in `migrations/0001_init.sql`. */
+export interface ProjectPackageTable {
+  org_id: string;
+  project_id: string;
+  package_id: string;
+  origin: ProjectPackageOrigin;
+  created_at: Generated<string>;
+}
+
+/** Mirrors `project_package_pattern` in `migrations/0001_init.sql`. */
+export interface ProjectPackagePatternTable {
+  id: string;
+  org_id: string;
+  project_id: string;
+  source_id: string;
+  pattern: string;
+  effect: PatternEffect;
+  created_at: Generated<string>;
+}
+
 export interface Database {
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
@@ -339,4 +438,10 @@ export interface Database {
   job_attempt: JobAttemptTable;
   job_schedule: JobScheduleTable;
   blob: BlobTable;
+  source: SourceTable;
+  registered_name: RegisteredNameTable;
+  package: PackageTable;
+  project_source: ProjectSourceTable;
+  project_package: ProjectPackageTable;
+  project_package_pattern: ProjectPackagePatternTable;
 }

@@ -1,6 +1,7 @@
 name = "package-broker"
 main = "../../.pb/cloudflare/worker.js"
 compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
 
 # Operator template. Bindings are created by name at deploy time and no
 # account or resource ids are committed. Every <deployment> placeholder must be

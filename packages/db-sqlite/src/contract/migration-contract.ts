@@ -1020,6 +1020,18 @@ export function describeMigrationContract(
         await migrate(executor, await loadCore(upTo0002), { holder: 'contract-populated' });
         await seedPopulated(executor);
         await migrate(executor, await loadCore(all), { holder: 'contract-upgrade' });
+        await migrate(
+          executor,
+          [
+            ...(await loadCore(all)),
+            await loadMigrationSource(
+              'core',
+              '0004_cache_epoch.sql',
+              await readFile(new URL('0004_cache_epoch.sql', migrationsUrl), 'utf8'),
+            ),
+          ],
+          { holder: 'contract-upgrade' },
+        );
         const catalogue = PERMISSIONS.map(({ name }) => name).sort();
         expect(await permissionsOf(executor, ROLE_IDS.organization_admin)).toEqual(
           [...PRE_0003_ADMIN_PERMISSIONS].sort(),

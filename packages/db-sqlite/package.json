@@ -46,6 +46,10 @@
       "types": "./dist/contract/auth-contract.d.ts",
       "default": "./dist/contract/auth-contract.js"
     },
+    "./contract/blob-contract": {
+      "types": "./dist/contract/blob-contract.d.ts",
+      "default": "./dist/contract/blob-contract.js"
+    },
     "./contract/cache-contract": {
       "types": "./dist/contract/cache-contract.d.ts",
       "default": "./dist/contract/cache-contract.js"

@@ -1,4 +1,3 @@
-import { inspect } from 'node:util';
 import type { Observability } from '@package-broker/core/platform/observability';
 import {
   GITHUB_API_VERSION,
@@ -13,6 +12,21 @@ import {
   parseRateLimit,
   type InstallationTokensOptions,
 } from './installation-token.js';
+
+const INSPECT = Symbol.for('nodejs.util.inspect.custom');
+
+function inspect(value: unknown, ...rest: readonly unknown[]): string {
+  void rest;
+  const custom = (value as { [INSPECT]?: unknown } | null)?.[INSPECT];
+  if (typeof custom === 'function') return String(custom.call(value));
+  if (value instanceof Error) {
+    const own = Object.getOwnPropertyNames(value).map((key) =>
+      String((value as unknown as Record<string, unknown>)[key]),
+    );
+    return [value.name, value.message, value.stack ?? '', ...own].join('\n');
+  }
+  return `${String(value)} ${JSON.stringify(value) ?? ''}`;
+}
 
 const TOKEN = 'ghs_fakeInstallationTokenValue0123456789';
 const OTHER = 'ghs_secondFakeInstallationToken987654321';

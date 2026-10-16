@@ -73,15 +73,27 @@ export interface GrantRepository {
     opId: string,
   ): Promise<'updated' | 'not_found' | 'last_holder' | 'role_scope_mismatch' | FencedRefusal>;
   /**
-   * Also revokes the user's live sessions in the same batch. Suspending a suspended user answers
-   * `suspended` and does not rewrite `updated_at`.
+   * One fenced batch: the acting session and `org:users:write`, admin-only reach over a protected
+   * holder and the exact remaining-holder check are re-read inside it. Revokes the user's live
+   * sessions in the same batch. `suspended` means this call changed the status; a user that was
+   * already suspended answers `unchanged` and nothing is written.
    */
   suspendUser(
     ctx: OrgContext,
+    fence: MutationFence,
     userId: string,
     now: string,
-  ): Promise<'suspended' | 'not_found' | 'last_holder'>;
-  /** Sets the status back to `active` and nothing else; false when the user is not suspended. */
-  reactivateUser(ctx: OrgContext, userId: string, now: string): Promise<boolean>;
+  ): Promise<'suspended' | 'unchanged' | 'not_found' | 'last_holder' | FencedRefusal>;
+  /**
+   * Fenced like suspendUser, and admin-only for a user who would hold a protected role once
+   * active. `reactivated` only when this call moved a suspended user to `active`; an active user
+   * answers `unchanged` and an unknown one `not_found`, both without a write.
+   */
+  reactivateUser(
+    ctx: OrgContext,
+    fence: MutationFence,
+    userId: string,
+    now: string,
+  ): Promise<'reactivated' | 'unchanged' | 'not_found' | FencedRefusal>;
   countProtectedHolders(ctx: OrgContext): Promise<number>;
 }

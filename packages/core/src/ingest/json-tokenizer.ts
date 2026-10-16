@@ -108,6 +108,9 @@ export class JsonTokenizer {
   #skipPending = false;
   #muted = false;
   #muteDepth = 0;
+  #bareNext = false;
+  #bare = false;
+  #bareDepth = 0;
   #closed = false;
   #failure: { readonly error: unknown } | null = null;
 
@@ -120,6 +123,17 @@ export class JsonTokenizer {
   skipNext(): void {
     if (!this.#muted) {
       this.#skipPending = true;
+    }
+  }
+
+  /**
+   * Structure-only mode for the next value (scalar or whole container): tokens are emitted and
+   * everything is validated, but string values are not decoded or buffered and arrive as ''.
+   * Keys are still decoded.
+   */
+  structureOnlyNext(): void {
+    if (!this.#muted) {
+      this.#bareNext = true;
     }
   }
 
@@ -161,6 +175,10 @@ export class JsonTokenizer {
       this.#failure = { error };
       throw error;
     }
+  }
+
+  #lean(): boolean {
+    return this.#muted || (this.#bare && !this.#isKey);
   }
 
   #guard(): void {
@@ -222,7 +240,7 @@ export class JsonTokenizer {
       this.#escape === 0 &&
       this.#pendingHigh < 0 &&
       this.#loneCount === 0 &&
-      !this.#muted
+      !this.#lean()
     ) {
       let end = index;
       while (end < size) {
@@ -269,7 +287,7 @@ export class JsonTokenizer {
       if (byte !== BACKSLASH) {
         throw new JsonStreamError('invalid_syntax', base + index);
       }
-      if (this.#muted) {
+      if (this.#lean()) {
         this.#flushDecoder(base + index);
       }
       this.#escape = 1;
@@ -279,7 +297,7 @@ export class JsonTokenizer {
   }
 
   #appendSpan(span: Uint8Array, at: number): void {
-    if (this.#muted) {
+    if (this.#lean()) {
       try {
         this.#decoder.decode(span, { stream: true });
       } catch {
@@ -353,7 +371,7 @@ export class JsonTokenizer {
   }
 
   #codeUnit(unit: number): void {
-    if (this.#muted) {
+    if (this.#lean()) {
       return;
     }
     if (this.#pendingHigh >= 0 && isLowSurrogate(unit)) {
@@ -373,7 +391,7 @@ export class JsonTokenizer {
   }
 
   #codePoint(point: number): void {
-    if (this.#muted) {
+    if (this.#lean()) {
       return;
     }
     this.#flushHigh();
@@ -444,6 +462,9 @@ export class JsonTokenizer {
     if (this.#muted) {
       this.#flushDecoder(at);
       this.#emitString(null, at, sink);
+    } else if (this.#lean()) {
+      this.#flushDecoder(at);
+      this.#emitString('', at, sink);
     } else {
       this.#emitString(this.#decode(), at, sink);
     }
@@ -493,6 +514,9 @@ export class JsonTokenizer {
     if (this.#muted && this.#stack.length === this.#muteDepth) {
       this.#muted = false;
     }
+    if (this.#bare && this.#stack.length === this.#bareDepth) {
+      this.#bare = false;
+    }
     this.#expect = this.#stack.length === 0 ? 'done' : 'commaOrEnd';
   }
 
@@ -504,6 +528,10 @@ export class JsonTokenizer {
       this.#skipPending = false;
       this.#muted = true;
       this.#muteDepth = this.#stack.length;
+    } else if (this.#bareNext) {
+      this.#bareNext = false;
+      this.#bare = true;
+      this.#bareDepth = this.#stack.length;
     }
   }
 
@@ -532,6 +560,7 @@ export class JsonTokenizer {
     }
     this.#stack.pop();
     this.#skipPending = false;
+    this.#bareNext = false;
     this.#emit(sink, { type, start: at, end: at + 1 });
     this.#valueDone();
   }

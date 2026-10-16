@@ -4,7 +4,7 @@ export default function github() {
   return definePlugin({
     id: 'github',
     package: '@package-broker/plugin-github',
-    apiVersion: 2,
+    apiVersion: 3,
     platforms: ['cloudflare', 'node'],
     capabilities: ['source'],
   });

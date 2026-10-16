@@ -17,17 +17,35 @@ const CORE_PACKAGE = '@package-broker/core';
 const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc']);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
-const REQUIRED_FILES = {
-  'db-sqlite': [
-    'migrations/0001_init.sql',
-    'migrations/0002_local_login.sql',
-    'migrations/0003_access_model.sql',
-    'migrations/0004_cache_epoch.sql',
-    'migrations/0005_admin_permission_topup.sql',
-    'migrations/0006_ports.sql',
-  ],
-};
+const STATIC_REQUIRED_FILES = {};
+const MIGRATION_PACKAGES = ['db-sqlite'];
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };
+
+function migrationProblems(pkg, names) {
+  const problems = [];
+  const numbers = names.map((name) => /^(\d+)_/.exec(name)?.[1]);
+  for (const [index, name] of names.entries()) {
+    if (numbers[index] === undefined) problems.push(`migration "${name}" has no numeric prefix`);
+    else if (Number(numbers[index]) !== index + 1)
+      problems.push(
+        `migrations of ${pkg} have a numbering gap: expected ${String(index + 1).padStart(4, '0')}, found "${name}"`,
+      );
+  }
+  return problems;
+}
+
+function requiredFiles(pkg) {
+  const required = [...(STATIC_REQUIRED_FILES[pkg] ?? [])];
+  const problems = [];
+  if (MIGRATION_PACKAGES.includes(pkg)) {
+    const names = readdirSync(join(ROOT, 'packages', pkg, 'migrations'))
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    required.push(...names.map((name) => `migrations/${name}`));
+    problems.push(...migrationProblems(pkg, names));
+  }
+  return { required, problems };
+}
 
 function readPackageJson(name) {
   try {
@@ -325,7 +343,9 @@ function checkPackedPackage(pkg, pkgJson, files) {
     }
   }
 
-  for (const required of REQUIRED_FILES[pkg] ?? []) {
+  const expected = requiredFiles(pkg);
+  problems.push(...expected.problems);
+  for (const required of expected.required) {
     if (!files.includes(required)) problems.push(`"${required}" is missing from the tarball`);
   }
 

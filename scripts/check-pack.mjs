@@ -22,6 +22,7 @@ const REQUIRED_FILES = {
     'migrations/0003_access_model.sql',
     'migrations/0004_cache_epoch.sql',
     'migrations/0005_admin_permission_topup.sql',
+    'migrations/0006_ports.sql',
   ],
 };
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };

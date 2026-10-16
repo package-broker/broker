@@ -120,6 +120,8 @@ export interface TokenAccess {
     readonly kind: 'sso' | 'local' | null;
     readonly identityId: string | null;
     readonly fresh: boolean;
+    /** The stored evidence time the 24 h comparison reads, as canonical text; null when absent. */
+    readonly evidenceAt: string | null;
   } | null;
   readonly project: AccessProject | null;
   readonly organizationPermissions: readonly string[];
@@ -672,6 +674,7 @@ interface TokenRow {
   readonly validation_kind: string | null;
   readonly validation_identity_id: string | null;
   readonly validation_fresh: number;
+  readonly validation_evidence_at: string | null;
   readonly expires_at: string | null;
   readonly revoked_at: string | null;
   readonly last_used_at: string | null;
@@ -754,6 +757,15 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
     when t.kind = 'pat' and t.validation_kind = 'local' and t.validation_identity_id is null then ${localFresh}
     else 0 end`;
 
+  const validationEvidence = sql<string | null>`case
+    when t.kind = 'pat' and t.validation_kind = 'sso' then (
+      select ev_i.validated_at from identity ev_i
+      where ev_i.org_id = ${ctx.orgId} and ev_i.id = t.validation_identity_id and ev_i.user_id = t.user_id)
+    when t.kind = 'pat' and t.validation_kind = 'local' and t.validation_identity_id is null then (
+      select ev_l.last_login_at from local_login ev_l
+      where ev_l.org_id = ${ctx.orgId} and ev_l.user_id = t.user_id)
+    else null end`;
+
   let query = loose
     .selectFrom('token as t')
     .leftJoin('user_account as u', (join) =>
@@ -817,6 +829,7 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
       't.validation_kind as validation_kind',
       't.validation_identity_id as validation_identity_id',
       validationFresh.as('validation_fresh'),
+      validationEvidence.as('validation_evidence_at'),
       't.expires_at as expires_at',
       't.revoked_at as revoked_at',
       't.last_used_at as last_used_at',
@@ -948,6 +961,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
                 : null,
             identityId: row.validation_identity_id,
             fresh: row.validation_fresh === 1,
+            evidenceAt: row.validation_evidence_at,
           },
     project,
     organizationPermissions,

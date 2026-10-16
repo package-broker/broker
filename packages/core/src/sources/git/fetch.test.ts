@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
@@ -95,10 +96,43 @@ interface Obj {
   type: 'commit' | 'tree' | 'blob';
   data: Uint8Array;
   oid: string;
+  stored?: boolean;
 }
 
-function makeObj(type: Obj['type'], data: Uint8Array): Obj {
-  return { type, data, oid: sha1(enc.encode(`${type} ${data.length}\0`), data).toString('hex') };
+function makeObj(type: Obj['type'], data: Uint8Array, stored = false): Obj {
+  return {
+    type,
+    data,
+    oid: sha1(enc.encode(`${type} ${data.length}\0`), data).toString('hex'),
+    ...(stored ? { stored } : {}),
+  };
+}
+
+function once<T>(build: () => T): () => T {
+  let value: T | undefined;
+  return () => (value ??= build());
+}
+
+const MIB = 1024 * 1024;
+const bigBlob = once(() => makeObj('blob', new Uint8Array(9 * MIB).fill(0x61)));
+const incompressibleBlob = once(() => makeObj('blob', new Uint8Array(randomBytes(17 * MIB)), true));
+const manifestBlobs = new Map<number, Obj>();
+function manifestBlob(n: number): Obj {
+  let blob = manifestBlobs.get(n);
+  if (!blob) {
+    blob = makeObj('blob', enc.encode(String.fromCharCode(65 + n).repeat(900 * 1024)));
+    manifestBlobs.set(n, blob);
+  }
+  return blob;
+}
+const bigBlobsByFill = new Map<number, Obj>();
+function bigBlobFilled(fill: number): Obj {
+  let blob = bigBlobsByFill.get(fill);
+  if (!blob) {
+    blob = makeObj('blob', new Uint8Array(9 * MIB).fill(fill));
+    bigBlobsByFill.set(fill, blob);
+  }
+  return blob;
 }
 
 interface TreeItem {
@@ -143,6 +177,16 @@ function packHeader(type: number, size: number): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+const deflated = new WeakMap<Obj, Uint8Array>();
+function deflateObj(o: Obj): Uint8Array {
+  let out = deflated.get(o);
+  if (!out) {
+    out = new Uint8Array(deflateSync(o.data, o.stored ? { level: 0 } : {}));
+    deflated.set(o, out);
+  }
+  return out;
+}
+
 function buildPack(objects: Obj[]): Uint8Array {
   const header = new Uint8Array(12);
   header.set(enc.encode('PACK'));
@@ -151,18 +195,20 @@ function buildPack(objects: Obj[]): Uint8Array {
   dv.setUint32(8, objects.length);
   const body = concat([
     header,
-    ...objects.flatMap((o) => [
-      packHeader(TYPE_CODE[o.type], o.data.length),
-      new Uint8Array(deflateSync(o.data)),
-    ]),
+    ...objects.flatMap((o) => [packHeader(TYPE_CODE[o.type], o.data.length), deflateObj(o)]),
   ]);
   return concat([body, new Uint8Array(sha1(body))]);
 }
 
+const SMALL_BAND = 97;
+const LARGE_BAND = 65_000;
+const LARGE_PACK = 256 * 1024;
+
 function fetchResponse(pack: Uint8Array): Uint8Array {
   const bands: Uint8Array[] = [];
-  for (let at = 0; at < pack.length; at += 97) {
-    bands.push(encodePkt(concat([Uint8Array.of(1), pack.subarray(at, at + 97)])));
+  const step = pack.length > LARGE_PACK ? LARGE_BAND : SMALL_BAND;
+  for (let at = 0; at < pack.length; at += step) {
+    bands.push(encodePkt(concat([Uint8Array.of(1), pack.subarray(at, at + step)])));
   }
   return concat([
     encodePkt('shallow-info\n'),
@@ -317,12 +363,25 @@ function seedReleases(fake: FakeGit, count: number, shared = 0): Release[] {
 
 function manifests(fake: FakeGit, count: number) {
   return Array.from({ length: count }, (_, n) => {
-    const blob = fake.add(
-      makeObj('blob', enc.encode(String.fromCharCode(65 + n).repeat(900 * 1024))),
-    );
+    const blob = fake.add(manifestBlob(n));
     const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
     return { name: `refs/tags/v${n}`, oid: fake.add(makeCommit(tree.oid)).oid };
   });
+}
+
+const wideFixture = once(() => {
+  const blob = makeObj('blob', enc.encode('{}'));
+  const tree = makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]);
+  const commits = Array.from({ length: MAX_WANTS_PER_REQUEST + 1 }, (_, n) =>
+    makeCommit(tree.oid, 1_000_000 + n),
+  );
+  return { objects: [blob, tree, ...commits], commits };
+});
+
+function wideRefs(fake: FakeGit) {
+  const { objects, commits } = wideFixture();
+  for (const o of objects) fake.add(o);
+  return commits.map((c, n) => ({ name: `refs/tags/v${n}`, oid: c.oid }));
 }
 
 describe('readFileAtRefs', () => {
@@ -845,7 +904,7 @@ describe('readFileAtRefs', () => {
   it('isolates oversize blobs by bisection within the request cap', async () => {
     const fake = new FakeGit();
     const host = 'bisect.example.com';
-    const big = fake.add(makeObj('blob', new Uint8Array(9 * 1024 * 1024).fill(0x61)));
+    const big = fake.add(bigBlob());
     const small = Array.from({ length: 8 }, (_, n) =>
       fake.add(makeObj('blob', enc.encode(`{"n":${n}}`))),
     );
@@ -870,10 +929,9 @@ describe('readFileAtRefs', () => {
     const host = 'threebig.example.com';
     const bigs = [3, 17, 33].map((n) => n);
     const refs = Array.from({ length: 41 }, (_, n) => {
-      const body = bigs.includes(n)
-        ? new Uint8Array(9 * 1024 * 1024).fill(65 + n)
-        : enc.encode(`{"n":${n}}`);
-      const blob = fake.add(makeObj('blob', body));
+      const blob = fake.add(
+        bigs.includes(n) ? bigBlobFilled(65 + n) : makeObj('blob', enc.encode(`{"n":${n}}`)),
+      );
       const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
       return { name: `refs/tags/v${n}`, oid: fake.add(makeCommit(tree.oid, 1_000 + n)).oid };
     });
@@ -885,7 +943,7 @@ describe('readFileAtRefs', () => {
   it('treats a pack over the response cap like an oversize blob', async () => {
     const fake = new FakeGit();
     const host = 'packcap.example.com';
-    const big = fake.add(makeObj('blob', new Uint8Array(randomBytes(17 * 1024 * 1024))));
+    const big = fake.add(incompressibleBlob());
     const small = fake.add(makeObj('blob', enc.encode('{}')));
     const mk = (name: string, blob: Obj) => ({
       name,
@@ -907,23 +965,23 @@ describe('readFileAtRefs', () => {
     ]);
   });
 
-  it('refetches only the failing chunk when a filter is rejected mid-way', async () => {
-    const fake = new FakeGit();
-    fake.rejected.add('tree:1');
-    const host = 'chunkfallback.example.com';
-    const blob = fake.add(makeObj('blob', enc.encode('{}')));
-    const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
-    const refs = Array.from({ length: MAX_WANTS_PER_REQUEST + 1 }, (_, n) => ({
-      name: `refs/tags/v${n}`,
-      oid: fake.add(makeCommit(tree.oid, 1_000_000 + n)).oid,
-    }));
-    await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
-    expect(fake.requests.slice(0, 3).map((r) => [r.filter, r.wants.length])).toEqual([
-      ['tree:1', MAX_WANTS_PER_REQUEST],
-      ['tree:0', MAX_WANTS_PER_REQUEST],
-      ['tree:0', 1],
-    ]);
-  });
+  // Inflating 10,001 distinct commits is the boundary under test and cannot shrink; the budget absorbs a loaded CI host.
+  it(
+    'refetches only the failing chunk when a filter is rejected mid-way',
+    { timeout: 20_000 },
+    async () => {
+      const fake = new FakeGit();
+      fake.rejected.add('tree:1');
+      const host = 'chunkfallback.example.com';
+      const refs = wideRefs(fake);
+      await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
+      expect(fake.requests.slice(0, 3).map((r) => [r.filter, r.wants.length])).toEqual([
+        ['tree:1', MAX_WANTS_PER_REQUEST],
+        ['tree:0', MAX_WANTS_PER_REQUEST],
+        ['tree:0', 1],
+      ]);
+    },
+  );
 
   it('treats an ERR that does not mention the filter as a plain remote error', async () => {
     const fake = new FakeGit();
@@ -940,7 +998,7 @@ describe('readFileAtRefs', () => {
   it('marks a single blob over the object cap too_large and keeps the others', async () => {
     const fake = new FakeGit();
     const host = 'bigblob.example.com';
-    const big = fake.add(makeObj('blob', new Uint8Array(9 * 1024 * 1024).fill(0x61)));
+    const big = fake.add(bigBlob());
     const small = fake.add(makeObj('blob', enc.encode('{}')));
     const mk = (name: string, blob: Obj) => ({
       name,
@@ -966,9 +1024,7 @@ describe('readFileAtRefs', () => {
     const fake = new FakeGit();
     const host = 'commitbudget.example.com';
     const refs = Array.from({ length: 30 }, (_, n) => {
-      const blob = fake.add(
-        makeObj('blob', enc.encode(String.fromCharCode(65 + n).repeat(900 * 1024))),
-      );
+      const blob = fake.add(manifestBlob(n));
       const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
       return { name: `refs/tags/v${n}`, oid: fake.add(makeCommit(tree.oid)).oid };
     });
@@ -999,24 +1055,24 @@ describe('readFileAtRefs', () => {
     ).rejects.toMatchObject({ code: 'bad_response' });
   });
 
-  it('splits more than 10,000 wants over several requests under the body cap', async () => {
-    const fake = new FakeGit();
-    const host = 'many.example.com';
-    const blob = fake.add(makeObj('blob', enc.encode('{}')));
-    const tree = fake.add(makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }]));
-    const refs = Array.from({ length: MAX_WANTS_PER_REQUEST + 1 }, (_, n) => ({
-      name: `refs/tags/v${n}`,
-      oid: fake.add(makeCommit(tree.oid, 1_000_000 + n)).oid,
-    }));
-    const result = await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
-    expect(result).toHaveLength(MAX_WANTS_PER_REQUEST + 1);
-    expect(result.every((r) => r.text === '{}')).toBe(true);
-    expect(fake.requests.slice(0, 2).map((r) => r.wants.length)).toEqual([
-      MAX_WANTS_PER_REQUEST,
-      1,
-    ]);
-    expect(fake.seen.every((r) => (r.body?.length ?? 0) < 1024 * 1024)).toBe(true);
-  });
+  // Inflating 10,001 distinct commits is the boundary under test and cannot shrink; the budget absorbs a loaded CI host.
+  it(
+    'splits more than 10,000 wants over several requests under the body cap',
+    { timeout: 20_000 },
+    async () => {
+      const fake = new FakeGit();
+      const host = 'many.example.com';
+      const refs = wideRefs(fake);
+      const result = await readFileAtRefs(ctx(fake, host), url(host), refs, 'composer.json');
+      expect(result).toHaveLength(MAX_WANTS_PER_REQUEST + 1);
+      expect(result.every((r) => r.text === '{}')).toBe(true);
+      expect(fake.requests.slice(0, 2).map((r) => r.wants.length)).toEqual([
+        MAX_WANTS_PER_REQUEST,
+        1,
+      ]);
+      expect(fake.seen.every((r) => (r.body?.length ?? 0) < 1024 * 1024)).toBe(true);
+    },
+  );
 
   it('never puts the committer e-mail in an error', async () => {
     const fake = new FakeGit();
@@ -1382,5 +1438,221 @@ describe('fail-closed protocol handling', () => {
         }),
     );
     expect(result).toBeInstanceOf(UpstreamError);
+  });
+});
+
+interface RecordedExchange {
+  request: { url: string; method: string; headers: Record<string, string>; bodyBase64: string };
+  response: { status: number; headers: Record<string, string>; bodyBase64: string };
+}
+
+interface Recorded {
+  recordedAt: string;
+  call: {
+    repoUrl: string;
+    refs: { name: string; oid: string; peeled?: string }[];
+    path: string;
+    filterCacheIndex: number | null;
+    capabilities: { filter: boolean } | null;
+  };
+  outcome:
+    | { kind: 'result'; value: unknown }
+    | { kind: 'error'; name: string; code: string; status?: number };
+  exchanges: RecordedExchange[];
+}
+
+const fromBase64 = (text: string): Uint8Array => new Uint8Array(Buffer.from(text, 'base64'));
+
+function loadRecorded(name: string): Recorded {
+  const file = new URL(`./fixtures/${name}.json`, import.meta.url);
+  return JSON.parse(readFileSync(file, 'utf8')) as Recorded;
+}
+
+function replay(recorded: Recorded) {
+  const queue = [...recorded.exchanges];
+  const sent: Wire[] = [];
+  const policyFetch = createPolicyFetch({
+    policy,
+    userAgent: 'package-broker-test',
+    fetchImpl: async (input, init) => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error('request beyond the recording');
+      expect(String(input)).toBe(next.request.url);
+      expect(init?.method).toBe(next.request.method);
+      expect(Buffer.from(init?.body as Uint8Array).toString('base64')).toBe(
+        next.request.bodyBase64,
+      );
+      expect(new Headers(init?.headers).get('git-protocol')).toBe('version=2');
+      sent.push(parseRequest(init?.body as Uint8Array));
+      return new Response(fromBase64(next.response.bodyBase64), {
+        status: next.response.status,
+        headers: next.response.headers,
+      });
+    },
+  });
+  return { policyFetch, sent, remaining: () => queue.length };
+}
+
+async function replayCall(recorded: Recorded, cacheHost?: string) {
+  const played = replay(recorded);
+  const cache = createFilterStrategyCache();
+  const { filterCacheIndex, capabilities, repoUrl, refs, path } = recorded.call;
+  if (filterCacheIndex !== null) cache.set(new URL(repoUrl).host, filterCacheIndex);
+  const settled = await readFileAtRefs(
+    {
+      policyFetch: played.policyFetch,
+      codecs,
+      runtime: 'docker',
+      filterCache: cache,
+      ...(capabilities ? { capabilities } : {}),
+    },
+    repoUrl,
+    refs,
+    path,
+  ).then(
+    (value) => ({ value }) as const,
+    (error: unknown) => ({ error }) as const,
+  );
+  expect(played.remaining()).toBe(0);
+  expect(cacheHost === undefined || cache.get(cacheHost) !== undefined).toBe(true);
+  return { ...played, settled, cache };
+}
+
+function expectRecordedOutcome(
+  recorded: Recorded,
+  settled: Awaited<ReturnType<typeof replayCall>>['settled'],
+) {
+  if (recorded.outcome.kind === 'result') {
+    expect('value' in settled && settled.value).toEqual(recorded.outcome.value);
+    return;
+  }
+  expect('error' in settled).toBe(true);
+  const error =
+    'error' in settled ? (settled.error as Error & { code?: string; status?: number }) : undefined;
+  expect(error?.name).toBe(recorded.outcome.name);
+  expect(error?.code).toBe(recorded.outcome.code);
+  if (recorded.outcome.status !== undefined) expect(error?.status).toBe(recorded.outcome.status);
+}
+
+const responseText = (exchange: RecordedExchange): string =>
+  new TextDecoder().decode(fromBase64(exchange.response.bodyBase64));
+
+describe('recorded exchanges', () => {
+  it('replays the GitHub tree:1 rejection and the fall back to tree:0', async () => {
+    const recorded = loadRecorded('github-tree1-rejected');
+    const first = recorded.exchanges[0]!;
+    expect(first.response.status).toBe(200);
+    expect(first.response.headers['content-type']).toBe(RESULT);
+    expect(responseText(first)).toBe('0031ERR tree filter allows max depth 0, but got 1');
+
+    const { sent, settled, cache } = await replayCall(recorded, 'github.com');
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent.map((r) => r.filter)).toEqual(['tree:1', 'tree:0', 'tree:0', undefined]);
+    expect(sent.map((r) => r.deepen)).toEqual(['1', '1', undefined, undefined]);
+    expect(cache.get('github.com')).toBe(1);
+    const [file] = (settled as { value: { text: string | null }[] }).value;
+    expect(JSON.parse(file!.text!)).toMatchObject({ name: 'composer/semver' });
+  });
+
+  it('replays the 41-ref composer/semver exchange in three batches with shallow-info', async () => {
+    const recorded = loadRecorded('github-semver-41-refs');
+    expect(recorded.call.refs).toHaveLength(41);
+    expect(responseText(recorded.exchanges[0]!)).toContain('shallow-info\n');
+
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent.map((r) => r.filter)).toEqual(['tree:0', 'tree:0', undefined]);
+    expect(sent[0]?.deepen).toBe('1');
+    expect(sent[1]?.deepen).toBeUndefined();
+    expect(sent[2]?.deepen).toBeUndefined();
+    const commits = new Set(recorded.call.refs.map((r) => r.peeled ?? r.oid));
+    expect(new Set(sent[0]?.wants)).toEqual(commits);
+    const files = (settled as { value: { text: string | null }[] }).value;
+    expect(files).toHaveLength(41);
+    expect(files.every((f) => f.text !== null)).toBe(true);
+  });
+
+  it('replays a root tree wanted by oid under tree:0', async () => {
+    const recorded = loadRecorded('github-tree-by-oid-tree0');
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent).toHaveLength(3);
+    expect(sent[1]?.wants).toHaveLength(1);
+    expect(sent[1]?.filter).toBe('tree:0');
+    expect(sent[1]?.deepen).toBeUndefined();
+    expect(responseText(recorded.exchanges[1]!)).toContain('packfile\n');
+  });
+
+  it('replays deepen 1 on a tag that peels to a tree as not_a_commit', async () => {
+    const recorded = loadRecorded('github-tag-peels-to-tree');
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent.map((r) => r.filter)).toEqual(['tree:1', 'tree:0']);
+    expect(sent[1]?.deepen).toBe('1');
+    expect(sent[1]?.wants).toEqual([recorded.call.refs[0]!.peeled]);
+    expect((settled as { value: { reason?: string }[] }).value[0]?.reason).toBe('not_a_commit');
+  });
+
+  it.each(['github-not-our-ref', 'github-not-our-ref-warm'])(
+    'replays the not-our-ref ERR for an unknown oid (%s) without a filter fall back',
+    async (name) => {
+      const recorded = loadRecorded(name);
+      expect(responseText(recorded.exchanges[0]!)).toMatch(
+        /^[0-9a-f]{4}ERR upload-pack: not our ref [0-9a-f]{40}$/,
+      );
+
+      const { sent, settled } = await replayCall(recorded);
+
+      expectRecordedOutcome(recorded, settled);
+      expect(settled).toMatchObject({ error: expect.any(GitRemoteError) });
+      expect(sent).toHaveLength(1);
+    },
+  );
+
+  it('replays a renamed GitHub repository, which still answers the POST with 200', async () => {
+    const recorded = loadRecorded('github-renamed-repository');
+    expect(recorded.exchanges[0]!.response.status).toBe(200);
+    expect(recorded.exchanges[0]!.response.headers.location).toBeUndefined();
+
+    const { settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+  });
+
+  it('replays the 401 GitHub answers for a renamed repository it no longer serves', async () => {
+    const recorded = loadRecorded('github-renamed-repository-401');
+    expect(recorded.exchanges[0]!.response.status).toBe(401);
+
+    const { settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(settled).toMatchObject({ error: expect.any(UpstreamError) });
+  });
+
+  it('replays stock git-http-backend answering a filter request with an empty 200', async () => {
+    const recorded = loadRecorded('local-git-http-backend');
+    expect(recorded.exchanges).toHaveLength(1);
+    expect(recorded.exchanges[0]!.response.status).toBe(200);
+    expect(recorded.exchanges[0]!.response.bodyBase64).toBe('');
+
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent[0]?.filter).toBe('tree:1');
+    expect(settled).toMatchObject({ error: expect.objectContaining({ code: 'bad_response' }) });
+  });
+
+  it('replays stock git-http-backend when the caller knows the filter is not advertised', async () => {
+    const recorded = loadRecorded('local-git-http-backend-no-filter');
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.filter).toBeUndefined();
+    expect((settled as { value: { text: string | null }[] }).value[0]?.text).toContain('acme/lib');
   });
 });

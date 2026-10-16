@@ -5,6 +5,14 @@ import {
   type MutationFence,
 } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { DbError } from '@package-broker/core/db/errors';
+import { PERMISSIONS } from '@package-broker/core/authz/permissions';
+import { scopeAllows } from '@package-broker/core/authz/scope';
+import type {
+  ServiceTokenIssueOutcome,
+  ServiceTokenStore,
+  ServiceTokenStoreInput,
+} from '@package-broker/core/authz/service-token-service';
 import {
   adminEligibility,
   assertCheck,
@@ -25,17 +33,21 @@ import {
   liveSessionCondition,
   requireIdleSeconds,
 } from './session-liveness.js';
+import { servicePrincipalAuthorityGuard } from './service-principal-authority.js';
 
 const MAX_SELECTOR_ATTEMPTS = 3;
 const MAX_PROJECTS = 200;
 const REAUTH_WINDOW_SECONDS = 600;
 const FRESHNESS_SECONDS = 86_400;
 const MAX_EXPIRY_DAYS = 90;
+const MAX_CI_READ_ONLY_EXPIRY_DAYS = 365;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SELECTOR = /^[a-z2-7]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const PLAINTEXT_PREFIX = 'pb_pat_';
 const PLAINTEXT = /^pb_pat_[a-z2-7]{12}_[A-Za-z0-9_-]{43}$/;
+const SERVICE_PLAINTEXT_PREFIX = 'pb_svc_';
+const SERVICE_PLAINTEXT = /^pb_svc_[a-z2-7]{12}_[A-Za-z0-9_-]{43}$/;
 
 interface TokenProjectTable {
   org_id: string;
@@ -79,6 +91,10 @@ export type IssueTokenResult =
     }
   | { readonly status: 'indeterminate' };
 
+export type IssueServiceTokenInput = ServiceTokenStoreInput;
+
+export type IssueServiceTokenResult = ServiceTokenIssueOutcome;
+
 export type RevokeTokenResult =
   | { readonly status: 'revoked'; readonly opId: string }
   | { readonly status: 'already_revoked' }
@@ -98,6 +114,20 @@ export interface TokenRepository {
     input: IssuePersonalTokenInput,
     mint: () => MintedToken | Promise<MintedToken>,
   ): Promise<IssueTokenResult>;
+  /**
+   * Inserts one svc token bound to the principal and its project, with no token_project rows, in
+   * one fenced batch. The batch requires on database time: a live, freshly reauthenticated session;
+   * the issuer's live management permission and every covered permission; the principal active,
+   * bound to `projectId`, at `principalRevision` and storing every covered permission; an active
+   * project whose token_max_scope admits the scope; and an expiry within min(CI setting, 365) days
+   * for a read token or min(default setting, 90) days otherwise. `conflict`: the principal changed.
+   */
+  issueService(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: IssueServiceTokenInput,
+    mint: () => MintedToken | Promise<MintedToken>,
+  ): Promise<IssueServiceTokenResult>;
   /**
    * Runs `guard` and the update as one fenced batch, so a revoked session cannot revoke. The opId
    * on `revoked` is the marker that gates the audit event; repeats carry none. `indeterminate`:
@@ -166,7 +196,11 @@ function validateInput(input: IssuePersonalTokenInput): string {
   return now;
 }
 
-function validateMinted(minted: MintedToken): void {
+function validateMinted(
+  minted: MintedToken,
+  plaintext: RegExp = PLAINTEXT,
+  prefix: string = PLAINTEXT_PREFIX,
+): void {
   if (
     typeof minted.selector !== 'string' ||
     !SELECTOR.test(minted.selector) ||
@@ -175,9 +209,8 @@ function validateMinted(minted: MintedToken): void {
     !Number.isSafeInteger(minted.pepperVersion) ||
     minted.pepperVersion < 1 ||
     typeof minted.plaintext !== 'string' ||
-    !PLAINTEXT.test(minted.plaintext) ||
-    minted.plaintext.slice(PLAINTEXT_PREFIX.length, PLAINTEXT_PREFIX.length + 12) !==
-      minted.selector
+    !plaintext.test(minted.plaintext) ||
+    minted.plaintext.slice(prefix.length, prefix.length + 12) !== minted.selector
   ) {
     throw new TypeError('minted token is malformed');
   }
@@ -417,6 +450,21 @@ async function anyLost(executor: SqlExecutor, guards: readonly Guard[]): Promise
   return false;
 }
 
+/**
+ * The head guard's first statement inserts nothing while its condition holds and fails with a
+ * UNIQUE error otherwise, so running it alone is a side-effect-free probe of that condition.
+ */
+async function headGuardLost(executor: SqlExecutor, guard: FenceGuard): Promise<boolean> {
+  const check = guard[0];
+  if (check === undefined) return false;
+  try {
+    await executor.batch([check]);
+    return false;
+  } catch (error) {
+    return error instanceof DbError && error.kind === 'unique';
+  }
+}
+
 function sessionLive(ctx: OrgContext, fence: MutationFence, idleSeconds: number): Guard {
   return sql<boolean>`exists (
     select 1 from session as live_session
@@ -429,6 +477,148 @@ function sessionLive(ctx: OrgContext, fence: MutationFence, idleSeconds: number)
       and ${liveSessionCondition('live_session', idleSeconds)})`;
 }
 
+function validateServiceInput(input: IssueServiceTokenInput): void {
+  nonEmpty('id', input.id);
+  nonEmpty('name', input.name);
+  nonEmpty('servicePrincipalId', input.servicePrincipalId);
+  if (input.projectId !== null) nonEmpty('projectId', input.projectId);
+  requireProviders(input.providerAnchors);
+  if (!Number.isSafeInteger(input.principalRevision) || input.principalRevision < 1) {
+    throw new TypeError('principalRevision must be a safe integer >= 1');
+  }
+  if (input.scope !== 'read' && input.scope !== 'write' && input.scope !== 'full') {
+    throw new TypeError('scope must be read, write or full');
+  }
+  if (input.readOnly !== (input.scope === 'read')) {
+    throw new TypeError('readOnly must be true exactly for the read scope');
+  }
+  const now = timestamp('now', input.now);
+  if (timestamp('expiresAt', input.expiresAt) <= now) {
+    throw new TypeError('expiresAt must be in the future');
+  }
+  nonEmpty('authority permission', input.authority.permission);
+  const { covers } = input.authority;
+  if (!Array.isArray(covers) || covers.length === 0) {
+    throw new TypeError('a service token covers at least one permission');
+  }
+  covers.forEach((name) => nonEmpty('covered permission', name));
+  if (new Set(covers).size !== covers.length) {
+    throw new TypeError('covered permissions must be distinct');
+  }
+  const mask = new Set(scopeMask(input));
+  if (!covers.every((name) => mask.has(name))) {
+    throw new TypeError('covered permissions must fit the scope at the principal boundary');
+  }
+}
+
+/** Every permission a token of this scope may carry at the principal's boundary. */
+function scopeMask(input: IssueServiceTokenInput): string[] {
+  return PERMISSIONS.map(({ name }) => name).filter(
+    (name) =>
+      scopeAllows(input.scope, name) && (input.projectId === null || name.startsWith('project:')),
+  );
+}
+
+function serviceIssuance(
+  ctx: OrgContext,
+  fence: MutationFence,
+  input: IssueServiceTokenInput,
+  idleSeconds: number,
+): Guard {
+  const allowedCaps = sql.join(SCOPE_CEILINGS[input.scope].map((cap) => sql.lit(cap)));
+  return sql<boolean>`exists (
+    with ip(org_id, session_id, user_id, principal_id, project_id, expires_at, read_only, covers, mask) as (
+      select ${ctx.orgId}, ${fence.sessionId}, ${fence.userId}, ${input.servicePrincipalId},
+        ${input.projectId}, ${input.expiresAt}, ${input.readOnly ? 1 : 0},
+        ${JSON.stringify(input.authority.covers)}, ${JSON.stringify(scopeMask(input))}
+    )
+    select 1 from ip
+    join session as issuing_session
+      on issuing_session.id = ip.session_id and issuing_session.org_id = ip.org_id
+      and issuing_session.user_id = ip.user_id
+    join user_account as issuing_user
+      on issuing_user.id = issuing_session.user_id and issuing_user.org_id = issuing_session.org_id
+    join organization as issuing_org on issuing_org.id = issuing_session.org_id
+    join service_principal as principal
+      on principal.id = ip.principal_id and principal.org_id = ip.org_id
+    where issuing_session.revoked_at is null
+      and unixepoch(coalesce(issuing_session.last_seen_at, issuing_session.created_at), 'subsec')
+        > unixepoch('now', 'subsec') - ${sql.lit(idleSeconds)}
+      and unixepoch(issuing_session.expires_at) > unixepoch('now')
+      and unixepoch(issuing_session.reauth_at)
+        between unixepoch('now') - ${sql.lit(REAUTH_WINDOW_SECONDS)} and unixepoch('now')
+      and issuing_user.status = 'active'
+      and unixepoch(ip.expires_at, 'subsec') > unixepoch('now', 'subsec')
+      and unixepoch(ip.expires_at, 'subsec') <= unixepoch('now', 'subsec') + ${sql.lit(86_400)} * (
+        case when ip.read_only = 1
+          then min(issuing_org.token_ci_readonly_expiry_days, ${sql.lit(MAX_CI_READ_ONLY_EXPIRY_DAYS)})
+          else min(issuing_org.token_default_expiry_days, ${sql.lit(MAX_EXPIRY_DAYS)})
+        end)
+      and principal.status = 'active'
+      and principal.project_id is ip.project_id
+      and (principal.project_id is null or exists (
+        select 1 from project as bound_project
+        where bound_project.id = principal.project_id
+          and bound_project.org_id = ip.org_id
+          and bound_project.status = 'active'
+          and bound_project.token_max_scope in (${allowedCaps})))
+      and not exists (
+        select 1 from json_each(ip.covers) as wanted
+        where wanted.value not in (
+          select stored.permission from service_principal_permission as stored
+          where stored.org_id = principal.org_id and stored.service_principal_id = principal.id))
+      and json_array_length(ip.covers) = (
+        select count(*) from service_principal_permission as conferred
+        where conferred.org_id = principal.org_id
+          and conferred.service_principal_id = principal.id
+          and conferred.permission in (select value from json_each(ip.mask))))`;
+}
+
+function principalUnchanged(ctx: OrgContext, input: IssueServiceTokenInput): Guard {
+  return sql<boolean>`exists (
+    select 1 from service_principal as current_principal
+    where current_principal.id = ${input.servicePrincipalId}
+      and current_principal.org_id = ${ctx.orgId}
+      and current_principal.revision = ${input.principalRevision})`;
+}
+
+function serviceStatements(
+  ctx: OrgContext,
+  fence: MutationFence,
+  input: IssueServiceTokenInput,
+  checks: readonly Guard[],
+  minted: MintedToken,
+  opId: string,
+): Statement[] {
+  return [
+    ...checks.flatMap((check) => assertCheck(check)),
+    compile(
+      db.insertInto('token').values({
+        id: input.id,
+        org_id: ctx.orgId,
+        kind: 'svc',
+        selector: minted.selector,
+        hash: minted.hash,
+        pepper_version: minted.pepperVersion,
+        name: input.name,
+        scopes_json: JSON.stringify([input.scope]),
+        read_only: input.readOnly ? 1 : 0,
+        user_id: null,
+        service_principal_id: input.servicePrincipalId,
+        customer_id: null,
+        project_id: input.projectId,
+        created_by_user_id: fence.userId,
+        expires_at: input.expiresAt,
+        project_mode: input.projectId === null ? 'all' : 'selected',
+        validation_kind: null,
+        validation_identity_id: null,
+        last_op_id: opId,
+        created_at: input.now,
+      }),
+    ),
+  ];
+}
+
 export interface TokenRepositoryOptions {
   /** Longest idle time of the issuing session, 60 to 86400 seconds; default one hour. */
   readonly idleSeconds?: number;
@@ -439,7 +629,7 @@ export function createTokenRepository(
   options: TokenRepositoryOptions = {},
 ): TokenRepository {
   const idleSeconds = requireIdleSeconds(options.idleSeconds ?? DEFAULT_IDLE_SECONDS);
-  return {
+  const repository = {
     async issuePersonal(ctx, fence, input, mint) {
       validateInput(input);
       const selection: Selection = {
@@ -468,6 +658,43 @@ export function createTokenRepository(
         if (outcome.reason === 'collision') continue;
         if (outcome.reason === 'conflict') return { status: 'refused', reason: 'id_conflict' };
         return { status: 'refused', reason: outcome.reason };
+      }
+      return { status: 'refused', reason: 'selector_collision' };
+    },
+
+    async issueService(ctx, fence, input, mint) {
+      validateServiceInput(input);
+      const issuance = serviceIssuance(ctx, fence, input, idleSeconds);
+      const unchanged = principalUnchanged(ctx, input);
+      const guard = servicePrincipalAuthorityGuard(ctx, fence, {
+        permission: input.authority.permission,
+        projectId: input.projectId,
+        organizationAdmin: input.authority.organizationAdmin,
+        covers: input.authority.covers,
+        providerAnchors: input.providerAnchors,
+      });
+      for (let attempt = 1; attempt <= MAX_SELECTOR_ATTEMPTS; attempt += 1) {
+        const minted = await mint();
+        validateMinted(minted, SERVICE_PLAINTEXT, SERVICE_PLAINTEXT_PREFIX);
+        const outcome = await runOrgFenced(
+          executor,
+          ctx,
+          fence,
+          guard,
+          serviceStatements(ctx, fence, input, [issuance, unchanged], minted, newOpId()),
+          probes(input.id, minted.selector),
+        );
+        if (outcome.ok) {
+          return { status: 'issued', id: input.id, plaintext: minted.plaintext };
+        }
+        if (outcome.reason === 'indeterminate') return { status: 'indeterminate' };
+        if ((await headGuardLost(executor, guard)) || (await anyLost(executor, [issuance]))) {
+          return { status: 'refused', reason: 'authority' };
+        }
+        if (await anyLost(executor, [unchanged])) return { status: 'refused', reason: 'conflict' };
+        if (outcome.reason === 'collision') continue;
+        if (outcome.reason === 'conflict') return { status: 'refused', reason: 'id_conflict' };
+        return { status: 'refused', reason: 'unclassified' };
       }
       return { status: 'refused', reason: 'selector_collision' };
     },
@@ -516,5 +743,6 @@ export function createTokenRepository(
       if (state.revoked_at !== null) return { status: 'already_revoked' };
       return { status: 'refused', reason: outcome.reason };
     },
-  };
+  } satisfies TokenRepository & ServiceTokenStore;
+  return repository;
 }

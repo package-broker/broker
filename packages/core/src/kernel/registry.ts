@@ -4,13 +4,17 @@ import {
   type HookMap,
   type PluginDefinition,
   type PortName,
+  type SourceProviderFactory,
   type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
+import type { SourceProvider } from '../sources/provider.js';
 import { JobError, defineJob, qualifyJobName, type JobDefinition } from '../platform/jobs.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityResolver } from './routes.js';
 import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
+
+const SOURCE_PROVIDERS_API_VERSION = 3;
 
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
 
@@ -31,6 +35,7 @@ export interface Registration {
   readonly jobs: readonly RegisteredJob[];
   readonly bindings: ReadonlyMap<PortName, string>;
   readonly identityFactory: IdentityProviderFactory | null;
+  readonly sourceProviders: ReadonlyMap<string, SourceProvider>;
 }
 
 export interface RegistrationOptions {
@@ -57,6 +62,7 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'capabilities',
   'binds',
   'identityProviders',
+  'sourceProviders',
   'migrations',
   'register',
   'init',
@@ -128,6 +134,8 @@ export function collectRegistrations(
   const jobNames = new Set<string>();
   const bindings = new Map<PortName, string>();
   let identityFactory: IdentityProviderFactory | null = null;
+  const sourceProviders = new Map<string, SourceProvider>();
+  const sourceProviderOwners = new Map<string, string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 
   for (const core of jobs) {
@@ -170,17 +178,36 @@ export function collectRegistrations(
 
     const bindsIdentity = binds.includes('identity');
     const factory: unknown = plugin.identityProviders;
-    if (factory !== undefined && typeof factory !== 'function') {
-      problems.push(`plugin "${id}" identityProviders must be a function`);
-    }
-    if (bindsIdentity && factory === undefined) {
-      problems.push(`plugin "${id}" binds identity but has no identityProviders`);
-    }
-    if (!bindsIdentity && factory !== undefined) {
-      problems.push(`plugin "${id}" has identityProviders but does not bind identity`);
-    }
+    problems.push(...providerFactoryProblems(id, 'identity', 'identityProviders', factory, binds));
     if (bindsIdentity && typeof factory === 'function' && bindings.get('identity') === id) {
       identityFactory = factory as IdentityProviderFactory;
+    }
+
+    const sourceFactory: unknown = plugin.sourceProviders;
+    problems.push(
+      ...providerFactoryProblems(id, 'source', 'sourceProviders', sourceFactory, binds),
+    );
+    if (sourceFactory !== undefined && plugin.apiVersion < SOURCE_PROVIDERS_API_VERSION) {
+      problems.push(
+        `plugin "${id}" declares sourceProviders and requires apiVersion ${SOURCE_PROVIDERS_API_VERSION}`,
+      );
+    }
+    if (binds.includes('source') && typeof sourceFactory === 'function') {
+      for (const provider of invokeSourceFactory(
+        id,
+        sourceFactory as SourceProviderFactory,
+        problems,
+      )) {
+        const holder = sourceProviderOwners.get(provider.id);
+        if (holder !== undefined) {
+          problems.push(
+            `source provider "${provider.id}" is supplied by plugins "${holder}" and "${id}"`,
+          );
+        } else {
+          sourceProviderOwners.set(provider.id, id);
+          sourceProviders.set(provider.id, provider);
+        }
+      }
     }
 
     if (plugin.register === undefined) {
@@ -286,5 +313,60 @@ export function collectRegistrations(
     jobs: Object.freeze(jobs),
     bindings,
     identityFactory,
+    sourceProviders,
   };
+}
+
+function providerFactoryProblems(
+  id: string,
+  port: PortName,
+  key: string,
+  factory: unknown,
+  binds: readonly string[],
+): string[] {
+  const bound = binds.includes(port);
+  const problems: string[] = [];
+  if (factory !== undefined && typeof factory !== 'function') {
+    problems.push(`plugin "${id}" ${key} must be a function`);
+  }
+  if (bound && factory === undefined) {
+    problems.push(`plugin "${id}" binds ${port} but has no ${key}`);
+  }
+  if (!bound && factory !== undefined) {
+    problems.push(`plugin "${id}" has ${key} but does not bind ${port}`);
+  }
+  return problems;
+}
+
+function invokeSourceFactory(
+  id: string,
+  factory: SourceProviderFactory,
+  problems: string[],
+): readonly SourceProvider[] {
+  let returned: unknown;
+  try {
+    returned = factory();
+  } catch (error) {
+    problems.push(`plugin "${id}" sourceProviders threw ${reportableErrorName(error)}`);
+    return [];
+  }
+  if (isThenable(returned)) {
+    problems.push(`plugin "${id}" sourceProviders must be synchronous`);
+    returned.then(undefined, () => undefined);
+    return [];
+  }
+  if (!Array.isArray(returned)) {
+    problems.push(`plugin "${id}" sourceProviders must return an array`);
+    return [];
+  }
+  const valid: SourceProvider[] = [];
+  for (const provider of returned as unknown[]) {
+    const providerId = (provider as { id?: unknown } | null)?.id;
+    if (typeof providerId !== 'string' || providerId === '') {
+      problems.push(`plugin "${id}" sourceProviders returned a provider without an id`);
+    } else {
+      valid.push(provider as SourceProvider);
+    }
+  }
+  return valid;
 }

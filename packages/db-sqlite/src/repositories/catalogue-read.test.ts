@@ -69,7 +69,10 @@ describe('resolveVersions against the oracle', () => {
     let winners = 0;
     let multiPage = 0;
     for (let seed = 1; seed <= 200; seed += 1) {
-      const config = randomCatalogueConfig(seed, 6, { longVersionLists: seed % 20 === 0 });
+      const config = randomCatalogueConfig(seed, 6, {
+        longVersionLists: seed % 20 === 0,
+        forged: seed % 2 === 1,
+      });
       const database = await openMigratedDatabase();
       try {
         await seedCatalogue(database.executor, config, { maxStatements: Infinity });

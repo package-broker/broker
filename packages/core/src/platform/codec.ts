@@ -41,27 +41,35 @@ export type CodecOperation = 'inflate' | 'gunzip';
 export class CodecLimitError extends Error {
   override readonly name = 'CodecLimitError';
 
-  constructor(
-    readonly operation: CodecOperation,
-    readonly maxOutput: number,
-  ) {
+  readonly operation: CodecOperation;
+  readonly maxOutput: number;
+
+  constructor(operation: CodecOperation, maxOutput: number) {
     super(`${operation} output exceeds ${maxOutput} bytes`);
+    this.operation = operation;
+    this.maxOutput = maxOutput;
   }
 }
 
 export class CodecTruncatedError extends Error {
   override readonly name = 'CodecTruncatedError';
 
-  constructor(readonly operation: CodecOperation) {
+  readonly operation: CodecOperation;
+
+  constructor(operation: CodecOperation) {
     super(`${operation} input ended before the stream did`);
+    this.operation = operation;
   }
 }
 
 export class CodecCorruptError extends Error {
   override readonly name = 'CodecCorruptError';
 
-  constructor(readonly operation: CodecOperation) {
+  readonly operation: CodecOperation;
+
+  constructor(operation: CodecOperation) {
     super(`${operation} input is corrupt`);
+    this.operation = operation;
   }
 }
 

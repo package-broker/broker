@@ -16,7 +16,8 @@ import type {
 import type { ProtectedHolderInput } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createIdentityBlockRepository, type IdentityBlockKey } from './identity-block.js';
-import { createLoginWriter, type LoginPlanWithAutoJoin } from './login.js';
+import type { LoginPlan } from '@package-broker/core/db/users';
+import { createLoginWriter } from './login.js';
 
 const OIDC = 'oidc';
 const ANCHOR = 'oidc:https://idp.example.test';
@@ -419,7 +420,7 @@ describe('unblock', () => {
   });
 });
 
-function loginPlan(overrides: Partial<LoginPlanWithAutoJoin> = {}): LoginPlanWithAutoJoin {
+function loginPlan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   const userId = overrides.userId ?? RETURNING_USER;
   const identityId = overrides.identityId ?? RETURNING_IDENTITY;
   return {

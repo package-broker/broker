@@ -27,6 +27,7 @@ function recordingRegistry(): {
   return {
     registry: {
       route: (route) => routes.push(route),
+      job: () => undefined,
       hook: (name, handler) => hooks.push({ name, handler: handler as HookMap['access.check'] }),
     },
     routes,

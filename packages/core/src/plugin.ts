@@ -2,6 +2,7 @@ import type { OrganizationRepository } from './db/organization.js';
 import type { OrgContext } from './db/port.js';
 import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.js';
 import type { Clock } from './ids.js';
+import type { JobDefinition } from './platform/jobs.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
@@ -38,7 +39,7 @@ export interface PluginDefinition extends PluginApi {
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
   readonly migrations?: { readonly dir: string };
-  /** Synchronous and pure: declares routes and hooks. Runs in pb build and at kernel boot. */
+  /** Synchronous and pure: declares routes, hooks and jobs. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;
   /** Runs once per kernel after every plugin registered. Receives ports, never adapters. */
   readonly init?: (ports: PluginPorts) => void | Promise<void>;
@@ -47,6 +48,7 @@ export interface PluginDefinition extends PluginApi {
 export interface PluginRegistry {
   route(route: RouteDefinition): void;
   hook<K extends keyof HookMap>(name: K, handler: HookMap[K]): void;
+  job(definition: JobDefinition): void;
 }
 
 export type RouteBoundary = 'none' | 'organization' | 'project' | 'self' | 'package';

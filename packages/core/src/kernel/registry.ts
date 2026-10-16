@@ -7,11 +7,18 @@ import {
   type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
+import { JobError, defineJob, qualifyJobName, type JobDefinition } from '../platform/jobs.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityResolver } from './routes.js';
 import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
 
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
+
+export interface RegisteredJob {
+  readonly plugin: string;
+  readonly qualifiedName: string;
+  readonly definition: JobDefinition;
+}
 
 export interface Registration {
   readonly routes: readonly RegisteredRoute[];
@@ -21,12 +28,14 @@ export interface Registration {
       readonly handler: HookMap[K];
     }>;
   };
+  readonly jobs: readonly RegisteredJob[];
   readonly bindings: ReadonlyMap<PortName, string>;
   readonly identityFactory: IdentityProviderFactory | null;
 }
 
 export interface RegistrationOptions {
   readonly packageResolver?: PackageVisibilityResolver;
+  readonly coreJobs?: readonly RegisteredJob[];
 }
 
 export class KernelConfigError extends Error {
@@ -85,6 +94,17 @@ function quoted(value: unknown): string {
   }
 }
 
+function jobProblemCode(error: unknown): string {
+  return error instanceof JobError ? error.code : reportableErrorName(error);
+}
+
+/** Kernel-internal: `core` is rejected as a plugin id, so core job types are qualified here. */
+export function registerCoreJob(definition: JobDefinition): RegisteredJob {
+  const frozen = defineJob(definition);
+  const qualifiedName = `core:${frozen.name}:v${frozen.version}`;
+  return Object.freeze({ plugin: 'core', qualifiedName, definition: frozen });
+}
+
 function isThenable(value: unknown): value is PromiseLike<unknown> {
   return (
     (typeof value === 'object' || typeof value === 'function') &&
@@ -104,9 +124,18 @@ export function collectRegistrations(
     'auth.resolveIdentity': [],
     'auth.mapGroups': [],
   };
+  const jobs: RegisteredJob[] = [...(options.coreJobs ?? [])];
+  const jobNames = new Set<string>();
   const bindings = new Map<PortName, string>();
   let identityFactory: IdentityProviderFactory | null = null;
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
+
+  for (const core of jobs) {
+    if (jobNames.has(core.qualifiedName)) {
+      problems.push(`job "${core.qualifiedName}" is registered more than once`);
+    }
+    jobNames.add(core.qualifiedName);
+  }
 
   for (const plugin of plugins) {
     const id = plugin.id;
@@ -183,6 +212,21 @@ export function collectRegistrations(
             });
           }
         },
+        job: (definition) => {
+          assertOpen();
+          try {
+            const frozen = defineJob(definition);
+            const qualifiedName = qualifyJobName(id, frozen.name, frozen.version);
+            if (jobNames.has(qualifiedName)) {
+              problems.push(`job "${qualifiedName}" is registered more than once`);
+            } else {
+              jobNames.add(qualifiedName);
+              jobs.push(Object.freeze({ plugin: id, qualifiedName, definition: frozen }));
+            }
+          } catch (error) {
+            problems.push(`plugin "${id}" job is invalid: ${jobProblemCode(error)}`);
+          }
+        },
       });
       if (isThenable(returned)) {
         problems.push(`plugin "${id}" register must be synchronous`);
@@ -236,5 +280,11 @@ export function collectRegistrations(
   for (const list of Object.values(hooks)) {
     Object.freeze(list);
   }
-  return { routes, hooks: Object.freeze(hooks), bindings, identityFactory };
+  return {
+    routes,
+    hooks: Object.freeze(hooks),
+    jobs: Object.freeze(jobs),
+    bindings,
+    identityFactory,
+  };
 }

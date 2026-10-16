@@ -24,6 +24,7 @@ const projectActor: ProjectActor = {
 };
 
 const actor: ActorContext = {
+  kind: 'organization',
   userId: 'actor-1',
   permissions: new Set(['org:projects:create', 'org:projects:archive']),
   isOrganizationAdmin: false,
@@ -97,7 +98,12 @@ describe('createProject', () => {
 
   it('does not treat organization admin as a wildcard', async () => {
     const { service, store } = setup();
-    const admin = { userId: 'actor-1', permissions: new Set<string>(), isOrganizationAdmin: true };
+    const admin = {
+      kind: 'organization' as const,
+      userId: 'actor-1',
+      permissions: new Set<string>(),
+      isOrganizationAdmin: true,
+    };
     expect(await service.createProject(ctx, admin, fenceOf(), input)).toMatchObject({
       error: 'forbidden',
     });

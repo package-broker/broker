@@ -38,6 +38,7 @@ export type Permission = string;
 
 /** `permissions` holds the actor's organization-scope grants only; project-scoped grants never go in. */
 export interface ActorContext {
+  readonly kind: 'organization';
   readonly userId: string;
   readonly permissions: ReadonlySet<Permission>;
   /** True when the actor holds a protects-last-holder role through an e-mail or a group grant; computed by the caller. */
@@ -179,6 +180,7 @@ interface Actor {
 
 function normalizeActor(raw: unknown): Actor | null {
   if (!isObject(raw)) return null;
+  if (raw['kind'] !== 'organization') return null;
   const { userId, permissions, isOrganizationAdmin } = raw;
   if (!isId(userId) || !(permissions instanceof Set)) return null;
   return {

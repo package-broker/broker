@@ -540,7 +540,7 @@ const upgrade: Case = async (open) => {
         executor,
         "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
       ),
-    ).toBe(43);
+    ).toBe(47);
     expect(
       await rowsOf(
         executor,
@@ -1492,7 +1492,7 @@ export const authContractCases = {
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
     it(
-      '1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 43 tables',
+      '1. upgrade: 0001 with populated rows then every later migration keep the rows, add no authority and give 47 tables',
       () => authContractCases.upgrade(open),
       30_000,
     );

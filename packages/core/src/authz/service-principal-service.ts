@@ -214,6 +214,16 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
     return fail('forbidden');
   }
 
+  function untagged(
+    ctx: OrgContext,
+    actor: ActorContext,
+    action: string,
+  ): ServicePrincipalResult<never> | null {
+    if ((actor as { kind?: unknown } | null)?.kind === 'organization') return null;
+    emit({ event: 'admin.denied', action, orgId: ctx.orgId, actorUserId: null });
+    return fail('forbidden');
+  }
+
   function requireFence(actor: ActorContext, fence: MutationFence | undefined): MutationFence {
     if (typeof fence !== 'object' || fence === null || fence.userId !== actor.userId) {
       throw new TypeError('the mutation fence must belong to the acting user');
@@ -294,6 +304,8 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
     id: string,
     action: 'suspended' | 'restored',
   ): Promise<ServicePrincipalResult<null>> {
+    const refused = untagged(ctx, actor, action);
+    if (refused !== null) return refused;
     const held = requireFence(actor, fence);
     const target = typeof id === 'string' && id !== '' ? await principals.get(ctx, id) : null;
     if (target === null) return missing(ctx, actor, held, action);
@@ -326,6 +338,8 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
 
   return {
     async create(ctx, actor, fence, input) {
+      const refused = untagged(ctx, actor, 'created');
+      if (refused !== null) return refused;
       const held = requireFence(actor, fence);
       if (!isValidName(input.name)) return fail('invalid_name');
       const { projectId } = input;
@@ -356,6 +370,8 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
     },
 
     async setPermissions(ctx, actor, fence, id, permissions) {
+      const refused = untagged(ctx, actor, 'permissions_changed');
+      if (refused !== null) return refused;
       const held = requireFence(actor, fence);
       const target = typeof id === 'string' && id !== '' ? await principals.get(ctx, id) : null;
       if (target === null) return missing(ctx, actor, held, 'permissions_changed');

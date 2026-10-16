@@ -54,7 +54,14 @@ const RULES: Readonly<Record<string, Rule>> = {
     testsAndScripts: ['miniflare', 'node', 'vitest'],
   },
   'runtime-node': {
-    allow: [...ws('core', 'db-sqlite'), 'better-sqlite3', '@hono/node-server', 'hono', 'node'],
+    allow: [
+      ...ws('core', 'db-sqlite'),
+      'aws4fetch',
+      'better-sqlite3',
+      '@hono/node-server',
+      'hono',
+      'node',
+    ],
     testOnly: ['vitest'],
   },
   cli: { allow: [ANY_WORKSPACE, 'esbuild', 'node', 'typescript'], testOnly: ['vitest'] },

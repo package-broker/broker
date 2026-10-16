@@ -77,6 +77,7 @@ interface Fixture {
   readonly lifecycle: BlobLifecycle;
   readonly objects: Map<string, { bytes: Uint8Array; mediaType: string }>;
   readonly publishCalls: unknown[];
+  rowRefetchable(key: Sha256): boolean | undefined;
   readonly getRanges: (ByteRange | undefined)[];
   fail: { put?: Error; get?: Error; head?: Error; publish?: Error };
   now: number;
@@ -118,6 +119,7 @@ function fixture(): Fixture {
   const f: Fixture = {
     objects,
     publishCalls,
+    rowRefetchable: (key) => rows.get(rk(ctx, key))?.refetchable,
     getRanges,
     fail: {},
     now: 1_000,
@@ -179,6 +181,14 @@ function fixture(): Fixture {
         };
         rows.set(k, row);
         return info(row);
+      },
+      async narrowRefetchable(c, args) {
+        const k = rk(c, args.key);
+        const r = rows.get(k);
+        if (!r || r.deletedAt !== null || leased(k) || r.purgeAfter !== null) return null;
+        if (r.size !== args.size || r.mediaType !== args.mediaType) return null;
+        rows.set(k, { ...r, refetchable: false });
+        return info(r);
       },
       async inspect(c, key) {
         const k = rk(c, key);
@@ -906,6 +916,235 @@ describe('publish and purge race', () => {
     await f.metadata.reserve(ctx, key);
     expect(await f.metadata.find(ctx, key)).toBeNull();
     expect(await createBlobStore(f.byteStore, f.metadata, opts()).head(ctx, key)).toBeNull();
+  });
+});
+
+describe('concurrent same-digest puts', () => {
+  const delayed = (f: Fixture, calls?: { n: number }): ByteStore => ({
+    ...f.byteStore,
+    async putVerified(k, b, i) {
+      if (calls) calls.n += 1;
+      await new Promise((r) => setTimeout(r, Math.random() * 5));
+      return f.byteStore.putVerified(k, b, i);
+    },
+  });
+  const bytes = enc.encode('concurrent');
+  const key = sha(bytes);
+  const put = (s: BlobStore) => s.put(ctx, key, streamOf([bytes]), { size: 10, ...input });
+
+  it('succeed with identical info across independent stores', async () => {
+    for (let round = 0; round < 50; round += 1) {
+      const f = fixture();
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => put(createBlobStore(delayed(f), f.metadata, opts()))),
+      );
+      for (const r of results) expect(r).toEqual(results[0]);
+      expect(results[0]).toEqual({
+        sha256: key,
+        size: 10,
+        mediaType: 'application/zip',
+        purgeAfter: null,
+      });
+      expect(f.objects.size).toBe(1);
+    }
+  });
+
+  it('stale publishes resolve to the row a concurrent writer published', async () => {
+    const f = fixture();
+    let entered = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((r) => (release = r));
+    const barred: ByteStore = {
+      ...f.byteStore,
+      async putVerified(k, b, i) {
+        entered += 1;
+        if (entered === 8) release();
+        await barrier;
+        return f.byteStore.putVerified(k, b, i);
+      },
+      async head(k) {
+        await new Promise((r) => setTimeout(r, 1));
+        return f.byteStore.head(k);
+      },
+    };
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => put(createBlobStore(barred, f.metadata, opts()))),
+    );
+    for (const r of results) expect(r).toEqual(results[0]);
+  });
+
+  it('an overflowing stream never reaches a byte store that commits at exactly size bytes', async () => {
+    const f = fixture();
+    const first = enc.encode('0123456789');
+    const key = sha(first);
+    const committing: ByteStore = {
+      ...f.byteStore,
+      async putVerified(k, b, i) {
+        const reader = b.getReader();
+        let got = 0;
+        while (got < i.size) {
+          const r = await reader.read();
+          if (r.done) throw new Error('short');
+          got += r.value.length;
+        }
+        f.objects.set(k, { bytes: first, mediaType: i.mediaType });
+        const tail = await reader.read();
+        if (!tail.done) throw new Error('overflow');
+        return { size: got, mediaType: i.mediaType };
+      },
+    };
+    const store = createBlobStore(committing, f.metadata, opts());
+    const body = streamOf([first, enc.encode('abcdefghij'), enc.encode('abcdefghijklmnop')]);
+    await expect(store.put(ctx, key, body, { size: 10, ...input })).rejects.toThrow(
+      BlobSizeMismatchError,
+    );
+    expect(f.objects.size).toBe(0);
+    expect(f.publishCalls).toHaveLength(0);
+  });
+
+  it('bad bodies racing a valid upload reject and leave exactly one object', async () => {
+    for (const bad of [
+      [enc.encode('corruptXXX')],
+      [enc.encode('short')],
+      [bytes, enc.encode('overflow')],
+    ]) {
+      const f = fixture();
+      const store = createBlobStore(delayed(f), f.metadata, opts());
+      const [good, wrong] = await Promise.allSettled([
+        put(store),
+        store.put(ctx, key, streamOf(bad), { size: 10, ...input }),
+      ]);
+      expect(good.status).toBe('fulfilled');
+      expect(wrong.status).toBe('rejected');
+      expect(f.objects.size).toBe(1);
+      expect([...f.objects.values()][0]?.bytes).toEqual(bytes);
+    }
+  });
+
+  const barred = (f: Fixture): ByteStore => {
+    let entered = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((r) => (release = r));
+    return {
+      ...f.byteStore,
+      async putVerified(k, b, i) {
+        entered += 1;
+        if (entered === 8) release();
+        await barrier;
+        return f.byteStore.putVerified(k, b, i);
+      },
+      async head(k) {
+        await new Promise((r) => setTimeout(r, 1));
+        return f.byteStore.head(k);
+      },
+    };
+  };
+  const race = (f: Fixture, refetchable: boolean, refuseFirst = 0) => {
+    const store = barred(f);
+    let refused = 0;
+    const metadata: BlobMetadataPort = {
+      ...f.metadata,
+      async publish(c, i) {
+        if (refused < refuseFirst) {
+          refused += 1;
+          return null;
+        }
+        return f.metadata.publish(c, i);
+      },
+    };
+    return Promise.all(
+      Array.from({ length: 8 }, () =>
+        createBlobStore(store, metadata, opts()).put(ctx, key, streamOf([bytes]), {
+          size: 10,
+          ...input,
+          refetchable,
+        }),
+      ),
+    );
+  };
+
+  it('barrier puts revive a row with a scheduled purge and clear it', async () => {
+    const f = fixture();
+    await put(createBlobStore(f.byteStore, f.metadata, opts()));
+    await f.lifecycle.softDelete(ctx, key, { removedAt: '2026-10-16T10:00:00.000Z' });
+    const results = await race(f, true);
+    for (const r of results) expect(r.purgeAfter).toBeNull();
+    expect((await f.metadata.find(ctx, key))?.purgeAfter).toBeNull();
+  });
+
+  it('a stale publish never shortcuts to a row whose purge is still scheduled', async () => {
+    const f = fixture();
+    await put(createBlobStore(f.byteStore, f.metadata, opts()));
+    await f.lifecycle.softDelete(ctx, key, { removedAt: '2026-10-16T10:00:00.000Z' });
+    expect((await f.metadata.find(ctx, key))?.purgeAfter).not.toBeNull();
+    let refused = false;
+    const metadata: BlobMetadataPort = {
+      ...f.metadata,
+      async publish(c, i) {
+        if (!refused) {
+          refused = true;
+          return null;
+        }
+        return f.metadata.publish(c, i);
+      },
+    };
+    const info = await put(createBlobStore(f.byteStore, metadata, opts()));
+    expect(info.purgeAfter).toBeNull();
+    expect((await f.metadata.find(ctx, key))?.purgeAfter).toBeNull();
+  });
+
+  it('barrier puts with refetchable false narrow an existing refetchable row', async () => {
+    const f = fixture();
+    await put(createBlobStore(f.byteStore, f.metadata, opts()));
+    expect(f.rowRefetchable(key)).toBe(true);
+    const results = await race(f, false, 8);
+    for (const r of results) expect(r).toEqual(results[0]);
+    expect(f.rowRefetchable(key)).toBe(false);
+  });
+
+  it('barrier puts on a fresh digest succeed for both refetchable values', async () => {
+    for (const refetchable of [true, false]) {
+      const f = fixture();
+      const results = await race(f, refetchable);
+      for (const r of results) expect(r).toEqual(results[0]);
+      expect(f.rowRefetchable(key)).toBe(refetchable);
+    }
+  });
+
+  it('a shortcut row whose bytes vanished falls back to the vanished-bytes error', async () => {
+    const f = fixture();
+    const store: ByteStore = {
+      ...f.byteStore,
+      async putVerified(k, b, i) {
+        const r = await f.byteStore.putVerified(k, b, i);
+        await f.metadata.publish(ctx, {
+          sha256: key,
+          size: 10,
+          ...input,
+          generation: await f.metadata.reserve(ctx, key),
+        });
+        await f.byteStore.remove(k);
+        return r;
+      },
+    };
+    const error = await put(createBlobStore(store, f.metadata, opts())).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BlobBytesVanishedError);
+  });
+
+  it('still refuses while a purge lease is live', async () => {
+    const f = fixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    await put(store);
+    await f.lifecycle.softDelete(ctx, key, { removedAt: '2026-10-16T10:00:00.000Z' });
+    await f.lifecycle.claimPurge(ctx, key);
+    const results = await Promise.allSettled([
+      put(store),
+      put(createBlobStore(delayed(f), f.metadata, opts())),
+    ]);
+    for (const r of results) {
+      expect(r.status).toBe('rejected');
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(BlobBusyError);
+    }
   });
 });
 

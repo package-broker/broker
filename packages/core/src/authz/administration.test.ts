@@ -19,11 +19,13 @@ const ULIDS = Array.from({ length: 50 }, (_, index) => `ID${String(index).padSta
 
 const ALL = PERMISSIONS.map(({ name }) => name);
 const administrator: ActorContext = {
+  kind: 'organization',
   userId: 'admin-1',
   permissions: new Set(ALL),
   isOrganizationAdmin: true,
 };
 const actorWith = (...permissions: string[]): ActorContext => ({
+  kind: 'organization',
   userId: 'actor-1',
   permissions: new Set(permissions),
   isOrganizationAdmin: false,
@@ -1197,6 +1199,7 @@ describe('grant changes and user status', () => {
 
 describe('1b: a non-admin holding every permission still cannot touch a protected role', () => {
   const powerful: ActorContext = {
+    kind: 'organization',
     userId: 'actor-2',
     permissions: new Set(ALL),
     isOrganizationAdmin: false,
@@ -1359,6 +1362,7 @@ describe('the actor is validated and the admin flag must be exactly true', () =>
   it('a string flag does not make an actor an administrator', async () => {
     for (const flag of ['false', 'true', 1, 'yes', {}]) {
       const actor = {
+        kind: 'organization',
         userId: 'actor-3',
         permissions: new Set(ALL),
         isOrganizationAdmin: flag,
@@ -1385,11 +1389,22 @@ describe('the actor is validated and the admin flag must be exactly true', () =>
     ['a string', 'admin'],
     [
       'permissions as an array',
-      { userId: 'a', permissions: ['org:roles:write'], isOrganizationAdmin: true },
+      {
+        kind: 'organization',
+        userId: 'a',
+        permissions: ['org:roles:write'],
+        isOrganizationAdmin: true,
+      },
     ],
-    ['permissions missing', { userId: 'a', isOrganizationAdmin: true }],
-    ['an empty user id', { userId: '', permissions: new Set(ALL), isOrganizationAdmin: true }],
-    ['a numeric user id', { userId: 7, permissions: new Set(ALL), isOrganizationAdmin: true }],
+    ['permissions missing', { kind: 'organization', userId: 'a', isOrganizationAdmin: true }],
+    [
+      'an empty user id',
+      { kind: 'organization', userId: '', permissions: new Set(ALL), isOrganizationAdmin: true },
+    ],
+    [
+      'a numeric user id',
+      { kind: 'organization', userId: 7, permissions: new Set(ALL), isOrganizationAdmin: true },
+    ],
   ])('%s is forbidden everywhere and nothing is written', async (_name, actor) => {
     const { admin, grants, roles, log } = setup();
     const bad = actor as unknown as ActorContext;
@@ -1421,6 +1436,7 @@ describe('admin.denied for an invalid actor', () => {
   it('never logs a caller-supplied user id when the actor does not validate', async () => {
     const { admin, log } = setup();
     const bad = {
+      kind: 'organization',
       userId: 'someone@example.com',
       permissions: ['org:roles:write'],
       isOrganizationAdmin: true,

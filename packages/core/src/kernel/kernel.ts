@@ -9,18 +9,42 @@ import type {
   RequestContext,
   RouteDefinition,
 } from '../plugin.js';
+import type { LogRecord, ObsRecordSink, ObsRegistry } from '../platform/observability.js';
+import { safeRecord } from '../platform/observability.js';
 import type { HookErrorHandler } from './access.js';
-import { authorizeRoute, denyAllEngine } from './authorize.js';
-import type { AuthorizationEngine, DenyLogger } from './authorize.js';
+import { authorizeRoute, denyAllEngine, ENGINE_PLUGIN, INPUT_PLUGIN } from './authorize.js';
+import type { AuthorizationDecision, AuthorizationEngine, DenyLogger } from './authorize.js';
 import { denialResponse } from './denial-page.js';
 import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
 import type { KernelLog } from './errors.js';
 import { reportableErrorName } from './error-name.js';
 import { liveResponse, readyResponse } from './health.js';
+import {
+  denyReason,
+  engineStatusReason,
+  envelopeReason,
+  hookErrorReason,
+  KERNEL_EVENTS,
+  KERNEL_REASON_CODES,
+} from './obs-codes.js';
+import {
+  createCompletionGuard,
+  createHttpMetrics,
+  createRequestScope,
+  logSink,
+} from './request-scope.js';
+import type { CompletionGuard, KernelObsContext, RequestScope } from './request-scope.js';
 import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './registry.js';
 import type { Registration } from './registry.js';
 import type { PackageVisibilityResolver } from './routes.js';
 import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
+
+export interface KernelObservability {
+  readonly sink: ObsRecordSink;
+  readonly deploymentId: string;
+  /** Honour an inbound W3C traceparent. Only behind a trusted proxy. Default false. */
+  readonly trustInboundTraceparent?: boolean;
+}
 
 export interface KernelOptions {
   readonly platform: Platform;
@@ -36,20 +60,27 @@ export interface KernelOptions {
   readonly packageResolver?: PackageVisibilityResolver;
   /** Default denyAllEngine. */
   readonly authorization?: AuthorizationEngine;
-  /** Default defaultLog. */
+  /** Default defaultLog. Ignored when `observability` is set. */
   readonly log?: KernelLog;
+  /** Default: records go to `log` through `logSink`, deployment id `unconfigured`. */
+  readonly observability?: KernelObservability;
 }
 
 export interface Kernel {
   fetch(request: Request): Promise<Response>;
   readonly registration: Registration;
   readonly coreRoutes: readonly RouteDefinition[];
+  /** Route templates usable as metric `route` labels and OTLP route attributes. */
+  readonly routeTemplates: ReadonlySet<string>;
 }
 
 type KernelEnv = {
   Bindings: {
     readonly requestId: string;
     readonly markLogged: () => void;
+    readonly scope: RequestScope;
+    readonly guard: CompletionGuard;
+    readonly log: KernelLog;
   };
 };
 type RegisteredRoute = Registration['routes'][number];
@@ -59,15 +90,78 @@ const CORE_PREFIX = '/_pb/';
 const RESERVED_ROOTS = ['/health', '/_pb'] as const;
 
 const REQUEST_ID_HEADER = 'x-request-id';
+const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
+const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
 
-function guardedLog(sink: KernelLog): KernelLog {
+function portAccepts(field: 'route' | 'deployment_id', value: string): boolean {
+  return safeRecord({ level: 'debug', event: 'probe', [field]: value })?.[field] === value;
+}
+
+function scopedLog(scope: RequestScope): KernelLog {
   return (entry) => {
-    try {
-      sink(entry);
-    } catch {
-      return;
-    }
+    scope.obs().log(entry as LogRecord);
   };
+}
+
+const silent: KernelLog = () => undefined;
+
+function hookPlugin(label: string): string {
+  return label.startsWith('core:') ? CORE_PLUGIN : label;
+}
+
+async function failureReason(response: Response): Promise<string> {
+  try {
+    const body = (await response.clone().json()) as { error?: { code?: unknown } };
+    return typeof body.error?.code === 'string' ? body.error.code : 'internal';
+  } catch {
+    return 'internal';
+  }
+}
+
+function frozenSet(values: Iterable<string>): ReadonlySet<string> {
+  const set = new Set(values);
+  for (const method of ['add', 'delete', 'clear'] as const) {
+    Object.defineProperty(set, method, {
+      value: () => {
+        throw new TypeError('Kernel route templates are frozen');
+      },
+    });
+  }
+  return Object.freeze(set);
+}
+
+type EngineCopy = { readonly [key: string]: unknown };
+
+function dataCopy(raw: unknown): EngineCopy | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  try {
+    if (Object.getPrototypeOf(raw) !== Object.prototype) return undefined;
+    const descriptors: Record<PropertyKey, PropertyDescriptor> =
+      Object.getOwnPropertyDescriptors(raw);
+    if (!Reflect.ownKeys(descriptors).every((key) => 'value' in descriptors[key]!)) {
+      return undefined;
+    }
+    return Object.defineProperties({}, descriptors) as EngineCopy;
+  } catch {
+    return undefined;
+  }
+}
+
+async function failed(
+  error: unknown,
+  requestId: string,
+  log: KernelLog,
+  guard: CompletionGuard,
+): Promise<Response> {
+  try {
+    const response = errorResponse(error, requestId, log);
+    guard.reason(envelopeReason(await failureReason(response)));
+    return response;
+  } catch {
+    log({ level: 'error', event: 'http.error', error_name: 'Error' });
+    guard.reason('error.internal');
+    return envelopeResponse(500, 'internal', 'Internal error', requestId);
+  }
 }
 
 function withRequestId(response: Response, requestId: string): Response {
@@ -151,7 +245,30 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   if (coreProblems.length > 0) throw new KernelConfigError(coreProblems);
   const { ports, resolveOrg, health } = options;
   const engine = options.authorization ?? denyAllEngine;
-  const log = guardedLog(options.log ?? defaultLog);
+  const deploymentId = options.observability?.deploymentId ?? UNCONFIGURED_DEPLOYMENT;
+  if (!portAccepts('deployment_id', deploymentId)) {
+    throw new KernelConfigError(['observability.deploymentId does not match the port pattern']);
+  }
+  const routeTemplates = frozenSet(
+    [
+      ...registration.routes.map((route) => route.path),
+      ...coreRoutes.map((route) => route.path),
+      ...HEALTH_ROUTES,
+    ].filter((path) => portAccepts('route', path)),
+  );
+  const registry: ObsRegistry = {
+    events: KERNEL_EVENTS,
+    reasonCodes: KERNEL_REASON_CODES,
+    routeTemplates,
+  };
+  const obsContext: KernelObsContext = {
+    sink: options.observability?.sink ?? logSink(options.log ?? defaultLog),
+    registry,
+    deploymentId,
+    runtime: options.platform,
+    trustInboundTraceparent: options.observability?.trustInboundTraceparent === true,
+  };
+  const httpMetrics = createHttpMetrics(obsContext);
   const accessChecks = registration.hooks['access.check'];
 
   for (const plugin of options.plugins) {
@@ -186,9 +303,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
 
   async function serve(route: RegisteredRoute, c: Context<KernelEnv>): Promise<Response> {
-    const requestId = c.env.requestId;
+    const { requestId, scope, guard } = c.env;
+    scope.set({ route: route.path });
     const permission = route.permission;
     if (route.boundary === 'self') {
+      guard.reason('authz.unauthenticated');
       return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
     }
     if (permission === null) {
@@ -197,20 +316,46 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
 
     const org = await resolveOrg();
+    let accepted: EngineCopy | undefined;
+    let engineOpen = true;
+    const observedEngine: AuthorizationEngine = {
+      async authorize(input) {
+        const raw: unknown = await engine.authorize(input);
+        const copy = engineOpen ? dataCopy(raw) : undefined;
+        if (copy === undefined) return raw as AuthorizationDecision;
+        accepted = copy;
+        return copy as unknown as AuthorizationDecision;
+      },
+    };
+    const afterEngineAllow = (): void => {
+      if (accepted?.['allow'] !== true) return;
+      const { projectId, tokenId } = accepted;
+      scope.set({
+        projectId: typeof projectId === 'string' ? projectId : null,
+        tokenId: typeof tokenId === 'string' ? tokenId : null,
+      });
+    };
     const onHookError: HookErrorHandler = (event) => {
-      log({
+      const reason = hookErrorReason(event.plugin, ENGINE_PLUGIN);
+      if (event.plugin === ENGINE_PLUGIN) engineOpen = false;
+      if (event.plugin !== ENGINE_PLUGIN && event.plugin !== INPUT_PLUGIN) afterEngineAllow();
+      guard.reason(reason);
+      scope.obs({ plugin: hookPlugin(event.plugin) }).log({
         level: 'warn',
-        requestId,
-        plugin: event.plugin,
-        error: reportableErrorName(event.error),
+        event: 'authz.error',
+        error_name: reportableErrorName(event.error),
+        reason_code: reason,
       });
     };
     const onDeny: DenyLogger = (entry) => {
-      const code =
-        entry.reason === 'hook_error' || entry.reason === 'invalid_hook_result'
-          ? entry.reason
-          : 'denied';
-      log({ level: 'warn', requestId, plugin: entry.plugin, code });
+      const reason = denyReason(entry.reason);
+      afterEngineAllow();
+      guard.reason(reason);
+      scope.obs({ plugin: hookPlugin(entry.plugin) }).log({
+        level: 'warn',
+        event: 'authz.denied',
+        reason_code: reason,
+      });
     };
     const decision = await authorizeRoute(
       {
@@ -225,33 +370,46 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         },
         params: Object.freeze({ ...c.req.param() }),
       },
-      engine,
+      observedEngine,
       accessChecks,
       onHookError,
       { onDeny },
     );
+    engineOpen = false;
     if (!decision.allow) {
+      guard.reason(engineStatusReason(decision.status));
       if (decision.status === 401) {
         return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
       }
       if (decision.status === 404) return routeNotFound(requestId);
       return denialResponse(c.req.raw, requestId);
     }
+    scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
     return invoke(route, c, org, decision.principal, decision.projectId);
   }
 
   const app = new Hono<KernelEnv>();
-  app.get('/health/live', (c) => liveResponse(c.env.requestId));
+  app.get('/health/live', (c) => {
+    c.env.scope.set({ route: '/health/live' });
+    return liveResponse(c.env.requestId);
+  });
   app.get('/health/ready', async (c) => {
-    const response = await readyResponse(health, resolveOrg, c.env.requestId, { log });
-    if (response.status >= 500) c.env.markLogged();
+    c.env.scope.set({ route: '/health/ready' });
+    const response = await readyResponse(health, resolveOrg, c.env.requestId, { log: c.env.log });
+    if (response.status >= 500) {
+      c.env.markLogged();
+      c.env.guard.reason('health.not_ready');
+    }
     return response;
   });
   for (const route of coreRoutes) {
     const registered: RegisteredRoute = { ...route, plugin: CORE_PLUGIN };
     app.on(route.method, route.path, (c) => serve(registered, c));
   }
-  const reservedNotFound = (c: Context<KernelEnv>): Response => routeNotFound(c.env.requestId);
+  const reservedNotFound = (c: Context<KernelEnv>): Response => {
+    c.env.guard.reason('route.not_found');
+    return routeNotFound(c.env.requestId);
+  };
   for (const root of RESERVED_ROOTS) {
     app.all(root, reservedNotFound);
     app.all(`${root}/*`, reservedNotFound);
@@ -259,39 +417,48 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   for (const route of registration.routes) {
     app.on(route.method, route.path, (c) => serve(route, c));
   }
-  app.notFound((c) => routeNotFound(c.env.requestId));
-  app.onError((error, c) => {
+  app.notFound(reservedNotFound);
+  app.onError(async (error, c) => {
+    const response = await failed(error, c.env.requestId, c.env.log, c.env.guard);
     c.env.markLogged();
-    return errorResponse(error, c.env.requestId, log);
+    return response;
   });
 
   async function fetch(request: Request): Promise<Response> {
-    const requestId = crypto.randomUUID();
+    const scope = createRequestScope(obsContext, request);
+    const guard = createCompletionGuard(scope, httpMetrics, request.signal);
+    const { requestId } = scope;
+    const isHead = request.method === 'HEAD';
+    const log = scopedLog(scope);
     let logged = false;
-    let response: Response;
+    let response: Response | undefined;
     try {
-      response = await app.fetch(request, {
-        requestId,
-        markLogged: () => {
-          logged = true;
-        },
-      });
-    } catch (error) {
-      logged = true;
-      response = errorResponse(error, requestId, log);
-    }
-    try {
-      if (request.method === 'HEAD') response = new Response(null, response);
-      response = withRequestId(response, requestId);
-      if (response.status >= 500 && !logged) {
-        log({ level: 'error', requestId, status: response.status });
+      try {
+        response = await app.fetch(request, {
+          requestId,
+          markLogged: () => {
+            logged = true;
+          },
+          scope,
+          guard,
+          log,
+        });
+      } catch (error) {
+        response = await failed(error, requestId, logged ? silent : log, guard);
+        logged = true;
+      }
+      try {
+        if (isHead) response = new Response(null, response);
+        response = withRequestId(response, requestId);
+      } catch (error) {
+        const failure = await failed(error, requestId, logged ? silent : log, guard);
+        response = isHead ? new Response(null, failure) : failure;
       }
       return response;
-    } catch (error) {
-      const failure = errorResponse(error, requestId, log);
-      return request.method === 'HEAD' ? new Response(null, failure) : failure;
+    } finally {
+      guard.complete(response?.status ?? 500);
     }
   }
 
-  return Object.freeze({ fetch, registration, coreRoutes });
+  return Object.freeze({ fetch, registration, coreRoutes, routeTemplates });
 }

@@ -8,8 +8,16 @@ import {
   type SqlBool,
 } from 'kysely';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
+import {
+  parseScopeLevel,
+  parseScopesJson,
+  tokenEffectivePermissions,
+  type ScopeLevel,
+  type TokenProjectMode,
+} from '@package-broker/core/authz/scope';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
+  adminEligibility,
   compile,
   db,
   EVIDENCE_FUTURE_SKEW_MS,
@@ -84,6 +92,47 @@ export interface SessionAccess {
   readonly protectedHolder: boolean;
 }
 
+export interface TokenLookupInput {
+  readonly selector: string;
+  readonly boundary: AccessBoundary;
+  readonly projectSlug: string | null;
+  readonly providerAnchors: readonly ProtectedHolderProvider[];
+}
+
+export interface TokenAccess {
+  readonly token: {
+    readonly id: string;
+    readonly kind: 'pat' | 'svc';
+    readonly name: string;
+    readonly userId: string | null;
+    readonly servicePrincipalId: string | null;
+    readonly boundProjectId: string | null;
+    readonly projectMode: TokenProjectMode | null;
+    readonly scope: { readonly level: ScopeLevel; readonly readOnly: boolean } | null;
+    readonly expiresAt: string | null;
+    readonly revokedAt: string | null;
+    readonly lastUsedAt: string | null;
+    readonly expired: boolean;
+    readonly revoked: boolean;
+  };
+  readonly principalStatus: string;
+  readonly validation: {
+    readonly kind: 'sso' | 'local' | null;
+    readonly identityId: string | null;
+    readonly fresh: boolean;
+  } | null;
+  readonly project: AccessProject | null;
+  readonly organizationPermissions: readonly string[];
+  readonly projectPermissions: readonly string[];
+  readonly protectedHolder: boolean;
+  /**
+   * Non-enumerable, so spreading, cloning (`{ ...access }`, `structuredClone`), logging or
+   * serializing the envelope never carries the hash. Read it from the original object before any
+   * copy; a copy has no verifier.
+   */
+  readonly verifier: { readonly secretHash: string; readonly pepperVersion: number };
+}
+
 export interface AccessRepository {
   /**
    * One `executor.all`. Null when the credential is unknown, revoked, expired, idle, in another
@@ -97,6 +146,15 @@ export interface AccessRepository {
    * time. True when a row changed. Call only after a route allow.
    */
   touchSession(ctx: OrgContext, sessionId: string): Promise<boolean>;
+  /**
+   * One `executor.all`. Null when the selector is unknown, not a personal or service token, or in
+   * another organization. Expired, revoked, suspended and stale tokens still return the envelope,
+   * with empty permission arrays. A project that is unknown, archived or not covered by the token
+   * returns `project: null` and empty arrays, identical for every cause. On an organization
+   * boundary only `organizationPermissions` is filled; on a project boundary only
+   * `projectPermissions`, holding the organization and project rows. Never writes.
+   */
+  lookupToken(ctx: OrgContext, input: TokenLookupInput): Promise<TokenAccess | null>;
 }
 
 export interface AccessRepositoryOptions {
@@ -593,6 +651,309 @@ function toAccess(row: LookupRow): SessionAccess {
   };
 }
 
+interface TokenRow {
+  readonly token_id: string;
+  readonly kind: 'pat' | 'svc';
+  readonly hash: string;
+  readonly pepper_version: number;
+  readonly token_name: string;
+  readonly scopes_json: string;
+  readonly read_only: number;
+  readonly user_id: string | null;
+  readonly service_principal_id: string | null;
+  readonly token_project_id: string | null;
+  readonly project_mode: string | null;
+  readonly validation_kind: string | null;
+  readonly validation_identity_id: string | null;
+  readonly validation_fresh: number;
+  readonly expires_at: string | null;
+  readonly revoked_at: string | null;
+  readonly last_used_at: string | null;
+  readonly expired: number;
+  readonly principal_status: string | null;
+  readonly binding_ok: number;
+  readonly principal_project_id: string | null;
+  readonly project_id: string | null;
+  readonly project_slug: string | null;
+  readonly project_name: string | null;
+  readonly project_status: string | null;
+  readonly project_token_max_scope: string | null;
+  readonly project_require_publish_approval: number | null;
+  readonly project_revision: number | null;
+  readonly access: string;
+  readonly service_permissions: string;
+}
+
+const SELECTOR = /^[a-z2-7]{12}$/;
+
+function requireSelector(value: string): string {
+  if (typeof value !== 'string' || !SELECTOR.test(value)) {
+    throw new TypeError('selector must be 12 characters from a-z and 2-7');
+  }
+  return value;
+}
+
+/** The single read behind `lookupToken`. */
+export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): Statement {
+  requireSelector(input.selector);
+  if (input.boundary !== 'organization' && input.boundary !== 'project') {
+    throw new TypeError('boundary must be organization or project');
+  }
+  if (input.projectSlug !== null && typeof input.projectSlug !== 'string') {
+    throw new TypeError('projectSlug must be a string or null');
+  }
+  requireProviders(input.providerAnchors);
+  const withProject = input.boundary === 'project' && input.projectSlug !== null;
+  const nowSeconds = sql`unixepoch('now', 'subsec')`;
+
+  const projectOperand: ProjectOperand = withProject
+    ? (looseEb.ref('p.id') as unknown as Expression<string | null>)
+    : null;
+  const userOperand = looseEb.ref('t.user_id') as unknown as Expression<string>;
+  const rows = permissionRows(ctx, userOperand, projectOperand, input.providerAnchors, {
+    localAdmin: sql<SqlBool>`t.validation_kind = 'local'`,
+  });
+  const access = loose
+    .selectFrom(rows.as('pr'))
+    .select(
+      sql<string>`json_object(
+      'organization', json_group_array(distinct pr.permission) filter (where pr.scope = 'organization'),
+      'project', json_group_array(distinct pr.permission) filter (where pr.scope = 'project'),
+      'holder', coalesce(max(pr.scope = 'organization' and pr.protects = 1), 0)
+    )`.as('access'),
+    )
+    .where(sql<SqlBool>`t.kind = 'pat'`);
+  const servicePermissions = loose
+    .selectFrom('service_principal_permission as spp')
+    .select(sql<string>`json_group_array(distinct spp.permission)`.as('permissions'))
+    .where('spp.org_id', '=', ctx.orgId)
+    .whereRef('spp.service_principal_id', '=', 't.service_principal_id');
+
+  const freshAlias = guardAliases(
+    ['user', 'grant', 'role', 'member', 'identity', 'binding', 'login', 'credential'],
+    ['t', 'u', 'sp', 'p'],
+  );
+  const holderAlias = { ...freshAlias, user: 'u' };
+  const ssoFresh =
+    input.providerAnchors.length === 0
+      ? sql<SqlBool>`0`
+      : sql<SqlBool>`exists ${verifiedIdentity(ctx, holderAlias, input.providerAnchors, undefined)
+          .whereRef(`${freshAlias.identity}.id`, '=', 't.validation_identity_id')
+          .where(freshEvidence(`${freshAlias.identity}.validated_at`))}`;
+  const localFresh = sql<SqlBool>`exists ${usableLocalLogin(ctx, holderAlias).where(
+    freshEvidence(`${freshAlias.login}.last_login_at`),
+  )} and ${adminEligibility(ctx, looseEb.ref('u.id') as unknown as Expression<string>)}`;
+  const validationFresh = sql<number>`case
+    when t.kind = 'pat' and t.validation_kind = 'sso' then ${ssoFresh}
+    when t.kind = 'pat' and t.validation_kind = 'local' and t.validation_identity_id is null then ${localFresh}
+    else 0 end`;
+
+  let query = loose
+    .selectFrom('token as t')
+    .leftJoin('user_account as u', (join) =>
+      join.onRef('u.id', '=', 't.user_id').onRef('u.org_id', '=', 't.org_id'),
+    )
+    .leftJoin('service_principal as sp', (join) =>
+      join.onRef('sp.id', '=', 't.service_principal_id').onRef('sp.org_id', '=', 't.org_id'),
+    );
+
+  const projectColumns = withProject
+    ? [
+        'p.id as project_id',
+        'p.slug as project_slug',
+        'p.name as project_name',
+        'p.status as project_status',
+        'p.token_max_scope as project_token_max_scope',
+        'p.require_publish_approval as project_require_publish_approval',
+        'p.revision as project_revision',
+      ]
+    : [
+        sql`null`.as('project_id'),
+        sql`null`.as('project_slug'),
+        sql`null`.as('project_name'),
+        sql`null`.as('project_status'),
+        sql`null`.as('project_token_max_scope'),
+        sql`null`.as('project_require_publish_approval'),
+        sql`null`.as('project_revision'),
+      ];
+  if (withProject) {
+    query = query.leftJoin('project as p', (join) =>
+      join
+        .onRef('p.org_id', '=', 't.org_id')
+        .on('p.slug', '=', input.projectSlug as string)
+        .on('p.status', '=', 'active')
+        .on(
+          sql<SqlBool>`(
+            (t.kind = 'pat' and t.project_id is null and t.project_mode = 'all')
+            or (t.kind = 'pat' and t.project_id is null and t.project_mode = 'selected' and exists (
+              select 1 from token_project tp
+              where tp.token_id = t.id and tp.org_id = t.org_id and tp.project_id = p.id
+            ))
+            or (t.kind = 'svc' and t.project_id is sp.project_id and (sp.project_id is null or sp.project_id = p.id))
+          )`,
+        ),
+    );
+  }
+
+  const select = query
+    .select([
+      't.id as token_id',
+      't.kind as kind',
+      't.hash as hash',
+      't.pepper_version as pepper_version',
+      't.name as token_name',
+      't.scopes_json as scopes_json',
+      't.read_only as read_only',
+      't.user_id as user_id',
+      't.service_principal_id as service_principal_id',
+      't.project_id as token_project_id',
+      't.project_mode as project_mode',
+      't.validation_kind as validation_kind',
+      't.validation_identity_id as validation_identity_id',
+      validationFresh.as('validation_fresh'),
+      't.expires_at as expires_at',
+      't.revoked_at as revoked_at',
+      't.last_used_at as last_used_at',
+      sql<number>`case when unixepoch(t.expires_at, 'subsec') > ${nowSeconds} then 0 else 1 end`.as(
+        'expired',
+      ),
+      sql<string | null>`case t.kind when 'pat' then u.status else sp.status end`.as(
+        'principal_status',
+      ),
+      sql<number>`case t.kind when 'svc' then (t.project_id is sp.project_id) else (t.project_id is null) end`.as(
+        'binding_ok',
+      ),
+      'sp.project_id as principal_project_id',
+      ...projectColumns,
+      access.as('access'),
+      servicePermissions.as('service_permissions'),
+    ])
+    .where('t.selector', '=', input.selector)
+    .where('t.org_id', '=', ctx.orgId)
+    .where('t.kind', 'in', ['pat', 'svc']);
+
+  return compile(select);
+}
+
+function parsedScope(row: TokenRow): TokenAccess['token']['scope'] {
+  const parsed = parseScopesJson(row.scopes_json);
+  if (!parsed.ok) return null;
+  const readOnly = parsed.level === 'read';
+  if ((row.read_only === 1) !== readOnly) return null;
+  return { level: parsed.level, readOnly };
+}
+
+export function tokenProjectMode(
+  kind: 'pat' | 'svc',
+  stored: string | null,
+  principalProjectId: string | null,
+): TokenProjectMode | null {
+  if (kind === 'svc') return principalProjectId === null ? 'all' : 'selected';
+  return stored === 'all' || stored === 'selected' ? stored : null;
+}
+
+function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
+  const scope = parsedScope(row);
+  const projectMode = tokenProjectMode(row.kind, row.project_mode, row.principal_project_id);
+  const isService = row.kind === 'svc';
+  const expired = row.expired === 1;
+  const revoked = row.revoked_at !== null;
+  const principalActive = row.principal_status === 'active';
+  const credentialValid = row.binding_ok === 1 && (isService || row.validation_fresh === 1);
+  const project: AccessProject | null =
+    row.project_id === null
+      ? null
+      : {
+          id: row.project_id,
+          slug: row.project_slug ?? '',
+          name: row.project_name ?? '',
+          status: row.project_status ?? '',
+          tokenMaxScope: row.project_token_max_scope ?? '',
+          requirePublishApproval: row.project_require_publish_approval === 1,
+          revision: row.project_revision ?? 1,
+        };
+
+  let organizationPermissions: string[] = [];
+  let projectPermissions: string[] = [];
+  let protectedHolder = false;
+  if (
+    !expired &&
+    !revoked &&
+    principalActive &&
+    credentialValid &&
+    scope !== null &&
+    projectMode !== null
+  ) {
+    const stored = JSON.parse(row.access) as AccessJson;
+    const orgRows = names(stored.organization);
+    const projectRows = names(stored.project);
+    protectedHolder =
+      !isService && scope.level === 'full' && projectMode === 'all' && stored.holder === 1;
+    const service = names(JSON.parse(row.service_permissions));
+    if (boundary === 'organization') {
+      organizationPermissions = [
+        ...tokenEffectivePermissions({
+          boundary: 'organization',
+          grants: isService ? service : orgRows,
+          projectMode,
+          scope,
+        }),
+      ].sort();
+    } else if (project !== null) {
+      const maxScope = parseScopeLevel(project.tokenMaxScope);
+      if (maxScope.ok) {
+        projectPermissions = [
+          ...tokenEffectivePermissions({
+            boundary: 'project',
+            grants: isService ? service : [...orgRows, ...projectRows],
+            projectMode,
+            scope,
+            tokenMaxScope: maxScope.level,
+          }),
+        ].sort();
+      }
+    }
+  }
+
+  const envelope: Omit<TokenAccess, 'verifier'> = {
+    token: {
+      id: row.token_id,
+      kind: row.kind,
+      name: row.token_name,
+      userId: row.user_id,
+      servicePrincipalId: row.service_principal_id,
+      boundProjectId: row.token_project_id,
+      projectMode,
+      scope,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      lastUsedAt: row.last_used_at,
+      expired,
+      revoked,
+    },
+    principalStatus: row.principal_status ?? '',
+    validation:
+      row.kind === 'svc'
+        ? null
+        : {
+            kind:
+              row.validation_kind === 'sso' || row.validation_kind === 'local'
+                ? row.validation_kind
+                : null,
+            identityId: row.validation_identity_id,
+            fresh: row.validation_fresh === 1,
+          },
+    project,
+    organizationPermissions,
+    projectPermissions,
+    protectedHolder,
+  };
+  return Object.defineProperty(envelope, 'verifier', {
+    value: { secretHash: row.hash, pepperVersion: row.pepper_version },
+    enumerable: false,
+  }) as TokenAccess;
+}
+
 export function createAccessRepository(
   executor: SqlExecutor,
   options: AccessRepositoryOptions = {},
@@ -603,6 +964,12 @@ export function createAccessRepository(
       const rows = await executor.all<LookupRow>(lookupSessionStatement(ctx, input, idleSeconds));
       const row = rows[0];
       return row === undefined ? null : toAccess(row);
+    },
+
+    async lookupToken(ctx, input) {
+      const rows = await executor.all<TokenRow>(lookupTokenStatement(ctx, input));
+      const row = rows[0];
+      return row === undefined ? null : toTokenAccess(row, input.boundary);
     },
 
     async touchSession(ctx, sessionId) {

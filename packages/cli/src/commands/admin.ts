@@ -17,6 +17,7 @@ import {
   resetLocalLogin,
 } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { createRoleRepository } from '@package-broker/db-sqlite/repositories/role';
 import {
   readProviderBinding,
   rebindProvider,
@@ -175,8 +176,21 @@ function roleIds(): Record<DefaultRoleKey, string> {
 }
 
 type Outcome =
-  | { readonly issued: true; readonly result: string }
+  | { readonly issued: true; readonly result: string; readonly toppedUp: number }
+  | { readonly issued: false; readonly toppedUp: number }
   | { readonly issued: false; readonly exit: number; readonly text: string };
+
+async function adminPermissionCount(
+  executor: ScalarSqlExecutor,
+  ctx: ReturnType<typeof orgContext>,
+): Promise<number> {
+  const roles = await createRoleRepository(executor).list(ctx);
+  return roles.find((role) => role.key === 'organization_admin')?.permissions.length ?? 0;
+}
+
+function toppedUpText(count: number): string {
+  return `topped up ${count} organization_admin ${count === 1 ? 'permission' : 'permissions'}`;
+}
 
 async function issue(command: Command, o: AdminOptions): Promise<number> {
   const email = typeof o.email === 'string' ? normalizeEmail(o.email) : null;
@@ -248,11 +262,20 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
       say(command, 'outcome unknown; re-running is safe');
       return 7;
     }
+    if (!outcome.issued && 'toppedUp' in outcome) {
+      say(
+        command,
+        `already_set_up; ${toppedUpText(outcome.toppedUp)}; no setup token issued; run pb admin reset-local to issue a new setup token`,
+      );
+      console.log(JSON.stringify({ result: 'already_set_up', toppedUp: outcome.toppedUp }));
+      return 0;
+    }
     if (!outcome.issued) {
       say(command, outcome.text);
       return outcome.exit;
     }
     issued = true;
+    if (outcome.toppedUp > 0) say(command, toppedUpText(outcome.toppedUp));
 
     if (command === 'admin bootstrap') {
       say(
@@ -304,15 +327,21 @@ async function runOperation(
   input: Parameters<typeof bootstrapAdmin>[2],
 ): Promise<Outcome> {
   if (command === 'admin bootstrap') {
+    const permissionsBefore = await adminPermissionCount(executor, ctx);
     const result = await bootstrapAdmin(executor, ctx, input);
+    const toppedUp =
+      permissionsBefore === 0
+        ? 0
+        : Math.max(0, (await adminPermissionCount(executor, ctx)) - permissionsBefore);
     if (result === 'already_set_up') {
+      if (toppedUp > 0) return { issued: false, toppedUp };
       return {
         issued: false,
         exit: 6,
         text: 'already_set_up; nothing changed; run pb admin reset-local to issue a new setup token',
       };
     }
-    return { issued: true, result };
+    return { issued: true, result, toppedUp };
   }
   const { email, setupHash, setupExpiresAt, grantId, roleIds: ids, opId, now } = input;
   const result = await resetLocalLogin(executor, ctx, {
@@ -338,7 +367,7 @@ async function runOperation(
       text: 'admin_role_missing; the organization has no organization_admin role; run pb admin bootstrap first',
     };
   }
-  return { issued: true, result };
+  return { issued: true, result, toppedUp: 0 };
 }
 
 export function runAdminBootstrap(o: AdminOptions): Promise<number> {

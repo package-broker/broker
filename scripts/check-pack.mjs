@@ -13,6 +13,8 @@ const DEPENDENCY_FIELDS = [
   'optionalDependencies',
 ];
 const UNRESOLVED_RANGE = /^(?:workspace|catalog|link|file):/;
+const CORE_PACKAGE = '@package-broker/core';
+const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc']);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const REQUIRED_FILES = {
@@ -37,6 +39,8 @@ function readPackageJson(name) {
     return { error: `package.json is unreadable or invalid: ${error.message}` };
   }
 }
+
+const CORE_VERSION = readPackageJson('core').json?.version ?? '0.0.0';
 
 function planPackages() {
   const names = new Set(REQUIRED_PACKAGES);
@@ -212,6 +216,98 @@ function checkEntryFields(pkgJson, files) {
   return { problems, count: entries.filter(([, value]) => value !== undefined).length };
 }
 
+function parseVersion(text) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(text);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? null,
+  };
+}
+
+function comparePrerelease(left, right) {
+  if (left === null) return right === null ? 0 : 1;
+  if (right === null) return -1;
+  const a = left.split('.');
+  const b = right.split('.');
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const one = a[index];
+    const two = b[index];
+    if (one === undefined) return -1;
+    if (two === undefined) return 1;
+    const oneNumeric = /^\d+$/.test(one);
+    const twoNumeric = /^\d+$/.test(two);
+    if (oneNumeric && twoNumeric) {
+      if (Number(one) !== Number(two)) return Number(one) < Number(two) ? -1 : 1;
+    } else if (oneNumeric !== twoNumeric) {
+      return oneNumeric ? -1 : 1;
+    } else if (one !== two) {
+      return one < two ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+function compareVersions(left, right) {
+  for (const key of ['major', 'minor', 'patch'])
+    if (left[key] !== right[key]) return left[key] < right[key] ? -1 : 1;
+  return comparePrerelease(left.prerelease, right.prerelease);
+}
+
+function rangeSatisfiedBy(range, versionText) {
+  const version = parseVersion(versionText);
+  if (!version) return null;
+  const text = range.trim();
+  if (text === '*' || text === '' || text === 'x') return version.prerelease === null;
+  const caret = /^\^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(text);
+  const exact = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(text);
+  const match = caret ?? exact;
+  if (!match) return null;
+  const lower = {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? null,
+  };
+  if (compareVersions(version, lower) < 0) return false;
+  if (!caret) return compareVersions(version, lower) === 0;
+  let upper;
+  if (lower.major > 0) upper = { major: lower.major + 1, minor: 0, patch: 0, prerelease: null };
+  else if (lower.minor > 0)
+    upper = { major: 0, minor: lower.minor + 1, patch: 0, prerelease: null };
+  else upper = { major: 0, minor: 0, patch: lower.patch + 1, prerelease: null };
+  if (compareVersions(version, upper) >= 0) return false;
+  if (version.prerelease !== null) {
+    if (lower.prerelease === null) return false;
+    if (
+      version.major !== lower.major ||
+      version.minor !== lower.minor ||
+      version.patch !== lower.patch
+    )
+      return false;
+  }
+  return true;
+}
+
+function checkCorePeer(pkg, pkgJson, coreVersion) {
+  if (!CORE_PEER_PACKAGES.has(pkg)) return [];
+  const range = pkgJson.peerDependencies?.[CORE_PACKAGE];
+  if (typeof range !== 'string')
+    return [`peerDependencies.${CORE_PACKAGE} is missing or not a string`];
+  const satisfied = rangeSatisfiedBy(range, coreVersion);
+  if (satisfied === null)
+    return [
+      `peerDependencies.${CORE_PACKAGE} range "${range}" is not a form this check can verify against core ${coreVersion}`,
+    ];
+  if (!satisfied)
+    return [
+      `peerDependencies.${CORE_PACKAGE} range "${range}" does not accept core ${coreVersion}`,
+    ];
+  return [];
+}
+
 function checkPackedPackage(pkg, pkgJson, files) {
   const { problems, targets } = checkExports(pkg, pkgJson, files);
   const entry = checkEntryFields(pkgJson, files);
@@ -254,7 +350,7 @@ function inspect(pkg) {
     const dir = join(extract, 'package');
     const files = listFiles(dir);
     const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    return checkPackedPackage(pkg, pkgJson, files);
+    return { ...checkPackedPackage(pkg, pkgJson, files), pkgJson };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -262,6 +358,7 @@ function inspect(pkg) {
 
 const { names: packages, rejected } = planPackages();
 
+const outcomes = [];
 for (const pkg of packages) {
   let result;
   try {
@@ -278,7 +375,16 @@ for (const pkg of packages) {
       files: 0,
     };
   }
+  outcomes.push({ pkg, result });
+}
 
+const packedCoreVersion =
+  outcomes.find(({ pkg }) => pkg === 'core')?.result.pkgJson?.version ?? CORE_VERSION;
+for (const { pkg, result } of outcomes)
+  if (result.pkgJson)
+    result.problems.push(...checkCorePeer(pkg, result.pkgJson, packedCoreVersion));
+
+for (const { pkg, result } of outcomes) {
   if (result.problems.length > 0) {
     process.exitCode = 1;
     console.error(`${pkg}: FAILED (${result.problems.length} problem(s))`);

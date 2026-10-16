@@ -101,6 +101,29 @@ const PURPOSE_HEADERS: ReadonlyMap<string, ReadonlyMap<string, HeaderCheck>> = n
 
 const refuse = (reason: string): UpstreamError => new UpstreamError('refused', undefined, reason);
 
+const GUARD_REFUSED = new Set([
+  'invalid_url',
+  'scheme',
+  'userinfo',
+  'port',
+  'zone_id',
+  'blocked_address',
+  'blocked_host',
+  'self_origin',
+  'invalid_address',
+]);
+const GUARD_NETWORK = new Set(['resolution_failed', 'no_address', 'aborted']);
+
+function guardFailure(error: unknown): UpstreamError | undefined {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof Error) || cause.name !== 'DnsGuardError') return undefined;
+  const reason = (cause as Error & { reason?: unknown }).reason;
+  if (typeof reason === 'string' && GUARD_REFUSED.has(reason)) return refuse(reason);
+  if (reason === 'resolution_timeout') return new UpstreamError('timeout');
+  if (typeof reason === 'string' && GUARD_NETWORK.has(reason)) return undefined;
+  return new UpstreamError('network');
+}
+
 function canonicalOrigin(text: string): string {
   if (typeof text !== 'string' || !BARE_ORIGIN.test(text.trim())) throw refuse('origin');
   try {
@@ -286,8 +309,8 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
           signal,
           ...(body !== undefined ? { body } : {}),
         });
-      } catch {
-        throw failure();
+      } catch (error) {
+        throw guardFailure(error) ?? failure();
       } finally {
         clearTimeout(timer);
       }

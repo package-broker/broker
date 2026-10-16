@@ -295,6 +295,25 @@ export interface JobScheduleTable {
   enabled: Generated<number>;
 }
 
+/** Mirrors `blob` in `migrations/0001_init.sql` and `migrations/0006_ports.sql`. */
+export interface BlobTable {
+  id: string;
+  org_id: string;
+  sha256: string;
+  size_bytes: number;
+  storage_key: string;
+  media_type: Generated<string>;
+  refetchable: Generated<number>;
+  upstream_url: string | null;
+  last_fetched_at: string | null;
+  last_accessed_at: string | null;
+  purge_after: string | null;
+  deleted_at: string | null;
+  created_at: Generated<string>;
+  purge_generation: string | null;
+  purge_lease_until: string | null;
+}
+
 export interface Database {
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
@@ -319,4 +338,5 @@ export interface Database {
   job: JobTable;
   job_attempt: JobAttemptTable;
   job_schedule: JobScheduleTable;
+  blob: BlobTable;
 }

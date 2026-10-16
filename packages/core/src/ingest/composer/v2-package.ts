@@ -17,6 +17,7 @@ import {
   type PolicyFetch,
   type UpstreamCredential,
   type UpstreamResponse,
+  type UpstreamRequest,
 } from '../../sources/policy-fetch.js';
 import {
   createPackageDescription,
@@ -55,6 +56,7 @@ export interface ComposerV2Source {
 }
 
 export interface ComposerV2Options {
+  readonly redirect?: UpstreamRequest['redirects'];
   readonly dev?: boolean;
   readonly validators?: DocumentValidators;
   /** The request path never sleeps; jobs honour Retry-After and recheck authenticated 404s. */
@@ -236,6 +238,7 @@ export async function describeComposerV2(
           headers,
           ...(source.credential === undefined ? {} : { credential: source.credential }),
           destinations,
+          ...(options.redirect === undefined ? {} : { redirects: options.redirect }),
           purpose: 'metadata',
           maxBytes,
           timeoutMs: source.timeoutMs ?? DEFAULT_TIMEOUT_MS,

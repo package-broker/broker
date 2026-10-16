@@ -9,6 +9,7 @@ import {
   parseSha256,
 } from '@package-broker/core/platform/blob';
 import type {
+  BlobInfo,
   BlobLifecycle,
   BlobStore,
   ByteRange,
@@ -51,10 +52,18 @@ export interface BlobContractFixture {
   readonly answerNextRangeWithFullBody: () => void;
 }
 
-/** `expireLease` moves a live purge lease into the past. */
+/**
+ * `expireLease` moves a live purge lease into the past. `narrowRefetchable` is the metadata port
+ * operation of the same name and `generationOf` reads the row's current purge generation.
+ */
 export interface BlobLifecycleFixture extends BlobContractFixture {
   readonly lifecycle: BlobLifecycle;
   readonly expireLease: (ctx: OrgContext, key: Sha256) => Promise<void>;
+  readonly narrowRefetchable: (
+    ctx: OrgContext,
+    input: { key: Sha256; size: number; mediaType: string },
+  ) => Promise<BlobInfo | null>;
+  readonly generationOf: (ctx: OrgContext, key: Sha256) => Promise<string | null>;
 }
 
 const FUNCTION_HOOKS = [
@@ -106,8 +115,10 @@ export function requireBlobLifecycleFixtureHooks(fixture: BlobLifecycleFixture):
   if (typeof record.lifecycle !== 'object' || record.lifecycle === null) {
     throw new Error('blob contract fixture is missing the lifecycle hook');
   }
-  if (typeof record.expireLease !== 'function') {
-    throw new Error('blob contract fixture is missing the expireLease hook');
+  for (const hook of ['expireLease', 'narrowRefetchable', 'generationOf'] as const) {
+    if (typeof record[hook] !== 'function') {
+      throw new Error(`blob contract fixture is missing the ${hook} hook`);
+    }
   }
   const lifecycle = record.lifecycle as Record<string, unknown>;
   for (const method of LIFECYCLE_METHODS) {
@@ -721,6 +732,53 @@ export function describeBlobLifecycleContract(
       await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
       return { org, data, key };
     }
+
+    it('narrowRefetchable clears refetchable and leaves the generation unchanged', async () => {
+      const f = await readyLifecycle(make);
+      const org = await f.seed(nextOrg());
+      const data = bytes('narrowed while live');
+      const key = await put(f.store, org, data);
+      const before = await f.generationOf(org, key);
+      const args = { key, size: data.length, mediaType: PLAIN.mediaType };
+      expect(await f.refetchableOf(org, key)).toBe(true);
+      const narrowed = await f.narrowRefetchable(org, args);
+      expect(narrowed).toEqual({
+        sha256: key,
+        size: data.length,
+        mediaType: PLAIN.mediaType,
+        purgeAfter: null,
+      });
+      expect(await f.refetchableOf(org, key)).toBe(false);
+      expect(await f.generationOf(org, key)).toBe(before);
+      expect(await readText(f.store, org, key)).toBe('narrowed while live');
+    });
+
+    it('narrowRefetchable returns null for an unknown digest and for size or media type mismatches', async () => {
+      const f = await readyLifecycle(make);
+      const org = await f.seed(nextOrg());
+      const data = bytes('narrow mismatch');
+      const key = await put(f.store, org, data);
+      const args = { key, size: data.length, mediaType: PLAIN.mediaType };
+      const unknown = await digestOf(bytes('never stored'));
+      expect(await f.narrowRefetchable(org, { ...args, key: unknown })).toBeNull();
+      expect(await f.narrowRefetchable(org, { ...args, size: data.length + 1 })).toBeNull();
+      expect(await f.narrowRefetchable(org, { ...args, mediaType: 'application/zip' })).toBeNull();
+      expect(await f.refetchableOf(org, key)).toBe(true);
+    });
+
+    it('narrowRefetchable refuses under a scheduled purge and under a live lease', async () => {
+      const f = await readyLifecycle(make);
+      const { org, data, key } = await scheduled(f, 'narrow refused');
+      const args = { key, size: data.length, mediaType: PLAIN.mediaType };
+      expect(await f.narrowRefetchable(org, args)).toBeNull();
+      expect(await f.refetchableOf(org, key)).toBe(true);
+      await f.expireRetention(org, key);
+      const claimed = await f.lifecycle.claimPurge(org, key);
+      expect(claimed).not.toBeNull();
+      expect(await f.narrowRefetchable(org, args)).toBeNull();
+      expect(await f.refetchableOf(org, key)).toBe(true);
+      expect(await f.generationOf(org, key)).toBe(claimed);
+    });
 
     it('refuses a claim before the deadline and grants one once it has passed', async () => {
       const f = await readyLifecycle(make);

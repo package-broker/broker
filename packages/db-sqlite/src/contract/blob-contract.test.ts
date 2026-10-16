@@ -127,6 +127,7 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture> {
       return repository.publish(ctx, input);
     },
     find: (ctx, key) => repository.find(ctx, key),
+    narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),
     inspect: (ctx, key) => repository.inspect(ctx, key),
   };
 
@@ -188,6 +189,14 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture> {
         ctx.orgId,
         key,
       );
+    },
+    narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),
+    async generationOf(ctx, key) {
+      const rows = await executor.all<{ purge_generation: string | null }>({
+        sql: 'SELECT purge_generation FROM blob WHERE org_id = ? AND sha256 = ?',
+        params: [ctx.orgId, key],
+      });
+      return rows[0]?.purge_generation ?? null;
     },
     async refetchableOf(ctx, key) {
       const rows = await executor.all<{ refetchable: number }>({
@@ -258,7 +267,7 @@ describe('blob contract harness', () => {
     expect(() => requireBlobFixtureHooks(fixture as unknown as BlobContractFixture)).not.toThrow();
   });
 
-  it.each(['lifecycle', 'expireLease'] as const)(
+  it.each(['lifecycle', 'expireLease', 'narrowRefetchable', 'generationOf'] as const)(
     'fails the lifecycle suite when the %s hook is missing',
     async (hook) => {
       const fixture: Record<string, unknown> = { ...(await sqliteFixture()) };

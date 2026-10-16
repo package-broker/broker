@@ -91,6 +91,15 @@ export interface BlobMetadataPort {
     },
   ): Promise<BlobInfo | null>;
   find(ctx: OrgContext, key: Sha256): Promise<BlobInfo | null>;
+  /**
+   * Clears `refetchable` on the live row without touching the purge generation. Returns null
+   * unless a live, non-deleted row with this size and media type exists with no live lease and
+   * no scheduled purge.
+   */
+  narrowRefetchable(
+    ctx: OrgContext,
+    input: { key: Sha256; size: number; mediaType: string },
+  ): Promise<BlobInfo | null>;
   inspect(ctx: OrgContext, key: Sha256): Promise<{ info: BlobInfo; purging: boolean } | null>;
 }
 
@@ -350,6 +359,27 @@ function boundedStream(
           pending = chunk.length > BLOB_CHUNK_BYTES ? chunk.subarray(BLOB_CHUNK_BYTES) : null;
           if (piece.buffer.byteLength > BLOB_CHUNK_BYTES) piece = piece.slice();
           if (piece.length > 0) {
+            if (pending === null && count === expected) {
+              for (;;) {
+                let tail: Awaited<ReturnType<typeof reader.read>>;
+                try {
+                  tail = await read();
+                } catch (error) {
+                  void cancel();
+                  controller.error(error);
+                  return;
+                }
+                if (tail.done) break;
+                if (tail.value.length > 0) {
+                  await cancel();
+                  controller.error(new BlobSizeMismatchError());
+                  return;
+                }
+              }
+              controller.enqueue(piece);
+              controller.close();
+              return;
+            }
             controller.enqueue(piece);
             return;
           }
@@ -429,6 +459,25 @@ export function createBlobStore(
           });
         let info = await publish();
         for (let attempt = 1; info === null; attempt += 1) {
+          const concurrent = input.refetchable
+            ? await metadata.find(ctx, digest)
+            : await metadata.narrowRefetchable(ctx, {
+                key: digest,
+                size: input.size,
+                mediaType: input.mediaType,
+              });
+          if (
+            concurrent !== null &&
+            concurrent.size === input.size &&
+            concurrent.mediaType === input.mediaType &&
+            concurrent.purgeAfter === null
+          ) {
+            const present = await byteStore.head(storageKey);
+            if (present !== null && present.size === input.size) {
+              info = concurrent;
+              break;
+            }
+          }
           if (attempt >= MAX_PUBLISH_ATTEMPTS) throw new BlobBusyError();
           generation = await metadata.reserve(ctx, digest);
           const present = await byteStore.head(storageKey);

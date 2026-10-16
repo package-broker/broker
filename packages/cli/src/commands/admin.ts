@@ -15,11 +15,10 @@ import { normalizeEmail } from '@package-broker/core/identity/policy';
 import { reportableErrorName } from '@package-broker/core/kernel/error-name';
 import { formatMasterKey, generateMasterKey } from '@package-broker/core/secrets/master-key';
 import {
-  bootstrapAdmin,
+  bootstrapAdminWithTopUp,
   resetLocalLogin,
 } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
-import { createRoleRepository } from '@package-broker/db-sqlite/repositories/role';
 import {
   readProviderBinding,
   rebindProvider,
@@ -213,14 +212,6 @@ type Outcome =
   | { readonly issued: false; readonly toppedUp: number }
   | { readonly issued: false; readonly exit: number; readonly text: string };
 
-async function adminPermissionCount(
-  executor: ScalarSqlExecutor,
-  ctx: ReturnType<typeof orgContext>,
-): Promise<number> {
-  const roles = await createRoleRepository(executor).list(ctx);
-  return roles.find((role) => role.key === 'organization_admin')?.permissions.length ?? 0;
-}
-
 function toppedUpText(count: number): string {
   return `topped up ${count} organization_admin ${count === 1 ? 'permission' : 'permissions'}`;
 }
@@ -370,15 +361,10 @@ async function runOperation(
   command: Command,
   executor: ScalarSqlExecutor,
   ctx: ReturnType<typeof orgContext>,
-  input: Parameters<typeof bootstrapAdmin>[2],
+  input: Parameters<typeof bootstrapAdminWithTopUp>[2],
 ): Promise<Outcome> {
   if (command === 'admin bootstrap') {
-    const permissionsBefore = await adminPermissionCount(executor, ctx);
-    const result = await bootstrapAdmin(executor, ctx, input);
-    const toppedUp =
-      permissionsBefore === 0
-        ? 0
-        : Math.max(0, (await adminPermissionCount(executor, ctx)) - permissionsBefore);
+    const { result, toppedUp } = await bootstrapAdminWithTopUp(executor, ctx, input);
     if (result === 'already_set_up') {
       if (toppedUp > 0) return { issued: false, toppedUp };
       return {

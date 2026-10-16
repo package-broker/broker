@@ -5,8 +5,12 @@ import {
   type MutationFence,
 } from '@package-broker/core/authz/fence';
 import type { DefaultRoleKey } from '@package-broker/core/authz/permissions';
-import { isUlid } from '@package-broker/core/ids';
+import type { ActorContext } from '@package-broker/core/authz/administration';
+import type { ProjectActor } from '@package-broker/core/authz/project-actor';
+import { createProjectService } from '@package-broker/core/authz/project-service';
+import { fixedClock, isUlid } from '@package-broker/core/ids';
 import { type OrgContext, type SqlExecutor, type Statement } from '@package-broker/core/db/port';
+import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createProjectRepository, ProjectSetupError, type ProjectRepository } from './project.js';
 import { seedDefaultsStatements } from './role.js';
@@ -779,4 +783,222 @@ describe('concurrency', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+describe('authority before existence', () => {
+  const MISSING = uid('ZZ');
+  const refused = () => fence({}, U2, S_OTHER);
+  const withRevision = (f: MutationFence, project: number) =>
+    mutationFence({ userId: f.userId, sessionId: f.sessionId } as unknown as AuthenticatedActor, {
+      project,
+    });
+  const methods = {
+    update: (f: MutationFence, id: string) => projects.update(a, f, id, { name: 'Renamed' }, LATER),
+    archive: (f: MutationFence, id: string) => projects.archive(a, f, id, LATER),
+    restore: (f: MutationFence, id: string) => projects.restore(a, f, id, LATER),
+  } as const;
+  const current = { update: 1, archive: 1, restore: 2 } as const;
+  const permitted = { update: fence(), archive: fence(), restore: fence({}, U1, S_FRESH) };
+
+  beforeEach(async () => {
+    await create();
+  });
+
+  async function prepare(method: keyof typeof methods): Promise<void> {
+    if (method === 'restore') {
+      expect(await projects.archive(a, fence({ project: 1 }), P1, LATER)).toBe('archived');
+    }
+  }
+
+  const cases = (['update', 'archive', 'restore'] as const).flatMap((method) => [
+    { method, row: 'an existing id', id: () => P1, revision: current[method] },
+    { method, row: 'a missing id', id: () => MISSING, revision: current[method] },
+    { method, row: 'another organization id', id: () => PB, revision: current[method] },
+    { method, row: 'a stale revision', id: () => P1, revision: 9 },
+  ]);
+
+  it.each(cases)(
+    '$method answers authority for $row to an actor without the permission',
+    async ({ method, id, revision }) => {
+      await prepare(method);
+      const before = await snapshot();
+      expect(await methods[method](withRevision(refused(), revision), id())).toBe('authority');
+      expect(await snapshot()).toBe(before);
+    },
+  );
+
+  it.each(['update', 'archive', 'restore'] as const)(
+    '%s answers authority to a revoked session for a missing id and a stale revision',
+    async (method) => {
+      await prepare(method);
+      const revoked = fence({}, U1, S_REVOKED);
+      expect(await methods[method](withRevision(revoked, current[method]), MISSING)).toBe(
+        'authority',
+      );
+      expect(await methods[method](withRevision(revoked, 9), P1)).toBe('authority');
+    },
+  );
+
+  it.each(['update', 'archive', 'restore'] as const)(
+    '%s still answers not_found and conflict to a permitted actor',
+    async (method) => {
+      await prepare(method);
+      const f = permitted[method];
+      expect(await methods[method](withRevision(f, current[method]), MISSING)).toBe('not_found');
+      expect(await methods[method](withRevision(f, current[method]), PB)).toBe('not_found');
+      expect(await methods[method](withRevision(f, 9), P1)).toBe('conflict');
+    },
+  );
+
+  it('restore answers authority without a fresh reauth even for a missing id', async () => {
+    await prepare('restore');
+    expect(await methods.restore(fence({ project: 2 }, U1, S1), MISSING)).toBe('authority');
+  });
+
+  it.each([
+    { method: 'update', id: () => P1, revision: 1, result: 'updated', all: 1, batch: 1 },
+    { method: 'update', id: () => MISSING, revision: 1, result: 'not_found', all: 1, batch: 0 },
+    { method: 'update', id: () => P1, revision: 9, result: 'conflict', all: 1, batch: 0 },
+    { method: 'archive', id: () => P1, revision: 1, result: 'archived', all: 1, batch: 1 },
+    { method: 'archive', id: () => MISSING, revision: 1, result: 'not_found', all: 1, batch: 0 },
+    { method: 'archive', id: () => P1, revision: 9, result: 'conflict', all: 4, batch: 1 },
+    { method: 'restore', id: () => P1, revision: 2, result: 'restored', all: 1, batch: 1 },
+    { method: 'restore', id: () => MISSING, revision: 2, result: 'not_found', all: 1, batch: 0 },
+    { method: 'restore', id: () => P1, revision: 9, result: 'conflict', all: 4, batch: 1 },
+  ] as const)(
+    '$method answers $result with $all reads and $batch batches',
+    async ({ method, id, revision, result, all, batch }) => {
+      await prepare(method);
+      const counted = countCalls(executor);
+      const repository = createProjectRepository(counted.executor);
+      const f = withRevision(permitted[method], revision);
+      const call = {
+        update: () => repository.update(a, f, id(), { name: 'Renamed' }, LATER),
+        archive: () => repository.archive(a, f, id(), LATER),
+        restore: () => repository.restore(a, f, id(), LATER),
+      }[method];
+      expect(await call()).toBe(result);
+      expect(counted.counts()).toEqual({ all, batch });
+    },
+  );
+
+  it('answers a refused actor without a batch', async () => {
+    const counted = countCalls(executor);
+    const repository = createProjectRepository(counted.executor);
+    expect(await repository.archive(a, withRevision(refused(), 1), MISSING, LATER)).toBe(
+      'authority',
+    );
+    expect(counted.counts()).toEqual({ all: 1, batch: 0 });
+  });
+
+  it('answers unchanged with a single read', async () => {
+    const counted = countCalls(executor);
+    const repository = createProjectRepository(counted.executor);
+    expect(await repository.update(a, fence({ project: 1 }), P1, { name: 'Alpha' }, LATER)).toBe(
+      'unchanged',
+    );
+    expect(counted.counts()).toEqual({ all: 1, batch: 0 });
+  });
+});
+
+describe('refusal through the project service', () => {
+  const MISSING = uid('ZZ');
+  const staleContext: ActorContext = {
+    kind: 'organization',
+    userId: U2,
+    permissions: new Set(['org:projects:archive']),
+    isOrganizationAdmin: false,
+  };
+  const projectContext = (id: string): ProjectActor => ({
+    kind: 'project',
+    userId: U2,
+    orgId: a.orgId,
+    projectId: id,
+    permissions: new Set(['project:settings:write']),
+  });
+  const service = () =>
+    createProjectService({
+      projects,
+      clock: fixedClock(LATER),
+      ids: { ulid: () => P2 },
+      log: () => undefined,
+    });
+  const calls = {
+    update: (id: string, revision: number) =>
+      service().updateSettings(
+        a,
+        projectContext(id),
+        fence({ project: revision }, U2, S_OTHER),
+        id,
+        {
+          name: 'Renamed',
+        },
+      ),
+    archive: (id: string, revision: number) =>
+      service().archiveProject(a, staleContext, fence({ project: revision }, U2, S_OTHER), id),
+    restore: (id: string, revision: number) =>
+      service().restoreProject(a, staleContext, fence({ project: revision }, U2, S_OTHER), id),
+  } as const;
+  const current = { update: 1, archive: 1, restore: 2 } as const;
+
+  beforeEach(async () => {
+    await create();
+  });
+
+  it.each(['update', 'archive', 'restore'] as const)(
+    '%s refuses identically for an existing id, a missing id and a stale revision',
+    async (method) => {
+      if (method === 'restore') {
+        expect(await projects.archive(a, fence({ project: 1 }), P1, LATER)).toBe('archived');
+      }
+      const before = await snapshot();
+      const results = [
+        await calls[method](P1, current[method]),
+        await calls[method](MISSING, current[method]),
+        await calls[method](PB, current[method]),
+        await calls[method](P1, 9),
+      ];
+      expect(results).toEqual(Array(4).fill({ ok: false, error: 'forbidden' }));
+      expect(await snapshot()).toBe(before);
+    },
+  );
+});
+
+describe('authority read parameter budget', () => {
+  it.each(['update', 'archive', 'restore'] as const)(
+    'binds at most 100 parameters for %s with 8 provider anchors',
+    async (method) => {
+      const statements: Statement[] = [];
+      const recording = new Proxy(executor, {
+        get(target, property, receiver) {
+          if (property === 'all') {
+            return async (statement: Statement) => {
+              statements.push(statement);
+              return target.all(statement);
+            };
+          }
+          const value: unknown = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const providerAnchors = Array.from({ length: 8 }, (_, index) => ({
+        provider: 'oidc',
+        anchor: `https://idp-${index}.example.test`,
+        emailAuthoritative: true,
+      }));
+      const repository = createProjectRepository(recording, { providerAnchors });
+      const f = fence({ project: 1 }, U2, S_OTHER);
+      const answer = {
+        update: () => repository.update(a, f, uid('ZZ'), { name: 'Renamed' }, LATER),
+        archive: () => repository.archive(a, f, uid('ZZ'), LATER),
+        restore: () => repository.restore(a, f, uid('ZZ'), LATER),
+      }[method];
+      expect(await answer()).toBe('authority');
+      expect(statements).toHaveLength(1);
+      const [read] = statements;
+      expect(read?.sql).toMatch(/left join "project" as "p"/);
+      expect(read?.params.length).toBeLessThanOrEqual(100);
+      expect(JSON.stringify(read?.params)).toContain('idp-7.example.test');
+    },
+  );
 });

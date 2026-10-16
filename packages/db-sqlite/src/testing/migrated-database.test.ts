@@ -1,10 +1,15 @@
+import { readdirSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createOrganizationRepository } from '@package-broker/db-sqlite/repositories/organization';
 import type { SqlExecutor } from '@package-broker/core/db/port';
-import { openMigratedDatabase, type MigratedDatabase } from './migrated-database.js';
+import {
+  discoveredMigrations,
+  openMigratedDatabase,
+  type MigratedDatabase,
+} from './migrated-database.js';
 
 const COUNT_TABLES =
   "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'";
@@ -118,5 +123,16 @@ describe('openMigratedDatabase', () => {
 
   it('8: the organization repository module exports a callable factory', () => {
     expect(typeof createOrganizationRepository).toBe('function');
+  });
+});
+
+describe('discoveredMigrations', () => {
+  it('returns every migration file in order', async () => {
+    const files = readdirSync(new URL('../../migrations/', import.meta.url))
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    const sources = await discoveredMigrations();
+    expect(sources.map((source) => `${source.id.slice('core:'.length)}.sql`)).toEqual(files);
+    expect(sources.length).toBeGreaterThanOrEqual(7);
   });
 });

@@ -6,6 +6,7 @@ import type { BlobStore } from './platform/blob.js';
 import type { Cache } from './platform/cache.js';
 import type { JobDefinition, Jobs } from './platform/jobs.js';
 import type { Observability } from './platform/observability.js';
+import type { SourceProvider } from './sources/provider.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
@@ -26,6 +27,9 @@ export type PortName =
 
 export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
 
+/** Receives no adapters and no credentials. */
+export type SourceProviderFactory = () => readonly SourceProvider[];
+
 export interface PluginApi {
   readonly apiVersion: number;
 }
@@ -37,10 +41,12 @@ export interface PluginDefinition extends PluginApi {
   readonly platforms: readonly Platform[];
   readonly dependsOn?: readonly string[];
   readonly capabilities?: readonly string[];
-  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders. */
+  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders, 'source' needs sourceProviders. */
   readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
+  /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
+  readonly sourceProviders?: SourceProviderFactory;
   readonly migrations?: { readonly dir: string };
   /** Synchronous and pure: declares routes, hooks and jobs. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;

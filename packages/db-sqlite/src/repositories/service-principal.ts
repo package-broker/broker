@@ -69,7 +69,7 @@ export interface ServicePrincipalRepository {
   ): Promise<
     'updated' | 'not_found' | 'invalid_permissions' | 'conflict' | 'authority' | 'indeterminate'
   >;
-  /** Suspending a suspended principal answers `suspended` and rewrites nothing. */
+  /** Suspending a suspended principal answers `unchanged` and rewrites nothing. */
   suspend(
     ctx: OrgContext,
     fence: MutationFence,
@@ -77,7 +77,7 @@ export interface ServicePrincipalRepository {
     id: string,
     now: string,
     opId: string,
-  ): Promise<'suspended' | 'not_found' | 'authority' | 'indeterminate'>;
+  ): Promise<'suspended' | 'unchanged' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
   restore(
     ctx: OrgContext,
     fence: MutationFence,
@@ -85,7 +85,9 @@ export interface ServicePrincipalRepository {
     id: string,
     now: string,
     opId: string,
-  ): Promise<'restored' | 'not_suspended' | 'not_found' | 'authority' | 'indeterminate'>;
+  ): Promise<
+    'restored' | 'not_suspended' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
+  >;
 }
 
 interface PrincipalRow {
@@ -235,6 +237,19 @@ export function createServicePrincipalRepository(
   async function load(ctx: OrgContext, id: string): Promise<ServicePrincipal | null> {
     const rows = await executor.all<PrincipalRow>(scalar(selectPrincipals(ctx, id)));
     return toPrincipals(rows)[0] ?? null;
+  }
+
+  async function exists(ctx: OrgContext, id: string): Promise<boolean> {
+    const found = await executor.all(
+      scalar(
+        db
+          .selectFrom('service_principal')
+          .select('id')
+          .where('org_id', '=', ctx.orgId)
+          .where('id', '=', id),
+      ),
+    );
+    return found.length > 0;
   }
 
   return {
@@ -432,7 +447,9 @@ export function createServicePrincipalRepository(
         ],
         probes,
       );
-      return outcome.ok ? 'updated' : failed(outcome);
+      if (outcome.ok) return 'updated';
+      if (outcome.reason === 'unclassified' && !(await exists(ctx, id))) return 'not_found';
+      return failed(outcome);
     },
 
     async suspend(ctx, fence, guard, id, now, opId) {
@@ -447,7 +464,7 @@ export function createServicePrincipalRepository(
         'suspended',
         'suspended',
       );
-      return result === 'not_suspended' ? 'suspended' : result;
+      return result === 'not_suspended' ? 'unchanged' : result;
     },
 
     async restore(ctx, fence, guard, id, now, opId) {
@@ -465,16 +482,39 @@ export function createServicePrincipalRepository(
     from: 'active' | 'suspended',
     to: 'active' | 'suspended',
     done: Done,
-  ): Promise<Done | 'not_found' | 'not_suspended' | 'authority' | 'indeterminate'> {
+  ): Promise<Done | 'not_found' | 'not_suspended' | 'conflict' | 'authority' | 'indeterminate'> {
     requireNonEmpty(id, 'id');
     requireNonEmpty(opId, 'opId');
     const stamp = timestamp(now);
+    const expected = fence.expected['service_principal'];
+    const revision = (comparison: '=' | '<>') =>
+      scalar(
+        db
+          .selectFrom('service_principal')
+          .select(sql<number>`revision ${sql.raw(comparison)} ${expected ?? 0}`.as('holds'))
+          .where('org_id', '=', ctx.orgId)
+          .where('id', '=', id),
+      );
+    const cas =
+      expected === undefined
+        ? []
+        : assertCheck(
+            existsGuard((database) =>
+              database
+                .selectFrom('service_principal')
+                .select('id')
+                .where('org_id', '=', ctx.orgId)
+                .where('id', '=', id)
+                .where('revision', '=', expected),
+            ),
+          );
     const outcome = await runOrgFenced(
       executor,
       ctx,
       fence,
       guard,
       [
+        ...cas,
         scalar(
           db
             .updateTable('service_principal')
@@ -492,11 +532,18 @@ export function createServicePrincipalRepository(
             .where('id', '=', id),
         ),
       ],
-      ALWAYS,
+      expected === undefined ? ALWAYS : { authority: revision('='), conflict: revision('<>') },
     );
-    if (!outcome.ok)
-      return failed({ reason: outcome.reason }) === 'indeterminate' ? 'indeterminate' : 'authority';
-    const [changed, state] = outcome.results.slice(guard.length);
+    if (!outcome.ok) {
+      if (outcome.reason === 'unclassified' && !(await exists(ctx, id))) return 'not_found';
+      const reason = failed({ reason: outcome.reason });
+      return reason === 'conflict' && expected !== undefined
+        ? 'conflict'
+        : reason === 'indeterminate'
+          ? 'indeterminate'
+          : 'authority';
+    }
+    const [changed, state] = outcome.results.slice(guard.length + cas.length);
     if (changed !== undefined && changed.rows.length > 0) return done;
     return state !== undefined && state.rows.length > 0 ? 'not_suspended' : 'not_found';
   }

@@ -3,6 +3,8 @@ import { orgContext, type OrgContext } from './db/port.js';
 import { fixedClock } from './ids.js';
 import {
   PLUGIN_BINDABLE_PORTS,
+  PlatformUnavailableError,
+  requirePlatformPorts,
   SUPPORTED_PLUGIN_API,
   definePlugin,
   type AccessCheckResult,
@@ -10,6 +12,7 @@ import {
   type AuthResolveIdentityInput,
   type HookMap,
   type MapGroupsResult,
+  type PlatformPorts,
   type PluginDefinition,
   type PluginPorts,
   type PluginRegistry,
@@ -242,5 +245,24 @@ describe('plugin contract', () => {
       Parameters<NonNullable<PluginDefinition['init']>>[0]
     >().toEqualTypeOf<PluginPorts>();
     expectTypeOf<Parameters<RouteDefinition['handler']>[0]>().toEqualTypeOf<RequestContext>();
+  });
+
+  it('returns the scoped platform ports and fails closed when they are absent', () => {
+    const platform = {
+      blob: {},
+      cache: {},
+      jobs: {},
+      observability: {},
+    } as unknown as PlatformPorts;
+    expect(requirePlatformPorts({ ...ports, platform })).toBe(platform);
+    expect(() => requirePlatformPorts(ports)).toThrow(PlatformUnavailableError);
+    expect(() => requirePlatformPorts(ports)).toThrow(
+      expect.objectContaining({ name: 'PlatformUnavailableError' }),
+    );
+    expectTypeOf<PluginPorts['platform']>().toEqualTypeOf<PlatformPorts | undefined>();
+    expect(PLUGIN_BINDABLE_PORTS).not.toContain('blob');
+    expect(PLUGIN_BINDABLE_PORTS).not.toContain('cache');
+    expect(PLUGIN_BINDABLE_PORTS).not.toContain('job');
+    expect(PLUGIN_BINDABLE_PORTS).not.toContain('observability');
   });
 });

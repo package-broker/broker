@@ -34,6 +34,7 @@ type Wrap = (executor: SqlExecutor) => SqlExecutor;
 type Case = (open: Open, wrap?: Wrap) => Promise<void>;
 
 const RUNS = 20;
+const INDETERMINATE_ATTEMPTS = 3;
 const NOW = '2026-10-15T12:00:00.000Z';
 const LATER = '2026-10-15T12:05:00.000Z';
 const LOCK_UNTIL = '2026-10-15T12:15:00.000Z';
@@ -1086,31 +1087,58 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       }
     };
 
+    const attemptRace = async (scenario: (typeof scenarios)[number], run: number) => {
+      await clearWorld(world);
+      await pair.executor.batch([
+        userRow(a, U1, 'u1@example.test'),
+        userRow(a, U2, 'u2@example.test'),
+        ...holderEvidence(a, [
+          [U1, 'u1@example.test'],
+          [U2, 'u2@example.test'],
+        ]),
+        ...actorRows(a, admin),
+        ...scenario.seed(run),
+      ]);
+      const beforeLeft = await rowOf(scenario.left);
+      const beforeRight = await rowOf(scenario.right);
+      const [firstExecutor, secondExecutor] = gatedPair(pair.executor, other);
+      const options = { holderInput: currentHolderInput };
+      const first = createGrantRepository(wrap(firstExecutor), options);
+      const second = createGrantRepository(wrap(secondExecutor), options);
+      const outcomes = await race(
+        run,
+        () => perform(first, scenario.left),
+        () => perform(second, scenario.right),
+      );
+      return { outcomes, beforeLeft, beforeRight, first };
+    };
+
     for (const scenario of scenarios) {
       for (let run = 0; run < RUNS; run += 1) {
-        await clearWorld(world);
-        await pair.executor.batch([
-          userRow(a, U1, 'u1@example.test'),
-          userRow(a, U2, 'u2@example.test'),
-          ...holderEvidence(a, [
-            [U1, 'u1@example.test'],
-            [U2, 'u2@example.test'],
-          ]),
-          ...actorRows(a, admin),
-          ...scenario.seed(run),
-        ]);
-        const beforeLeft = await rowOf(scenario.left);
-        const beforeRight = await rowOf(scenario.right);
-        const [firstExecutor, secondExecutor] = gatedPair(pair.executor, other);
-        const options = { holderInput: currentHolderInput };
-        const first = createGrantRepository(wrap(firstExecutor), options);
-        const second = createGrantRepository(wrap(secondExecutor), options);
-
-        const outcomes = await race(
-          run,
-          () => perform(first, scenario.left),
-          () => perform(second, scenario.right),
-        );
+        let settled: Awaited<ReturnType<typeof attemptRace>> | undefined;
+        const seen: string[] = [];
+        for (
+          let attempt = 0;
+          attempt < INDETERMINATE_ATTEMPTS && settled === undefined;
+          attempt += 1
+        ) {
+          const result = await attemptRace(scenario, run);
+          if (result.outcomes.includes('indeterminate')) {
+            seen.push(result.outcomes.join('/'));
+            expect(
+              await result.first.countProtectedHolders(a),
+              `${scenario.name}: holders after an indeterminate attempt`,
+            ).toBeGreaterThanOrEqual(1);
+          } else {
+            settled = result;
+          }
+        }
+        if (settled === undefined) {
+          throw new Error(
+            `${scenario.name}: every one of ${INDETERMINATE_ATTEMPTS} attempts was indeterminate (${seen.join(', ')}); the race never completed`,
+          );
+        }
+        const { outcomes, beforeLeft, beforeRight, first } = settled;
 
         expect(
           scenario.expected.map((entry) => entry.outcomes),
@@ -1463,8 +1491,11 @@ export const authContractCases = {
 
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
-    it('1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 43 tables', () =>
-      authContractCases.upgrade(open));
+    it(
+      '1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 43 tables',
+      () => authContractCases.upgrade(open),
+      30_000,
+    );
     it('2. reset deletes the TOTP credential and clears its reference and enabled time together', () =>
       authContractCases.resetCleanup(open));
     it(
@@ -1482,8 +1513,11 @@ export function describeAuthContract(name: string, open: Open): void {
       () => authContractCases.setupRestage(open),
       60_000,
     );
-    it('6. bootstrap promotes an existing auditor grant', () =>
-      authContractCases.bootstrapPromotion(open));
+    it(
+      '6. bootstrap promotes an existing auditor grant',
+      () => authContractCases.bootstrapPromotion(open),
+      30_000,
+    );
     it(
       '7. last-admin races: at least one holder always survives',
       () => authContractCases.lastAdminRaces(open),

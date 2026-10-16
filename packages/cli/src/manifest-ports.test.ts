@@ -64,6 +64,7 @@ describe('renderManifestJson', () => {
     const plugins = [
       plugin('a', {
         binds: ['source'],
+        sourceProviders: () => [],
         register: (r) =>
           r.route({
             method: 'GET',
@@ -135,7 +136,7 @@ describe('renderManifestFromConfig', () => {
           'const factory = (opts: { path: string }) => ({',
           "  id: 'opt',",
           "  package: '@test/opt',",
-          '  apiVersion: 2,',
+          '  apiVersion: 3,',
           "  platforms: ['node'],",
           "  register: (r: any) => r.route({ method: 'GET', path: opts.path, permission: null, handler: () => new Response('ok') }),",
           '});',

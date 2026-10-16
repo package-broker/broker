@@ -6,7 +6,7 @@ const plugin = (id: string, extra: { dependsOn?: string[]; apiVersion?: number }
   definePlugin({
     id,
     package: `@package-broker/plugin-${id}`,
-    apiVersion: extra.apiVersion ?? 2,
+    apiVersion: extra.apiVersion ?? 3,
     platforms: ['node'],
     ...(extra.dependsOn ? { dependsOn: extra.dependsOn } : {}),
   });
@@ -46,6 +46,13 @@ describe('manifest', () => {
     expect(errors.join('\n')).toMatch(/does not support target "cloudflare"/);
     expect(errors.join('\n')).toMatch(/apiVersion 4/);
     expect(errors.join('\n')).toMatch(/missing plugin "zz"/);
+  });
+
+  it('reports an API 2 plugin with the range message and accepts API 3', () => {
+    expect(validatePlugins([plugin('legacy', { apiVersion: 2 })], 'node')).toEqual([
+      'plugin "legacy" has apiVersion 2, core supports 3 to 3',
+    ]);
+    expect(validatePlugins([plugin('current', { apiVersion: 3 })], 'node')).toEqual([]);
   });
 
   it('renders static imports', () => {

@@ -7,7 +7,7 @@ import type {
 } from '@package-broker/core/db/port';
 import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createD1HttpExecutor, type D1HttpOptions } from './d1-http-executor.js';
+import { createD1HttpExecutor, isLostResponse, type D1HttpOptions } from './d1-http-executor.js';
 
 const ACCOUNT_ID = 'acct0f3e9b7c2d14a6';
 const DATABASE_ID = 'dbid-5c1a-77e2-9f40';
@@ -771,5 +771,36 @@ describe('D1 HTTP executor: secrets and network failures', () => {
       },
       async () => d1Success([{ rows: [], changes: 0 }]),
     );
+  });
+});
+
+describe('D1 HTTP executor: lost-response marker', () => {
+  it('marks a fetch rejection and a body read failure as lost, and a validation error as not sent', async () => {
+    await withHarness(
+      async ({ executor }) => {
+        const rejected = await rejection(executor.all({ sql: 'SELECT 1', params: [] }));
+        expect(isLostResponse(rejected)).toBe(true);
+        const invalid = await rejection(executor.all({ sql: 'SELECT 1; SELECT 2', params: [] }));
+        expect(invalid).toBeInstanceOf(TypeError);
+        expect(isLostResponse(invalid)).toBe(false);
+      },
+      () => Promise.reject(new DOMException('timed out', 'TimeoutError')),
+    );
+    await withHarness(
+      async ({ executor }) => {
+        expect(isLostResponse(await rejection(executor.all({ sql: 'SELECT 1', params: [] })))).toBe(
+          true,
+        );
+      },
+      async () => {
+        const response = new Response('{}', { status: 200 });
+        vi.spyOn(response, 'text').mockRejectedValue(new Error('closed'));
+        return response;
+      },
+    );
+  });
+
+  it('does not treat a plain DbError with the same message as lost', () => {
+    expect(isLostResponse(new DbError('unknown', 'd1 http response read failed'))).toBe(false);
   });
 });

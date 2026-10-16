@@ -1,4 +1,8 @@
 import type { Generated } from 'kysely';
+import type { VersionStability } from '@package-broker/core/catalogue/versions';
+import type { VersionStatus } from '@package-broker/core/catalogue/version-rules';
+
+export type { VersionStability, VersionStatus };
 
 /** Mirrors `organization` in `migrations/0001_init.sql`. */
 export interface OrganizationTable {
@@ -323,6 +327,8 @@ export type SourceStatus = 'active' | 'degraded' | 'failing' | 'paused';
 export type PackageStatus = 'active' | 'removed_upstream';
 export type ProjectPackageOrigin = 'subscription' | 'explicit' | 'pattern';
 export type PatternEffect = 'include' | 'exclude';
+export type DistType = 'zip' | 'tar' | 'tgz';
+export type DistTagAction = 'set' | 'remove';
 
 /** Mirrors `source` in `migrations/0001_init.sql`. */
 export interface SourceTable {
@@ -413,6 +419,74 @@ export interface ProjectPackagePatternTable {
   created_at: Generated<string>;
 }
 
+/** Mirrors `version` in `migrations/0001_init.sql`. */
+export interface VersionTable {
+  id: string;
+  org_id: string;
+  package_id: string;
+  version: string;
+  version_normalized: string;
+  stability: Generated<VersionStability>;
+  published_at: string;
+  published_at_basis: string;
+  upstream_released_at: string | null;
+  license: string | null;
+  blob_id: string | null;
+  dist_type: DistType | null;
+  composer_shasum: string | null;
+  npm_integrity: string | null;
+  source_ref: string | null;
+  metadata_json: string;
+  deprecated_message: string | null;
+  status: Generated<VersionStatus>;
+  removed_upstream_at: string | null;
+  tombstoned_at: string | null;
+  tombstone_reason: string | null;
+  purge_after: string | null;
+  revision: Generated<number>;
+  last_op_id: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+/** Mirrors `version_revision` in `migrations/0001_init.sql`. */
+export interface VersionRevisionTable {
+  id: string;
+  org_id: string;
+  version_id: string;
+  revision: number;
+  blob_id: string | null;
+  source_ref: string | null;
+  metadata_json: string;
+  reason: string;
+  op_id: string | null;
+  created_at: Generated<string>;
+}
+
+/** Mirrors `dist_tag` in `migrations/0001_init.sql`. */
+export interface DistTagTable {
+  org_id: string;
+  package_id: string;
+  tag: string;
+  version_id: string;
+  updated_at: Generated<string>;
+}
+
+/** Mirrors `dist_tag_history` in `migrations/0001_init.sql`. */
+export interface DistTagHistoryTable {
+  id: string;
+  org_id: string;
+  package_id: string;
+  tag: string;
+  version_id: string | null;
+  previous_version_id: string | null;
+  action: DistTagAction;
+  actor_type: string;
+  actor_id: string | null;
+  op_id: string | null;
+  created_at: Generated<string>;
+}
+
 export interface Database {
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
@@ -444,4 +518,8 @@ export interface Database {
   project_source: ProjectSourceTable;
   project_package: ProjectPackageTable;
   project_package_pattern: ProjectPackagePatternTable;
+  version: VersionTable;
+  version_revision: VersionRevisionTable;
+  dist_tag: DistTagTable;
+  dist_tag_history: DistTagHistoryTable;
 }

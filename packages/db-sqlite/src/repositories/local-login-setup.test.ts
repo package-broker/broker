@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DbError } from '@package-broker/core/db/errors';
 import type { CredentialRecord } from '@package-broker/core/db/credentials';
 import type { LocalLoginSetupWriter } from '@package-broker/core/db/local-login';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -41,13 +42,13 @@ function insert(sql: string, ...params: Statement['params']): Statement {
   return { sql, params };
 }
 
-function hex(label: string): string {
-  return Buffer.from(label).toString('hex').padEnd(64, '0');
-}
-
 function opId(): string {
   opCounter += 1;
   return `01J0OP${String(opCounter).padStart(20, '0')}`;
+}
+
+function hex(label: string): string {
+  return Buffer.from(label).toString('hex').padEnd(64, '0');
 }
 
 function credentialRow(
@@ -81,7 +82,6 @@ function stageInput(
     userId: ADMIN,
     setupHash: SETUP_HASH,
     credential: credentialRow(a, credentialId, { now }),
-    opId: opId(),
     now,
     ...overrides,
   };
@@ -112,7 +112,6 @@ function completeInput(
     credentialRev: 3,
     passwordHash: PASSWORD_HASH,
     step: 57_000_123,
-    opId: opId(),
     session: newSession(),
     previousSecretHash: hex('old-session'),
     now: LATER,
@@ -274,15 +273,11 @@ afterEach(async () => {
 describe('stagePendingTotp', () => {
   it('1a: deletes the old pending credential, inserts the new one and references it', async () => {
     await seedPending();
-    const op = opId();
-    await expect(
-      writer.stagePendingTotp(a, stageInput(NEW_CREDENTIAL, { opId: op })),
-    ).resolves.toBe(true);
+    await expect(writer.stagePendingTotp(a, stageInput(NEW_CREDENTIAL))).resolves.toBe(true);
     expect(await credentialIds()).toEqual([NEW_CREDENTIAL]);
     const row = await loginRow();
     expect(row.totp_credential_id).toBe(NEW_CREDENTIAL);
     expect(row.last_op_id).not.toBeNull();
-    expect(row.last_op_id).not.toBe(op);
     expect(row.setup_hash).toBe(SETUP_HASH);
     const stored = await executor.all<{ org_id: string; kind: string; aad: string }>(
       insert('SELECT org_id, kind, aad FROM credential WHERE id = ?', NEW_CREDENTIAL),
@@ -451,13 +446,10 @@ describe('stagePendingTotp', () => {
   });
 
   it('1l: a caller operation id that is already stored does not let a refused stage through', async () => {
-    const op = opId();
-    await expect(
-      writer.stagePendingTotp(a, stageInput(NEW_CREDENTIAL, { opId: op })),
-    ).resolves.toBe(true);
+    await expect(writer.stagePendingTotp(a, stageInput(NEW_CREDENTIAL))).resolves.toBe(true);
     const before = await loginRow();
     await expect(
-      writer.stagePendingTotp(a, stageInput(THIRD_CREDENTIAL, { opId: op, now: SETUP_EXPIRES })),
+      writer.stagePendingTotp(a, stageInput(THIRD_CREDENTIAL, { now: SETUP_EXPIRES })),
     ).resolves.toBe(false);
     expect(await credentialIds()).toEqual([NEW_CREDENTIAL]);
     expect(await loginRow()).toEqual(before);
@@ -480,10 +472,13 @@ describe('stagePendingTotp', () => {
     await seedPending();
     const admin = await loginRow();
     const plain = await loginRow(PLAIN);
-    const outcome = await writer
-      .stagePendingTotp(a, stageInput(THIRD_CREDENTIAL))
-      .catch(() => 'rejected');
-    expect([false, 'rejected']).toContain(outcome);
+    const failure = await writer.stagePendingTotp(a, stageInput(THIRD_CREDENTIAL)).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(DbError);
+    expect((failure as DbError).kind).toBe('unique');
+    expect((failure as DbError).constraint).toBe('credential.id');
     expect(await credentialIds()).toEqual([OLD_CREDENTIAL, THIRD_CREDENTIAL].sort());
     expect(await loginRow()).toEqual(admin);
     expect(await loginRow(PLAIN)).toEqual(plain);
@@ -572,7 +567,6 @@ describe('completeSetup', () => {
       last_login_at: LATER,
     });
     expect(row.last_op_id).not.toBeNull();
-    expect(row.last_op_id).not.toBe(input.opId);
     expect(await sessionRows()).toEqual([
       { id: OLD_SESSION, user_id: ADMIN, revoked_at: LATER },
       { id: NEW_SESSION, user_id: ADMIN, revoked_at: null },
@@ -720,14 +714,9 @@ describe('completeSetup', () => {
   });
 
   it('1l: a caller operation id used by the stage does not let a refused completion insert a session', async () => {
-    const op = opId();
-    await expect(
-      writer.stagePendingTotp(a, stageInput(OLD_CREDENTIAL, { opId: op })),
-    ).resolves.toBe(true);
+    await expect(writer.stagePendingTotp(a, stageInput(OLD_CREDENTIAL))).resolves.toBe(true);
     const before = await loginRow();
-    await expect(
-      writer.completeSetup(a, completeInput({ opId: op, credentialRev: 2 })),
-    ).resolves.toBe(false);
+    await expect(writer.completeSetup(a, completeInput({ credentialRev: 2 }))).resolves.toBe(false);
     expect(await loginRow()).toEqual(before);
     expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
   });
@@ -790,7 +779,7 @@ describe('two connections', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it('4d: two completions of the same setup produce one session', async () => {
+  it('4d: a second completion after the first is refused and leaves one new session', async () => {
     const other = createLocalLoginSetupWriter(await database.second());
     const results = await Promise.all([
       writer.completeSetup(a, completeInput()),
@@ -807,7 +796,7 @@ describe('two connections', () => {
     expect(await sessionRows()).toHaveLength(2);
   });
 
-  it('4e: a completion and a restage racing: exactly one of them wins', async () => {
+  it('4e: a restage and a completion issued together on two connections: exactly one applies', async () => {
     const other = createLocalLoginSetupWriter(await database.second());
     const [completed, staged] = await Promise.all([
       writer.completeSetup(a, completeInput()),

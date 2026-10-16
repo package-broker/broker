@@ -45,9 +45,16 @@ describe('identity providers in collectRegistrations', () => {
     expect(problemsOf([plugin('sso', { identityProviders: () => [] })])).toEqual([
       'plugin "sso" has identityProviders but does not bind identity',
     ]);
-    expect(problemsOf([plugin('sso', { binds: ['source'], identityProviders: () => [] })])).toEqual(
-      ['plugin "sso" has identityProviders but does not bind identity'],
-    );
+    expect(
+      problemsOf([
+        plugin('sso', {
+          apiVersion: 3,
+          binds: ['source'],
+          sourceProviders: () => [],
+          identityProviders: () => [],
+        }),
+      ]),
+    ).toEqual(['plugin "sso" has identityProviders but does not bind identity']);
   });
 
   it.each([['text'], [42], [null], [{}]])(
@@ -67,7 +74,12 @@ describe('identity providers in collectRegistrations', () => {
     const problems = problemsOf([
       plugin('a', { binds: ['identity'] }),
       plugin('b', { identityProviders: () => [] }),
-      plugin('c', { binds: ['source'], identityProviders: 'x' as never }),
+      plugin('c', {
+        apiVersion: 3,
+        binds: ['source'],
+        sourceProviders: () => [],
+        identityProviders: 'x' as never,
+      }),
       plugin('core'),
     ]);
     expect(problems).toEqual([

@@ -1,8 +1,8 @@
 # Contributing
 
-## Contributor License Agreement
+## Developer Certificate of Origin
 
-Every contributor must sign the Contributor License Agreement in [CLA.md](CLA.md) before a pull request can be merged.
+Contributions are accepted under the repository licence (AGPL-3.0-only). Every commit in a pull request must carry a `Signed-off-by:` trailer with your name and e-mail address, which attests the [Developer Certificate of Origin 1.1](https://developercertificate.org/): that you wrote the change or have the right to submit it under that licence. Add the trailer with `git commit -s`. CI rejects a pull request with an unsigned commit; `git commit --amend -s` or `git rebase --signoff` adds the trailer to existing commits.
 
 ## Workflow
 

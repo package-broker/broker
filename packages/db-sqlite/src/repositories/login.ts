@@ -10,7 +10,7 @@ import {
   type Database,
   type Guard,
 } from '../kysely.js';
-import { sessionInsertStatement } from './session.js';
+import { revokePreviousStatement, sessionInsertStatement } from './session.js';
 
 const MAX_GROUPS = 1000;
 const MAX_GROUP_NAME = 256;
@@ -20,9 +20,6 @@ const SECRET_HASH = /^[0-9a-f]{64}$/;
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 const eb = expressionBuilder<Database>();
-
-/** A missing `autoJoin` means false. */
-export type LoginPlanWithAutoJoin = LoginPlan & { readonly autoJoin?: boolean };
 
 function timestamp(field: string, value: string): string {
   if (typeof value !== 'string' || !TIMESTAMP.test(value)) {
@@ -128,7 +125,16 @@ function bindingStatement(ctx: OrgContext, plan: LoginPlan): ScalarStatement {
   return compile(
     db
       .insertInto('identity_provider_binding')
-      .values({ org_id: ctx.orgId, provider: plan.provider, anchor: plan.trustAnchor })
+      .columns(['org_id', 'provider', 'anchor'])
+      .expression(
+        db
+          .selectNoFrom((values) => [
+            values.val(ctx.orgId).as('org_id'),
+            values.val(plan.provider).as('provider'),
+            values.val(plan.trustAnchor).as('anchor'),
+          ])
+          .where(eb.not(blockedGuard(ctx, plan))),
+      )
       .onConflict((conflict) => conflict.doNothing()),
   ) as ScalarStatement;
 }
@@ -174,6 +180,18 @@ function foreignIdentityGuard(ctx: OrgContext, plan: LoginPlan): Guard {
       .where('identity.provider', '=', plan.provider)
       .where('identity.subject', '=', plan.subject)
       .where('identity.user_id', '<>', plan.userId),
+  );
+}
+
+function blockedGuard(ctx: OrgContext, plan: LoginPlan): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('identity_block')
+      .select(sql.lit(1).as('one'))
+      .where('identity_block.org_id', '=', ctx.orgId)
+      .where('identity_block.provider', '=', plan.provider)
+      .where('identity_block.issuer', '=', plan.trustAnchor)
+      .where('identity_block.subject', '=', plan.subject),
   );
 }
 
@@ -332,33 +350,16 @@ function insertGroupsStatement(
   ) as ScalarStatement;
 }
 
-function revokePreviousStatement(
-  ctx: OrgContext,
-  plan: LoginPlan,
-  previousSecretHash: string,
-  now: string,
-  guards: readonly Guard[],
-): ScalarStatement {
-  let query = db
-    .updateTable('session')
-    .set({ revoked_at: now })
-    .where('session.org_id', '=', ctx.orgId)
-    .where('session.secret_hash', '=', previousSecretHash)
-    .where('session.revoked_at', 'is', null)
-    .where('session.id', '<>', plan.session.id)
-    .where((values) =>
-      values.exists(
-        values
-          .selectFrom('session as created')
-          .select('created.id')
-          .where('created.id', '=', plan.session.id)
-          .where('created.org_id', '=', ctx.orgId)
-          .where('created.secret_hash', '=', plan.session.secretHash)
-          .where('created.created_at', '=', now),
-      ),
-    );
-  for (const guard of guards) query = query.where(guard);
-  return compile(query) as ScalarStatement;
+function createdSessionGuard(ctx: OrgContext, plan: LoginPlan, now: string): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('session as created')
+      .select('created.id')
+      .where('created.id', '=', plan.session.id)
+      .where('created.org_id', '=', ctx.orgId)
+      .where('created.secret_hash', '=', plan.session.secretHash)
+      .where('created.created_at', '=', now),
+  );
 }
 
 function touchUserStatement(
@@ -387,7 +388,7 @@ function touchUserStatement(
 
 export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
   return {
-    async commit(ctx: OrgContext, plan: LoginPlanWithAutoJoin): Promise<'created' | 'refused'> {
+    async commit(ctx: OrgContext, plan: LoginPlan): Promise<'created' | 'refused'> {
       const now = timestamp('now', plan.now);
       const evidenceTime = timestamp('evidenceTime', plan.evidenceTime);
       normalizedEmail(plan.email);
@@ -413,8 +414,15 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
         subject: plan.subject,
         userId: plan.userId,
       });
-      const guards = [owns, anchorOk, plannedIdentityGuard(ctx, plan), currentUserGuard(ctx, plan)];
-      const identityGuards = [anchorOk];
+      const unblocked = eb.not(blockedGuard(ctx, plan));
+      const guards = [
+        owns,
+        anchorOk,
+        unblocked,
+        plannedIdentityGuard(ctx, plan),
+        currentUserGuard(ctx, plan),
+      ];
+      const identityGuards = [anchorOk, unblocked];
       if (!plan.createUser) {
         const singleSubject = eb.not(otherSubjectGuard(ctx, plan));
         guards.push(singleSubject);
@@ -424,7 +432,7 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
 
       const statements: ScalarStatement[] = [bindingStatement(ctx, plan)];
       if (plan.createUser) {
-        const creationGuards = [anchorOk];
+        const creationGuards = [anchorOk, unblocked];
         if (plan.autoJoin !== true) creationGuards.push(invitationGuard(ctx, plan, groups));
         statements.push(createUserStatement(ctx, plan, creationGuards, now, displayName));
       }
@@ -436,7 +444,12 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
       const sessionIndex = statements.length;
       statements.push(sessionInsertStatement(ctx, plan.session, guards) as ScalarStatement);
       if (previousSecretHash !== null) {
-        statements.push(revokePreviousStatement(ctx, plan, previousSecretHash, now, guards));
+        statements.push(
+          revokePreviousStatement(ctx, previousSecretHash, plan.session.id, now, [
+            ...guards,
+            createdSessionGuard(ctx, plan, now),
+          ]),
+        );
       }
       statements.push(touchUserStatement(ctx, plan, guards, now, displayName));
 

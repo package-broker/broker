@@ -3,11 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ScalarStatement, StatementResult } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
+import type { LoginPlan } from '@package-broker/core/db/users';
 import { isoTimestamp, systemClock, ulid } from '@package-broker/core/ids';
-import {
-  createLoginWriter,
-  type LoginPlanWithAutoJoin,
-} from '@package-broker/db-sqlite/repositories/login';
+import { createLoginWriter } from '@package-broker/db-sqlite/repositories/login';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import {
   openMigratedDatabase,
@@ -103,7 +101,7 @@ async function seedLogins(database: MigratedDatabase | null, file: string | null
     ] as const;
     for (const [index, [userId, email, subject, provider, anchor]] of logins.entries()) {
       const identityId = `01J0IDENT${String(index)}00000000000000X`;
-      const plan: LoginPlanWithAutoJoin = {
+      const plan: LoginPlan = {
         userId,
         createUser: true,
         autoJoin: true,

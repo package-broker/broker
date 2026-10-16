@@ -7,6 +7,7 @@ import {
   notModifiedResponse,
   npmValidators,
   representationValidator,
+  validatorHeaders,
   type ClockAdvance,
   type RepresentationClock,
 } from './conditional.js';
@@ -49,6 +50,7 @@ function memoryClock(start = Date.parse('2026-10-16T10:00:00Z')) {
       }
       const current = rows.get(id)!;
       return {
+        stale: false,
         validator: current.validator,
         lastModified: new Date(current.lastModified).toISOString().replace('.000Z', 'Z'),
       };
@@ -116,10 +118,30 @@ describe('representation validator', () => {
 });
 
 describe('composer validators', () => {
+  it('omits Last-Modified for a stale reading and serves a conditional request with 200', async () => {
+    const clock: RepresentationClock = {
+      advance: async () => ({
+        validator: 'f'.repeat(64),
+        lastModified: '2026-10-16T10:00:00Z',
+        stale: true,
+      }),
+    };
+    const validators = await composerValidators(clock, ctx, pkg, 'composer-p2', 1, embedded);
+    expect(validators).toEqual({});
+    const request = get({ 'If-Modified-Since': 'Fri, 16 Oct 2026 10:00:00 GMT' });
+    const response = isNotModified(request, validators)
+      ? notModifiedResponse(validators, 'Authorization')
+      : new Response('body', { headers: validatorHeaders(validators) });
+    expect(response.status).toBe(200);
+    expect(response.headers.has('Last-Modified')).toBe(false);
+  });
+
   it('keys the clock by project, package name hash and form', async () => {
     const { clock } = memoryClock();
     await composerValidators(clock, ctx, pkg, 'composer-p2', 1, embedded);
     const [, input] = vi.mocked(clock.advance).mock.calls[0]!;
+    expect(input.rev).toBe(pkg.rev);
+    expect(input.packageId).toBe(pkg.packageId);
     expect(input.projectId).toBe('proj-1');
     expect(input.form).toBe('composer-p2');
     expect(input.keyHash).toMatch(HEX64);
@@ -150,12 +172,16 @@ describe('composer validators', () => {
     const first = await composerValidators(clock, ctx, pkg, 'composer-p2', 1, embedded);
     const second = await composerValidators(clock, ctx, next, 'composer-p2', render, embedded);
     expect(second.lastModified).not.toBe(first.lastModified);
-    expect(isNotModified(get({ 'If-Modified-Since': first.lastModified }), second)).toBe(false);
+    expect(isNotModified(get({ 'If-Modified-Since': first.lastModified! }), second)).toBe(false);
   });
 
   it('refuses a clock that returns another validator', async () => {
     const clock: RepresentationClock = {
-      advance: async () => ({ validator: 'f'.repeat(64), lastModified: '2026-10-16T10:00:00Z' }),
+      advance: async () => ({
+        stale: false,
+        validator: 'f'.repeat(64),
+        lastModified: '2026-10-16T10:00:00Z',
+      }),
     };
     await expect(composerValidators(clock, ctx, pkg, 'composer-p2', 1, embedded)).rejects.toThrow();
   });

@@ -7,12 +7,15 @@ export type NpmForm = Exclude<CatalogueDocKind, ComposerForm>;
 
 export interface ClockAdvance {
   readonly projectId: string;
+  readonly packageId: string;
   readonly keyHash: string;
   readonly form: ComposerForm;
   readonly validator: string;
+  readonly rev: number;
 }
 
 export interface ClockReading {
+  readonly stale: boolean;
   readonly validator: string;
   /** `YYYY-MM-DDTHH:MM:SSZ`, whole seconds. */
   readonly lastModified: string;
@@ -73,10 +76,18 @@ export async function composerValidators(
   form: ComposerForm,
   renderVersion: number,
   embedded: RenderEmbedded,
-): Promise<{ lastModified: string }> {
+): Promise<{ lastModified?: string }> {
   const validator = await representationValidator(pkg, form, renderVersion, embedded);
   const keyHash = await sha256Hex(JSON.stringify([pkg.ecosystem, pkg.key]));
-  const reading = await clock.advance(ctx, { projectId: pkg.projectId, keyHash, form, validator });
+  const reading = await clock.advance(ctx, {
+    projectId: pkg.projectId,
+    packageId: pkg.packageId,
+    keyHash,
+    form,
+    validator,
+    rev: pkg.rev,
+  });
+  if (reading.stale) return {};
   if (reading.validator !== validator) {
     throw new Error('representation clock returned a different validator');
   }

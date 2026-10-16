@@ -23,6 +23,7 @@ async function make(): Promise<JobContractFixture> {
   const database = await openMigratedDatabase({
     file: join(directory, 'contract.sqlite'),
     twoOrganizations: true,
+    d1PatternLimit: true,
   });
   closers.push(async () => {
     await database.close();

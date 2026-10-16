@@ -126,4 +126,24 @@ describe('liveSessionCondition', () => {
       text: 1,
     });
   });
+
+  describe('absolute lifetime', () => {
+    const future = { expiresAt: nowOffset('+86400'), lastSeenAt: NOW };
+
+    it('refuses a session created 12 h and 1 s ago', () => {
+      expect(evaluate({ ...future, createdAt: nowOffset('-43201') }).shared).toBe(0);
+    });
+
+    it('refuses a session created exactly 12 h ago', () => {
+      expect(evaluate({ ...future, createdAt: nowOffset('-43200') }).shared).toBe(0);
+    });
+
+    it('accepts a session created 12 h minus 1 s ago', () => {
+      expect(evaluate({ ...future, createdAt: nowOffset('-43199') }).shared).toBe(1);
+    });
+
+    it('refuses a malformed created_at even when last_seen_at is fresh', () => {
+      expect(evaluate({ ...future, createdAt: sql`'not-a-timestamp'` }).shared).toBe(0);
+    });
+  });
 });

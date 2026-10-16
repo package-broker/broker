@@ -1,0 +1,53 @@
+export type BackupScope = 'include' | 'include-rows-only' | 'regenerate' | 'exclude';
+
+export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
+  access_grant: 'include',
+  access_mutation_guard: 'exclude',
+  audit_event: 'include',
+  blob: 'include-rows-only',
+  bundle: 'include',
+  bundle_item: 'include',
+  cache_epoch: 'regenerate',
+  credential: 'include',
+  customer: 'include',
+  customer_grant: 'include',
+  dist_tag: 'include',
+  dist_tag_history: 'include',
+  identity: 'include',
+  identity_block: 'include',
+  identity_provider_binding: 'include',
+  import_ref: 'include',
+  import_run: 'include',
+  job: 'exclude',
+  job_attempt: 'exclude',
+  job_schedule: 'exclude',
+  local_login: 'include',
+  migration_lock: 'exclude',
+  organization: 'include',
+  package: 'include',
+  project: 'include',
+  project_package: 'include',
+  project_package_pattern: 'include',
+  project_source: 'include',
+  registered_name: 'include',
+  role: 'include',
+  role_permission: 'include',
+  schema_migration: 'include',
+  service_principal: 'include',
+  service_principal_permission: 'include',
+  session: 'exclude',
+  source: 'include',
+  token: 'include',
+  token_project: 'include',
+  user_account: 'include',
+  user_group: 'exclude',
+  version: 'include',
+  version_revision: 'include',
+  webhook_delivery: 'exclude',
+};
+
+export function backupScopeOf(table: string): BackupScope {
+  const scope = BACKUP_SCOPE[table];
+  if (scope === undefined) throw new Error(`table ${table} has no backup scope`);
+  return scope;
+}

@@ -1172,8 +1172,8 @@ describe('completeIdentityLogin: lost write race', () => {
   });
 });
 
-function firstPlan(harnessValue: Harness): LoginPlan & { autoJoin: boolean } {
-  return harnessValue.plans()[0] as LoginPlan & { autoJoin: boolean };
+function firstPlan(harnessValue: Harness): LoginPlan {
+  return harnessValue.plans()[0] as LoginPlan;
 }
 
 describe('completeIdentityLogin: denial attribution', () => {

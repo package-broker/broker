@@ -21,9 +21,6 @@ const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[
 
 const eb = expressionBuilder<Database>();
 
-/** A missing `autoJoin` means false. */
-export type LoginPlanWithAutoJoin = LoginPlan & { readonly autoJoin?: boolean };
-
 function timestamp(field: string, value: string): string {
   if (typeof value !== 'string' || !TIMESTAMP.test(value)) {
     throw new TypeError(`${field} must be a UTC timestamp with millisecond precision`);
@@ -391,7 +388,7 @@ function touchUserStatement(
 
 export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
   return {
-    async commit(ctx: OrgContext, plan: LoginPlanWithAutoJoin): Promise<'created' | 'refused'> {
+    async commit(ctx: OrgContext, plan: LoginPlan): Promise<'created' | 'refused'> {
       const now = timestamp('now', plan.now);
       const evidenceTime = timestamp('evidenceTime', plan.evidenceTime);
       normalizedEmail(plan.email);

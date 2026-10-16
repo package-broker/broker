@@ -346,3 +346,84 @@ describe('parseAllowlist', () => {
     }
   });
 });
+
+describe('userinfo in any spelling', () => {
+  it.each([
+    ['https:@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https://@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https://:@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https:\\\\@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https:/\\@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https:///@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https:/\t/@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https:\n@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['\x01https:@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['\x00https://@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['\x1fhttps:\\\\@example.com/', { username: '', password: '', hostname: 'example.com' }],
+    ['https://u%40x@example.com/', { username: 'u%40x', password: '', hostname: 'example.com' }],
+  ])('refuses %s as userinfo', (input, parsed) => {
+    const url = new URL(input);
+    expect({ username: url.username, password: url.password, hostname: url.hostname }).toEqual(
+      parsed,
+    );
+    expect(classifyUrl(input, node)).toEqual({ ok: false, reason: 'userinfo' });
+  });
+
+  it('refuses a percent-encoded at sign in the host', () => {
+    expect(() => new URL('https://user%40example.com/')).toThrow();
+    expect(classifyUrl('https://user%40example.com/', node)).toEqual({
+      ok: false,
+      reason: 'invalid_url',
+    });
+  });
+
+  it.each([
+    'https:@broker.example.com',
+    'https:\\\\@broker.example.com',
+    '\x01https:@broker.example.com',
+    '\x00https://@broker.example.com',
+    '\x1fhttps:\\\\@broker.example.com',
+  ])('refuses %s as a self origin', (bad) => {
+    expect(() =>
+      createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [bad] }),
+    ).toThrow('selfOrigins entries must be absolute http(s) origins');
+  });
+});
+
+describe('self origins are bare origins', () => {
+  it.each([
+    'https://broker.example/app',
+    'https://broker.example/app/',
+    'https://broker.example/?x=1',
+    'https://broker.example/?',
+    'https://broker.example/#top',
+    'https://broker.example#',
+    'https://broker.example/.',
+    'https://broker.example/./',
+    'https://broker.example/..',
+    'https://broker.example/%2e/',
+    'https://broker.example//',
+    'https://broker.example\\',
+  ])('throws on %s', (bad) => {
+    expect(() =>
+      createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [bad] }),
+    ).toThrow('selfOrigins entries must be absolute http(s) origins');
+  });
+
+  it('accepts an origin with or without the root slash', () => {
+    const policy = createOutboundPolicy({
+      allowPrivateHosts: [],
+      runtime: 'node',
+      selfOrigins: [
+        'https://broker.example',
+        'https://pkg.example:8443/',
+        '\x01https://x.example\x1f',
+      ],
+    });
+    expect(policy.selfOrigins).toEqual([
+      'https://broker.example',
+      'https://pkg.example:8443',
+      'https://x.example',
+    ]);
+  });
+});

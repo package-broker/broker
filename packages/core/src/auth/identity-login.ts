@@ -59,8 +59,6 @@ export interface IdentityLoginDeps {
   readonly onDenied?: IdentityReauthDeps['onDenied'];
 }
 
-type PlanWithAutoJoin = LoginPlan & { readonly autoJoin: boolean };
-
 interface Candidate {
   readonly email: string;
   readonly subject: string;
@@ -299,7 +297,7 @@ async function attempt(
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_MS).toISOString();
   const sessionId = deps.ids.ulid();
-  const plan: PlanWithAutoJoin = {
+  const plan: LoginPlan = {
     userId,
     createUser,
     email: candidate.email,

@@ -830,6 +830,7 @@ describe('permissionRows and holdsPermission', () => {
           providerAnchors: [OIDC],
           projectState: 'active',
         }),
+        a,
       );
 
     await expect(executor.batch([...guard(U1, 'project:grants:write')])).resolves.toBeDefined();
@@ -1153,6 +1154,7 @@ describe('round 2', () => {
                 }),
               ),
           ),
+          a,
         );
       await expect(executor.batch([...guard('u1@example.test')])).resolves.toBeDefined();
       await expect(executor.batch([...guard('u2@example.test')])).rejects.toThrow();

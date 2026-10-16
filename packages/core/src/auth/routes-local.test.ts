@@ -749,7 +749,7 @@ describe('createLocalRoutes', () => {
 
       expect(response.status).toBe(500);
       assertNoSentinels(h.entries);
-      expect(h.entries.some((entry) => entry['error'] === 'DbError')).toBe(true);
+      expect(h.entries.some((entry) => entry['error_name'] === 'DbError')).toBe(true);
     });
 
     it('survives a throwing log sink', async () => {

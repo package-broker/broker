@@ -34,6 +34,11 @@ import {
   type ProtectedHolderProvider,
   type UserIdOperand,
 } from '../kysely.js';
+import {
+  DEFAULT_IDLE_SECONDS,
+  liveSessionCondition,
+  requireIdleSeconds,
+} from './session-liveness.js';
 
 export type { ProtectedHolderProvider } from '../kysely.js';
 
@@ -176,7 +181,6 @@ const looseEb = expressionBuilder<LooseDatabase, string>();
 
 const SECRET_HASH = /^[0-9a-f]{64}$/;
 const TOUCH_INTERVAL_SECONDS = 300;
-const DEFAULT_IDLE_SECONDS = 3600;
 
 const KNOWN_PERMISSIONS: readonly string[] = PERMISSIONS.map((entry) => entry.name);
 const KNOWN_PROJECT_PERMISSIONS: readonly string[] = PERMISSIONS.filter(
@@ -478,13 +482,6 @@ function requireSecretHash(value: string): string {
   return value;
 }
 
-function requireIdleSeconds(value: number): number {
-  if (!Number.isInteger(value) || value < 60 || value > 86400) {
-    throw new RangeError('idleSeconds must be an integer from 60 to 86400');
-  }
-  return value;
-}
-
 /** The single read behind `lookupSession`. */
 export function lookupSessionStatement(
   ctx: OrgContext,
@@ -501,7 +498,6 @@ export function lookupSessionStatement(
   }
   requireProviders(input.providerAnchors);
   const withProject = input.boundary === 'project' && input.projectSlug !== null;
-  const nowSeconds = sql`unixepoch('now', 'subsec')`;
 
   const projectOperand: ProjectOperand = withProject
     ? (looseEb.ref('p.id') as unknown as Expression<string | null>)
@@ -595,12 +591,8 @@ export function lookupSessionStatement(
     ])
     .where('s.secret_hash', '=', input.secretHash)
     .where('s.org_id', '=', ctx.orgId)
-    .where('s.revoked_at', 'is', null)
     .where(sql<SqlBool>`(s.identity_id is null or i.id is not null)`)
-    .where(sql<SqlBool>`unixepoch(s.expires_at, 'subsec') > ${nowSeconds}`)
-    .where(
-      sql<SqlBool>`unixepoch(coalesce(s.last_seen_at, s.created_at), 'subsec') > ${nowSeconds} - ${idleSeconds}`,
-    )
+    .where(liveSessionCondition('s', idleSeconds))
     .where('u.status', '=', 'active');
 
   return compile(select);
@@ -1000,11 +992,7 @@ export function createAccessRepository(
             .set({ last_seen_at: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` })
             .where('org_id', '=', ctx.orgId)
             .where('id', '=', sessionId)
-            .where('revoked_at', 'is', null)
-            .where(sql<SqlBool>`unixepoch(expires_at, 'subsec') > unixepoch('now', 'subsec')`)
-            .where(
-              sql<SqlBool>`unixepoch(coalesce(last_seen_at, created_at), 'subsec') > unixepoch('now', 'subsec') - ${idleSeconds}`,
-            )
+            .where(liveSessionCondition('session', idleSeconds))
             .where(
               sql<SqlBool>`unixepoch(coalesce(last_seen_at, created_at), 'subsec') < unixepoch('now', 'subsec') - ${TOUCH_INTERVAL_SECONDS}`,
             )

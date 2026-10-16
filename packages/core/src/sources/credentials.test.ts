@@ -7,6 +7,7 @@ import {
   parseCredentialMaterial,
   type CredentialKind,
 } from './credentials.js';
+import { stripCredentialEcho } from './credential-echo.js';
 import { createPolicyFetch } from './policy-fetch.js';
 import { createOutboundPolicy } from './url-policy.js';
 
@@ -135,7 +136,8 @@ describe('round 2 hardening', () => {
     const material = parse('header', { name: ' X-Api-Key ', value: `  ${SECRET}  ` });
     const bound = bindCredential(material, [ORIGIN]);
     expect(bound.apply(new Headers(), new URL(`${ORIGIN}/`)).headers.get('x-api-key')).toBe(SECRET);
-    expect(credentialEchoProbe(material).secrets).toEqual([SECRET]);
+    expect(credentialEchoProbe(material).secrets).toContain(SECRET);
+    expect(credentialEchoProbe(material).secrets).not.toContain(`  ${SECRET}  `);
     refusal(() => parse('header', { name: 'x-api-key', value: `${SECRET}\tx` }));
   });
 
@@ -326,5 +328,150 @@ describe('credentialEchoProbe', () => {
     const material = parse('bearer');
     credentialEchoProbe(material);
     expect(JSON.stringify(material)).not.toContain(SECRET);
+  });
+});
+
+describe('harmless formatting of key material', () => {
+  const pem = samples.ssh_key.privateKeyPem ?? '';
+
+  it.each([`\n${pem}`, `\n\n  ${pem}\n\n`, `\t${pem}\r\n`])(
+    'accepts and normalises a PEM with surrounding whitespace',
+    (padded) => {
+      const ssh = parse('ssh_key', { ...samples.ssh_key, privateKeyPem: padded });
+      if (ssh.kind !== 'ssh_key') throw new Error('kind');
+      expect(ssh.privateKeyPem).toBe(`${pem}\n`);
+      const app = parse('github_app', { ...samples.github_app, privateKeyPem: padded });
+      if (app.kind !== 'github_app') throw new Error('kind');
+      expect(app.privateKeyPem).toBe(`${pem}\n`);
+    },
+  );
+
+  it('still refuses a truncated PEM', () => {
+    refusal(() =>
+      parse('ssh_key', {
+        ...samples.ssh_key,
+        privateKeyPem: `\n-----BEGIN PRIVATE KEY-----\n${PEM_BODY}\n`,
+      }),
+    );
+    refusal(() =>
+      parse('ssh_key', {
+        ...samples.ssh_key,
+        privateKeyPem: `-----BEGIN PRIVATE KEY-----\n${PEM_BODY}`,
+      }),
+    );
+    refusal(() => parse('ssh_key', { ...samples.ssh_key, privateKeyPem: `x\n${pem}` }));
+  });
+
+  it.each(['\f', '\v'])('refuses a PEM padded or broken with %j', (ws) => {
+    refusal(() => parse('ssh_key', { ...samples.ssh_key, privateKeyPem: `${ws}${pem}` }));
+    refusal(() => parse('ssh_key', { ...samples.ssh_key, privateKeyPem: `${pem}${ws}` }));
+    refusal(() =>
+      parse('ssh_key', {
+        ...samples.ssh_key,
+        privateKeyPem: `-----BEGIN PRIVATE KEY-----${ws}${PEM_BODY}\n-----END PRIVATE KEY-----`,
+      }),
+    );
+  });
+
+  it('trims the end of every known_hosts line', () => {
+    const material = parse('ssh_key', {
+      ...samples.ssh_key,
+      knownHosts: 'host ssh-ed25519 AAAA \t\r\nother ssh-rsa BBBB\t',
+    });
+    if (material.kind !== 'ssh_key') throw new Error('kind');
+    expect(material.knownHosts).toBe('host ssh-ed25519 AAAA\nother ssh-rsa BBBB');
+  });
+
+  it('accepts and normalises known_hosts fields separated by tabs', () => {
+    const material = parse('ssh_key', {
+      ...samples.ssh_key,
+      knownHosts: 'host\tssh-ed25519\tAAAA\nother  \t ecdsa-sha2-nistp256 BBBB\tcomment',
+    });
+    if (material.kind !== 'ssh_key') throw new Error('kind');
+    expect(material.knownHosts).toBe(
+      'host ssh-ed25519 AAAA\nother ecdsa-sha2-nistp256 BBBB comment',
+    );
+  });
+
+  it('still refuses other known_hosts formats', () => {
+    refusal(() => parse('ssh_key', { ...samples.ssh_key, knownHosts: 'host\tAAAA' }));
+    refusal(() => parse('ssh_key', { ...samples.ssh_key, knownHosts: 'host\trsa\tAAAA' }));
+    refusal(() => parse('ssh_key', { ...samples.ssh_key, knownHosts: 'host\tssh-ed25519\tAA*A' }));
+  });
+});
+
+describe('credentialEchoProbe encoded variants', () => {
+  const SPECIAL = 'tok/en+v@lue?=ab~';
+  const b64 = (text: string): string => Buffer.from(text, 'utf8').toString('base64');
+  const b64url = (text: string): string => Buffer.from(text, 'utf8').toString('base64url');
+  const encoded = (text: string): string[] => [
+    text,
+    encodeURIComponent(text),
+    b64(text),
+    b64url(text),
+  ];
+
+  it.each([
+    ['bearer', { token: SPECIAL }],
+    ['npm_token', { token: SPECIAL }],
+    ['header', { name: 'x-api-key', value: SPECIAL }],
+    ['query', { param: 'access_token', value: SPECIAL }],
+  ] as const)('%s emits raw, percent-encoded, base64 and base64url forms', (kind, value) => {
+    const secrets = credentialEchoProbe(parse(kind, value)).secrets;
+    for (const variant of encoded(SPECIAL)) expect(secrets).toContain(variant);
+  });
+
+  it('http_basic emits every form of the password and of user:pass', () => {
+    const secrets = credentialEchoProbe(
+      parse('http_basic', { username: 'deploy', password: SPECIAL }),
+    ).secrets;
+    for (const variant of [...encoded(SPECIAL), ...encoded(`deploy:${SPECIAL}`)]) {
+      expect(secrets).toContain(variant);
+    }
+    expect(secrets).not.toContain('deploy');
+  });
+
+  it('http_basic emits every form of a username of at least eight characters', () => {
+    const secrets = credentialEchoProbe(
+      parse('http_basic', { username: 'deploy@corp', password: SPECIAL }),
+    ).secrets;
+    for (const variant of encoded('deploy@corp')) expect(secrets).toContain(variant);
+  });
+
+  it('github_app and ssh_key emit every form of the key material', () => {
+    const pem = samples.ssh_key.privateKeyPem ?? '';
+    for (const variant of encoded(pem)) {
+      expect(credentialEchoProbe(parse('ssh_key')).secrets).toContain(variant);
+      expect(credentialEchoProbe(parse('github_app')).secrets).toContain(variant);
+    }
+    for (const variant of encoded(`${SECRET}-hook`)) {
+      expect(credentialEchoProbe(parse('github_app')).secrets).toContain(variant);
+    }
+  });
+
+  it.each([
+    ['bearer', { token: SPECIAL }],
+    ['header', { name: 'x-api-key', value: SPECIAL }],
+    ['query', { param: 'access_token', value: SPECIAL }],
+  ] as const)('the echo guard refuses a base64url-encoded %s secret', (kind, value) => {
+    const probe = credentialEchoProbe(parse(kind, value));
+    expect(stripCredentialEcho({ description: `x ${b64url(SPECIAL)} y` }, probe)).toEqual({
+      refused: true,
+      reason: 'credential_echo',
+    });
+    expect(stripCredentialEcho({ description: b64(SPECIAL) }, probe)).toEqual({
+      refused: true,
+      reason: 'credential_echo',
+    });
+  });
+
+  it('the echo guard refuses a base64url-encoded basic pair', () => {
+    const probe = credentialEchoProbe(
+      parse('http_basic', { username: 'deploy', password: SPECIAL }),
+    );
+    expect(stripCredentialEcho({ readme: b64url(`deploy:${SPECIAL}`) }, probe)).toEqual({
+      refused: true,
+      reason: 'credential_echo',
+    });
   });
 });

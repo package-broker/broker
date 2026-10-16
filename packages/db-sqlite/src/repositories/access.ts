@@ -155,6 +155,12 @@ export interface AccessRepository {
    * `projectPermissions`, holding the organization and project rows. Never writes.
    */
   lookupToken(ctx: OrgContext, input: TokenLookupInput): Promise<TokenAccess | null>;
+  /**
+   * Sets `last_used_at` to database time only while the token is still unrevoked, unexpired, of
+   * the expected kind with an active principal, and its last use is NULL or at least five minutes
+   * old. True when a row changed. Call only after credential proof and a route allow.
+   */
+  touchToken(ctx: OrgContext, tokenId: string, kind: 'pat' | 'svc'): Promise<boolean>;
 }
 
 export interface AccessRepositoryOptions {
@@ -990,6 +996,34 @@ export function createAccessRepository(
             )
             .where(
               sql<SqlBool>`exists (select 1 from user_account where user_account.id = session.user_id and user_account.org_id = session.org_id and user_account.status = 'active')`,
+            )
+            .returning('id'),
+        ),
+      );
+      return rows.length > 0;
+    },
+
+    async touchToken(ctx, tokenId, kind) {
+      const rows = await executor.all<{ id: string }>(
+        compile(
+          loose
+            .updateTable('token')
+            .set({ last_used_at: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` })
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', tokenId)
+            .where('kind', '=', kind)
+            .where('revoked_at', 'is', null)
+            .where(
+              sql<SqlBool>`(expires_at is null or unixepoch(expires_at, 'subsec') > unixepoch('now', 'subsec'))`,
+            )
+            .where(
+              sql<SqlBool>`(last_used_at is null or unixepoch(last_used_at, 'subsec') is null or unixepoch(last_used_at, 'subsec') < unixepoch('now', 'subsec') - ${TOUCH_INTERVAL_SECONDS})`,
+            )
+            .where(
+              sql<SqlBool>`(
+                (token.kind = 'pat' and exists (select 1 from user_account where user_account.id = token.user_id and user_account.org_id = token.org_id and user_account.status = 'active'))
+                or (token.kind = 'svc' and exists (select 1 from service_principal where service_principal.id = token.service_principal_id and service_principal.org_id = token.org_id and service_principal.status = 'active'))
+              )`,
             )
             .returning('id'),
         ),

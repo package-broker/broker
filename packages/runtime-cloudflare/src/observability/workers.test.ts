@@ -181,3 +181,17 @@ describe('createWorkersSink', () => {
     ).toThrow(RangeError);
   });
 });
+
+describe('createWorkersSink field allowlist', () => {
+  it('drops fields outside the shared allowlist', () => {
+    const { sink, logs, errors, points } = setup();
+    sink.emit({
+      kind: 'log',
+      record: { level: 'info', event: 'req.done', message: 'secret text', email: 'a@b.c' },
+    } as ObsRecord);
+    const written = JSON.stringify([logs, errors, points]);
+    expect(written).not.toContain('message');
+    expect(written).not.toContain('email');
+    expect(written).toContain('req.done');
+  });
+});

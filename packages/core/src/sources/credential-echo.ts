@@ -99,8 +99,8 @@ function carriesQueryParam(text: string, params: ReadonlySet<string>): boolean {
 }
 
 /**
- * Known limits: a secret re-encoded as base64, split across several fields, or
- * percent-encoded more than 3 times, or otherwise transformed beyond percent-encoding and case is not detected. Only
+ * Known limits: only the probe's forms (including base64 cores at any byte offset),
+ * percent-decoded up to 3 times and case-folded, are detected; any other transformation, or a secret split across several fields, is not. Only
  * string, number and boolean values are compared.
  */
 export function stripCredentialEcho(

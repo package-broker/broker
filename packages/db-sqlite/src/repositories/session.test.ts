@@ -389,6 +389,48 @@ describe('revokePreviousStatement', () => {
     expect((await row('old-revoked'))?.revoked_at).toBe(PAST);
   });
 
+  it('leaves the previous session alive when a guard is false and revokes it when true', async () => {
+    await seed({ id: 'old', secret: 'old' });
+    await executor.batch([sessionInsertStatement(a, newSession(), [])]);
+    const fails = existsGuard((db) =>
+      db.selectFrom('organization').select('id').where('id', '=', 'nope'),
+    );
+    const passes = existsGuard((db) =>
+      db.selectFrom('organization').select('id').where('id', '=', a.orgId),
+    );
+
+    const [blocked] = await executor.batch([
+      revokePreviousStatement(a, hash('old'), 'new-session', NOW, [passes, fails]),
+    ]);
+    expect(blocked?.changes).toBe(0);
+    expect((await row('old'))?.revoked_at).toBeNull();
+
+    const [allowed] = await executor.batch([
+      revokePreviousStatement(a, hash('old'), 'new-session', NOW, [passes]),
+    ]);
+    expect(allowed?.changes).toBe(1);
+    expect((await row('old'))?.revoked_at).toBe(NOW);
+  });
+
+  it('never revokes the new session even when it carries the previous hash', async () => {
+    await executor.batch([sessionInsertStatement(a, newSession({ secretHash: hash('old') }), [])]);
+    const [result] = await executor.batch([
+      revokePreviousStatement(a, hash('old'), 'new-session', NOW),
+    ]);
+    expect(result?.changes).toBe(0);
+    expect((await row('new-session'))?.revoked_at).toBeNull();
+  });
+
+  it('leaves a session of another organization untouched when its hash is given', async () => {
+    await seed({ id: 'old-b', org: b, userId: USER_B, secret: 'old' });
+    await executor.batch([sessionInsertStatement(a, newSession(), [])]);
+    const [result] = await executor.batch([
+      revokePreviousStatement(a, hash('old'), 'new-session', NOW),
+    ]);
+    expect(result?.changes).toBe(0);
+    expect((await row('old-b'))?.revoked_at).toBeNull();
+  });
+
   it('revokes nothing when the new session id belongs to another organization', async () => {
     await seed({ id: 'old', secret: 'old' });
     await seed({ id: 'foreign', org: b, userId: USER_B, secret: 'foreign' });

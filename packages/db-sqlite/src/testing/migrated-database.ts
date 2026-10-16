@@ -31,7 +31,7 @@ function normalizeFile(file: string | undefined): string | undefined {
   return file;
 }
 
-async function loadCoreMigrations(): Promise<MigrationSource[]> {
+export async function discoveredMigrations(): Promise<MigrationSource[]> {
   const names = readdirSync(migrationsUrl)
     .filter((name) => name.endsWith('.sql'))
     .sort();
@@ -55,7 +55,7 @@ export async function openMigratedDatabase(
   let closed = false;
 
   try {
-    const sources = await loadCoreMigrations();
+    const sources = await discoveredMigrations();
     await migrate(opened.executor, sources, { holder: HOLDER });
     const orgs =
       options.twoOrganizations === true ? await seedTwoOrganizations(opened.executor) : null;

@@ -8,7 +8,16 @@ import type {
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
 import { isValidProviderId } from '@package-broker/core/identity/port';
-import { compile, db, existsGuard, protectedHolder, type Database, type Guard } from '../kysely.js';
+import {
+  compile,
+  db,
+  existsGuard,
+  protectedHolder,
+  type Database,
+  type Guard,
+  type ProtectedHolderExclusion,
+  type ProtectedHolderInput,
+} from '../kysely.js';
 import { revokeAllForUserStatement } from './session.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -77,6 +86,21 @@ function requireSubject(subject: GrantSubject): void {
   }
 }
 
+export type {
+  ProtectedHolderExclusion,
+  ProtectedHolderInput,
+  ProtectedHolderProvider,
+} from '../kysely.js';
+
+export interface GrantRepositoryOptions {
+  readonly holderInput: (ctx: OrgContext) => ProtectedHolderInput | Promise<ProtectedHolderInput>;
+}
+
+export interface ProtectedGrantRepository extends GrantRepository {
+  isProtectedHolder(ctx: OrgContext, userId: string, input: ProtectedHolderInput): Promise<boolean>;
+  countProtectedHoldersFor(ctx: OrgContext, input: ProtectedHolderInput): Promise<number>;
+}
+
 function toGrant(row: GrantRow): OrganizationGrant {
   let subject: GrantSubject;
   if (row.subject_type === 'email') {
@@ -107,16 +131,25 @@ function organizationRoleExists(ctx: OrgContext, roleId: string) {
     );
 }
 
+function withExclusion(
+  input: ProtectedHolderInput,
+  exclude: ProtectedHolderExclusion,
+): ProtectedHolderInput {
+  return { ...input, exclude: { ...input.exclude, ...exclude } };
+}
+
 function anotherHolder(
   ctx: OrgContext,
-  exclude: { readonly grantId?: string; readonly userId?: string },
+  input: ProtectedHolderInput,
+  exclude: ProtectedHolderExclusion,
 ): Guard {
+  const remaining = withExclusion(input, exclude);
   return existsGuard((database) =>
     database
       .selectFrom('user_account as holder')
       .select(sql.lit(1).as('one'))
       .where('holder.org_id', '=', ctx.orgId)
-      .where((eb) => protectedHolder(ctx, eb.ref('holder.id'), exclude)),
+      .where((eb) => protectedHolder(ctx, eb.ref('holder.id'), remaining)),
   );
 }
 
@@ -129,7 +162,10 @@ function organizationGrantExists(ctx: OrgContext, id: string) {
     .where('access_grant.scope', '=', 'organization');
 }
 
-export function createGrantRepository(executor: ScalarSqlExecutor): GrantRepository {
+export function createGrantRepository(
+  executor: ScalarSqlExecutor,
+  options: GrantRepositoryOptions,
+): ProtectedGrantRepository {
   return {
     async listOrganization(ctx: OrgContext): Promise<OrganizationGrant[]> {
       const rows = await executor.all<GrantRow>(
@@ -228,6 +264,7 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
     },
 
     async deleteOrganization(ctx, id) {
+      const holders = await options.holderInput(ctx);
       const [deleted, remaining] = await executor.batch([
         scalar(
           db
@@ -247,7 +284,7 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
                       .where('current_role.protects_last_holder', '=', 1),
                   ),
                 ),
-                anotherHolder(ctx, { grantId: id }),
+                anotherHolder(ctx, holders, { grantId: id }),
               ]),
             )
             .returning('id'),
@@ -260,6 +297,7 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
 
     async changeRole(ctx, id, roleId, now) {
       const stamp = timestamp(now);
+      const holders = await options.holderInput(ctx);
       const targetRole = organizationRoleExists(ctx, roleId);
       const [updated, state] = await executor.batch([
         scalar(
@@ -290,7 +328,7 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
                     .where('next_role.org_id', '=', ctx.orgId)
                     .where('next_role.protects_last_holder', '=', 1),
                 ),
-                anotherHolder(ctx, { grantId: id }),
+                anotherHolder(ctx, holders, { grantId: id }),
               ]),
             )
             .returning('id'),
@@ -305,6 +343,7 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
 
     async suspendUser(ctx, userId, now) {
       const stamp = timestamp(now);
+      const holders = await options.holderInput(ctx);
       const suspended = existsGuard((database) =>
         database
           .selectFrom('user_account')
@@ -323,8 +362,8 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
             .where('user_account.status', '=', 'active')
             .where((eb) =>
               eb.or([
-                anotherHolder(ctx, { userId }),
-                eb.not(protectedHolder(ctx, eb.ref('user_account.id'))),
+                anotherHolder(ctx, holders, { userId }),
+                eb.not(protectedHolder(ctx, eb.ref('user_account.id'), holders)),
               ]),
             )
             .returning('id'),
@@ -360,13 +399,41 @@ export function createGrantRepository(executor: ScalarSqlExecutor): GrantReposit
     },
 
     async countProtectedHolders(ctx) {
+      const holders = await options.holderInput(ctx);
       const rows = await executor.all<CountRow>(
         scalar(
           db
             .selectFrom('user_account as holder')
             .select((eb) => eb.fn.countAll<number>().as('n'))
             .where('holder.org_id', '=', ctx.orgId)
-            .where((eb) => protectedHolder(ctx, eb.ref('holder.id'))),
+            .where((eb) => protectedHolder(ctx, eb.ref('holder.id'), holders)),
+        ),
+      );
+      return Number(rows[0]?.n ?? 0);
+    },
+
+    async isProtectedHolder(ctx, userId, input) {
+      const rows = await executor.all<IdRow>(
+        scalar(
+          db
+            .selectFrom('user_account as holder')
+            .select('holder.id')
+            .where('holder.org_id', '=', ctx.orgId)
+            .where('holder.id', '=', userId)
+            .where((eb) => protectedHolder(ctx, eb.ref('holder.id'), input)),
+        ),
+      );
+      return rows.length > 0;
+    },
+
+    async countProtectedHoldersFor(ctx, input) {
+      const rows = await executor.all<CountRow>(
+        scalar(
+          db
+            .selectFrom('user_account as holder')
+            .select((eb) => eb.fn.countAll<number>().as('n'))
+            .where('holder.org_id', '=', ctx.orgId)
+            .where((eb) => protectedHolder(ctx, eb.ref('holder.id'), input)),
         ),
       );
       return Number(rows[0]?.n ?? 0);

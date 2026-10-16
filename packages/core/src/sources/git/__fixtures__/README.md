@@ -1,0 +1,2 @@
+Packfiles for pack.test.ts, generated offline in a temporary bare repository from blobs and one tree (no commits):
+`git hash-object -w` for three 600-line blobs differing by one line and an empty blob, `git mktree` for a tree naming them, then `git pack-objects -q --stdout --window=10 --delta-base-offset` (ofs-delta.pack) and without `--delta-base-offset` (ref-delta.pack). empty-blob.pack holds only the empty blob.

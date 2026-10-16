@@ -1,0 +1,45 @@
+{
+  "scenario": "local-git-http-backend",
+  "note": "Stock git-http-backend (git version 2.54.0, uploadpack.allowFilter unset) in node:24-alpine.",
+  "recordedAt": "2026-10-16T13:30:27.836Z",
+  "call": {
+    "repoUrl": "https://git.example.test/lib.git",
+    "refs": [
+      {
+        "name": "refs/tags/v1.0.0",
+        "oid": "91fede8b81f411b38642d05137392a751f4e0f4d"
+      }
+    ],
+    "path": "composer.json",
+    "filterCacheIndex": null,
+    "capabilities": null
+  },
+  "outcome": {
+    "kind": "error",
+    "name": "GitFetchError",
+    "code": "bad_response",
+    "message": "bad_response"
+  },
+  "exchanges": [
+    {
+      "request": {
+        "url": "https://git.example.test/lib.git/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDkxZmVkZThiODFmNDExYjM4NjQyZDA1MTM3MzkyYTc1MWY0ZTBmNGQKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZToxCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": ""
+      }
+    }
+  ]
+}

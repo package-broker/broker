@@ -13,7 +13,9 @@ describeMigrationLockContract(
     const directory = await mkdtemp(join(tmpdir(), 'pb-migration-lock-'));
     const connections: OpenedExecutor[] = [];
     const connect = (): OpenedExecutor => {
-      const opened = openNodeSqliteExecutor(join(directory, 'database.sqlite'));
+      const opened = openNodeSqliteExecutor(join(directory, 'database.sqlite'), {
+        d1PatternLimit: true,
+      });
       connections.push(opened);
       return opened;
     };

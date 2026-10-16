@@ -19,7 +19,7 @@ export interface AuthorizationRequest {
 
 export type AuthorizationDecision =
   | { readonly allow: true; readonly principal: Principal; readonly projectId: string | null }
-  | { readonly allow: false; readonly status: 401 | 403 };
+  | { readonly allow: false; readonly status: 401 | 403 | 404 };
 
 export interface AuthorizationEngine {
   authorize(request: AuthorizationRequest): Promise<AuthorizationDecision>;
@@ -52,6 +52,7 @@ const PRINCIPAL_KINDS = {
 const CONTROL_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 const FORBIDDEN: AuthorizationDecision = Object.freeze({ allow: false, status: 403 });
+const NOT_FOUND: AuthorizationDecision = Object.freeze({ allow: false, status: 404 });
 const UNAUTHORIZED: AuthorizationDecision = Object.freeze({ allow: false, status: 401 });
 
 export class EngineTimeoutError extends Error {
@@ -118,6 +119,7 @@ function validDecision(value: unknown): AuthorizationDecision | undefined {
       const status = dataValue(value, 'status');
       if (status === 401) return UNAUTHORIZED;
       if (status === 403) return FORBIDDEN;
+      if (status === 404) return NOT_FOUND;
       return undefined;
     }
 

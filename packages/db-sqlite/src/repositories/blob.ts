@@ -206,6 +206,35 @@ export function createBlobRepository(
       return rows[0] === undefined ? null : info(rows[0]);
     },
 
+    async narrowRefetchable(ctx, input) {
+      const sha256 = parseSha256(input?.key);
+      if (
+        !Number.isSafeInteger(input.size) ||
+        input.size < 0 ||
+        typeof input.mediaType !== 'string' ||
+        !BLOB_MEDIA_TYPES.has(input.mediaType)
+      ) {
+        throw new BlobValidationError();
+      }
+      const [result] = await executor.batch([
+        statement(
+          db
+            .updateTable('blob')
+            .set({ refetchable: 0 })
+            .where('org_id', '=', ctx.orgId)
+            .where('sha256', '=', sha256)
+            .where('deleted_at', 'is', null)
+            .where('size_bytes', '=', input.size)
+            .where('media_type', '=', input.mediaType)
+            .where('purge_after', 'is', null)
+            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
+            .returning(['sha256', 'size_bytes', 'media_type', 'purge_after']),
+        ),
+      ]);
+      const row = result?.rows[0] as InfoRow | undefined;
+      return row === undefined ? null : info(row);
+    },
+
     async inspect(ctx, key) {
       const sha256 = parseSha256(key);
       const rows = await executor.all<InfoRow & { purging: number }>(

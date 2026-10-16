@@ -373,6 +373,7 @@ describe('twoPassPut', () => {
           return info;
         },
         find: async (_c, key) => rows.get(key) ?? null,
+        narrowRefetchable: async () => null,
         inspect: async () => null,
       };
       const store = createBlobStore(byteStore, metadata, {

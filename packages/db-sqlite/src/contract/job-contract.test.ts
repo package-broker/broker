@@ -8,6 +8,7 @@ import { openMigratedDatabase } from '../testing/migrated-database.js';
 import {
   assertJobFixture,
   describeJobContract,
+  interceptBatches,
   jobContractCases,
   type JobContractFixture,
 } from './job-contract.js';
@@ -38,6 +39,7 @@ async function make(): Promise<JobContractFixture> {
     schedule: createJobScheduleRepository(database.executor),
     scheduleB: createJobScheduleRepository(second),
     random: (draw) => createJobRepository(database.executor, { random: draw }),
+    intercept: interceptBatches,
     async setLease(jobId, iso) {
       await database.executor.batch([
         { sql: 'UPDATE job SET lease_until = ? WHERE id = ?', params: [iso, jobId] },
@@ -88,6 +90,13 @@ const REQUIRED_CASES = [
   'settle after expiry without takeover succeeds',
   'schedule sync without conflict succeeds',
   'schedule sync with a conflicting interval rolls back',
+  'lease expiry between the statements of a claim stays consistent',
+  'a lease that lapses right after the grant leaves a reapable claim',
+  'a fault between claim statements rolls the claim back',
+  'a slot boundary inside a tick fires exactly one slot',
+  'corrupt payload scan progresses past valid resource-blocked rows',
+  'a stored payload accepted only by SQLite is dead before claim',
+  'a corrupted queued payload is dead with invalid_payload and the queue moves',
 ];
 
 describe('job contract registry', () => {
@@ -95,6 +104,39 @@ describe('job contract registry', () => {
     const names = [...jobContractCases.keys()];
     expect(names).toEqual(expect.arrayContaining(REQUIRED_CASES));
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('the slot boundary case detects an update that recomputes the slot from now', async () => {
+    const fixture = await make();
+    const run = jobContractCases.get('a slot boundary inside a tick fires exactly one slot')!;
+    let recomputed = false;
+    const intercept: NonNullable<JobContractFixture['intercept']> = (base, hook) =>
+      interceptBatches(
+        {
+          ...base,
+          all: (statement) => {
+            if (/^UPDATE job_schedule SET\s+last_slot/.test(statement.sql)) {
+              recomputed = true;
+              return base.all({
+                sql: `UPDATE job_schedule SET
+                  last_slot = strftime('%Y-%m-%dT%H:%M:00.000Z','now'),
+                  next_run_at = strftime('%Y-%m-%dT%H:%M:00.000Z','now','+1 minute')
+                  WHERE name = 'core:slot-boundary:v1'`,
+                params: [],
+              });
+            }
+            return base.all(statement);
+          },
+        },
+        hook,
+      );
+    await expect(run({ ...fixture, intercept })).rejects.toMatchObject({
+      actual: {
+        last_slot: '2020-01-01T00:02:00.000Z',
+        next_run_at: '2020-01-01T00:03:00.000Z',
+      },
+    });
+    expect(recomputed).toBe(true);
   });
 
   it('fails a fixture with a missing hook instead of skipping', () => {

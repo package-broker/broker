@@ -18,6 +18,10 @@
       "types": "./dist/db/*.d.ts",
       "default": "./dist/db/*.js"
     },
+    "./blob/s3": {
+      "types": "./dist/blob/s3.d.ts",
+      "default": "./dist/blob/s3.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -29,6 +33,7 @@
     "@hono/node-server": "catalog:",
     "@package-broker/core": "workspace:^",
     "@package-broker/db-sqlite": "workspace:^",
+    "aws4fetch": "1.0.20",
     "better-sqlite3": "catalog:",
     "hono": "catalog:"
   },

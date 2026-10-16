@@ -9,7 +9,7 @@ import type { Observability } from './platform/observability.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
-export const SUPPORTED_PLUGIN_API = [2, 3] as const;
+export const SUPPORTED_PLUGIN_API = [3, 3] as const;
 
 export type Platform = 'cloudflare' | 'node';
 

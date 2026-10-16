@@ -313,13 +313,73 @@ describe('authorizeRoute', () => {
     expect(Object.isFrozen(result)).toBe(true);
   });
 
-  it('reports a well-formed deny with status 404 as malformed', async () => {
+  it('forwards an exact deny with status 404', async () => {
     const onHookError = vi.fn<HookErrorHandler>();
 
     await expect(
       authorizeRoute(request, engineResolving({ allow: false, status: 404 }), [], onHookError),
-    ).resolves.toEqual({ allow: false, status: 403 });
+    ).resolves.toEqual({ allow: false, status: 404 });
+    expect(onHookError).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 405, 410, 500])(
+    'reports a deny with status %i outside the accepted set as malformed',
+    async (status) => {
+      const onHookError = vi.fn<HookErrorHandler>();
+
+      await expect(
+        authorizeRoute(request, engineResolving({ allow: false, status }), [], onHookError),
+      ).resolves.toEqual({ allow: false, status: 403 });
+      expectMalformedReport(onHookError);
+    },
+  );
+
+  it.each([
+    ['extra key', { allow: false, status: 404, reason: 'x' }],
+    ['string status', { allow: false, status: '404' }],
+    ['fractional status', { allow: false, status: 404.5 }],
+    ['missing status', { allow: false }],
+    ['null prototype', Object.assign(Object.create(null) as object, { allow: false, status: 404 })],
+    [
+      'class instance',
+      new (class Deny {
+        allow = false;
+        status = 404;
+      })(),
+    ],
+    [
+      'accessor status',
+      Object.defineProperty({ allow: false }, 'status', { get: () => 404, enumerable: true }),
+    ],
+    [
+      'throwing proxy',
+      new Proxy(
+        { allow: false, status: 404 },
+        {
+          getOwnPropertyDescriptor() {
+            throw new Error('trap');
+          },
+        },
+      ),
+    ],
+  ])('reports a malformed 404 (%s) through onHookError and denies 403', async (_name, value) => {
+    const onHookError = vi.fn<HookErrorHandler>();
+
+    await expect(authorizeRoute(request, engineResolving(value), [], onHookError)).resolves.toEqual(
+      { allow: false, status: 403 },
+    );
     expectMalformedReport(onHookError);
+  });
+
+  it('keeps a 404 decision when a hook chain is present and never runs the hooks', async () => {
+    const handler = vi.fn<Handler>(() => undefined);
+
+    const result = await authorizeRoute(request, engineResolving({ allow: false, status: 404 }), [
+      hook('a', handler),
+    ]);
+
+    expect(result).toEqual({ allow: false, status: 404 });
+    expect(handler).not.toHaveBeenCalled();
   });
 
   describe('snapshot taken before the engine runs', () => {

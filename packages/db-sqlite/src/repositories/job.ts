@@ -37,6 +37,16 @@ const MAX_PAYLOAD_BYTES = 131072;
 const MAX_TYPES_BYTES = 65536;
 const encoder = new TextEncoder();
 
+function typeList(types: readonly string[]): string {
+  if (!Array.isArray(types)) throw new RangeError('types must be an array');
+  if (types.length > MAX_TYPES) throw new RangeError('too many job types');
+  const json = JSON.stringify(types.map((type) => text('type', type)));
+  if (encoder.encode(json).length > MAX_TYPES_BYTES) {
+    throw new RangeError('registered types exceed the parameter budget');
+  }
+  return json;
+}
+
 const ERROR_CODES: Readonly<Record<JobErrorCode, true>> = {
   invalid_name: true,
   invalid_version: true,
@@ -58,6 +68,41 @@ const ERROR_CODES: Readonly<Record<JobErrorCode, true>> = {
 function isJobErrorCode(value: unknown): value is JobErrorCode {
   return typeof value === 'string' && Object.hasOwn(ERROR_CODES, value);
 }
+
+export const JOB_DUE_PAGE_LIMIT = 100;
+export const JOB_UNREGISTERED_GRACE_SECONDS = 24 * 60 * 60;
+
+export interface DueJobLister {
+  /**
+   * IDs of claimable jobs: queued, due by database time, of a registered type and not waiting on a
+   * resource that a running job holds; of several due rows on one resource only the first is listed. Ordered by `(run_at, id)`; `afterId` continues after that
+   * job's current position, and an unknown or no longer queued cursor yields an empty page.
+   */
+  listDue(
+    ctx: OrgContext,
+    input: {
+      readonly types: readonly string[];
+      readonly limit: number;
+      readonly afterId?: string | undefined;
+    },
+  ): Promise<readonly string[]>;
+  /**
+   * Marks dead (last error `unknown_job_type`) at most `limit` queued jobs whose type is not in
+   * `types`, that have been due for at least `graceSeconds`, and whose type had no attempt start or
+   * finish within that window (so a type that was registered again recently is spared). An empty
+   * `types` list buries nothing. Returns the number of rows changed.
+   */
+  buryUnregistered(
+    ctx: OrgContext,
+    input: {
+      readonly types: readonly string[];
+      readonly graceSeconds: number;
+      readonly limit: number;
+    },
+  ): Promise<number>;
+}
+
+export type SqliteJobRepository = JobRepository & DueJobLister;
 
 export interface JobRepositoryOptions {
   readonly random?: () => number;
@@ -155,7 +200,7 @@ function marker(outcome: JobAttemptOutcome, column: 'next_run_at' | 'finished_at
 export function createJobRepository(
   executor: SqlExecutor,
   options: JobRepositoryOptions = {},
-): JobRepository {
+): SqliteJobRepository {
   const jitter = (): RawBuilder<number> => {
     if (options.random === undefined) {
       return sql<number>`(0.8 + 0.2 * (abs(random() % 1000001)) / 1000000.0)`;
@@ -339,12 +384,8 @@ export function createJobRepository(
       const who = ulidOwner(owner);
       const lease = integer('leaseSeconds', input.leaseSeconds, 1, MAX_LEASE_SECONDS);
       const cap = integer('maxRunning', input.maxRunning, 1, MAX_RUNNING_LIMIT);
-      if (input.types.length > MAX_TYPES) throw new RangeError('too many job types');
+      const types = typeList(input.types);
       if (input.types.length === 0) return null;
-      const types = JSON.stringify(input.types.map((type) => text('type', type)));
-      if (encoder.encode(types).length > MAX_TYPES_BYTES) {
-        throw new RangeError('registered types exceed the parameter budget');
-      }
       const target = input.id === undefined ? sql`` : sql`AND c.id = ${text('id', input.id)}`;
       const eligible = sql`c.org_id = ${ctx.orgId} AND c.state = 'queued' AND c.run_at <= ${NOW}
         AND c.type IN (SELECT value FROM json_each(${types})) ${target}`;
@@ -469,6 +510,55 @@ export function createJobRepository(
         expireOrphans(ctx, expired(sql`NOT EXISTS`)),
       ]);
       return (requeued?.changes ?? 0) + (orphans?.changes ?? 0);
+    },
+
+    async listDue(ctx, input) {
+      const page = integer('limit', input.limit, 1, JOB_DUE_PAGE_LIMIT);
+      const types = typeList(input.types);
+      if (input.types.length === 0) return [];
+      const after =
+        input.afterId === undefined
+          ? sql``
+          : sql`AND (j.run_at, j.id) > (SELECT c.run_at, c.id FROM job c
+              WHERE c.org_id = ${ctx.orgId} AND c.id = ${text('afterId', input.afterId)}
+              AND c.state = 'queued')`;
+      const rows = await executor.all<{ id: string }>(
+        statement(sql`SELECT j.id FROM job j
+          WHERE j.state = 'queued' AND j.run_at <= ${NOW} AND j.org_id = ${ctx.orgId}
+          AND j.type IN (SELECT value FROM json_each(${types}))
+          AND (j.resource_key IS NULL OR (
+            NOT EXISTS (SELECT 1 FROM job r WHERE r.org_id = j.org_id
+              AND r.resource_key = j.resource_key AND r.state = 'running')
+            AND NOT EXISTS (SELECT 1 FROM job e WHERE e.org_id = j.org_id
+              AND e.resource_key = j.resource_key AND e.state = 'queued' AND e.run_at <= ${NOW}
+              AND e.type IN (SELECT value FROM json_each(${types}))
+              AND (e.run_at, e.id) < (j.run_at, j.id))))
+          ${after}
+          ORDER BY j.run_at, j.id LIMIT ${page}`),
+      );
+      return rows.map((row) => row.id);
+    },
+
+    async buryUnregistered(ctx, input) {
+      const types = typeList(input.types);
+      const grace = integer('graceSeconds', input.graceSeconds, 0, MAX_RELEASE_DELAY_SECONDS);
+      const page = integer('limit', input.limit, 1, JOB_DUE_PAGE_LIMIT);
+      if (input.types.length === 0) return 0;
+      const cutoff = sql`strftime(${sql.raw(`'${FORMAT}'`)}, 'now', printf('-%d seconds', ${grace}))`;
+      const [result] = await executor.batch([
+        statement(sql`UPDATE job SET state = 'dead', last_error = 'unknown_job_type',
+          finished_at = ${NOW}, updated_at = ${NOW}
+          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND id IN (
+            SELECT u.id FROM job u
+            WHERE u.state = 'queued' AND u.org_id = ${ctx.orgId}
+              AND u.run_at <= ${cutoff}
+              AND u.type NOT IN (SELECT value FROM json_each(${types}))
+              AND NOT EXISTS (SELECT 1 FROM job_attempt a JOIN job t ON t.id = a.job_id
+                WHERE a.org_id = ${ctx.orgId} AND t.type = u.type
+                AND (a.started_at > ${cutoff} OR a.finished_at > ${cutoff}))
+            ORDER BY u.run_at, u.id LIMIT ${page})`),
+      ]);
+      return result?.changes ?? 0;
     },
   };
 }

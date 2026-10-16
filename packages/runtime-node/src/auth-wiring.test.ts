@@ -86,7 +86,13 @@ const migrationsDirectory = join(
 );
 
 async function migrationSources(): Promise<MigrationSource[]> {
-  const names = ['0001_init.sql', '0002_local_login.sql', '0004_cache_epoch.sql'];
+  const names = [
+    '0001_init.sql',
+    '0002_local_login.sql',
+    '0003_access_model.sql',
+    '0004_cache_epoch.sql',
+    '0005_admin_permission_topup.sql',
+  ];
   return Promise.all(
     names.map(async (name) =>
       loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),

@@ -433,7 +433,7 @@ async function coreSources(): Promise<MigrationSource[]> {
 }
 
 describe('admin completeness', () => {
-  it('2: an organization seeded as of migration 0001 has every catalogue permission on organization_admin after all migrations and the bootstrap top-up', async () => {
+  it('2: an organization seeded as of migration 0001 has every catalogue permission on organization_admin after all migrations, before any bootstrap', async () => {
     const opened = openNodeSqliteExecutor();
     try {
       const [init, ...later] = await coreSources();
@@ -473,7 +473,7 @@ describe('admin completeness', () => {
         const roles = await createRoleRepository(opened.executor).list(ctx);
         return roles.find((role) => role.key === 'organization_admin')?.permissions ?? [];
       };
-      expect(missingCatalogue(await adminPermissions()).length).toBeGreaterThan(0);
+      expect(missingCatalogue(await adminPermissions())).toEqual([]);
 
       const bootstrap = (prefix: string, tag: string) =>
         bootstrapAdmin(opened.executor, ctx, {

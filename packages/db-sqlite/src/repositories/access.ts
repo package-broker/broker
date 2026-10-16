@@ -3,6 +3,7 @@ import {
   sql,
   type Expression,
   type Kysely,
+  type QueryCreator,
   type SelectQueryBuilder,
   type SqlBool,
 } from 'kysely';
@@ -13,12 +14,15 @@ import {
   db,
   EVIDENCE_FUTURE_SKEW_MS,
   EVIDENCE_MAX_AGE_MS,
+  boundVerifiedIdentity,
   guardAliases,
+  guardBindings,
   referencedTable,
   requireProviders,
   usableLocalLogin,
   verifiedIdentity,
   type Guard,
+  type GuardBindings,
   type ProtectedHolderProvider,
   type UserIdOperand,
 } from '../kysely.js';
@@ -127,7 +131,7 @@ export interface PermissionRowsOptions {
 }
 
 function freshEvidence(column: string) {
-  return sql<SqlBool>`${instantMs(column)} between ${nowMs} - ${EVIDENCE_MAX_AGE_MS} and ${nowMs} + ${EVIDENCE_FUTURE_SKEW_MS}`;
+  return sql<SqlBool>`${instantMs(column)} between ${nowMs} - ${sql.lit(EVIDENCE_MAX_AGE_MS)} and ${nowMs} + ${sql.lit(EVIDENCE_FUTURE_SKEW_MS)}`;
 }
 
 const ALIAS_NAMES = [
@@ -140,12 +144,19 @@ const ALIAS_NAMES = [
   'login',
   'credential',
   'perm',
+  'values',
+  'anchors',
 ] as const;
 
 type RowAlias = Record<(typeof ALIAS_NAMES)[number], string>;
 
+function literals(values: readonly string[]) {
+  return values.map((value) => sql.lit(value));
+}
+
 function branch(
-  ctx: OrgContext,
+  bindings: GuardBindings,
+  creator: QueryCreator<LooseDatabase>,
   alias: RowAlias,
   kind: 'email' | 'group',
   scope: PermissionScopeName,
@@ -158,8 +169,8 @@ function branch(
   const grantOwner = kind === 'email' ? alias.user : alias.member;
   const base =
     kind === 'email'
-      ? loose.selectFrom(`user_account as ${alias.user}`)
-      : loose
+      ? creator.selectFrom(`user_account as ${alias.user}`)
+      : creator
           .selectFrom(`user_group as ${alias.member}`)
           .innerJoin(`user_account as ${alias.user}`, (join) =>
             join
@@ -171,8 +182,8 @@ function branch(
     .innerJoin(`access_grant as ${alias.grant}`, (join) => {
       let joined = join
         .onRef(`${alias.grant}.org_id`, '=', `${grantOwner}.org_id`)
-        .on(`${alias.grant}.subject_type`, '=', kind)
-        .on(`${alias.grant}.scope`, '=', scope);
+        .on(`${alias.grant}.subject_type`, '=', sql.lit(kind))
+        .on(`${alias.grant}.scope`, '=', sql.lit(scope));
       joined =
         kind === 'email'
           ? joined
@@ -182,7 +193,7 @@ function branch(
               .onRef(`${alias.grant}.subject_provider`, '=', `${alias.member}.provider`)
               .onRef(`${alias.grant}.subject_value`, '=', `${alias.member}.group_name`);
       return scope === 'project'
-        ? joined.on(`${alias.grant}.project_id`, '=', projectId as string)
+        ? joined.on(`${alias.grant}.project_id`, '=', bound(bindings, 'project_id', projectId))
         : joined;
     })
     .innerJoin(`role as ${alias.role}`, (join) =>
@@ -201,29 +212,29 @@ function branch(
       `${alias.perm}.permission as permission`,
       `${alias.role}.protects_last_holder as protects`,
     ])
-    .where(`${alias.user}.org_id`, '=', ctx.orgId)
-    .where(`${alias.user}.id`, '=', userId)
-    .where(`${alias.user}.status`, '=', 'active')
-    .where(`${alias.perm}.permission`, 'in', names);
+    .where(`${alias.user}.org_id`, '=', bindings.org)
+    .where(`${alias.user}.id`, '=', bound(bindings, 'user_id', userId))
+    .where(`${alias.user}.status`, '=', sql.lit('active'))
+    .where(`${alias.perm}.permission`, 'in', literals(names));
 
   if (kind === 'group') {
     return query
-      .where(sql<SqlBool>`${sql.ref(`${alias.member}.org_id`)} = ${ctx.orgId}`)
+      .where(sql<SqlBool>`${sql.ref(`${alias.member}.org_id`)} = ${bindings.org}`)
       .where(freshEvidence(`${alias.member}.refreshed_at`))
       .where((eb) =>
         eb.exists(
-          verifiedIdentity(ctx, alias, providers, undefined)
+          boundVerifiedIdentity(bindings, alias, false)
             .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
             .where(freshEvidence(`${alias.identity}.validated_at`)),
         ),
       );
   }
 
-  const authoritative = providers.filter((entry) => entry.emailAuthoritative);
+  const authoritative = providers.some((entry) => entry.emailAuthoritative);
   return query.where((eb) => {
     const alternatives: Expression<SqlBool>[] = [];
-    if (authoritative.length > 0) {
-      alternatives.push(eb.exists(verifiedIdentity(ctx, alias, authoritative, undefined)));
+    if (authoritative) {
+      alternatives.push(eb.exists(boundVerifiedIdentity(bindings, alias, true)));
     }
     if (scope === 'organization' && localAdmin !== undefined) {
       alternatives.push(
@@ -231,13 +242,21 @@ function branch(
           typeof localAdmin === 'boolean'
             ? sql<SqlBool>`${sql.lit(localAdmin ? 1 : 0)}`
             : localAdmin,
-          eb(`${alias.role}.protects_last_holder`, '=', 1),
-          eb.exists(usableLocalLogin(ctx, alias)),
+          eb(`${alias.role}.protects_last_holder`, '=', sql.lit(1)),
+          eb.exists(usableLocalLogin(bindings, alias)),
         ]),
       );
     }
     return alternatives.length === 0 ? sql<SqlBool>`0` : eb.or(alternatives);
   });
+}
+
+function bound(
+  bindings: GuardBindings,
+  column: string,
+  operand: UserIdOperand | ProjectOperand,
+): Expression<string> {
+  return (typeof operand === 'string' ? bindings.value(column) : operand) as Expression<string>;
 }
 
 /**
@@ -247,6 +266,11 @@ function branch(
  * grants of `projectId` contribute `project:*` names only, so they never carry organization
  * authority. Evidence freshness is database time. `userId` and `projectId` may be correlated
  * table-qualified column references.
+ *
+ * The organization, string ids and provider anchors bind once in a leading WITH of this select,
+ * so its bound parameter count does not depend on the number of anchors or branches. Use the
+ * result only as a derived table or a subquery, never as the right-hand member of a union: SQLite
+ * accepts a WITH only at the head of a whole select.
  */
 export function permissionRows(
   ctx: OrgContext,
@@ -260,17 +284,35 @@ export function permissionRows(
     referencedTable(userId),
     projectId === null ? null : referencedTable(projectId as UserIdOperand),
   ]);
+  const values: Record<string, string> = { org_id: ctx.orgId };
+  if (typeof userId === 'string') values.user_id = userId;
+  if (typeof projectId === 'string') values.project_id = projectId;
+  const bindings = guardBindings(
+    { values: alias.values, anchors: alias.anchors },
+    values,
+    providerAnchors,
+  );
   const localAdmin = options.localAdmin;
   const scopes: PermissionScopeName[] =
     projectId === null ? ['organization'] : ['organization', 'project'];
   const branches: SelectQueryBuilder<LooseDatabase, string, PermissionRow>[] = [];
   for (const scope of scopes) {
-    branches.push(
-      branch(ctx, alias, 'email', scope, userId, projectId, providerAnchors, localAdmin) as never,
-    );
-    if (providerAnchors.length > 0) {
+    for (const kind of providerAnchors.length > 0
+      ? (['email', 'group'] as const)
+      : (['email'] as const)) {
+      const creator = branches.length === 0 ? bindings.creator : loose;
       branches.push(
-        branch(ctx, alias, 'group', scope, userId, projectId, providerAnchors, localAdmin) as never,
+        branch(
+          bindings,
+          creator,
+          alias,
+          kind,
+          scope,
+          userId,
+          projectId,
+          providerAnchors,
+          localAdmin,
+        ) as never,
       );
     }
   }
@@ -296,6 +338,10 @@ export interface HoldsPermissionInput {
 /**
  * An existence condition for `assertGuard` or a `where`: the user holds `permission` through the
  * organization grants plus, when `projectId` is set, that project's grants. Database time.
+ *
+ * One condition binds about a dozen parameters whatever the number of anchors. D1 refuses a
+ * statement with more than 100; a guard combining more conditions than fit splits them, passing one
+ * to `assertGuard` and each further one to its own `assertCheck` at the head of the mutations.
  */
 export function holdsPermission(ctx: OrgContext, input: HoldsPermissionInput): Guard {
   if (!KNOWN_PERMISSIONS.includes(input.permission)) {
@@ -330,8 +376,8 @@ export function holdsPermission(ctx: OrgContext, input: HoldsPermissionInput): G
     .select(sql.lit(1).as('one'))
     .where(`${project}.org_id`, '=', ctx.orgId)
     .where(`${project}.id`, '=', input.projectId as string)
-    .where(`${project}.status`, '=', 'active')}`;
-  return sql<SqlBool>`${active} and ${held}`;
+    .where(`${project}.status`, '=', sql.lit('active'))}`;
+  return sql<SqlBool>`(${active} and ${held})`;
 }
 
 interface LookupRow {

@@ -419,6 +419,73 @@ describe('find and inspect', () => {
   });
 });
 
+describe('narrowRefetchable', () => {
+  const args = { key: D1, size: 10, mediaType: 'application/zip' };
+
+  it('clears refetchable without touching the generation', async () => {
+    const repo = createBlobRepository(executor);
+    const { generation } = await publish(repo);
+    const narrowed = await repo.narrowRefetchable(a, args);
+    expect(narrowed).toEqual({
+      sha256: D1,
+      size: 10,
+      mediaType: 'application/zip',
+      purgeAfter: null,
+    });
+    const row = await rowOf(a, D1);
+    expect(row?.refetchable).toBe(0);
+    expect(row?.purge_generation).toBe(generation);
+    expect(await repo.narrowRefetchable(a, args)).not.toBeNull();
+  });
+
+  it('returns null for an absent row, a different size or media type, or another organization', async () => {
+    const repo = createBlobRepository(executor);
+    expect(await repo.narrowRefetchable(a, args)).toBeNull();
+    await publish(repo);
+    expect(await repo.narrowRefetchable(a, { ...args, size: 11 })).toBeNull();
+    expect(await repo.narrowRefetchable(a, { ...args, mediaType: 'text/plain' })).toBeNull();
+    expect(await repo.narrowRefetchable(b, args)).toBeNull();
+    expect((await rowOf(a, D1))?.refetchable).toBe(1);
+  });
+
+  it('refuses under a scheduled purge and under a live lease, leaving the row untouched', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await repo.softDelete(a, D1, { removedAt: '2020-01-01T00:00:00.000Z' });
+    const scheduled = await rowOf(a, D1);
+    expect(await repo.narrowRefetchable(a, args)).toBeNull();
+    await due(a, D1);
+    const claimed = await repo.claimPurge(a, D1);
+    expect(claimed).not.toBeNull();
+    expect(await repo.narrowRefetchable(a, args)).toBeNull();
+    const row = await rowOf(a, D1);
+    expect(row?.refetchable).toBe(1);
+    expect(row?.purge_generation).toBe(claimed);
+    expect(scheduled?.refetchable).toBe(1);
+  });
+
+  it('refuses on a deleted row', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await exec(
+      'UPDATE blob SET deleted_at = ? WHERE org_id = ?',
+      '2020-01-01T00:00:00.000Z',
+      a.orgId,
+    );
+    expect(await repo.narrowRefetchable(a, args)).toBeNull();
+  });
+
+  it('rejects invalid input', async () => {
+    const repo = createBlobRepository(executor);
+    await expect(repo.narrowRefetchable(a, { ...args, size: -1 })).rejects.toBeInstanceOf(
+      BlobValidationError,
+    );
+    await expect(repo.narrowRefetchable(a, { ...args, mediaType: 'x/y' })).rejects.toBeInstanceOf(
+      BlobValidationError,
+    );
+  });
+});
+
 describe('softDelete', () => {
   it('anchors the deadline at database time plus the organization retention', async () => {
     const repo = createBlobRepository(executor);

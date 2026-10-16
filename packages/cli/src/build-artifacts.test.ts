@@ -136,11 +136,26 @@ async function resolveSpecifier(contents: string): Promise<{ resolved: string[];
   return { resolved, output: result.outputFiles?.[0]?.text ?? '' };
 }
 
+function manifestBody(ids: string[]): string[] {
+  return [
+    `const orderedPluginIds = ${JSON.stringify(ids)};`,
+    'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
+    'export const plugins = orderedPluginIds.map((id) => {',
+    '  const plugin = pluginsById.get(id);',
+    '  if (plugin === undefined) throw new Error(`plugin "${id}" is missing from config.plugins`);',
+    '  return plugin;',
+    '});',
+    'if (plugins.length !== config.plugins.length) {',
+    '  throw new Error(`config.plugins has ${config.plugins.length} plugins, expected ${plugins.length}`);',
+    '}',
+  ];
+}
+
 describe('renderBuildManifest', () => {
   it('parses and imports Windows config paths with forward slashes and escaped characters', async () => {
     const configPath = String.raw`C:\broker files\owner's "config".ts`;
     const { resolved, output } = await resolveSpecifier(
-      renderBuildManifest(configPath, [], 'win32'),
+      renderBuildManifest(configPath, [], [], 'win32'),
     );
     expect(resolved).toEqual([`C:/broker files/owner's "config".ts`]);
     expect(output).toContain('intended config');
@@ -148,25 +163,55 @@ describe('renderBuildManifest', () => {
   });
 
   it('renders a Windows path with forward slashes', () => {
-    expect(renderBuildManifest(String.raw`C:\broker files\config.ts`, undefined, 'win32')).toBe(
-      String.raw`import config from "C:/broker files/config.ts";
-export const plugins = config.plugins;
-export const platformPorts = null;
-`,
+    expect(renderBuildManifest(String.raw`C:\broker files\config.ts`, [], undefined, 'win32')).toBe(
+      [
+        'import config from "C:/broker files/config.ts";',
+        ...manifestBody([]),
+        'export const platformPorts = null;',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('renders the ordered ids and the load-time guards for a non-empty list', () => {
+    expect(renderBuildManifest('/srv/config.ts', ['a', 'b'], undefined, 'linux')).toBe(
+      [
+        'import config from "/srv/config.ts";',
+        'const orderedPluginIds = ["a","b"];',
+        'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
+        'export const plugins = orderedPluginIds.map((id) => {',
+        '  const plugin = pluginsById.get(id);',
+        '  if (plugin === undefined) throw new Error(`plugin "${id}" is missing from config.plugins`);',
+        '  return plugin;',
+        '});',
+        'if (plugins.length !== config.plugins.length) {',
+        '  throw new Error(`config.plugins has ${config.plugins.length} plugins, expected ${plugins.length}`);',
+        '}',
+        'export const platformPorts = null;',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('renders an empty ordered list', () => {
+    expect(renderBuildManifest('/srv/config.ts', [], undefined, 'linux')).toContain(
+      'const orderedPluginIds = [];\n',
     );
   });
 
   it('keeps a backslash of a POSIX path, where it is an ordinary filename character', async () => {
     const configPath = String.raw`/srv/broker\config.ts`;
     const { resolved, output } = await resolveSpecifier(
-      renderBuildManifest(configPath, undefined, 'linux'),
+      renderBuildManifest(configPath, [], undefined, 'linux'),
     );
     expect(resolved).toEqual([configPath]);
-    expect(renderBuildManifest(configPath, undefined, 'linux')).toBe(
-      String.raw`import config from "/srv/broker\\config.ts";
-export const plugins = config.plugins;
-export const platformPorts = null;
-`,
+    expect(renderBuildManifest(configPath, [], undefined, 'linux')).toBe(
+      [
+        String.raw`import config from "/srv/broker\\config.ts";`,
+        ...manifestBody([]),
+        'export const platformPorts = null;',
+        '',
+      ].join('\n'),
     );
     expect(output).toContain('intended config');
   });
@@ -244,7 +289,7 @@ describe('describePlatformPorts', () => {
 
 describe('renderBuildManifest platformPorts', () => {
   it('exports the selected description as a literal, without reading process env', () => {
-    const rendered = renderBuildManifest('/srv/config.ts', undefined, 'linux', NODE_PORTS);
+    const rendered = renderBuildManifest('/srv/config.ts', [], undefined, 'linux', NODE_PORTS);
     expect(rendered).toContain(
       `export const platformPorts = ${JSON.stringify(NODE_PORTS, null, 2)};`,
     );
@@ -254,10 +299,10 @@ describe('renderBuildManifest platformPorts', () => {
 
   it('exports null when no stanza is configured', () => {
     const expected = 'export const platformPorts = null;\n';
-    expect(renderBuildManifest('/srv/config.ts', undefined, 'linux', undefined)).toContain(
+    expect(renderBuildManifest('/srv/config.ts', [], undefined, 'linux', undefined)).toContain(
       expected,
     );
-    expect(renderBuildManifest('/srv/config.ts', undefined, 'linux', null)).toContain(expected);
+    expect(renderBuildManifest('/srv/config.ts', [], undefined, 'linux', null)).toContain(expected);
   });
 });
 
@@ -464,5 +509,108 @@ export default { platform: 'node', plugins: [plugin] };
     await expect(
       build({ configPath: config, target: 'node', cwd: project, runtimeEntry }),
     ).rejects.toThrow(/cannot bind port "blob"/);
+  });
+});
+
+describe('built plugin order round trip', () => {
+  let project: string;
+  let runtimeEntry: string;
+
+  beforeEach(async () => {
+    project = await mkdtemp(path.join(tmpdir(), 'pb-plugin-order-'));
+    runtimeEntry = path.join(project, 'runtime-entry.ts');
+    await writeFile(
+      runtimeEntry,
+      "import { plugins } from '#pb-manifest';\nexport default { plugins };\n",
+    );
+  });
+
+  afterEach(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+
+  async function config(cycle = false): Promise<string> {
+    const configPath = path.join(project, 'broker.config.ts');
+    await writeFile(
+      configPath,
+      `export default {
+        platform: 'node',
+        plugins: [
+          { id: 'b', package: '@package-broker/core', apiVersion: 2,
+            platforms: ['node', 'cloudflare'], dependsOn: ['a'] },
+          { id: 'a', package: '@package-broker/core', apiVersion: 2,
+            platforms: ['node', 'cloudflare'], dependsOn: ${JSON.stringify(cycle ? ['b'] : [])} }
+        ]
+      };`,
+    );
+    return configPath;
+  }
+
+  async function loadBundle(file: string): Promise<{ plugins: { id: string }[] }> {
+    const copy = path.join(project, `${path.basename(path.dirname(file))}-loaded.mjs`);
+    await writeFile(
+      copy,
+      (await readFile(file, 'utf8')).replace(/^\/\/# sourceMappingURL=.*$/m, ''),
+    );
+    return (await import(pathToFileURL(copy).href)) as { plugins: { id: string }[] };
+  }
+
+  async function stubRuntimeEntry(): Promise<string> {
+    const entry = path.join(project, 'runtime-entry.ts');
+    await writeFile(
+      entry,
+      "import { plugins } from '#pb-manifest';\nexport { plugins };\nexport default { plugins };\n",
+    );
+    return entry;
+  }
+
+  it.each(['node', 'cloudflare'] as const)(
+    'exports dependencies before dependants from the %s bundle',
+    async (target) => {
+      const result = await build({
+        configPath: await config(),
+        target,
+        outDir: path.join(project, target),
+        runtimeEntry: await stubRuntimeEntry(),
+      });
+      const loaded = await loadBundle(result.bundle);
+      expect(loaded.plugins.map(({ id }) => id)).toEqual(['a', 'b']);
+    },
+  );
+
+  it.each([
+    [
+      'an ordered id missing from config.plugins',
+      ['a', 'x'],
+      'plugin "x" is missing from config.plugins',
+    ],
+    [
+      'a config with more plugins than ordered ids',
+      ['a'],
+      'config.plugins has 2 plugins, expected 1',
+    ],
+  ])('throws at module load for %s', async (_name, ids, message) => {
+    const configFile = await config();
+    const entry = path.join(project, 'guard-entry.ts');
+    await writeFile(entry, `import { plugins } from '#guard';\nexport { plugins };\n`);
+    const guard = path.join(project, 'guard-manifest.ts');
+    await writeFile(guard, renderBuildManifest(configFile, ids));
+    const out = path.join(project, 'guard.mjs');
+    await bundle({
+      entryPoints: [entry],
+      outfile: out,
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      alias: { '#guard': guard },
+      logLevel: 'silent',
+    });
+    await expect(import(pathToFileURL(out).href)).rejects.toThrow(message);
+  });
+
+  it('rejects a cycle with the existing validation message', async () => {
+    await expect(
+      build({ configPath: await config(true), outDir: path.join(project, 'cycle'), runtimeEntry }),
+    ).rejects.toThrow('dependency cycle at plugin "b"');
   });
 });

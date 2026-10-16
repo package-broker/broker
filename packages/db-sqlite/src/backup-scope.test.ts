@@ -39,6 +39,10 @@ describe('backup scope manifest', () => {
     'webhook_delivery',
     'migration_lock',
     'access_mutation_guard',
+    'ingest_session',
+    'upstream_state',
+    'fetch_lease',
+    'representation_clock',
   ])('excludes %s', (table) => {
     expect(backupScopeOf(table)).toBe('exclude');
   });
@@ -88,6 +92,10 @@ describe('backup scope manifest', () => {
       webhook_delivery: 'exclude',
       migration_lock: 'exclude',
       access_mutation_guard: 'exclude',
+      ingest_session: 'exclude',
+      upstream_state: 'exclude',
+      fetch_lease: 'exclude',
+      representation_clock: 'exclude',
     });
   });
 

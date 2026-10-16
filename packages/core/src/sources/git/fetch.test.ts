@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
@@ -1437,5 +1438,221 @@ describe('fail-closed protocol handling', () => {
         }),
     );
     expect(result).toBeInstanceOf(UpstreamError);
+  });
+});
+
+interface RecordedExchange {
+  request: { url: string; method: string; headers: Record<string, string>; bodyBase64: string };
+  response: { status: number; headers: Record<string, string>; bodyBase64: string };
+}
+
+interface Recorded {
+  recordedAt: string;
+  call: {
+    repoUrl: string;
+    refs: { name: string; oid: string; peeled?: string }[];
+    path: string;
+    filterCacheIndex: number | null;
+    capabilities: { filter: boolean } | null;
+  };
+  outcome:
+    | { kind: 'result'; value: unknown }
+    | { kind: 'error'; name: string; code: string; status?: number };
+  exchanges: RecordedExchange[];
+}
+
+const fromBase64 = (text: string): Uint8Array => new Uint8Array(Buffer.from(text, 'base64'));
+
+function loadRecorded(name: string): Recorded {
+  const file = new URL(`./fixtures/${name}.json`, import.meta.url);
+  return JSON.parse(readFileSync(file, 'utf8')) as Recorded;
+}
+
+function replay(recorded: Recorded) {
+  const queue = [...recorded.exchanges];
+  const sent: Wire[] = [];
+  const policyFetch = createPolicyFetch({
+    policy,
+    userAgent: 'package-broker-test',
+    fetchImpl: async (input, init) => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error('request beyond the recording');
+      expect(String(input)).toBe(next.request.url);
+      expect(init?.method).toBe(next.request.method);
+      expect(Buffer.from(init?.body as Uint8Array).toString('base64')).toBe(
+        next.request.bodyBase64,
+      );
+      expect(new Headers(init?.headers).get('git-protocol')).toBe('version=2');
+      sent.push(parseRequest(init?.body as Uint8Array));
+      return new Response(fromBase64(next.response.bodyBase64), {
+        status: next.response.status,
+        headers: next.response.headers,
+      });
+    },
+  });
+  return { policyFetch, sent, remaining: () => queue.length };
+}
+
+async function replayCall(recorded: Recorded, cacheHost?: string) {
+  const played = replay(recorded);
+  const cache = createFilterStrategyCache();
+  const { filterCacheIndex, capabilities, repoUrl, refs, path } = recorded.call;
+  if (filterCacheIndex !== null) cache.set(new URL(repoUrl).host, filterCacheIndex);
+  const settled = await readFileAtRefs(
+    {
+      policyFetch: played.policyFetch,
+      codecs,
+      runtime: 'docker',
+      filterCache: cache,
+      ...(capabilities ? { capabilities } : {}),
+    },
+    repoUrl,
+    refs,
+    path,
+  ).then(
+    (value) => ({ value }) as const,
+    (error: unknown) => ({ error }) as const,
+  );
+  expect(played.remaining()).toBe(0);
+  expect(cacheHost === undefined || cache.get(cacheHost) !== undefined).toBe(true);
+  return { ...played, settled, cache };
+}
+
+function expectRecordedOutcome(
+  recorded: Recorded,
+  settled: Awaited<ReturnType<typeof replayCall>>['settled'],
+) {
+  if (recorded.outcome.kind === 'result') {
+    expect('value' in settled && settled.value).toEqual(recorded.outcome.value);
+    return;
+  }
+  expect('error' in settled).toBe(true);
+  const error =
+    'error' in settled ? (settled.error as Error & { code?: string; status?: number }) : undefined;
+  expect(error?.name).toBe(recorded.outcome.name);
+  expect(error?.code).toBe(recorded.outcome.code);
+  if (recorded.outcome.status !== undefined) expect(error?.status).toBe(recorded.outcome.status);
+}
+
+const responseText = (exchange: RecordedExchange): string =>
+  new TextDecoder().decode(fromBase64(exchange.response.bodyBase64));
+
+describe('recorded exchanges', () => {
+  it('replays the GitHub tree:1 rejection and the fall back to tree:0', async () => {
+    const recorded = loadRecorded('github-tree1-rejected');
+    const first = recorded.exchanges[0]!;
+    expect(first.response.status).toBe(200);
+    expect(first.response.headers['content-type']).toBe(RESULT);
+    expect(responseText(first)).toBe('0031ERR tree filter allows max depth 0, but got 1');
+
+    const { sent, settled, cache } = await replayCall(recorded, 'github.com');
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent.map((r) => r.filter)).toEqual(['tree:1', 'tree:0', 'tree:0', undefined]);
+    expect(sent.map((r) => r.deepen)).toEqual(['1', '1', undefined, undefined]);
+    expect(cache.get('github.com')).toBe(1);
+    const [file] = (settled as { value: { text: string | null }[] }).value;
+    expect(JSON.parse(file!.text!)).toMatchObject({ name: 'composer/semver' });
+  });
+
+  it('replays the 41-ref composer/semver exchange in three batches with shallow-info', async () => {
+    const recorded = loadRecorded('github-semver-41-refs');
+    expect(recorded.call.refs).toHaveLength(41);
+    expect(responseText(recorded.exchanges[0]!)).toContain('shallow-info\n');
+
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent.map((r) => r.filter)).toEqual(['tree:0', 'tree:0', undefined]);
+    expect(sent[0]?.deepen).toBe('1');
+    expect(sent[1]?.deepen).toBeUndefined();
+    expect(sent[2]?.deepen).toBeUndefined();
+    const commits = new Set(recorded.call.refs.map((r) => r.peeled ?? r.oid));
+    expect(new Set(sent[0]?.wants)).toEqual(commits);
+    const files = (settled as { value: { text: string | null }[] }).value;
+    expect(files).toHaveLength(41);
+    expect(files.every((f) => f.text !== null)).toBe(true);
+  });
+
+  it('replays a root tree wanted by oid under tree:0', async () => {
+    const recorded = loadRecorded('github-tree-by-oid-tree0');
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent).toHaveLength(3);
+    expect(sent[1]?.wants).toHaveLength(1);
+    expect(sent[1]?.filter).toBe('tree:0');
+    expect(sent[1]?.deepen).toBeUndefined();
+    expect(responseText(recorded.exchanges[1]!)).toContain('packfile\n');
+  });
+
+  it('replays deepen 1 on a tag that peels to a tree as not_a_commit', async () => {
+    const recorded = loadRecorded('github-tag-peels-to-tree');
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent.map((r) => r.filter)).toEqual(['tree:1', 'tree:0']);
+    expect(sent[1]?.deepen).toBe('1');
+    expect(sent[1]?.wants).toEqual([recorded.call.refs[0]!.peeled]);
+    expect((settled as { value: { reason?: string }[] }).value[0]?.reason).toBe('not_a_commit');
+  });
+
+  it.each(['github-not-our-ref', 'github-not-our-ref-warm'])(
+    'replays the not-our-ref ERR for an unknown oid (%s) without a filter fall back',
+    async (name) => {
+      const recorded = loadRecorded(name);
+      expect(responseText(recorded.exchanges[0]!)).toMatch(
+        /^[0-9a-f]{4}ERR upload-pack: not our ref [0-9a-f]{40}$/,
+      );
+
+      const { sent, settled } = await replayCall(recorded);
+
+      expectRecordedOutcome(recorded, settled);
+      expect(settled).toMatchObject({ error: expect.any(GitRemoteError) });
+      expect(sent).toHaveLength(1);
+    },
+  );
+
+  it('replays a renamed GitHub repository, which still answers the POST with 200', async () => {
+    const recorded = loadRecorded('github-renamed-repository');
+    expect(recorded.exchanges[0]!.response.status).toBe(200);
+    expect(recorded.exchanges[0]!.response.headers.location).toBeUndefined();
+
+    const { settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+  });
+
+  it('replays the 401 GitHub answers for a renamed repository it no longer serves', async () => {
+    const recorded = loadRecorded('github-renamed-repository-401');
+    expect(recorded.exchanges[0]!.response.status).toBe(401);
+
+    const { settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(settled).toMatchObject({ error: expect.any(UpstreamError) });
+  });
+
+  it('replays stock git-http-backend answering a filter request with an empty 200', async () => {
+    const recorded = loadRecorded('local-git-http-backend');
+    expect(recorded.exchanges).toHaveLength(1);
+    expect(recorded.exchanges[0]!.response.status).toBe(200);
+    expect(recorded.exchanges[0]!.response.bodyBase64).toBe('');
+
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent[0]?.filter).toBe('tree:1');
+    expect(settled).toMatchObject({ error: expect.objectContaining({ code: 'bad_response' }) });
+  });
+
+  it('replays stock git-http-backend when the caller knows the filter is not advertised', async () => {
+    const recorded = loadRecorded('local-git-http-backend-no-filter');
+    const { sent, settled } = await replayCall(recorded);
+
+    expectRecordedOutcome(recorded, settled);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.filter).toBeUndefined();
+    expect((settled as { value: { text: string | null }[] }).value[0]?.text).toContain('acme/lib');
   });
 });

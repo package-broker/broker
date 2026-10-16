@@ -1,5 +1,5 @@
 import { METRIC_LABEL_KEYS } from './metrics.js';
-import { DROPPED_COUNTER, metricLabelValueAllowed } from './observability.js';
+import { APPROVED_ERROR_NAMES, DROPPED_COUNTER, metricLabelValueAllowed } from './observability.js';
 import type { FetchLike } from './tracing.js';
 
 export type OtlpSignal = 'logs' | 'metrics' | 'traces';
@@ -163,6 +163,51 @@ const SPAN_ATTRIBUTES = new Set<string>([
   'provider',
 ]);
 
+const APPROVED_ERRORS: ReadonlySet<string> = new Set(APPROVED_ERROR_NAMES);
+const HTTP_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+const PLUGIN_ID = /^[a-z][a-z0-9_.-]{0,63}$/;
+const ENTITY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PROVIDER_SLUG = /^[a-z0-9_-]{1,32}$/;
+const matches =
+  (re: RegExp) =>
+  (v: unknown): boolean =>
+    typeof v === 'string' && re.test(v);
+const isInt = (v: unknown, min: number, max: number): boolean =>
+  typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+
+const ATTRIBUTE_CHECKS: Readonly<
+  Record<string, (v: unknown, routes: ReadonlySet<string>) => boolean>
+> = {
+  request_id: matches(UUID),
+  plugin: matches(PLUGIN_ID),
+  route: (v, routes) => typeof v === 'string' && routes.has(v),
+  method: (v) => typeof v === 'string' && HTTP_METHODS.has(v),
+  status: (v) => isInt(v, 100, 599),
+  duration_ms: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
+  project_id: matches(ENTITY_ID),
+  token_id: matches(ENTITY_ID),
+  job_id: matches(ENTITY_ID),
+  attempt: (v) => isInt(v, 0, 1000),
+  error_name: (v) => typeof v === 'string' && APPROVED_ERRORS.has(v),
+  reason_code: matches(CODE),
+  provider: matches(PROVIDER_SLUG),
+};
+
+function validAttributes(
+  entries: Iterable<readonly [string, unknown]>,
+  routes: ReadonlySet<string>,
+): Json[] {
+  const kept: (readonly [string, unknown])[] = [];
+  for (const [key, value] of entries) {
+    if (value === null && (key === 'request_id' || key === 'project_id' || key === 'token_id')) {
+      continue;
+    }
+    if (ATTRIBUTE_CHECKS[key]?.(value, routes) === true) kept.push([key, value]);
+  }
+  return attributes(kept);
+}
+
 const isRecord = (value: unknown): value is Json =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -243,7 +288,7 @@ function metricAttributes(labels: unknown, routes: ReadonlySet<string>): Json[] 
   return attributes(entries);
 }
 
-function encodeLogRecord(input: unknown, { now }: Ctx): Json | null {
+function encodeLogRecord(input: unknown, { now, routes }: Ctx): Json | null {
   if (!isRecord(input)) return null;
   const level = read(input, 'level');
   const event = read(input, 'event');
@@ -257,7 +302,10 @@ function encodeLogRecord(input: unknown, { now }: Ctx): Json | null {
     severityNumber: severity,
     severityText: level.toUpperCase(),
     body: { stringValue: event },
-    attributes: attributes(LOG_ATTRIBUTES.map((key) => [key, read(input, key)] as const)),
+    attributes: validAttributes(
+      LOG_ATTRIBUTES.map((key) => [key, read(input, key)] as const),
+      routes,
+    ),
   };
   const traceId = read(input, 'trace_id');
   const spanId = read(input, 'span_id');
@@ -339,7 +387,7 @@ function encodeMetric(input: unknown, { now, routes }: Ctx): Json | null {
   return null;
 }
 
-function encodeSpan(input: unknown, { now }: Ctx): Json | null {
+function encodeSpan(input: unknown, { now, routes }: Ctx): Json | null {
   if (!isRecord(input)) return null;
   const traceId = read(input, 'traceId');
   const spanId = read(input, 'spanId');
@@ -367,7 +415,7 @@ function encodeSpan(input: unknown, { now }: Ctx): Json | null {
     kind: kind ?? 1,
     startTimeUnixNano: start,
     endTimeUnixNano: end,
-    attributes: attributes(entries),
+    attributes: validAttributes(entries, routes),
   };
   const parent = read(input, 'parentSpanId');
   if (typeof parent === 'string' && SPAN_ID.test(parent) && !ZEROS.test(parent)) {
@@ -416,8 +464,13 @@ function encodeAll(signal: OtlpSignal, records: unknown, resource: unknown, ctx:
 
 const defaultNow: NowFn = () => new Date();
 
-export function encodeLogs(records: unknown, resource: unknown, now: NowFn = defaultNow): unknown {
-  return encodeAll('logs', records, resource, { now, routes: NO_ROUTES });
+export function encodeLogs(
+  records: unknown,
+  resource: unknown,
+  now: NowFn = defaultNow,
+  routeTemplates: ReadonlySet<string> = NO_ROUTES,
+): unknown {
+  return encodeAll('logs', records, resource, { now, routes: routeTemplates });
 }
 
 export function encodeMetrics(
@@ -429,8 +482,13 @@ export function encodeMetrics(
   return encodeAll('metrics', points, resource, { now, routes: routeTemplates });
 }
 
-export function encodeTraces(spans: unknown, resource: unknown, now: NowFn = defaultNow): unknown {
-  return encodeAll('traces', spans, resource, { now, routes: NO_ROUTES });
+export function encodeTraces(
+  spans: unknown,
+  resource: unknown,
+  now: NowFn = defaultNow,
+  routeTemplates: ReadonlySet<string> = NO_ROUTES,
+): unknown {
+  return encodeAll('traces', spans, resource, { now, routes: routeTemplates });
 }
 
 function ipv4(hostname: string): number[] | null {

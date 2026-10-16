@@ -541,7 +541,7 @@ export interface FetchLeaseTable {
   acquired_at: string;
 }
 
-/** Mirrors `representation_clock` in `migrations/0007_registry.sql`. */
+/** Mirrors `representation_clock`. */
 export interface RepresentationClockTable {
   org_id: string;
   project_id: string;
@@ -549,6 +549,8 @@ export interface RepresentationClockTable {
   form: RepresentationForm;
   validator: string;
   last_modified: string;
+  rev: Generated<number>;
+  package_id: Generated<string>;
 }
 
 export interface Database {

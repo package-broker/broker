@@ -175,7 +175,7 @@ function idpPlugin(): PluginDefinition {
     id: 'idp',
     package: 'test/idp',
     platforms: ['cloudflare'],
-    apiVersion: 2,
+    apiVersion: 3,
     binds: ['identity'],
     identityProviders: (ctx) => {
       if (ctx.env('PB_IDP_MODE') === 'broken') throw new Error(FACTORY_SENTINEL);
@@ -200,7 +200,7 @@ describe('auth wiring on Miniflare D1', () => {
         id: 'counted',
         package: 'test/counted',
         platforms: ['cloudflare'],
-        apiVersion: 2,
+        apiVersion: 3,
         register,
       }),
     ]);
@@ -224,7 +224,7 @@ describe('auth wiring on Miniflare D1', () => {
       id: 'register-throws',
       package: 'test/register-throws',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       register() {
         calls += 1;
         throw new Error(REGISTER_SENTINEL);
@@ -257,7 +257,7 @@ describe('auth wiring on Miniflare D1', () => {
       id: 'register-throws',
       package: 'test/register-throws',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       register() {
         calls += 1;
         throw new Error(REGISTER_SENTINEL);
@@ -364,7 +364,7 @@ describe('auth wiring on Miniflare D1', () => {
       id: 'idp-probe',
       package: 'test/idp-probe',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       binds: ['identity'],
       identityProviders: (ctx) => {
         for (const name of [
@@ -497,7 +497,7 @@ describe('misconfigured environment', () => {
       id: 'failing',
       package: 'test/failing',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       init() {
         throw new Error('init failed');
       },
@@ -686,7 +686,7 @@ describe('plugin hooks and identity fetch', () => {
       id: 'access-idp',
       package: 'test/access-idp',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       binds: ['identity'],
       identityProviders: () => [accessProvider()],
     });
@@ -697,7 +697,7 @@ describe('plugin hooks and identity fetch', () => {
       id: 'deny-login',
       package: 'test/deny-login',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       register(registry) {
         registry.hook('auth.resolveIdentity', () => ({ deny: true }));
       },
@@ -735,7 +735,7 @@ describe('plugin hooks and identity fetch', () => {
       id: 'shared-registration',
       package: 'test/shared-registration',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       binds: ['identity'],
       identityProviders: () => [accessProvider()],
       register(registry) {
@@ -773,7 +773,7 @@ describe('plugin hooks and identity fetch', () => {
       id: 'fetch-probe',
       package: 'test/fetch-probe',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       binds: ['identity'],
       identityProviders: (ctx) => {
         captured = ctx.fetch;

@@ -13,10 +13,10 @@ import type { GrantRepository } from '@package-broker/core/db/grants';
 import { fixedClock } from '@package-broker/core/ids';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
-import { sql } from 'kysely';
 import { compile, db, protectedHolder } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createRoleRepository } from './role.js';
+import { createUnlinkRepository } from './unlink.js';
 import {
   createGrantRepository as createFencedGrantRepository,
   type GrantRepositoryOptions,
@@ -1575,34 +1575,40 @@ describe('concurrent guarded operations on one file database', () => {
     }
   });
 
+  const UNLINK_ANCHOR = `oidc:${ANCHOR}`;
+
+  function boundHolderInput(): ProtectedHolderInput {
+    const holders = holderInput();
+    if (holders.kind !== 'fresh') throw new Error('fresh holder input expected');
+    return {
+      ...holders,
+      providers: holders.providers.map((entry) =>
+        entry.provider === 'oidc' ? { ...entry, anchor: UNLINK_ANCHOR } : entry,
+      ),
+    };
+  }
+
   async function unlinkHolderEvidence(
     userId: string,
     through: SqlExecutor = secondExecutor,
   ): Promise<'unlinked' | 'last_holder'> {
-    const removed = await through.all<{ id: string }>(
-      compile(
-        db
-          .deleteFrom('identity')
-          .where('identity.org_id', '=', org.orgId)
-          .where('identity.user_id', '=', userId)
-          .where((eb) =>
-            eb.exists(
-              db
-                .selectFrom('user_account as holder')
-                .select(sql.lit(1).as('one'))
-                .where('holder.org_id', '=', org.orgId)
-                .where((inner) =>
-                  protectedHolder(org, inner.ref('holder.id'), {
-                    ...holderInput(),
-                    exclude: { userId, identityId: actorOf(org).identity },
-                  }),
-                ),
-            ),
-          )
-          .returning('id'),
-      ),
-    );
-    return removed.length > 0 ? 'unlinked' : 'last_holder';
+    const outcome = await createUnlinkRepository(through, {
+      holderInput: async (ctx) => ({
+        ...boundHolderInput(),
+        exclude: { userId: actorOf(ctx).user },
+      }),
+    }).unlinkIdentity(org, await fenceFor(org), {
+      identityId: `ID-oidc-${userId}`,
+      userId,
+      provider: 'oidc',
+      subject: `oidc-${userId}`,
+      anchor: UNLINK_ANCHOR,
+      now: LATER,
+    });
+    if (outcome !== 'unlinked' && outcome !== 'last_holder') {
+      throw new Error(`unexpected unlink outcome ${outcome}`);
+    }
+    return outcome;
   }
 
   function held(executor: SqlExecutor, on: 'all' | 'batch') {
@@ -1644,10 +1650,19 @@ describe('concurrent guarded operations on one file database', () => {
     for (const order of ['suspend first', 'unlink first'] as const) {
       it(`7: latched suspend against unlink of the other holder, ${label}, ${order}`, async () => {
         await reset(world());
+        await shared.executor.batch([
+          stmt('DELETE FROM identity WHERE id = ?', `ID-access-${U1}`),
+          stmt(
+            'INSERT OR REPLACE INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+            org.orgId,
+            'oidc',
+            UNLINK_ANCHOR,
+          ),
+        ]);
         const suspendGate = held(shared.executor, 'batch');
-        const unlinkGate = held(secondExecutor, 'all');
+        const unlinkGate = held(secondExecutor, 'batch');
         const suspending = createGrantRepository(suspendGate.executor, {
-          holderInput,
+          holderInput: boundHolderInput,
         }).suspendUser(org, U2, LATER);
         const unlinking = unlinkHolderEvidence(U1, unlinkGate.executor);
         await Promise.all([suspendGate.reached, unlinkGate.reached]);
@@ -1659,7 +1674,8 @@ describe('concurrent guarded operations on one file database', () => {
         expect(outcomes).toEqual(
           suspendFirst ? ['suspended', 'last_holder'] : ['last_holder', 'unlinked'],
         );
-        expect(await first.countProtectedHolders(org)).toBe(1);
+        const counter = createGrantRepository(shared.executor, { holderInput: boundHolderInput });
+        expect(await counter.countProtectedHolders(org)).toBe(1);
       });
     }
   }

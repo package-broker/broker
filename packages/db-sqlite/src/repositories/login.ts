@@ -10,7 +10,7 @@ import {
   type Database,
   type Guard,
 } from '../kysely.js';
-import { sessionInsertStatement } from './session.js';
+import { revokePreviousStatement, sessionInsertStatement } from './session.js';
 
 const MAX_GROUPS = 1000;
 const MAX_GROUP_NAME = 256;
@@ -353,33 +353,16 @@ function insertGroupsStatement(
   ) as ScalarStatement;
 }
 
-function revokePreviousStatement(
-  ctx: OrgContext,
-  plan: LoginPlan,
-  previousSecretHash: string,
-  now: string,
-  guards: readonly Guard[],
-): ScalarStatement {
-  let query = db
-    .updateTable('session')
-    .set({ revoked_at: now })
-    .where('session.org_id', '=', ctx.orgId)
-    .where('session.secret_hash', '=', previousSecretHash)
-    .where('session.revoked_at', 'is', null)
-    .where('session.id', '<>', plan.session.id)
-    .where((values) =>
-      values.exists(
-        values
-          .selectFrom('session as created')
-          .select('created.id')
-          .where('created.id', '=', plan.session.id)
-          .where('created.org_id', '=', ctx.orgId)
-          .where('created.secret_hash', '=', plan.session.secretHash)
-          .where('created.created_at', '=', now),
-      ),
-    );
-  for (const guard of guards) query = query.where(guard);
-  return compile(query) as ScalarStatement;
+function createdSessionGuard(ctx: OrgContext, plan: LoginPlan, now: string): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('session as created')
+      .select('created.id')
+      .where('created.id', '=', plan.session.id)
+      .where('created.org_id', '=', ctx.orgId)
+      .where('created.secret_hash', '=', plan.session.secretHash)
+      .where('created.created_at', '=', now),
+  );
 }
 
 function touchUserStatement(
@@ -464,7 +447,12 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
       const sessionIndex = statements.length;
       statements.push(sessionInsertStatement(ctx, plan.session, guards) as ScalarStatement);
       if (previousSecretHash !== null) {
-        statements.push(revokePreviousStatement(ctx, plan, previousSecretHash, now, guards));
+        statements.push(
+          revokePreviousStatement(ctx, previousSecretHash, plan.session.id, now, [
+            ...guards,
+            createdSessionGuard(ctx, plan, now),
+          ]),
+        );
       }
       statements.push(touchUserStatement(ctx, plan, guards, now, displayName));
 

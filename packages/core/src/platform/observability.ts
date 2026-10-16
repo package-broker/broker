@@ -117,6 +117,16 @@ export interface ObservabilityScope {
 
 export const MAX_RECORD_BYTES = 8192;
 export const DROPPED_COUNTER = 'pb.obs.dropped';
+export const DROPPED_SIGNALS = [
+  'log',
+  'counter',
+  'histogram',
+  'unregistered',
+  'cardinality',
+  'kind_conflict',
+  'export',
+] as const;
+export type DroppedSignal = (typeof DROPPED_SIGNALS)[number];
 export const HTTP_REQUEST_EVENT = 'http.request';
 
 export const APPROVED_ERROR_NAMES = [
@@ -416,7 +426,7 @@ export function createObservability(
       return;
     }
   };
-  const dropped = (signal: 'log' | 'counter' | 'histogram' | 'unregistered'): void =>
+  const dropped = (signal: DroppedSignal): void =>
     emit({ kind: 'counter', name: DROPPED_COUNTER, labels: { signal }, value: 1 });
   const validName = (name: unknown): name is string => isString(name) && CODE.test(name);
 

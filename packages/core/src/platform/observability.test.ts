@@ -1,6 +1,8 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   APPROVED_ERROR_NAMES,
+  DROPPED_SIGNALS,
+  metricLabelValueAllowed,
   HTTP_REQUEST_EVENT,
   LOG_FIELDS,
   type SafeLogRecord,
@@ -612,5 +614,23 @@ describe('projectLogFields', () => {
   it('orders keys by LOG_FIELDS', () => {
     const out = projectLogFields({ reason_code: 'r', event: 'a.b', level: 'info' });
     expect(Object.keys(out)).toEqual(['level', 'event', 'reason_code']);
+  });
+});
+
+describe('dropped signal vocabulary', () => {
+  it('accepts every dropped signal as a label value', () => {
+    expect([...DROPPED_SIGNALS]).toEqual([
+      'log',
+      'counter',
+      'histogram',
+      'unregistered',
+      'cardinality',
+      'kind_conflict',
+      'export',
+    ]);
+    for (const signal of DROPPED_SIGNALS) {
+      expect(metricLabelValueAllowed('signal', signal, new Set())).toBe(true);
+    }
+    expect(metricLabelValueAllowed('signal', 'logs ', new Set())).toBe(false);
   });
 });

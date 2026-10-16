@@ -3,11 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ScalarStatement, StatementResult } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
+import type { LoginPlan } from '@package-broker/core/db/users';
 import { isoTimestamp, systemClock, ulid } from '@package-broker/core/ids';
-import {
-  createLoginWriter,
-  type LoginPlanWithAutoJoin,
-} from '@package-broker/db-sqlite/repositories/login';
+import { createLoginWriter } from '@package-broker/db-sqlite/repositories/login';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import {
   openMigratedDatabase,
@@ -105,7 +103,7 @@ async function seedLogins(database: MigratedDatabase | null, file: string | null
     ] as const;
     for (const [index, [userId, email, subject, provider, anchor]] of logins.entries()) {
       const identityId = `01J0IDENT${String(index)}00000000000000X`;
-      const plan: LoginPlanWithAutoJoin = {
+      const plan: LoginPlan = {
         userId,
         createUser: true,
         autoJoin: true,
@@ -518,9 +516,11 @@ it('13. executor errors print the error name only, never messages, anchors or th
   const throwing = (async () => {
     throw new Error(SENTINEL);
   }) as unknown as typeof fetch;
-  expect(await runAdminRebindProvider(options(cloudflareTarget(throwing)))).toBe(1);
+  expect(await runAdminRebindProvider(options(cloudflareTarget(throwing)))).toBe(7);
   expect(output().stderr).not.toContain(SENTINEL);
-  expect(output().stderr).toMatch(/^admin rebind-provider: failed \(\w+\)$/);
+  expect(output().stderr).toBe(
+    'admin rebind-provider: outcome unknown; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong',
+  );
 });
 
 it('14. the CLI routes rebind-provider and rejects ambiguous targets and foreign flags', async () => {
@@ -561,4 +561,17 @@ it('16. the usage text lists the command and the exit codes', async () => {
   expect(usage).toContain('pb admin bootstrap/reset-local: 0');
   expect(usage).toContain('no binding with that provider and expected anchor; nothing changed');
   expect(usage).toContain('the swap may have applied');
+});
+
+it('17. a non-lost executor error exits 1 with the error name only', async () => {
+  const failing = await createHarness({
+    override: (call) => (call === 2 ? d1Failure(`near "${SENTINEL}": syntax error`) : undefined),
+  });
+  try {
+    expect(await runAdminRebindProvider(options(cloudflareTarget(failing.fetch)))).toBe(1);
+    expect(output().stderr).toMatch(/^admin rebind-provider: failed \(\w+\)$/);
+    expect(output().stderr).not.toContain(SENTINEL);
+  } finally {
+    await failing.database.close();
+  }
 });

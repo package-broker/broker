@@ -1,4 +1,5 @@
 import { PERMISSIONS } from '../authz/permissions.js';
+import type { PackageEcosystem } from '../plugin.js';
 
 export const RESERVED_PATH_PREFIXES = ['/health/', '/_pb/'] as const;
 
@@ -63,6 +64,15 @@ const BOUNDARIES: ReadonlySet<string> = new Set([
 ]);
 const PROJECT_PARAMETER = ':project';
 const PACKAGE_PERMISSION_PREFIX = 'project:packages:';
+const PACKAGE_BOUNDARY_PERMISSIONS: ReadonlySet<string> = new Set([
+  'project:packages:read',
+  'project:packages:write',
+]);
+export const PACKAGE_ECOSYSTEMS = [
+  'composer',
+  'npm',
+] as const satisfies readonly PackageEcosystem[];
+const ECOSYSTEM_NAMES: ReadonlySet<string> = new Set(PACKAGE_ECOSYSTEMS);
 const BOUNDARY_API_VERSION = 3;
 const MAX_REPORTED_LENGTH = 80;
 
@@ -83,6 +93,27 @@ interface BoundaryInput {
   readonly permission: unknown;
   readonly boundary?: unknown;
   readonly needsOrg?: unknown;
+  readonly package?: unknown;
+}
+
+function packageBindingProblems(binding: unknown): string[] {
+  if (typeof binding !== 'object' || binding === null) {
+    return ['the package boundary requires a package binding'];
+  }
+  const { ecosystem, name, fetchOnAdmission } = binding as Record<string, unknown>;
+  const problems: string[] = [];
+  if (typeof ecosystem !== 'string' || !ECOSYSTEM_NAMES.has(ecosystem)) {
+    problems.push(
+      `the package binding has unknown ecosystem ${reported(ecosystem)}; use ${PACKAGE_ECOSYSTEMS.join(' or ')}`,
+    );
+  }
+  if (typeof name !== 'function') {
+    problems.push('the package binding requires a name extractor function');
+  }
+  if (fetchOnAdmission !== undefined && typeof fetchOnAdmission !== 'boolean') {
+    problems.push('the package binding fetchOnAdmission must be a boolean');
+  }
+  return problems;
 }
 
 function hasResolver(resolver: unknown): boolean {
@@ -126,7 +157,19 @@ export function routeBoundaryProblems(
     }
   }
   if (boundary === 'package') {
-    fail('the package boundary is reserved until a package resolver exists');
+    if (!hasResolver(options.packageResolver)) {
+      fail('the package boundary is reserved until a package resolver exists');
+      return problems;
+    }
+    for (const problem of packageBindingProblems(route.package)) fail(problem);
+    if (!hasProject) fail('the package boundary requires :project in the path');
+    if (typeof permission !== 'string' || !PACKAGE_BOUNDARY_PERMISSIONS.has(permission)) {
+      fail(
+        `the package boundary is reserved for ${[...PACKAGE_BOUNDARY_PERMISSIONS].join(' or ')}, got ${permission === null ? 'null' : reported(permission)}`,
+      );
+    }
+  } else if (route.package !== undefined) {
+    fail('a package binding is only allowed on the package boundary');
   }
   if (boundary === 'self' && options.allowSelf !== true) {
     fail('the self boundary is not available to plugin routes');

@@ -5,6 +5,16 @@ import {
   projectSlugProblem,
   reservedFirstSegments,
 } from '@package-broker/core/authz/project-path';
+import { PROJECT_LIST_MAX_LIMIT } from '@package-broker/core/authz/project-list';
+import {
+  PROJECT_NAME_MAX_LENGTH,
+  TOKEN_MAX_SCOPES,
+  type ProjectChanges,
+  type ProjectCreateInput,
+  type ProjectStatus,
+  type ProjectStore,
+  type TokenMaxScope,
+} from '@package-broker/core/authz/project-service';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { isUlid, ulid } from '@package-broker/core/ids';
 import {
@@ -26,13 +36,6 @@ import {
   requireIdleSeconds,
 } from './session-liveness.js';
 
-export const PROJECT_NAME_MAX_LENGTH = 100;
-export const PROJECT_LIST_MAX_LIMIT = 200;
-export const TOKEN_MAX_SCOPES = ['read', 'write', 'full'] as const;
-
-export type TokenMaxScope = (typeof TOKEN_MAX_SCOPES)[number];
-export type ProjectStatus = 'active' | 'archived';
-
 export interface Project {
   readonly id: string;
   readonly slug: string;
@@ -41,12 +44,6 @@ export interface Project {
   readonly tokenMaxScope: TokenMaxScope;
   readonly requirePublishApproval: boolean;
   readonly revision: number;
-}
-
-export interface ProjectChanges {
-  readonly name?: string;
-  readonly tokenMaxScope?: TokenMaxScope;
-  readonly requirePublishApproval?: boolean;
 }
 
 export interface ProjectRepositoryOptions {
@@ -61,8 +58,9 @@ export interface ProjectRepositoryOptions {
  * Every write derives its authority from the fence, inside the decisive batch: the actor is active,
  * the session is live and owned by the actor, and the permission is held. A refusing batch rolls
  * back and answers `authority`. `conflict` means the fence's expected `project` revision is stale.
+ * `not_found` and `conflict` are only answered to an actor that holds the permission.
  */
-export interface ProjectRepository {
+export interface ProjectRepository extends ProjectStore {
   get(ctx: OrgContext, id: string): Promise<Project | null>;
   /** Returns archived projects too unless `activeOnly` is set. */
   getBySlug(
@@ -86,16 +84,7 @@ export interface ProjectRepository {
   create(
     ctx: OrgContext,
     fence: MutationFence,
-    input: {
-      readonly id: string;
-      readonly slug: string;
-      readonly name: string;
-      readonly tokenMaxScope?: TokenMaxScope;
-      readonly requirePublishApproval?: boolean;
-      /** Project-scoped role of this organization; defaults to the stored project_owner role. */
-      readonly initialRoleId?: string;
-      readonly now: string;
-    },
+    input: ProjectCreateInput & { readonly id: string; readonly now: string },
   ): Promise<
     | 'created'
     | 'duplicate'
@@ -302,6 +291,37 @@ export function createProjectRepository(
     return row === undefined ? null : toProject(row);
   }
 
+  async function loadAuthorized(
+    ctx: OrgContext,
+    id: string,
+    authority: Guard,
+  ): Promise<{ readonly held: boolean; readonly project: Project | null }> {
+    requireId(id, 'id');
+    const [row] = await executor.all<
+      { held: number } & { [K in keyof ProjectRow]: ProjectRow[K] | null }
+    >(
+      scalar(
+        db
+          .selectFrom(db.selectNoFrom(sql<number>`${authority} is 1`.as('held')).as('probe'))
+          .leftJoin('project as p', (join) =>
+            join.on('p.org_id', '=', ctx.orgId).on('p.id', '=', id),
+          )
+          .select([
+            'probe.held',
+            'p.id',
+            'p.slug',
+            'p.name',
+            'p.status',
+            'p.token_max_scope',
+            'p.require_publish_approval',
+            'p.revision',
+          ]),
+      ),
+    );
+    if (row?.held !== 1) return { held: false, project: null };
+    return { held: true, project: row.id === null ? null : toProject(row as ProjectRow) };
+  }
+
   function revisionCheck(ctx: OrgContext, id: string, expected: number, status: ProjectStatus) {
     return [
       ...assertCheck(
@@ -362,9 +382,11 @@ export function createProjectRepository(
   ): Promise<Done | Noop | 'not_found' | 'conflict' | 'authority' | 'indeterminate'> {
     const stamp = timestamp(now);
     const expected = expectedRevision(fence);
-    if ((await load(ctx, id)) === null) return 'not_found';
-
     const authority = projectAuthority(ctx, fence, 'org:projects:archive', { reauth });
+    const { held, project } = await loadAuthorized(ctx, id, authority);
+    if (!held) return 'authority';
+    if (project === null) return 'not_found';
+
     const outcome = await runOrgFenced(
       executor,
       ctx,
@@ -559,8 +581,11 @@ export function createProjectRepository(
       const expected = expectedRevision(fence);
       if (changes.name !== undefined) requireName(changes.name);
       if (changes.tokenMaxScope !== undefined) requireScope(changes.tokenMaxScope);
-      const current = await load(ctx, id);
+      const authority = projectAuthority(ctx, fence, 'project:settings:write', { projectId: id });
+      const { held, project: current } = await loadAuthorized(ctx, id, authority);
+      if (!held) return 'authority';
       if (current === null) return 'not_found';
+      if (current.revision !== expected) return 'conflict';
 
       const differences = [
         ...(changes.name !== undefined && changes.name !== current.name
@@ -574,14 +599,7 @@ export function createProjectRepository(
           ? [sql<boolean>`require_publish_approval <> ${changes.requirePublishApproval ? 1 : 0}`]
           : []),
       ];
-      const authority = projectAuthority(ctx, fence, 'project:settings:write', { projectId: id });
-      if (current.revision !== expected) return 'conflict';
-      if (differences.length === 0 && current.status === 'active') {
-        const [granted] = await executor.all<{ held: number }>(
-          scalar(db.selectNoFrom(sql<number>`${authority} is 1`.as('held'))),
-        );
-        return granted?.held === 1 ? 'unchanged' : 'authority';
-      }
+      if (differences.length === 0 && current.status === 'active') return 'unchanged';
 
       const outcome = await runOrgFenced(
         executor,
@@ -640,5 +658,5 @@ export function createProjectRepository(
         true,
       );
     },
-  };
+  } satisfies ProjectStore & ProjectRepository;
 }

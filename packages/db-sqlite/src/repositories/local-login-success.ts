@@ -157,8 +157,7 @@ function reauthStatement(
 }
 
 /**
- * `input.opId` is ignored: every call mints its own operation marker, so a caller that reuses an
- * id cannot make a replayed step pass the later statements. A re-authenticating caller checks the
+ * Every call mints its own operation marker, so a replayed step cannot pass the later statements. A re-authenticating caller checks the
  * idle cutoff of the session itself before calling; this writer only checks revocation and expiry.
  */
 export function createLocalLoginSuccessWriter(executor: SqlExecutor): LocalLoginSuccessWriter {

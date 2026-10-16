@@ -2,13 +2,20 @@ import { sql, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
-import { compile, db, existsGuard, type Database, type Guard } from '../kysely.js';
+import { compile, db, existsGuard, newOpId, type Database, type Guard } from '../kysely.js';
 import { seedDefaultsStatements } from './role.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SETUP_HASH = /^[0-9a-f]{64}$/;
 const ID = /^[\x21-\x7e]{1,64}$/;
 const ADMIN_ROLE_KEY: DefaultRoleKey = 'organization_admin';
+const ADMIN_PERMISSIONS = JSON.stringify(adminCatalogue());
+
+function adminCatalogue(): readonly string[] {
+  const role = DEFAULT_ROLES.find((candidate) => candidate.key === ADMIN_ROLE_KEY);
+  if (role === undefined) throw new Error('DEFAULT_ROLES has no organization_admin role');
+  return role.permissions;
+}
 
 export interface BootstrapAdminInput {
   readonly email: string;
@@ -19,6 +26,11 @@ export interface BootstrapAdminInput {
   readonly roleIds: Readonly<Record<DefaultRoleKey, string>>;
   readonly opId: string;
   readonly now: string;
+}
+
+export interface BootstrapAdminOutcome {
+  readonly result: 'created' | 'refreshed' | 'already_set_up';
+  readonly toppedUp: number;
 }
 
 export interface ResetLocalLoginInput {
@@ -179,6 +191,81 @@ function adminGrantStatements(
   return [scalar(promote), scalar(insert)];
 }
 
+function protectedAdminRoles(ctx: OrgContext) {
+  return db
+    .selectFrom('role as topup_role')
+    .innerJoin(sql`json_each(${ADMIN_PERMISSIONS})`.as('wanted'), (join) => join.onTrue())
+    .where('topup_role.org_id', '=', ctx.orgId)
+    .where('topup_role.key', '=', ADMIN_ROLE_KEY)
+    .where('topup_role.is_system', '=', 1)
+    .where('topup_role.protects_last_holder', '=', 1);
+}
+
+function adminPermissionsMissing(ctx: OrgContext): Guard {
+  return existsGuard(() =>
+    protectedAdminRoles(ctx)
+      .select(sql.lit(1).as('one'))
+      .where((eb) =>
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom('role_permission as held')
+              .select(sql.lit(1).as('one'))
+              .whereRef('held.org_id', '=', 'topup_role.org_id')
+              .whereRef('held.role_id', '=', 'topup_role.id')
+              .where(sql<SqlBool>`held.permission = wanted.value`),
+          ),
+        ),
+      ),
+  );
+}
+
+/**
+ * Runs before the seed: an existing protected admin role missing catalogue permissions gets them here,
+ * with its revision and the organization's cache_epoch bumped first, and the batch fails unless
+ * exactly one cache_epoch row was replaced. The insert returns one row per added permission. A role
+ * created by the seed later in the batch is not a top-up.
+ */
+function adminTopUpStatements(ctx: OrgContext, now: string): ScalarStatement[] {
+  const missing = adminPermissionsMissing(ctx);
+  const bumpEpoch = db
+    .updateTable('cache_epoch')
+    .set({ version: sql<string>`hex(randomblob(16))` })
+    .where('cache_epoch.org_id', '=', ctx.orgId)
+    .where(missing);
+  const epochBumpedOnce = db
+    .insertInto('access_mutation_guard')
+    .columns(['key'])
+    .expression(
+      db
+        .selectFrom(sql`json_each('[1,2]')`.as('twice'))
+        .select(sql<string>`${newOpId()}`.as('key'))
+        .where(sql<SqlBool>`changes() <> 1`)
+        .where(missing),
+    );
+  const revise = db
+    .updateTable('role')
+    .set((eb) => ({ revision: eb('revision', '+', 1), updated_at: now }))
+    .where('role.org_id', '=', ctx.orgId)
+    .where('role.key', '=', ADMIN_ROLE_KEY)
+    .where('role.is_system', '=', 1)
+    .where('role.protects_last_holder', '=', 1)
+    .where(missing);
+  const insert = db
+    .insertInto('role_permission')
+    .columns(['org_id', 'role_id', 'permission'])
+    .expression(
+      protectedAdminRoles(ctx).select((eb) => [
+        eb.val(ctx.orgId).as('org_id'),
+        'topup_role.id as role_id',
+        sql<string>`wanted.value`.as('permission'),
+      ]),
+    )
+    .onConflict((conflict) => conflict.doNothing())
+    .returning('permission');
+  return [scalar(bumpEpoch), scalar(epochBumpedOnce), scalar(revise), scalar(insert)];
+}
+
 function rowsOf(result: { readonly rows: readonly unknown[] } | undefined): number {
   return result === undefined ? 0 : result.rows.length;
 }
@@ -212,7 +299,16 @@ export async function bootstrapAdmin(
   executor: ScalarSqlExecutor,
   ctx: OrgContext,
   input: BootstrapAdminInput,
-): Promise<'created' | 'refreshed' | 'already_set_up'> {
+): Promise<BootstrapAdminOutcome['result']> {
+  return (await bootstrapAdminWithTopUp(executor, ctx, input)).result;
+}
+
+/** As bootstrapAdmin, also reporting how many organization_admin permissions the same batch added. */
+export async function bootstrapAdminWithTopUp(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  input: BootstrapAdminInput,
+): Promise<BootstrapAdminOutcome> {
   const email = requireEmail(input.email);
   requireId('userId', input.userId);
   requireId('grantId', input.grantId);
@@ -289,17 +385,20 @@ export async function bootstrapAdmin(
       .returning('user_id'),
   );
 
+  const topUp = adminTopUpStatements(ctx, input.now);
   const results = await executor.batch([
     existed,
+    ...topUp,
     ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
     user,
     ...adminGrantStatements(ctx, { email, grantId: input.grantId, now: input.now }, pending),
     login,
   ]);
 
-  if (rowsOf(results[results.length - 1]) === 0) return 'already_set_up';
+  const toppedUp = rowsOf(results[topUp.length]);
+  if (rowsOf(results[results.length - 1]) === 0) return { result: 'already_set_up', toppedUp };
   const previous = results[0]?.rows[0] as { existed?: number } | undefined;
-  return Number(previous?.existed) === 1 ? 'refreshed' : 'created';
+  return { result: Number(previous?.existed) === 1 ? 'refreshed' : 'created', toppedUp };
 }
 
 /**

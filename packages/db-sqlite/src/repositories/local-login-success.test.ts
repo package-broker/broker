@@ -126,7 +126,6 @@ async function snapshotOf(email = 'admin@example.test'): Promise<LocalLoginSnaps
 interface Input {
   readonly snapshot: LocalLoginSnapshot;
   readonly step: number;
-  readonly opId: string;
   readonly rehash: string | null;
   readonly session: NewSession | null;
   readonly previousSecretHash: string | null;
@@ -138,7 +137,6 @@ function loginInput(snapshot: LocalLoginSnapshot, overrides: Partial<Input> = {}
   return {
     snapshot,
     step: STEP,
-    opId: OP,
     rehash: null,
     session: newSession('01J0SESSIONNEW0000000000A1', snapshot.userId),
     previousSecretHash: null,
@@ -439,9 +437,8 @@ describe('login refusals', () => {
 
   it('refuses a replayed step when the caller reuses the operation id', async () => {
     const snapshot = await snapshotOf();
-    await expect(writer.succeed(a, loginInput(snapshot, { opId: OP }))).resolves.toBe(true);
+    await expect(writer.succeed(a, loginInput(snapshot))).resolves.toBe(true);
     const replay = loginInput(snapshot, {
-      opId: OP,
       session: newSession('01J0SESSIONNEW0000000000A2'),
       previousSecretHash: hash('01J0SESSIONNEW0000000000A1'),
     });

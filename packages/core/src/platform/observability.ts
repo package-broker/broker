@@ -77,6 +77,7 @@ export interface ObservabilityScope {
 
 export const MAX_RECORD_BYTES = 8192;
 export const DROPPED_COUNTER = 'pb.obs.dropped';
+export const HTTP_REQUEST_EVENT = 'http.request';
 
 export const APPROVED_ERROR_NAMES = [
   'Error',
@@ -89,6 +90,41 @@ export const APPROVED_ERROR_NAMES = [
   'StaleFenceError',
   'PlatformUnavailableError',
   'UnknownJobType',
+  'SyntaxError',
+  'ReferenceError',
+  'EvalError',
+  'URIError',
+  'AggregateError',
+  'DOMException',
+  'AbortError',
+  'TimeoutError',
+  'NonError',
+  'NotBootstrappedError',
+  'CsrfError',
+  'CredentialNotFoundError',
+  'UnknownKeyVersionError',
+  'SecretDecryptError',
+  'HookTimeoutError',
+  'EngineTimeoutError',
+  'ProbeFailedError',
+  'ReadinessTimeoutError',
+  'BadBodyError',
+  'OidcProviderError',
+  'JwtError',
+  'BoundedFetchError',
+  'AlreadyBootstrappedError',
+  'StartupConfigError',
+  'SqlScanError',
+  'MigrationSourceError',
+  'MigrationLockedError',
+  'MigrationSyntaxError',
+  'MigrationChecksumError',
+  'MigrationApplyError',
+  'MigrationOrderError',
+  'MigrationStateError',
+  'BuiltManifestError',
+  'JobError',
+  'JsonStreamError',
 ] as const;
 
 export type ErrorName = (typeof APPROVED_ERROR_NAMES)[number];

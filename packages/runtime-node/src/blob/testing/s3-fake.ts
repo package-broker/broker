@@ -15,6 +15,7 @@ const SUPPORTED_AMZ_HEADERS = new Set([
   'x-amz-copy-source',
   'x-amz-security-token',
   'x-amz-checksum-sha256',
+  'x-amz-checksum-mode',
 ]);
 const XML_PREFIX = '\n\n  <?xml version="1.0" encoding="UTF-8"?>';
 const AUTHORIZATION =
@@ -47,6 +48,7 @@ interface StoredObject {
   readonly bytes: Uint8Array;
   readonly contentType: string;
   readonly etag: string;
+  readonly checksumSha256: string | null;
 }
 
 class Rejection extends Error {
@@ -270,6 +272,11 @@ export function startS3Fake(options: S3FakeOptions = {}): S3Fake {
     for (const [name, value] of request.headers) {
       if (name.startsWith('x-amz-') && !SUPPORTED_AMZ_HEADERS.has(name))
         throw new Rejection(501, 'NotImplemented');
+      if (
+        name === 'x-amz-checksum-mode' &&
+        (value !== 'ENABLED' || (request.method !== 'GET' && request.method !== 'HEAD'))
+      )
+        throw new Rejection(501, 'NotImplemented');
       if ((name === 'x-amz-checksum-sha256' || name === 'content-md5') && !plainPut)
         throw new Rejection(501, 'NotImplemented');
       if (name.startsWith('if-') && !(name === 'if-none-match' && value === '*' && plainPut)) {
@@ -311,6 +318,7 @@ export function startS3Fake(options: S3FakeOptions = {}): S3Fake {
           bytes: body,
           contentType: request.headers.get('content-type') ?? 'binary/octet-stream',
           etag,
+          checksumSha256: request.headers.get('x-amz-checksum-sha256'),
         });
         return new Response(null, { status: 200, headers: { etag } });
       }
@@ -327,6 +335,11 @@ export function startS3Fake(options: S3FakeOptions = {}): S3Fake {
           etag: stored.etag,
           'accept-ranges': 'bytes',
         };
+        if (
+          request.headers.get('x-amz-checksum-mode') === 'ENABLED' &&
+          stored.checksumSha256 !== null
+        )
+          headers['x-amz-checksum-sha256'] = stored.checksumSha256;
         const range = request.headers.get('range');
         if (request.method === 'HEAD')
           return new Response(null, {

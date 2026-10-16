@@ -2,7 +2,7 @@ import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp } from '../ids.js';
-import { isValidProviderId, isValidSubject } from '../identity/port.js';
+import { isValidProviderId, isValidSubject, isValidTrustAnchor } from '../identity/port.js';
 import { buildOrganizationActor, type ActorAccessSnapshot } from './actor.js';
 import type { AdminLog } from './administration.js';
 import type { MutationFence } from './fence.js';
@@ -118,10 +118,27 @@ function isAuthorized(
   return fence.userId === userId && fence.sessionId === id;
 }
 
-function requireFence(fence: unknown): asserts fence is MutationFence {
+function requireFence(fence: unknown, operation: string): asserts fence is MutationFence {
   if (!isRecord(fence) || !isId(fence['userId']) || !isId(fence['sessionId'])) {
-    throw new TypeError('identity unlink requires a mutation fence');
+    throw new TypeError(`${operation} requires a mutation fence`);
   }
+}
+
+function frozenSession(copy: SessionCopy): AuthenticatedSession {
+  return {
+    session: { reauthAt: copy.reauthAt },
+    principal: { kind: 'user', id: copy.userId },
+  } as unknown as AuthenticatedSession;
+}
+
+function emitter(log: AdminLog): (entry: Readonly<Record<string, unknown>>) => void {
+  return (entry) => {
+    try {
+      log(entry);
+    } catch {
+      // A failing sink must not change the outcome already decided.
+    }
+  };
 }
 
 function copyRequest(request: unknown): UnlinkIdentityRequest | null {
@@ -138,14 +155,7 @@ function copyRequest(request: unknown): UnlinkIdentityRequest | null {
 
 export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
   const { unlinks, sessions, providers, clock } = deps;
-
-  function emit(entry: Readonly<Record<string, unknown>>): void {
-    try {
-      deps.log(entry);
-    } catch {
-      // A failing sink must not change the outcome already decided.
-    }
-  }
+  const emit = emitter(deps.log);
 
   function denied(ctx: OrgContext, actorUserId: string | null): UnlinkResult {
     emit({ level: 'warn', event: 'identity.unlink_denied', orgId: ctx.orgId, actorUserId });
@@ -154,13 +164,10 @@ export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
 
   return {
     async unlinkIdentity(ctx, authenticated, snapshot, fence, request) {
-      requireFence(fence);
+      requireFence(fence, 'identity unlink');
       const copy = copySession(authenticated);
       if (!isAuthorized(copy, snapshot, fence)) return denied(ctx, copy.userId);
-      const frozen = {
-        session: { reauthAt: copy.reauthAt },
-        principal: { kind: 'user', id: copy.userId },
-      } as unknown as AuthenticatedSession;
+      const frozen = frozenSession(copy);
       if (!sessions.isReauthFresh(frozen)) return fail('reauth_required');
       const input = copyRequest(request);
       if (input === null) return fail('invalid_input');
@@ -196,6 +203,121 @@ export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
           return fail('indeterminate');
         default:
           throw new Error('identity unlink answered an unknown outcome');
+      }
+    },
+  };
+}
+
+export interface UnblockIdentityRequest {
+  readonly provider: string;
+  /** The trust anchor recorded on the block when it was placed. */
+  readonly issuer: string;
+  readonly subject: string;
+}
+
+export type UnblockStoreOutcome = 'unblocked' | 'authority' | 'not_found' | 'indeterminate';
+
+/** One fenced batch that re-proves the actor's live session and authority, then deletes one block. */
+export interface IdentityBlockStore {
+  unblock(
+    ctx: OrgContext,
+    fence: MutationFence,
+    request: UnblockIdentityRequest,
+  ): Promise<UnblockStoreOutcome>;
+}
+
+export type UnblockError =
+  'not_found' | 'forbidden' | 'reauth_required' | 'invalid_input' | 'indeterminate';
+
+export type UnblockResult =
+  { readonly ok: true } | { readonly ok: false; readonly error: UnblockError };
+
+export interface UnblockServiceDeps {
+  readonly blocks: IdentityBlockStore;
+  readonly sessions: Pick<SessionService, 'isReauthFresh'>;
+  readonly log: AdminLog;
+}
+
+/**
+ * Lifts one identity block. CSRF is asserted by the HTTP boundary before this call; the authority,
+ * reauthentication and logging rules are those of `UnlinkService`.
+ */
+export interface UnblockService {
+  unblockIdentity(
+    ctx: OrgContext,
+    authenticated: AuthenticatedSession,
+    snapshot: ActorAccessSnapshot,
+    fence: MutationFence,
+    request: UnblockIdentityRequest,
+  ): Promise<UnblockResult>;
+}
+
+const UNBLOCKED: UnblockResult = Object.freeze({ ok: true });
+
+function failUnblock(error: UnblockError): UnblockResult {
+  return { ok: false, error };
+}
+
+function copyUnblockRequest(request: unknown): UnblockIdentityRequest | null {
+  if (!isRecord(request)) return null;
+  const provider = request['provider'];
+  const issuer = request['issuer'];
+  const subject = request['subject'];
+  if (typeof provider !== 'string' || !isValidProviderId(provider)) return null;
+  if (typeof issuer !== 'string' || !isValidTrustAnchor(issuer)) return null;
+  if (!isValidSubject(subject)) return null;
+  return { provider, issuer, subject };
+}
+
+export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
+  const { blocks, sessions } = deps;
+  const emit = emitter(deps.log);
+
+  function denied(
+    ctx: OrgContext,
+    actorUserId: string | null,
+    provider: string | null,
+  ): UnblockResult {
+    emit({
+      level: 'warn',
+      event: 'identity.unblock_denied',
+      orgId: ctx.orgId,
+      actorUserId,
+      provider,
+    });
+    return failUnblock('forbidden');
+  }
+
+  return {
+    async unblockIdentity(ctx, authenticated, snapshot, fence, request) {
+      requireFence(fence, 'identity unblock');
+      const copy = copySession(authenticated);
+      if (!isAuthorized(copy, snapshot, fence)) return denied(ctx, copy.userId, null);
+      const frozen = frozenSession(copy);
+      if (!sessions.isReauthFresh(frozen)) return failUnblock('reauth_required');
+      const input = copyUnblockRequest(request);
+      if (input === null) return failUnblock('invalid_input');
+
+      const outcome = await blocks.unblock(ctx, fence, input);
+      switch (outcome) {
+        case 'unblocked':
+          emit({
+            level: 'info',
+            event: 'identity.unblocked',
+            orgId: ctx.orgId,
+            actorUserId: copy.userId,
+            provider: input.provider,
+          });
+          return UNBLOCKED;
+        case 'authority':
+          if (!sessions.isReauthFresh(frozen)) return failUnblock('reauth_required');
+          return denied(ctx, copy.userId, input.provider);
+        case 'not_found':
+          return failUnblock('not_found');
+        case 'indeterminate':
+          return failUnblock('indeterminate');
+        default:
+          throw new Error('identity unblock answered an unknown outcome');
       }
     },
   };

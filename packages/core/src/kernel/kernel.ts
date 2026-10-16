@@ -9,8 +9,16 @@ import type {
   RequestContext,
   RouteDefinition,
 } from '../plugin.js';
-import type { LogRecord, ObsRecordSink, ObsRegistry } from '../platform/observability.js';
-import { safeRecord } from '../platform/observability.js';
+import { createRepositoryJobs } from '../platform/jobs-port.js';
+import type { JobsFactory } from '../platform/jobs-port.js';
+import type {
+  LogRecord,
+  Observability,
+  ObservabilityScope,
+  ObsRecordSink,
+  ObsRegistry,
+} from '../platform/observability.js';
+import { forPlugin, noopObservability, safeRecord } from '../platform/observability.js';
 import type { HookErrorHandler } from './access.js';
 import { authorizeRoute, denyAllEngine, ENGINE_PLUGIN, INPUT_PLUGIN } from './authorize.js';
 import type { AuthorizationDecision, AuthorizationEngine, DenyLogger } from './authorize.js';
@@ -35,7 +43,9 @@ import {
 } from './request-scope.js';
 import type { CompletionGuard, KernelObsContext, RequestScope } from './request-scope.js';
 import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './registry.js';
-import type { Registration } from './registry.js';
+import type { RegisteredJob, Registration } from './registry.js';
+import { bindPluginPorts } from './plugin-ports.js';
+import type { PlatformServices } from './plugin-ports.js';
 import type { PackageVisibilityResolver } from './routes.js';
 import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
 
@@ -64,6 +74,18 @@ export interface KernelOptions {
   readonly log?: KernelLog;
   /** Default: records go to `log` through `logSink`, deployment id `unconfigured`. */
   readonly observability?: KernelObservability;
+  /** Unscoped runtime services; the kernel binds them per plugin, request and job. */
+  readonly platformServices?: PlatformServices;
+}
+
+export interface JobClaim {
+  readonly jobId: string;
+  readonly attempt: number;
+}
+
+export interface JobScope {
+  readonly ports: PluginPorts;
+  readonly observability: Observability;
 }
 
 export interface Kernel {
@@ -72,6 +94,8 @@ export interface Kernel {
   readonly coreRoutes: readonly RouteDefinition[];
   /** Route templates usable as metric `route` labels and OTLP route attributes. */
   readonly routeTemplates: ReadonlySet<string>;
+  /** Ports and observability for one claimed attempt of a job from `registration.jobs`. */
+  jobScope(job: RegisteredJob, claim: JobClaim): JobScope;
 }
 
 type KernelEnv = {
@@ -244,6 +268,27 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   if (coreProblems.length > 0) throw new KernelConfigError(coreProblems);
   const { ports, resolveOrg, health } = options;
+  const services = options.platformServices;
+  if (Object.hasOwn(ports, 'platform') || ports.platform !== undefined) {
+    throw new KernelConfigError(['ports.platform is bound by the kernel; pass platform services']);
+  }
+  Object.freeze(ports);
+  const registeredJobs = Object.freeze([...registration.jobs]);
+  if (services === undefined && registeredJobs.length > 0) {
+    const owners = [...new Set(registeredJobs.map((job) => job.plugin))];
+    throw new KernelConfigError(
+      owners.map((owner) => `plugin "${owner}" registers jobs but platform services are disabled`),
+    );
+  }
+  const jobs: JobsFactory | undefined =
+    services === undefined
+      ? undefined
+      : createRepositoryJobs({
+          store: services.jobStore,
+          jobs: registeredJobs,
+          clock: ports.clock,
+          ids: ports.ids,
+        });
   const engine = options.authorization ?? denyAllEngine;
   const deploymentId = options.observability?.deploymentId ?? UNCONFIGURED_DEPLOYMENT;
   if (!portAccepts('deployment_id', deploymentId)) {
@@ -271,8 +316,50 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const httpMetrics = createHttpMetrics(obsContext);
   const accessChecks = registration.hooks['access.check'];
 
+  const pluginObservability = (
+    pluginId: string,
+    extra: Pick<ObservabilityScope, 'jobId' | 'attempt'> = {},
+  ): Observability => {
+    try {
+      return forPlugin(
+        obsContext.sink,
+        { deploymentId, runtime: obsContext.runtime, requestId: null, ...extra },
+        pluginId,
+        registry,
+      );
+    } catch {
+      return noopObservability;
+    }
+  };
+  const unattended = Object.freeze({ projectId: null, tokenId: null });
+
   for (const plugin of options.plugins) {
-    if (plugin.init !== undefined) await plugin.init(ports);
+    if (plugin.init === undefined) continue;
+    await plugin.init(
+      bindPluginPorts(ports, services, jobs, {
+        pluginId: plugin.id,
+        observability: pluginObservability(plugin.id),
+        initiator: unattended,
+      }),
+    );
+  }
+
+  function jobScope(job: RegisteredJob, claim: JobClaim): JobScope {
+    if (!registeredJobs.includes(job)) {
+      throw new TypeError('jobScope requires a job from kernel.registration.jobs');
+    }
+    const observability = pluginObservability(job.plugin, {
+      jobId: claim.jobId,
+      attempt: claim.attempt,
+    });
+    return Object.freeze({
+      ports: bindPluginPorts(ports, services, jobs, {
+        pluginId: job.plugin,
+        observability,
+        initiator: unattended,
+      }),
+      observability,
+    });
   }
 
   async function invoke(
@@ -289,7 +376,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       principal,
       projectId,
       params: Object.freeze({ ...c.req.param() }),
-      ports,
+      ports: bindPluginPorts(ports, services, jobs, {
+        pluginId: route.plugin,
+        observability: c.env.scope.obs({ plugin: route.plugin }),
+        initiator: { projectId, tokenId: c.env.scope.fields().tokenId ?? null },
+      }),
     });
     const response: unknown = await route.handler(context);
     if (!(response instanceof Response)) {
@@ -460,5 +551,5 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
   }
 
-  return Object.freeze({ fetch, registration, coreRoutes, routeTemplates });
+  return Object.freeze({ fetch, registration, coreRoutes, routeTemplates, jobScope });
 }

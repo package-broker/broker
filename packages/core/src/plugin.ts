@@ -2,7 +2,10 @@ import type { OrganizationRepository } from './db/organization.js';
 import type { OrgContext } from './db/port.js';
 import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.js';
 import type { Clock } from './ids.js';
-import type { JobDefinition } from './platform/jobs.js';
+import type { BlobStore } from './platform/blob.js';
+import type { Cache } from './platform/cache.js';
+import type { JobDefinition, Jobs } from './platform/jobs.js';
+import type { Observability } from './platform/observability.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
@@ -90,6 +93,29 @@ export interface PluginPorts {
   readonly organizations: OrganizationReader;
   readonly clock: Clock;
   readonly ids: { ulid(): string };
+  /** Absent when platform services are disabled; read it through requirePlatformPorts. */
+  readonly platform?: PlatformPorts;
+}
+
+export interface PlatformPorts {
+  readonly blob: BlobStore;
+  readonly cache: Cache;
+  readonly jobs: Jobs;
+  readonly observability: Observability;
+}
+
+export class PlatformUnavailableError extends Error {
+  constructor() {
+    super('Platform services are not enabled');
+    this.name = 'PlatformUnavailableError';
+  }
+}
+
+export function requirePlatformPorts(ports: PluginPorts): PlatformPorts {
+  if (ports.platform === undefined || ports.platform === null) {
+    throw new PlatformUnavailableError();
+  }
+  return ports.platform;
 }
 
 export interface AccessCheckInput {

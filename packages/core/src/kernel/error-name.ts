@@ -42,6 +42,7 @@ const REPORTABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
   'MigrationOrderError',
   'MigrationStateError',
   'BuiltManifestError',
+  'JobError',
 ]);
 
 const MAX_PROTOTYPE_STEPS = 32;

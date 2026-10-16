@@ -20,12 +20,12 @@ describe('manifest', () => {
 
   it('reports duplicate ids, unsupported targets, api range and missing dependencies', () => {
     const errors = validatePlugins(
-      [plugin('a'), plugin('a'), plugin('c', { apiVersion: 3, dependsOn: ['zz'] })],
+      [plugin('a'), plugin('a'), plugin('c', { apiVersion: 4, dependsOn: ['zz'] })],
       'cloudflare',
     );
     expect(errors.join('\n')).toMatch(/duplicate plugin id "a"/);
     expect(errors.join('\n')).toMatch(/does not support target "cloudflare"/);
-    expect(errors.join('\n')).toMatch(/apiVersion 3/);
+    expect(errors.join('\n')).toMatch(/apiVersion 4/);
     expect(errors.join('\n')).toMatch(/missing plugin "zz"/);
   });
 

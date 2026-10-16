@@ -91,6 +91,11 @@ describe('startNode', () => {
     return loadMigrationSource('core', '0001_init.sql', text);
   }
 
+  async function epochSource(): Promise<MigrationSource> {
+    const text = await readFile(join(migrationsDirectory, '0004_cache_epoch.sql'), 'utf8');
+    return loadMigrationSource('core', '0004_cache_epoch.sql', text);
+  }
+
   async function listen(broker: NodeBroker): Promise<string> {
     running.push(broker);
     await new Promise<void>((resolve) => broker.server.listen(0, '127.0.0.1', resolve));
@@ -109,7 +114,7 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [healthyPlugin()],
-      migrations: [await initSource()],
+      migrations: [await initSource(), await epochSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -161,7 +166,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: [await initSource(), await epochSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -195,7 +200,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: [await initSource(), await epochSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -210,7 +215,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource()],
+        migrations: [await initSource(), await epochSource()],
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'other',
@@ -243,7 +248,7 @@ describe('startNode', () => {
       const failure = await rejection(
         startNode({
           plugins: [broken],
-          migrations: [await initSource()],
+          migrations: [await initSource(), await epochSource()],
           env: {
             PB_SQLITE_PATH: path,
             PB_ORG_SLUG: 'acme',
@@ -269,7 +274,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource()],
+        migrations: [await initSource(), await epochSource()],
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'acme',

@@ -13,6 +13,7 @@ import {
   type SqlBool,
 } from 'kysely';
 import type { OrgContext, SqlValue, Statement } from '@package-broker/core/db/port';
+import { fenceGuard, type FenceGuard } from '@package-broker/core/authz/fence';
 import { ulid } from '@package-broker/core/ids';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import type { Database } from './schema.js';
@@ -450,4 +451,34 @@ export function protectedHolder(
   }
 
   return existsOf(branches.reduce((all, branch) => all.unionAll(branch), localAdmin));
+}
+
+interface GuardCtes {
+  guard_cond: { f: number };
+  guard_rows: { n: number };
+}
+
+/**
+ * Fails the batch with a UNIQUE error unless the condition evaluates to integer 1; any other value
+ * (NULL, 2, '1') fails closed. Conditions should be exists/comparisons.
+ */
+export function assertGuard(condition: Guard): FenceGuard {
+  const ctes = db as unknown as Kysely<GuardCtes & Database>;
+  const insert = ctes
+    .with(
+      (cte) => cte('guard_cond(f)').materialized(),
+      (qb) => qb.selectNoFrom(eb(condition, 'is not', sql.lit(1)).as('f')),
+    )
+    .with('guard_rows(n)', (qb) =>
+      qb.selectNoFrom(sql.lit(1).as('n')).unionAll(qb.selectNoFrom(sql.lit(2).as('n'))),
+    )
+    .insertInto('access_mutation_guard')
+    .columns(['key'])
+    .expression(
+      ctes
+        .selectFrom(['guard_cond', 'guard_rows'])
+        .select(sql<string>`${newOpId()}`.as('key'))
+        .where('guard_cond.f', '=', sql.lit(1)),
+    );
+  return fenceGuard([compile(insert)]);
 }

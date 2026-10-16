@@ -240,6 +240,12 @@ export interface AccessMutationGuardTable {
   key: string;
 }
 
+/** Mirrors `cache_epoch` in `migrations/0004_cache_epoch.sql`. */
+export interface CacheEpochTable {
+  org_id: string;
+  version: string;
+}
+
 export interface Database {
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
@@ -260,4 +266,5 @@ export interface Database {
   service_principal_permission: ServicePrincipalPermissionTable;
   identity_block: IdentityBlockTable;
   access_mutation_guard: AccessMutationGuardTable;
+  cache_epoch: CacheEpochTable;
 }

@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
+import { sql } from 'kysely';
 import { describe, expect, it } from 'vitest';
 import type { DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type { CredentialRecord } from '@package-broker/core/db/credentials';
@@ -18,6 +19,7 @@ import { createLocalLoginSetupWriter } from '../repositories/local-login-setup.j
 import { createLocalLoginSuccessWriter } from '../repositories/local-login-success.js';
 import { createLoginWriter } from '../repositories/login.js';
 import { seedDefaultsStatements } from '../repositories/role.js';
+import { assertGuard, newOpId } from '../kysely.js';
 import { seedTwoOrganizations } from './two-organizations.js';
 
 export interface OpenedAuthDatabase {
@@ -76,6 +78,7 @@ const ADMIN = mint();
 const USER_X = mint();
 const U1 = mint();
 const U2 = mint();
+const U3 = mint();
 const BOOT_USER = mint();
 const CREDENTIAL = mint();
 const NEW_CREDENTIAL = mint();
@@ -496,7 +499,7 @@ const upgrade: Case = async (open) => {
         executor,
         "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
       ),
-    ).toBe(42);
+    ).toBe(43);
     expect(
       await rowsOf(
         executor,
@@ -1313,6 +1316,42 @@ const totpSetupRequired: Case = async (open) => {
   });
 };
 
+const accessMutationGuard: Case = async (open) => {
+  await withWorld(open, async ({ pair, a }) => {
+    const { executor } = pair;
+    const addUser = (id: string): Statement =>
+      st(
+        'INSERT INTO user_account (id, org_id, email, status) VALUES (?, ?, ?, ?)',
+        id,
+        a.orgId,
+        `${id.toLowerCase()}@example.test`,
+        'active',
+      );
+    const guardRows = () => countOf(executor, 'SELECT count(*) AS n FROM access_mutation_guard');
+    const holds = (value: 0 | 1 | null) => sql<boolean>`(select ${sql.lit(value)})`;
+
+    await executor.batch([...assertGuard(holds(1)), addUser(U1)]);
+    expect(await countOf(executor, 'SELECT count(*) AS n FROM user_account')).toBe(1);
+    expect(await guardRows()).toBe(0);
+
+    const plan = await executor.all<{ detail: string }>({
+      sql: `EXPLAIN QUERY PLAN ${assertGuard(holds(1))[0]?.sql ?? ''}`,
+      params: [newOpId()],
+    });
+    const details = plan.map((row) => row.detail).join('\n');
+    expect(details).toMatch(/MATERIALIZE guard_cond/);
+    expect(details).not.toMatch(/CO-ROUTINE guard_cond/);
+
+    for (const value of [0, null] as const) {
+      await expect(
+        executor.batch([addUser(U3), ...assertGuard(holds(value)), addUser(U2)]),
+      ).rejects.toMatchObject({ kind: 'unique' });
+      expect(await countOf(executor, 'SELECT count(*) AS n FROM user_account')).toBe(1);
+      expect(await guardRows()).toBe(0);
+    }
+  });
+};
+
 export const authContractCases = {
   upgrade,
   resetCleanup,
@@ -1324,11 +1363,12 @@ export const authContractCases = {
   loginBatchRace,
   reserveAttempt,
   totpSetupRequired,
+  accessMutationGuard,
 } as const satisfies Record<string, Case>;
 
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
-    it('1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 42 tables', () =>
+    it('1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 43 tables', () =>
       authContractCases.upgrade(open));
     it('2. reset deletes the TOTP credential and clears its reference and enabled time together', () =>
       authContractCases.resetCleanup(open));
@@ -1366,5 +1406,7 @@ export function describeAuthContract(name: string, open: Open): void {
     );
     it('10. TOTP enabled without a credential requires setup and never passes', () =>
       authContractCases.totpSetupRequired(open));
+    it('11. access mutation guard: true lands, false and NULL fail with UNIQUE and leave no row', () =>
+      authContractCases.accessMutationGuard(open));
   });
 }

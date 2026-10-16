@@ -8,7 +8,7 @@ function plugin(id: string, overrides: Partial<PluginDefinition> = {}): PluginDe
   return {
     id,
     package: `@test/${id}`,
-    apiVersion: SUPPORTED_PLUGIN_API[0],
+    apiVersion: SUPPORTED_PLUGIN_API[1],
     platforms: ['node'],
     ...overrides,
   };
@@ -41,13 +41,23 @@ describe('collectRegistrations', () => {
   it('returns routes with plugin ids, hooks in order and the bindings map', () => {
     const first = () => undefined;
     const second = () => undefined;
-    const a = withRoutes('alpha', [{ method: 'GET', path: '/a', permission: 'a.read', handler }], {
-      binds: ['source'],
-      register(registry) {
-        registry.route({ method: 'GET', path: '/a', permission: 'a.read', handler });
-        registry.hook('access.check', first);
+    const a = withRoutes(
+      'alpha',
+      [{ method: 'GET', path: '/a', permission: 'org:read', boundary: 'organization', handler }],
+      {
+        binds: ['source'],
+        register(registry) {
+          registry.route({
+            method: 'GET',
+            path: '/a',
+            permission: 'org:read',
+            boundary: 'organization',
+            handler,
+          });
+          registry.hook('access.check', first);
+        },
       },
-    });
+    );
     const b = plugin('beta', {
       binds: ['identity'],
       identityProviders: () => [],
@@ -166,7 +176,14 @@ describe('collectRegistrations', () => {
 
   it('rejects needsOrg: false with a permission', () => {
     const bad = withRoutes('p', [
-      { method: 'GET', path: '/x', permission: 'x.read', needsOrg: false, handler },
+      {
+        method: 'GET',
+        path: '/x',
+        permission: 'org:read',
+        boundary: 'organization',
+        needsOrg: false,
+        handler,
+      },
     ]);
     expect(problemsOf([bad])).toEqual([
       'plugin "p" route GET /x: a route without organization context must be public',
@@ -196,7 +213,14 @@ describe('collectRegistrations', () => {
 
   it('reports the path problem and the organization problem of one route', () => {
     const bad = withRoutes('p', [
-      { method: 'GET', path: 'x', permission: 'x.read', needsOrg: false, handler },
+      {
+        method: 'GET',
+        path: 'x',
+        permission: 'org:read',
+        boundary: 'organization',
+        needsOrg: false,
+        handler,
+      },
     ]);
     expect(problemsOf([bad])).toEqual([
       'plugin "p": route path "x" must start with "/"',
@@ -232,7 +256,16 @@ describe('collectRegistrations', () => {
     const a = plugin('a', { apiVersion: 99, binds: ['source'] });
     const b = withRoutes(
       'b',
-      [{ method: 'GET', path: '/x', permission: 'p', needsOrg: false, handler }],
+      [
+        {
+          method: 'GET',
+          path: '/x',
+          permission: 'org:read',
+          boundary: 'organization',
+          needsOrg: false,
+          handler,
+        },
+      ],
       {
         binds: ['source'],
       },

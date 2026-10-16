@@ -61,7 +61,7 @@ let sources: MigrationSource[] | undefined;
 
 async function coreMigrations(): Promise<MigrationSource[]> {
   sources ??= await Promise.all(
-    ['0001_init.sql', '0002_local_login.sql'].map(async (name) =>
+    ['0001_init.sql', '0002_local_login.sql', '0004_cache_epoch.sql'].map(async (name) =>
       loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),
   );

@@ -144,7 +144,7 @@ async function columnsOf(table: string): Promise<Map<string, TableInfo>> {
 
 describe('migration 0003 access model', () => {
   it('1: applies after 0001 and 0002, is expand phase and leaves 0001 and 0002 checksums unchanged', async () => {
-    const sources = await loadCore();
+    const sources = await loadCore((name) => name <= '0003_z');
     expect(sources.map((source) => source.id)).toEqual([
       'core:0001_init',
       'core:0002_local_login',
@@ -191,7 +191,9 @@ describe('migration 0003 access model', () => {
     expect((await columnsOf('project')).has('revision')).toBe(false);
 
     await migrateAll();
-    const again = await migrate(opened.executor, await loadCore(), { holder: 'access-model-test' });
+    const again = await migrate(opened.executor, await loadCore((n) => n <= '0003_z'), {
+      holder: 'access-model-test',
+    });
     expect(again.applied).toEqual([]);
     expect(again.skipped).toHaveLength(3);
   });

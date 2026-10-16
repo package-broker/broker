@@ -12,7 +12,12 @@ import type {
 } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { bootstrapAdmin, resetLocalLogin, type BootstrapAdminInput } from './admin-bootstrap.js';
+import {
+  bootstrapAdmin,
+  bootstrapAdminWithTopUp,
+  resetLocalLogin,
+  type BootstrapAdminInput,
+} from './admin-bootstrap.js';
 import { createLocalLoginReader } from './local-login.js';
 import { seedDefaultsStatements } from './role.js';
 
@@ -456,11 +461,10 @@ describe('bootstrapAdmin', () => {
   it('5: reads the local login first and returns the upsert of the last statement', async () => {
     const recorded = recording(executor);
     await bootstrapAdmin(recorded.executor, a, input());
-    expect(recorded.statements).toHaveLength(15);
     const first = recorded.statements[0]?.sql ?? '';
     expect(first).toMatch(/^select exists \(select 1 as "one" from "local_login"/);
     expect(first).toContain('as "existed"');
-    const last = recorded.statements[14]?.sql ?? '';
+    const last = recorded.statements.at(-1)?.sql ?? '';
     expect(last).toMatch(/^insert into "local_login"/);
     expect(last).toMatch(/on conflict \("user_id"\) do update set/);
     expect(last).toMatch(/where "local_login"\."password_hash" is null returning "user_id"$/);
@@ -495,6 +499,215 @@ describe('bootstrapAdmin', () => {
       ).rejects.toBeInstanceOf(TypeError);
     }
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+  });
+});
+
+describe('bootstrapAdmin organization_admin top-up', () => {
+  const TOPPED = ['org:projects:archive', 'project:service-principals:write'];
+
+  async function adminRole(ctx: OrgContext) {
+    const found = await rows<{ id: string; revision: number; updated_at: string }>(
+      "SELECT id, revision, updated_at FROM role WHERE org_id = ? AND key = 'organization_admin'",
+      ctx.orgId,
+    );
+    return found[0] ?? null;
+  }
+
+  async function epochOf(ctx: OrgContext): Promise<string | null> {
+    const found = await rows<{ version: string }>(
+      'SELECT version FROM cache_epoch WHERE org_id = ?',
+      ctx.orgId,
+    );
+    return found[0]?.version ?? null;
+  }
+
+  async function adminPermissions(ctx: OrgContext): Promise<string[]> {
+    const found = await rows<{ permission: string }>(
+      "SELECT p.permission FROM role_permission p JOIN role r ON r.id = p.role_id WHERE r.org_id = ? AND r.key = 'organization_admin' ORDER BY p.permission",
+      ctx.orgId,
+    );
+    return found.map((row) => row.permission);
+  }
+
+  async function otherRoles(ctx: OrgContext) {
+    return {
+      roles: await rows(
+        "SELECT * FROM role WHERE org_id = ? AND key <> 'organization_admin' ORDER BY id",
+        ctx.orgId,
+      ),
+      permissions: await rows(
+        "SELECT p.* FROM role_permission p JOIN role r ON r.id = p.role_id WHERE p.org_id = ? AND r.key <> 'organization_admin' ORDER BY p.role_id, p.permission",
+        ctx.orgId,
+      ),
+    };
+  }
+
+  async function dropTwo(ctx: OrgContext): Promise<void> {
+    await run(
+      "DELETE FROM role_permission WHERE org_id = ? AND permission IN (?, ?) AND role_id IN (SELECT id FROM role WHERE key = 'organization_admin')",
+      ctx.orgId,
+      TOPPED[0] ?? '',
+      TOPPED[1] ?? '',
+    );
+  }
+
+  const second = () =>
+    input({
+      setupHash: HASH_2,
+      setupExpiresAt: LATER_EXPIRES,
+      opId: '01J0OP000000000000000000O7',
+      grantId: '01J0GRANTADMIN0000000000G7',
+      now: LATER,
+    });
+
+  it('a fresh organization reports no top-up and keeps its cache epoch', async () => {
+    const epoch = await epochOf(a);
+    expect(await bootstrapAdminWithTopUp(executor, a, input())).toEqual({
+      result: 'created',
+      toppedUp: 0,
+    });
+    expect((await adminRole(a))?.revision).toBe(1);
+    expect(await epochOf(a)).toBe(epoch);
+  });
+
+  it('two missing permissions: toppedUp 2, revision +1, updated_at the batch time, cache epoch replaced', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    const complete = await adminPermissions(a);
+    await dropTwo(a);
+    const role = await adminRole(a);
+    const epoch = await epochOf(a);
+    const epochB = await epochOf(b);
+    const others = await otherRoles(a);
+    expect(others.roles).toHaveLength(4);
+    expect(others.permissions.length).toBeGreaterThan(0);
+
+    expect(await bootstrapAdminWithTopUp(executor, a, second())).toEqual({
+      result: 'refreshed',
+      toppedUp: 2,
+    });
+
+    expect(await adminRole(a)).toEqual({
+      id: role?.id,
+      revision: (role?.revision ?? 0) + 1,
+      updated_at: LATER,
+    });
+    expect(await epochOf(a)).not.toBe(epoch);
+    expect(await epochOf(a)).toMatch(/^[0-9A-F]{32}$/);
+    expect(await epochOf(b)).toBe(epochB);
+    expect(await adminPermissions(a)).toEqual(complete);
+    expect(await otherRoles(a)).toEqual(others);
+  });
+
+  it('a replay after a top-up gives toppedUp 0 and leaves the revision and the epoch alone', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    await dropTwo(a);
+    expect((await bootstrapAdminWithTopUp(executor, a, second())).toppedUp).toBe(2);
+    const role = await adminRole(a);
+    const epoch = await epochOf(a);
+
+    expect(
+      await bootstrapAdminWithTopUp(
+        executor,
+        a,
+        input({
+          setupHash: HASH_3,
+          setupExpiresAt: LATER_EXPIRES,
+          opId: '01J0OP000000000000000000O8',
+          grantId: '01J0GRANTADMIN0000000000G8',
+          now: LATER,
+        }),
+      ),
+    ).toEqual({ result: 'refreshed', toppedUp: 0 });
+    expect(await adminRole(a)).toEqual(role);
+    expect(await epochOf(a)).toBe(epoch);
+  });
+
+  it('a set-up admin still gets the top-up and reports already_set_up with the count', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    await run(
+      'UPDATE local_login SET password_hash = ?, setup_hash = NULL, setup_expires_at = NULL',
+      PASSWORD_HASH,
+    );
+    await dropTwo(a);
+    const role = await adminRole(a);
+    const epoch = await epochOf(a);
+
+    expect(await bootstrapAdminWithTopUp(executor, a, second())).toEqual({
+      result: 'already_set_up',
+      toppedUp: 2,
+    });
+    expect((await adminRole(a))?.revision).toBe((role?.revision ?? 0) + 1);
+    expect(await epochOf(a)).not.toBe(epoch);
+  });
+
+  it('a complete organization: toppedUp 0, revision, updated_at and cache epoch unchanged', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    const role = await adminRole(a);
+    const epoch = await epochOf(a);
+
+    expect(await bootstrapAdminWithTopUp(executor, a, second())).toEqual({
+      result: 'refreshed',
+      toppedUp: 0,
+    });
+    expect(await adminRole(a)).toEqual(role);
+    expect(await epochOf(a)).toBe(epoch);
+  });
+
+  it('a batch failure after the insert rolls back the permissions, the revision and the epoch bump', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    await dropTwo(a);
+    const role = await adminRole(a);
+    const epoch = await epochOf(a);
+    const permissions = await adminPermissions(a);
+
+    const faulty: ScalarSqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: (list) =>
+        executor.batch([
+          ...list,
+          { sql: 'INSERT INTO access_mutation_guard (key) VALUES (?), (?)', params: ['x', 'x'] },
+        ]),
+    };
+    await expect(bootstrapAdminWithTopUp(faulty, a, second())).rejects.toThrow(
+      /UNIQUE|constraint/i,
+    );
+
+    expect(await adminRole(a)).toEqual(role);
+    expect(await epochOf(a)).toBe(epoch);
+    expect(await adminPermissions(a)).toEqual(permissions);
+  });
+
+  it('a top-up without a cache_epoch row fails the whole batch', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    await dropTwo(a);
+    await run('DELETE FROM cache_epoch WHERE org_id = ?', a.orgId);
+    const role = await adminRole(a);
+    const permissions = await adminPermissions(a);
+
+    await expect(bootstrapAdminWithTopUp(executor, a, second())).rejects.toThrow(
+      /UNIQUE|constraint/i,
+    );
+
+    expect(await adminRole(a)).toEqual(role);
+    expect(await adminPermissions(a)).toEqual(permissions);
+  });
+
+  it('an unprotected role keyed organization_admin is never topped up', async () => {
+    await bootstrapAdminWithTopUp(executor, a, input());
+    await run(
+      "UPDATE role SET protects_last_holder = 0 WHERE org_id = ? AND key = 'organization_admin'",
+      a.orgId,
+    );
+    await dropTwo(a);
+    const role = await adminRole(a);
+    const epoch = await epochOf(a);
+
+    expect((await bootstrapAdminWithTopUp(executor, a, second())).toppedUp).toBe(0);
+    expect(await adminRole(a)).toEqual(role);
+    expect(await epochOf(a)).toBe(epoch);
+    const held = await adminPermissions(a);
+    for (const permission of TOPPED) expect(held).not.toContain(permission);
   });
 });
 

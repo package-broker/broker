@@ -50,7 +50,7 @@ const ports: PluginPorts = {
 
 describe('plugin contract', () => {
   it('keeps the supported API range and the identity definePlugin', () => {
-    expect(SUPPORTED_PLUGIN_API).toEqual([2, 3]);
+    expect(SUPPORTED_PLUGIN_API).toEqual([3, 3]);
     const definition = {
       id: 'x',
       package: '@package-broker/plugin-x',

@@ -163,8 +163,13 @@ export function createCacheApiAdapter(
       const put = async (): Promise<void> => {
         await (await open()).put(req, response);
       };
-      if (options.waitUntil) options.waitUntil(put().catch(failed));
-      else await put();
+      if (options.waitUntil) {
+        try {
+          options.waitUntil(put().catch(failed));
+        } catch {
+          failed();
+        }
+      } else await put();
     },
 
     async delete(_ctx: OrgContext, key) {

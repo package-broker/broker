@@ -25,43 +25,54 @@ export interface Codecs {
    * trailer, so packfile readers can continue after it. Throws CodecTruncatedError when `input`
    * ends before the stream does (more input may help), CodecCorruptError for invalid data and
    * CodecLimitError when the output would exceed `maxOutput`.
+   * With `expectedSize` (the size a packfile object header declares) the output buffer is allocated
+   * once at exactly that size and the output must match it: more throws CodecLimitError, less
+   * throws CodecCorruptError. `expectedSize` above `maxOutput` throws CodecLimitError.
    */
-  inflateConsumed(input: Uint8Array, maxOutput: number): InflateResult;
+  inflateConsumed(input: Uint8Array, maxOutput: number, expectedSize?: number): InflateResult;
   /**
    * Gunzips a stream of concatenated members as one output. Errors the readable side with
    * CodecLimitError past `maxOutput`, CodecTruncatedError when the input ends inside a member
    * and CodecCorruptError for a bad header, checksum or trailing bytes that are not a member.
    */
-  gunzip(maxOutput: number): TransformStream<Uint8Array, Uint8Array>;
-  deflateRaw(): TransformStream<Uint8Array, Uint8Array>;
+  gunzip(maxOutput: number): ReadableWritablePair<Uint8Array, Uint8Array>;
+  deflateRaw(): ReadableWritablePair<Uint8Array, Uint8Array>;
 }
 
-export type CodecOperation = 'inflate' | 'gunzip';
+export type CodecOperation = 'inflate' | 'gunzip' | 'deflate';
 
 export class CodecLimitError extends Error {
   override readonly name = 'CodecLimitError';
 
-  constructor(
-    readonly operation: CodecOperation,
-    readonly maxOutput: number,
-  ) {
+  readonly operation: CodecOperation;
+  readonly maxOutput: number;
+
+  constructor(operation: CodecOperation, maxOutput: number) {
     super(`${operation} output exceeds ${maxOutput} bytes`);
+    this.operation = operation;
+    this.maxOutput = maxOutput;
   }
 }
 
 export class CodecTruncatedError extends Error {
   override readonly name = 'CodecTruncatedError';
 
-  constructor(readonly operation: CodecOperation) {
+  readonly operation: CodecOperation;
+
+  constructor(operation: CodecOperation) {
     super(`${operation} input ended before the stream did`);
+    this.operation = operation;
   }
 }
 
 export class CodecCorruptError extends Error {
   override readonly name = 'CodecCorruptError';
 
-  constructor(readonly operation: CodecOperation) {
+  readonly operation: CodecOperation;
+
+  constructor(operation: CodecOperation) {
     super(`${operation} input is corrupt`);
+    this.operation = operation;
   }
 }
 

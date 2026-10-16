@@ -61,6 +61,9 @@ const ALLOWED_KEYS = new Set([
   'dist',
   'source',
 ]);
+export const MAX_RELEASE_SKEW_MS = 24 * 60 * 60 * 1000;
+export const MIN_COMPOSER_RELEASE_TIME = '2011-01-01T00:00:00.000Z';
+const MIN_COMPOSER_RELEASE_MS = Date.parse(MIN_COMPOSER_RELEASE_TIME);
 const DEFAULT_BRANCH_ALIAS = '9999999-dev';
 const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const TIME = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$/;
@@ -91,7 +94,7 @@ function sameName(key: string, name: unknown): boolean {
   }
 }
 
-function releasedAt(time: unknown): string | null {
+function releasedAt(time: unknown, importedAt: string): string | null {
   if (typeof time !== 'string') return null;
   let ms: number;
   if (/^\d+$/.test(time)) {
@@ -128,7 +131,12 @@ function releasedAt(time: unknown): string | null {
     ms = local - offset + Number((match[7] ?? '').slice(0, 3).padEnd(3, '0'));
   }
   const date = new Date(ms);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  const parsed = date.getTime();
+  if (Number.isNaN(parsed)) return null;
+  if (parsed < MIN_COMPOSER_RELEASE_MS || parsed > Date.parse(importedAt) + MAX_RELEASE_SKEW_MS) {
+    return null;
+  }
+  return date.toISOString();
 }
 
 function usableDist(dist: unknown): dist is Json & { type: 'zip' | 'tar' } {
@@ -161,7 +169,12 @@ export function composerVersionInput(
   if (!CANONICAL_TIMESTAMP.test(origin.importedAt)) throw new InvalidComposerOriginError();
   if (!isRecord(rawVersionObject)) return skip('malformed');
 
-  const echo = stripCredentialEcho(rawVersionObject, origin.probe);
+  const allowed: Json = {};
+  for (const [name, value] of Object.entries(rawVersionObject)) {
+    if (ALLOWED_KEYS.has(name)) allowed[name] = value;
+  }
+
+  const echo = stripCredentialEcho(allowed, origin.probe);
   if (echo.refused) return skip(echo.reason === 'malformed' ? 'malformed' : 'credential_echo');
   const echoed = echo.object as Json;
 
@@ -186,10 +199,7 @@ export function composerVersionInput(
     return skip('invalid_version');
   }
 
-  const object: Json = {};
-  for (const [name, value] of Object.entries(echoed)) {
-    if (ALLOWED_KEYS.has(name)) object[name] = value;
-  }
+  const object: Json = { ...echoed };
   if (upstreamNormalized !== undefined && !upstreamPresent) delete object.version_normalized;
 
   if (usableDist(object.dist)) {
@@ -213,7 +223,7 @@ export function composerVersionInput(
   const source = isRecord(stored.source) ? stored.source : null;
   if (dist === null && source === null) return skip('no_installable_reference');
 
-  const released = releasedAt(stored.time);
+  const released = releasedAt(stored.time, origin.importedAt);
   return {
     ok: true,
     stripped: echo.stripped.length,

@@ -25,6 +25,12 @@ function mapZlibError(error: unknown, operation: CodecOperation, maxOutput: numb
   return error;
 }
 
+function assertExpectedSize(expectedSize: number): void {
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) {
+    throw new RangeError('expectedSize must be a non-negative safe integer');
+  }
+}
+
 function digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
   const hashes = algs.map((alg) => [alg, createHash(alg)] as const);
   let resolve!: (value: Record<A, Uint8Array>) => void;
@@ -53,19 +59,32 @@ function digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
   return { transform, digests };
 }
 
-function inflateConsumed(input: Uint8Array, maxOutput: number) {
+function inflateConsumed(input: Uint8Array, maxOutput: number, expectedSize?: number) {
   assertMaxOutput(maxOutput);
+  if (expectedSize !== undefined) assertExpectedSize(expectedSize);
   try {
+    if (expectedSize !== undefined && expectedSize > maxOutput) {
+      throw new CodecLimitError('inflate', maxOutput);
+    }
+    const limit = expectedSize ?? maxOutput;
     const options: ZlibOptions & { info: true } = {
       info: true,
-      maxOutputLength: Math.min(Math.max(1, maxOutput), bufferConstants.MAX_LENGTH),
+      maxOutputLength: Math.min(Math.max(1, limit), bufferConstants.MAX_LENGTH),
+      ...(expectedSize === undefined ? {} : { chunkSize: Math.max(64, expectedSize + 1) }),
     };
     const { buffer, engine } = inflateSync(input, options) as unknown as {
-      buffer: Buffer;
+      buffer: Uint8Array;
       engine: { bytesWritten: number };
     };
-    if (buffer.length > maxOutput) throw new CodecLimitError('inflate', maxOutput);
-    return { data: new Uint8Array(buffer), consumed: engine.bytesWritten };
+    if (buffer.length > limit) throw new CodecLimitError('inflate', maxOutput);
+    if (expectedSize !== undefined && buffer.length !== expectedSize) {
+      throw new CodecCorruptError('inflate');
+    }
+    const exact =
+      buffer.byteOffset === 0 && buffer.buffer.byteLength === buffer.length
+        ? new Uint8Array(buffer.buffer, 0, buffer.length)
+        : new Uint8Array(buffer);
+    return { data: exact, consumed: engine.bytesWritten };
   } catch (error) {
     throw mapZlibError(error, 'inflate', maxOutput);
   }
@@ -76,7 +95,7 @@ function zlibTransform(
   operation: CodecOperation,
   maxOutput: number,
   rejectTrailing: boolean,
-): TransformStream<Uint8Array, Uint8Array> {
+): ReadableWritablePair<Uint8Array, Uint8Array> {
   let produced = 0;
   let fed = 0;
   let failure: unknown;
@@ -155,5 +174,5 @@ export const nodeCodecs: Codecs = {
     assertMaxOutput(maxOutput);
     return zlibTransform(createGunzip(), 'gunzip', maxOutput, true);
   },
-  deflateRaw: () => zlibTransform(createDeflateRaw(), 'gunzip', Number.MAX_SAFE_INTEGER, false),
+  deflateRaw: () => zlibTransform(createDeflateRaw(), 'deflate', Number.MAX_SAFE_INTEGER, false),
 };

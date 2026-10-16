@@ -1,11 +1,13 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   loadMigrationSource,
   type MigrationSource,
 } from '@package-broker/db-sqlite/migrations/source';
 import { afterEach, describe, expect, it } from 'vitest';
+import { build } from './build.js';
 import { toManifestMigrations } from './build-artifacts.js';
 import { BuiltManifestError, loadBuiltMigrations } from './commands/built-manifest.js';
 import { renderManifestJson, type Manifest } from './manifest.js';
@@ -97,4 +99,37 @@ describe('build manifest round trip', () => {
 
     await expect(loadBuiltMigrations(outDir)).rejects.toBeInstanceOf(BuiltManifestError);
   });
+});
+
+describe('example broker.config.ts', () => {
+  const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
+
+  it.each(['cloudflare', 'node'] as const)(
+    'builds for --target %s with the platformPorts stanza of that target',
+    async (target) => {
+      const outDir = await mkdtemp(path.join(tmpdir(), 'pb-example-'));
+      dirs.push(outDir);
+      const runtimeEntry = path.join(outDir, 'runtime-entry.ts');
+      await writeFile(
+        runtimeEntry,
+        "import { plugins, platformPorts } from '#pb-manifest';\nexport default { plugins, platformPorts };\n",
+      );
+
+      const result = await build({
+        configPath: 'broker.config.ts',
+        target,
+        cwd: repoRoot,
+        outDir: path.join(outDir, 'out'),
+        runtimeEntry,
+      });
+
+      const manifest = JSON.parse(await readFile(result.manifestJson, 'utf8')) as {
+        platformPorts: { blob: { adapter: string } } | null;
+      };
+      expect(manifest.platformPorts?.blob.adapter).toBe(
+        target === 'cloudflare' ? 'r2' : 'filesystem',
+      );
+    },
+    60_000,
+  );
 });

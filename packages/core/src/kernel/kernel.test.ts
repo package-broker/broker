@@ -345,8 +345,121 @@ describe('createKernel', () => {
         expect.objectContaining({
           level: 'warn',
           plugin: 'guard',
-          reason: 'quota-exceeded',
+          code: 'denied',
           requestId: response.headers.get('x-request-id'),
+        }),
+      ]);
+    });
+
+    it('never logs the hook reason or a thrown message', async () => {
+      const SENTINEL = 'sentinel-secret-9f3a';
+      for (const handler of [
+        () => ({ deny: true as const, reason: SENTINEL }),
+        () => {
+          throw new RangeError(SENTINEL);
+        },
+      ]) {
+        const h = harness(
+          [
+            plugin('alpha', [protectedItem]),
+            plugin('guard', [], {
+              register(registry) {
+                registry.hook('access.check', handler);
+              },
+            }),
+          ],
+          { authorization: allowUser },
+        );
+        const kernel = await createKernel(h.options);
+
+        const response = await kernel.fetch(
+          new Request(`${BASE}/secure/7`, { headers: { accept: 'text/html' } }),
+        );
+
+        expect(response.status).toBe(403);
+        expect(await response.text()).not.toContain(SENTINEL);
+        expect(JSON.stringify(h.logs)).not.toContain(SENTINEL);
+      }
+    });
+
+    it('answers a browser 403 with the static page and a JSON client with the envelope', async () => {
+      const h = harness([plugin('alpha', [protectedItem])]);
+      const kernel = await createKernel(h.options);
+
+      const page = await kernel.fetch(
+        new Request(`${BASE}/secure/1`, { headers: { accept: 'text/html,*/*;q=0.8' } }),
+      );
+      const api = await kernel.fetch(
+        new Request(`${BASE}/secure/1`, { headers: { accept: 'application/json' } }),
+      );
+
+      expect(page.status).toBe(403);
+      expect(page.headers.get('content-type')).toMatch(/^text\/html/);
+      expect(page.headers.get('vary')).toBe('Accept');
+      expect(await page.text()).toContain('You do not have access.');
+      expect(api.status).toBe(403);
+      expect((await envelope(api)).code).toBe('forbidden');
+    });
+
+    it('answers a 404 decision exactly like an unknown route', async () => {
+      const notFoundEngine = engineReturning({ allow: false, status: 404 });
+      const h = harness([plugin('alpha', [protectedItem])], { authorization: notFoundEngine });
+      const kernel = await createKernel(h.options);
+      const snapshot = async (path: string): Promise<unknown> => {
+        const response = await kernel.fetch(
+          new Request(`${BASE}${path}`, { headers: { accept: 'text/html' } }),
+        );
+        const headers = Object.fromEntries(
+          [...response.headers].filter(([name]) => name !== 'x-request-id'),
+        );
+        const text = await response.text();
+        const id = response.headers.get('x-request-id') ?? '';
+        return { status: response.status, headers, body: text.replaceAll(id, '<id>') };
+      };
+
+      const unknownRoute = await snapshot('/nowhere/1');
+      const decision404 = await snapshot('/secure/1');
+
+      expect(decision404).toEqual(unknownRoute);
+      expect(decision404).toMatchObject({ status: 404 });
+    });
+
+    it('does not let a hook turn a 404 decision into anything else', async () => {
+      const h = harness(
+        [
+          plugin('alpha', [protectedItem]),
+          plugin('guard', [], {
+            register(registry) {
+              registry.hook('access.check', () => ({ deny: true, reason: 'x' }));
+            },
+          }),
+        ],
+        { authorization: engineReturning({ allow: false, status: 404 }) },
+      );
+      const kernel = await createKernel(h.options);
+
+      const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
+
+      expect(response.status).toBe(404);
+      expect((await envelope(response)).code).toBe('not_found');
+    });
+
+    it('reports a malformed engine decision to the log by plugin and error name', async () => {
+      const h = harness([plugin('alpha', [protectedItem])], {
+        authorization: {
+          authorize: () => Promise.resolve({ allow: false, status: 404, x: 1 } as never),
+        },
+      });
+      const kernel = await createKernel(h.options);
+
+      const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
+
+      expect(response.status).toBe(403);
+      expect(h.logs).toEqual([
+        expect.objectContaining({
+          level: 'warn',
+          plugin: 'core:authorization',
+          error: 'TypeError',
         }),
       ]);
     });

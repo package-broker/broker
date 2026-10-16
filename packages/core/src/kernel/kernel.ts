@@ -12,6 +12,7 @@ import type {
 import type { HookErrorHandler } from './access.js';
 import { authorizeRoute, denyAllEngine } from './authorize.js';
 import type { AuthorizationEngine, DenyLogger } from './authorize.js';
+import { denialResponse } from './denial-page.js';
 import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
 import type { KernelLog } from './errors.js';
 import { reportableErrorName } from './error-name.js';
@@ -180,6 +181,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     return response;
   }
 
+  function routeNotFound(requestId: string): Response {
+    return envelopeResponse(404, 'not_found', 'Route not found', requestId);
+  }
+
   async function serve(route: RegisteredRoute, c: Context<KernelEnv>): Promise<Response> {
     const requestId = c.env.requestId;
     const permission = route.permission;
@@ -201,7 +206,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       });
     };
     const onDeny: DenyLogger = (entry) => {
-      log({ level: 'warn', requestId, plugin: entry.plugin, reason: entry.reason });
+      const code =
+        entry.reason === 'hook_error' || entry.reason === 'invalid_hook_result'
+          ? entry.reason
+          : 'denied';
+      log({ level: 'warn', requestId, plugin: entry.plugin, code });
     };
     const decision = await authorizeRoute(
       {
@@ -222,9 +231,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       { onDeny },
     );
     if (!decision.allow) {
-      return decision.status === 401
-        ? envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId)
-        : envelopeResponse(403, 'forbidden', 'Forbidden', requestId);
+      if (decision.status === 401) {
+        return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
+      }
+      if (decision.status === 404) return routeNotFound(requestId);
+      return denialResponse(c.req.raw, requestId);
     }
     return invoke(route, c, org, decision.principal, decision.projectId);
   }
@@ -240,8 +251,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     const registered: RegisteredRoute = { ...route, plugin: CORE_PLUGIN };
     app.on(route.method, route.path, (c) => serve(registered, c));
   }
-  const reservedNotFound = (c: Context<KernelEnv>): Response =>
-    envelopeResponse(404, 'not_found', 'Route not found', c.env.requestId);
+  const reservedNotFound = (c: Context<KernelEnv>): Response => routeNotFound(c.env.requestId);
   for (const root of RESERVED_ROOTS) {
     app.all(root, reservedNotFound);
     app.all(`${root}/*`, reservedNotFound);
@@ -249,7 +259,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   for (const route of registration.routes) {
     app.on(route.method, route.path, (c) => serve(route, c));
   }
-  app.notFound((c) => envelopeResponse(404, 'not_found', 'Route not found', c.env.requestId));
+  app.notFound((c) => routeNotFound(c.env.requestId));
   app.onError((error, c) => {
     c.env.markLogged();
     return errorResponse(error, c.env.requestId, log);

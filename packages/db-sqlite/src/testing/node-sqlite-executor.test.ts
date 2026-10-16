@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DbError } from '@package-broker/core/db/errors';
 import type { ScalarStatement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
-import { openNodeSqliteExecutor } from './node-sqlite-executor.js';
+import {
+  D1_MAX_BOUND_PARAMETERS,
+  D1_MAX_PATTERN_LENGTH,
+  openNodeSqliteExecutor,
+} from './node-sqlite-executor.js';
 
 const CREATE_TABLE = {
   sql: 'CREATE TABLE sample (id INTEGER PRIMARY KEY, name TEXT NOT NULL)',
@@ -306,5 +310,122 @@ describe('countCalls', () => {
     await expect(
       counted.executor.all({ sql: 'SELECT 1 AS one', params: [] }),
     ).rejects.toBeInstanceOf(DbError);
+  });
+});
+
+function placeholders(count: number): ScalarStatement {
+  return {
+    sql: `SELECT ${Array.from({ length: count }, () => '?').join(' + ')} AS total`,
+    params: Array.from({ length: count }, () => 1),
+  };
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<DbError> {
+  const error: unknown = await promise.then(
+    () => undefined,
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(DbError);
+  return error as DbError;
+}
+
+describe('openNodeSqliteExecutor D1 limits', () => {
+  it('accepts a statement with exactly 100 bound parameters', async () => {
+    const opened = openNodeSqliteExecutor();
+    try {
+      expect(D1_MAX_BOUND_PARAMETERS).toBe(100);
+      await expect(opened.executor.all(placeholders(100))).resolves.toEqual([{ total: 100 }]);
+      await expect(opened.executor.batch([placeholders(100)])).resolves.toHaveLength(1);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('refuses 101 bound parameters from all() and batch() before running anything', async () => {
+    const opened = openNodeSqliteExecutor();
+    try {
+      await opened.executor.batch([CREATE_TABLE]);
+      const secret = 'secret-value';
+      const statement: ScalarStatement = {
+        sql: `SELECT ${Array.from({ length: 101 }, () => '?').join(', ')}`,
+        params: Array.from({ length: 101 }, () => secret),
+      };
+
+      const fromAll = await rejectionOf(opened.executor.all(statement));
+      expect(fromAll.kind).toBe('too_big');
+      expect(fromAll.message).toContain('101');
+      expect(fromAll.message).not.toContain(secret);
+
+      const fromBatch = await rejectionOf(
+        opened.executor.batch([
+          { sql: 'INSERT INTO sample (id, name) VALUES (?, ?)', params: [1, 'a'] },
+          statement,
+        ]),
+      );
+      expect(fromBatch.kind).toBe('too_big');
+      expect(fromBatch.message).not.toContain(secret);
+      expect(await opened.executor.all({ sql: 'SELECT id FROM sample', params: [] })).toEqual([]);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('refuses numbered placeholder ?101 from all() and batch()', async () => {
+    const opened = openNodeSqliteExecutor();
+    try {
+      await opened.executor.batch([CREATE_TABLE]);
+      const statement: ScalarStatement = { sql: 'SELECT ?101 AS value', params: [] };
+
+      const fromAll = await rejectionOf(opened.executor.all(statement));
+      expect(fromAll.message).toContain('variable number must be between ?1 and ?100');
+
+      const fromBatch = await rejectionOf(
+        opened.executor.batch([
+          { sql: 'INSERT INTO sample (id, name) VALUES (?, ?)', params: [1, 'a'] },
+          statement,
+        ]),
+      );
+      expect(fromBatch.message).toContain('variable number must be between ?1 and ?100');
+      expect(await opened.executor.all({ sql: 'SELECT id FROM sample', params: [] })).toEqual([]);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('leaves GLOB and LIKE patterns unlimited by default', async () => {
+    const opened = openNodeSqliteExecutor();
+    try {
+      const rows = await opened.executor.all({
+        sql: "SELECT 'a' GLOB ? AS ok",
+        params: ['a'.repeat(D1_MAX_PATTERN_LENGTH + 1)],
+      });
+      expect(rows).toEqual([{ ok: 0 }]);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it('applies the D1 50-byte GLOB/LIKE pattern limit when d1PatternLimit is on', async () => {
+    const opened = openNodeSqliteExecutor(':memory:', { d1PatternLimit: true });
+    try {
+      expect(D1_MAX_PATTERN_LENGTH).toBe(50);
+      const atLimit = 'a'.repeat(D1_MAX_PATTERN_LENGTH);
+      const overLimit = 'a'.repeat(D1_MAX_PATTERN_LENGTH + 1);
+
+      await expect(
+        opened.executor.all({ sql: 'SELECT ? GLOB ? AS ok', params: [atLimit, atLimit] }),
+      ).resolves.toEqual([{ ok: 1 }]);
+      await expect(
+        opened.executor.all({ sql: "SELECT 'a' GLOB ? AS ok", params: [overLimit] }),
+      ).rejects.toBeInstanceOf(DbError);
+      await expect(
+        opened.executor.all({ sql: "SELECT 'a' LIKE ? AS ok", params: [overLimit] }),
+      ).rejects.toBeInstanceOf(DbError);
+      await expect(
+        opened.executor.all({ sql: `SELECT 'a' GLOB '${overLimit}' AS ok`, params: [] }),
+      ).rejects.toBeInstanceOf(DbError);
+    } finally {
+      await opened.close();
+    }
   });
 });

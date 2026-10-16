@@ -79,7 +79,7 @@ const HEADER_VALUE = /^[\x21-\x7e]([\x20-\x7e]*[\x21-\x7e])?$/;
 const PARAM_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
 const APP_ID = /^[1-9][0-9]{0,19}$/;
 const PRIVATE_KEY =
-  /^-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----[A-Za-z0-9+/=\s]+-----END \1PRIVATE KEY-----\s*$/;
+  /^-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----[A-Za-z0-9+/= \t\r\n]+-----END \1PRIVATE KEY-----[ \t\r\n]*$/;
 const KNOWN_HOSTS_LINE =
   /^(@(cert-authority|revoked) )?\S+ (ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9]+|sk-[a-z0-9@.-]+) [A-Za-z0-9+/=]+( .*)?$/;
 const BARE_HTTPS_ORIGIN = /^https:\/\/[^/?#@\\\s]+$/i;
@@ -96,6 +96,15 @@ const privateKey: Check = (v) => PRIVATE_KEY.test(v);
 const knownHosts: Check = (v) => {
   const lines = v.split(/\r?\n/).filter((line) => line.trim() !== '' && !line.startsWith('#'));
   return lines.length > 0 && lines.every((line) => KNOWN_HOSTS_LINE.test(line));
+};
+
+const NORMALISE: Readonly<Record<string, (value: string) => string>> = {
+  privateKeyPem: (v) => `${v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')}\n`,
+  knownHosts: (v) =>
+    v
+      .split(/\r?\n/)
+      .map((line) => line.replace(/[ \t]+/g, ' ').replace(/ $/, ''))
+      .join('\n'),
 };
 
 const SHAPES: Readonly<Record<CredentialKind, Readonly<Record<string, Check>>>> = {
@@ -149,7 +158,8 @@ export function parseCredentialMaterial(
   for (const [key, check] of Object.entries(shape)) {
     const raw = record[key];
     if (typeof raw !== 'string' || LONE_SURROGATE.test(raw)) throw invalid('fields');
-    const value = kind === 'header' ? raw.trim() : raw;
+    const normalise = Object.hasOwn(NORMALISE, key) ? NORMALISE[key] : undefined;
+    const value = kind === 'header' ? raw.trim() : normalise ? normalise(raw) : raw;
     if (!check(value)) throw invalid('fields');
     fields[key] = kind === 'header' && key === 'name' ? value.toLowerCase() : value;
   }
@@ -186,12 +196,29 @@ function canonicalHttpsOrigin(text: unknown): string {
   return url.origin;
 }
 
-function basicToken(username: string, password: string): string {
+function base64(text: string): string {
   let binary = '';
-  for (const byte of new TextEncoder().encode(`${username}:${password}`)) {
+  for (const byte of new TextEncoder().encode(text)) {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary);
+}
+
+function basicToken(username: string, password: string): string {
+  return base64(`${username}:${password}`);
+}
+
+function encodedForms(text: string): string[] {
+  const padded = base64(text);
+  const unpadded = padded.replace(/=+$/, '');
+  return [
+    text,
+    encodeURIComponent(text),
+    new URLSearchParams({ v: text }).toString().slice(2),
+    padded,
+    unpadded,
+    unpadded.replaceAll('+', '-').replaceAll('/', '_'),
+  ];
 }
 
 export function bindCredential(
@@ -240,6 +267,10 @@ export function bindCredential(
   });
 }
 
+function pemForms(pem: string): string[] {
+  return [...encodedForms(pem), ...encodedForms(pem.replace(/\n$/, ''))];
+}
+
 export function credentialEchoProbe(material: CredentialMaterial): CredentialEchoProbe {
   assertGenuine(material);
   const candidates: string[] = [];
@@ -247,31 +278,29 @@ export function credentialEchoProbe(material: CredentialMaterial): CredentialEch
   switch (material.kind) {
     case 'http_basic':
       candidates.push(
-        material.password,
-        material.username,
-        basicToken(material.username, material.password),
+        ...encodedForms(material.password),
+        ...encodedForms(`${material.username}:${material.password}`),
       );
+      if (material.username.length >= MIN_SECRET_LENGTH) {
+        candidates.push(...encodedForms(material.username));
+      }
       break;
     case 'bearer':
     case 'npm_token':
-      candidates.push(material.token);
+      candidates.push(...encodedForms(material.token));
       break;
     case 'header':
-      candidates.push(material.value);
+      candidates.push(...encodedForms(material.value));
       break;
     case 'query':
-      candidates.push(
-        material.value,
-        encodeURIComponent(material.value),
-        new URLSearchParams({ v: material.value }).toString().slice(2),
-      );
+      candidates.push(...encodedForms(material.value));
       queryParams.push(material.param);
       break;
     case 'github_app':
-      candidates.push(material.privateKeyPem, material.webhookSecret);
+      candidates.push(...pemForms(material.privateKeyPem), ...encodedForms(material.webhookSecret));
       break;
     case 'ssh_key':
-      candidates.push(material.privateKeyPem);
+      candidates.push(...pemForms(material.privateKeyPem));
       break;
   }
   const secrets = [...new Set(candidates)].filter((value) => value.length >= MIN_SECRET_LENGTH);

@@ -208,6 +208,25 @@ function basicToken(username: string, password: string): string {
   return base64(`${username}:${password}`);
 }
 
+const MIN_OFFSET_CORE_LENGTH = 16;
+
+function offsetCores(text: string): string[] {
+  const bytes = new TextEncoder().encode(text);
+  const cores: string[] = [];
+  for (const offset of [0, 1, 2]) {
+    const prefixed = new Uint8Array(offset + bytes.length);
+    prefixed.set(bytes, offset);
+    let binary = '';
+    for (const byte of prefixed) binary += String.fromCharCode(byte);
+    const first = Math.ceil((offset * 8) / 6);
+    const last = Math.floor((prefixed.length * 8) / 6);
+    const core = btoa(binary).slice(first, last);
+    if (core.length < MIN_OFFSET_CORE_LENGTH) continue;
+    cores.push(core, core.replaceAll('+', '-').replaceAll('/', '_'));
+  }
+  return cores;
+}
+
 function encodedForms(text: string): string[] {
   const padded = base64(text);
   const unpadded = padded.replace(/=+$/, '');
@@ -218,6 +237,7 @@ function encodedForms(text: string): string[] {
     padded,
     unpadded,
     unpadded.replaceAll('+', '-').replaceAll('/', '_'),
+    ...offsetCores(text),
   ];
 }
 

@@ -1,0 +1,31 @@
+name: Documentation request
+description: Report a missing or wrong documentation page
+title: 'docs: '
+labels: ['documentation']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security vulnerabilities through the [private reporting form](https://github.com/package-broker/broker/security/advisories/new), not through an issue.
+  - type: input
+    id: page
+    attributes:
+      label: Page or topic
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is missing or wrong
+    validations:
+      required: true
+  - type: dropdown
+    id: audience
+    attributes:
+      label: Audience
+      options:
+        - Operator
+        - Developer
+        - Plugin author
+    validations:
+      required: true

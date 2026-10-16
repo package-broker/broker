@@ -81,7 +81,7 @@ function unwrapReference(node: OperationNode): OperationNode {
   return node;
 }
 
-function referencedTable(value: UserIdOperand): string | null {
+export function referencedTable(value: UserIdOperand): string | null {
   if (typeof value === 'string') return null;
   const node = unwrapReference(value.toOperationNode());
   if (node.kind !== 'ReferenceNode') {
@@ -94,20 +94,19 @@ function referencedTable(value: UserIdOperand): string | null {
   return table.table.identifier.name;
 }
 
-function guardAliases<K extends string>(
+export function guardAliases<K extends string>(
   names: readonly K[],
-  outer: string | null,
+  outer: string | null | readonly (string | null)[],
 ): Record<K, string> {
-  const outerName = outer?.toLowerCase();
+  const outerNames = (Array.isArray(outer) ? outer : [outer]).flatMap((name) =>
+    typeof name === 'string' ? [name.toLowerCase()] : [],
+  );
   for (let attempt = 1; ; attempt += 1) {
     const suffix = attempt === 1 ? '' : `_${attempt}`;
     const aliases = Object.fromEntries(
       names.map((name) => [name, `guard_${name}${suffix}`]),
     ) as Record<K, string>;
-    if (
-      outerName === undefined ||
-      !Object.values<string>(aliases).some((alias) => alias === outerName)
-    ) {
+    if (!Object.values<string>(aliases).some((alias) => outerNames.includes(alias))) {
       return aliases;
     }
   }
@@ -238,20 +237,20 @@ export type ProtectedHolderInput =
     })
   | (ProtectedHolderCommon & { readonly kind: 'local_recovery' });
 
-const EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const EVIDENCE_FUTURE_SKEW_MS = 60 * 1000;
+export const EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const EVIDENCE_FUTURE_SKEW_MS = 60 * 1000;
 
 function evidenceWithin(column: string, lowerMs: number, upperMs: number) {
   const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
   return sql<SqlBool>`${ms} >= ${lowerMs} and ${ms} <= ${upperMs}`;
 }
 
-type HolderAlias = Record<
+export type HolderAlias = Record<
   'user' | 'grant' | 'role' | 'member' | 'identity' | 'binding' | 'login' | 'credential',
   string
 >;
 
-function usableLocalLogin(ctx: OrgContext, alias: HolderAlias) {
+export function usableLocalLogin(ctx: OrgContext, alias: HolderAlias) {
   return loose
     .selectFrom(`local_login as ${alias.login}`)
     .select(sql.lit(1).as('one'))
@@ -270,7 +269,7 @@ function usableLocalLogin(ctx: OrgContext, alias: HolderAlias) {
     );
 }
 
-function verifiedIdentity(
+export function verifiedIdentity(
   ctx: OrgContext,
   alias: HolderAlias,
   providers: readonly ProtectedHolderProvider[],
@@ -307,6 +306,20 @@ function verifiedIdentity(
 
 const HOLDER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
+export function requireProviders(providers: readonly ProtectedHolderProvider[]): void {
+  for (const entry of providers) {
+    if (
+      typeof entry.provider !== 'string' ||
+      !isValidProviderId(entry.provider) ||
+      typeof entry.anchor !== 'string' ||
+      entry.anchor === '' ||
+      typeof entry.emailAuthoritative !== 'boolean'
+    ) {
+      throw new TypeError('protected holder provider must have a provider id and an anchor');
+    }
+  }
+}
+
 export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
   if (typeof input !== 'object' || input === null) {
     throw new TypeError('protected holder input is required');
@@ -323,17 +336,7 @@ export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
   ) {
     throw new TypeError('now must be a UTC timestamp with millisecond precision');
   }
-  for (const entry of input.providers) {
-    if (
-      typeof entry.provider !== 'string' ||
-      !isValidProviderId(entry.provider) ||
-      typeof entry.anchor !== 'string' ||
-      entry.anchor === '' ||
-      typeof entry.emailAuthoritative !== 'boolean'
-    ) {
-      throw new TypeError('protected holder provider must have a provider id and an anchor');
-    }
-  }
+  requireProviders(input.providers);
 }
 
 /**

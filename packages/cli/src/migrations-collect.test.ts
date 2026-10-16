@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256Hex } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { definePlugin } from '@package-broker/core/plugin';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { collectMigrations, defaultResolvePackageDir } from './migrations-collect.js';
@@ -92,15 +93,18 @@ describe('collectMigrations', () => {
 });
 
 describe('defaultResolvePackageDir', () => {
-  it('collects the real core migrations in order with their checksums', async () => {
+  it('collects the discovered core migrations in order with their checksums', async () => {
     const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
     const plan = await collectMigrations([], defaultResolvePackageDir(repoRoot));
+    const discovered = await discoveredMigrations();
+    expect(discovered.length).toBeGreaterThan(0);
+    expect(plan.map((source) => source.id)).toEqual(discovered.map((source) => source.id));
+    expect(plan.map((source) => source.checksum)).toEqual(
+      discovered.map((source) => source.checksum),
+    );
     const files = (await readdir(path.join(repoRoot, 'packages/db-sqlite/migrations')))
       .filter((file) => file.endsWith('.sql'))
       .sort();
-    const ids = files.map((file) => `core:${file.slice(0, -'.sql'.length)}`);
-    expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
-    expect(plan.map((source) => source.id)).toEqual(ids);
     for (const [index, file] of files.entries()) {
       const real = await readFile(
         path.join(repoRoot, 'packages/db-sqlite/migrations', file),

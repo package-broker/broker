@@ -1,3 +1,4 @@
+import { sql } from 'kysely';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import {
   isReservedProviderId,
@@ -8,9 +9,9 @@ import { anchorMatches, compile, db } from '../kysely.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
-const SESSIONS = 0;
-const IDENTITIES = 2;
-const BINDING = 3;
+const SESSIONS = 2;
+const IDENTITIES = 4;
+const BINDING = 5;
 
 function providerId(provider: string): void {
   if (
@@ -40,7 +41,9 @@ function timestamp(value: string): void {
 }
 
 /**
- * The binding is updated last, so a login planned under the old anchor that commits afterwards is
+ * Blocks the old subjects under the old anchor and revokes the personal tokens bound to the
+ * identities before they are deleted, so ON DELETE SET NULL never leaves a live token without an
+ * identity. The binding is updated last, so a login planned under the old anchor that commits afterwards is
  * refused. `swapped` is false when the stored anchor is not `expectedAnchor` or there is no binding.
  */
 export async function rebindProvider(
@@ -61,6 +64,37 @@ export async function rebindProvider(
 
   const bound = anchorMatches(ctx, provider, expectedAnchor);
   const statements = [
+    db
+      .insertInto('identity_block')
+      .columns(['org_id', 'provider', 'issuer', 'subject', 'blocked_at'])
+      .expression(
+        db
+          .selectFrom('identity')
+          .select([
+            'identity.org_id',
+            'identity.provider',
+            sql<string>`${expectedAnchor}`.as('issuer'),
+            'identity.subject',
+            sql<string>`${now}`.as('blocked_at'),
+          ])
+          .where('identity.org_id', '=', ctx.orgId)
+          .where('identity.provider', '=', provider)
+          .where(bound),
+      )
+      .onConflict((conflict) => conflict.doNothing()),
+    db
+      .updateTable('token')
+      .set({ revoked_at: now })
+      .where('token.org_id', '=', ctx.orgId)
+      .where('token.revoked_at', 'is', null)
+      .where('token.validation_identity_id', 'in', (values) =>
+        values
+          .selectFrom('identity')
+          .select('identity.id')
+          .where('identity.org_id', '=', ctx.orgId)
+          .where('identity.provider', '=', provider),
+      )
+      .where(bound),
     db
       .deleteFrom('session')
       .where('session.org_id', '=', ctx.orgId)

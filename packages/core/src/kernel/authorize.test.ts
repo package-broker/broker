@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { EngineTimeoutError, INPUT_PLUGIN, authorizeRoute, denyAllEngine } from './authorize.js';
+import {
+  ENGINE_PLUGIN,
+  EngineTimeoutError,
+  INPUT_PLUGIN,
+  authorizeRoute,
+  denyAllEngine,
+} from './authorize.js';
 import type { AuthorizationEngine, AuthorizationRequest, DenyLogger } from './authorize.js';
 import type { HookErrorHandler } from './access.js';
 import { orgContext } from '../db/port.js';
@@ -840,5 +846,108 @@ describe('authorizeRoute', () => {
       ),
     ).resolves.toEqual({ allow: false, status: 403 });
     expect(onHookError).toHaveBeenCalledOnce();
+  });
+});
+
+describe('verified tokenId', () => {
+  const allowWith = (extra: Record<string, unknown>): unknown => ({
+    allow: true,
+    principal,
+    projectId: null,
+    ...extra,
+  });
+  const denied = { allow: false, status: 403 };
+
+  it('exports the engine label', () => {
+    expect(ENGINE_PLUGIN).toBe('core:authorization');
+  });
+
+  it('omits tokenId from the copy when the engine did not supply the key', async () => {
+    const result = await authorizeRoute(request, engineResolving(allowWith({})), []);
+
+    expect(result).toStrictEqual({ allow: true, principal, projectId: null });
+    expect(Object.hasOwn(result, 'tokenId')).toBe(false);
+  });
+
+  it('carries a valid tokenId in a frozen copy', async () => {
+    const result = await authorizeRoute(
+      request,
+      engineResolving(allowWith({ tokenId: 'tok_01' })),
+      [],
+    );
+
+    expect(result).toStrictEqual({ allow: true, principal, projectId: null, tokenId: 'tok_01' });
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  it('carries a null tokenId as null', async () => {
+    const result = await authorizeRoute(request, engineResolving(allowWith({ tokenId: null })), []);
+
+    expect(result).toStrictEqual({ allow: true, principal, projectId: null, tokenId: null });
+  });
+
+  it('accepts a 64 character tokenId', async () => {
+    const tokenId = 'a'.repeat(64);
+    const result = await authorizeRoute(request, engineResolving(allowWith({ tokenId })), []);
+
+    expect(result).toStrictEqual({ allow: true, principal, projectId: null, tokenId });
+  });
+
+  it.each([
+    ['empty', ''],
+    ['65 characters', 'a'.repeat(65)],
+    ['a space', 'tok 01'],
+    ['a dot', 'tok.01'],
+    ['a number', 42],
+    ['an object', { id: 'tok_01' }],
+    ['undefined', undefined],
+  ])('denies with 403 when tokenId is %s', async (_label, tokenId) => {
+    const onHookError = vi.fn<HookErrorHandler>();
+
+    await expect(
+      authorizeRoute(request, engineResolving(allowWith({ tokenId })), [], onHookError),
+    ).resolves.toEqual(denied);
+    expectMalformedReport(onHookError);
+  });
+
+  it('denies with 403 and reads a getter tokenId at most once', async () => {
+    const getter = vi.fn(() => 'tok_01');
+    const decision = allowWith({});
+    Object.defineProperty(decision, 'tokenId', { enumerable: true, get: getter });
+
+    await expect(authorizeRoute(request, engineResolving(decision), [])).resolves.toEqual(denied);
+    expect(getter.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it('denies with 403 when tokenId is inherited', async () => {
+    const decision = Object.assign(Object.create({ tokenId: 'tok_01' }) as object, allowWith({}));
+
+    await expect(authorizeRoute(request, engineResolving(decision), [])).resolves.toEqual(denied);
+  });
+
+  it.each([401, 403, 404])('denies with 403 when a %s decision carries tokenId', async (status) => {
+    const decision = { allow: false, status, tokenId: 'tok_01' };
+
+    await expect(authorizeRoute(request, engineResolving(decision), [])).resolves.toEqual(denied);
+  });
+
+  it('denies with 403 on any other extra key', async () => {
+    await expect(
+      authorizeRoute(request, engineResolving(allowWith({ extra: 1 })), []),
+    ).resolves.toEqual(denied);
+    await expect(
+      authorizeRoute(request, engineResolving(allowWith({ tokenId: 'tok_01', extra: 1 })), []),
+    ).resolves.toEqual(denied);
+  });
+
+  it('keeps tokenId on the decision after the hooks allow', async () => {
+    const handler = vi.fn<Handler>(() => undefined);
+    const result = await authorizeRoute(
+      request,
+      engineResolving(allowWith({ tokenId: 'tok_01' })),
+      [hook('a', handler)],
+    );
+
+    expect(result).toStrictEqual({ allow: true, principal, projectId: null, tokenId: 'tok_01' });
   });
 });

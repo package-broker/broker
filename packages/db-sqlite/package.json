@@ -46,6 +46,10 @@
       "types": "./dist/contract/auth-contract.d.ts",
       "default": "./dist/contract/auth-contract.js"
     },
+    "./contract/cache-contract": {
+      "types": "./dist/contract/cache-contract.d.ts",
+      "default": "./dist/contract/cache-contract.js"
+    },
     "./contract/count-calls": {
       "types": "./dist/contract/count-calls.d.ts",
       "default": "./dist/contract/count-calls.js"

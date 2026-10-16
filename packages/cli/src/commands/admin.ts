@@ -1,5 +1,6 @@
-import { existsSync, unlinkSync } from 'node:fs';
-import { open, unlink, type FileHandle } from 'node:fs/promises';
+import { existsSync, lstatSync, unlinkSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { lstat, open, unlink, type FileHandle } from 'node:fs/promises';
 import { randomToken, sha256Hex } from '@package-broker/core/auth/primitives';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { DbError } from '@package-broker/core/db/errors';
@@ -11,6 +12,7 @@ import {
   isValidTrustAnchor,
 } from '@package-broker/core/identity/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
+import { reportableErrorName } from '@package-broker/core/kernel/error-name';
 import { formatMasterKey, generateMasterKey } from '@package-broker/core/secrets/master-key';
 import {
   bootstrapAdmin,
@@ -23,7 +25,7 @@ import {
   rebindProvider,
 } from '@package-broker/db-sqlite/repositories/provider-binding';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
-import { createD1HttpExecutor } from '../cloudflare/d1-http-executor.js';
+import { createD1HttpExecutor, isLostResponse } from '../cloudflare/d1-http-executor.js';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -47,7 +49,6 @@ type Command =
   'admin bootstrap' | 'admin reset-local' | 'admin rebind-provider' | 'admin show-provider-binding';
 
 const SIGNALS = ['SIGINT', 'SIGTERM'] as const;
-const RESPONSE_READ_FAILED = 'd1 http response read failed';
 const SETUP_TOKEN_TTL_MS = 24 * 3_600_000;
 const KEY_VERSION = /^[1-9][0-9]{0,8}$/;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -57,11 +58,6 @@ const NEXT = [
   'POST /_pb/auth/local/setup/start {"token"}',
   'POST /_pb/auth/local/setup/finish {"token","password","code"}',
 ];
-
-function errorName(error: unknown): string {
-  const name = (error as { name?: unknown } | null | undefined)?.name;
-  return typeof name === 'string' && /^\w{1,64}$/.test(name) ? name : 'Error';
-}
 
 function say(command: string, text: string): void {
   console.error(`${command}: ${text}`);
@@ -88,7 +84,7 @@ export async function runGenerateMasterKey(o: {
       say(command, 'invalid_key_version');
       return 2;
     }
-    say(command, `failed (${errorName(error)})`);
+    say(command, `failed (${reportableErrorName(error)})`);
     return 1;
   }
 }
@@ -155,18 +151,55 @@ async function createTokenFile(
       say(command, 'token_file_exists');
       return 'exists';
     }
-    say(command, `token_file_failed (${errorName(error)})`);
+    say(command, `token_file_failed (${reportableErrorName(error)})`);
     return 'failed';
   }
 }
 
-function lostResponse(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
-    if (current instanceof DbError && current.message === RESPONSE_READ_FAILED) return true;
-    current = current.cause;
+interface FileIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+const DIRECTORY_SYNC_UNSUPPORTED = new Set(['EISDIR', 'EPERM', 'EINVAL']);
+
+async function syncDirectoryOf(path: string): Promise<void> {
+  let directory: FileHandle;
+  try {
+    directory = await open(dirname(path), 'r');
+  } catch (error) {
+    if (DIRECTORY_SYNC_UNSUPPORTED.has((error as { code?: string } | null)?.code ?? '')) return;
+    throw error;
   }
-  return false;
+  try {
+    await directory.sync();
+  } catch (error) {
+    if (!DIRECTORY_SYNC_UNSUPPORTED.has((error as { code?: string } | null)?.code ?? '')) {
+      throw error;
+    }
+  } finally {
+    await directory.close().catch(() => undefined);
+  }
+}
+
+function sameFile(a: FileIdentity, b: FileIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function unlinkTokenFileSync(path: string, identity: FileIdentity): void {
+  try {
+    if (sameFile(lstatSync(path, { bigint: true }), identity)) unlinkSync(path);
+  } catch {
+    /* the file may already be gone */
+  }
+}
+
+async function unlinkTokenFile(path: string, identity: FileIdentity): Promise<void> {
+  try {
+    if (sameFile(await lstat(path, { bigint: true }), identity)) await unlink(path);
+  } catch {
+    /* the file may already be gone */
+  }
 }
 
 function roleIds(): Record<DefaultRoleKey, string> {
@@ -200,21 +233,20 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
   }
 
   let handle: FileHandle | null = null;
-  let created = false;
+  let identity: FileIdentity | null = null;
   let issued = false;
-  let signalled = false;
+  const pending: { signal: NodeJS.Signals | null } = { signal: null };
   let opened: Opened | null = null;
   const onSignal = (signal: NodeJS.Signals): void => {
-    signalled = true;
-    if (created && o.tokenFile !== undefined) {
-      try {
-        unlinkSync(o.tokenFile);
-      } catch {
-        /* the file may already be gone */
-      }
+    const repeated = pending.signal !== null;
+    pending.signal ??= signal;
+    if (identity !== null && o.tokenFile !== undefined) {
+      unlinkTokenFileSync(o.tokenFile, identity);
     }
-    for (const name of SIGNALS) process.off(name, onSignal);
-    process.kill(process.pid, signal);
+    if (repeated) {
+      for (const name of SIGNALS) process.off(name, onSignal);
+      process.kill(process.pid, signal);
+    }
   };
   if (o.tokenFile !== undefined) for (const name of SIGNALS) process.on(name, onSignal);
 
@@ -224,7 +256,8 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
       if (file === 'exists') return 2;
       if (file === 'failed') return 1;
       handle = file;
-      created = true;
+      const { dev, ino } = await handle.stat({ bigint: true });
+      identity = { dev, ino };
     }
 
     opened = openTarget(command, o.target);
@@ -250,15 +283,26 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
     };
     const ctx = orgContext(organization.id);
 
-    if (handle !== null) {
+    if (pending.signal !== null) {
+      say(command, 'outcome unknown; re-running is safe');
+      return 7;
+    }
+
+    if (handle !== null && o.tokenFile !== undefined) {
       await handle.writeFile(`${token}\n`);
       await handle.sync();
       await handle.close();
       handle = null;
+      await syncDirectoryOf(o.tokenFile);
+    }
+
+    if (pending.signal !== null) {
+      say(command, 'outcome unknown; re-running is safe');
+      return 7;
     }
 
     const outcome = await runOperation(command, opened.executor, ctx, input);
-    if (signalled) {
+    if (pending.signal !== null) {
       say(command, 'outcome unknown; re-running is safe');
       return 7;
     }
@@ -305,18 +349,20 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
       say(command, 'organization not found; run pb bootstrap or pb cloudflare bootstrap first');
       return 5;
     }
-    if (lostResponse(error)) {
+    if (isLostResponse(error)) {
       say(command, 'outcome unknown; re-running is safe');
       return 7;
     }
-    say(command, `failed (${errorName(error)})`);
+    say(command, `failed (${reportableErrorName(error)})`);
     return 1;
   } finally {
-    for (const name of SIGNALS) process.off(name, onSignal);
     await handle?.close().catch(() => undefined);
-    if (created && !issued && o.tokenFile !== undefined)
-      await unlink(o.tokenFile).catch(() => undefined);
+    if (identity !== null && !issued && o.tokenFile !== undefined) {
+      await unlinkTokenFile(o.tokenFile, identity);
+    }
     await opened?.close().catch(() => undefined);
+    for (const name of SIGNALS) process.off(name, onSignal);
+    if (pending.signal !== null) process.kill(process.pid, pending.signal);
   }
 }
 
@@ -440,14 +486,14 @@ export async function runAdminRebindProvider(o: RebindProviderOptions): Promise<
     );
     return 0;
   } catch (error) {
-    if (lostResponse(error)) {
+    if (isLostResponse(error)) {
       say(
         command,
         'outcome unknown; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong',
       );
       return 7;
     }
-    say(command, `failed (${errorName(error)})`);
+    say(command, `failed (${reportableErrorName(error)})`);
     return 1;
   } finally {
     await opened?.close().catch(() => undefined);
@@ -499,11 +545,11 @@ export async function runAdminShowProviderBinding(o: ShowProviderBindingOptions)
     );
     return 0;
   } catch (error) {
-    if (lostResponse(error)) {
+    if (isLostResponse(error)) {
       say(command, 'outcome unknown; re-running is safe');
       return 7;
     }
-    say(command, `failed (${errorName(error)})`);
+    say(command, `failed (${reportableErrorName(error)})`);
     return 1;
   } finally {
     await opened?.close().catch(() => undefined);

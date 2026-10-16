@@ -210,3 +210,21 @@ describe('composition with the observability port', () => {
     ]);
   });
 });
+
+describe('pb.upstream.bytes', () => {
+  it('is registered as a counter', () => {
+    const { sink: s, calls } = sink();
+    createMetricsRegistry(s).counter('pb.upstream.bytes', { provider: 'npm' }).add(42);
+    expect(calls).toEqual([
+      { kind: 'counter', name: 'pb.upstream.bytes', labels: { provider: 'npm' }, value: 42 },
+    ]);
+  });
+
+  it('rejects an unregistered label key', () => {
+    const registry = createMetricsRegistry(sink().sink);
+    expect(() =>
+      // @ts-expect-error package_name is not an allowed label key
+      registry.counter('pb.upstream.bytes', { package_name: 'left-pad' }),
+    ).toThrow(RangeError);
+  });
+});

@@ -34,6 +34,7 @@ export const METRIC_NAMES = [
   'pb.jobs.queue_delay_ms',
   'pb.upstream.requests',
   'pb.upstream.duration_ms',
+  'pb.upstream.bytes',
   'pb.obs.export_failures',
 ] as const;
 

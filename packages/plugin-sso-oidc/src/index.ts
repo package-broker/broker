@@ -29,7 +29,7 @@ function definition(
     definePlugin({
       id: 'sso-oidc',
       package: '@package-broker/plugin-sso-oidc',
-      apiVersion: 2,
+      apiVersion: 3,
       platforms: Object.freeze(['cloudflare', 'node'] as const),
       capabilities: Object.freeze(['sso'] as const),
       ...extra,

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   APPROVED_ERROR_NAMES,
+  DROPPED_SIGNALS,
+  metricLabelValueAllowed,
   HTTP_REQUEST_EVENT,
   type ObsRecord,
   type ObsRecordSink,
@@ -550,5 +552,23 @@ describe('HTTP_REQUEST_EVENT', () => {
     expect(HTTP_REQUEST_EVENT).toBe('http.request');
     expect(HTTP_REQUEST_EVENT).toMatch(/^[a-z][a-z0-9_.]{0,63}$/);
     expect(safeRecord({ level: 'info', event: HTTP_REQUEST_EVENT })?.event).toBe('http.request');
+  });
+});
+
+describe('dropped signal vocabulary', () => {
+  it('accepts every dropped signal as a label value', () => {
+    expect([...DROPPED_SIGNALS]).toEqual([
+      'log',
+      'counter',
+      'histogram',
+      'unregistered',
+      'cardinality',
+      'kind_conflict',
+      'export',
+    ]);
+    for (const signal of DROPPED_SIGNALS) {
+      expect(metricLabelValueAllowed('signal', signal, new Set())).toBe(true);
+    }
+    expect(metricLabelValueAllowed('signal', 'logs ', new Set())).toBe(false);
   });
 });

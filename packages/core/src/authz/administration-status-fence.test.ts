@@ -13,6 +13,7 @@ const ctx = orgContext('org-a');
 const NOW = '2026-10-15T08:00:00.000Z';
 
 const actor: ActorContext = {
+  kind: 'organization',
   userId: 'actor-1',
   permissions: new Set(['org:users:write']),
   isOrganizationAdmin: false,

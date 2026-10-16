@@ -12,6 +12,7 @@ interface Rule {
   readonly testOnly: readonly string[];
   readonly kitAndTests?: readonly string[];
   readonly testsAndScripts?: readonly string[];
+  readonly onlyIn?: Readonly<Record<string, readonly string[]>>;
 }
 
 const ANY_WORKSPACE = 'workspace:*';
@@ -52,6 +53,7 @@ const RULES: Readonly<Record<string, Rule>> = {
     allow: [...ws('core', 'db-sqlite'), 'hono'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
+    onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },
   },
   'runtime-node': {
     allow: [
@@ -102,7 +104,8 @@ function classify(specifier: string): string {
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] ?? specifier);
 }
 
-function isAllowed(rule: Rule, dependency: string, kind: FileKind): boolean {
+function isAllowed(rule: Rule, dependency: string, kind: FileKind, file: string): boolean {
+  if (rule.onlyIn?.[dependency]?.includes(file)) return true;
   if (rule.allow.includes(ANY_WORKSPACE) && WORKSPACE_PACKAGES.has(dependency)) return true;
   if (rule.allow.includes(dependency)) return true;
   if (kind === 'test' && rule.testOnly.includes(dependency)) return true;
@@ -212,7 +215,7 @@ function findViolations(
     }
     const dependency = classify(specifier);
     if (dependency === `${WORKSPACE_PREFIX}${pkg}`) return;
-    if (!rule || !isAllowed(rule, dependency, kind)) {
+    if (!rule || !isAllowed(rule, dependency, kind, relativePath)) {
       report(`${pkg} must not import ${dependency || specifier} from a ${kind} file`);
     }
   };
@@ -291,6 +294,19 @@ describe('classifier', () => {
     expect(findViolations('packages/db-sqlite/src/a.ts', text)).toHaveLength(2);
     expect(findViolations('packages/runtime-cloudflare/scripts/a.mjs', text)).toEqual([]);
     expect(findViolations('packages/runtime-cloudflare/src/a.ts', text)).toHaveLength(2);
+  });
+
+  it('allows the node import in exactly one runtime-cloudflare production file', () => {
+    const text = "import { inflateSync } from 'node:zlib';";
+    const codec = 'packages/runtime-cloudflare/src/codec/workers-codec.ts';
+    expect(findViolations(codec, text)).toEqual([]);
+    expect(findViolations(codec, "import { x } from 'kysely';")).toHaveLength(1);
+    expect(findViolations('packages/runtime-cloudflare/src/codec/other.ts', text)).toHaveLength(1);
+    expect(
+      findViolations('packages/runtime-cloudflare/src/blob/workers-codec.ts', text),
+    ).toHaveLength(1);
+    expect(findViolations('packages/runtime-node/src/codec/workers-codec.ts', text)).toEqual([]);
+    expect(findViolations('packages/db-sqlite/src/codec/workers-codec.ts', text)).toHaveLength(1);
   });
 
   it('exempts the generated manifest alias only at the runtime entry points', () => {

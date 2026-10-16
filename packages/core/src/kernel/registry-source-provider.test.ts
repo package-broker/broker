@@ -86,7 +86,10 @@ describe('source providers in collectRegistrations', () => {
   it('rejects sourceProviders on apiVersion 2', () => {
     expect(
       problemsOf([plugin('gh', { apiVersion: 2, binds: ['source'], sourceProviders: () => [] })]),
-    ).toEqual(['plugin "gh" declares sourceProviders and requires apiVersion 3']);
+    ).toEqual([
+      'plugin "gh" has apiVersion 2, core supports 3 to 3',
+      'plugin "gh" declares sourceProviders and requires apiVersion 3',
+    ]);
   });
 
   it('fails when two plugins supply the same provider id', () => {

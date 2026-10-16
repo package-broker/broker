@@ -1,4 +1,8 @@
-import type { ObsRecord, ObsRecordSink } from '@package-broker/core/platform/observability';
+import {
+  projectLogFields,
+  type ObsRecord,
+  type ObsRecordSink,
+} from '@package-broker/core/platform/observability';
 
 export interface AnalyticsEngineLike {
   writeDataPoint(point: {
@@ -10,43 +14,8 @@ export interface AnalyticsEngineLike {
 
 export const AE_BLOB_BUDGET_BYTES = 1024;
 
-const LOG_FIELDS = [
-  'level',
-  'event',
-  'timestamp',
-  'service',
-  'deployment_id',
-  'runtime',
-  'request_id',
-  'trace_id',
-  'span_id',
-  'plugin',
-  'route',
-  'method',
-  'status',
-  'duration_ms',
-  'project_id',
-  'token_id',
-  'job_id',
-  'attempt',
-  'error_name',
-  'reason_code',
-] as const;
-
 const DEPLOYMENT_ID = /^[A-Za-z0-9_.-]{1,64}$/;
 const ENCODER = new TextEncoder();
-
-function project(record: object): Record<string, unknown> {
-  const descriptors = Object.getOwnPropertyDescriptors(record);
-  const out: Record<string, unknown> = {};
-  for (const key of LOG_FIELDS) {
-    const descriptor = descriptors[key];
-    if (descriptor !== undefined && 'value' in descriptor && descriptor.value !== undefined) {
-      out[key] = descriptor.value;
-    }
-  }
-  return out;
-}
 
 export function createWorkersSink(options: {
   deploymentId: string;
@@ -75,7 +44,7 @@ export function createWorkersSink(options: {
     emit(record: ObsRecord): void {
       if (record.kind === 'log') {
         const level = record.record.level;
-        const safe = project(record.record);
+        const safe = projectLogFields(record.record);
         if (level === 'warn' || level === 'error') out.error(safe);
         else out.log(safe);
         return;

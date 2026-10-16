@@ -1,0 +1,323 @@
+import { sql, type Compilable, type SqlBool } from 'kysely';
+import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import {
+  BLOB_MEDIA_TYPES,
+  BlobBusyError,
+  BlobConflictError,
+  BlobValidationError,
+  blobStorageKey,
+  parseSha256,
+  type BlobInfo,
+  type BlobMetadataPort,
+  type PurgeGeneration,
+  type Sha256,
+} from '@package-broker/core/platform/blob';
+import { compile, db } from '../kysely.js';
+
+export interface BlobLifecycleMetadata {
+  softDelete(ctx: OrgContext, key: Sha256, input: { removedAt: string }): Promise<boolean>;
+  claimPurge(ctx: OrgContext, key: Sha256): Promise<PurgeGeneration | null>;
+  canStartRemove(
+    ctx: OrgContext,
+    key: Sha256,
+    generation: PurgeGeneration,
+    deleteTimeoutMs: number,
+  ): Promise<boolean>;
+  markDeleted(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<boolean>;
+  cancelPurge(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<boolean>;
+}
+
+export interface BlobRepositoryOptions {
+  readonly purgeLeaseSeconds?: number;
+}
+
+const DEFAULT_PURGE_LEASE_SECONDS = 900;
+const MIN_PURGE_LEASE_SECONDS = 60;
+const GENERATION = /^[0-9a-f]{32}$/;
+const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
+
+const NOW = sql<string>`strftime(${sql.lit(FORMAT)}, 'now')`;
+const FRESH = sql<string>`lower(hex(randomblob(16)))`;
+const leaseLive = (column: string) =>
+  sql<SqlBool>`(${sql.ref(column)} is not null and ${sql.ref(column)} > ${NOW})`;
+
+interface InfoRow {
+  readonly sha256: string;
+  readonly size_bytes: number;
+  readonly media_type: string;
+  readonly purge_after: string | null;
+}
+
+function info(row: InfoRow): BlobInfo {
+  return {
+    sha256: row.sha256 as Sha256,
+    size: row.size_bytes,
+    mediaType: row.media_type,
+    purgeAfter: row.purge_after,
+  };
+}
+
+function statement(query: Compilable): ScalarStatement {
+  return compile(query) as ScalarStatement;
+}
+
+function requireGeneration(generation: string): void {
+  if (typeof generation !== 'string' || !GENERATION.test(generation)) {
+    throw new BlobValidationError();
+  }
+}
+
+function requireTimestamp(value: string): void {
+  if (typeof value !== 'string' || !UTC_TIMESTAMP.test(value)) throw new BlobValidationError();
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new BlobValidationError();
+  }
+}
+
+export function createBlobRepository(
+  executor: ScalarSqlExecutor,
+  options: BlobRepositoryOptions = {},
+): BlobMetadataPort & BlobLifecycleMetadata {
+  const leaseSeconds = options.purgeLeaseSeconds ?? DEFAULT_PURGE_LEASE_SECONDS;
+  if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < MIN_PURGE_LEASE_SECONDS) {
+    throw new BlobValidationError();
+  }
+
+  const keyed = (ctx: OrgContext, sha256: Sha256) => ({ org: ctx.orgId, sha256 });
+
+  async function changed(query: Compilable): Promise<boolean> {
+    const [result] = await executor.batch([statement(query)]);
+    return result?.changes === 1;
+  }
+
+  return {
+    async reserve(ctx, key) {
+      const sha256 = parseSha256(key);
+      const bump = db
+        .updateTable('blob')
+        .set({ purge_generation: FRESH, purge_lease_until: null })
+        .where('org_id', '=', ctx.orgId)
+        .where('sha256', '=', sha256)
+        .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
+        .returning('purge_generation');
+      const probe = db
+        .selectFrom(sql<{ one: number }>`(select 1 as one)`.as('probe'))
+        .select([
+          FRESH.as('fresh'),
+          sql<number>`exists (select 1 from blob where org_id = ${ctx.orgId} and sha256 = ${sha256} and ${leaseLive('purge_lease_until')})`.as(
+            'busy',
+          ),
+        ]);
+      const [bumped, fresh] = await executor.batch([statement(bump), statement(probe)]);
+      const generation = (bumped?.rows[0] as { purge_generation: string } | undefined)
+        ?.purge_generation;
+      if (generation !== undefined) return generation as PurgeGeneration;
+      const row = fresh?.rows[0] as { fresh: string; busy: number } | undefined;
+      if (row === undefined) throw new BlobValidationError();
+      if (row.busy === 1) throw new BlobBusyError();
+      return row.fresh as PurgeGeneration;
+    },
+
+    async publish(ctx, input) {
+      const sha256 = parseSha256(input?.sha256);
+      if (
+        !Number.isSafeInteger(input.size) ||
+        input.size < 0 ||
+        typeof input.mediaType !== 'string' ||
+        !BLOB_MEDIA_TYPES.has(input.mediaType) ||
+        typeof input.refetchable !== 'boolean'
+      ) {
+        throw new BlobValidationError();
+      }
+      requireGeneration(input.generation);
+      const upsert = db
+        .insertInto('blob')
+        .values({
+          id: FRESH,
+          org_id: ctx.orgId,
+          sha256,
+          size_bytes: input.size,
+          storage_key: blobStorageKey(ctx.orgId, sha256),
+          media_type: input.mediaType,
+          refetchable: input.refetchable ? 1 : 0,
+          purge_generation: input.generation,
+        })
+        .onConflict((conflict) =>
+          conflict
+            .columns(['org_id', 'sha256'])
+            .doUpdateSet({
+              refetchable: sql<number>`case when blob.deleted_at is not null then excluded.refetchable else min(blob.refetchable, excluded.refetchable) end`,
+              upstream_url: sql<
+                string | null
+              >`case when blob.deleted_at is not null then excluded.upstream_url else blob.upstream_url end`,
+              last_fetched_at: sql<
+                string | null
+              >`case when blob.deleted_at is not null then excluded.last_fetched_at else blob.last_fetched_at end`,
+              last_accessed_at: sql<
+                string | null
+              >`case when blob.deleted_at is not null then excluded.last_accessed_at else blob.last_accessed_at end`,
+              purge_lease_until: null,
+              size_bytes: sql<number>`excluded.size_bytes`,
+              media_type: sql<string>`excluded.media_type`,
+              storage_key: sql<string>`excluded.storage_key`,
+              purge_after: null,
+              deleted_at: null,
+            })
+            .where(
+              sql<SqlBool>`blob.purge_generation = excluded.purge_generation and not ${leaseLive('blob.purge_lease_until')} and (blob.deleted_at is not null or (blob.size_bytes = excluded.size_bytes and blob.media_type = excluded.media_type))`,
+            ),
+        )
+        .returning(['sha256', 'size_bytes', 'media_type', 'purge_after']);
+      const existing = db
+        .selectFrom('blob')
+        .select(['size_bytes', 'media_type', 'deleted_at'])
+        .where('org_id', '=', ctx.orgId)
+        .where('sha256', '=', sha256);
+      const [written, current] = await executor.batch([statement(upsert), statement(existing)]);
+      const row = written?.rows[0] as InfoRow | undefined;
+      if (row !== undefined) return info(row);
+      const stored = current?.rows[0] as
+        { size_bytes: number; media_type: string; deleted_at: string | null } | undefined;
+      if (
+        stored !== undefined &&
+        stored.deleted_at === null &&
+        (stored.size_bytes !== input.size || stored.media_type !== input.mediaType)
+      ) {
+        throw new BlobConflictError();
+      }
+      return null;
+    },
+
+    async find(ctx, key) {
+      const sha256 = parseSha256(key);
+      const rows = await executor.all<InfoRow>(
+        statement(
+          db
+            .selectFrom('blob')
+            .select(['sha256', 'size_bytes', 'media_type', 'purge_after'])
+            .where('org_id', '=', ctx.orgId)
+            .where('sha256', '=', sha256)
+            .where('deleted_at', 'is', null)
+            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`),
+        ),
+      );
+      return rows[0] === undefined ? null : info(rows[0]);
+    },
+
+    async inspect(ctx, key) {
+      const sha256 = parseSha256(key);
+      const rows = await executor.all<InfoRow & { purging: number }>(
+        statement(
+          db
+            .selectFrom('blob')
+            .select(['sha256', 'size_bytes', 'media_type', 'purge_after'])
+            .select(leaseLive('purge_lease_until').as('purging'))
+            .where('org_id', '=', ctx.orgId)
+            .where('sha256', '=', sha256)
+            .where('deleted_at', 'is', null),
+        ),
+      );
+      const row = rows[0];
+      return row === undefined ? null : { info: info(row), purging: row.purging === 1 };
+    },
+
+    async softDelete(ctx, key, input) {
+      const { org, sha256 } = keyed(ctx, parseSha256(key));
+      requireTimestamp(input?.removedAt);
+      const removedAt = input.removedAt;
+      return changed(
+        db
+          .updateTable('blob')
+          .set({
+            purge_after: sql<string>`coalesce(purge_after, strftime(${sql.lit(FORMAT)}, 'now', '+' || (select retention_removed_upstream_days from organization where id = blob.org_id) || ' days'))`,
+          })
+          .where('org_id', '=', org)
+          .where('sha256', '=', sha256)
+          .where('deleted_at', 'is', null)
+          .where(sql<SqlBool>`${removedAt} <= ${NOW}`)
+          .where(
+            sql<SqlBool>`(select retention_removed_upstream_days from organization where id = blob.org_id) is not null`,
+          ),
+      );
+    },
+
+    async claimPurge(ctx, key) {
+      const sha256 = parseSha256(key);
+      const [result] = await executor.batch([
+        statement(
+          db
+            .updateTable('blob')
+            .set({
+              purge_generation: FRESH,
+              purge_lease_until: sql<string>`strftime(${sql.lit(FORMAT)}, 'now', ${`+${leaseSeconds} seconds`})`,
+            })
+            .where('org_id', '=', ctx.orgId)
+            .where('sha256', '=', sha256)
+            .where('deleted_at', 'is', null)
+            .where('purge_after', 'is not', null)
+            .where(sql<SqlBool>`purge_after <= ${NOW}`)
+            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
+            .returning('purge_generation'),
+        ),
+      ]);
+      const row = result?.rows[0] as { purge_generation: string } | undefined;
+      return row === undefined ? null : (row.purge_generation as PurgeGeneration);
+    },
+
+    async canStartRemove(ctx, key, generation, deleteTimeoutMs) {
+      const sha256 = parseSha256(key);
+      requireGeneration(generation);
+      if (!Number.isSafeInteger(deleteTimeoutMs) || deleteTimeoutMs < 0) {
+        throw new BlobValidationError();
+      }
+      const modifier = `+${Math.ceil(deleteTimeoutMs / 1000)} seconds`;
+      const rows = await executor.all(
+        statement(
+          db
+            .selectFrom('blob')
+            .select(sql<number>`1`.as('ok'))
+            .where('org_id', '=', ctx.orgId)
+            .where('sha256', '=', sha256)
+            .where('deleted_at', 'is', null)
+            .where('purge_generation', '=', generation)
+            .where(
+              sql<SqlBool>`purge_lease_until > strftime(${sql.lit(FORMAT)}, 'now', ${modifier})`,
+            ),
+        ),
+      );
+      return rows.length === 1;
+    },
+
+    async markDeleted(ctx, key, generation) {
+      const sha256 = parseSha256(key);
+      requireGeneration(generation);
+      return changed(
+        db
+          .updateTable('blob')
+          .set({ deleted_at: NOW, purge_lease_until: null })
+          .where('org_id', '=', ctx.orgId)
+          .where('sha256', '=', sha256)
+          .where('deleted_at', 'is', null)
+          .where('purge_lease_until', 'is not', null)
+          .where('purge_generation', '=', generation),
+      );
+    },
+
+    async cancelPurge(ctx, key, generation) {
+      const sha256 = parseSha256(key);
+      requireGeneration(generation);
+      return changed(
+        db
+          .updateTable('blob')
+          .set({ purge_after: null, purge_lease_until: null })
+          .where('org_id', '=', ctx.orgId)
+          .where('sha256', '=', sha256)
+          .where('deleted_at', 'is', null)
+          .where('purge_lease_until', 'is not', null)
+          .where('purge_generation', '=', generation),
+      );
+    },
+  };
+}

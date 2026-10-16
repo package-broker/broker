@@ -430,6 +430,309 @@ async function probeNewConstraints(executor: ScalarSqlExecutor): Promise<void> {
   expect(await count(executor, 'SELECT count(*) AS n FROM service_principal_permission')).toBe(0);
 }
 
+const TOPUP_PERMISSIONS = ['org:projects:archive', 'project:service-principals:write'];
+const ORG_B = '01J0ACME000000000000000002';
+const ORG_C = '01J0ACME000000000000000003';
+const ADMIN_B = '01J0ROLE000000000000000020';
+const ADMIN_C = '01J0ROLE000000000000000021';
+const STALE = '2026-01-01T00:00:00.000Z';
+const OWNER_ROLE = '01J0ROLE000000000000000022';
+
+async function loadThrough(last: string): Promise<MigrationSource[]> {
+  const names = [
+    '0001_init.sql',
+    '0002_local_login.sql',
+    '0003_access_model.sql',
+    '0004_cache_epoch.sql',
+    '0005_admin_permission_topup.sql',
+    '0006_ports.sql',
+  ].filter((name) => name <= last);
+  return Promise.all(
+    names.map(async (name) =>
+      loadMigrationSource('core', name, await readFile(new URL(name, migrationsUrl), 'utf8')),
+    ),
+  );
+}
+
+async function seedRole(
+  executor: ScalarSqlExecutor,
+  role: {
+    readonly id: string;
+    readonly org: string;
+    readonly key: string;
+    readonly scope: string;
+    readonly isSystem: number;
+    readonly protects: number;
+    readonly permissions: readonly string[];
+  },
+): Promise<void> {
+  await run(
+    executor,
+    'INSERT INTO role (id, org_id, key, name, scope, is_system, protects_last_holder) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [role.id, role.org, role.key, role.key, role.scope, role.isSystem, role.protects],
+  );
+  for (const permission of role.permissions) {
+    await run(
+      executor,
+      'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      [role.org, role.id, permission],
+    );
+  }
+}
+
+async function seedTopupOrganizations(executor: ScalarSqlExecutor): Promise<void> {
+  await seedPopulated(executor);
+  await run(executor, 'DROP INDEX organization_singleton');
+  for (const [id, slug] of [
+    [ORG_B, 'beta'],
+    [ORG_C, 'gamma'],
+  ] as const) {
+    await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+      id,
+      slug,
+      slug,
+    ]);
+  }
+  await seedRole(executor, {
+    id: ADMIN_B,
+    org: ORG_B,
+    key: 'organization_admin',
+    scope: 'organization',
+    isSystem: 1,
+    protects: 1,
+    permissions: [...PRE_0003_ADMIN_PERMISSIONS, ...TOPUP_PERMISSIONS],
+  });
+  await seedRole(executor, {
+    id: ADMIN_C,
+    org: ORG_C,
+    key: 'organization_admin',
+    scope: 'organization',
+    isSystem: 1,
+    protects: 0,
+    permissions: PRE_0003_ADMIN_PERMISSIONS,
+  });
+  await seedRole(executor, {
+    id: OWNER_ROLE,
+    org: ORG,
+    key: 'project_owner',
+    scope: 'project',
+    isSystem: 1,
+    protects: 0,
+    permissions: ['project:read'],
+  });
+  await run(executor, 'UPDATE role SET updated_at = ?', [STALE]);
+  for (const org of [ORG, ORG_B, ORG_C]) {
+    await run(executor, 'INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [org, 'v0']);
+  }
+}
+
+async function roleState(executor: ScalarSqlExecutor): Promise<unknown[]> {
+  const found = await rows<{
+    org_id: string;
+    id: string;
+    revision: number;
+    updated_at: string;
+    permission: string | null;
+  }>(
+    executor,
+    `SELECT r.org_id, r.id, r.revision, r.updated_at, p.permission
+     FROM role r LEFT JOIN role_permission p ON p.org_id = r.org_id AND p.role_id = r.id`,
+  );
+  const roles = new Map<
+    string,
+    { id: string; revision: number; updatedAt: string; permissions: string[] }
+  >();
+  for (const row of found) {
+    const role = roles.get(row.id) ?? {
+      id: row.id,
+      revision: row.revision,
+      updatedAt: row.updated_at,
+      permissions: [],
+    };
+    if (row.permission !== null) role.permissions.push(row.permission);
+    roles.set(row.id, role);
+  }
+  return [...roles.values()]
+    .map((role) => ({ ...role, permissions: role.permissions.sort() }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+async function epochVersions(executor: ScalarSqlExecutor): Promise<Record<string, string>> {
+  const found = await rows<{ org_id: string; version: string }>(
+    executor,
+    'SELECT org_id, version FROM cache_epoch',
+  );
+  return Object.fromEntries(found.map((row) => [row.org_id, row.version]));
+}
+
+const JOB_QUEUED = '01J0JOB0000000000000000000';
+const JOB_RUNNING = '01J0JOB0000000000000000001';
+const JOB_DEAD = '01J0JOB0000000000000000002';
+const BLOB_LIVE = '01J0BLOB000000000000000000';
+const BLOB_GONE = '01J0BLOB000000000000000001';
+const BLOB_FRESH = '01J0BLOB000000000000000002';
+const LEASE_UNTIL = '2026-10-16T09:05:00.000Z';
+const ATTEMPT_OUTCOMES = ['running', 'succeeded', 'failed', 'lease_expired', 'released'];
+const PORT_TABLES = ['job', 'job_attempt', 'blob'];
+const EXPECTED_BLOB_INDEXES = ['blob_digest', 'blob_idle', 'blob_purge', 'blob_storage_key'];
+
+async function loadPre0006(): Promise<MigrationSource[]> {
+  return loadThrough('0005_z');
+}
+
+async function loadAll(): Promise<MigrationSource[]> {
+  return loadThrough('0006_z');
+}
+
+async function seedJob(
+  executor: ScalarSqlExecutor,
+  job: { readonly id: string; readonly state: string; readonly key: string },
+): Promise<void> {
+  await run(
+    executor,
+    `INSERT INTO job (id, org_id, type, payload_json, resource_key, idempotency_key, state, attempts, max_attempts,
+       lease_owner, lease_until, fence, run_at, last_error, finished_at, created_at, updated_at)
+     VALUES (?, ?, 'sync', '{"a":1}', ?, ?, ?, 2, 5, 'worker-1', ?, 2, ?, 'boom', ?, ?, ?)`,
+    [job.id, ORG, job.key, job.key, job.state, LEASE_UNTIL, NOW, NOW, NOW, NOW],
+  );
+}
+
+async function seedAttempt(
+  executor: ScalarSqlExecutor,
+  attempt: {
+    readonly id: string;
+    readonly job: string;
+    readonly fence: number;
+    readonly outcome: string;
+  },
+): Promise<void> {
+  await run(
+    executor,
+    `INSERT INTO job_attempt (id, org_id, job_id, attempt, fence, worker, outcome, error, started_at, finished_at, next_run_at)
+     VALUES (?, ?, ?, ?, ?, 'worker-1', ?, 'E_BOOM', ?, ?, ?)`,
+    [attempt.id, ORG, attempt.job, attempt.fence, attempt.fence, attempt.outcome, NOW, NOW, NOW],
+  );
+}
+
+async function seedBlob(
+  executor: ScalarSqlExecutor,
+  id: string,
+  columns: Readonly<Record<string, ScalarSqlValue>>,
+): Promise<void> {
+  const values: Record<string, ScalarSqlValue> = {
+    id,
+    org_id: ORG,
+    sha256: id
+      .slice(-1)
+      .repeat(64)
+      .replace(/[^0-9a-f]/g, 'c'),
+    size_bytes: 10,
+    storage_key: `blobs/${id}`,
+    ...columns,
+  };
+  const names = Object.keys(values);
+  await run(
+    executor,
+    `INSERT INTO blob (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`,
+    Object.values(values),
+  );
+}
+
+async function seedPortRows(executor: ScalarSqlExecutor): Promise<void> {
+  await seedPopulated(executor);
+  await run(executor, 'INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [ORG, 'v0']);
+  await seedJob(executor, { id: JOB_QUEUED, state: 'queued', key: 'k-queued' });
+  await seedJob(executor, { id: JOB_RUNNING, state: 'running', key: 'k-running' });
+  await seedJob(executor, { id: JOB_DEAD, state: 'dead', key: 'k-dead' });
+  await seedAttempt(executor, {
+    id: '01J0ATT0000000000000000000',
+    job: JOB_QUEUED,
+    fence: 1,
+    outcome: 'failed',
+  });
+  await seedAttempt(executor, {
+    id: '01J0ATT0000000000000000001',
+    job: JOB_RUNNING,
+    fence: 1,
+    outcome: 'lease_expired',
+  });
+  await seedAttempt(executor, {
+    id: '01J0ATT0000000000000000002',
+    job: JOB_RUNNING,
+    fence: 2,
+    outcome: 'running',
+  });
+  await seedAttempt(executor, {
+    id: '01J0ATT0000000000000000003',
+    job: JOB_DEAD,
+    fence: 1,
+    outcome: 'dead',
+  });
+  await seedBlob(executor, BLOB_LIVE, {
+    upstream_url: 'https://example.test/a.zip',
+    last_fetched_at: NOW,
+    last_accessed_at: NOW,
+    purge_after: SETUP_EXPIRES,
+  });
+  await seedBlob(executor, BLOB_GONE, { refetchable: 0, deleted_at: NOW });
+}
+
+async function snapshotPortTables(
+  executor: ScalarSqlExecutor,
+  columns: ReadonlyMap<string, string[]>,
+): Promise<Record<string, unknown[]>> {
+  const result: Record<string, unknown[]> = {};
+  for (const table of PORT_TABLES) {
+    const names = columns.get(table) ?? [];
+    result[table] = await rows(executor, `SELECT ${names.join(', ')} FROM ${table} ORDER BY id`);
+  }
+  return result;
+}
+
+async function portColumns(executor: ScalarSqlExecutor): Promise<Map<string, string[]>> {
+  const map = new Map<string, string[]>();
+  for (const table of PORT_TABLES) map.set(table, await columnNames(executor, table));
+  return map;
+}
+
+async function tableInfo(
+  executor: ScalarSqlExecutor,
+  table: string,
+  column: string,
+): Promise<unknown[]> {
+  return rows(
+    executor,
+    `SELECT name, type, "notnull", dflt_value FROM pragma_table_info('${table}') WHERE name = ?`,
+    [column],
+  );
+}
+
+async function attemptShape(executor: ScalarSqlExecutor): Promise<Record<string, unknown[]>> {
+  return {
+    columns: await rows(
+      executor,
+      'SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(\'job_attempt\') ORDER BY cid',
+    ),
+    foreignKeys: await rows(
+      executor,
+      'SELECT "table", "from", "to", on_update, on_delete, "match" FROM pragma_foreign_key_list(\'job_attempt\') ORDER BY "from"',
+    ),
+    indexes: await rows(
+      executor,
+      'SELECT name, "unique", origin, partial FROM pragma_index_list(\'job_attempt\') ORDER BY name',
+    ),
+    strict: await rows(executor, "SELECT strict FROM pragma_table_list('job_attempt')"),
+  };
+}
+
+async function indexNames(executor: ScalarSqlExecutor, table: string): Promise<string[]> {
+  const found = await rows<{ name: string }>(
+    executor,
+    `SELECT name FROM pragma_index_list('${table}') WHERE name NOT LIKE 'sqlite_autoindex%' ORDER BY name`,
+  );
+  return found.map((row) => row.name);
+}
+
 export function describeMigrationContract(
   name: string,
   open: () => Promise<OpenedPair>,
@@ -771,6 +1074,331 @@ export function describeMigrationContract(
         expect(
           await count(executor, 'SELECT count(*) AS n FROM service_principal_permission'),
         ).toBe(0);
+      });
+    });
+
+    it('14. 0005 tops up only a protected system Organization Admin that lacks the new permissions and bumps its revision once', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadThrough('0004_z'), { holder: 'contract-populated' });
+        await seedTopupOrganizations(executor);
+        const before = (await roleState(executor)) as { id: string }[];
+        const untouched = (id: string) => before.filter((row) => row.id === id);
+        const permissionsBefore = await count(
+          executor,
+          'SELECT count(*) AS n FROM role_permission',
+        );
+
+        const result = await migrate(executor, await loadThrough('0005_z'), {
+          holder: 'contract-topup',
+        });
+
+        expect(result.applied).toEqual(['core:0005_admin_permission_topup']);
+        expect(await permissionsOf(executor, ROLE_IDS.organization_admin)).toEqual(
+          [...PRE_0003_ADMIN_PERMISSIONS, ...TOPUP_PERMISSIONS].sort(),
+        );
+        const [toppedRole] = await rows<{ updated_at: string }>(
+          executor,
+          'SELECT updated_at FROM role WHERE id = ?',
+          [ROLE_IDS.organization_admin],
+        );
+        expect(toppedRole?.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+        expect(toppedRole?.updated_at).not.toBe(STALE);
+        const epochs = await epochVersions(executor);
+        expect(epochs[ORG]).toMatch(/^[0-9A-F]{32}$/);
+        expect(epochs[ORG_B]).toBe('v0');
+        expect(epochs[ORG_C]).toBe('v0');
+        expect(
+          await rows(executor, 'SELECT revision FROM role WHERE id = ?', [
+            ROLE_IDS.organization_admin,
+          ]),
+        ).toEqual([{ revision: 2 }]);
+        const after = (await roleState(executor)) as { id: string }[];
+        for (const id of [ADMIN_B, ADMIN_C, OWNER_ROLE, READER_ROLE]) {
+          expect(
+            after.filter((row) => row.id === id),
+            id,
+          ).toEqual(untouched(id));
+        }
+        expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(
+          permissionsBefore + TOPUP_PERMISSIONS.length,
+        );
+        expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        expect(await lockHolder(executor)).toBeNull();
+      });
+    });
+
+    it('15. 0005 adds only the missing permission and still bumps the revision once', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadThrough('0004_z'), { holder: 'contract-populated' });
+        await seedPopulated(executor);
+        await run(
+          executor,
+          'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+          [ORG, ROLE_IDS.organization_admin, 'org:projects:archive'],
+        );
+
+        await migrate(executor, await loadThrough('0005_z'), { holder: 'contract-topup' });
+
+        expect(await permissionsOf(executor, ROLE_IDS.organization_admin)).toEqual(
+          [...PRE_0003_ADMIN_PERMISSIONS, ...TOPUP_PERMISSIONS].sort(),
+        );
+        expect(
+          await rows(executor, 'SELECT revision FROM role WHERE id = ?', [
+            ROLE_IDS.organization_admin,
+          ]),
+        ).toEqual([{ revision: 2 }]);
+      });
+    });
+
+    it('16. 0005 on a fresh database creates no role and no permission row', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+
+        const result = await migrate(executor, await loadThrough('0005_z'), {
+          holder: 'contract-fresh',
+        });
+
+        expect(result.applied.at(-1)).toBe('core:0005_admin_permission_topup');
+        expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
+        expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
+      });
+    });
+
+    it('17. fresh 0006: job provenance columns, the released attempt outcome, a cascading leaf table and the blob purge columns', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        const preCount = await (async () => {
+          await migrate(executor, await loadPre0006(), { holder: 'contract-pre' });
+          return countTables(executor);
+        })();
+        const blobIndexesBefore = await indexNames(executor, 'blob');
+        const attemptShapeBefore = await attemptShape(executor);
+
+        const result = await migrate(executor, await loadAll(), { holder: 'contract-fresh' });
+
+        expect(await attemptShape(executor)).toEqual(attemptShapeBefore);
+        expect(attemptShapeBefore.strict).toEqual([{ strict: 1 }]);
+
+        expect(result.applied).toEqual(['core:0006_ports']);
+        expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
+          { name: 'project_id', type: 'TEXT', notnull: 0, dflt_value: null },
+        ]);
+        expect(await tableInfo(executor, 'job', 'initiator_token_id')).toEqual([
+          { name: 'initiator_token_id', type: 'TEXT', notnull: 0, dflt_value: null },
+        ]);
+        expect(
+          await rows(
+            executor,
+            'SELECT "from", "table", "to" FROM pragma_foreign_key_list(\'job\') ORDER BY "from"',
+          ),
+        ).toEqual([
+          { from: 'org_id', table: 'organization', to: 'id' },
+          { from: 'project_id', table: 'project', to: 'id' },
+        ]);
+        expect(await tableNames(executor)).not.toContain('job_attempt_0006');
+        expect(await countTables(executor)).toBe(preCount);
+        expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+
+        await seedPopulated(executor);
+        await seedJob(executor, { id: JOB_QUEUED, state: 'queued', key: 'k-queued' });
+        for (const [index, outcome] of ATTEMPT_OUTCOMES.entries()) {
+          await run(executor, 'DELETE FROM job_attempt');
+          await seedAttempt(executor, {
+            id: `01J0ATT000000000000000000${index}`,
+            job: JOB_QUEUED,
+            fence: 1,
+            outcome,
+          });
+        }
+        await run(executor, 'DELETE FROM job_attempt');
+        for (const outcome of ['dead', 'bogus']) {
+          const error = await rejection(
+            seedAttempt(executor, {
+              id: '01J0ATT0000000000000000009',
+              job: JOB_QUEUED,
+              fence: 1,
+              outcome,
+            }),
+          );
+          expect(String((error as Error).message), outcome).toMatch(/CHECK/i);
+        }
+        await seedAttempt(executor, {
+          id: '01J0ATT0000000000000000000',
+          job: JOB_QUEUED,
+          fence: 1,
+          outcome: 'released',
+        });
+        const duplicate = await rejection(
+          seedAttempt(executor, {
+            id: '01J0ATT0000000000000000001',
+            job: JOB_QUEUED,
+            fence: 1,
+            outcome: 'running',
+          }),
+        );
+        expect(String((duplicate as Error).message)).toMatch(/UNIQUE|job_attempt_fence/i);
+        await run(executor, 'DELETE FROM job WHERE id = ?', [JOB_QUEUED]);
+        expect(await count(executor, 'SELECT count(*) AS n FROM job_attempt')).toBe(0);
+        expect(await lockHolder(executor)).toBeNull();
+
+        expect(await tableInfo(executor, 'blob', 'purge_generation')).toEqual([
+          { name: 'purge_generation', type: 'TEXT', notnull: 0, dflt_value: null },
+        ]);
+        expect(await tableInfo(executor, 'blob', 'purge_lease_until')).toEqual([
+          { name: 'purge_lease_until', type: 'TEXT', notnull: 0, dflt_value: null },
+        ]);
+        const blobColumns = await columnNames(executor, 'blob');
+        expect(blobColumns.slice(-2)).toEqual(['purge_generation', 'purge_lease_until']);
+        expect(await indexNames(executor, 'blob')).toEqual(blobIndexesBefore);
+        expect(blobIndexesBefore).toEqual(EXPECTED_BLOB_INDEXES);
+        await seedBlob(executor, BLOB_FRESH, {});
+        expect(
+          await rows(
+            executor,
+            'SELECT purge_generation, purge_lease_until FROM blob WHERE id = ?',
+            [BLOB_FRESH],
+          ),
+        ).toEqual([{ purge_generation: null, purge_lease_until: null }]);
+        await run(
+          executor,
+          "UPDATE blob SET purge_generation = lower(hex(randomblob(16))), purge_lease_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+900 seconds') WHERE id = ?",
+          [BLOB_FRESH],
+        );
+        const [lease] = await rows<{ generation: string; live: number }>(
+          executor,
+          "SELECT purge_generation AS generation, purge_lease_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS live FROM blob WHERE id = ?",
+          [BLOB_FRESH],
+        );
+        expect(lease?.generation).toMatch(/^[0-9a-f]{32}$/);
+        expect(lease?.live).toBe(1);
+      });
+    });
+
+    it('18. a populated 0005 database upgrades to 0006 with every job, attempt and blob row intact', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadPre0006(), { holder: 'contract-populated' });
+        await seedPortRows(executor);
+        const columns = await portColumns(executor);
+        const before = await snapshotPortTables(executor, columns);
+        const epochBefore = await epochVersions(executor);
+        const counts = await Promise.all(
+          PORT_TABLES.map((table) => count(executor, `SELECT count(*) AS n FROM ${table}`)),
+        );
+        expect(before.job_attempt).toHaveLength(4);
+
+        const result = await migrate(executor, await loadAll(), { holder: 'contract-upgrade' });
+
+        expect(result.applied).toEqual(['core:0006_ports']);
+        const after = await snapshotPortTables(executor, columns);
+        expect(after.job).toEqual(before.job);
+        expect(after.blob).toEqual(before.blob);
+        expect(after.job_attempt).toEqual(
+          (before.job_attempt as { outcome: string }[]).map((row) =>
+            row.outcome === 'dead' ? { ...row, outcome: 'failed' } : row,
+          ),
+        );
+        expect(
+          await rows(executor, 'SELECT project_id, initiator_token_id FROM job ORDER BY id'),
+        ).toEqual(Array(3).fill({ project_id: null, initiator_token_id: null }));
+        expect(
+          await rows(executor, 'SELECT purge_generation, purge_lease_until FROM blob ORDER BY id'),
+        ).toEqual(Array(2).fill({ purge_generation: null, purge_lease_until: null }));
+        expect(
+          await Promise.all(
+            PORT_TABLES.map((table) => count(executor, `SELECT count(*) AS n FROM ${table}`)),
+          ),
+        ).toEqual(counts);
+        expect(await epochVersions(executor)).toEqual(epochBefore);
+        expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        expect(await lockHolder(executor)).toBeNull();
+      });
+    });
+
+    it('19. a failing 0006 apply leaves the old attempt CHECK, no new column and no bookkeeping row, and a retry applies', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadPre0006(), { holder: 'contract-populated' });
+        await seedPortRows(executor);
+        const columns = await portColumns(executor);
+        const before = await snapshotPortTables(executor, columns);
+        const tablesBefore = await tableNames(executor);
+        const bookkeepingBefore = await readBookkeeping(executor);
+        const [real] = (await loadAll()).slice(-1);
+        if (real === undefined || real.name !== '0006_ports')
+          throw new Error('0006_ports.sql is missing');
+        const broken = await loadMigrationSource(
+          'core',
+          '0006_ports.sql',
+          `${real.sql}\nINSERT INTO job_attempt (id, org_id, job_id, attempt, fence, worker) VALUES (NULL, '${ORG}', '${JOB_QUEUED}', 1, 99, 'w');\n`,
+        );
+
+        const error = await rejection(
+          migrate(executor, [...(await loadPre0006()), broken], { holder: 'contract-failing' }),
+        );
+
+        expect(error).toBeInstanceOf(MigrationApplyError);
+        expect(await tableNames(executor)).toEqual(tablesBefore);
+        expect(await columnNames(executor, 'job')).not.toContain('project_id');
+        expect(await columnNames(executor, 'job')).not.toContain('initiator_token_id');
+        expect(await columnNames(executor, 'blob')).not.toContain('purge_generation');
+        expect(await columnNames(executor, 'blob')).not.toContain('purge_lease_until');
+        expect(await snapshotPortTables(executor, columns)).toEqual(before);
+        expect(await indexNames(executor, 'job_attempt')).toEqual(['job_attempt_fence']);
+        await seedAttempt(executor, {
+          id: '01J0ATT0000000000000000009',
+          job: JOB_QUEUED,
+          fence: 9,
+          outcome: 'dead',
+        });
+        expect(await readBookkeeping(executor)).toEqual(bookkeepingBefore);
+        expect(await lockHolder(executor)).toBeNull();
+
+        const beforeRetry = await snapshotPortTables(executor, columns);
+
+        const retry = await migrate(executor, await loadAll(), { holder: 'contract-retry' });
+
+        expect(retry.applied).toEqual(['core:0006_ports']);
+        const after = await snapshotPortTables(executor, columns);
+        expect(after.job).toEqual(beforeRetry.job);
+        expect(after.blob).toEqual(beforeRetry.blob);
+        expect(after.job_attempt).toEqual(
+          (beforeRetry.job_attempt as { outcome: string }[]).map((row) =>
+            row.outcome === 'dead' ? { ...row, outcome: 'failed' } : row,
+          ),
+        );
+        expect(await columnNames(executor, 'job')).toEqual(
+          expect.arrayContaining(['project_id', 'initiator_token_id']),
+        );
+        expect(await columnNames(executor, 'blob')).toEqual(
+          expect.arrayContaining(['purge_generation', 'purge_lease_until']),
+        );
+      });
+    });
+
+    it('20. job.project_id is a foreign key; job.initiator_token_id survives the token it names', async () => {
+      await withPair(open, async ({ executor }) => {
+        await enableForeignKeys(executor);
+        await migrate(executor, await loadAll(), { holder: 'contract-fresh' });
+        await seedPopulated(executor);
+        const insertJob = (id: string, project: string | null, token: string | null) =>
+          run(
+            executor,
+            "INSERT INTO job (id, org_id, type, project_id, initiator_token_id) VALUES (?, ?, 'sync', ?, ?)",
+            [id, ORG, project, token],
+          );
+
+        const missing = await rejection(insertJob(JOB_QUEUED, 'no-such-project', null));
+        expect(String((missing as Error).message)).toMatch(/FOREIGN KEY/i);
+        await insertJob(JOB_RUNNING, PROJECT, PAT_UNBOUND);
+        await run(executor, 'DELETE FROM token WHERE id = ?', [PAT_UNBOUND]);
+
+        expect(await rows(executor, 'SELECT id, project_id, initiator_token_id FROM job')).toEqual([
+          { id: JOB_RUNNING, project_id: PROJECT, initiator_token_id: PAT_UNBOUND },
+        ]);
+        expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
       });
     });
   });

@@ -4,6 +4,7 @@ import type { MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { existsGuard, type Guard, type ProtectedHolderProvider } from '../kysely.js';
 import { holdsPermission } from './access.js';
+import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
 export interface ActorHoldsInput {
   readonly permission: string;
@@ -20,10 +21,7 @@ export interface ActorHoldsInput {
  * holds the permission now, and (for a project) the project is active unless `allowArchived`.
  */
 export function actorHolds(ctx: OrgContext, fence: MutationFence, input: ActorHoldsInput): Guard {
-  const idleSeconds = input.idleSeconds ?? SESSION_IDLE_MS / 1000;
-  if (!Number.isInteger(idleSeconds) || idleSeconds < 60 || idleSeconds > 86400) {
-    throw new RangeError('idleSeconds must be an integer from 60 to 86400');
-  }
+  const idleSeconds = requireIdleSeconds(input.idleSeconds ?? SESSION_IDLE_MS / 1000);
   const session = existsGuard((database) =>
     database
       .selectFrom('session as s')
@@ -40,13 +38,9 @@ export function actorHolds(ctx: OrgContext, fence: MutationFence, input: ActorHo
       .where('s.org_id', '=', ctx.orgId)
       .where('s.id', '=', fence.sessionId)
       .where('s.user_id', '=', fence.userId)
-      .where('s.revoked_at', 'is', null)
       .where('actor.status', '=', 'active')
       .where(sql<SqlBool>`(s.identity_id is null or i.id is not null)`)
-      .where(sql<SqlBool>`unixepoch(s.expires_at, 'subsec') > unixepoch('now', 'subsec')`)
-      .where(
-        sql<SqlBool>`unixepoch(coalesce(s.last_seen_at, s.created_at), 'subsec') > unixepoch('now', 'subsec') - ${idleSeconds}`,
-      ),
+      .where(liveSessionCondition('s', idleSeconds)),
   );
   const projectExists =
     input.projectId !== null && input.allowArchived === true

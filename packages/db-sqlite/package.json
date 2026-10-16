@@ -66,6 +66,10 @@
       "types": "./dist/contract/migration-lock-contract.d.ts",
       "default": "./dist/contract/migration-lock-contract.js"
     },
+    "./contract/observability-contract": {
+      "types": "./dist/contract/observability-contract.d.ts",
+      "default": "./dist/contract/observability-contract.js"
+    },
     "./contract/two-organizations": {
       "types": "./dist/contract/two-organizations.d.ts",
       "default": "./dist/contract/two-organizations.js"

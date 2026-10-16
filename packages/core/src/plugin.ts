@@ -56,6 +56,16 @@ export interface PluginRegistry {
 
 export type RouteBoundary = 'none' | 'organization' | 'project' | 'self' | 'package';
 
+export type PackageEcosystem = 'composer' | 'npm';
+
+export interface PackageRouteBinding {
+  readonly ecosystem: PackageEcosystem;
+  /** Returns the raw package name from the route parameters; null means the request names no package. */
+  readonly name: (params: Readonly<Record<string, string>>) => string | null;
+  /** Default false: an admissible but unseen package is not fetched for this route. */
+  readonly fetchOnAdmission?: boolean;
+}
+
 export interface RouteDefinition {
   /** HEAD is served by GET routes, same authorization. */
   readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -64,9 +74,12 @@ export interface RouteDefinition {
   readonly permission: string | null;
   /**
    * Required when permission is set; omitted means 'none' on a public route. 'self' is an
-   * authenticated-session route with no permission. 'package' is reserved.
+   * authenticated-session route with no permission. 'package' needs a registered package
+   * resolver, `package`, :project in the path and project:packages:read or write.
    */
   readonly boundary?: RouteBoundary;
+  /** Required when boundary is 'package', rejected otherwise. */
+  readonly package?: PackageRouteBinding;
   /** Default true; false requires permission null. */
   readonly needsOrg?: boolean;
   readonly handler: (ctx: RequestContext) => Promise<Response> | Response;

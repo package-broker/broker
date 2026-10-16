@@ -12,7 +12,7 @@ const plugin = (id: string, migrations?: { dir: string }) =>
   definePlugin({
     id,
     package: `fake-plugin-${id}`,
-    apiVersion: 2,
+    apiVersion: 3,
     platforms: ['node'],
     ...(migrations ? { migrations } : {}),
   });

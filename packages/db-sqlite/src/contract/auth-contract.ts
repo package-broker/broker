@@ -463,7 +463,7 @@ const upgrade: Case = async (open) => {
         executor,
         "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
       ),
-    ).toBe(42);
+    ).toBe(43);
     expect(
       await rowsOf(
         executor,
@@ -1290,7 +1290,7 @@ export const authContractCases = {
 
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
-    it('1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 42 tables', () =>
+    it('1. upgrade: 0001 with populated rows then 0002 and 0003 keep the rows, add no authority and give 43 tables', () =>
       authContractCases.upgrade(open));
     it('2. reset deletes the TOTP credential and clears its reference and enabled time together', () =>
       authContractCases.resetCleanup(open));

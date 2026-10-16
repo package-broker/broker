@@ -21,6 +21,11 @@ async function writeBuiltOutput(root: string): Promise<void> {
   await mkdir(join(root, 'generated'), { recursive: true });
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
+  const epoch = await readFile(
+    new URL('../../../db-sqlite/migrations/0004_cache_epoch.sql', import.meta.url),
+    'utf8',
+  );
+  await writeFile(join(root, 'migrations', 'core', '0004_cache_epoch.sql'), epoch);
   await writeFile(
     join(root, 'generated', 'manifest.json'),
     JSON.stringify({
@@ -30,6 +35,12 @@ async function writeBuiltOutput(root: string): Promise<void> {
           id: 'core:0001_init',
           name: '0001_init.sql',
           checksum: await sha256Hex(sql),
+          phase: 'expand',
+        },
+        {
+          id: 'core:0004_cache_epoch',
+          name: '0004_cache_epoch.sql',
+          checksum: await sha256Hex(epoch),
           phase: 'expand',
         },
       ],
@@ -55,11 +66,21 @@ afterEach(async () => {
 it('applies a migration once and skips it on the second run', async () => {
   expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(0);
   expect(console.log).toHaveBeenLastCalledWith(
-    JSON.stringify({ applied: ['core:0001_init'], skipped: [], unknown: [], pending: [] }),
+    JSON.stringify({
+      applied: ['core:0001_init', 'core:0004_cache_epoch'],
+      skipped: [],
+      unknown: [],
+      pending: [],
+    }),
   );
   expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(0);
   expect(console.log).toHaveBeenLastCalledWith(
-    JSON.stringify({ applied: [], skipped: ['core:0001_init'], unknown: [], pending: [] }),
+    JSON.stringify({
+      applied: [],
+      skipped: ['core:0001_init', 'core:0004_cache_epoch'],
+      unknown: [],
+      pending: [],
+    }),
   );
 });
 
@@ -76,7 +97,12 @@ it('rejects tampered SQL before creating a database', async () => {
 it('lists pending migrations without creating tables for a dry run', async () => {
   expect(await run(['migrate', '--sqlite', file, '--out', outDir, '--dry-run'])).toBe(0);
   expect(console.log).toHaveBeenLastCalledWith(
-    JSON.stringify({ applied: [], skipped: [], unknown: [], pending: ['core:0001_init'] }),
+    JSON.stringify({
+      applied: [],
+      skipped: [],
+      unknown: [],
+      pending: ['core:0001_init', 'core:0004_cache_epoch'],
+    }),
   );
   const opened = openBetterSqliteExecutor(file);
   try {
@@ -170,7 +196,12 @@ it('falls back to .pb/node when --out is empty', async () => {
   process.chdir(dir);
   expect(await run(['migrate', '--sqlite', file, '--out', '', '--dry-run'])).toBe(0);
   expect(console.log).toHaveBeenLastCalledWith(
-    JSON.stringify({ applied: [], skipped: [], unknown: [], pending: ['core:0001_init'] }),
+    JSON.stringify({
+      applied: [],
+      skipped: [],
+      unknown: [],
+      pending: ['core:0001_init', 'core:0004_cache_epoch'],
+    }),
   );
 });
 

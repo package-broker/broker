@@ -113,16 +113,17 @@ async function migrateAll(): Promise<void> {
 }
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 42 tables, expand phase for 0002', async () => {
+  it('1: a fresh database gets every core migration: 43 tables, expand phase for 0002', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
     expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
+    expect(ids.at(-1)).toBe('core:0004_cache_epoch');
     expect(result.applied).toEqual(ids);
-    // 37 from 0001, +2 from 0002, +3 from 0003: service_principal_permission, identity_block, access_mutation_guard
-    expect(await countTables()).toBe(42);
+    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch
+    expect(await countTables()).toBe(43);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -154,8 +155,8 @@ describe('core migrations', () => {
 
     expect(result.applied).toEqual(sources.slice(1).map((source) => source.id));
     expect(result.skipped).toEqual(['core:0001_init']);
-    // 0002 and 0003 add 5 tables to the 37 of 0001
-    expect(await countTables()).toBe(42);
+    // 0002, 0003 and 0004 add 6 tables to the 37 of 0001
+    expect(await countTables()).toBe(43);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -296,6 +297,114 @@ describe('core migrations', () => {
       expect(await dbErrorKind(bind('', 'anchor'))).toBe('check');
       expect(await dbErrorKind(bind(' dex', 'anchor'))).toBe('check');
       expect(await dbErrorKind(bind('okta', ''))).toBe('check');
+    });
+  });
+
+  describe('cache_epoch', () => {
+    const OTHER_ORG = '01J0ACME000000000000000001';
+
+    it('17: seeds one random 32-character hex version for each existing organization', async () => {
+      const [init] = await loadCore((name) => name.startsWith('0001_'));
+      if (init === undefined) throw new Error('0001_init.sql is missing');
+      await migrate(opened.executor, [init], { holder: 'core-migrations-test' });
+      await seedOrganization();
+
+      await migrateAll();
+
+      const found = await rows<{ org_id: string; version: string }>(
+        'SELECT org_id, version FROM cache_epoch',
+      );
+      expect(found).toHaveLength(1);
+      expect(found[0]?.org_id).toBe(ORG);
+      expect(found[0]?.version).toMatch(/^[0-9A-F]{32}$/);
+    });
+
+    it('18: seeds no row on an empty database and creates no trigger', async () => {
+      await migrateAll();
+
+      expect(await rows('SELECT org_id FROM cache_epoch')).toEqual([]);
+      expect(await rows("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([]);
+    });
+
+    it('19: a version is required and an unknown organization fails with kind foreign_key', async () => {
+      await migrateAll();
+      await seedOrganization();
+
+      expect(
+        await dbErrorKind(
+          run('INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [ORG, null]),
+        ),
+      ).toBe('not_null');
+      expect(
+        await dbErrorKind(
+          run('INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [
+            '01J0MISSING00000000000000',
+            'v',
+          ]),
+        ),
+      ).toBe('foreign_key');
+    });
+
+    it('20: a second row for one organization fails with kind unique', async () => {
+      await migrateAll();
+      await seedOrganization();
+      await run('INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [ORG, 'a']);
+
+      expect(
+        await dbErrorKind(
+          run('INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)', [ORG, 'b']),
+        ),
+      ).toBe('unique');
+    });
+
+    it('21: deleting the organization cascades to its cache_epoch row only', async () => {
+      await migrateAll();
+      await seedOrganization();
+      await run('DROP INDEX organization_singleton');
+      await run('INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+        OTHER_ORG,
+        'other',
+        'Other',
+      ]);
+      await run('INSERT INTO cache_epoch (org_id, version) SELECT id, ? FROM organization', ['v']);
+
+      await run('DELETE FROM organization WHERE id = ?', [OTHER_ORG]);
+
+      expect(await rows('SELECT org_id FROM cache_epoch')).toEqual([{ org_id: ORG }]);
+    });
+
+    it('23: a failure after CREATE TABLE cache_epoch leaves no table and no bookkeeping row', async () => {
+      const before = await loadCore((name) => name < '0004_');
+      const [real] = await loadCore((name) => name.startsWith('0004_'));
+      if (real === undefined) throw new Error('0004_cache_epoch.sql is missing');
+      const broken = await loadMigrationSource(
+        'core',
+        '0004_cache_epoch.sql',
+        `${real.sql}\nCREATE TABL broken (id INTEGER);\n`,
+      );
+
+      await expect(
+        migrate(opened.executor, [...before, broken], { holder: 'core-migrations-test' }),
+      ).rejects.toThrow();
+
+      expect(await tableNames()).not.toContain('cache_epoch');
+      expect(
+        await rows<{ id: string }>("SELECT id FROM schema_migration WHERE id LIKE '%0004%'"),
+      ).toEqual([]);
+      expect(await countTables()).toBe(42);
+    });
+
+    it('22: the table is STRICT without a rowid shortcut and has exactly org_id and version', async () => {
+      await migrateAll();
+
+      expect(
+        await rows<{ name: string }>(
+          "SELECT name FROM pragma_table_info('cache_epoch') ORDER BY cid",
+        ),
+      ).toEqual([{ name: 'org_id' }, { name: 'version' }]);
+      expect(await rows("SELECT strict FROM pragma_table_list WHERE name = 'cache_epoch'")).toEqual(
+        [{ strict: 1 }],
+      );
     });
   });
 });

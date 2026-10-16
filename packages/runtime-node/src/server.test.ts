@@ -85,7 +85,12 @@ describe('createNodeServer', () => {
       '0001_init.sql',
       await readFile(join(migrationsDirectory, '0001_init.sql'), 'utf8'),
     );
-    await migrate(opened.executor, [init], { holder: 'runtime-node-server-test' });
+    const epoch = await loadMigrationSource(
+      'core',
+      '0004_cache_epoch.sql',
+      await readFile(join(migrationsDirectory, '0004_cache_epoch.sql'), 'utf8'),
+    );
+    await migrate(opened.executor, [init, epoch], { holder: 'runtime-node-server-test' });
   });
 
   afterEach(async () => {

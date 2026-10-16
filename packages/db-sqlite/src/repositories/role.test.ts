@@ -15,6 +15,7 @@ import { migrate } from '../migrations/runner.js';
 import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { openNodeSqliteExecutor } from '../testing/node-sqlite-executor.js';
+import { bootstrapAdmin } from './admin-bootstrap.js';
 import { createRoleRepository, seedDefaultsStatements } from './role.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -191,7 +192,7 @@ async function coreSources(): Promise<MigrationSource[]> {
 }
 
 describe('admin completeness', () => {
-  it('2: an organization seeded as of migration 0001 has every catalogue permission on organization_admin after all migrations', async () => {
+  it('2: an organization seeded as of migration 0001 has every catalogue permission on organization_admin after all migrations and the bootstrap top-up', async () => {
     const opened = openNodeSqliteExecutor();
     try {
       const [init, ...later] = await coreSources();
@@ -199,6 +200,7 @@ describe('admin completeness', () => {
       await migrate(opened.executor, [init], { holder: 't155' });
       const orgId = '01J0UPGRADE0000000000000AA';
       const adminId = '01J0UPGRADEADMIN00000000AA';
+      const ownerId = '01J0UPGRADEOWNER00000000AA';
       await opened.executor.batch([
         {
           sql: 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)',
@@ -209,6 +211,15 @@ describe('admin completeness', () => {
                 VALUES (?, ?, 'organization_admin', 'Organization Admin', 'organization', 1, 1)`,
           params: [adminId, orgId],
         },
+        {
+          sql: `INSERT INTO role (id, org_id, key, name, scope, is_system, protects_last_holder)
+                VALUES (?, ?, 'project_owner', 'Project Owner', 'project', 1, 0)`,
+          params: [ownerId, orgId],
+        },
+        {
+          sql: 'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+          params: [orgId, ownerId, 'project:read'],
+        },
         ...ADMIN_PERMISSIONS_AT_0001.map((permission) => ({
           sql: 'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
           params: [orgId, adminId, permission],
@@ -216,10 +227,33 @@ describe('admin completeness', () => {
       ]);
       await migrate(opened.executor, [init, ...later], { holder: 't155' });
 
-      const roles = await createRoleRepository(opened.executor).list(orgContext(orgId));
-      const admin = roles.find((role) => role.key === 'organization_admin');
-      expect(admin).toBeDefined();
-      expect(missingCatalogue(admin?.permissions ?? [])).toEqual([]);
+      const ctx = orgContext(orgId);
+      const adminPermissions = async () => {
+        const roles = await createRoleRepository(opened.executor).list(ctx);
+        return roles.find((role) => role.key === 'organization_admin')?.permissions ?? [];
+      };
+      expect(missingCatalogue(await adminPermissions()).length).toBeGreaterThan(0);
+
+      const bootstrap = (prefix: string, tag: string) =>
+        bootstrapAdmin(opened.executor, ctx, {
+          email: 'admin@example.test',
+          userId: `01J0UPGRADEUSER${tag}`,
+          setupHash: 'a1'.repeat(32),
+          setupExpiresAt: '2026-10-16T12:00:00.000Z',
+          grantId: `01J0UPGRADEGRANT${tag}`,
+          roleIds: idsWith(prefix),
+          opId: `01J0UPGRADEOP${tag}`,
+          now: NOW,
+        });
+      await bootstrap('01J0FRA', 'AA');
+      const topped = await adminPermissions();
+      expect(missingCatalogue(topped)).toEqual([]);
+
+      await bootstrap('01J0FRB', 'AA');
+      expect([...(await adminPermissions())].sort()).toEqual([...topped].sort());
+
+      const roles = await createRoleRepository(opened.executor).list(ctx);
+      expect(roles.find((role) => role.id === ownerId)?.permissions).toEqual(['project:read']);
     } finally {
       await opened.close();
     }

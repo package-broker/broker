@@ -84,6 +84,7 @@ function insertRole(
 }
 
 interface PermissionGuards {
+  readonly matchByKey?: string;
   readonly unprotectedOnly?: boolean;
   readonly organizationScopeOnly?: boolean;
   readonly freshRole?: {
@@ -103,8 +104,14 @@ function insertPermissions(
   let source = db
     .selectFrom('role as r')
     .innerJoin(sql`json_each(${JSON.stringify(permissions)})`.as('j'), (join) => join.onTrue())
-    .where('r.id', '=', roleId)
     .where('r.org_id', '=', ctx.orgId);
+  source =
+    guards.matchByKey === undefined
+      ? source.where('r.id', '=', roleId)
+      : source
+          .where('r.key', '=', guards.matchByKey)
+          .where('r.is_system', '=', 1)
+          .where('r.protects_last_holder', '=', 1);
   if (guards.unprotectedOnly === true) source = source.where('r.protects_last_holder', '=', 0);
   if (guards.organizationScopeOnly === true) source = source.where('r.scope', '=', 'organization');
   const fresh = guards.freshRole;
@@ -167,7 +174,12 @@ export function seedDefaultsStatements(
           'key',
         ),
       ),
-      insertPermissions(ctx, id, role.permissions, {}),
+      insertPermissions(
+        ctx,
+        id,
+        role.permissions,
+        role.protectsLastHolder ? { matchByKey: role.key } : {},
+      ),
     ];
   });
 }

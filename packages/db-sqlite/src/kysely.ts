@@ -12,8 +12,15 @@ import {
   type SelectQueryBuilder,
   type SqlBool,
 } from 'kysely';
-import type { OrgContext, SqlValue, Statement } from '@package-broker/core/db/port';
-import { fenceGuard, type FenceGuard } from '@package-broker/core/authz/fence';
+import type { OrgContext, SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
+import {
+  fenceGuard,
+  runFenced,
+  type FailureProbes,
+  type FencedOutcome,
+  type FenceGuard,
+  type MutationFence,
+} from '@package-broker/core/authz/fence';
 import { ulid } from '@package-broker/core/ids';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import type { Database } from './schema.js';
@@ -462,10 +469,11 @@ interface GuardCtes {
 }
 
 /**
- * Fails the batch with a UNIQUE error unless the condition evaluates to integer 1; any other value
- * (NULL, 2, '1') fails closed. Conditions should be exists/comparisons.
+ * One statement that fails the batch with a UNIQUE error unless the condition evaluates to integer
+ * 1; any other value (NULL, 2, '1') fails closed. Conditions should be exists/comparisons. Never
+ * bumps the epoch: use it for CAS and postconditions placed among the mutations.
  */
-export function assertGuard(condition: Guard): FenceGuard {
+export function assertCheck(condition: Guard): readonly Statement[] {
   const ctes = db as unknown as Kysely<GuardCtes & Database>;
   const insert = ctes
     .with(
@@ -483,5 +491,67 @@ export function assertGuard(condition: Guard): FenceGuard {
         .select(sql<string>`${newOpId()}`.as('key'))
         .where('guard_cond.f', '=', sql.lit(1)),
     );
-  return fenceGuard([compile(insert)]);
+  return [compile(insert)];
+}
+
+const guardOrgs = new WeakMap<object, string>();
+
+/**
+ * The fence guard: three statements. The check from assertCheck, then the organization's cache_epoch
+ * version replaced, then a failure unless exactly one row was replaced, so a missing cache_epoch row
+ * fails the whole batch. Exactly one assertGuard belongs in a batch; it is the only statement that
+ * bumps the epoch.
+ */
+export function assertGuard(condition: Guard, ctx: OrgContext): FenceGuard {
+  const ctes = db as unknown as Kysely<GuardCtes & Database>;
+  const bump = ctes
+    .updateTable('cache_epoch')
+    .set({ version: sql<string>`hex(randomblob(16))` })
+    .where('org_id', '=', ctx.orgId);
+  const bumpedOnce = ctes
+    .with('guard_rows(n)', (qb) =>
+      qb.selectNoFrom(sql.lit(1).as('n')).unionAll(qb.selectNoFrom(sql.lit(2).as('n'))),
+    )
+    .insertInto('access_mutation_guard')
+    .columns(['key'])
+    .expression(
+      ctes
+        .selectFrom(['guard_rows'])
+        .select(sql<string>`${newOpId()}`.as('key'))
+        .where(sql<boolean>`changes() <> 1`),
+    );
+  const guard = fenceGuard([...assertCheck(condition), compile(bump), compile(bumpedOnce)]);
+  guardOrgs.set(guard, ctx.orgId);
+  return guard;
+}
+
+/**
+ * The entry point for fenced writes. Refuses a guard that assertGuard did not build for ctx, and
+ * mutations that touch cache_epoch (only the guard bumps it); a missing cache_epoch row after a
+ * failed batch is a deployment fault and throws instead of being classified.
+ */
+export async function runOrgFenced(
+  executor: SqlExecutor,
+  ctx: OrgContext,
+  fence: MutationFence,
+  guard: FenceGuard,
+  mutations: readonly Statement[],
+  probes: FailureProbes,
+): Promise<FencedOutcome> {
+  if (guardOrgs.get(guard) !== ctx.orgId) {
+    throw new TypeError('the fence guard was not built by assertGuard for this organization');
+  }
+  if (mutations.some((statement) => /cache_epoch/i.test(statement.sql))) {
+    throw new TypeError('fenced mutations must not touch cache_epoch; the guard bumps it');
+  }
+  const outcome = await runFenced(executor, fence, guard, mutations, probes);
+  if (!outcome.ok && outcome.reason !== 'indeterminate') {
+    const epoch = await executor.all(
+      compile(db.selectFrom('cache_epoch').select('org_id').where('org_id', '=', ctx.orgId)),
+    );
+    if (epoch.length === 0) {
+      throw new Error('cache_epoch row is missing for the organization');
+    }
+  }
+  return outcome;
 }

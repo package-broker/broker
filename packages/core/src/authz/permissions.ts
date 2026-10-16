@@ -23,7 +23,7 @@ export interface PermissionInfo {
   readonly sessionOnly: boolean;
 }
 
-function permission(name: string, description: string, sessionOnly = false): PermissionInfo {
+function permission(name: string, description: string, sessionOnly = true): PermissionInfo {
   return Object.freeze({
     name,
     scope: scopeOf(name),
@@ -33,34 +33,36 @@ function permission(name: string, description: string, sessionOnly = false): Per
 }
 
 export const PERMISSIONS: readonly PermissionInfo[] = Object.freeze([
-  permission('org:read', 'Read organization details'),
-  permission('org:settings:write', 'Change organization settings', true),
-  permission('org:users:read', 'Read organization users'),
-  permission('org:users:write', 'Manage organization users', true),
-  permission('org:roles:read', 'Read organization roles'),
-  permission('org:roles:write', 'Manage organization roles', true),
-  permission('org:grants:read', 'Read organization grants'),
-  permission('org:grants:write', 'Manage organization grants', true),
-  permission('org:projects:create', 'Add projects', true),
-  permission('org:sources:read', 'Read organization sources'),
-  permission('org:sources:write', 'Manage organization sources', true),
+  permission('org:read', 'Read organization details', false),
+  permission('org:settings:write', 'Change organization settings'),
+  permission('org:users:read', 'Read organization users', false),
+  permission('org:users:write', 'Manage organization users'),
+  permission('org:roles:read', 'Read organization roles', false),
+  permission('org:roles:write', 'Manage organization roles'),
+  permission('org:grants:read', 'Read organization grants', false),
+  permission('org:grants:write', 'Manage organization grants'),
+  permission('org:projects:create', 'Add projects'),
+  permission('org:projects:archive', 'Archive projects'),
+  permission('org:sources:read', 'Read organization sources', false),
+  permission('org:sources:write', 'Manage organization sources'),
   permission('org:tokens:read', 'Read organization tokens'),
   permission('org:tokens:revoke', 'Revoke organization tokens'),
-  permission('org:service-principals:write', 'Manage service principals', true),
-  permission('org:audit:read', 'Read organization audit records'),
-  permission('project:read', 'Read project details'),
-  permission('project:settings:write', 'Change project settings', true),
-  permission('project:grants:read', 'Read project grants'),
-  permission('project:grants:write', 'Manage project grants', true),
-  permission('project:packages:read', 'Read project packages'),
-  permission('project:packages:write', 'Publish project packages'),
-  permission('project:packages:manage', 'Manage project packages', true),
-  permission('project:sources:read', 'Read project sources'),
-  permission('project:sources:write', 'Manage project sources', true),
-  permission('project:tokens:create', 'Issue project tokens', true),
+  permission('org:service-principals:write', 'Manage service principals'),
+  permission('org:audit:read', 'Read organization audit records', false),
+  permission('project:read', 'Read project details', false),
+  permission('project:settings:write', 'Change project settings'),
+  permission('project:grants:read', 'Read project grants', false),
+  permission('project:grants:write', 'Manage project grants'),
+  permission('project:packages:read', 'Read project packages', false),
+  permission('project:packages:write', 'Publish project packages', false),
+  permission('project:packages:manage', 'Manage project packages'),
+  permission('project:sources:read', 'Read project sources', false),
+  permission('project:sources:write', 'Manage project sources'),
+  permission('project:service-principals:write', 'Manage project service principals'),
+  permission('project:tokens:create', 'Issue project tokens'),
   permission('project:tokens:read', 'Read project tokens'),
   permission('project:tokens:revoke', 'Revoke project tokens'),
-  permission('project:audit:read', 'Read project audit records'),
+  permission('project:audit:read', 'Read project audit records', false),
 ]);
 
 export type DefaultRoleKey =
@@ -125,6 +127,7 @@ export const DEFAULT_ROLES: readonly DefaultRole[] = Object.freeze([
     'project:packages:manage',
     'project:sources:read',
     'project:sources:write',
+    'project:service-principals:write',
     'project:tokens:create',
     'project:tokens:read',
     'project:tokens:revoke',

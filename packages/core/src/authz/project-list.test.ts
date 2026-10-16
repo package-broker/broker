@@ -38,6 +38,7 @@ function world(init: Partial<World> & Pick<World, 'projects'>): World {
 
 function actorOf(w: World, isOrganizationAdmin = false): ActorContext {
   return {
+    kind: 'organization',
     userId: 'u1',
     permissions: new Set(w.organizationPermissions),
     isOrganizationAdmin,

@@ -25,7 +25,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const registry: ObsRegistry = {
   events: KERNEL_EVENTS,
   reasonCodes: KERNEL_REASON_CODES,
-  routeTemplates: new Set(['/p/{name}', '/health/live']),
+  routeTemplates: new Set(['/p/{name}', '/health/live', '/health/ready']),
 };
 
 function setup(trust = false) {
@@ -142,6 +142,51 @@ describe('abort', () => {
     guard.complete(204);
     expect(remove).toHaveBeenCalledTimes(1);
     expect(remove.mock.calls[0]?.[1]).toBe(add.mock.calls[0]?.[1]);
+  });
+});
+
+describe('health completion levels', () => {
+  it.each([
+    ['/health/live', 200, 'debug'],
+    ['/health/ready', 200, 'debug'],
+    ['/health/ready', 204, 'debug'],
+    ['/health/ready', 199, 'warn'],
+    ['/health/ready', 302, 'warn'],
+    ['/health/ready', 404, 'warn'],
+    ['/health/ready', 503, 'warn'],
+  ] as const)('%s status %d logs at %s', (route, status, level) => {
+    const s = setup();
+    const scope = createRequestScope(s.ctx, request());
+    const guard = createCompletionGuard(scope, s.http);
+    scope.set({ route });
+    guard.complete(status);
+    expect(s.logs()[0]).toMatchObject({ level, route, status });
+    expect(s.metrics('pb.http.requests')[0]).toMatchObject({
+      labels: { route, status_class: `${String(status)[0]}xx` },
+    });
+  });
+
+  it('an aborted health request logs at warn with request.aborted', () => {
+    const s = setup();
+    const scope = createRequestScope(s.ctx, request());
+    const controller = new AbortController();
+    createCompletionGuard(scope, s.http, controller.signal);
+    scope.set({ route: '/health/ready' });
+    controller.abort();
+    expect(s.logs()[0]).toMatchObject({ level: 'warn', reason_code: 'request.aborted' });
+    expect(s.logs()[0]).not.toHaveProperty('status');
+    expect(s.metrics('pb.http.requests')[0]).toMatchObject({
+      labels: { route: '/health/ready', outcome: 'aborted' },
+    });
+  });
+
+  it('an invalid health status stays at error', () => {
+    const s = setup();
+    const scope = createRequestScope(s.ctx, request());
+    scope.set({ route: '/health/ready' });
+    createCompletionGuard(scope, s.http).complete(600);
+    expect(s.logs()[0]).toMatchObject({ level: 'error' });
+    expect(s.logs()[0]).not.toHaveProperty('status');
   });
 });
 

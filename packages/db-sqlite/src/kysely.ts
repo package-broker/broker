@@ -443,6 +443,7 @@ export function protectedHolder(
   ctx: OrgContext,
   userIdColumn: Expression<string>,
   input: ProtectedHolderInput,
+  options: { readonly includeSuspended?: boolean } = {},
 ): Guard {
   requireProtectedHolderInput(input);
   const outer = referencedTable(userIdColumn);
@@ -511,7 +512,9 @@ export function protectedHolder(
       .select(sql.lit(1).as('one'))
       .where(`${alias.user}.org_id`, '=', org)
       .where(`${alias.user}.id`, '=', userIdColumn)
-      .where(`${alias.user}.status`, '=', sql.lit('active'));
+      .$if(options.includeSuspended !== true, (qb) =>
+        qb.where(`${alias.user}.status`, '=', sql.lit('active')),
+      );
     if (exclude?.grantId !== undefined) {
       query = query.where(`${alias.grant}.id`, '<>', bindings.value('excluded_grant'));
     }
@@ -559,7 +562,9 @@ export function protectedHolder(
       .where(`${alias.member}.org_id`, '=', org)
       .where(`${alias.user}.org_id`, '=', org)
       .where(`${alias.user}.id`, '=', userIdColumn)
-      .where(`${alias.user}.status`, '=', sql.lit('active'))
+      .$if(options.includeSuspended !== true, (qb) =>
+        qb.where(`${alias.user}.status`, '=', sql.lit('active')),
+      )
       .where(evidence(`${alias.member}.refreshed_at`))
       .where((eb) =>
         eb.exists(

@@ -96,8 +96,18 @@ export interface Administration {
     id: string,
     roleId: string,
   ): Promise<AdminResult<null>>;
-  suspendUser(ctx: OrgContext, actor: ActorContext, userId: string): Promise<AdminResult<null>>;
-  reactivateUser(ctx: OrgContext, actor: ActorContext, userId: string): Promise<AdminResult<null>>;
+  suspendUser(
+    ctx: OrgContext,
+    actor: ActorContext,
+    fence: MutationFence,
+    userId: string,
+  ): Promise<AdminResult<null>>;
+  reactivateUser(
+    ctx: OrgContext,
+    actor: ActorContext,
+    fence: MutationFence,
+    userId: string,
+  ): Promise<AdminResult<null>>;
 }
 
 export interface AdministrationDeps {
@@ -309,19 +319,21 @@ export function createAdministration(deps: AdministrationDeps): Administration {
   async function changeStatus(
     ctx: OrgContext,
     rawActor: ActorContext,
+    fence: MutationFence | undefined,
     action: string,
     userId: string,
-    run: (actor: Actor, status: 'active' | 'suspended') => Promise<AdminResult<null>>,
+    run: (actor: Actor, held: MutationFence) => Promise<AdminResult<null>>,
   ): Promise<AdminResult<null>> {
     const actor = authorize(ctx, rawActor, action, 'org:users:write');
     if (actor === null) return fail('forbidden');
+    const held = requireFence(actor, fence);
     if (!isId(userId)) return fail('not_found');
     const user = await users.get(ctx, userId);
     if (user === null) return fail('not_found');
     if (!actor.isAdmin && !(await mayTouchHolder(ctx, user.email))) {
       return deny(ctx, actor, action);
     }
-    return run(actor, user.status);
+    return run(actor, held);
   }
 
   return {
@@ -529,17 +541,26 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    suspendUser: (ctx, rawActor, userId) =>
-      changeStatus(ctx, rawActor, 'suspended', userId, async (actor, before) => {
-        const result = await grants.suspendUser(ctx, userId, now());
+    suspendUser: (ctx, rawActor, fence, userId) =>
+      changeStatus(ctx, rawActor, fence, 'suspended', userId, async (actor, held) => {
+        const result = await grants.suspendUser(ctx, held, userId, now());
+        if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
+          return fencedFailure(ctx, actor, 'suspended', result);
+        }
+        if (result === 'unchanged') return OK;
         if (result !== 'suspended') return fail(result);
-        if (before !== 'suspended') userEvent(ctx, actor, 'suspended', userId);
+        userEvent(ctx, actor, 'suspended', userId);
         return OK;
       }),
 
-    reactivateUser: (ctx, rawActor, userId) =>
-      changeStatus(ctx, rawActor, 'reactivated', userId, async (actor) => {
-        if (!(await grants.reactivateUser(ctx, userId, now()))) return fail('not_found');
+    reactivateUser: (ctx, rawActor, fence, userId) =>
+      changeStatus(ctx, rawActor, fence, 'reactivated', userId, async (actor, held) => {
+        const result = await grants.reactivateUser(ctx, held, userId, now());
+        if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
+          return fencedFailure(ctx, actor, 'reactivated', result);
+        }
+        if (result === 'unchanged') return OK;
+        if (result !== 'reactivated') return fail('not_found');
         userEvent(ctx, actor, 'reactivated', userId);
         return OK;
       }),

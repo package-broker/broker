@@ -214,6 +214,12 @@ function actorStatements(org: OrgContext): Statement[] {
       ACTOR.role,
       'org:grants:write',
     ),
+    stmt(
+      'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      org.orgId,
+      ACTOR.role,
+      'org:users:write',
+    ),
     grant(org, '01J0ACTORGRNT00000000000AA', 'email', 'actor@actor.test', ACTOR.role),
     stmt(
       'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -250,6 +256,11 @@ async function deleteGrant(id: string) {
   await ensureActor();
   counter += 1;
   return grants.deleteOrganization(a, await fenceFor(id), id, `OP${counter}`);
+}
+
+async function suspend(userId: string, now: string) {
+  await ensureActor();
+  return grants.suspendUser(a, await fenceFor(userId), userId, now);
 }
 
 async function changeGrantRole(id: string, roleId: string, now: string) {
@@ -580,7 +591,7 @@ describe('local-admin eligibility', () => {
     await seed(stmt('UPDATE local_login SET totp_credential_id = NULL WHERE user_id = ?', U2));
 
     expect(await deleteGrant(G_EMAIL)).toBe('last_holder');
-    expect(await grants.suspendUser(a, U1, NOW)).toBe('last_holder');
+    expect(await suspend(U1, NOW)).toBe('last_holder');
   });
 
   it('fresh also counts the bootstrap local admin without any provider', async () => {
@@ -766,7 +777,7 @@ describe('writers use the freshness-aware predicate', () => {
 
     expect(await deleteGrant(G_EMAIL)).toBe('last_holder');
     expect(await changeGrantRole(G_EMAIL, VIEWER, NOW)).toBe('last_holder');
-    expect(await grants.suspendUser(a, U1, NOW)).toBe('last_holder');
+    expect(await suspend(U1, NOW)).toBe('last_holder');
     expect(await grants.countProtectedHolders(a)).toBe(1);
   });
 

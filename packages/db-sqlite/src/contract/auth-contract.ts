@@ -1051,7 +1051,7 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       operation: GrantOperation,
     ): Promise<string> => {
       if (operation.kind === 'suspend') {
-        return repository.suspendUser(a, operation.target, LATER);
+        return repository.suspendUser(a, await fenceFor(operation.target), operation.target, LATER);
       }
       const fence = await fenceFor(operation.target);
       return operation.kind === 'delete'

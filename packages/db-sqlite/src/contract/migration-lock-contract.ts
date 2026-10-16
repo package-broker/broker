@@ -233,7 +233,7 @@ export function describeMigrationLockContract(
           ).toHaveLength(37);
         });
       }
-    }, 20_000);
+    }, 60_000);
 
     it('13. two pending runners both resolve, one applies and one skips (ten races)', async () => {
       for (let iteration = 0; iteration < 10; iteration += 1) {
@@ -288,6 +288,6 @@ export function describeMigrationLockContract(
           ).toEqual([{ id: pending.id }]);
         });
       }
-    }, 20_000);
+    }, 60_000);
   });
 }

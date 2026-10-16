@@ -1,5 +1,5 @@
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
-import { SESSION_ABSOLUTE_MS, SESSION_IDLE_MS } from '@package-broker/core/auth/session';
+import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type {
   GrantRepository,
@@ -141,10 +141,6 @@ function organizationRoleExists(ctx: OrgContext, roleId: string) {
     );
 }
 
-function dbTimeAgo(ms: number) {
-  return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms / 1000} seconds`})`;
-}
-
 type LooseDatabase = Record<string, Record<string, unknown>>;
 
 const loose = db as unknown as Kysely<LooseDatabase>;
@@ -212,7 +208,6 @@ function actorEvidence(
       join session s on s.org_id = au.org_id and s.user_id = au.id
       where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
         and s.id = ${fence.sessionId}
-        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
         and ${liveSessionCondition('s', SESSION_IDLE_MS / 1000)})
     and ${holdsPermission(ctx, {
       userId: fence.userId,

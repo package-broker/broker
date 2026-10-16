@@ -6,8 +6,18 @@ import {
   CodecTruncatedError,
   type DigestAlgorithm,
 } from '@package-broker/core/platform/codec';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { nodeCodecs } from './node-codec.js';
+
+const swap = vi.hoisted(() => ({ deflateRawAsGunzip: false }));
+vi.mock('node:zlib', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:zlib')>();
+  return {
+    ...actual,
+    createDeflateRaw: (...args: Parameters<typeof actual.createDeflateRaw>) =>
+      swap.deflateRawAsGunzip ? actual.createGunzip() : actual.createDeflateRaw(...args),
+  };
+});
 
 const ALGS: readonly DigestAlgorithm[] = ['sha1', 'sha256', 'sha384', 'sha512'];
 const EXPECTED: Record<DigestAlgorithm, string> = {
@@ -21,7 +31,7 @@ const EXPECTED: Record<DigestAlgorithm, string> = {
 const message = Uint8Array.from({ length: 70 }, (_, i) => (i * 7 + 3) & 0xff);
 
 async function run(
-  transform: TransformStream<Uint8Array, Uint8Array>,
+  transform: ReadableWritablePair<Uint8Array, Uint8Array>,
   chunks: readonly Uint8Array[],
 ): Promise<Uint8Array> {
   const source = new ReadableStream<Uint8Array>({
@@ -167,6 +177,56 @@ describe('nodeCodecs inflateConsumed', () => {
     );
   });
 
+  describe('with an expected size', () => {
+    it('returns one exact-size buffer', () => {
+      const r = nodeCodecs.inflateConsumed(stream, 10_000, payload.length);
+      expect(Buffer.from(r.data)).toEqual(payload);
+      expect(r.data.buffer.byteLength).toBe(payload.length);
+      expect(r.data.byteOffset).toBe(0);
+      expect(r.consumed).toBe(stream.length);
+    });
+
+    it('does not allocate a default 64 KB chunk', () => {
+      const spy = vi.spyOn(Buffer, 'allocUnsafe');
+      try {
+        nodeCodecs.inflateConsumed(deflateSync(Buffer.from('abc')), 100, 3);
+        expect(spy.mock.calls.every(([n]) => n < 65_536)).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('throws CodecLimitError when the output is larger than expected', () => {
+      expect(() => nodeCodecs.inflateConsumed(stream, 10_000, payload.length - 1)).toThrow(
+        CodecLimitError,
+      );
+    });
+
+    it('throws CodecCorruptError when the output is smaller than expected', () => {
+      expect(() => nodeCodecs.inflateConsumed(stream, 10_000, payload.length + 1)).toThrow(
+        CodecCorruptError,
+      );
+    });
+
+    it('throws CodecLimitError when the expected size exceeds maxOutput', () => {
+      expect(() => nodeCodecs.inflateConsumed(stream, 10, payload.length)).toThrow(CodecLimitError);
+    });
+
+    it('throws CodecLimitError for one output byte with expected size 0', () => {
+      const oneByte = deflateSync(Buffer.from('x'));
+      expect(() => nodeCodecs.inflateConsumed(oneByte, 100, 0)).toThrow(CodecLimitError);
+    });
+
+    it('accepts an empty stream with expected size 0 and maxOutput 0', () => {
+      const empty = deflateSync(Buffer.alloc(0));
+      expect(nodeCodecs.inflateConsumed(empty, 0, 0).data.length).toBe(0);
+    });
+
+    it.each([-1, 1.5, Number.NaN, 2 ** 53])('rejects expected size %s with RangeError', (bad) => {
+      expect(() => nodeCodecs.inflateConsumed(stream, 10_000, bad)).toThrow(RangeError);
+    });
+  });
+
   it('throws CodecCorruptError for invalid data and for raw deflate', () => {
     expect(() => nodeCodecs.inflateConsumed(Buffer.from('zzzzzzzz'), 100)).toThrow(
       CodecCorruptError,
@@ -297,5 +357,20 @@ describe('nodeCodecs deflateRaw', () => {
   it('produces a raw deflate stream that inflates back', async () => {
     const out = await run(nodeCodecs.deflateRaw(), [message.subarray(0, 30), message.subarray(30)]);
     expect(new Uint8Array(inflateRawSync(out))).toEqual(message);
+  });
+});
+
+describe('nodeCodecs deflateRaw errors', () => {
+  it('labels an engine failure as deflate', async () => {
+    swap.deflateRawAsGunzip = true;
+    try {
+      const failure = await run(nodeCodecs.deflateRaw(), [Buffer.from('zzzzzzzzzz')]).catch(
+        (e: unknown) => e,
+      );
+      expect(failure).toBeInstanceOf(CodecCorruptError);
+      expect((failure as CodecCorruptError).operation).toBe('deflate');
+    } finally {
+      swap.deflateRawAsGunzip = false;
+    }
   });
 });

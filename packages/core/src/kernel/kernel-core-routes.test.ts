@@ -183,7 +183,7 @@ describe('createKernel coreRoutes', () => {
     const text = await response.text();
     expect(text).not.toContain('secret');
     expect(JSON.parse(text)).toMatchObject({ error: { code: 'internal' } });
-    expect(logs).toHaveLength(1);
+    expect(logs.map((entry) => entry['event'])).toEqual(['http.error', 'http.request']);
     expect(JSON.stringify(logs)).not.toContain('secret');
   });
 

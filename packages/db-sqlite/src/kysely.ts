@@ -9,11 +9,19 @@ import {
   type Compilable,
   type Expression,
   type OperationNode,
+  type QueryCreator,
   type SelectQueryBuilder,
   type SqlBool,
 } from 'kysely';
-import type { OrgContext, SqlValue, Statement } from '@package-broker/core/db/port';
-import { fenceGuard, type FenceGuard } from '@package-broker/core/authz/fence';
+import type { OrgContext, SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
+import {
+  fenceGuard,
+  runFenced,
+  type FailureProbes,
+  type FencedOutcome,
+  type FenceGuard,
+  type MutationFence,
+} from '@package-broker/core/authz/fence';
 import { ulid } from '@package-broker/core/ids';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import type { Database } from './schema.js';
@@ -74,7 +82,7 @@ function unwrapReference(node: OperationNode): OperationNode {
   return node;
 }
 
-function referencedTable(value: UserIdOperand): string | null {
+export function referencedTable(value: UserIdOperand): string | null {
   if (typeof value === 'string') return null;
   const node = unwrapReference(value.toOperationNode());
   if (node.kind !== 'ReferenceNode') {
@@ -87,20 +95,19 @@ function referencedTable(value: UserIdOperand): string | null {
   return table.table.identifier.name;
 }
 
-function guardAliases<K extends string>(
+export function guardAliases<K extends string>(
   names: readonly K[],
-  outer: string | null,
+  outer: string | null | readonly (string | null)[],
 ): Record<K, string> {
-  const outerName = outer?.toLowerCase();
+  const outerNames = (Array.isArray(outer) ? outer : [outer]).flatMap((name) =>
+    typeof name === 'string' ? [name.toLowerCase()] : [],
+  );
   for (let attempt = 1; ; attempt += 1) {
     const suffix = attempt === 1 ? '' : `_${attempt}`;
     const aliases = Object.fromEntries(
       names.map((name) => [name, `guard_${name}${suffix}`]),
     ) as Record<K, string>;
-    if (
-      outerName === undefined ||
-      !Object.values<string>(aliases).some((alias) => alias === outerName)
-    ) {
+    if (!Object.values<string>(aliases).some((alias) => outerNames.includes(alias))) {
       return aliases;
     }
   }
@@ -231,24 +238,92 @@ export type ProtectedHolderInput =
     })
   | (ProtectedHolderCommon & { readonly kind: 'local_recovery' });
 
-const EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const EVIDENCE_FUTURE_SKEW_MS = 60 * 1000;
+export const EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const EVIDENCE_FUTURE_SKEW_MS = 60 * 1000;
 
-function evidenceWithin(column: string, lowerMs: number, upperMs: number) {
-  const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
-  return sql<SqlBool>`${ms} >= ${lowerMs} and ${ms} <= ${upperMs}`;
-}
-
-type HolderAlias = Record<
+export type HolderAlias = Record<
   'user' | 'grant' | 'role' | 'member' | 'identity' | 'binding' | 'login' | 'credential',
   string
 >;
 
-function usableLocalLogin(ctx: OrgContext, alias: HolderAlias) {
+/**
+ * Values a guard binds once in a leading WITH and references wherever it needs them, so a statement
+ * stays under the D1 limit of 100 bound parameters however often the value is used. Provider anchors
+ * travel as one JSON parameter.
+ */
+export interface GuardBindings {
+  /** Query creator that carries the WITH; start exactly one select of the guard from it. */
+  readonly creator: QueryCreator<LooseDatabase>;
+  readonly org: Expression<string>;
+  value(column: string): Expression<string | number>;
+  /** A select of `(provider, anchor)`, all anchors or the e-mail authoritative ones only. */
+  anchors(authoritativeOnly: boolean): Expression<unknown>;
+}
+
+const BOUND_COLUMN = /^[a-z][a-z_]*$/;
+const BOUND_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function guardBindings(
+  names: { readonly values: string; readonly anchors: string },
+  values: Readonly<Record<string, string | number>>,
+  providers: readonly ProtectedHolderProvider[],
+): GuardBindings {
+  requireProviders(providers);
+  if (!BOUND_NAME.test(names.values) || !BOUND_NAME.test(names.anchors)) {
+    throw new TypeError('guard binding names must be SQL identifiers');
+  }
+  const columns = Object.keys(values);
+  if (!columns.includes('org_id') || !columns.every((column) => BOUND_COLUMN.test(column))) {
+    throw new TypeError('guard bindings need org_id and lowercase column names');
+  }
+  let creator = loose.with(`${names.values}(${columns.join(', ')})`, (qb) =>
+    qb.selectNoFrom(columns.map((column) => sql.val(values[column]).as(column))),
+  ) as unknown as QueryCreator<LooseDatabase>;
+  if (providers.length > 0) {
+    creator = creator.with(
+      `${names.anchors}(provider, anchor, email_authoritative)`,
+      () =>
+        sql`(select json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') from json_each(${JSON.stringify(
+          providers.map((entry) => [
+            entry.provider,
+            entry.anchor,
+            entry.emailAuthoritative ? 1 : 0,
+          ]),
+        )}))`,
+    ) as unknown as QueryCreator<LooseDatabase>;
+  }
+  const value = (column: string) => {
+    if (!columns.includes(column)) throw new TypeError(`guard binding ${column} is not bound`);
+    return sql<
+      string | number
+    >`(select ${sql.ref(`${names.values}.${column}`)} from ${sql.table(names.values)})`;
+  };
+  return {
+    creator,
+    org: value('org_id') as Expression<string>,
+    value,
+    anchors: (authoritativeOnly) =>
+      providers.length === 0
+        ? sql`select null, null where 0`
+        : sql`select provider, anchor from ${sql.table(names.anchors)}${
+            authoritativeOnly ? sql` where email_authoritative = 1` : sql``
+          }`,
+  };
+}
+
+function jsonAnchors(providers: readonly ProtectedHolderProvider[]): Expression<unknown> {
+  return sql`select json_extract(value, '$[0]'), json_extract(value, '$[1]') from json_each(${JSON.stringify(
+    providers.map((entry) => [entry.provider, entry.anchor]),
+  )})`;
+}
+
+type OrgOperand = Expression<string> | string;
+
+function localLogin(org: OrgOperand, alias: HolderAlias) {
   return loose
     .selectFrom(`local_login as ${alias.login}`)
     .select(sql.lit(1).as('one'))
-    .where(`${alias.login}.org_id`, '=', ctx.orgId)
+    .where(`${alias.login}.org_id`, '=', org)
     .whereRef(`${alias.login}.user_id`, '=', `${alias.user}.id`)
     .where(`${alias.login}.password_hash`, 'is not', null)
     .where(`${alias.login}.totp_enabled_at`, 'is not', null)
@@ -257,38 +332,38 @@ function usableLocalLogin(ctx: OrgContext, alias: HolderAlias) {
         loose
           .selectFrom(`credential as ${alias.credential}`)
           .select(sql.lit(1).as('one'))
-          .where(`${alias.credential}.org_id`, '=', ctx.orgId)
+          .where(`${alias.credential}.org_id`, '=', org)
           .whereRef(`${alias.credential}.id`, '=', `${alias.login}.totp_credential_id`),
       ),
     );
 }
 
-function verifiedIdentity(
-  ctx: OrgContext,
+export function usableLocalLogin(ctx: OrgContext | GuardBindings, alias: HolderAlias) {
+  return localLogin('orgId' in ctx ? ctx.orgId : ctx.org, alias);
+}
+
+function identityWithAnchor(
+  org: OrgOperand,
   alias: HolderAlias,
-  providers: readonly ProtectedHolderProvider[],
+  anchors: Expression<unknown>,
   exclude: ProtectedHolderExclusion | undefined,
 ) {
   let query = loose
     .selectFrom(`identity as ${alias.identity}`)
     .select(sql.lit(1).as('one'))
-    .where(`${alias.identity}.org_id`, '=', ctx.orgId)
+    .where(`${alias.identity}.org_id`, '=', org)
     .whereRef(`${alias.identity}.user_id`, '=', `${alias.user}.id`)
     .whereRef(`${alias.identity}.email`, '=', `${alias.user}.email`)
-    .where(`${alias.identity}.email_verified`, '=', 1)
+    .where(`${alias.identity}.email_verified`, '=', sql.lit(1))
     .where((eb) =>
       eb.exists(
         loose
           .selectFrom(`identity_provider_binding as ${alias.binding}`)
           .select(sql.lit(1).as('one'))
-          .where(`${alias.binding}.org_id`, '=', ctx.orgId)
+          .where(`${alias.binding}.org_id`, '=', org)
           .whereRef(`${alias.binding}.provider`, '=', `${alias.identity}.provider`)
-          .where((inner) =>
-            inner(
-              inner.refTuple(`${alias.binding}.provider`, `${alias.binding}.anchor`),
-              'in',
-              providers.map((entry) => inner.tuple(entry.provider, entry.anchor)),
-            ),
+          .where(
+            sql<SqlBool>`(${sql.ref(`${alias.binding}.provider`)}, ${sql.ref(`${alias.binding}.anchor`)}) in (${anchors})`,
           ),
       ),
     );
@@ -298,7 +373,40 @@ function verifiedIdentity(
   return query;
 }
 
+/** The anchors bind as one JSON parameter whatever their number. */
+export function verifiedIdentity(
+  ctx: OrgContext,
+  alias: HolderAlias,
+  providers: readonly ProtectedHolderProvider[],
+  exclude: ProtectedHolderExclusion | undefined,
+) {
+  return identityWithAnchor(ctx.orgId, alias, jsonAnchors(providers), exclude);
+}
+
+/** `verifiedIdentity` against anchors and organization already bound by `guardBindings`. */
+export function boundVerifiedIdentity(
+  bindings: GuardBindings,
+  alias: HolderAlias,
+  authoritativeOnly: boolean,
+) {
+  return identityWithAnchor(bindings.org, alias, bindings.anchors(authoritativeOnly), undefined);
+}
+
 const HOLDER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+export function requireProviders(providers: readonly ProtectedHolderProvider[]): void {
+  for (const entry of providers) {
+    if (
+      typeof entry.provider !== 'string' ||
+      !isValidProviderId(entry.provider) ||
+      typeof entry.anchor !== 'string' ||
+      entry.anchor === '' ||
+      typeof entry.emailAuthoritative !== 'boolean'
+    ) {
+      throw new TypeError('protected holder provider must have a provider id and an anchor');
+    }
+  }
+}
 
 export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
   if (typeof input !== 'object' || input === null) {
@@ -316,17 +424,7 @@ export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
   ) {
     throw new TypeError('now must be a UTC timestamp with millisecond precision');
   }
-  for (const entry of input.providers) {
-    if (
-      typeof entry.provider !== 'string' ||
-      !isValidProviderId(entry.provider) ||
-      typeof entry.anchor !== 'string' ||
-      entry.anchor === '' ||
-      typeof entry.emailAuthoritative !== 'boolean'
-    ) {
-      throw new TypeError('protected holder provider must have a provider id and an anchor');
-    }
-  }
+  requireProviders(input.providers);
 }
 
 /**
@@ -339,6 +437,7 @@ export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
  * and an enabled TOTP.
  *
  * `userIdColumn` follows the same rule as `UserIdOperand`: a table-qualified column reference.
+ * Every input value binds once, so the bound parameter count does not depend on the anchors.
  */
 export function protectedHolder(
   ctx: OrgContext,
@@ -348,54 +447,94 @@ export function protectedHolder(
   requireProtectedHolderInput(input);
   const outer = referencedTable(userIdColumn);
   const alias = guardAliases(
-    ['user', 'grant', 'role', 'member', 'identity', 'binding', 'login', 'credential'],
+    [
+      'user',
+      'grant',
+      'role',
+      'member',
+      'identity',
+      'binding',
+      'login',
+      'credential',
+      'values',
+      'anchors',
+    ],
     outer,
   );
   const exclude = input.exclude;
+  const fresh = input.kind === 'fresh';
+  const nowMs = fresh ? Date.parse(input.now) : 0;
+  const values: Record<string, string | number> = { org_id: ctx.orgId };
+  if (fresh) {
+    values.lower_ms = nowMs - EVIDENCE_MAX_AGE_MS;
+    values.upper_ms = nowMs + EVIDENCE_FUTURE_SKEW_MS;
+  }
+  if (exclude?.grantId !== undefined) values.excluded_grant = exclude.grantId;
+  if (exclude?.userId !== undefined) values.excluded_user = exclude.userId;
+  if (exclude?.identityId !== undefined) values.excluded_identity = exclude.identityId;
+  const membership = exclude?.membership;
+  if (membership !== undefined) {
+    values.excluded_member_user = membership.userId;
+    values.excluded_member_provider = membership.provider;
+    values.excluded_member_group = membership.groupName;
+  }
+  const bindings = guardBindings(
+    { values: alias.values, anchors: alias.anchors },
+    values,
+    fresh ? input.providers : [],
+  );
+  const org = bindings.org;
 
-  const emailGrants = () => {
-    let query = loose
+  const verified = (authoritativeOnly: boolean) => {
+    const query = boundVerifiedIdentity(bindings, alias, authoritativeOnly);
+    return exclude?.identityId === undefined
+      ? query
+      : query.where(`${alias.identity}.id`, '<>', bindings.value('excluded_identity'));
+  };
+
+  const emailGrants = (creator: QueryCreator<LooseDatabase>) => {
+    let query = creator
       .selectFrom(`user_account as ${alias.user}`)
       .innerJoin(`access_grant as ${alias.grant}`, (join) =>
         join
           .onRef(`${alias.grant}.org_id`, '=', `${alias.user}.org_id`)
-          .on(`${alias.grant}.subject_type`, '=', 'email')
+          .on(`${alias.grant}.subject_type`, '=', sql.lit('email'))
           .onRef(`${alias.grant}.subject_value`, '=', `${alias.user}.email`)
-          .on(`${alias.grant}.scope`, '=', 'organization'),
+          .on(`${alias.grant}.scope`, '=', sql.lit('organization')),
       )
       .innerJoin(`role as ${alias.role}`, (join) =>
         join
           .onRef(`${alias.role}.id`, '=', `${alias.grant}.role_id`)
           .onRef(`${alias.role}.org_id`, '=', `${alias.grant}.org_id`)
-          .on(`${alias.role}.protects_last_holder`, '=', 1),
+          .on(`${alias.role}.protects_last_holder`, '=', sql.lit(1)),
       )
       .select(sql.lit(1).as('one'))
-      .where(`${alias.user}.org_id`, '=', ctx.orgId)
+      .where(`${alias.user}.org_id`, '=', org)
       .where(`${alias.user}.id`, '=', userIdColumn)
-      .where(`${alias.user}.status`, '=', 'active');
+      .where(`${alias.user}.status`, '=', sql.lit('active'));
     if (exclude?.grantId !== undefined) {
-      query = query.where(`${alias.grant}.id`, '<>', exclude.grantId);
+      query = query.where(`${alias.grant}.id`, '<>', bindings.value('excluded_grant'));
     }
     if (exclude?.userId !== undefined) {
-      query = query.where(`${alias.user}.id`, '<>', exclude.userId);
+      query = query.where(`${alias.user}.id`, '<>', bindings.value('excluded_user'));
     }
     return query;
   };
 
-  const localAdmin = emailGrants().where((eb) => eb.exists(usableLocalLogin(ctx, alias)));
+  const localAdmin = emailGrants(bindings.creator).where((eb) =>
+    eb.exists(usableLocalLogin(bindings, alias)),
+  );
   if (input.kind === 'local_recovery') return existsOf(localAdmin);
 
-  const nowMs = Date.parse(input.now);
-  const lowerMs = nowMs - EVIDENCE_MAX_AGE_MS;
-  const upperMs = nowMs + EVIDENCE_FUTURE_SKEW_MS;
+  const evidence = (column: string) => {
+    const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
+    return sql<SqlBool>`(${ms} >= ${bindings.value('lower_ms')} and ${ms} <= ${bindings.value('upper_ms')})`;
+  };
 
   const branches: (typeof localAdmin)[] = [];
 
-  const emailProviders = input.providers.filter((entry) => entry.emailAuthoritative);
-  if (emailProviders.length > 0) {
-    branches.push(
-      emailGrants().where((eb) => eb.exists(verifiedIdentity(ctx, alias, emailProviders, exclude))),
-    );
+  if (input.providers.some((entry) => entry.emailAuthoritative)) {
+    branches.push(emailGrants(loose).where((eb) => eb.exists(verified(true))));
   }
 
   if (input.providers.length > 0) {
@@ -405,44 +544,43 @@ export function protectedHolder(
       .innerJoin(`access_grant as ${alias.grant}`, (join) =>
         join
           .onRef(`${alias.grant}.org_id`, '=', `${alias.member}.org_id`)
-          .on(`${alias.grant}.subject_type`, '=', 'group')
+          .on(`${alias.grant}.subject_type`, '=', sql.lit('group'))
           .onRef(`${alias.grant}.subject_provider`, '=', `${alias.member}.provider`)
           .onRef(`${alias.grant}.subject_value`, '=', `${alias.member}.group_name`)
-          .on(`${alias.grant}.scope`, '=', 'organization'),
+          .on(`${alias.grant}.scope`, '=', sql.lit('organization')),
       )
       .innerJoin(`role as ${alias.role}`, (join) =>
         join
           .onRef(`${alias.role}.id`, '=', `${alias.grant}.role_id`)
           .onRef(`${alias.role}.org_id`, '=', `${alias.grant}.org_id`)
-          .on(`${alias.role}.protects_last_holder`, '=', 1),
+          .on(`${alias.role}.protects_last_holder`, '=', sql.lit(1)),
       )
       .select(sql.lit(1).as('one'))
-      .where(`${alias.member}.org_id`, '=', ctx.orgId)
-      .where(`${alias.user}.org_id`, '=', ctx.orgId)
+      .where(`${alias.member}.org_id`, '=', org)
+      .where(`${alias.user}.org_id`, '=', org)
       .where(`${alias.user}.id`, '=', userIdColumn)
-      .where(`${alias.user}.status`, '=', 'active')
-      .where(evidenceWithin(`${alias.member}.refreshed_at`, lowerMs, upperMs))
+      .where(`${alias.user}.status`, '=', sql.lit('active'))
+      .where(evidence(`${alias.member}.refreshed_at`))
       .where((eb) =>
         eb.exists(
-          verifiedIdentity(ctx, alias, input.providers, exclude)
+          verified(false)
             .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
-            .where(evidenceWithin(`${alias.identity}.validated_at`, lowerMs, upperMs)),
+            .where(evidence(`${alias.identity}.validated_at`)),
         ),
       );
     if (exclude?.grantId !== undefined) {
-      byGroup = byGroup.where(`${alias.grant}.id`, '<>', exclude.grantId);
+      byGroup = byGroup.where(`${alias.grant}.id`, '<>', bindings.value('excluded_grant'));
     }
     if (exclude?.userId !== undefined) {
-      byGroup = byGroup.where(`${alias.user}.id`, '<>', exclude.userId);
+      byGroup = byGroup.where(`${alias.user}.id`, '<>', bindings.value('excluded_user'));
     }
-    const membership = exclude?.membership;
     if (membership !== undefined) {
       byGroup = byGroup.where((eb) =>
         eb.not(
           eb.and([
-            eb(`${alias.member}.user_id`, '=', membership.userId),
-            eb(`${alias.member}.provider`, '=', membership.provider),
-            eb(`${alias.member}.group_name`, '=', membership.groupName),
+            eb(`${alias.member}.user_id`, '=', bindings.value('excluded_member_user')),
+            eb(`${alias.member}.provider`, '=', bindings.value('excluded_member_provider')),
+            eb(`${alias.member}.group_name`, '=', bindings.value('excluded_member_group')),
           ]),
         ),
       );
@@ -459,10 +597,15 @@ interface GuardCtes {
 }
 
 /**
- * Fails the batch with a UNIQUE error unless the condition evaluates to integer 1; any other value
- * (NULL, 2, '1') fails closed. Conditions should be exists/comparisons.
+ * One statement that fails the batch with a UNIQUE error unless the condition evaluates to integer
+ * 1; any other value (NULL, 2, '1') fails closed. Conditions should be exists/comparisons. Never
+ * bumps the epoch: use it for CAS and postconditions placed among the mutations.
+ *
+ * D1 refuses a statement with more than 100 bound parameters. When the conditions of one fence do
+ * not fit one statement, keep one in `assertGuard` and give each further condition its own
+ * `assertCheck` placed first among the mutations; the batch fails as a whole on any of them.
  */
-export function assertGuard(condition: Guard): FenceGuard {
+export function assertCheck(condition: Guard): readonly Statement[] {
   const ctes = db as unknown as Kysely<GuardCtes & Database>;
   const insert = ctes
     .with(
@@ -480,5 +623,67 @@ export function assertGuard(condition: Guard): FenceGuard {
         .select(sql<string>`${newOpId()}`.as('key'))
         .where('guard_cond.f', '=', sql.lit(1)),
     );
-  return fenceGuard([compile(insert)]);
+  return [compile(insert)];
+}
+
+const guardOrgs = new WeakMap<object, string>();
+
+/**
+ * The fence guard: three statements. The check from assertCheck, then the organization's cache_epoch
+ * version replaced, then a failure unless exactly one row was replaced, so a missing cache_epoch row
+ * fails the whole batch. Exactly one assertGuard belongs in a batch; it is the only statement that
+ * bumps the epoch.
+ */
+export function assertGuard(condition: Guard, ctx: OrgContext): FenceGuard {
+  const ctes = db as unknown as Kysely<GuardCtes & Database>;
+  const bump = ctes
+    .updateTable('cache_epoch')
+    .set({ version: sql<string>`hex(randomblob(16))` })
+    .where('org_id', '=', ctx.orgId);
+  const bumpedOnce = ctes
+    .with('guard_rows(n)', (qb) =>
+      qb.selectNoFrom(sql.lit(1).as('n')).unionAll(qb.selectNoFrom(sql.lit(2).as('n'))),
+    )
+    .insertInto('access_mutation_guard')
+    .columns(['key'])
+    .expression(
+      ctes
+        .selectFrom(['guard_rows'])
+        .select(sql<string>`${newOpId()}`.as('key'))
+        .where(sql<boolean>`changes() <> 1`),
+    );
+  const guard = fenceGuard([...assertCheck(condition), compile(bump), compile(bumpedOnce)]);
+  guardOrgs.set(guard, ctx.orgId);
+  return guard;
+}
+
+/**
+ * The entry point for fenced writes. Refuses a guard that assertGuard did not build for ctx, and
+ * mutations that touch cache_epoch (only the guard bumps it); a missing cache_epoch row after a
+ * failed batch is a deployment fault and throws instead of being classified.
+ */
+export async function runOrgFenced(
+  executor: SqlExecutor,
+  ctx: OrgContext,
+  fence: MutationFence,
+  guard: FenceGuard,
+  mutations: readonly Statement[],
+  probes: FailureProbes,
+): Promise<FencedOutcome> {
+  if (guardOrgs.get(guard) !== ctx.orgId) {
+    throw new TypeError('the fence guard was not built by assertGuard for this organization');
+  }
+  if (mutations.some((statement) => /cache_epoch/i.test(statement.sql))) {
+    throw new TypeError('fenced mutations must not touch cache_epoch; the guard bumps it');
+  }
+  const outcome = await runFenced(executor, fence, guard, mutations, probes);
+  if (!outcome.ok && outcome.reason !== 'indeterminate') {
+    const epoch = await executor.all(
+      compile(db.selectFrom('cache_epoch').select('org_id').where('org_id', '=', ctx.orgId)),
+    );
+    if (epoch.length === 0) {
+      throw new Error('cache_epoch row is missing for the organization');
+    }
+  }
+  return outcome;
 }

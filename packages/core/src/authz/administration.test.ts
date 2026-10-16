@@ -9,6 +9,7 @@ import type { Clock } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
 import type { IdentityProvider } from '../identity/port.js';
 import { createAdministration } from './administration.js';
+import { mutationFence, type AuthenticatedActor } from './fence.js';
 import type { ActorContext } from './administration.js';
 import { DEFAULT_ROLES, PERMISSIONS } from './permissions.js';
 
@@ -27,6 +28,18 @@ const actorWith = (...permissions: string[]): ActorContext => ({
   permissions: new Set(permissions),
   isOrganizationAdmin: false,
 });
+const heldBy = (userId: string) => expect.objectContaining({ userId, sessionId: 'session-1' });
+
+function fenceFor(actor: unknown) {
+  const userId = (actor as { userId?: unknown } | null)?.userId;
+  return mutationFence(
+    {
+      userId: typeof userId === 'string' && userId !== '' ? userId : 'unknown',
+      sessionId: 'session-1',
+    } as unknown as AuthenticatedActor,
+    { role: 1 },
+  );
+}
 const grantsWriter = actorWith('org:grants:write', 'org:read');
 const rolesWriter = actorWith('org:roles:write', 'org:read', 'project:read');
 const usersWriter = actorWith('org:users:write');
@@ -38,6 +51,7 @@ const customRole = (overrides: Partial<Role> = {}): Role => ({
   scope: 'organization',
   isSystem: false,
   protectsLastHolder: false,
+  revision: 1,
   permissions: ['org:read'],
   ...overrides,
 });
@@ -137,21 +151,27 @@ describe('createRole', () => {
   it('1: unknown permission and org permission on a project role are invalid_permission with details and no repository call', async () => {
     const { admin, roles } = setup();
     expect(
-      await admin.createRole(ctx, administrator, { ...input, permissions: ['project:nope'] }),
+      await admin.createRole(ctx, administrator, fenceFor(administrator), {
+        ...input,
+        permissions: ['project:nope'],
+      }),
     ).toEqual({
       ok: false,
       error: 'invalid_permission',
       details: ['Unknown permission: "project:nope"'],
     });
     expect(
-      await admin.createRole(ctx, administrator, { ...input, permissions: ['org:read'] }),
+      await admin.createRole(ctx, administrator, fenceFor(administrator), {
+        ...input,
+        permissions: ['org:read'],
+      }),
     ).toEqual({
       ok: false,
       error: 'invalid_permission',
       details: ['Organization permission in project role: "org:read"'],
     });
     expect(
-      await admin.createRole(ctx, administrator, {
+      await admin.createRole(ctx, administrator, fenceFor(administrator), {
         ...input,
         permissions: ['project:read', 'project:read'],
       }),
@@ -166,7 +186,9 @@ describe('createRole', () => {
   it('3: organization_admin and every default key are invalid_key', async () => {
     const { admin, roles } = setup();
     for (const { key } of DEFAULT_ROLES) {
-      expect(await admin.createRole(ctx, administrator, { ...input, key })).toMatchObject({
+      expect(
+        await admin.createRole(ctx, administrator, fenceFor(administrator), { ...input, key }),
+      ).toMatchObject({
         ok: false,
         error: 'invalid_key',
       });
@@ -178,7 +200,9 @@ describe('createRole', () => {
     'rejects the malformed key %j',
     async (key) => {
       const { admin, roles } = setup();
-      expect(await admin.createRole(ctx, administrator, { ...input, key })).toMatchObject({
+      expect(
+        await admin.createRole(ctx, administrator, fenceFor(administrator), { ...input, key }),
+      ).toMatchObject({
         ok: false,
         error: 'invalid_key',
       });
@@ -198,7 +222,9 @@ describe('createRole', () => {
     'lone\ud800surrogate',
   ])('rejects the name %j', async (name) => {
     const { admin, roles } = setup();
-    expect(await admin.createRole(ctx, administrator, { ...input, name })).toMatchObject({
+    expect(
+      await admin.createRole(ctx, administrator, fenceFor(administrator), { ...input, name }),
+    ).toMatchObject({
       ok: false,
       error: 'invalid_name',
     });
@@ -208,24 +234,35 @@ describe('createRole', () => {
   it('accepts a name of 100 code points, counting an astral character once', async () => {
     const { admin } = setup();
     const name = (count: number) => '\u{1f600}'.repeat(count);
-    expect((await admin.createRole(ctx, administrator, { ...input, name: name(100) })).ok).toBe(
-      true,
-    );
-    expect((await admin.createRole(ctx, administrator, { ...input, name: name(101) })).ok).toBe(
-      false,
-    );
+    expect(
+      (
+        await admin.createRole(ctx, administrator, fenceFor(administrator), {
+          ...input,
+          name: name(100),
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await admin.createRole(ctx, administrator, fenceFor(administrator), {
+          ...input,
+          name: name(101),
+        })
+      ).ok,
+    ).toBe(false);
   });
 
   it('creates the role with a server generated id and timestamp, returns it and logs', async () => {
     const { admin, roles, log } = setup();
-    const result = await admin.createRole(ctx, administrator, input);
-    expect(roles.create).toHaveBeenCalledExactlyOnceWith(ctx, {
+    const result = await admin.createRole(ctx, administrator, fenceFor(administrator), input);
+    expect(roles.create).toHaveBeenCalledExactlyOnceWith(ctx, heldBy('admin-1'), {
       id: 'ID00',
       key: 'release_manager',
       name: 'Release manager',
       scope: 'project',
       permissions: ['project:read', 'project:packages:write'],
       now: NOW,
+      opId: 'ID01',
     });
     expect(result).toEqual({
       ok: true,
@@ -236,6 +273,7 @@ describe('createRole', () => {
         scope: 'project',
         isSystem: false,
         protectsLastHolder: false,
+        revision: 1,
         permissions: ['project:read', 'project:packages:write'],
       },
     });
@@ -253,14 +291,15 @@ describe('createRole', () => {
     let tick = 0;
     const clock: Clock = { now: () => new Date(Date.UTC(2026, 9, 15, 8, 0, tick++)) };
     const { admin, roles } = setup({ clock });
-    await admin.createRole(ctx, administrator, input);
-    await admin.createRole(ctx, administrator, input);
+    await admin.createRole(ctx, administrator, fenceFor(administrator), input);
+    await admin.createRole(ctx, administrator, fenceFor(administrator), input);
     const calls = (roles.create as ReturnType<typeof vi.fn>).mock.calls as unknown as [
+      unknown,
       unknown,
       { id: string; now: string },
     ][];
-    expect(calls.map(([, call]) => call.id)).toEqual(['ID00', 'ID01']);
-    expect(calls.map(([, call]) => call.now)).toEqual([
+    expect(calls.map(([, , call]) => call.id)).toEqual(['ID00', 'ID02']);
+    expect(calls.map(([, , call]) => call.now)).toEqual([
       '2026-10-15T08:00:00.000Z',
       '2026-10-15T08:00:01.000Z',
     ]);
@@ -268,30 +307,35 @@ describe('createRole', () => {
 
   it('ignores a protectsLastHolder, id or now supplied by the caller', async () => {
     const { admin, roles } = setup();
-    await admin.createRole(ctx, administrator, {
+    await admin.createRole(ctx, administrator, fenceFor(administrator), {
       ...input,
       protectsLastHolder: true,
       id: 'client-id',
       now: '1999-01-01T00:00:00.000Z',
     } as typeof input);
-    expect(roles.create).toHaveBeenCalledExactlyOnceWith(ctx, {
+    expect(roles.create).toHaveBeenCalledExactlyOnceWith(ctx, heldBy('admin-1'), {
       id: 'ID00',
       key: 'release_manager',
       name: 'Release manager',
       scope: 'project',
       permissions: ['project:read', 'project:packages:write'],
       now: NOW,
+      opId: 'ID01',
     });
   });
 
   it('maps the repository results one to one', async () => {
     const duplicate = setup({ roles: { create: vi.fn(async () => 'duplicate_key') } });
-    expect(await duplicate.admin.createRole(ctx, administrator, input)).toEqual({
+    expect(
+      await duplicate.admin.createRole(ctx, administrator, fenceFor(administrator), input),
+    ).toEqual({
       ok: false,
       error: 'duplicate',
     });
     const invalid = setup({ roles: { create: vi.fn(async () => 'invalid_permissions') } });
-    expect(await invalid.admin.createRole(ctx, administrator, input)).toEqual({
+    expect(
+      await invalid.admin.createRole(ctx, administrator, fenceFor(administrator), input),
+    ).toEqual({
       ok: false,
       error: 'invalid_permission',
       details: ['The repository refused the permission list'],
@@ -304,7 +348,7 @@ describe('createRole', () => {
     const { admin, roles } = setup();
     for (const permissions of ['org:read', null, [1], [{}]]) {
       expect(
-        await admin.createRole(ctx, administrator, {
+        await admin.createRole(ctx, administrator, fenceFor(administrator), {
           ...input,
           permissions,
         } as unknown as typeof input),
@@ -316,21 +360,29 @@ describe('createRole', () => {
   it('1c: a role above the actor permissions is forbidden, a subset is allowed', async () => {
     const { admin, roles } = setup();
     expect(
-      await admin.createRole(ctx, rolesWriter, {
+      await admin.createRole(ctx, rolesWriter, fenceFor(rolesWriter), {
         ...input,
         permissions: ['project:read', 'project:packages:write'],
       }),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(roles.create).not.toHaveBeenCalled();
     expect(
-      (await admin.createRole(ctx, rolesWriter, { ...input, permissions: ['project:read'] })).ok,
+      (
+        await admin.createRole(ctx, rolesWriter, fenceFor(rolesWriter), {
+          ...input,
+          permissions: ['project:read'],
+        })
+      ).ok,
     ).toBe(true);
   });
 
   it('1a: an actor without org:roles:write is forbidden before any validation', async () => {
     const { admin, roles } = setup();
     expect(
-      await admin.createRole(ctx, grantsWriter, { ...input, key: 'organization_admin' }),
+      await admin.createRole(ctx, grantsWriter, fenceFor(grantsWriter), {
+        ...input,
+        key: 'organization_admin',
+      }),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(roles.create).not.toHaveBeenCalled();
   });
@@ -347,11 +399,20 @@ describe('listRoles', () => {
 describe('renameRole', () => {
   it('renames with a server timestamp and logs', async () => {
     const { admin, roles, log } = setup();
-    expect(await admin.renameRole(ctx, rolesWriter, 'role-1', 'Operators')).toEqual({
+    expect(
+      await admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', 'Operators'),
+    ).toEqual({
       ok: true,
       value: null,
     });
-    expect(roles.rename).toHaveBeenCalledExactlyOnceWith(ctx, 'role-1', 'Operators', NOW);
+    expect(roles.rename).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      heldBy('actor-1'),
+      'role-1',
+      'Operators',
+      NOW,
+      'ID00',
+    );
     expect(log).toHaveBeenCalledExactlyOnceWith({
       level: 'info',
       event: 'role.changed',
@@ -364,11 +425,15 @@ describe('renameRole', () => {
 
   it('refuses an invalid name before the repository', async () => {
     const { admin, roles } = setup();
-    expect(await admin.renameRole(ctx, rolesWriter, 'role-1', '')).toMatchObject({
+    expect(
+      await admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', ''),
+    ).toMatchObject({
       ok: false,
       error: 'invalid_name',
     });
-    expect(await admin.renameRole(ctx, rolesWriter, 'role-1', 'a\u0000b')).toMatchObject({
+    expect(
+      await admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', 'a\u0000b'),
+    ).toMatchObject({
       ok: false,
       error: 'invalid_name',
     });
@@ -377,12 +442,16 @@ describe('renameRole', () => {
 
   it('4: not_found and locked surface unchanged', async () => {
     const missing = setup({ roles: { rename: vi.fn(async () => 'not_found') } });
-    expect(await missing.admin.renameRole(ctx, rolesWriter, 'x', 'Name')).toEqual({
+    expect(
+      await missing.admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), 'x', 'Name'),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
     const locked = setup({ roles: { rename: vi.fn(async () => 'locked') } });
-    expect(await locked.admin.renameRole(ctx, rolesWriter, 'role-1', 'Name')).toEqual({
+    expect(
+      await locked.admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', 'Name'),
+    ).toEqual({
       ok: false,
       error: 'locked',
     });
@@ -392,12 +461,16 @@ describe('renameRole', () => {
 
   it('1a and 5: forbidden without org:roles:write; empty and non-string ids are not_found', async () => {
     const { admin, roles } = setup();
-    expect(await admin.renameRole(ctx, grantsWriter, 'role-1', 'Name')).toEqual({
+    expect(
+      await admin.renameRole(ctx, grantsWriter, fenceFor(grantsWriter), 'role-1', 'Name'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
     for (const id of ['', 5, null]) {
-      expect(await admin.renameRole(ctx, rolesWriter, id as never, 'Name')).toEqual({
+      expect(
+        await admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), id as never, 'Name'),
+      ).toEqual({
         ok: false,
         error: 'not_found',
       });
@@ -411,12 +484,20 @@ describe('setRolePermissions', () => {
 
   it('validates against the stored role scope', async () => {
     const { admin, roles } = setup({ stored: [projectRole] });
-    expect(await admin.setRolePermissions(ctx, administrator, 'role-1', ['org:read'])).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, administrator, fenceFor(administrator), 'role-1', [
+        'org:read',
+      ]),
+    ).toEqual({
       ok: false,
       error: 'invalid_permission',
       details: ['Organization permission in project role: "org:read"'],
     });
-    expect(await admin.setRolePermissions(ctx, administrator, 'role-1', ['nope'])).toMatchObject({
+    expect(
+      await admin.setRolePermissions(ctx, administrator, fenceFor(administrator), 'role-1', [
+        'nope',
+      ]),
+    ).toMatchObject({
       ok: false,
       error: 'invalid_permission',
     });
@@ -425,9 +506,22 @@ describe('setRolePermissions', () => {
 
   it('updates an organization role and logs once', async () => {
     const { admin, roles, log } = setup();
-    const result = await admin.setRolePermissions(ctx, rolesWriter, 'role-1', ['org:read']);
+    const result = await admin.setRolePermissions(
+      ctx,
+      rolesWriter,
+      fenceFor(rolesWriter),
+      'role-1',
+      ['org:read'],
+    );
     expect(result).toEqual({ ok: true, value: null });
-    expect(roles.setPermissions).toHaveBeenCalledExactlyOnceWith(ctx, 'role-1', ['org:read'], NOW);
+    expect(roles.setPermissions).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      heldBy('actor-1'),
+      'role-1',
+      ['org:read'],
+      NOW,
+      'ID00',
+    );
     expect(log).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         event: 'role.changed',
@@ -440,14 +534,21 @@ describe('setRolePermissions', () => {
   it('1c: permissions above the actor are forbidden', async () => {
     const { admin, roles } = setup();
     expect(
-      await admin.setRolePermissions(ctx, rolesWriter, 'role-1', ['org:read', 'org:users:write']),
+      await admin.setRolePermissions(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', [
+        'org:read',
+        'org:users:write',
+      ]),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(roles.setPermissions).not.toHaveBeenCalled();
   });
 
   it('5: a role that protects the last holder is locked before the permissions are validated', async () => {
     const { admin, roles } = setup();
-    expect(await admin.setRolePermissions(ctx, rolesWriter, 'role-admin', ['bogus'])).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, rolesWriter, fenceFor(rolesWriter), 'role-admin', [
+        'bogus',
+      ]),
+    ).toEqual({
       ok: false,
       error: 'locked',
     });
@@ -456,11 +557,17 @@ describe('setRolePermissions', () => {
 
   it('4: a missing role is not_found without a write; empty ids never reach the repository', async () => {
     const { admin, roles } = setup();
-    expect(await admin.setRolePermissions(ctx, rolesWriter, 'missing', ['org:read'])).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, rolesWriter, fenceFor(rolesWriter), 'missing', [
+        'org:read',
+      ]),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await admin.setRolePermissions(ctx, rolesWriter, '', ['org:read'])).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, rolesWriter, fenceFor(rolesWriter), '', ['org:read']),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -482,16 +589,22 @@ describe('setRolePermissions', () => {
       ],
     ] as const) {
       const { admin, log } = setup({ roles: { setPermissions: vi.fn(async () => repo) } });
-      expect(await admin.setRolePermissions(ctx, rolesWriter, 'role-1', ['org:read'])).toEqual(
-        expected,
-      );
+      expect(
+        await admin.setRolePermissions(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', [
+          'org:read',
+        ]),
+      ).toEqual(expected);
       expect(log).not.toHaveBeenCalled();
     }
   });
 
   it('1a: forbidden without org:roles:write', async () => {
     const { admin, roles } = setup();
-    expect(await admin.setRolePermissions(ctx, grantsWriter, 'role-1', ['org:read'])).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, grantsWriter, fenceFor(grantsWriter), 'role-1', [
+        'org:read',
+      ]),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -502,8 +615,11 @@ describe('setRolePermissions', () => {
 describe('deleteRole', () => {
   it('deletes and logs', async () => {
     const { admin, roles, log } = setup();
-    expect(await admin.deleteRole(ctx, rolesWriter, 'role-1')).toEqual({ ok: true, value: null });
-    expect(roles.delete).toHaveBeenCalledExactlyOnceWith(ctx, 'role-1');
+    expect(await admin.deleteRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1')).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(roles.delete).toHaveBeenCalledExactlyOnceWith(ctx, heldBy('actor-1'), 'role-1', 'ID00');
     expect(log).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ event: 'role.changed', action: 'deleted', roleId: 'role-1' }),
     );
@@ -516,18 +632,24 @@ describe('deleteRole', () => {
       ['system', 'system_role'],
     ] as const) {
       const { admin, log } = setup({ roles: { delete: vi.fn(async () => repo) } });
-      expect(await admin.deleteRole(ctx, rolesWriter, 'role-1')).toEqual({ ok: false, error });
+      expect(await admin.deleteRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1')).toEqual({
+        ok: false,
+        error,
+      });
       expect(log).not.toHaveBeenCalled();
     }
   });
 
   it('1a and 5: forbidden without org:roles:write; empty id is not_found', async () => {
     const { admin, roles } = setup();
-    expect(await admin.deleteRole(ctx, grantsWriter, 'role-1')).toEqual({
+    expect(await admin.deleteRole(ctx, grantsWriter, fenceFor(grantsWriter), 'role-1')).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.deleteRole(ctx, rolesWriter, '')).toEqual({ ok: false, error: 'not_found' });
+    expect(await admin.deleteRole(ctx, rolesWriter, fenceFor(rolesWriter), '')).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
     expect(roles.delete).not.toHaveBeenCalled();
   });
 });
@@ -1009,7 +1131,11 @@ describe('superior targets: a non-admin cannot act on a role or grant above thei
 
   it('setRolePermissions: stripping a permission the actor lacks is forbidden', async () => {
     const { admin, roles, log } = setup({ stored });
-    expect(await admin.setRolePermissions(ctx, rolesActor, 'role-sup', ['org:read'])).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, rolesActor, fenceFor(rolesActor), 'role-sup', [
+        'org:read',
+      ]),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -1021,35 +1147,47 @@ describe('superior targets: a non-admin cannot act on a role or grant above thei
       orgId: 'org-a',
       actorUserId: 'actor-1',
     });
-    expect((await admin.setRolePermissions(ctx, administrator, 'role-sup', ['org:read'])).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await admin.setRolePermissions(ctx, administrator, fenceFor(administrator), 'role-sup', [
+          'org:read',
+        ])
+      ).ok,
+    ).toBe(true);
   });
 
   it('renameRole and deleteRole: forbidden on a superior role, allowed on a lower one', async () => {
     const { admin, roles } = setup({ stored });
-    expect(await admin.renameRole(ctx, rolesActor, 'role-sup', 'Renamed')).toEqual({
+    expect(
+      await admin.renameRole(ctx, rolesActor, fenceFor(rolesActor), 'role-sup', 'Renamed'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.deleteRole(ctx, rolesActor, 'role-sup')).toEqual({
+    expect(await admin.deleteRole(ctx, rolesActor, fenceFor(rolesActor), 'role-sup')).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(roles.rename).not.toHaveBeenCalled();
     expect(roles.delete).not.toHaveBeenCalled();
-    expect((await admin.renameRole(ctx, rolesActor, 'role-1', 'Renamed')).ok).toBe(true);
-    expect((await admin.deleteRole(ctx, rolesActor, 'role-1')).ok).toBe(true);
-    expect((await admin.deleteRole(ctx, administrator, 'role-sup')).ok).toBe(true);
+    expect(
+      (await admin.renameRole(ctx, rolesActor, fenceFor(rolesActor), 'role-1', 'Renamed')).ok,
+    ).toBe(true);
+    expect((await admin.deleteRole(ctx, rolesActor, fenceFor(rolesActor), 'role-1')).ok).toBe(true);
+    expect(
+      (await admin.deleteRole(ctx, administrator, fenceFor(administrator), 'role-sup')).ok,
+    ).toBe(true);
   });
 
   it('renameRole and deleteRole: a missing role is not_found for a non-admin', async () => {
     const { admin, roles } = setup({ stored });
-    expect(await admin.renameRole(ctx, rolesActor, 'nope', 'Renamed')).toEqual({
+    expect(
+      await admin.renameRole(ctx, rolesActor, fenceFor(rolesActor), 'nope', 'Renamed'),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await admin.deleteRole(ctx, rolesActor, 'nope')).toEqual({
+    expect(await admin.deleteRole(ctx, rolesActor, fenceFor(rolesActor), 'nope')).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -1128,10 +1266,10 @@ describe('the actor is validated and the admin flag must be exactly true', () =>
     const bad = actor as unknown as ActorContext;
     const input = { key: 'ops_two', name: 'Ops', scope: 'organization' as const, permissions: [] };
     const results = await Promise.all([
-      admin.createRole(ctx, bad, input),
-      admin.renameRole(ctx, bad, 'role-1', 'Name'),
-      admin.setRolePermissions(ctx, bad, 'role-1', []),
-      admin.deleteRole(ctx, bad, 'role-1'),
+      admin.createRole(ctx, bad, fenceFor(bad), input),
+      admin.renameRole(ctx, bad, fenceFor(bad), 'role-1', 'Name'),
+      admin.setRolePermissions(ctx, bad, fenceFor(bad), 'role-1', []),
+      admin.deleteRole(ctx, bad, fenceFor(bad), 'role-1'),
       admin.grantOrganization(ctx, bad, {
         subject: { type: 'email', value: 'me@example.com' },
         roleId: 'role-1',
@@ -1158,7 +1296,10 @@ describe('admin.denied for an invalid actor', () => {
       permissions: ['org:roles:write'],
       isOrganizationAdmin: true,
     } as unknown as ActorContext;
-    expect(await admin.deleteRole(ctx, bad, 'role-1')).toEqual({ ok: false, error: 'forbidden' });
+    expect(await admin.deleteRole(ctx, bad, fenceFor(bad), 'role-1')).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
     expect(log).toHaveBeenCalledExactlyOnceWith({
       level: 'info',
       event: 'admin.denied',
@@ -1175,7 +1316,7 @@ describe('admin.denied', () => {
     const { admin, log } = setup({
       storedGrants: [grantOf('g-admin', 'role-admin', 'target@example.com')],
     });
-    await admin.createRole(ctx, grantsWriter, {
+    await admin.createRole(ctx, grantsWriter, fenceFor(grantsWriter), {
       key: 'ops_two',
       name: 'Ops',
       scope: 'organization',
@@ -1247,12 +1388,14 @@ describe('privilege escalation by a user with only org:grants:write', () => {
       error: 'forbidden',
     });
     expect(await admin.suspendUser(ctx, attacker, 'u1')).toEqual({ ok: false, error: 'forbidden' });
-    expect(await admin.setRolePermissions(ctx, attacker, 'role-1', ALL)).toEqual({
+    expect(
+      await admin.setRolePermissions(ctx, attacker, fenceFor(attacker), 'role-1', ALL),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(
-      await admin.createRole(ctx, attacker, {
+      await admin.createRole(ctx, attacker, fenceFor(attacker), {
         key: 'sneaky',
         name: 'Sneaky',
         scope: 'organization',
@@ -1278,7 +1421,10 @@ describe('logging', () => {
     log.mockImplementation(() => {
       throw new Error('sink down');
     });
-    expect(await admin.deleteRole(ctx, rolesWriter, 'role-1')).toEqual({ ok: true, value: null });
+    expect(await admin.deleteRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1')).toEqual({
+      ok: true,
+      value: null,
+    });
   });
 });
 
@@ -1293,7 +1439,11 @@ describe('repository contract: invalid input is answered, never thrown', () => {
     const roles = {
       list: async () => [stored],
       get: async () => stored,
-      create: async (_: OrgContext, input: { key: string; name: string; now: string }) => {
+      create: async (
+        _: OrgContext,
+        _fence: unknown,
+        input: { key: string; name: string; now: string },
+      ) => {
         if (!/^[a-z][a-z0-9_]{0,63}$/.test(input.key)) throw new TypeError('key');
         if (NAME.test(input.name) || count(input.name) < 1 || count(input.name) > 100) {
           throw new TypeError('name');
@@ -1301,7 +1451,7 @@ describe('repository contract: invalid input is answered, never thrown', () => {
         if (!TIMESTAMP.test(input.now)) throw new TypeError('now');
         return 'created';
       },
-      rename: async (_: OrgContext, _id: string, name: string, now: string) => {
+      rename: async (_: OrgContext, _fence: unknown, _id: string, name: string, now: string) => {
         if (NAME.test(name) || count(name) < 1 || count(name) > 100) throw new TypeError('name');
         if (!TIMESTAMP.test(now)) throw new TypeError('now');
         return 'renamed';
@@ -1362,13 +1512,19 @@ describe('repository contract: invalid input is answered, never thrown', () => {
   it.each(names)('createRole and renameRole with the name %j', async (name) => {
     const { admin } = strictRepositories();
     const valid = count(name) >= 1 && count(name) <= 100 && !NAME.test(name);
-    const created = await admin.createRole(ctx, administrator, {
+    const created = await admin.createRole(ctx, administrator, fenceFor(administrator), {
       key: 'ops_two',
       name,
       scope: 'organization',
       permissions: ['org:read'],
     });
-    const renamed = await admin.renameRole(ctx, administrator, 'role-1', name);
+    const renamed = await admin.renameRole(
+      ctx,
+      administrator,
+      fenceFor(administrator),
+      'role-1',
+      name,
+    );
     expect(created.ok).toBe(valid);
     expect(renamed.ok).toBe(valid);
     if (!created.ok) expect(created.error).toBe('invalid_name');

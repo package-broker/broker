@@ -20,12 +20,21 @@ function insert(org: {
   };
 }
 
-/** Test databases only. */
+function epoch(orgId: string): ScalarStatement {
+  return {
+    sql: 'INSERT INTO cache_epoch (org_id, version) VALUES (?, hex(randomblob(16))) ON CONFLICT (org_id) DO NOTHING',
+    params: [orgId],
+  };
+}
+
+/** Test databases only; the schema must already include migration 0004 (cache_epoch). */
 export async function seedTwoOrganizations(executor: ScalarSqlExecutor): Promise<TwoOrganizations> {
   await executor.batch([
     { sql: 'DROP INDEX organization_singleton', params: [] },
     insert(A),
     insert(B),
+    epoch(A.id),
+    epoch(B.id),
   ]);
   return { a: orgContext(A.id), b: orgContext(B.id) };
 }

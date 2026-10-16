@@ -1330,12 +1330,12 @@ const accessMutationGuard: Case = async (open) => {
     const guardRows = () => countOf(executor, 'SELECT count(*) AS n FROM access_mutation_guard');
     const holds = (value: 0 | 1 | null) => sql<boolean>`(select ${sql.lit(value)})`;
 
-    await executor.batch([...assertGuard(holds(1)), addUser(U1)]);
+    await executor.batch([...assertGuard(holds(1), a), addUser(U1)]);
     expect(await countOf(executor, 'SELECT count(*) AS n FROM user_account')).toBe(1);
     expect(await guardRows()).toBe(0);
 
     const plan = await executor.all<{ detail: string }>({
-      sql: `EXPLAIN QUERY PLAN ${assertGuard(holds(1))[0]?.sql ?? ''}`,
+      sql: `EXPLAIN QUERY PLAN ${assertGuard(holds(1), a)[0]?.sql ?? ''}`,
       params: [newOpId()],
     });
     const details = plan.map((row) => row.detail).join('\n');
@@ -1344,11 +1344,49 @@ const accessMutationGuard: Case = async (open) => {
 
     for (const value of [0, null] as const) {
       await expect(
-        executor.batch([addUser(U3), ...assertGuard(holds(value)), addUser(U2)]),
+        executor.batch([addUser(U3), ...assertGuard(holds(value), a), addUser(U2)]),
       ).rejects.toMatchObject({ kind: 'unique' });
       expect(await countOf(executor, 'SELECT count(*) AS n FROM user_account')).toBe(1);
       expect(await guardRows()).toBe(0);
     }
+
+    const epoch = async (): Promise<string[]> =>
+      (
+        await executor.all<{ version: string }>({
+          sql: 'SELECT version FROM cache_epoch WHERE org_id = ? ORDER BY org_id',
+          params: [a.orgId],
+        })
+      ).map((row) => row.version);
+    const users = () => countOf(executor, 'SELECT count(*) AS n FROM user_account');
+
+    const start = await epoch();
+    await executor.batch([...assertGuard(holds(1), a), addUser(U2)]);
+    const committed = await epoch();
+    expect(committed).toHaveLength(1);
+    expect(committed).not.toEqual(start);
+
+    await expect(executor.batch([...assertGuard(holds(0), a), addUser(U3)])).rejects.toMatchObject({
+      kind: 'unique',
+    });
+    expect(await epoch()).toEqual(committed);
+
+    await expect(
+      executor.batch([...assertGuard(holds(1), a), addUser(U3), addUser(U3)]),
+    ).rejects.toMatchObject({ kind: 'unique' });
+    expect(await epoch()).toEqual(committed);
+
+    const usersBefore = await users();
+    await executor.batch([{ sql: 'DELETE FROM cache_epoch WHERE org_id = ?', params: [a.orgId] }]);
+    await expect(
+      executor.batch([
+        addUser(U3),
+        ...assertGuard(holds(1), a),
+        addUser('01J0USER000000000000000004'),
+      ]),
+    ).rejects.toMatchObject({ kind: 'unique' });
+    expect(await users()).toBe(usersBefore);
+    expect(await epoch()).toEqual([]);
+    expect(await guardRows()).toBe(0);
   });
 };
 

@@ -120,9 +120,9 @@ describe('core migrations', () => {
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
     expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
-    expect(ids.at(-1)).toBe('core:0004_cache_epoch');
+    expect(ids.at(-1)).toBe('core:0006_ports');
     expect(result.applied).toEqual(ids);
-    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch
+    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none
     expect(await countTables()).toBe(43);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),

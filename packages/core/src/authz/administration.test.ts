@@ -37,7 +37,7 @@ function fenceFor(actor: unknown) {
       userId: typeof userId === 'string' && userId !== '' ? userId : 'unknown',
       sessionId: 'session-1',
     } as unknown as AuthenticatedActor,
-    { role: 1 },
+    { role: 1, grant: 1 },
   );
 }
 const grantsWriter = actorWith('org:grants:write', 'org:read');
@@ -68,6 +68,7 @@ const grantOf = (id: string, roleId: string, value = 'someone@example.com'): Org
   roleId,
   createdBy: null,
   createdAt: NOW,
+  revision: 1,
 });
 const userOf = (overrides: Partial<User> = {}): User => ({
   id: 'u1',
@@ -659,16 +660,17 @@ describe('grantOrganization', () => {
 
   it('2: stores the e-mail normalized and logs without it', async () => {
     const { admin, grants, log } = setup();
-    const result = await admin.grantOrganization(ctx, grantsWriter, {
+    const result = await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
       subject: email,
       roleId: 'role-1',
     });
-    expect(grants.createOrganization).toHaveBeenCalledExactlyOnceWith(ctx, {
+    expect(grants.createOrganization).toHaveBeenCalledExactlyOnceWith(ctx, heldBy('actor-1'), {
       id: 'ID00',
       subject: { type: 'email', value: 'admin@example.com' },
       roleId: 'role-1',
       createdBy: 'actor-1',
       now: NOW,
+      opId: 'ID01',
     });
     expect(result).toEqual({
       ok: true,
@@ -678,6 +680,7 @@ describe('grantOrganization', () => {
         roleId: 'role-1',
         createdBy: 'actor-1',
         createdAt: NOW,
+        revision: 1,
       },
     });
     expect(log).toHaveBeenCalledExactlyOnceWith({
@@ -702,7 +705,7 @@ describe('grantOrganization', () => {
   ])('refuses the e-mail %j as invalid_subject', async (value) => {
     const { admin, grants } = setup();
     expect(
-      await admin.grantOrganization(ctx, grantsWriter, {
+      await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
         subject: { type: 'email', value },
         roleId: 'role-1',
       }),
@@ -714,7 +717,7 @@ describe('grantOrganization', () => {
     const { admin, grants } = setup();
     for (const provider of ['other', 'local', 'CORP', '', '__proto__', 'constructor']) {
       expect(
-        await admin.grantOrganization(ctx, grantsWriter, {
+        await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
           subject: { type: 'group', provider, value: 'admins' },
           roleId: 'role-1',
         }),
@@ -725,17 +728,18 @@ describe('grantOrganization', () => {
 
   it('accepts a group of a configured provider', async () => {
     const { admin, grants } = setup();
-    const result = await admin.grantOrganization(ctx, grantsWriter, {
+    const result = await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
       subject: { type: 'group', provider: 'corp', value: 'Platform Admins' },
       roleId: 'role-1',
     });
     expect(result.ok).toBe(true);
-    expect(grants.createOrganization).toHaveBeenCalledExactlyOnceWith(ctx, {
+    expect(grants.createOrganization).toHaveBeenCalledExactlyOnceWith(ctx, heldBy('actor-1'), {
       id: 'ID00',
       subject: { type: 'group', provider: 'corp', value: 'Platform Admins' },
       roleId: 'role-1',
       createdBy: 'actor-1',
       now: NOW,
+      opId: 'ID01',
     });
   });
 
@@ -744,7 +748,7 @@ describe('grantOrganization', () => {
     async (value) => {
       const { admin, grants } = setup();
       expect(
-        await admin.grantOrganization(ctx, grantsWriter, {
+        await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
           subject: { type: 'group', provider: 'corp', value },
           roleId: 'role-1',
         }),
@@ -755,7 +759,7 @@ describe('grantOrganization', () => {
 
   it('accepts a group name of 256 code points', async () => {
     const { admin } = setup();
-    const result = await admin.grantOrganization(ctx, grantsWriter, {
+    const result = await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
       subject: { type: 'group', provider: 'corp', value: '\u{1f600}'.repeat(256) },
       roleId: 'role-1',
     });
@@ -766,7 +770,10 @@ describe('grantOrganization', () => {
     const { admin, grants } = setup();
     for (const subject of [null, {}, { type: 'user', value: 'x' }, { type: 'email' }, 'a@b.io']) {
       expect(
-        await admin.grantOrganization(ctx, grantsWriter, { subject, roleId: 'role-1' } as never),
+        await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
+          subject,
+          roleId: 'role-1',
+        } as never),
       ).toMatchObject({ ok: false, error: 'invalid_subject' });
     }
     expect(grants.createOrganization).not.toHaveBeenCalled();
@@ -776,7 +783,10 @@ describe('grantOrganization', () => {
     for (const repo of ['duplicate', 'role_scope_mismatch'] as const) {
       const { admin, log } = setup({ grants: { createOrganization: vi.fn(async () => repo) } });
       expect(
-        await admin.grantOrganization(ctx, grantsWriter, { subject: email, roleId: 'role-1' }),
+        await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
+          subject: email,
+          roleId: 'role-1',
+        }),
       ).toEqual({ ok: false, error: repo });
       expect(log).not.toHaveBeenCalled();
     }
@@ -788,7 +798,7 @@ describe('grantOrganization', () => {
     });
     for (const roleId of ['nope', 'role-p', '', 7]) {
       expect(
-        await admin.grantOrganization(ctx, administrator, {
+        await admin.grantOrganization(ctx, administrator, fenceFor(administrator), {
           subject: email,
           roleId: roleId as never,
         }),
@@ -801,7 +811,12 @@ describe('grantOrganization', () => {
     const above = customRole({ id: 'role-big', permissions: ['org:read', 'org:users:write'] });
     const { admin, grants } = setup({ stored: [customRole(), adminRole, above] });
     for (const roleId of ['role-admin', 'role-big']) {
-      expect(await admin.grantOrganization(ctx, grantsWriter, { subject: email, roleId })).toEqual({
+      expect(
+        await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
+          subject: email,
+          roleId,
+        }),
+      ).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -809,7 +824,12 @@ describe('grantOrganization', () => {
     expect(grants.createOrganization).not.toHaveBeenCalled();
     for (const roleId of ['role-admin', 'role-big']) {
       expect(
-        (await admin.grantOrganization(ctx, administrator, { subject: email, roleId })).ok,
+        (
+          await admin.grantOrganization(ctx, administrator, fenceFor(administrator), {
+            subject: email,
+            roleId,
+          })
+        ).ok,
       ).toBe(true);
     }
   });
@@ -817,7 +837,10 @@ describe('grantOrganization', () => {
   it('3: an actor who is not a user of the organization is forbidden, not a TypeError', async () => {
     const { admin, grants } = setup({ users: { get: vi.fn(async () => null) } });
     expect(
-      await admin.grantOrganization(ctx, grantsWriter, { subject: email, roleId: 'role-1' }),
+      await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
+        subject: email,
+        roleId: 'role-1',
+      }),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(grants.createOrganization).not.toHaveBeenCalled();
   });
@@ -825,7 +848,10 @@ describe('grantOrganization', () => {
   it('1a: forbidden without org:grants:write', async () => {
     const { admin, grants } = setup();
     expect(
-      await admin.grantOrganization(ctx, rolesWriter, { subject: email, roleId: 'role-1' }),
+      await admin.grantOrganization(ctx, rolesWriter, fenceFor(rolesWriter), {
+        subject: email,
+        roleId: 'role-1',
+      }),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(grants.createOrganization).not.toHaveBeenCalled();
   });
@@ -834,11 +860,18 @@ describe('grantOrganization', () => {
 describe('grant changes and user status', () => {
   it('4: revoke surfaces last_holder and not_found unchanged and logs on success', async () => {
     const ok = setup();
-    expect(await ok.admin.revokeOrganizationGrant(ctx, grantsWriter, 'g1')).toEqual({
+    expect(
+      await ok.admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1'),
+    ).toEqual({
       ok: true,
       value: null,
     });
-    expect(ok.grants.deleteOrganization).toHaveBeenCalledExactlyOnceWith(ctx, 'g1');
+    expect(ok.grants.deleteOrganization).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      heldBy('actor-1'),
+      'g1',
+      'ID00',
+    );
     expect(ok.log).toHaveBeenCalledExactlyOnceWith({
       level: 'info',
       event: 'grant.changed',
@@ -850,7 +883,9 @@ describe('grant changes and user status', () => {
     });
     for (const repo of ['last_holder', 'not_found'] as const) {
       const { admin, log } = setup({ grants: { deleteOrganization: vi.fn(async () => repo) } });
-      expect(await admin.revokeOrganizationGrant(ctx, grantsWriter, 'g1')).toEqual({
+      expect(
+        await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1'),
+      ).toEqual({
         ok: false,
         error: repo,
       });
@@ -860,15 +895,21 @@ describe('grant changes and user status', () => {
 
   it('an unknown grant id is not_found before the repository; empty ids too', async () => {
     const { admin, grants } = setup();
-    expect(await admin.revokeOrganizationGrant(ctx, grantsWriter, 'nope')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'nope'),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await admin.revokeOrganizationGrant(ctx, grantsWriter, '')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), ''),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await admin.changeGrantRole(ctx, grantsWriter, 'nope', 'role-1')).toEqual({
+    expect(
+      await admin.changeGrantRole(ctx, grantsWriter, fenceFor(grantsWriter), 'nope', 'role-1'),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -878,22 +919,36 @@ describe('grant changes and user status', () => {
 
   it('1b: only an organization admin revokes a grant of a protected role', async () => {
     const { admin, grants } = setup({ storedGrants: [grantOf('g-admin', 'role-admin')] });
-    expect(await admin.revokeOrganizationGrant(ctx, grantsWriter, 'g-admin')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g-admin'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(grants.deleteOrganization).not.toHaveBeenCalled();
-    expect((await admin.revokeOrganizationGrant(ctx, administrator, 'g-admin')).ok).toBe(true);
+    expect(
+      (await admin.revokeOrganizationGrant(ctx, administrator, fenceFor(administrator), 'g-admin'))
+        .ok,
+    ).toBe(true);
   });
 
   it('4: changeGrantRole passes a server timestamp and surfaces every refusal', async () => {
     const stored = [customRole(), customRole({ id: 'role-2' }), adminRole];
     const ok = setup({ stored });
-    expect(await ok.admin.changeGrantRole(ctx, grantsWriter, 'g1', 'role-2')).toEqual({
+    expect(
+      await ok.admin.changeGrantRole(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', 'role-2'),
+    ).toEqual({
       ok: true,
       value: null,
     });
-    expect(ok.grants.changeRole).toHaveBeenCalledExactlyOnceWith(ctx, 'g1', 'role-2', NOW);
+    expect(ok.grants.changeRole).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      heldBy('actor-1'),
+      'g1',
+      'role-2',
+      NOW,
+      'ID00',
+    );
     expect(ok.log).toHaveBeenCalledExactlyOnceWith({
       level: 'info',
       event: 'grant.changed',
@@ -906,7 +961,9 @@ describe('grant changes and user status', () => {
     });
     for (const repo of ['not_found', 'last_holder', 'role_scope_mismatch'] as const) {
       const { admin, log } = setup({ stored, grants: { changeRole: vi.fn(async () => repo) } });
-      expect(await admin.changeGrantRole(ctx, grantsWriter, 'g1', 'role-2')).toEqual({
+      expect(
+        await admin.changeGrantRole(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', 'role-2'),
+      ).toEqual({
         ok: false,
         error: repo,
       });
@@ -919,7 +976,9 @@ describe('grant changes and user status', () => {
       stored: [customRole(), customRole({ id: 'role-p', scope: 'project', permissions: [] })],
     });
     for (const roleId of ['nope', 'role-p', '']) {
-      expect(await admin.changeGrantRole(ctx, administrator, 'g1', roleId)).toEqual({
+      expect(
+        await admin.changeGrantRole(ctx, administrator, fenceFor(administrator), 'g1', roleId),
+      ).toEqual({
         ok: false,
         error: 'role_scope_mismatch',
       });
@@ -931,31 +990,57 @@ describe('grant changes and user status', () => {
     const above = customRole({ id: 'role-big', permissions: ['org:read', 'org:users:write'] });
     const stored = [customRole(), adminRole, above];
     const to = setup({ stored });
-    expect(await to.admin.changeGrantRole(ctx, grantsWriter, 'g1', 'role-admin')).toEqual({
+    expect(
+      await to.admin.changeGrantRole(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', 'role-admin'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await to.admin.changeGrantRole(ctx, grantsWriter, 'g1', 'role-big')).toEqual({
+    expect(
+      await to.admin.changeGrantRole(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', 'role-big'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(to.grants.changeRole).not.toHaveBeenCalled();
     const from = setup({ stored, storedGrants: [grantOf('g-admin', 'role-admin')] });
-    expect(await from.admin.changeGrantRole(ctx, grantsWriter, 'g-admin', 'role-1')).toEqual({
+    expect(
+      await from.admin.changeGrantRole(
+        ctx,
+        grantsWriter,
+        fenceFor(grantsWriter),
+        'g-admin',
+        'role-1',
+      ),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(from.grants.changeRole).not.toHaveBeenCalled();
-    expect((await to.admin.changeGrantRole(ctx, administrator, 'g1', 'role-big')).ok).toBe(true);
+    expect(
+      (
+        await to.admin.changeGrantRole(
+          ctx,
+          administrator,
+          fenceFor(administrator),
+          'g1',
+          'role-big',
+        )
+      ).ok,
+    ).toBe(true);
   });
 
   it('1a: grant and user methods are forbidden without their permission', async () => {
     const { admin, grants, roles } = setup();
-    expect(await admin.revokeOrganizationGrant(ctx, usersWriter, 'g1')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, usersWriter, fenceFor(usersWriter), 'g1'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.changeGrantRole(ctx, usersWriter, 'g1', 'role-1')).toEqual({
+    expect(
+      await admin.changeGrantRole(ctx, usersWriter, fenceFor(usersWriter), 'g1', 'role-1'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -1100,20 +1185,29 @@ describe('1b: a non-admin holding every permission still cannot touch a protecte
       storedGrants: [grantOf('g1', 'role-1'), grantOf('g-admin', 'role-admin')],
     });
     expect(
-      await admin.grantOrganization(ctx, powerful, { subject: email, roleId: 'role-admin' }),
+      await admin.grantOrganization(ctx, powerful, fenceFor(powerful), {
+        subject: email,
+        roleId: 'role-admin',
+      }),
     ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.changeGrantRole(ctx, powerful, 'g1', 'role-admin')).toEqual({
+    expect(
+      await admin.changeGrantRole(ctx, powerful, fenceFor(powerful), 'g1', 'role-admin'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.changeGrantRole(ctx, powerful, 'g-admin', 'role-1')).toEqual({
+    expect(
+      await admin.changeGrantRole(ctx, powerful, fenceFor(powerful), 'g-admin', 'role-1'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.revokeOrganizationGrant(ctx, powerful, 'g-admin')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, powerful, fenceFor(powerful), 'g-admin'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -1195,19 +1289,26 @@ describe('superior targets: a non-admin cannot act on a role or grant above thei
     expect(roles.delete).not.toHaveBeenCalled();
   });
 
-  it('revokeOrganizationGrant: forbidden for a superior grant role and for a missing role', async () => {
+  it('revokeOrganizationGrant: forbidden for a missing role; a superior grant role is revocable', async () => {
     const { admin, grants } = setup({
       stored,
       storedGrants: [grantOf('g-sup', 'role-sup'), grantOf('g-gone', 'role-gone')],
     });
-    for (const id of ['g-sup', 'g-gone']) {
-      expect(await admin.revokeOrganizationGrant(ctx, grantsActor, id)).toEqual({
-        ok: false,
-        error: 'forbidden',
-      });
-    }
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsActor, fenceFor(grantsActor), 'g-gone'),
+    ).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
     expect(grants.deleteOrganization).not.toHaveBeenCalled();
-    expect((await admin.revokeOrganizationGrant(ctx, administrator, 'g-gone')).ok).toBe(true);
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsActor, fenceFor(grantsActor), 'g-sup'),
+    ).toEqual({ ok: true, value: null });
+    expect(grants.deleteOrganization).toHaveBeenCalledOnce();
+    expect(
+      (await admin.revokeOrganizationGrant(ctx, administrator, fenceFor(administrator), 'g-gone'))
+        .ok,
+    ).toBe(true);
   });
 
   it('changeGrantRole: forbidden when the current role is superior or missing', async () => {
@@ -1216,13 +1317,18 @@ describe('superior targets: a non-admin cannot act on a role or grant above thei
       storedGrants: [grantOf('g-sup', 'role-sup'), grantOf('g-gone', 'role-gone')],
     });
     for (const id of ['g-sup', 'g-gone']) {
-      expect(await admin.changeGrantRole(ctx, grantsActor, id, 'role-1')).toEqual({
+      expect(
+        await admin.changeGrantRole(ctx, grantsActor, fenceFor(grantsActor), id, 'role-1'),
+      ).toEqual({
         ok: false,
         error: 'forbidden',
       });
     }
     expect(grants.changeRole).not.toHaveBeenCalled();
-    expect((await admin.changeGrantRole(ctx, administrator, 'g-sup', 'role-1')).ok).toBe(true);
+    expect(
+      (await admin.changeGrantRole(ctx, administrator, fenceFor(administrator), 'g-sup', 'role-1'))
+        .ok,
+    ).toBe(true);
   });
 });
 
@@ -1235,12 +1341,12 @@ describe('the actor is validated and the admin flag must be exactly true', () =>
         isOrganizationAdmin: flag,
       } as unknown as ActorContext;
       const { admin, grants } = setup({ storedGrants: [grantOf('g1', 'role-1')] });
-      expect(await admin.changeGrantRole(ctx, actor, 'g1', 'role-admin')).toEqual({
+      expect(await admin.changeGrantRole(ctx, actor, fenceFor(actor), 'g1', 'role-admin')).toEqual({
         ok: false,
         error: 'forbidden',
       });
       expect(
-        await admin.grantOrganization(ctx, actor, {
+        await admin.grantOrganization(ctx, actor, fenceFor(actor), {
           subject: { type: 'email', value: 'me@example.com' },
           roleId: 'role-admin',
         }),
@@ -1270,12 +1376,12 @@ describe('the actor is validated and the admin flag must be exactly true', () =>
       admin.renameRole(ctx, bad, fenceFor(bad), 'role-1', 'Name'),
       admin.setRolePermissions(ctx, bad, fenceFor(bad), 'role-1', []),
       admin.deleteRole(ctx, bad, fenceFor(bad), 'role-1'),
-      admin.grantOrganization(ctx, bad, {
+      admin.grantOrganization(ctx, bad, fenceFor(bad), {
         subject: { type: 'email', value: 'me@example.com' },
         roleId: 'role-1',
       }),
-      admin.revokeOrganizationGrant(ctx, bad, 'g1'),
-      admin.changeGrantRole(ctx, bad, 'g1', 'role-1'),
+      admin.revokeOrganizationGrant(ctx, bad, fenceFor(bad), 'g1'),
+      admin.changeGrantRole(ctx, bad, fenceFor(bad), 'g1', 'role-1'),
       admin.suspendUser(ctx, bad, 'u1'),
       admin.reactivateUser(ctx, bad, 'u1'),
     ]);
@@ -1322,11 +1428,11 @@ describe('admin.denied', () => {
       scope: 'organization',
       permissions: [],
     });
-    await admin.grantOrganization(ctx, grantsWriter, {
+    await admin.grantOrganization(ctx, grantsWriter, fenceFor(grantsWriter), {
       subject: { type: 'email', value: 'me@example.com' },
       roleId: 'role-admin',
     });
-    await admin.revokeOrganizationGrant(ctx, grantsWriter, 'g-admin');
+    await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g-admin');
     await admin.suspendUser(ctx, usersWriter, 'u1');
     expect(log.mock.calls.map(([entry]) => entry)).toEqual([
       {
@@ -1374,16 +1480,23 @@ describe('privilege escalation by a user with only org:grants:write', () => {
     const self = { type: 'email', value: 'me@example.com' } as const;
 
     expect(
-      await admin.grantOrganization(ctx, attacker, { subject: self, roleId: 'role-admin' }),
+      await admin.grantOrganization(ctx, attacker, fenceFor(attacker), {
+        subject: self,
+        roleId: 'role-admin',
+      }),
     ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.changeGrantRole(ctx, attacker, 'g-me', 'role-admin')).toEqual({
+    expect(
+      await admin.changeGrantRole(ctx, attacker, fenceFor(attacker), 'g-me', 'role-admin'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await admin.revokeOrganizationGrant(ctx, attacker, 'g-admin')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, attacker, fenceFor(attacker), 'g-admin'),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -1463,6 +1576,7 @@ describe('repository contract: invalid input is answered, never thrown', () => {
       listOrganization: async () => [],
       createOrganization: async (
         _: OrgContext,
+        _fence: unknown,
         input: {
           subject: { type: string; value: string; provider?: string };
           now: string;
@@ -1543,7 +1657,7 @@ describe('repository contract: invalid input is answered, never thrown', () => {
 
   it.each(emails)('grantOrganization with the e-mail %j', async (value, stored) => {
     const { admin } = strictRepositories();
-    const result = await admin.grantOrganization(ctx, administrator, {
+    const result = await admin.grantOrganization(ctx, administrator, fenceFor(administrator), {
       subject: { type: 'email', value },
       roleId: 'role-1',
     });
@@ -1569,7 +1683,7 @@ describe('repository contract: invalid input is answered, never thrown', () => {
 
   it.each(groups)('grantOrganization with the group %j', async (value, acceptable) => {
     const { admin } = strictRepositories();
-    const result = await admin.grantOrganization(ctx, administrator, {
+    const result = await admin.grantOrganization(ctx, administrator, fenceFor(administrator), {
       subject: { type: 'group', provider: 'corp', value },
       roleId: 'role-1',
     });

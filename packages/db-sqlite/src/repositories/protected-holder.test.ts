@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  mutationFence,
+  type AuthenticatedActor,
+  type MutationFence,
+} from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
@@ -180,6 +185,79 @@ function binding(org: OrgContext, provider: string, anchor: string): Statement {
   );
 }
 
+const ACTOR_IDENTITY = '01J0ACTORIDEN00000000000AA';
+const ACTOR = {
+  user: '01J0ACTORUSER00000000000AA',
+  role: '01J0ACTORROLE00000000000AA',
+  session: '01J0ACTORSESS00000000000AA',
+};
+
+function actorStatements(org: OrgContext): Statement[] {
+  const now = new Date().toISOString();
+  const hash = 'a'.repeat(64);
+  return [
+    user(org, ACTOR.user, 'actor@actor.test'),
+    stmt(
+      'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      ACTOR_IDENTITY,
+      org.orgId,
+      ACTOR.user,
+      'oidc',
+      'subject-actor',
+      'actor@actor.test',
+      now,
+    ),
+    role(org, ACTOR.role, 'test_actor', 1),
+    stmt(
+      'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      org.orgId,
+      ACTOR.role,
+      'org:grants:write',
+    ),
+    grant(org, '01J0ACTORGRNT00000000000AA', 'email', 'actor@actor.test', ACTOR.role),
+    stmt(
+      'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ACTOR.session,
+      org.orgId,
+      ACTOR.user,
+      hash,
+      hash,
+      now,
+      new Date(Date.now() + 3_600_000).toISOString(),
+    ),
+  ];
+}
+
+async function fenceFor(grantId: string): Promise<MutationFence> {
+  const found = await executor.all<{ revision: number }>(
+    stmt('SELECT revision FROM access_grant WHERE id = ?', grantId),
+  );
+  return mutationFence(
+    { userId: ACTOR.user, sessionId: ACTOR.session } as unknown as AuthenticatedActor,
+    { grant: found[0]?.revision ?? 1 },
+  );
+}
+
+let actorSeeded = false;
+
+async function ensureActor(): Promise<void> {
+  if (actorSeeded) return;
+  actorSeeded = true;
+  await seed(...actorStatements(a));
+}
+
+async function deleteGrant(id: string) {
+  await ensureActor();
+  counter += 1;
+  return grants.deleteOrganization(a, await fenceFor(id), id, `OP${counter}`);
+}
+
+async function changeGrantRole(id: string, roleId: string, now: string) {
+  await ensureActor();
+  counter += 1;
+  return grants.changeRole(a, await fenceFor(id), id, roleId, now, `OP${counter}`);
+}
+
 async function seed(...statements: Statement[]): Promise<void> {
   await executor.batch(statements);
 }
@@ -200,7 +278,11 @@ beforeEach(async () => {
   if (database.orgs === null) throw new Error('two organizations were not seeded');
   ({ a, b } = database.orgs);
   executor = database.executor;
-  grants = createGrantRepository(executor, { holderInput: () => fresh([AUTHORITATIVE]) });
+  actorSeeded = false;
+  grants = createGrantRepository(executor, {
+    holderInput: () =>
+      fresh([AUTHORITATIVE], actorSeeded ? { identityId: ACTOR_IDENTITY } : undefined),
+  });
   await seed(
     role(a, ADMIN, 'organization_admin', 1),
     role(a, VIEWER, 'org_viewer', 0),
@@ -497,7 +579,7 @@ describe('local-admin eligibility', () => {
     );
     await seed(stmt('UPDATE local_login SET totp_credential_id = NULL WHERE user_id = ?', U2));
 
-    expect(await grants.deleteOrganization(a, G_EMAIL)).toBe('last_holder');
+    expect(await deleteGrant(G_EMAIL)).toBe('last_holder');
     expect(await grants.suspendUser(a, U1, NOW)).toBe('last_holder');
   });
 
@@ -682,8 +764,8 @@ describe('writers use the freshness-aware predicate', () => {
   it('a stale group holder does not keep a protected role alive', async () => {
     await stale();
 
-    expect(await grants.deleteOrganization(a, G_EMAIL)).toBe('last_holder');
-    expect(await grants.changeRole(a, G_EMAIL, VIEWER, NOW)).toBe('last_holder');
+    expect(await deleteGrant(G_EMAIL)).toBe('last_holder');
+    expect(await changeGrantRole(G_EMAIL, VIEWER, NOW)).toBe('last_holder');
     expect(await grants.suspendUser(a, U1, NOW)).toBe('last_holder');
     expect(await grants.countProtectedHolders(a)).toBe(1);
   });
@@ -693,7 +775,7 @@ describe('writers use the freshness-aware predicate', () => {
     await seed(stmt('UPDATE user_group SET refreshed_at = ? WHERE user_id = ?', ago(HOUR), U2));
 
     expect(await grants.countProtectedHolders(a)).toBe(2);
-    expect(await grants.deleteOrganization(a, G_EMAIL)).toBe('deleted');
+    expect(await deleteGrant(G_EMAIL)).toBe('deleted');
   });
 });
 

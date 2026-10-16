@@ -128,7 +128,16 @@ function bindingStatement(ctx: OrgContext, plan: LoginPlan): ScalarStatement {
   return compile(
     db
       .insertInto('identity_provider_binding')
-      .values({ org_id: ctx.orgId, provider: plan.provider, anchor: plan.trustAnchor })
+      .columns(['org_id', 'provider', 'anchor'])
+      .expression(
+        db
+          .selectNoFrom((values) => [
+            values.val(ctx.orgId).as('org_id'),
+            values.val(plan.provider).as('provider'),
+            values.val(plan.trustAnchor).as('anchor'),
+          ])
+          .where(eb.not(blockedGuard(ctx, plan))),
+      )
       .onConflict((conflict) => conflict.doNothing()),
   ) as ScalarStatement;
 }
@@ -174,6 +183,18 @@ function foreignIdentityGuard(ctx: OrgContext, plan: LoginPlan): Guard {
       .where('identity.provider', '=', plan.provider)
       .where('identity.subject', '=', plan.subject)
       .where('identity.user_id', '<>', plan.userId),
+  );
+}
+
+function blockedGuard(ctx: OrgContext, plan: LoginPlan): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('identity_block')
+      .select(sql.lit(1).as('one'))
+      .where('identity_block.org_id', '=', ctx.orgId)
+      .where('identity_block.provider', '=', plan.provider)
+      .where('identity_block.issuer', '=', plan.trustAnchor)
+      .where('identity_block.subject', '=', plan.subject),
   );
 }
 
@@ -413,8 +434,15 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
         subject: plan.subject,
         userId: plan.userId,
       });
-      const guards = [owns, anchorOk, plannedIdentityGuard(ctx, plan), currentUserGuard(ctx, plan)];
-      const identityGuards = [anchorOk];
+      const unblocked = eb.not(blockedGuard(ctx, plan));
+      const guards = [
+        owns,
+        anchorOk,
+        unblocked,
+        plannedIdentityGuard(ctx, plan),
+        currentUserGuard(ctx, plan),
+      ];
+      const identityGuards = [anchorOk, unblocked];
       if (!plan.createUser) {
         const singleSubject = eb.not(otherSubjectGuard(ctx, plan));
         guards.push(singleSubject);
@@ -424,7 +452,7 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
 
       const statements: ScalarStatement[] = [bindingStatement(ctx, plan)];
       if (plan.createUser) {
-        const creationGuards = [anchorOk];
+        const creationGuards = [anchorOk, unblocked];
         if (plan.autoJoin !== true) creationGuards.push(invitationGuard(ctx, plan, groups));
         statements.push(createUserStatement(ctx, plan, creationGuards, now, displayName));
       }

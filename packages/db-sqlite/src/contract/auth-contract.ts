@@ -72,8 +72,6 @@ function mint(): string {
 
 const OP_RESET = 1000;
 const OP_RESET_RACE = 2000;
-const OP_COMPLETE = 3000;
-const OP_STAGE = 4000;
 const OP_BOOTSTRAP = 5000;
 
 const ADMIN = mint();
@@ -426,7 +424,6 @@ function successInput(snapshot: LocalLoginSnapshot, session: NewSession) {
   return {
     snapshot,
     step: STEP,
-    opId: 'ignored',
     rehash: null,
     session,
     previousSecretHash: null,
@@ -754,7 +751,6 @@ const setupRestage: Case = async (open, wrap = (executor) => executor) => {
             credentialRev: 3,
             passwordHash: PASSWORD_HASH,
             step: STEP,
-            opId: opOf(OP_COMPLETE, run),
             session: newSession(NEW_SESSION, ADMIN, LATER),
             previousSecretHash: hash('old-session'),
             now: LATER,
@@ -764,7 +760,6 @@ const setupRestage: Case = async (open, wrap = (executor) => executor) => {
             userId: ADMIN,
             setupHash: SETUP_HASH,
             credential: staged(NEW_CREDENTIAL),
-            opId: opOf(OP_STAGE, run),
             now: NOW,
           }),
       );
@@ -1185,6 +1180,7 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         session: { ...newSession(overrides.sessionId ?? NEW_SESSION, U1), identityId },
         previousSecretHash: overrides.previous === false ? null : hash('old-session'),
         now: NOW,
+        autoJoin: false,
       };
     };
     const identityRow = (id: string, userId: string, subject: string): Statement =>

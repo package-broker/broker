@@ -48,6 +48,13 @@ function unguarded(prefix: string, sql: string, keep: number): Rewrite {
     statement.sql.startsWith(prefix) ? { sql, params: statement.params.slice(0, keep) } : statement;
 }
 
+function dropCheck(marker: string): Rewrite {
+  return (statement) =>
+    statement.sql.startsWith('with "guard_cond"') && statement.sql.includes(marker)
+      ? { sql: 'select 1 where 0', params: [] }
+      : statement;
+}
+
 function only(prefixes: string[], rewrite: Rewrite): Rewrite {
   return (statement) =>
     prefixes.some((prefix) => statement.sql.startsWith(prefix)) ? rewrite(statement) : statement;
@@ -123,11 +130,7 @@ describe('weakened guards are caught by the contract cases', () => {
     {
       name: 'a grant delete without the holder guard removes the last holder',
       run: 'lastAdminRaces',
-      rewrite: unguarded(
-        'delete from "access_grant"',
-        'delete from "access_grant" where "id" = ? and "org_id" = ? returning "id"',
-        2,
-      ),
+      rewrite: dropCheck('"access_grant" as "pg"'),
       failure: /delete against delete: expected/,
     },
     {

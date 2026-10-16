@@ -2,12 +2,25 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  mutationFence,
+  type AuthenticatedActor,
+  type MutationFence,
+} from '@package-broker/core/authz/fence';
+import { createAdministration } from '@package-broker/core/authz/administration';
+import { DbError } from '@package-broker/core/db/errors';
 import type { GrantRepository } from '@package-broker/core/db/grants';
+import { fixedClock } from '@package-broker/core/ids';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { compile, db, protectedHolder } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createGrantRepository, type ProtectedHolderInput } from './grant.js';
+import { createRoleRepository } from './role.js';
+import {
+  createGrantRepository as createFencedGrantRepository,
+  type GrantRepositoryOptions,
+  type ProtectedHolderInput,
+} from './grant.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 const LATER = '2026-10-15T13:00:00.000Z';
@@ -41,6 +54,146 @@ function holderInput(): ProtectedHolderInput {
       anchor: ANCHOR,
       emailAuthoritative: true,
     })),
+  };
+}
+
+type UnfencedGrants = Pick<
+  GrantRepository,
+  'listOrganization' | 'suspendUser' | 'reactivateUser' | 'countProtectedHolders'
+> & {
+  createOrganization(
+    ctx: OrgContext,
+    input: Omit<Parameters<GrantRepository['createOrganization']>[2], 'opId'>,
+  ): ReturnType<GrantRepository['createOrganization']>;
+  deleteOrganization(
+    ctx: OrgContext,
+    id: string,
+  ): ReturnType<GrantRepository['deleteOrganization']>;
+  changeRole(
+    ctx: OrgContext,
+    id: string,
+    roleId: string,
+    now: string,
+  ): ReturnType<GrantRepository['changeRole']>;
+};
+
+const ACTOR_PERMISSION = 'org:grants:write';
+let storage: SqlExecutor;
+let operations = 0;
+
+function actorOf(org: OrgContext) {
+  const tag = org.orgId.slice(-8);
+  return {
+    user: `01J0ACTORUSER${tag}`,
+    identity: `01J0ACTORIDEN${tag}`,
+    role: `01J0ACTORROLE${tag}`,
+    grant: `01J0ACTORGRNT${tag}`,
+    session: `01J0ACTORSESS${tag}`,
+  };
+}
+
+function actorStatements(org: OrgContext): Statement[] {
+  const ids = actorOf(org);
+  const now = new Date().toISOString();
+  const hash = Buffer.from(ids.session).toString('hex').padEnd(64, '0');
+  return [
+    stmt(
+      'INSERT OR IGNORE INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+      ids.user,
+      org.orgId,
+      'actor@actor.test',
+    ),
+    stmt(
+      'INSERT OR IGNORE INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      ids.identity,
+      org.orgId,
+      ids.user,
+      'oidc',
+      `subject-${ids.user}`,
+      'actor@actor.test',
+      now,
+    ),
+    stmt(
+      'INSERT OR IGNORE INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES (?, ?, ?, ?, ?, 1)',
+      ids.role,
+      org.orgId,
+      'test_actor',
+      'test_actor',
+      'organization',
+    ),
+    stmt(
+      'INSERT OR IGNORE INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      org.orgId,
+      ids.role,
+      ACTOR_PERMISSION,
+    ),
+    stmt(
+      'INSERT OR IGNORE INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, NULL, ?, ?)',
+      ids.grant,
+      org.orgId,
+      'email',
+      'actor@actor.test',
+      'organization',
+      ids.role,
+      NOW,
+      NOW,
+    ),
+    stmt(
+      'INSERT OR IGNORE INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ids.session,
+      org.orgId,
+      ids.user,
+      hash,
+      hash,
+      now,
+      new Date(Date.now() + 3_600_000).toISOString(),
+    ),
+  ];
+}
+
+async function revisionOf(id: string): Promise<number> {
+  const found = await storage.all<{ revision: number }>(
+    stmt('SELECT revision FROM access_grant WHERE id = ?', id),
+  );
+  return found[0]?.revision ?? 1;
+}
+
+async function fenceFor(org: OrgContext, id?: string): Promise<MutationFence> {
+  const ids = actorOf(org);
+  return mutationFence(
+    { userId: ids.user, sessionId: ids.session } as unknown as AuthenticatedActor,
+    id === undefined ? {} : { grant: await revisionOf(id) },
+  );
+}
+
+function nextOp(): string {
+  operations += 1;
+  return `OP${String(operations).padStart(24, '0')}`;
+}
+
+/** Keeps the pre-fence call shapes: a seeded organization admin acts, and its own evidence is not counted as a holder. */
+function createGrantRepository(
+  target: Parameters<typeof createFencedGrantRepository>[0],
+  options: GrantRepositoryOptions,
+): UnfencedGrants {
+  const fenced = createFencedGrantRepository(target, {
+    holderInput: async (ctx) => ({
+      ...(await options.holderInput(ctx)),
+      exclude: { identityId: actorOf(ctx).identity },
+    }),
+  });
+  return {
+    listOrganization: async (ctx) =>
+      (await fenced.listOrganization(ctx)).filter((grant) => grant.id !== actorOf(ctx).grant),
+    suspendUser: (ctx, userId, now) => fenced.suspendUser(ctx, userId, now),
+    reactivateUser: (ctx, userId, now) => fenced.reactivateUser(ctx, userId, now),
+    countProtectedHolders: (ctx) => fenced.countProtectedHolders(ctx),
+    createOrganization: async (ctx, input) =>
+      fenced.createOrganization(ctx, await fenceFor(ctx), { ...input, opId: nextOp() }),
+    deleteOrganization: async (ctx, id) =>
+      fenced.deleteOrganization(ctx, await fenceFor(ctx, id), id, nextOp()),
+    changeRole: async (ctx, id, roleId, now) =>
+      fenced.changeRole(ctx, await fenceFor(ctx, id), id, roleId, now, nextOp()),
   };
 }
 
@@ -80,7 +233,7 @@ let database: MigratedDatabase;
 let a: OrgContext;
 let b: OrgContext;
 let executor: SqlExecutor;
-let grants: GrantRepository;
+let grants: UnfencedGrants;
 
 function stmt(sql: string, ...params: Statement['params']): Statement {
   return { sql, params };
@@ -213,6 +366,7 @@ beforeEach(async () => {
   ({ a, b } = database.orgs);
   executor = database.executor;
   grants = createGrantRepository(executor, { holderInput });
+  storage = executor;
   await seed([
     ...rolesFor(a, ADMIN, true),
     ...rolesFor(b, ADMIN_B, false),
@@ -228,6 +382,8 @@ beforeEach(async () => {
       [U2, 'u2@example.test'],
       [U3, 'u3@example.test'],
     ]),
+    ...actorStatements(a),
+    ...actorStatements(b),
   ]);
 });
 
@@ -243,7 +399,7 @@ async function snapshot(): Promise<string> {
   return JSON.stringify([
     await rows('SELECT * FROM access_grant ORDER BY id'),
     await rows('SELECT id, status, updated_at FROM user_account ORDER BY id'),
-    await rows('SELECT id, revoked_at FROM session ORDER BY id'),
+    await rows("SELECT id, revoked_at FROM session WHERE id NOT LIKE '01J0ACTOR%' ORDER BY id"),
   ]);
 }
 
@@ -399,6 +555,7 @@ describe('listOrganization', () => {
         roleId: AUDITOR,
         createdBy: null,
         createdAt: '2026-10-15T11:00:00.000Z',
+        revision: 1,
       },
       {
         id: G1,
@@ -406,6 +563,7 @@ describe('listOrganization', () => {
         roleId: ADMIN,
         createdBy: U1,
         createdAt: NOW,
+        revision: 1,
       },
     ]);
     expect(await grants.listOrganization(b)).toHaveLength(1);
@@ -463,6 +621,7 @@ describe('createOrganization', () => {
         roleId: ADMIN,
         createdBy: U1,
         createdAt: NOW,
+        revision: 1,
       },
       {
         id: G2,
@@ -470,6 +629,7 @@ describe('createOrganization', () => {
         roleId: AUDITOR,
         createdBy: null,
         createdAt: NOW,
+        revision: 1,
       },
     ]);
     const stored = await rows(
@@ -496,7 +656,7 @@ describe('createOrganization', () => {
         roleId: PROJECT_ROLE,
       }),
     ).toBe('role_scope_mismatch');
-    expect(await rows('SELECT id FROM access_grant')).toEqual([]);
+    expect(await rows("SELECT id FROM access_grant WHERE id NOT LIKE '01J0ACTOR%'")).toEqual([]);
   });
 
   it('6: a second grant for the same subject is a duplicate, in either subject kind', async () => {
@@ -642,9 +802,9 @@ describe('createOrganization', () => {
         createdBy: '01J0USER00000000000000ZZZZ',
       }),
     ).rejects.toThrow(TypeError);
-    expect(await rows('SELECT id, created_by FROM access_grant')).toEqual([
-      { id: G1, created_by: U1 },
-    ]);
+    expect(
+      await rows("SELECT id, created_by FROM access_grant WHERE id NOT LIKE '01J0ACTOR%'"),
+    ).toEqual([{ id: G1, created_by: U1 }]);
     expect(
       await grants.createOrganization(a, { ...email(G2, 'y@example.test'), createdBy: null }),
     ).toBe('created');
@@ -694,7 +854,9 @@ describe('deleteOrganization', () => {
       emailGrant(a, G1, 'u1@example.test', '01J0ROLEVIEWER00000000000AA', PROJECT),
     ]);
     expect(await grants.deleteOrganization(a, G1)).toBe('not_found');
-    expect(await rows('SELECT id FROM access_grant')).toEqual([{ id: G1 }]);
+    expect(await rows("SELECT id FROM access_grant WHERE id NOT LIKE '01J0ACTOR%'")).toEqual([
+      { id: G1 },
+    ]);
   });
 
   it('a grant that points at a protected role of another organization is not protected', async () => {
@@ -793,7 +955,7 @@ describe('changeRole', () => {
       emailGrant(a, G1, 'u1@example.test', '01J0ROLEVIEWER00000000000AA', PROJECT),
     ]);
     expect(await grants.changeRole(a, G1, ADMIN, LATER)).toBe('not_found');
-    expect(await rows('SELECT role_id FROM access_grant')).toEqual([
+    expect(await rows("SELECT role_id FROM access_grant WHERE id NOT LIKE '01J0ACTOR%'")).toEqual([
       { role_id: '01J0ROLEVIEWER00000000000AA' },
     ]);
   });
@@ -846,7 +1008,9 @@ describe('suspendUser and reactivateUser', () => {
     ).toBe('suspended');
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
     expect(await statusOf(U2)).toBe('suspended');
-    expect(await rows('SELECT id, revoked_at FROM session ORDER BY id')).toEqual([
+    expect(
+      await rows("SELECT id, revoked_at FROM session WHERE id NOT LIKE '01J0ACTOR%' ORDER BY id"),
+    ).toEqual([
       { id: '01J0SESSION0000000000000001', revoked_at: LATER },
       { id: '01J0SESSION0000000000000002', revoked_at: '2026-10-15T09:00:00.000Z' },
       { id: '01J0SESSION0000000000000003', revoked_at: null },
@@ -861,7 +1025,9 @@ describe('suspendUser and reactivateUser', () => {
     ]);
     expect(await grants.suspendUser(a, U1, LATER)).toBe('last_holder');
     expect(await statusOf(U1)).toBe('active');
-    expect(await rows('SELECT revoked_at FROM session')).toEqual([{ revoked_at: null }]);
+    expect(await rows("SELECT revoked_at FROM session WHERE id NOT LIKE '01J0ACTOR%'")).toEqual([
+      { revoked_at: null },
+    ]);
   });
 
   it('5: reactivation restores active and leaves the revoked sessions revoked', async () => {
@@ -871,7 +1037,9 @@ describe('suspendUser and reactivateUser', () => {
     expect(await rows('SELECT status, email FROM user_account WHERE id = ?', U2)).toEqual([
       { status: 'active', email: 'u2@example.test' },
     ]);
-    expect(await rows('SELECT revoked_at FROM session')).toEqual([{ revoked_at: LATER }]);
+    expect(await rows("SELECT revoked_at FROM session WHERE id NOT LIKE '01J0ACTOR%'")).toEqual([
+      { revoked_at: LATER },
+    ]);
     expect(await grants.reactivateUser(a, U2, '2026-10-15T15:00:00.000Z')).toBe(false);
   });
 
@@ -961,8 +1129,8 @@ describe('concurrent guarded operations on one file database', () => {
   let directory: string;
   let shared: MigratedDatabase;
   let org: OrgContext;
-  let first: GrantRepository;
-  let second: GrantRepository;
+  let first: UnfencedGrants;
+  let second: UnfencedGrants;
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'pb-grants-'));
@@ -972,7 +1140,12 @@ describe('concurrent guarded operations on one file database', () => {
     });
     if (shared.orgs === null) throw new Error('two organizations expected');
     org = shared.orgs.a;
-    await shared.executor.batch([...rolesFor(org, ADMIN, true), ...bindings(org)]);
+    storage = shared.executor;
+    await shared.executor.batch([
+      ...rolesFor(org, ADMIN, true),
+      ...bindings(org),
+      ...actorStatements(org),
+    ]);
     first = createGrantRepository(shared.executor, { holderInput });
     second = createGrantRepository(await shared.second(), { holderInput });
   });
@@ -995,6 +1168,7 @@ describe('concurrent guarded operations on one file database', () => {
         [U1, 'u1@example.test'],
         [U2, 'u2@example.test'],
       ]),
+      ...actorStatements(org),
       ...statements,
     ]);
   }
@@ -1264,7 +1438,12 @@ describe('spike scale', () => {
           .selectFrom('user_account as holder')
           .select('holder.id')
           .where('holder.org_id', '=', org.orgId)
-          .where((eb) => protectedHolder(org, eb.ref('holder.id'), holderInput()))
+          .where((eb) =>
+            protectedHolder(org, eb.ref('holder.id'), {
+              ...holderInput(),
+              exclude: { identityId: actorOf(org).identity },
+            }),
+          )
           .orderBy('holder.id'),
       ),
     );
@@ -1347,4 +1526,705 @@ describe('spike scale', () => {
     await exercise(world, 12, 5);
     await drain(world);
   }, 180_000);
+});
+
+describe('fenced grant mutators', () => {
+  const LOW = '01J0ROLELOW00000000000000A';
+  const HIGH = '01J0ROLEHIGH0000000000000A';
+
+  let fenced: ReturnType<typeof createFencedGrantRepository>;
+  let statements: Statement[];
+  let uncounted = '01J0NONE';
+
+  interface Acting {
+    readonly userId: string;
+    readonly sessionId: string;
+    readonly grantId: string;
+    readonly roleId: string;
+  }
+
+  function fenceOfActing(acting: Acting, grant?: number): MutationFence {
+    return mutationFence(
+      { userId: acting.userId, sessionId: acting.sessionId } as unknown as AuthenticatedActor,
+      grant === undefined ? {} : { grant },
+    );
+  }
+
+  async function actingAs(
+    name: string,
+    permissions: readonly string[],
+    admin = false,
+  ): Promise<Acting> {
+    const tag = name.toUpperCase().padEnd(10, '0');
+    const acting: Acting = {
+      userId: `01J0ACTORU${tag}000000`,
+      sessionId: `01J0ACTORS${tag}000000`,
+      grantId: `01J0ACTORG${tag}000000`,
+      roleId: `01J0ACTORR${tag}000000`,
+    };
+    const email = `${name}@actor.test`;
+    const now = new Date().toISOString();
+    const hash = Buffer.from(acting.sessionId).toString('hex').padEnd(64, '0');
+    await seed([
+      user(a, acting.userId, email),
+      stmt(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        `01J0ACTORI${tag}000000`,
+        a.orgId,
+        acting.userId,
+        'oidc',
+        `subject-${name}`,
+        email,
+        now,
+      ),
+      role(a, acting.roleId, `actor_${name}`, 'organization', admin ? 1 : 0),
+      ...permissions.map((permission) =>
+        stmt(
+          'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+          a.orgId,
+          acting.roleId,
+          permission,
+        ),
+      ),
+      stmt(
+        'INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        acting.grantId,
+        a.orgId,
+        'email',
+        email,
+        'organization',
+        acting.roleId,
+        NOW,
+        NOW,
+      ),
+      stmt(
+        'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        acting.sessionId,
+        a.orgId,
+        acting.userId,
+        hash,
+        hash,
+        now,
+        new Date(Date.now() + 3_600_000).toISOString(),
+      ),
+    ]);
+    return acting;
+  }
+
+  const WRITER = ['org:grants:write', 'org:read'];
+
+  beforeEach(async () => {
+    statements = [];
+    const recording: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => {
+        statements.push(statement);
+        return executor.all(statement);
+      },
+      batch: (batch) => {
+        statements.push(...batch);
+        return executor.batch(batch);
+      },
+    };
+    fenced = createFencedGrantRepository(recording, {
+      holderInput: () => ({ ...holderInput(), exclude: { identityId: uncounted } }),
+    });
+    uncounted = '01J0NONE';
+    await seed([
+      role(a, LOW, 'low', 'organization', 0),
+      role(a, HIGH, 'high', 'organization', 0),
+      stmt(
+        'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+        a.orgId,
+        LOW,
+        'org:read',
+        a.orgId,
+        HIGH,
+        'org:read',
+        a.orgId,
+        HIGH,
+        'org:users:write',
+      ),
+    ]);
+  });
+
+  async function worldState(): Promise<string> {
+    return JSON.stringify([
+      await rows('SELECT * FROM access_grant ORDER BY id'),
+      await rows('SELECT * FROM cache_epoch ORDER BY org_id'),
+    ]);
+  }
+
+  const create = (acting: Acting, roleId: string, id = G1, email = 'new@example.test') =>
+    fenced.createOrganization(a, fenceOfActing(acting), {
+      id,
+      subject: { type: 'email', value: email },
+      roleId,
+      createdBy: acting.userId,
+      now: NOW,
+      opId: `OP${id}`,
+    });
+
+  it('1: a non-admin cannot grant a role with a permission it lacks, nor a protected role', async () => {
+    const writer = await actingAs('writer', WRITER);
+    const before = await worldState();
+    expect(await create(writer, HIGH)).toBe('authority');
+    expect(await create(writer, ADMIN)).toBe('authority');
+    expect(await worldState()).toBe(before);
+    expect(await create(writer, LOW)).toBe('created');
+  });
+
+  it('1: an organization admin grants any role, protected included', async () => {
+    const admin = await actingAs('boss', WRITER, true);
+    expect(await create(admin, HIGH)).toBe('created');
+    expect(await create(admin, ADMIN, G2, 'second@example.test')).toBe('created');
+  });
+
+  it('1: the T157 probe is forbidden: a non-admin cannot demote a superior, or promote to one', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([
+      emailGrant(a, G1, 'superior@example.test', HIGH),
+      emailGrant(a, G2, 'peer@example.test', LOW),
+    ]);
+    const before = await worldState();
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, LOW, LATER, 'OP1')).toBe(
+      'authority',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G2, HIGH, LATER, 'OP2')).toBe(
+      'authority',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G2, ADMIN, LATER, 'OP3')).toBe(
+      'authority',
+    );
+    expect(await worldState()).toBe(before);
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G2, LOW, LATER, 'OP4')).toBe(
+      'updated',
+    );
+  });
+
+  it('1: the subset is read inside the batch: a permission lost after the fence was built refuses', async () => {
+    const writer = await actingAs('writer', [...WRITER, 'org:users:write']);
+    const fence = fenceOfActing(writer);
+    await seed([
+      stmt(
+        'DELETE FROM role_permission WHERE role_id = ? AND permission = ?',
+        writer.roleId,
+        'org:users:write',
+      ),
+    ]);
+    expect(
+      await fenced.createOrganization(a, fence, {
+        id: G1,
+        subject: { type: 'email', value: 'new@example.test' },
+        roleId: HIGH,
+        createdBy: writer.userId,
+        now: NOW,
+        opId: 'OPX',
+      }),
+    ).toBe('authority');
+    expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([]);
+  });
+
+  it('1: a suspended actor, a revoked session and an actor of another organization refuse', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
+    await seed([stmt('UPDATE session SET revoked_at = ? WHERE id = ?', NOW, writer.sessionId)]);
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toBe(
+      'authority',
+    );
+    const other = await actingAs('other', WRITER);
+    await seed([
+      stmt('UPDATE user_account SET status = ? WHERE id = ?', 'suspended', other.userId),
+    ]);
+    expect(await fenced.deleteOrganization(a, fenceOfActing(other, 1), G1, 'OP2')).toBe(
+      'authority',
+    );
+    const foreign = await actingAs('foreign', WRITER);
+    expect(await fenced.deleteOrganization(b, fenceOfActing(foreign, 1), G1, 'OP3')).toBe(
+      'authority',
+    );
+    expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([{ id: G1 }]);
+  });
+
+  it('2: a non-admin revokes a grant whose role holds permissions it lacks', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(a, G1, 'departing@example.test', HIGH)]);
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toBe('deleted');
+    expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([]);
+  });
+
+  it('2: only an admin revokes or moves a grant of a protected role', async () => {
+    const writer = await actingAs('writer', WRITER);
+    const admin = await actingAs('boss', WRITER, true);
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      emailGrant(a, G2, 'u2@example.test', ADMIN),
+    ]);
+    const before = await worldState();
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toBe(
+      'authority',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, LOW, LATER, 'OP2')).toBe(
+      'authority',
+    );
+    expect(await worldState()).toBe(before);
+    expect(await fenced.deleteOrganization(a, fenceOfActing(admin, 1), G1, 'OP3')).toBe('deleted');
+  });
+
+  it('2: removing or demoting the last protected holder is refused inside the batch', async () => {
+    const admin = await actingAs('boss', WRITER, true);
+    uncounted =
+      (await rows('SELECT id FROM identity WHERE user_id = ?', admin.userId)).map(
+        (row) => (row as { id: string }).id,
+      )[0] ?? uncounted;
+    await seed([
+      stmt('DELETE FROM access_grant WHERE id = ?', actorOf(a).grant),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+    ]);
+    const before = await worldState();
+    expect(await fenced.deleteOrganization(a, fenceOfActing(admin, 1), G1, 'OP1')).toBe(
+      'last_holder',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(admin, 1), G1, LOW, LATER, 'OP2')).toBe(
+      'last_holder',
+    );
+    expect(await worldState()).toBe(before);
+  });
+
+  it('3: a stale grant revision answers conflict and leaves no delta', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
+    const before = await worldState();
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 7), G1, 'OP1')).toBe(
+      'conflict',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 7), G1, LOW, LATER, 'OP2')).toBe(
+      'conflict',
+    );
+    expect(await worldState()).toBe(before);
+  });
+
+  it('3: a change bumps the revision once and records the op id; the old fence then conflicts', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
+    const stale = fenceOfActing(writer, 1);
+    expect(await fenced.changeRole(a, stale, G1, LOW, LATER, 'OPCHANGE')).toBe('updated');
+    expect(await rows('SELECT revision, last_op_id FROM access_grant WHERE id = ?', G1)).toEqual([
+      { revision: 2, last_op_id: 'OPCHANGE' },
+    ]);
+    expect(await fenced.changeRole(a, stale, G1, LOW, LATER, 'OPAGAIN')).toBe('conflict');
+    expect(await fenced.deleteOrganization(a, stale, G1, 'OPDELETE')).toBe('conflict');
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 2), G1, 'OPDELETE')).toBe(
+      'deleted',
+    );
+  });
+
+  it('3: an unknown grant is not_found and a missing role is role_scope_mismatch', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G3, 'OP1')).toBe(
+      'not_found',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G3, LOW, LATER, 'OP2')).toBe(
+      'not_found',
+    );
+    await seed([role(a, '01J0ROLEPROJECTOPEN000000', 'open_project', 'project', 0)]);
+    expect(
+      await fenced.changeRole(
+        a,
+        fenceOfActing(writer, 1),
+        G1,
+        '01J0ROLEPROJECTOPEN000000',
+        LATER,
+        'OP3',
+      ),
+    ).toBe('role_scope_mismatch');
+    expect(await create(writer, '01J0ROLEMISSING000000000A')).toBe('role_scope_mismatch');
+  });
+
+  it('refuses a fence without a grant revision and an empty op id before any SQL', async () => {
+    const writer = await actingAs('writer', WRITER);
+    statements.length = 0;
+    await expect(fenced.deleteOrganization(a, fenceOfActing(writer), G1, 'OP1')).rejects.toThrow(
+      TypeError,
+    );
+    await expect(
+      fenced.changeRole(a, fenceOfActing(writer), G1, LOW, LATER, 'OP1'),
+    ).rejects.toThrow(TypeError);
+    await expect(fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, '')).rejects.toThrow(
+      TypeError,
+    );
+    expect(statements).toEqual([]);
+  });
+
+  it('keeps every statement of the fenced batches and failure probes within 100 bound parameters', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([
+      emailGrant(a, G1, 'x@example.test', HIGH),
+      emailGrant(a, G2, 'y@example.test', LOW),
+    ]);
+    statements.length = 0;
+    await create(writer, HIGH, G3, 'z@example.test');
+    await create(writer, LOW, G3, 'z@example.test');
+    await fenced.changeRole(a, fenceOfActing(writer, 1), G2, HIGH, LATER, 'OP1');
+    await fenced.changeRole(a, fenceOfActing(writer, 9), G2, LOW, LATER, 'OP2');
+    await fenced.changeRole(a, fenceOfActing(writer, 1), G2, LOW, LATER, 'OP3');
+    await fenced.deleteOrganization(a, fenceOfActing(writer, 9), G1, 'OP4');
+    await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP5');
+    expect(statements.length).toBeGreaterThan(20);
+    expect(Math.max(...statements.map((statement) => statement.params.length))).toBeLessThanOrEqual(
+      100,
+    );
+  });
+
+  it('a lost-in-flight concurrent change from one revision gives one winner and one conflict', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pb-grant-fence-'));
+    const shared = await openMigratedDatabase({
+      file: join(directory, 'store.sqlite'),
+      twoOrganizations: true,
+    });
+    try {
+      if (shared.orgs === null) throw new Error('two organizations expected');
+      const org = shared.orgs.a;
+      const second = await shared.second();
+      const sharedActor = {
+        user: '01J0ACTORUSHARED00000000AA',
+        session: '01J0ACTORSSHARED0000000AA',
+      };
+      const hash = Buffer.from(sharedActor.session).toString('hex').padEnd(64, '0');
+      await shared.executor.batch([
+        ...rolesFor(org, ADMIN, true),
+        ...bindings(org),
+        user(org, sharedActor.user, 'shared@actor.test'),
+        stmt(
+          'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+          '01J0ACTORISHARED00000000AA',
+          org.orgId,
+          sharedActor.user,
+          'oidc',
+          'subject-shared',
+          'shared@actor.test',
+          new Date().toISOString(),
+        ),
+        stmt(
+          'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+          org.orgId,
+          ADMIN,
+          'org:grants:write',
+        ),
+        emailGrant(org, G3, 'shared@actor.test', ADMIN),
+        emailGrant(org, G1, 'target@example.test', AUDITOR),
+        emailGrant(org, G2, 'keeper@example.test', ADMIN),
+        user(org, U1, 'keeper@example.test'),
+        stmt(
+          'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          sharedActor.session,
+          org.orgId,
+          sharedActor.user,
+          hash,
+          hash,
+          new Date().toISOString(),
+          new Date(Date.now() + 3_600_000).toISOString(),
+        ),
+      ]);
+      const options = {
+        holderInput: () => ({ ...holderInput(), exclude: { identityId: '01J0NONE' } }),
+      };
+      const one = createFencedGrantRepository(shared.executor, options);
+      const two = createFencedGrantRepository(second, options);
+      const fence = mutationFence(
+        {
+          userId: sharedActor.user,
+          sessionId: sharedActor.session,
+        } as unknown as AuthenticatedActor,
+        { grant: 1 },
+      );
+      const outcomes = await Promise.all([
+        one.changeRole(org, fence, G1, ADMIN_TWO, LATER, 'OPONE'),
+        two.changeRole(org, fence, G1, ADMIN, LATER, 'OPTWO'),
+      ]);
+      expect([...outcomes].sort()).toEqual(['conflict', 'updated']);
+      expect(
+        await shared.executor.all({
+          sql: 'SELECT revision FROM access_grant WHERE id = ?',
+          params: [G1],
+        }),
+      ).toEqual([{ revision: 2 }]);
+    } finally {
+      await shared.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it('a busy or too-big database error surfaces and is never answered as a duplicate', async () => {
+    const writer = await actingAs('writer', WRITER);
+    for (const kind of ['busy', 'too_big'] as const) {
+      const failing: SqlExecutor = {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        batch: () => Promise.reject(new DbError(kind, `simulated ${kind}`)),
+      };
+      const repository = createFencedGrantRepository(failing, { holderInput });
+      await expect(
+        repository.createOrganization(a, fenceOfActing(writer), {
+          id: G1,
+          subject: { type: 'email', value: 'new@example.test' },
+          roleId: LOW,
+          createdBy: writer.userId,
+          now: NOW,
+          opId: 'OPBUSY',
+        }),
+      ).rejects.toThrow(/failed unclassified/);
+    }
+  });
+
+  it('a real duplicate subject or id is still answered duplicate', async () => {
+    const writer = await actingAs('writer', WRITER);
+    expect(await create(writer, LOW)).toBe('created');
+    expect(await create(writer, LOW, G2)).toBe('duplicate');
+    expect(await create(writer, LOW, G1, 'other@example.test')).toBe('duplicate');
+  });
+
+  it('an id that exists in another organization is answered duplicate and nothing is stored', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(b, G1, 'elsewhere@example.test', ADMIN_B)]);
+    const before = await worldState();
+    expect(await create(writer, LOW)).toBe('duplicate');
+    expect(await worldState()).toBe(before);
+    expect(await rows('SELECT org_id FROM access_grant WHERE id = ?', G1)).toEqual([
+      { org_id: b.orgId },
+    ]);
+  });
+
+  it('exposes the grant revision: read after a change gives the new one and a fence built from it works', async () => {
+    const writer = await actingAs('writer', WRITER);
+    await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
+    const revisionOfListed = async () =>
+      (await fenced.listOrganization(a)).find((grant) => grant.id === G1)?.revision;
+    expect(await revisionOfListed()).toBe(1);
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, HIGH, LATER, 'OP1')).toBe(
+      'authority',
+    );
+    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, LOW, LATER, 'OP2')).toBe(
+      'updated',
+    );
+    const revision = await revisionOfListed();
+    expect(revision).toBe(2);
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, revision), G1, 'OP3')).toBe(
+      'deleted',
+    );
+  });
+
+  it('a createdBy outside the organization is refused inside the batch: nothing commits, then it throws', async () => {
+    const writer = await actingAs('writer', WRITER);
+    const before = await worldState();
+    await expect(
+      fenced.createOrganization(a, fenceOfActing(writer), {
+        id: G1,
+        subject: { type: 'email', value: 'new@example.test' },
+        roleId: LOW,
+        createdBy: UB,
+        now: NOW,
+        opId: 'OPCREATOR',
+      }),
+    ).rejects.toThrow(TypeError);
+    expect(await worldState()).toBe(before);
+  });
+
+  describe('authority changing between the service reads and the batch', () => {
+    let directory: string;
+    let shared: MigratedDatabase;
+    let org: OrgContext;
+    let other: SqlExecutor;
+    let beforeBatch: (() => Promise<void>) | null;
+    let admin: ReturnType<typeof createAdministration>;
+    const actorIds = {
+      user: '01J0ACTORUSTALE00000000AA',
+      session: '01J0ACTORSSTALE0000000AA',
+      role: '01J0ACTORRSTALE0000000AA',
+    };
+    const staleActor = {
+      userId: actorIds.user,
+      permissions: new Set(['org:grants:write', 'org:read', 'org:users:write']),
+      isOrganizationAdmin: false,
+    };
+
+    beforeEach(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'pb-grant-stale-'));
+      shared = await openMigratedDatabase({
+        file: join(directory, 'store.sqlite'),
+        twoOrganizations: true,
+      });
+      if (shared.orgs === null) throw new Error('two organizations expected');
+      org = shared.orgs.a;
+      other = await shared.second();
+      beforeBatch = null;
+      const hash = Buffer.from(actorIds.session).toString('hex').padEnd(64, '0');
+      await shared.executor.batch([
+        ...rolesFor(org, ADMIN, true),
+        ...bindings(org),
+        user(org, actorIds.user, 'stale@actor.test'),
+        stmt(
+          'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+          '01J0ACTORISTALE00000000AA',
+          org.orgId,
+          actorIds.user,
+          'oidc',
+          'subject-stale',
+          'stale@actor.test',
+          new Date().toISOString(),
+        ),
+        role(org, actorIds.role, 'stale_actor', 'organization', 0),
+        ...['org:grants:write', 'org:read', 'org:users:write'].map((permission) =>
+          stmt(
+            'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+            org.orgId,
+            actorIds.role,
+            permission,
+          ),
+        ),
+        stmt(
+          'INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          G3,
+          org.orgId,
+          'email',
+          'stale@actor.test',
+          'organization',
+          actorIds.role,
+          NOW,
+          NOW,
+        ),
+        stmt(
+          'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          actorIds.session,
+          org.orgId,
+          actorIds.user,
+          hash,
+          hash,
+          new Date().toISOString(),
+          new Date(Date.now() + 3_600_000).toISOString(),
+        ),
+        role(org, LOW, 'low', 'organization', 0),
+        role(org, HIGH, 'high', 'organization', 0),
+        stmt(
+          'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?), (?, ?, ?)',
+          org.orgId,
+          LOW,
+          'org:read',
+          org.orgId,
+          HIGH,
+          'org:users:write',
+        ),
+      ]);
+      const barrier: SqlExecutor = {
+        driver: shared.executor.driver,
+        all: (statement) => shared.executor.all(statement),
+        batch: async (batch) => {
+          const hook = beforeBatch;
+          beforeBatch = null;
+          if (hook !== null) await hook();
+          return shared.executor.batch(batch);
+        },
+      };
+      let next = 0;
+      admin = createAdministration({
+        roles: createRoleRepository(shared.executor),
+        grants: createFencedGrantRepository(barrier, { holderInput }),
+        users: { get: async () => ({ id: actorIds.user }) as never },
+        providers: new Map(),
+        clock: fixedClock(LATER),
+        ids: { ulid: () => `01J0STALEID${String(next++).padStart(15, '0')}` },
+        log: () => undefined,
+      });
+    });
+
+    afterEach(async () => {
+      await shared.close();
+      await rm(directory, { recursive: true, force: true });
+    });
+
+    const fence = (grant?: number) =>
+      mutationFence(
+        { userId: actorIds.user, sessionId: actorIds.session } as unknown as AuthenticatedActor,
+        grant === undefined ? {} : { grant },
+      );
+    const grantRows = () =>
+      shared.executor.all({
+        sql: 'SELECT id, role_id, revision FROM access_grant ORDER BY id',
+        params: [],
+      });
+    const dropPermission = () =>
+      other
+        .batch([
+          stmt(
+            'DELETE FROM role_permission WHERE role_id = ? AND permission = ?',
+            actorIds.role,
+            'org:users:write',
+          ),
+        ])
+        .then(() => undefined);
+
+    it('create: the actor loses a permission after the service authorized it', async () => {
+      const before = JSON.stringify(await grantRows());
+      beforeBatch = dropPermission;
+      const result = await admin.grantOrganization(org, staleActor, fence(), {
+        subject: { type: 'email', value: 'new@example.test' },
+        roleId: HIGH,
+      });
+      expect(result).toEqual({ ok: false, error: 'forbidden' });
+      expect(JSON.stringify(await grantRows())).toBe(before);
+    });
+
+    it('change: the actor loses a permission after the service authorized it', async () => {
+      await shared.executor.batch([emailGrant(org, G1, 'x@example.test', LOW)]);
+      const before = JSON.stringify(await grantRows());
+      beforeBatch = dropPermission;
+      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, HIGH)).toEqual({
+        ok: false,
+        error: 'forbidden',
+      });
+      expect(JSON.stringify(await grantRows())).toBe(before);
+    });
+
+    it('change: the replacement role gains a permission the actor lacks after the service read it', async () => {
+      await shared.executor.batch([emailGrant(org, G1, 'x@example.test', LOW)]);
+      const before = JSON.stringify(await grantRows());
+      beforeBatch = () =>
+        other
+          .batch([
+            stmt(
+              'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+              org.orgId,
+              HIGH,
+              'org:roles:write',
+            ),
+          ])
+          .then(() => undefined);
+      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, HIGH)).toEqual({
+        ok: false,
+        error: 'forbidden',
+      });
+      expect(JSON.stringify(await grantRows())).toBe(before);
+    });
+
+    it('change: the current role gains a permission the actor lacks after the service read it', async () => {
+      await shared.executor.batch([emailGrant(org, G1, 'x@example.test', LOW)]);
+      const before = JSON.stringify(await grantRows());
+      beforeBatch = () =>
+        other
+          .batch([
+            stmt(
+              'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+              org.orgId,
+              LOW,
+              'org:roles:write',
+            ),
+          ])
+          .then(() => undefined);
+      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, LOW)).toEqual({
+        ok: false,
+        error: 'forbidden',
+      });
+      expect(JSON.stringify(await grantRows())).toBe(before);
+    });
+  });
 });

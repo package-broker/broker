@@ -1,5 +1,6 @@
-import { sql, type Compilable, type ExpressionBuilder } from 'kysely';
-import { DbError } from '@package-broker/core/db/errors';
+import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
+import { SESSION_ABSOLUTE_MS, SESSION_IDLE_MS } from '@package-broker/core/auth/session';
+import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type {
   GrantRepository,
   GrantSubject,
@@ -9,15 +10,20 @@ import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-br
 import { normalizeEmail } from '@package-broker/core/identity/policy';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import {
+  assertCheck,
+  assertGuard,
   compile,
   db,
   existsGuard,
   protectedHolder,
+  runOrgFenced,
   type Database,
   type Guard,
   type ProtectedHolderExclusion,
   type ProtectedHolderInput,
+  type ProtectedHolderProvider,
 } from '../kysely.js';
+import { holdsPermission, permissionRows } from './access.js';
 import { revokeAllForUserStatement } from './session.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -32,6 +38,7 @@ interface GrantRow {
   readonly role_id: string;
   readonly created_by: string | null;
   readonly created_at: string;
+  readonly revision: number;
 }
 
 interface IdRow {
@@ -116,6 +123,7 @@ function toGrant(row: GrantRow): OrganizationGrant {
     roleId: row.role_id,
     createdBy: row.created_by,
     createdAt: row.created_at,
+    revision: row.revision,
   };
 }
 
@@ -129,6 +137,182 @@ function organizationRoleExists(ctx: OrgContext, roleId: string) {
         .where('target_role.org_id', '=', ctx.orgId)
         .where('target_role.scope', '=', 'organization'),
     );
+}
+
+const DB_TIME = sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
+
+function dbTimeAgo(ms: number) {
+  return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms / 1000} seconds`})`;
+}
+
+type LooseDatabase = Record<string, Record<string, unknown>>;
+
+const loose = db as unknown as Kysely<LooseDatabase>;
+
+function providersOf(input: ProtectedHolderInput): readonly ProtectedHolderProvider[] {
+  return input.kind === 'fresh' ? input.providers : [];
+}
+
+function requireNonEmpty(value: string, label: string): void {
+  if (typeof value !== 'string' || value === '') {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+}
+
+function expectedRevision(fence: MutationFence): number {
+  const expected = fence.expected['grant'];
+  if (expected === undefined) throw new TypeError('fence must carry an expected grant revision');
+  return expected;
+}
+
+interface GrantAuthority {
+  /** Acting user, live session and `org:grants:write`; the head of the fenced batch. */
+  readonly live: Guard;
+  /** Admin-only protected roles and, where wanted, the permission subset. */
+  readonly reach: Guard;
+}
+
+interface ReachScope {
+  readonly roleId?: string;
+  readonly grantId?: string;
+  readonly subset: boolean;
+}
+
+function grantAuthority(
+  ctx: OrgContext,
+  fence: MutationFence,
+  providers: readonly ProtectedHolderProvider[],
+  scope: ReachScope,
+): GrantAuthority {
+  const org = ctx.orgId;
+  const localAdmin = sql<SqlBool>`exists ${loose
+    .selectFrom('session as la_session')
+    .select(sql.lit(1).as('one'))
+    .where('la_session.org_id', '=', org)
+    .where('la_session.id', '=', fence.sessionId)
+    .where('la_session.revoked_at', 'is', null)
+    .where('la_session.identity_id', 'is', null)}`;
+  const rows = () =>
+    loose.selectFrom(
+      permissionRows(ctx, fence.userId, null, providers, { localAdmin }).as('lr') as never,
+    );
+  const isAdmin = sql<SqlBool>`exists ${rows()
+    .select(sql.lit(1).as('one'))
+    .where(sql<SqlBool>`lr.protects = 1`)}`;
+  const livePermissions = rows().select(sql<string>`lr.permission`.as('permission'));
+  const grantRole = sql`(select g.role_id from access_grant g where g.org_id = ${org} and g.id = ${scope.grantId ?? null})`;
+  const involved = sql`(${sql.join(
+    [
+      ...(scope.roleId === undefined ? [] : [sql`r.id = ${scope.roleId}`]),
+      ...(scope.grantId === undefined ? [] : [sql`r.id = ${grantRole}`]),
+    ],
+    sql` or `,
+  )})`;
+  const touchesProtected = sql<SqlBool>`exists (
+    select 1 from role r where r.org_id = ${org} and r.protects_last_holder = 1 and ${involved})`;
+  const wanted = sql`select rp.permission from role_permission rp where rp.org_id = ${org} and ${sql`(${sql.join(
+    [
+      ...(scope.roleId === undefined ? [] : [sql`rp.role_id = ${scope.roleId}`]),
+      ...(scope.grantId === undefined || !scope.subset ? [] : [sql`rp.role_id = ${grantRole}`]),
+    ],
+    sql` or `,
+  )})`}`;
+  const withinActor = scope.subset
+    ? sql<SqlBool>`not exists (select 1 from (${wanted}) wanted where wanted.permission not in ${livePermissions})`
+    : sql<SqlBool>`1`;
+  const live = sql<SqlBool>`(
+    exists (
+      select 1 from user_account au
+      join session s on s.org_id = au.org_id and s.user_id = au.id
+      where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
+        and s.id = ${fence.sessionId} and s.revoked_at is null
+        and s.expires_at > ${DB_TIME}
+        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
+        and coalesce(s.last_seen_at, s.created_at) > ${dbTimeAgo(SESSION_IDLE_MS)})
+    and ${holdsPermission(ctx, {
+      userId: fence.userId,
+      permission: 'org:grants:write',
+      projectId: null,
+      providerAnchors: providers,
+      projectState: 'any',
+      session: fence.sessionId,
+    })})`;
+  return {
+    live,
+    reach: sql<SqlBool>`(${isAdmin} or (not ${touchesProtected} and ${withinActor}))`,
+  };
+}
+
+function probe(condition: Guard): ScalarStatement {
+  return scalar(db.selectNoFrom(sql<number>`${condition}`.as('holds')));
+}
+
+function probesFor(
+  authority: GrantAuthority,
+  collision: readonly Guard[],
+  revision?: { readonly ctx: OrgContext; readonly id: string; readonly expected: number },
+): FailureProbes {
+  return {
+    authority: probe(sql<SqlBool>`(${authority.live} and ${authority.reach}) is not 1`),
+    ...(revision === undefined
+      ? {}
+      : {
+          conflict: probe(
+            sql<SqlBool>`exists (select 1 from access_grant where org_id = ${revision.ctx.orgId} and id = ${revision.id} and scope = 'organization' and revision <> ${revision.expected})`,
+          ),
+        }),
+    collision: probe(sql<SqlBool>`(${sql.join(collision, sql` and `)}) is not 1`),
+  };
+}
+
+type RefusedBy = 'authority' | 'conflict' | 'indeterminate' | 'collision';
+
+function refusedBy(outcome: { readonly reason: string }, label: string): RefusedBy {
+  if (
+    outcome.reason === 'authority' ||
+    outcome.reason === 'conflict' ||
+    outcome.reason === 'indeterminate' ||
+    outcome.reason === 'collision'
+  ) {
+    return outcome.reason;
+  }
+  throw new Error(`${label} failed unclassified (${outcome.reason})`);
+}
+
+function grantRevisionHolds(ctx: OrgContext, id: string, expected: number): Guard {
+  return sql<SqlBool>`exists (select 1 from access_grant where org_id = ${ctx.orgId} and id = ${id} and scope = 'organization' and revision = ${expected})`;
+}
+
+function targetRoleHolds(ctx: OrgContext, roleId: string): Guard {
+  return sql<SqlBool>`exists (select 1 from role where org_id = ${ctx.orgId} and id = ${roleId} and scope = 'organization')`;
+}
+
+function grantOnProtectedRole(ctx: OrgContext, id: string): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('access_grant as pg')
+      .innerJoin('role as current_role', (join) =>
+        join
+          .onRef('current_role.id', '=', 'pg.role_id')
+          .onRef('current_role.org_id', '=', 'pg.org_id'),
+      )
+      .select(sql.lit(1).as('one'))
+      .where('pg.id', '=', id)
+      .where('pg.org_id', '=', ctx.orgId)
+      .where('pg.scope', '=', 'organization')
+      .where('current_role.protects_last_holder', '=', 1),
+  );
+}
+
+function roleProtects(ctx: OrgContext, roleId: string): Guard {
+  return existsGuard((database) =>
+    database
+      .selectFrom('role as next_role')
+      .select(sql.lit(1).as('one'))
+      .where('next_role.id', '=', roleId)
+      .where('next_role.org_id', '=', ctx.orgId)
+      .where('next_role.protects_last_holder', '=', 1),
+  );
 }
 
 function withExclusion(
@@ -180,6 +364,7 @@ export function createGrantRepository(
               'access_grant.role_id',
               'access_grant.created_by',
               'access_grant.created_at',
+              'access_grant.revision',
             ])
             .where('access_grant.org_id', '=', ctx.orgId)
             .where('access_grant.scope', '=', 'organization')
@@ -190,13 +375,14 @@ export function createGrantRepository(
       return rows.map(toGrant);
     },
 
-    async createOrganization(ctx, input) {
+    async createOrganization(ctx, fence, input) {
       requireSubject(input.subject);
       const now = timestamp(input.now);
+      requireNonEmpty(input.opId, 'opId');
       const subject = input.subject;
       const provider = subject.type === 'group' ? subject.provider : null;
       const createdBy = input.createdBy;
-      let source = db
+      const source = db
         .selectFrom('role')
         .select((eb) => [
           eb.val(input.id).as('id'),
@@ -210,21 +396,11 @@ export function createGrantRepository(
           eb.val(createdBy).as('created_by'),
           eb.val(now).as('created_at'),
           eb.val(now).as('updated_at'),
+          eb.val(input.opId).as('last_op_id'),
         ])
         .where('role.id', '=', input.roleId)
         .where('role.org_id', '=', ctx.orgId)
         .where('role.scope', '=', 'organization');
-      if (createdBy !== null) {
-        source = source.where((eb) =>
-          eb.exists(
-            eb
-              .selectFrom('user_account as creator')
-              .select(sql.lit(1).as('one'))
-              .where('creator.id', '=', createdBy)
-              .where('creator.org_id', '=', ctx.orgId),
-          ),
-        );
-      }
       const insert = scalar(
         db
           .insertInto('access_grant')
@@ -240,103 +416,164 @@ export function createGrantRepository(
             'created_by',
             'created_at',
             'updated_at',
+            'last_op_id',
           ])
           .expression(source)
           .returning('id'),
       );
-      const roleCheck = scalar(
-        db
-          .selectFrom('role as target_role')
-          .select('target_role.id')
-          .where('target_role.id', '=', input.roleId)
-          .where('target_role.org_id', '=', ctx.orgId)
-          .where('target_role.scope', '=', 'organization'),
+      const providers = providersOf(await options.holderInput(ctx));
+      const authority = grantAuthority(ctx, fence, providers, {
+        roleId: input.roleId,
+        subset: true,
+      });
+      const roleHolds = targetRoleHolds(ctx, input.roleId);
+      const creatorHolds =
+        createdBy === null
+          ? sql<SqlBool>`1`
+          : sql<SqlBool>`exists (select 1 from user_account where org_id = ${ctx.orgId} and id = ${createdBy})`;
+      const unused = sql<SqlBool>`(not exists (select 1 from access_grant where id = ${input.id})
+        and not exists (
+          select 1 from access_grant where org_id = ${ctx.orgId} and scope = 'organization'
+            and subject_type = ${subject.type} and subject_value = ${subject.value}
+            and coalesce(subject_provider, '') = ${provider ?? ''}))`;
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(authority.live, ctx),
+        [
+          ...assertCheck(authority.reach),
+          ...assertCheck(roleHolds),
+          ...assertCheck(creatorHolds),
+          ...assertCheck(unused),
+          insert,
+        ],
+        probesFor(authority, [roleHolds, creatorHolds, unused]),
       );
-      try {
-        const [inserted, role] = await executor.batch([insert, roleCheck]);
-        if ((inserted?.rows.length ?? 0) > 0) return 'created';
-        if ((role?.rows.length ?? 0) === 0) return 'role_scope_mismatch';
-      } catch (error) {
-        if (error instanceof DbError && error.kind === 'unique') return 'duplicate';
-        throw error;
+      if (!outcome.ok) {
+        const reason = refusedBy(outcome, 'grant create');
+        if (reason === 'conflict') throw new Error('grant create has no revision to conflict with');
+        if (reason !== 'collision') return reason;
+        const found = await executor.all<{ role_ok: number; creator_ok: number }>(
+          scalar(
+            db.selectNoFrom([
+              sql<number>`${roleHolds}`.as('role_ok'),
+              sql<number>`${creatorHolds}`.as('creator_ok'),
+            ]),
+          ),
+        );
+        if (found[0]?.role_ok !== 1) return 'role_scope_mismatch';
+        if (found[0]?.creator_ok !== 1) {
+          throw new TypeError('createdBy must be a user of the organization');
+        }
+        return 'duplicate';
       }
-      throw new TypeError('createdBy must be a user of the organization');
+      const inserted = outcome.results[outcome.results.length - 1];
+      if ((inserted?.rows.length ?? 0) > 0) return 'created';
+      throw new Error('grant create inserted no row after its guards held');
     },
 
-    async deleteOrganization(ctx, id) {
+    async deleteOrganization(ctx, fence, id, opId) {
+      requireNonEmpty(id, 'id');
+      requireNonEmpty(opId, 'opId');
+      const expected = expectedRevision(fence);
       const holders = await options.holderInput(ctx);
-      const [deleted, remaining] = await executor.batch([
-        scalar(
-          db
-            .deleteFrom('access_grant')
-            .where('access_grant.id', '=', id)
-            .where('access_grant.org_id', '=', ctx.orgId)
-            .where('access_grant.scope', '=', 'organization')
-            .where((eb) =>
-              eb.or([
-                eb.not(
-                  eb.exists(
-                    eb
-                      .selectFrom('role as current_role')
-                      .select(sql.lit(1).as('one'))
-                      .whereRef('current_role.id', '=', 'access_grant.role_id')
-                      .whereRef('current_role.org_id', '=', 'access_grant.org_id')
-                      .where('current_role.protects_last_holder', '=', 1),
-                  ),
-                ),
-                anotherHolder(ctx, holders, { grantId: id }),
-              ]),
-            )
-            .returning('id'),
-        ),
-        scalar(organizationGrantExists(ctx, id)),
-      ]);
-      if ((deleted?.rows.length ?? 0) > 0) return 'deleted';
-      return (remaining?.rows.length ?? 0) > 0 ? 'last_holder' : 'not_found';
+      const authority = grantAuthority(ctx, fence, providersOf(holders), {
+        grantId: id,
+        subset: false,
+      });
+      const revision = grantRevisionHolds(ctx, id, expected);
+      const lastHolder = sql<SqlBool>`(not ${grantOnProtectedRole(ctx, id)} or ${anotherHolder(ctx, holders, { grantId: id })})`;
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(authority.live, ctx),
+        [
+          ...assertCheck(authority.reach),
+          ...assertCheck(revision),
+          ...assertCheck(lastHolder),
+          scalar(
+            db
+              .deleteFrom('access_grant')
+              .where('access_grant.id', '=', id)
+              .where('access_grant.org_id', '=', ctx.orgId)
+              .where('access_grant.scope', '=', 'organization')
+              .where('access_grant.revision', '=', expected)
+              .returning('id'),
+          ),
+        ],
+        probesFor(authority, [revision, lastHolder], { ctx, id, expected }),
+      );
+      if (outcome.ok) {
+        const deleted = outcome.results[outcome.results.length - 1];
+        if ((deleted?.rows.length ?? 0) > 0) return 'deleted';
+        throw new Error('grant delete matched no row after its guards held');
+      }
+      const reason = refusedBy(outcome, 'grant delete');
+      if (reason !== 'collision') return reason;
+      const remaining = await executor.all<IdRow>(scalar(organizationGrantExists(ctx, id)));
+      return remaining.length > 0 ? 'last_holder' : 'not_found';
     },
 
-    async changeRole(ctx, id, roleId, now) {
+    async changeRole(ctx, fence, id, roleId, now, opId) {
       const stamp = timestamp(now);
+      requireNonEmpty(id, 'id');
+      requireNonEmpty(roleId, 'roleId');
+      requireNonEmpty(opId, 'opId');
+      const expected = expectedRevision(fence);
       const holders = await options.holderInput(ctx);
-      const targetRole = organizationRoleExists(ctx, roleId);
-      const [updated, state] = await executor.batch([
+      const authority = grantAuthority(ctx, fence, providersOf(holders), {
+        grantId: id,
+        roleId,
+        subset: true,
+      });
+      const revision = grantRevisionHolds(ctx, id, expected);
+      const roleHolds = targetRoleHolds(ctx, roleId);
+      const lastHolder = sql<SqlBool>`(not ${grantOnProtectedRole(ctx, id)} or ${roleProtects(ctx, roleId)} or ${anotherHolder(ctx, holders, { grantId: id })})`;
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(authority.live, ctx),
+        [
+          ...assertCheck(authority.reach),
+          ...assertCheck(revision),
+          ...assertCheck(roleHolds),
+          ...assertCheck(lastHolder),
+          scalar(
+            db
+              .updateTable('access_grant')
+              .set({
+                role_id: roleId,
+                updated_at: stamp,
+                revision: sql`revision + 1`,
+                last_op_id: opId,
+              })
+              .where('access_grant.id', '=', id)
+              .where('access_grant.org_id', '=', ctx.orgId)
+              .where('access_grant.scope', '=', 'organization')
+              .where('access_grant.revision', '=', expected)
+              .returning('id'),
+          ),
+        ],
+        probesFor(authority, [revision, roleHolds, lastHolder], { ctx, id, expected }),
+      );
+      if (outcome.ok) {
+        const updated = outcome.results[outcome.results.length - 1];
+        if ((updated?.rows.length ?? 0) > 0) return 'updated';
+        throw new Error('grant change matched no row after its guards held');
+      }
+      const reason = refusedBy(outcome, 'grant change');
+      if (reason !== 'collision') return reason;
+      const rows = await executor.all<RoleCheckRow>(
         scalar(
-          db
-            .updateTable('access_grant')
-            .set({ role_id: roleId, updated_at: stamp })
-            .where('access_grant.id', '=', id)
-            .where('access_grant.org_id', '=', ctx.orgId)
-            .where('access_grant.scope', '=', 'organization')
-            .where(targetRole)
-            .where((eb) =>
-              eb.or([
-                eb.not(
-                  eb.exists(
-                    eb
-                      .selectFrom('role as current_role')
-                      .select(sql.lit(1).as('one'))
-                      .whereRef('current_role.id', '=', 'access_grant.role_id')
-                      .whereRef('current_role.org_id', '=', 'access_grant.org_id')
-                      .where('current_role.protects_last_holder', '=', 1),
-                  ),
-                ),
-                eb.exists(
-                  eb
-                    .selectFrom('role as next_role')
-                    .select(sql.lit(1).as('one'))
-                    .where('next_role.id', '=', roleId)
-                    .where('next_role.org_id', '=', ctx.orgId)
-                    .where('next_role.protects_last_holder', '=', 1),
-                ),
-                anotherHolder(ctx, holders, { grantId: id }),
-              ]),
-            )
-            .returning('id'),
+          organizationGrantExists(ctx, id).select((eb) =>
+            organizationRoleExists(ctx, roleId)(eb).as('role_ok'),
+          ),
         ),
-        scalar(organizationGrantExists(ctx, id).select((eb) => targetRole(eb).as('role_ok'))),
-      ]);
-      if ((updated?.rows.length ?? 0) > 0) return 'updated';
-      const row = state?.rows[0] as RoleCheckRow | undefined;
+      );
+      const row = rows[0];
       if (row === undefined) return 'not_found';
       return row.role_ok === 1 ? 'last_holder' : 'role_scope_mismatch';
     },

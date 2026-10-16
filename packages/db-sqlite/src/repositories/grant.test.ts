@@ -13,6 +13,7 @@ import type { GrantRepository } from '@package-broker/core/db/grants';
 import { fixedClock } from '@package-broker/core/ids';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
+import { sql } from 'kysely';
 import { compile, db, protectedHolder } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createRoleRepository } from './role.js';
@@ -57,10 +58,17 @@ function holderInput(): ProtectedHolderInput {
   };
 }
 
-type UnfencedGrants = Pick<
-  GrantRepository,
-  'listOrganization' | 'suspendUser' | 'reactivateUser' | 'countProtectedHolders'
-> & {
+type UnfencedGrants = Pick<GrantRepository, 'listOrganization' | 'countProtectedHolders'> & {
+  suspendUser(
+    ctx: OrgContext,
+    userId: string,
+    now: string,
+  ): ReturnType<GrantRepository['suspendUser']>;
+  reactivateUser(
+    ctx: OrgContext,
+    userId: string,
+    now: string,
+  ): ReturnType<GrantRepository['reactivateUser']>;
   createOrganization(
     ctx: OrgContext,
     input: Omit<Parameters<GrantRepository['createOrganization']>[2], 'opId'>,
@@ -128,6 +136,12 @@ function actorStatements(org: OrgContext): Statement[] {
       ACTOR_PERMISSION,
     ),
     stmt(
+      'INSERT OR IGNORE INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      org.orgId,
+      ids.role,
+      'org:users:write',
+    ),
+    stmt(
       'INSERT OR IGNORE INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, NULL, ?, ?)',
       ids.grant,
       org.orgId,
@@ -185,8 +199,10 @@ function createGrantRepository(
   return {
     listOrganization: async (ctx) =>
       (await fenced.listOrganization(ctx)).filter((grant) => grant.id !== actorOf(ctx).grant),
-    suspendUser: (ctx, userId, now) => fenced.suspendUser(ctx, userId, now),
-    reactivateUser: (ctx, userId, now) => fenced.reactivateUser(ctx, userId, now),
+    suspendUser: async (ctx, userId, now) =>
+      fenced.suspendUser(ctx, await fenceFor(ctx), userId, now),
+    reactivateUser: async (ctx, userId, now) =>
+      fenced.reactivateUser(ctx, await fenceFor(ctx), userId, now),
     countProtectedHolders: (ctx) => fenced.countProtectedHolders(ctx),
     createOrganization: async (ctx, input) =>
       fenced.createOrganization(ctx, await fenceFor(ctx), { ...input, opId: nextOp() }),
@@ -1033,28 +1049,28 @@ describe('suspendUser and reactivateUser', () => {
   it('5: reactivation restores active and leaves the revoked sessions revoked', async () => {
     await seed([session(a, '01J0SESSION0000000000000001', U2)]);
     expect(await grants.suspendUser(a, U2, LATER)).toBe('suspended');
-    expect(await grants.reactivateUser(a, U2, '2026-10-15T14:00:00.000Z')).toBe(true);
+    expect(await grants.reactivateUser(a, U2, '2026-10-15T14:00:00.000Z')).toBe('reactivated');
     expect(await rows('SELECT status, email FROM user_account WHERE id = ?', U2)).toEqual([
       { status: 'active', email: 'u2@example.test' },
     ]);
     expect(await rows("SELECT revoked_at FROM session WHERE id NOT LIKE '01J0ACTOR%'")).toEqual([
       { revoked_at: LATER },
     ]);
-    expect(await grants.reactivateUser(a, U2, '2026-10-15T15:00:00.000Z')).toBe(false);
+    expect(await grants.reactivateUser(a, U2, '2026-10-15T15:00:00.000Z')).toBe('unchanged');
   });
 
-  it('suspending a suspended user answers suspended and does not rewrite updated_at', async () => {
+  it('suspending a suspended user answers unchanged and does not rewrite updated_at', async () => {
     expect(await grants.suspendUser(a, U2, NOW)).toBe('suspended');
-    expect(await grants.suspendUser(a, U2, LATER)).toBe('suspended');
+    expect(await grants.suspendUser(a, U2, LATER)).toBe('unchanged');
     expect(await rows('SELECT updated_at FROM user_account WHERE id = ?', U2)).toEqual([
       { updated_at: NOW },
     ]);
   });
 
-  it('a user suspended by a rival connection answers suspended, not last_holder', async () => {
+  it('a user suspended by a rival connection answers unchanged, not last_holder', async () => {
     await seed([emailGrant(a, G1, 'u1@example.test', ADMIN)]);
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U1));
-    expect(await grants.suspendUser(a, U1, LATER)).toBe('suspended');
+    expect(await grants.suspendUser(a, U1, LATER)).toBe('unchanged');
   });
 
   it('a holder of a protected role in another organization does not let the last holder go', async () => {
@@ -1082,22 +1098,311 @@ describe('suspendUser and reactivateUser', () => {
     const before = await snapshot();
     expect(await grants.suspendUser(a, '01J0USER00000000000000ZZZZ', LATER)).toBe('not_found');
     expect(await grants.suspendUser(a, UB, LATER)).toBe('not_found');
-    expect(await grants.reactivateUser(a, UB, LATER)).toBe(false);
-    expect(await grants.reactivateUser(a, '01J0USER00000000000000ZZZZ', LATER)).toBe(false);
+    expect(await grants.reactivateUser(a, UB, LATER)).toBe('not_found');
+    expect(await grants.reactivateUser(a, '01J0USER00000000000000ZZZZ', LATER)).toBe('not_found');
     expect(await snapshot()).toBe(before);
   });
 
-  it('reactivateUser is false for an active user and one statement', async () => {
+  it('reactivateUser is unchanged for an active user: one batch and four reads', async () => {
     const counted = countCalls(executor);
     expect(
       await createGrantRepository(counted.executor, { holderInput }).reactivateUser(a, U1, LATER),
-    ).toBe(false);
-    expect(counted.counts().all + counted.counts().batch).toBe(1);
+    ).toBe('unchanged');
+    expect(counted.counts()).toEqual({ all: 4, batch: 1 });
   });
 
   it('rejects a malformed timestamp before SQL', async () => {
     await expect(grants.suspendUser(a, U1, 'now')).rejects.toThrow(TypeError);
     await expect(grants.reactivateUser(a, U1, 'now')).rejects.toThrow(TypeError);
+  });
+});
+
+const LIMITED = {
+  user: '01J0LIMITEDUSER00000000AA',
+  identity: '01J0LIMITEDIDEN00000000AA',
+  role: '01J0LIMITEDROLE00000000AA',
+  grant: '01J0LIMITEDGRNT00000000AA',
+  session: '01J0LIMITEDSESS00000000AA',
+};
+
+function limitedActor(org: OrgContext, permission = 'org:users:write'): Statement[] {
+  const now = new Date().toISOString();
+  const hash = 'b'.repeat(64);
+  return [
+    user(org, LIMITED.user, 'limited@actor.test'),
+    stmt(
+      'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      LIMITED.identity,
+      org.orgId,
+      LIMITED.user,
+      'oidc',
+      'subject-limited',
+      'limited@actor.test',
+      now,
+    ),
+    stmt(
+      'INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES (?, ?, ?, ?, ?, 0)',
+      LIMITED.role,
+      org.orgId,
+      'limited_actor',
+      'limited_actor',
+      'organization',
+    ),
+    stmt(
+      'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      org.orgId,
+      LIMITED.role,
+      permission,
+    ),
+    emailGrant(org, LIMITED.grant, 'limited@actor.test', LIMITED.role),
+    stmt(
+      'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      LIMITED.session,
+      org.orgId,
+      LIMITED.user,
+      hash,
+      hash,
+      now,
+      new Date(Date.now() + 3_600_000).toISOString(),
+    ),
+  ];
+}
+
+function limitedFence(): MutationFence {
+  return mutationFence(
+    { userId: LIMITED.user, sessionId: LIMITED.session } as unknown as AuthenticatedActor,
+    {},
+  );
+}
+
+async function epochOf(org: OrgContext): Promise<unknown> {
+  const found = await executor.all<{ version: string }>(
+    stmt('SELECT version FROM cache_epoch WHERE org_id = ?', org.orgId),
+  );
+  return found[0]?.version;
+}
+
+describe('user status fence', () => {
+  it('a non-admin cannot suspend a holder reached through an e-mail grant', async () => {
+    await seed([
+      ...limitedActor(a),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      emailGrant(a, G2, 'u2@example.test', ADMIN),
+      session(a, '01J0SESSION0000000000000001', U2),
+    ]);
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    const epoch = await epochOf(a);
+    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await statusOf(U2)).toBe('active');
+    expect(await rows("SELECT revoked_at FROM session WHERE id LIKE '01J0SESSION%'")).toEqual([
+      { revoked_at: null },
+    ]);
+    expect(await epochOf(a)).toBe(epoch);
+  });
+
+  it('a non-admin cannot suspend a holder reached only through a group', async () => {
+    await seed([
+      ...limitedActor(a),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      groupGrant(a, G2, 'oidc', 'admins', ADMIN),
+      membership(a, U2, 'oidc', 'admins'),
+    ]);
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await statusOf(U2)).toBe('active');
+  });
+
+  it('a non-admin may suspend a user whose group evidence is stale and who is no holder', async () => {
+    await seed([
+      ...limitedActor(a),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      groupGrant(a, G2, 'oidc', 'admins', ADMIN),
+      membership(a, U2, 'oidc', 'admins'),
+    ]);
+    await executor.all(stmt("UPDATE user_group SET refreshed_at = '2020-01-01T00:00:00.000Z'"));
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('suspended');
+  });
+
+  it('a non-admin may suspend a user who is no holder', async () => {
+    await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('suspended');
+  });
+
+  it('an actor without org:users:write is refused by the batch', async () => {
+    await seed([...limitedActor(a, 'org:read'), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await statusOf(U3)).toBe('active');
+    await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
+    expect(await repository.reactivateUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await statusOf(U3)).toBe('suspended');
+  });
+
+  it('an actor whose session was revoked is refused by the batch', async () => {
+    await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    await executor.all(
+      stmt('UPDATE session SET revoked_at = ? WHERE id = ?', NOW, LIMITED.session),
+    );
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await statusOf(U3)).toBe('active');
+  });
+
+  it('a suspended actor is refused by the batch', async () => {
+    await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    await executor.all(
+      stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", LIMITED.user),
+    );
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
+  });
+
+  it('reactivating a user who is not suspended writes nothing', async () => {
+    const before = await snapshot();
+    const epoch = await epochOf(a);
+    expect(await grants.reactivateUser(a, U1, LATER)).toBe('unchanged');
+    expect(await grants.reactivateUser(a, '01J0USER00000000000000ZZZZ', LATER)).toBe('not_found');
+    expect(await snapshot()).toBe(before);
+    expect(await epochOf(a)).toBe(epoch);
+  });
+
+  it('a repeated suspension changes nothing the second time', async () => {
+    await seed([session(a, '01J0SESSION0000000000000001', U2)]);
+    const first = await epochOf(a);
+    expect(await grants.suspendUser(a, U2, NOW)).toBe('suspended');
+    const afterFirst = await epochOf(a);
+    expect(afterFirst).not.toBe(first);
+    const before = await snapshot();
+    expect(await grants.suspendUser(a, U2, LATER)).toBe('unchanged');
+    expect(await snapshot()).toBe(before);
+    expect(await epochOf(a)).toBe(afterFirst);
+  });
+
+  it('a reactivation bumps the epoch once and a second one does not', async () => {
+    await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
+    const first = await epochOf(a);
+    expect(await grants.reactivateUser(a, U3, LATER)).toBe('reactivated');
+    const afterFirst = await epochOf(a);
+    expect(afterFirst).not.toBe(first);
+    expect(await grants.reactivateUser(a, U3, LATER)).toBe('unchanged');
+    expect(await epochOf(a)).toBe(afterFirst);
+  });
+
+  it('a non-admin cannot reactivate a suspended admin holding through an e-mail grant', async () => {
+    await seed([
+      ...limitedActor(a),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      emailGrant(a, G2, 'u2@example.test', ADMIN),
+    ]);
+    await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U2));
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    const before = await snapshot();
+    const epoch = await epochOf(a);
+    expect(await repository.reactivateUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await snapshot()).toBe(before);
+    expect(await epochOf(a)).toBe(epoch);
+    expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
+    expect(await statusOf(U2)).toBe('active');
+  });
+
+  it('a non-admin cannot reactivate a suspended admin holding through a group', async () => {
+    await seed([
+      ...limitedActor(a),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      groupGrant(a, G2, 'oidc', 'admins', ADMIN),
+      membership(a, U2, 'oidc', 'admins'),
+    ]);
+    await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U2));
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    const before = await snapshot();
+    expect(await repository.reactivateUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await snapshot()).toBe(before);
+    expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
+  });
+
+  it('a non-admin may reactivate a suspended user who would hold no protected role', async () => {
+    await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
+    const repository = createFencedGrantRepository(executor, { holderInput });
+    expect(await repository.reactivateUser(a, limitedFence(), U3, LATER)).toBe('reactivated');
+  });
+
+  it('a refusal whose cause is gone by the time it is classified is a retryable conflict', async () => {
+    await seed([
+      ...limitedActor(a),
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      emailGrant(a, G2, 'u2@example.test', ADMIN),
+    ]);
+    let promoted = false;
+    const promoting: SqlExecutor = {
+      driver: executor.driver,
+      all: async (statement) => {
+        if (!promoted) {
+          promoted = true;
+          await executor.all(
+            stmt('UPDATE role SET protects_last_holder = 1 WHERE id = ?', LIMITED.role),
+          );
+        }
+        return executor.all(statement);
+      },
+      batch: (statements) => executor.batch(statements),
+    };
+    const repository = createFencedGrantRepository(promoting, { holderInput });
+    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('conflict');
+    expect(await statusOf(U2)).toBe('active');
+  });
+
+  it('no field of an injected holder input makes the guards count suspended users', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', ADMIN),
+      emailGrant(a, G2, 'u2@example.test', ADMIN),
+    ]);
+    await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U2));
+    const injected = createGrantRepository(executor, {
+      holderInput: async () =>
+        ({ ...(await holderInput()), includeSuspended: true }) as unknown as ProtectedHolderInput,
+    });
+    expect(await injected.suspendUser(a, U1, LATER)).toBe('last_holder');
+    expect(await statusOf(U1)).toBe('active');
+    const protectedInjected = createFencedGrantRepository(executor, {
+      holderInput: () =>
+        ({
+          ...holderInput(),
+          includeSuspended: true,
+          exclude: { identityId: actorOf(a).identity },
+        }) as unknown as ProtectedHolderInput,
+    });
+    expect(await protectedInjected.countProtectedHolders(a)).toBe(1);
+  });
+
+  it('a busy database is a retryable conflict and an oversized statement is a programming error', async () => {
+    await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    const failing = (kind: 'busy' | 'too_big'): SqlExecutor => ({
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: async () => {
+        throw new DbError(kind, `${kind}: injected`);
+      },
+    });
+    const busy = createFencedGrantRepository(failing('busy'), { holderInput });
+    expect(await busy.suspendUser(a, limitedFence(), U3, LATER)).toBe('conflict');
+    expect(await busy.reactivateUser(a, limitedFence(), U3, LATER)).toBe('conflict');
+    const big = createFencedGrantRepository(failing('too_big'), { holderInput });
+    await expect(big.suspendUser(a, limitedFence(), U3, LATER)).rejects.toMatchObject({
+      kind: 'too_big',
+    });
+    await expect(big.reactivateUser(a, limitedFence(), U3, LATER)).rejects.toMatchObject({
+      kind: 'too_big',
+    });
+  });
+
+  it('a user of another organization is not touched by a fence of this one', async () => {
+    const epochB = await epochOf(b);
+    expect(await grants.suspendUser(a, UB, LATER)).toBe('not_found');
+    expect(await statusOf(UB)).toBe('active');
+    expect(await epochOf(b)).toBe(epochB);
   });
 });
 
@@ -1131,6 +1436,7 @@ describe('concurrent guarded operations on one file database', () => {
   let org: OrgContext;
   let first: UnfencedGrants;
   let second: UnfencedGrants;
+  let secondExecutor: SqlExecutor;
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'pb-grants-'));
@@ -1147,7 +1453,8 @@ describe('concurrent guarded operations on one file database', () => {
       ...actorStatements(org),
     ]);
     first = createGrantRepository(shared.executor, { holderInput });
-    second = createGrantRepository(await shared.second(), { holderInput });
+    secondExecutor = await shared.second();
+    second = createGrantRepository(secondExecutor, { holderInput });
   });
 
   afterEach(async () => {
@@ -1267,6 +1574,144 @@ describe('concurrent guarded operations on one file database', () => {
       expect(await first.countProtectedHolders(org)).toBe(1);
     }
   });
+
+  async function unlinkHolderEvidence(
+    userId: string,
+    through: SqlExecutor = secondExecutor,
+  ): Promise<'unlinked' | 'last_holder'> {
+    const removed = await through.all<{ id: string }>(
+      compile(
+        db
+          .deleteFrom('identity')
+          .where('identity.org_id', '=', org.orgId)
+          .where('identity.user_id', '=', userId)
+          .where((eb) =>
+            eb.exists(
+              db
+                .selectFrom('user_account as holder')
+                .select(sql.lit(1).as('one'))
+                .where('holder.org_id', '=', org.orgId)
+                .where((inner) =>
+                  protectedHolder(org, inner.ref('holder.id'), {
+                    ...holderInput(),
+                    exclude: { userId, identityId: actorOf(org).identity },
+                  }),
+                ),
+            ),
+          )
+          .returning('id'),
+      ),
+    );
+    return removed.length > 0 ? 'unlinked' : 'last_holder';
+  }
+
+  function held(executor: SqlExecutor, on: 'all' | 'batch') {
+    let release!: () => void;
+    let arrive!: () => void;
+    const open = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    let waited = false;
+    const wait = async (): Promise<void> => {
+      if (waited) return;
+      waited = true;
+      arrive();
+      await open;
+    };
+    const gated: SqlExecutor = {
+      driver: executor.driver,
+      all: async (statement) => {
+        if (on === 'all') await wait();
+        return executor.all(statement);
+      },
+      batch: async (statements) => {
+        if (on === 'batch') await wait();
+        return executor.batch(statements);
+      },
+    };
+    return { executor: gated, reached, release };
+  }
+
+  const worlds: [string, () => Statement[]][] = [
+    ['e-mail grants', byEmail],
+    ['a group holder', withGroup],
+  ];
+
+  for (const [label, world] of worlds) {
+    for (const order of ['suspend first', 'unlink first'] as const) {
+      it(`7: latched suspend against unlink of the other holder, ${label}, ${order}`, async () => {
+        await reset(world());
+        const suspendGate = held(shared.executor, 'batch');
+        const unlinkGate = held(secondExecutor, 'all');
+        const suspending = createGrantRepository(suspendGate.executor, {
+          holderInput,
+        }).suspendUser(org, U2, LATER);
+        const unlinking = unlinkHolderEvidence(U1, unlinkGate.executor);
+        await Promise.all([suspendGate.reached, unlinkGate.reached]);
+        const suspendFirst = order === 'suspend first';
+        (suspendFirst ? suspendGate : unlinkGate).release();
+        await (suspendFirst ? suspending : unlinking);
+        (suspendFirst ? unlinkGate : suspendGate).release();
+        const outcomes = await Promise.all([suspending, unlinking]);
+        expect(outcomes).toEqual(
+          suspendFirst ? ['suspended', 'last_holder'] : ['last_holder', 'unlinked'],
+        );
+        expect(await first.countProtectedHolders(org)).toBe(1);
+      });
+    }
+  }
+
+  for (const order of ['first connection', 'second connection'] as const) {
+    it(`7: two concurrent suspensions of one user record exactly one event, ${order} wins`, async () => {
+      await reset(byEmail());
+      const events: { event?: string }[] = [];
+      const gates = [held(shared.executor, 'batch'), held(secondExecutor, 'batch')] as const;
+      const administrators = gates.map((gate) =>
+        createAdministration({
+          roles: { list: async () => [], get: async () => null } as never,
+          grants: createFencedGrantRepository(gate.executor, {
+            holderInput: async (ctx) => ({
+              ...holderInput(),
+              exclude: { identityId: actorOf(ctx).identity },
+            }),
+          }),
+          users: {
+            get: async () => ({ id: U2, email: 'u2@example.test', status: 'active' }) as never,
+          },
+          providers: new Map(),
+          clock: fixedClock(LATER),
+          ids: { ulid: () => 'ID' },
+          log: (entry) => events.push(entry as { event?: string }),
+        }),
+      );
+      const admin = {
+        userId: actorOf(org).user,
+        permissions: new Set(['org:users:write']),
+        isOrganizationAdmin: true,
+      };
+      const fence = await fenceFor(org);
+      const calls = administrators.map((administration) =>
+        administration.suspendUser(org, admin, fence, U2),
+      );
+      await Promise.all(gates.map((gate) => gate.reached));
+      const winner = order === 'first connection' ? 0 : 1;
+      gates[winner]?.release();
+      await calls[winner];
+      gates[1 - winner]?.release();
+      const results = await Promise.all(calls);
+      expect(results).toEqual([
+        { ok: true, value: null },
+        { ok: true, value: null },
+      ]);
+      expect(events.filter((entry) => entry.event === 'user.changed')).toHaveLength(1);
+      expect(
+        await shared.executor.all(stmt('SELECT status FROM user_account WHERE id = ?', U2)),
+      ).toEqual([{ status: 'suspended' }]);
+    });
+  }
 
   it('7: delete against suspend when the person keeps a second grant', async () => {
     for (let run = 0; run < RUNS; run += 1) {
@@ -1871,6 +2316,14 @@ describe('fenced grant mutators', () => {
     await fenced.changeRole(a, fenceOfActing(writer, 1), G2, LOW, LATER, 'OP3');
     await fenced.deleteOrganization(a, fenceOfActing(writer, 9), G1, 'OP4');
     await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP5');
+    const manager = await actingAs('manager', ['org:users:write', 'org:read']);
+    const lowManager = await actingAs('lowmanager', ['org:read']);
+    await fenced.suspendUser(a, fenceOfActing(manager), U1, LATER);
+    await fenced.suspendUser(a, fenceOfActing(manager), U1, LATER);
+    await fenced.suspendUser(a, fenceOfActing(lowManager), U2, LATER);
+    await fenced.reactivateUser(a, fenceOfActing(lowManager), U1, LATER);
+    await fenced.reactivateUser(a, fenceOfActing(manager), U1, LATER);
+    await fenced.reactivateUser(a, fenceOfActing(manager), U1, LATER);
     expect(statements.length).toBeGreaterThan(20);
     expect(Math.max(...statements.map((statement) => statement.params.length))).toBeLessThanOrEqual(
       100,

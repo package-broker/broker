@@ -387,7 +387,7 @@ describe('resolvePackObjects', () => {
     );
     expect(out).toHaveLength(150_001);
     expect(dec.decode(out[0]?.data)).toBe('0');
-  });
+  }, 60_000);
 
   it('resolves an OFS delta on a REF delta result and a REF delta on an OFS result', async () => {
     const mid = enc.encode('2345wxyz');

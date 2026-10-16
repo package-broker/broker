@@ -213,6 +213,30 @@ describe('createNodeServer', () => {
     expect(await response.text()).toBe(body);
   });
 
+  it('10: a POST whose body the handler reads completes once at info with its status', async () => {
+    const { plugin } = brokerPlugin('whoami');
+    const entries: Array<Readonly<Record<string, unknown>>> = [];
+    const broker = createNodeServer([plugin], {
+      executor: opened.executor,
+      log: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const base = await listen(broker);
+    await bootstrapOrganization(opened.executor);
+    const body = 'x'.repeat(256 * 1024);
+
+    const response = await fetch(`${base}/echo`, { method: 'POST', body });
+    expect(await response.text()).toBe(body);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const completions = entries.filter((entry) => entry['event'] === 'http.request');
+    expect(completions).toEqual([
+      expect.objectContaining({ level: 'info', status: 200, method: 'POST', route: '/echo' }),
+    ]);
+    expect(JSON.stringify(entries)).not.toContain('request.aborted');
+  });
+
   it('5: exposes exactly one own key, get, on the organizations port', async () => {
     const { plugin, ports } = brokerPlugin('whoami');
     const broker = brokerFor([plugin]);

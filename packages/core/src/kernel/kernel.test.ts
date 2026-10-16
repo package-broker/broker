@@ -242,7 +242,7 @@ describe('createKernel', () => {
     const response = await kernel.fetch(new Request(`${BASE}/health/ready`));
 
     expect(response.status).toBe(503);
-    expect(h.logs).toHaveLength(1);
+    expect(h.logs.map((entry) => entry['event'])).toEqual(['http.error', 'http.request']);
     expect(h.logs[0]).toMatchObject({
       level: 'error',
       request_id: response.headers.get('x-request-id'),
@@ -344,10 +344,12 @@ describe('createKernel', () => {
       expect(h.logs).toEqual([
         expect.objectContaining({
           level: 'warn',
+          event: 'authz.denied',
           plugin: 'guard',
-          code: 'denied',
-          requestId: response.headers.get('x-request-id'),
+          reason_code: 'hook.denied',
+          request_id: response.headers.get('x-request-id'),
         }),
+        expect.objectContaining({ event: 'http.request', status: 403 }),
       ]);
     });
 
@@ -458,9 +460,11 @@ describe('createKernel', () => {
       expect(h.logs).toEqual([
         expect.objectContaining({
           level: 'warn',
-          plugin: 'core:authorization',
-          error: 'TypeError',
+          event: 'authz.error',
+          plugin: 'core',
+          error_name: 'TypeError',
         }),
+        expect.objectContaining({ event: 'http.request', status: 403 }),
       ]);
     });
 
@@ -485,7 +489,7 @@ describe('createKernel', () => {
       expect(response.status).toBe(403);
       expect(JSON.stringify(h.logs)).not.toContain('secret detail');
       expect(h.logs).toContainEqual(
-        expect.objectContaining({ level: 'warn', plugin: 'broken', error: 'RangeError' }),
+        expect.objectContaining({ level: 'warn', plugin: 'broken', error_name: 'RangeError' }),
       );
     });
 
@@ -572,7 +576,7 @@ describe('createKernel', () => {
       expect(response.status).toBe(500);
       expect((await envelope(response)).code).toBe('internal');
       expect(response.headers.get('x-request-id')).toMatch(UUID);
-      expect(h.logs).toHaveLength(1);
+      expect(h.logs.map((entry) => entry['event'])).toEqual(['http.error', 'http.request']);
     });
 
     it('answers a HEAD request with an empty body when the handler body was already read', async () => {
@@ -586,7 +590,7 @@ describe('createKernel', () => {
       expect(response.status).toBe(200);
       expect(await response.text()).toBe('');
       expect(response.headers.get('x-request-id')).toMatch(UUID);
-      expect(h.logs).toHaveLength(0);
+      expect(h.logs.map((entry) => entry['event'])).toEqual(['http.request']);
     });
 
     it('turns a GET Response.error() into a logged 500 envelope', async () => {
@@ -602,7 +606,7 @@ describe('createKernel', () => {
       expect(response.status).toBe(500);
       expect((await envelope(response)).code).toBe('internal');
       expect(response.headers.get('x-request-id')).toMatch(UUID);
-      expect(h.logs).toHaveLength(1);
+      expect(h.logs.map((entry) => entry['event'])).toEqual(['http.error', 'http.request']);
     });
 
     it('turns a HEAD Response.error() into a logged 500 envelope', async () => {
@@ -618,7 +622,7 @@ describe('createKernel', () => {
       expect(response.status).toBe(500);
       expect(await response.text()).toBe('');
       expect(response.headers.get('x-request-id')).toMatch(UUID);
-      expect(h.logs).toHaveLength(1);
+      expect(h.logs.map((entry) => entry['event'])).toEqual(['http.error', 'http.request']);
     });
   });
 
@@ -638,10 +642,10 @@ describe('createKernel', () => {
     const response = await kernel.fetch(new Request(`${BASE}/down`));
 
     expect(response.status).toBe(503);
-    expect(h.logs).toHaveLength(1);
+    expect(h.logs.map((entry) => entry['event'])).toEqual(['http.request']);
     expect(h.logs[0]).toMatchObject({
       level: 'error',
-      requestId: response.headers.get('x-request-id'),
+      request_id: response.headers.get('x-request-id'),
       status: 503,
     });
     expect(JSON.stringify(h.logs)).not.toContain('nope');
@@ -668,7 +672,7 @@ describe('createKernel', () => {
     const text = await response.text();
     expect(text).not.toContain('secret');
     expect(JSON.parse(text)).toMatchObject({ error: { code: 'internal' } });
-    expect(h.logs).toHaveLength(1);
+    expect(h.logs.map((entry) => entry['event'])).toEqual(['http.error', 'http.request']);
     expect(JSON.stringify(h.logs)).not.toContain('secret');
   });
 

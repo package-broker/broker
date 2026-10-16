@@ -1,0 +1,44 @@
+{
+  "scenario": "github-not-our-ref",
+  "note": "Cold cache, oid that no ref of the repository reaches.",
+  "recordedAt": "2026-10-16T13:27:37.094Z",
+  "call": {
+    "repoUrl": "https://github.com/composer/semver",
+    "refs": [
+      {
+        "name": "refs/tags/v0.0.0",
+        "oid": "1234567890abcdef1234567890abcdef12345678"
+      }
+    ],
+    "path": "composer.json",
+    "filterCacheIndex": null
+  },
+  "outcome": {
+    "kind": "error",
+    "name": "GitRemoteError",
+    "code": "remote_error",
+    "message": "remote_error"
+  },
+  "exchanges": [
+    {
+      "request": {
+        "url": "https://github.com/composer/semver/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2NzgKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZToxCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDA0OUVSUiB1cGxvYWQtcGFjazogbm90IG91ciByZWYgMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3OA=="
+      }
+    }
+  ]
+}

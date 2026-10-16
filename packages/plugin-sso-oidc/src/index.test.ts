@@ -44,7 +44,7 @@ describe('plugin-sso-oidc', () => {
   it('declares its plugin definition', () => {
     const plugin = ssoOidc();
     expect(plugin.id).toBe('sso-oidc');
-    expect(plugin.apiVersion).toBe(2);
+    expect(plugin.apiVersion).toBe(3);
   });
 
   it('binds nothing without providers', () => {
@@ -52,7 +52,7 @@ describe('plugin-sso-oidc', () => {
       expect(plugin).toEqual({
         id: 'sso-oidc',
         package: '@package-broker/plugin-sso-oidc',
-        apiVersion: 2,
+        apiVersion: 3,
         platforms: ['cloudflare', 'node'],
         capabilities: ['sso'],
       });

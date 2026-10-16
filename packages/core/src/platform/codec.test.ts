@@ -137,6 +137,27 @@ describe('codec port', () => {
   });
 });
 
+describe('codec port stream types', () => {
+  it('accepts a TransformStream and a plain readable/writable pair', () => {
+    const transform = new TransformStream<Uint8Array, Uint8Array>();
+    const plain = { readable: transform.readable, writable: transform.writable };
+    const withTransform: Codecs = {
+      ...fakeCodecs(),
+      gunzip: () => transform,
+      deflateRaw: () => transform,
+    };
+    const withPlain: Codecs = { ...fakeCodecs(), gunzip: () => plain, deflateRaw: () => plain };
+    expect(withTransform.gunzip(1)).toBe(transform);
+    expect(withPlain.deflateRaw()).toBe(plain);
+  });
+
+  it('labels deflate failures', () => {
+    const e = new CodecCorruptError('deflate');
+    expect(e.operation).toBe('deflate');
+    expect(new CodecLimitError('deflate', 3).message).toBe('deflate output exceeds 3 bytes');
+  });
+});
+
 describe('parseIntegrity', () => {
   it('accepts an npm sha512 value', () => {
     const r = parseIntegrity(sha512Npm);

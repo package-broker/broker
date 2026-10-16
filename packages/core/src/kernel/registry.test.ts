@@ -47,6 +47,7 @@ describe('collectRegistrations', () => {
       [{ method: 'GET', path: '/a', permission: 'org:read', boundary: 'organization', handler }],
       {
         binds: ['source'],
+        sourceProviders: () => [],
         register(registry) {
           registry.route({
             method: 'GET',
@@ -151,7 +152,7 @@ describe('collectRegistrations', () => {
   it.each(['source', 'identity'] as const)('accepts binds: [%s]', (port) => {
     const definition = plugin('p', {
       binds: [port],
-      ...(port === 'identity' ? { identityProviders: () => [] } : {}),
+      ...(port === 'identity' ? { identityProviders: () => [] } : { sourceProviders: () => [] }),
     });
     expect(collectRegistrations([definition]).bindings.get(port)).toBe('p');
   });
@@ -165,8 +166,8 @@ describe('collectRegistrations', () => {
 
   it('rejects a port bound twice', () => {
     const problems = problemsOf([
-      plugin('a', { binds: ['source'] }),
-      plugin('b', { binds: ['source'] }),
+      plugin('a', { binds: ['source'], sourceProviders: () => [] }),
+      plugin('b', { binds: ['source'], sourceProviders: () => [] }),
     ]);
     expect(problems).toEqual(['port "source" is bound by plugins "a" and "b"']);
   });
@@ -281,8 +282,22 @@ describe('collectRegistrations', () => {
     ]);
   });
 
+  it('refuses an API 2 plugin and registers the same plugin at API 3', () => {
+    let thrown: unknown;
+    try {
+      collectRegistrations([plugin('legacy', { apiVersion: 2 })]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(KernelConfigError);
+    expect((thrown as KernelConfigError).problems).toEqual([
+      'plugin "legacy" has apiVersion 2, core supports 3 to 3',
+    ]);
+    expect(() => collectRegistrations([plugin('legacy', { apiVersion: 3 })])).not.toThrow();
+  });
+
   it('collects three problems from one set', () => {
-    const a = plugin('a', { apiVersion: 99, binds: ['source'] });
+    const a = plugin('a', { apiVersion: 99, binds: ['source'], sourceProviders: () => [] });
     const b = withRoutes(
       'b',
       [
@@ -297,6 +312,7 @@ describe('collectRegistrations', () => {
       ],
       {
         binds: ['source'],
+        sourceProviders: () => [],
       },
     );
     const error = (() => {

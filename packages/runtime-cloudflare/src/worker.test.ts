@@ -102,7 +102,7 @@ function whoamiPlugin(): PluginDefinition {
     id: 'whoami',
     package: 'test/whoami',
     platforms: ['cloudflare'],
-    apiVersion: 2,
+    apiVersion: 3,
     register(registry) {
       registry.route({
         method: 'GET',
@@ -119,7 +119,7 @@ function pingPlugin(onInit: (ports: PluginPorts) => void = () => undefined): Plu
     id: 'ping',
     package: 'test/ping',
     platforms: ['cloudflare'],
-    apiVersion: 2,
+    apiVersion: 3,
     register(registry) {
       registry.route({
         method: 'GET',
@@ -191,7 +191,7 @@ describe('createWorker', () => {
       id: 'flaky',
       package: 'test/flaky',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       register(registry) {
         registry.route({
           method: 'GET',
@@ -224,7 +224,7 @@ describe('createWorker', () => {
       id: 'flaky-binding',
       package: 'test/flaky-binding',
       platforms: ['cloudflare'],
-      apiVersion: 2,
+      apiVersion: 3,
       register(registry) {
         registry.route({
           method: 'GET',

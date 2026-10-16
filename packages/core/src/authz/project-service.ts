@@ -205,7 +205,7 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
   function normalize(raw: unknown, scope: 'organization' | 'project'): OrgActor | null {
     if (typeof raw !== 'object' || raw === null) return null;
     const { userId, permissions, kind } = raw as Record<string, unknown>;
-    if ((kind === 'project') !== (scope === 'project')) return null;
+    if (kind !== scope) return null;
     if (typeof userId !== 'string' || userId === '' || !(permissions instanceof Set)) return null;
     return { userId, permissions: permissions as ReadonlySet<string> };
   }

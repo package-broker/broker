@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  APPROVED_ERROR_NAMES,
+  HTTP_REQUEST_EVENT,
   type ObsRecord,
   type ObsRecordSink,
   type ObservabilityScope,
@@ -473,5 +475,80 @@ describe('noopObservability', () => {
       noopObservability.counter('pb.x');
       noopObservability.histogram('pb.x', 1);
     }).not.toThrow();
+  });
+});
+
+const KERNEL_ERROR_NAMES = [
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'ReferenceError',
+  'EvalError',
+  'URIError',
+  'AggregateError',
+  'DOMException',
+  'AbortError',
+  'TimeoutError',
+  'NonError',
+  'NotBootstrappedError',
+  'KernelConfigError',
+  'SecretsConfigError',
+  'DbError',
+  'CsrfError',
+  'CredentialNotFoundError',
+  'UnknownKeyVersionError',
+  'SecretDecryptError',
+  'HookTimeoutError',
+  'EngineTimeoutError',
+  'ProbeFailedError',
+  'ReadinessTimeoutError',
+  'BadBodyError',
+  'OidcProviderError',
+  'JwtError',
+  'BoundedFetchError',
+  'AlreadyBootstrappedError',
+  'StartupConfigError',
+  'SqlScanError',
+  'MigrationSourceError',
+  'MigrationLockedError',
+  'MigrationSyntaxError',
+  'MigrationChecksumError',
+  'MigrationApplyError',
+  'MigrationOrderError',
+  'MigrationStateError',
+  'BuiltManifestError',
+  'JobError',
+  'JsonStreamError',
+];
+
+describe('approved error names', () => {
+  it.each(KERNEL_ERROR_NAMES)('keeps the kernel name %s through safeRecord', (name) => {
+    expect(safeRecord({ level: 'error', event: 'e', error_name: name })?.error_name).toBe(name);
+  });
+
+  it.each(['BlobRangeError', 'StaleFenceError', 'PlatformUnavailableError', 'UnknownJobType'])(
+    'keeps the pre-existing name %s',
+    (name) => {
+      expect(APPROVED_ERROR_NAMES).toContain(name);
+    },
+  );
+
+  it('maps a name in neither list to Error', () => {
+    expect(
+      safeRecord({ level: 'error', event: 'e', error_name: 'NotAKernelError' })?.error_name,
+    ).toBe('Error');
+  });
+
+  it('has no duplicate names', () => {
+    expect(new Set(APPROVED_ERROR_NAMES).size).toBe(APPROVED_ERROR_NAMES.length);
+  });
+});
+
+describe('HTTP_REQUEST_EVENT', () => {
+  it('is the http.request event and a valid code', () => {
+    expect(HTTP_REQUEST_EVENT).toBe('http.request');
+    expect(HTTP_REQUEST_EVENT).toMatch(/^[a-z][a-z0-9_.]{0,63}$/);
+    expect(safeRecord({ level: 'info', event: HTTP_REQUEST_EVENT })?.event).toBe('http.request');
   });
 });

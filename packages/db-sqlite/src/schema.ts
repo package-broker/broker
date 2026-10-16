@@ -487,6 +487,70 @@ export interface DistTagHistoryTable {
   created_at: Generated<string>;
 }
 
+export type IngestScope = 'source' | 'package';
+export type IngestState = 'running' | 'complete' | 'abandoned';
+export type UpstreamForm =
+  'composer-p2' | 'composer-p2-dev' | 'composer-v1-provider' | 'npm-packument';
+export type RepresentationForm = 'composer-p2' | 'composer-p2-dev';
+
+/** Mirrors `ingest_session` in `migrations/0007_registry.sql`. */
+export interface IngestSessionTable {
+  id: string;
+  org_id: string;
+  scope: IngestScope;
+  scope_key: string;
+  source_id: string;
+  package_key: string | null;
+  generation: number;
+  owner: string;
+  fence: number;
+  lease_until: string;
+  state: IngestState;
+  snapshot_id: string | null;
+  snapshot_blob_sha256: string | null;
+  stamp: string | null;
+  cursor: string | null;
+  seen_count: Generated<number>;
+  pending_validators: string | null;
+  pages_so_far: Generated<number>;
+  started_at: string;
+  updated_at: string;
+}
+
+/** Mirrors `upstream_state` in `migrations/0007_registry.sql`. */
+export interface UpstreamStateTable {
+  org_id: string;
+  package_id: string;
+  form: UpstreamForm;
+  etag: string | null;
+  last_modified: string | null;
+  content_sha256: string | null;
+  checked_at: string;
+  fresh_until: string;
+  not_found_count: Generated<number>;
+  first_not_found_at: string | null;
+}
+
+/** Mirrors `fetch_lease` in `migrations/0007_registry.sql`. */
+export interface FetchLeaseTable {
+  org_id: string;
+  lease_key: string;
+  owner: string;
+  fence: number;
+  lease_until: string;
+  acquired_at: string;
+}
+
+/** Mirrors `representation_clock` in `migrations/0007_registry.sql`. */
+export interface RepresentationClockTable {
+  org_id: string;
+  project_id: string;
+  key_hash: string;
+  form: RepresentationForm;
+  validator: string;
+  last_modified: string;
+}
+
 export interface Database {
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
@@ -522,4 +586,8 @@ export interface Database {
   version_revision: VersionRevisionTable;
   dist_tag: DistTagTable;
   dist_tag_history: DistTagHistoryTable;
+  ingest_session: IngestSessionTable;
+  upstream_state: UpstreamStateTable;
+  fetch_lease: FetchLeaseTable;
+  representation_clock: RepresentationClockTable;
 }

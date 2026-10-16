@@ -2,6 +2,8 @@
 
 A package registry broker for Composer and npm that runs on Cloudflare Workers or on Node. This repository is the 2.0 monorepo skeleton: the build composition, versioning, dependency and CI mechanisms are wired; there are no product features yet.
 
+> Pre-release. The 2.0 line is under active development towards its first release candidate: no tagged release exists yet, the API and the plugin contract still change, and external pull requests are not accepted until the contributor terms are published (see [CONTRIBUTING.md](CONTRIBUTING.md)). Security reports are welcome at any time, see [SECURITY.md](SECURITY.md).
+
 ## Prerequisites
 
 - Node 24 (see `.nvmrc`) and pnpm (`corepack enable`; the version is pinned in `package.json`).

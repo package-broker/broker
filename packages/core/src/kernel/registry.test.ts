@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition, type RouteDefinition } from '../plugin.js';
-import { KernelConfigError, collectRegistrations } from './registry.js';
+import type { JobDefinition } from '../platform/jobs.js';
+import { KernelConfigError, collectRegistrations, registerCoreJob } from './registry.js';
 
 const handler = () => new Response('ok');
 
@@ -283,5 +284,116 @@ describe('collectRegistrations', () => {
     expect(error.problems[0]).toContain('plugin "a" has apiVersion 99');
     expect(error.problems[1]).toBe('port "source" is bound by plugins "a" and "b"');
     expect(error.problems[2]).toContain('plugin "b" route GET /x');
+  });
+  describe('jobs', () => {
+    const job = (overrides: Partial<JobDefinition> = {}): JobDefinition => ({
+      name: 'sync',
+      version: 1,
+      validate: (input) => input,
+      handler: async () => undefined,
+      ...overrides,
+    });
+    const withJobs = (id: string, ...definitions: JobDefinition[]) =>
+      plugin(id, {
+        register(registry) {
+          for (const definition of definitions) registry.job(definition);
+        },
+      });
+
+    it('records a valid job with the plugin and the qualified name', () => {
+      const definition = job({ schedule: { everySeconds: 300 } });
+      const { jobs } = collectRegistrations([withJobs('alpha', definition)]);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]!.plugin).toBe('alpha');
+      expect(jobs[0]!.qualifiedName).toBe('alpha:sync:v1');
+      expect(jobs[0]!.definition.name).toBe('sync');
+      expect(jobs[0]!.definition.schedule).toEqual({ everySeconds: 300 });
+      expect(Object.isFrozen(jobs[0]!.definition)).toBe(true);
+    });
+
+    it('returns no jobs when none are registered', () => {
+      expect(collectRegistrations([plugin('alpha')]).jobs).toEqual([]);
+    });
+
+    it('rejects a duplicate qualified name within and across plugins', () => {
+      expect(problemsOf([withJobs('alpha', job(), job())])).toEqual([
+        'job "alpha:sync:v1" is registered more than once',
+      ]);
+      expect(() =>
+        collectRegistrations([withJobs('alpha', job()), withJobs('alpha2', job())]),
+      ).not.toThrow();
+    });
+
+    it('rejects a non-function handler and validate', () => {
+      const badHandler = job({ handler: 'nope' as never });
+      const badValidate = job({ name: 'other', validate: 1 as never });
+      const problems = problemsOf([withJobs('alpha', badHandler, badValidate)]);
+      expect(problems).toHaveLength(2);
+      expect(problems[0]).toContain('plugin "alpha" job');
+      expect(problems[0]).toContain('invalid_definition');
+    });
+
+    it('rejects an invalid interval', () => {
+      for (const everySeconds of [30, 61, 0, -60, Number.NaN, '60' as never]) {
+        const problems = problemsOf([withJobs('alpha', job({ schedule: { everySeconds } }))]);
+        expect(problems).toHaveLength(1);
+        expect(problems[0]).toContain('invalid_schedule');
+      }
+    });
+
+    it('rejects an invalid name', () => {
+      const problems = problemsOf([withJobs('alpha', job({ name: 'Bad:Name' }))]);
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toContain('invalid_name');
+    });
+
+    it('rejects an async register that registers a job', () => {
+      const asyncPlugin = plugin('alpha', {
+        register: (async (registry: { job(d: JobDefinition): void }) => {
+          registry.job(job());
+        }) as never,
+      });
+      expect(problemsOf([asyncPlugin])).toContain('plugin "alpha" register must be synchronous');
+    });
+
+    it('rejects a job registered after register returned', () => {
+      let captured: { job(d: JobDefinition): void } | undefined;
+      const late = plugin('alpha', {
+        register(registry) {
+          captured = registry;
+        },
+      });
+      collectRegistrations([late]);
+      expect(() => captured!.job(job())).toThrow('registry is sealed');
+    });
+
+    it('still rejects a plugin that binds a runtime-owned port', () => {
+      for (const port of ['blob', 'cache', 'job', 'observability'] as const) {
+        const problems = problemsOf([
+          plugin('alpha', { binds: [port] as never, register: (r) => r.job(job()) }),
+        ]);
+        expect(problems).toContain(
+          `plugin "alpha" cannot bind port "${port}": provided by the runtime`,
+        );
+      }
+    });
+
+    it('registers a core job outside the plugin-qualified path', () => {
+      const core = registerCoreJob(job({ name: 'session-cleanup' }));
+      expect(core.plugin).toBe('core');
+      expect(core.qualifiedName).toBe('core:session-cleanup:v1');
+      expect(Object.isFrozen(core.definition)).toBe(true);
+      const { jobs } = collectRegistrations([withJobs('alpha', job())], { coreJobs: [core] });
+      expect(jobs.map((entry) => entry.qualifiedName)).toEqual([
+        'core:session-cleanup:v1',
+        'alpha:sync:v1',
+      ]);
+      expect(() => registerCoreJob(job({ name: 'Bad' }))).toThrow();
+    });
+
+    it('rejects a duplicate core job', () => {
+      const core = registerCoreJob(job({ name: 'session-cleanup' }));
+      expect(() => collectRegistrations([], { coreJobs: [core, core] })).toThrow(KernelConfigError);
+    });
   });
 });

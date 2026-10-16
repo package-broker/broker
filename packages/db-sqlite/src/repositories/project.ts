@@ -20,6 +20,11 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
+import {
+  DEFAULT_IDLE_SECONDS,
+  liveSessionCondition,
+  requireIdleSeconds,
+} from './session-liveness.js';
 
 export const PROJECT_NAME_MAX_LENGTH = 100;
 export const PROJECT_LIST_MAX_LIMIT = 200;
@@ -144,7 +149,6 @@ interface ProjectRow {
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const FORBIDDEN_NAME_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
-const DEFAULT_IDLE_SECONDS = 3600;
 const REAUTH_SECONDS = 600;
 
 /** The stored project_owner role of the organization is missing. */
@@ -243,10 +247,7 @@ export function createProjectRepository(
     ...(options.reservedSlugs ?? []),
   ]);
   const providerAnchors = options.providerAnchors ?? [];
-  const idleSeconds = options.idleSeconds ?? DEFAULT_IDLE_SECONDS;
-  if (!Number.isInteger(idleSeconds) || idleSeconds < 60 || idleSeconds > 86400) {
-    throw new RangeError('idleSeconds must be an integer from 60 to 86400');
-  }
+  const idleSeconds = requireIdleSeconds(options.idleSeconds ?? DEFAULT_IDLE_SECONDS);
 
   function projectAuthority(
     ctx: OrgContext,
@@ -271,12 +272,8 @@ export function createProjectRepository(
         .where('s.org_id', '=', ctx.orgId)
         .where('s.id', '=', fence.sessionId)
         .where('s.user_id', '=', fence.userId)
-        .where('s.revoked_at', 'is', null)
         .where('actor.status', '=', 'active')
-        .where(sql<SqlBool>`unixepoch(s.expires_at, 'subsec') > unixepoch('now', 'subsec')`)
-        .where(
-          sql<SqlBool>`unixepoch(coalesce(s.last_seen_at, s.created_at), 'subsec') > unixepoch('now', 'subsec') - ${idleSeconds}`,
-        );
+        .where(liveSessionCondition('s', idleSeconds));
       if (scope.reauth === true) {
         query = query.where(
           sql<SqlBool>`unixepoch(s.reauth_at, 'subsec') > unixepoch('now', 'subsec') - ${REAUTH_SECONDS}`,

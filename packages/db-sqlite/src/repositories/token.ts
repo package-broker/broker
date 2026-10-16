@@ -28,12 +28,16 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission } from './access.js';
+import {
+  DEFAULT_IDLE_SECONDS,
+  liveSessionCondition,
+  requireIdleSeconds,
+} from './session-liveness.js';
 import { servicePrincipalAuthorityGuard } from './service-principal-authority.js';
 
 const MAX_SELECTOR_ATTEMPTS = 3;
 const MAX_PROJECTS = 200;
 const REAUTH_WINDOW_SECONDS = 600;
-const DEFAULT_IDLE_SECONDS = 3600;
 const FRESHNESS_SECONDS = 86_400;
 const MAX_EXPIRY_DAYS = 90;
 const MAX_CI_READ_ONLY_EXPIRY_DAYS = 365;
@@ -309,10 +313,7 @@ function conditions(
     join user_account as issuing_user
       on issuing_user.id = issuing_session.user_id and issuing_user.org_id = issuing_session.org_id
     join organization as issuing_org on issuing_org.id = issuing_session.org_id
-    where issuing_session.revoked_at is null
-      and unixepoch(coalesce(issuing_session.last_seen_at, issuing_session.created_at), 'subsec')
-        > unixepoch('now', 'subsec') - ${sql.lit(idleSeconds)}
-      and unixepoch(issuing_session.expires_at) > unixepoch('now')
+    where ${liveSessionCondition('issuing_session', idleSeconds)}
       and unixepoch(issuing_session.reauth_at)
         between unixepoch('now') - ${sql.lit(REAUTH_WINDOW_SECONDS)} and unixepoch('now')
       and issuing_user.status = 'active'
@@ -472,11 +473,8 @@ function sessionLive(ctx: OrgContext, fence: MutationFence, idleSeconds: number)
     where live_session.id = ${fence.sessionId}
       and live_session.org_id = ${ctx.orgId}
       and live_session.user_id = ${fence.userId}
-      and live_session.revoked_at is null
       and live_user.status = 'active'
-      and unixepoch(live_session.expires_at) > unixepoch('now')
-      and unixepoch(coalesce(live_session.last_seen_at, live_session.created_at), 'subsec')
-        > unixepoch('now', 'subsec') - ${sql.lit(idleSeconds)})`;
+      and ${liveSessionCondition('live_session', idleSeconds)})`;
 }
 
 function validateServiceInput(input: IssueServiceTokenInput): void {
@@ -630,10 +628,7 @@ export function createTokenRepository(
   executor: SqlExecutor,
   options: TokenRepositoryOptions = {},
 ): TokenRepository {
-  const idleSeconds = options.idleSeconds ?? DEFAULT_IDLE_SECONDS;
-  if (!Number.isInteger(idleSeconds) || idleSeconds < 60 || idleSeconds > 86_400) {
-    throw new RangeError('idleSeconds must be an integer from 60 to 86400');
-  }
+  const idleSeconds = requireIdleSeconds(options.idleSeconds ?? DEFAULT_IDLE_SECONDS);
   const repository = {
     async issuePersonal(ctx, fence, input, mint) {
       validateInput(input);

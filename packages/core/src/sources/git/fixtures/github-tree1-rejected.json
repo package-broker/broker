@@ -1,0 +1,109 @@
+{
+  "scenario": "github-tree1-rejected",
+  "note": "Cold filter cache: tree:1 is tried first, then tree:0.",
+  "recordedAt": "2026-10-16T13:27:20.082Z",
+  "call": {
+    "repoUrl": "https://github.com/composer/semver",
+    "refs": [
+      {
+        "name": "refs/heads/main",
+        "oid": "528948210cc46f967a4b98e83b19e76f2b504993"
+      }
+    ],
+    "path": "composer.json",
+    "filterCacheIndex": null
+  },
+  "outcome": {
+    "kind": "result",
+    "value": [
+      {
+        "ref": "refs/heads/main",
+        "commit": "528948210cc46f967a4b98e83b19e76f2b504993",
+        "committedAt": "2026-10-05T13:12:12.000Z",
+        "text": "{\n    \"name\": \"composer/semver\",\n    \"description\": \"Version comparison library that offers utilities, version constraint parsing and validation.\",\n    \"type\": \"library\",\n    \"license\": \"MIT\",\n    \"keywords\": [\n        \"semver\",\n        \"semantic\",\n        \"versioning\",\n        \"validation\"\n    ],\n    \"authors\": [\n        {\n            \"name\": \"Nils Adermann\",\n            \"email\": \"naderman@naderman.de\",\n            \"homepage\": \"http://www.naderman.de\"\n        },\n        {\n            \"name\": \"Jordi Boggiano\",\n            \"email\": \"j.boggiano@seld.be\",\n            \"homepage\": \"http://seld.be\"\n        },\n        {\n            \"name\": \"Rob Bast\",\n            \"email\": \"rob.bast@gmail.com\",\n            \"homepage\": \"http://robbast.nl\"\n        }\n    ],\n    \"support\": {\n        \"irc\": \"ircs://irc.libera.chat:6697/composer\",\n        \"issues\": \"https://github.com/composer/semver/issues\"\n    },\n    \"require\": {\n        \"php\": \"^5.3.2 || ^7.0 || ^8.0\"\n    },\n    \"require-dev\": {\n        \"symfony/phpunit-bridge\": \"^3 || ^7\",\n        \"phpstan/phpstan\": \"^1.11\"\n    },\n    \"autoload\": {\n        \"psr-4\": {\n            \"Composer\\\\Semver\\\\\": \"src\"\n        }\n    },\n    \"autoload-dev\": {\n        \"psr-4\": {\n            \"Composer\\\\Semver\\\\\": \"tests\"\n        }\n    },\n    \"extra\": {\n        \"branch-alias\": {\n            \"dev-main\": \"3.x-dev\"\n        }\n    },\n    \"scripts\": {\n        \"test\": \"SYMFONY_PHPUNIT_REMOVE_RETURN_TYPEHINT=1 vendor/bin/simple-phpunit\",\n        \"phpstan\": \"@php vendor/bin/phpstan analyse\"\n    }\n}\n"
+      }
+    ]
+  },
+  "exchanges": [
+    {
+      "request": {
+        "url": "https://github.com/composer/semver/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDUyODk0ODIxMGNjNDZmOTY3YTRiOThlODNiMTllNzZmMmI1MDQ5OTMKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZToxCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAzMUVSUiB0cmVlIGZpbHRlciBhbGxvd3MgbWF4IGRlcHRoIDAsIGJ1dCBnb3QgMQ=="
+      }
+    },
+    {
+      "request": {
+        "url": "https://github.com/composer/semver/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDUyODk0ODIxMGNjNDZmOTY3YTRiOThlODNiMTllNzZmMmI1MDQ5OTMKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZTowCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAxMXNoYWxsb3ctaW5mbwowMDM0c2hhbGxvdyA1Mjg5NDgyMTBjYzQ2Zjk2N2E0Yjk4ZTgzYjE5ZTc2ZjJiNTA0OTkzMDAwMTAwMGRwYWNrZmlsZQowMWE1AVBBQ0sAAAACAAAAAZ0heJydkF9vmzAUxd/9Kfw+rbHNn2Bpm0YCS9wSRwnQVnkztnEJJFDitAufftBNe9rTjnSln47uubo6ttca+h7xtNaBrxQRbolFUPpCBbqUnieRr3BBhXYFAp3o9dnCuet6ipSB6yLiC6GoRPNxmdC5QLjUPqVuOcY0EFf70vbwvu1VBRetMZU4t/DL8a74w98vulF3hf4G8ZxigjzqEPgJEYSAbE+nylr9n3HTmUtl4OdJi3jFOEzTNUzZiodZvo8/fABzzFmOmnU4aTdOtJkokQ5vk6fHenPM8SarJ8/sFQvJzYtZlh6G1+Pbw3t/FTJa3fsAFvFwvLbcBFYu8ax25ZSIDqRB4V8dBrGKx2ts5EU2OUuHD2KJm0PEMM9iD8CPN9bdbMfYhbvsB/2JLpTjgdDTrWPF1stvye7ZPtowqnJnNjDyqlM0qDqRbNv7ThJspbgB+PA8FPXTvm+KOHwzm76ru/f8K/hdR8yjf5UB8k4Jq6F8EWejm9aAXwNwonLPs3foPx+RoVqDtUPDdIDwEVAWMDAwNgFhMDAwMA=="
+      }
+    },
+    {
+      "request": {
+        "url": "https://github.com/composer/semver/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDY1MjVlZWU4NmRkMmE0ZjFhOGY2YWQ4ZWZjNTVjMDZkMWI5YWU0YTAKMDAxMmZpbHRlciB0cmVlOjAKMDAxMG5vLXByb2dyZXNzCjAwMGVvZnMtZGVsdGEKMDAwOWRvbmUKMDAwMA=="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAwZHBhY2tmaWxlCjAyMDMBUEFDSwAAAAIAAAABoSJ4nDM0MDAzMVHQS88sSSwpKcpMKi1JLWboUGB0eVwW/M3m+vpbHdG7hDsZd08zMQACsMKM0iSGPd99f1f9iq57b3rRzDTZMVP+ytSFhgizMtPz8otSGa4pfFtXFWS/Kk3KweiiaG7sbObiCzBVBRkF8cnFDGFTb7pLPDZ/3LiVO+p6dwyz9DaeVqgSZw9HP3dXH393vdwUBs6g/M1yt+yerJ09te1E0CYnf/ePnjB1/n4hQZ5OoSGefmCldSrn1jV4PErT/rbv54ap7wMvpvcWQJX6eDq7+gW7MrhllrapqRy3X77LNvTBg/jqZ9ceLIMqCXJ1dPF1BZkTznsrPV7a+veVnt2xHas2iznkpbyCKkrOzy3IL04t0ssqzs9jKDec9rgiO32e89SPFsUnpx3S+peyHKoQ6MviksQ83aTE4tSczLxUvbxUoIbJNp+YRc8+P9VnXKilZHbFxbl7QguqBrA6vZTM4hIG0wN/Fq+8dqakIeZ4R0/5R+F1EwRYEIpL8zJL9CpycyBqvz2+l/8qjV1saod9yb7ePfvs962fCom44qJkhpPhEbfuMzfLPd16cN//mNv7FTXPWkFkgZFeUsywqLZ27cljeXMf310XfWftngAJv/rdAEza3U0V9+4NaOyOSBnP8HhwYZwLbqTKMDAwNgHmMDAwMA=="
+      }
+    },
+    {
+      "request": {
+        "url": "https://github.com/composer/semver/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IDc3MzE5NmUzNzg2YjY3OWU0Mzk1ZjEzODczYzk5NmMyMmFmZTY0YTcKMDAxMG5vLXByb2dyZXNzCjAwMGVvZnMtZGVsdGEKMDAwOWRvbmUKMDAwMA=="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAwZHBhY2tmaWxlCjAyN2MBUEFDSwAAAAIAAAABsV94nJVUXW/aMBR951dYeQanjK3dkCaxTkxlUimitBIaAzmJId6Cnfk60Kjlv+/aJCyhRWvzYuvknHOPrz8eGwQ/T7I197rEC9U6VcC1D3y94dpr7n9HHEItUiOUtKx7rgGnxLKZFoDTRASa6ZyYmBmilktkkMyIRBjBoUk2B4UEo5mQhqAShFwRJiOyYYmImLWnZUmTpy5RYVzCiQi5BPfnejAp0d883yodAcI/HOLQ2hpKhEkjwipWRMMoNfSQyHPgz6ISy0ysdL3Q42FW6+VQJEC+RFxjTVnxdiQMIhLLkmzP6JUTGvFjcqzWPGUr5xobk3Z9f7vd0qriINg1/5frO3ZKkEu1Wgkm1clgv2hQUHrAk4gGr4lVMt8QZ6wCcsnAnAyiVUADJPRWFqF46F4RBEVWQ2VSyVLbScjSVGmDmn/BPKFDa4IDoAkOFM8f14yGeK675+efLvzyilRPiwDIOJTlrXQlTJwFNqx/dKf8gtyotMfT/E8mNK+HSePUWs4/0A59R56eyPyCnrnxIz17Ud+K+KbuAfl6qWTuo1cmhWkFWkT7Rs07e8vqOpAFhkm/GB2tTdvtejG8AypRLDpKC7r1vgY5+Gux+tns1i1/NrOugH0+2pdj9+dreVMFw8HAqRr8AR+hujm+MjKMW3jtGTyvgVlaePpcRzr0wWU74b1/KeseLo3V3k6vv90Mp4vR1ehuOJgsxv3rm/s+DpO78XAxmY76V4Ph5HMbH0wZKe0HQvog1mnCW8UOvrBd1riH86qo+IWvK0tyKC7krrFr/AVRQ5YNVAQ2+9jaFTtHuGzFsDZPsytuOTAwMDYBqzAwMDA="
+      }
+    }
+  ]
+}

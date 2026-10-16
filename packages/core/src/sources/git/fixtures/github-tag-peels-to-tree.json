@@ -1,0 +1,71 @@
+{
+  "scenario": "github-tag-peels-to-tree",
+  "note": "torvalds/linux v2.6.11-tree: annotated tag whose peeled object is a tree.",
+  "recordedAt": "2026-10-16T13:27:36.880Z",
+  "call": {
+    "repoUrl": "https://github.com/torvalds/linux",
+    "refs": [
+      {
+        "name": "refs/tags/v2.6.11-tree",
+        "oid": "5dc01c595e6c6ec9ccda4f6f69c131c0dd945f8c",
+        "peeled": "c39ae07f393806ccf406ef966e9a15afc43cc36a"
+      }
+    ],
+    "path": "Makefile",
+    "filterCacheIndex": null
+  },
+  "outcome": {
+    "kind": "result",
+    "value": [
+      {
+        "ref": "refs/tags/v2.6.11-tree",
+        "commit": "c39ae07f393806ccf406ef966e9a15afc43cc36a",
+        "committedAt": null,
+        "text": null,
+        "reason": "not_a_commit"
+      }
+    ]
+  },
+  "exchanges": [
+    {
+      "request": {
+        "url": "https://github.com/torvalds/linux/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IGMzOWFlMDdmMzkzODA2Y2NmNDA2ZWY5NjZlOWExNWFmYzQzY2MzNmEKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZToxCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAzMUVSUiB0cmVlIGZpbHRlciBhbGxvd3MgbWF4IGRlcHRoIDAsIGJ1dCBnb3QgMQ=="
+      }
+    },
+    {
+      "request": {
+        "url": "https://github.com/torvalds/linux/git-upload-pack",
+        "method": "POST",
+        "headers": {
+          "accept": "application/x-git-upload-pack-result",
+          "content-type": "application/x-git-upload-pack-request",
+          "git-protocol": "version=2"
+        },
+        "bodyBase64": "MDAxMmNvbW1hbmQ9ZmV0Y2gKMDAwMTAwMzJ3YW50IGMzOWFlMDdmMzkzODA2Y2NmNDA2ZWY5NjZlOWExNWFmYzQzY2MzNmEKMDAwZGRlZXBlbiAxCjAwMTJmaWx0ZXIgdHJlZTowCjAwMTBuby1wcm9ncmVzcwowMDBlb2ZzLWRlbHRhCjAwMDlkb25lCjAwMDA="
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/x-git-upload-pack-result",
+          "cache-control": "no-cache, max-age=0, must-revalidate"
+        },
+        "bodyBase64": "MDAxMXNoYWxsb3ctaW5mbwowMDAxMDAwZHBhY2tmaWxlCjAyZmQBUEFDSwAAAAIAAAABoC54AQHgAh/9MTAwNjQ0IENPUFlJTkcAKn4zjsL8aqxGGhH+gEl5nmVjkWYxMDA2NDQgQ1JFRElUUwBxqg1NbNMSE6isZO5VsaQM01EZJTQwMDAwIERvY3VtZW50YXRpb24AZN2Ccm5I5UcWCcDMegy+TvhG7s8xMDA2NDQgTUFJTlRBSU5FUlMAfNLHrTX83i4nNQmHaBBLtOpB9mkxMDA2NDQgTWFrZWZpbGUAeGBQqXT4uIYXzjpFh4/W1hR4VKUxMDA2NDQgUkVBRE1FAA3yDwciew5pfMwzBzv1cnQqr7hlMTAwNjQ0IFJFUE9SVElORy1CVUdTAEFg0aT87V8U+jRxKMkIwDluq8siNDAwMDAgYXJjaAAnaCtjRt/Hlw73Mvq0X1HZbTNtUTQwMDAwIGNyeXB0bwDyPQSHFKlu5/3Mz3NS/+jkJVKeBDQwMDAwIGRyaXZlcnMAxF1Z3vfvRtaTeNe2u6ZdZ1dmstY0MDAwMCBmcwAwirAUkhtSHE7IWltR1pGp5Oq2/jQwMDAwIGluY2x1ZGUAvAIkQx7wbwnI+R8szjx3NdJMhNU0MDAwMCBpbml0AHG28RZI9MADB8wYngVzNcmn/M5GNDAwMDAgaXBjAAxz9jL9PImac6xlH2K+/NA3zXtVNDAwMDAga2VybmVsAEdIwsuvqAu/KAb48V3jsZAVtH6nNDAwMDAgbGliAIpviS+zAIJ3+HBuE8i0CMoNWAilNDAwMDAgbW0AqKEu3zpOT8xS4A3EpSpA/dsR/2c0MDAwMCBuZXQAUQZakQkQrtB3+rMvVcwzV7MXJds0MDAwMCBzY3JpcHRzAFEN7L8WMyyOllbrCyAdINHtGE61NDAwMDAgc2VjdXJpdHkA9oyLVYbqrZOAqAUVBU2RML3UbFI0MDAwMCBzb3VuZABsdvUfcnHCnneNmUP1Xx4ZIVqZ3zQwMDAwIHVzcgB3rbrQqG1OEWi8mr5y+NqEH6g3brusIzAwMTkBhFrJgddzJjojax8ya7Roh7jLQ+cwMDA2ASwwMDAw"
+      }
+    }
+  ]
+}

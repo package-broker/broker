@@ -413,7 +413,7 @@ describe('exporter flush', () => {
     await exporter.flush();
     expect(collector.calls[0]!.body.resourceLogs[0].scopeLogs[0].logRecords).toHaveLength(500);
     expect(
-      sink.seen.filter((s) => s.name === 'pb.obs.dropped' && s.labels.signal === 'logs'),
+      sink.seen.filter((s) => s.name === 'pb.obs.dropped' && s.labels.signal === 'log'),
     ).toHaveLength(3);
   });
 

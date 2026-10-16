@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AppJwtError, createAppJwt } from './app-jwt.js';
+import { AppJwtError, createAppJwt, forgetAppKeys, inspectAppKeyCache } from './app-jwt.js';
 
 const RSA = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' } as const;
 const PKCS8_HEADER_LENGTH_2048 = 26;
@@ -169,5 +169,280 @@ describe('createAppJwt', () => {
   ])('rejects clock value %s with invalid_now', async (now) => {
     const error = await failure(() => createAppJwt(pkcs8, '1', now));
     expect(error.code).toBe('invalid_now');
+  });
+});
+
+const otherPair = await crypto.subtle.generateKey(
+  { ...RSA, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) },
+  true,
+  ['sign', 'verify'],
+);
+const otherPkcs8 = pem(
+  'PRIVATE KEY',
+  new Uint8Array(await crypto.subtle.exportKey('pkcs8', otherPair.privateKey)),
+);
+
+describe('createAppJwt key cache', () => {
+  async function withImportSpy(run: (spy: ReturnType<typeof vi.spyOn>) => Promise<void>) {
+    forgetAppKeys();
+    const spy = vi.spyOn(crypto.subtle, 'importKey');
+    try {
+      await run(spy);
+    } finally {
+      spy.mockRestore();
+      forgetAppKeys();
+    }
+  }
+
+  it('imports once for two JWTs under the same credential id and PEM', async () => {
+    await withImportSpy(async (spy) => {
+      const first = await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      const second = await createAppJwt(pkcs8, '1', 1_800_000_060, { credentialId: 'cred-a' });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await verifies(first)).toBe(true);
+      expect(await verifies(second)).toBe(true);
+    });
+  });
+
+  it('shares one import across concurrent requests for the same credential', async () => {
+    await withImportSpy(async (spy) => {
+      const jwts = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' }),
+        ),
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      for (const jwt of jwts) expect(await verifies(jwt)).toBe(true);
+    });
+  });
+
+  it('imports again when the PEM under the same credential id rotates', async () => {
+    await withImportSpy(async (spy) => {
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      const rotated = await createAppJwt(otherPkcs8, '1', 1_800_000_000, {
+        credentialId: 'cred-a',
+      });
+      expect(spy).toHaveBeenCalledTimes(2);
+      const [header, payload, signature] = rotated.split('.') as [string, string, string];
+      expect(
+        await crypto.subtle.verify(
+          RSA.name,
+          otherPair.publicKey,
+          fromBase64Url(signature),
+          new TextEncoder().encode(`${header}.${payload}`),
+        ),
+      ).toBe(true);
+      expect(inspectAppKeyCache()).toHaveLength(1);
+    });
+  });
+
+  it('evicts the old key when a wrong PEM arrives under the same credential id', async () => {
+    await withImportSpy(async (spy) => {
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-b' });
+      const error = await failure(() =>
+        createAppJwt(pem('PRIVATE KEY', rsa1024Der), '1', 1_800_000_000, {
+          credentialId: 'cred-a',
+        }),
+      );
+      expect(error.code).toBe('invalid_key');
+      expect(inspectAppKeyCache().map((entry) => entry.credentialId)).toEqual(['cred-b']);
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      expect(spy).toHaveBeenCalledTimes(4);
+    });
+  });
+
+  it('does not cache a key whose credential was forgotten while its PEM was hashed', async () => {
+    await withImportSpy(async (spy) => {
+      const original = crypto.subtle.digest.bind(crypto.subtle);
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const digest = vi.spyOn(crypto.subtle, 'digest').mockImplementation((async (
+        ...args: Parameters<typeof original>
+      ) => {
+        await gate;
+        return original(...args);
+      }) as never);
+      try {
+        const pending = createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+        await vi.waitFor(() => expect(digest).toHaveBeenCalledTimes(1));
+        forgetAppKeys('cred-a');
+        release();
+        expect(await verifies(await pending)).toBe(true);
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(inspectAppKeyCache()).toHaveLength(0);
+      } finally {
+        release();
+        digest.mockRestore();
+      }
+    });
+  });
+
+  it('does not cache with an empty credential id', async () => {
+    await withImportSpy(async (spy) => {
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: '' });
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: '' });
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(inspectAppKeyCache()).toHaveLength(0);
+    });
+  });
+
+  it('imports without caching once 16 imports are already in flight', async () => {
+    forgetAppKeys();
+    const original = crypto.subtle.importKey.bind(crypto.subtle);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const spy = vi.spyOn(crypto.subtle, 'importKey').mockImplementation((async (
+      ...args: Parameters<typeof original>
+    ) => {
+      calls += 1;
+      if (calls <= 16) await gate;
+      return original(...args);
+    }) as never);
+    try {
+      const held = Array.from({ length: 16 }, (_, index) =>
+        createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: `cred-${index}` }),
+      );
+      await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(16));
+      const overflow = await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-16' });
+      expect(await verifies(overflow)).toBe(true);
+      expect(inspectAppKeyCache()).toHaveLength(0);
+      release();
+      await Promise.all(held);
+      const ids = inspectAppKeyCache().map((entry) => entry.credentialId);
+      expect(ids).toHaveLength(16);
+      expect(ids).not.toContain('cred-16');
+    } finally {
+      release();
+      spy.mockRestore();
+      forgetAppKeys();
+    }
+  });
+
+  it('zero-fills the PEM bytes after hashing them', async () => {
+    await withImportSpy(async () => {
+      const digest = vi.spyOn(crypto.subtle, 'digest');
+      try {
+        await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+        expect(digest).toHaveBeenCalledTimes(1);
+        const bytes = digest.mock.calls[0]![1] as Uint8Array;
+        expect(bytes.length).toBe(pkcs8.length);
+        expect(bytes.every((byte) => byte === 0)).toBe(true);
+      } finally {
+        digest.mockRestore();
+      }
+    });
+  });
+
+  it('does not cache without a credential id', async () => {
+    await withImportSpy(async (spy) => {
+      await createAppJwt(pkcs8, '1', 1_800_000_000);
+      await createAppJwt(pkcs8, '1', 1_800_000_000);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(inspectAppKeyCache()).toHaveLength(0);
+    });
+  });
+
+  it('evicts the least recently used credential when the 17th arrives', async () => {
+    await withImportSpy(async (spy) => {
+      for (let index = 0; index < 16; index += 1) {
+        await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: `cred-${index}` });
+      }
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-0' });
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-16' });
+      expect(spy).toHaveBeenCalledTimes(17);
+      const ids = inspectAppKeyCache().map((entry) => entry.credentialId);
+      expect(ids).toHaveLength(16);
+      expect(ids).toContain('cred-0');
+      expect(ids).not.toContain('cred-1');
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-1' });
+      expect(spy).toHaveBeenCalledTimes(18);
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-0' });
+      expect(spy).toHaveBeenCalledTimes(18);
+    });
+  });
+
+  it('exposes only key metadata and hex digests, never the key or PEM text', async () => {
+    await withImportSpy(async () => {
+      await createAppJwt(pkcs1, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-b' });
+      const entries = inspectAppKeyCache();
+      expect(entries).toHaveLength(2);
+      const body = pkcs8.split('\n')[1]!;
+      for (const entry of entries) {
+        expect(Object.keys(entry).sort()).toEqual([
+          'credentialId',
+          'digest',
+          'extractable',
+          'type',
+          'usages',
+        ]);
+        expect(entry.type).toBe('private');
+        expect(entry.extractable).toBe(false);
+        expect(entry.usages).toEqual(['sign']);
+        expect(entry.digest).toMatch(/^[0-9a-f]{64}$/);
+        const text = JSON.stringify(entry);
+        expect(text).not.toMatch(/BEGIN|END|MII/);
+        expect(text).not.toContain(body.slice(0, 20));
+      }
+    });
+  });
+
+  it('keys the cache by SHA-256 of the PEM', async () => {
+    await withImportSpy(async () => {
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      const expected = Array.from(
+        new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pkcs8))),
+        (byte) => byte.toString(16).padStart(2, '0'),
+      ).join('');
+      expect(inspectAppKeyCache()[0]?.digest).toBe(expected);
+    });
+  });
+
+  it('does not cache a key that fails to import', async () => {
+    await withImportSpy(async () => {
+      const error = await failure(() =>
+        createAppJwt(pem('PRIVATE KEY', rsa1024Der), '1', 1_800_000_000, {
+          credentialId: 'cred-a',
+        }),
+      );
+      expect(error.code).toBe('invalid_key');
+      expect(inspectAppKeyCache()).toHaveLength(0);
+    });
+  });
+
+  it('forgets one credential or all of them', async () => {
+    await withImportSpy(async (spy) => {
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-b' });
+      forgetAppKeys('cred-a');
+      expect(inspectAppKeyCache().map((entry) => entry.credentialId)).toEqual(['cred-b']);
+      await createAppJwt(pkcs8, '1', 1_800_000_000, { credentialId: 'cred-a' });
+      expect(spy).toHaveBeenCalledTimes(3);
+      forgetAppKeys();
+      expect(inspectAppKeyCache()).toHaveLength(0);
+    });
+  });
+
+  it('rejects an oversized PEM before hashing it', async () => {
+    await withImportSpy(async () => {
+      const digest = vi.spyOn(crypto.subtle, 'digest');
+      try {
+        const error = await failure(() =>
+          createAppJwt(`${pkcs8}${'A'.repeat(16384)}`, '1', 1_800_000_000, {
+            credentialId: 'cred-a',
+          }),
+        );
+        expect(error.code).toBe('invalid_key');
+        expect(digest).not.toHaveBeenCalled();
+      } finally {
+        digest.mockRestore();
+      }
+    });
   });
 });

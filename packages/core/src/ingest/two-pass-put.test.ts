@@ -472,3 +472,135 @@ describe('twoPassPut', () => {
     });
   });
 });
+
+describe('twoPassPut with a supplied first pass', () => {
+  function spied(chunks: Uint8Array[], onPull?: (index: number) => void) {
+    const reasons: unknown[] = [];
+    let i = 0;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          onPull?.(i);
+          const next = chunks[i++];
+          if (next === undefined) controller.close();
+          else controller.enqueue(next);
+        },
+        cancel(reason) {
+          reasons.push(reason);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return { stream, reasons };
+  }
+
+  it('reads pass 1 from the supplied stream and opens only for pass 2', async () => {
+    const f = fakeStore();
+    const all = enc.encode('hello world');
+    let opens = 0;
+    const counts: number[] = [];
+    const result = await twoPassPut(
+      ctx,
+      async () => (opens++, streamOf([all])),
+      f.store,
+      opts({
+        firstPass: streamOf([enc.encode('hello '), enc.encode('world')]),
+        onUpstreamBytes: { add: (n = 1) => counts.push(n) },
+      }),
+    );
+    expect(result.status).toBe('stored');
+    expect(Buffer.from(result.digests.sha256).toString('hex')).toBe(hex('sha256', all));
+    expect(result.size).toBe(all.length);
+    expect(f.stored.get(hex('sha256', all))).toEqual(all);
+    expect(opens).toBe(1);
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(2 * all.length);
+  });
+
+  it('retries through open() when pass 2 differs from the supplied first pass', async () => {
+    const f = fakeStore();
+    let opens = 0;
+    const result = await twoPassPut(
+      ctx,
+      async () => (opens++, streamOf([enc.encode('steady')])),
+      f.store,
+      opts({ firstPass: streamOf([enc.encode('drifte')]) }),
+    );
+    expect(result.status).toBe('stored');
+    expect(opens).toBe(3);
+    expect(f.stored.get(hex('sha256', enc.encode('steady')))).toEqual(enc.encode('steady'));
+  });
+
+  it('throws UpstreamUnstableError when the retry through open() also differs', async () => {
+    const f = fakeStore();
+    let opens = 0;
+    const open = async (): Promise<ReadableStream<Uint8Array>> =>
+      streamOf([enc.encode(opens++ % 2 === 0 ? 'other-pass' : 'first-pass')]);
+    await expect(
+      twoPassPut(ctx, open, f.store, opts({ firstPass: streamOf([enc.encode('first-pass')]) })),
+    ).rejects.toThrow(UpstreamUnstableError);
+    expect(opens).toBe(3);
+    expect(f.stored.size).toBe(0);
+  });
+
+  it('cancels the supplied stream when aborted during pass 1', async () => {
+    const f = fakeStore();
+    const ac = new AbortController();
+    const first = spied([enc.encode('ab'), enc.encode('cd'), enc.encode('ef')], (index) => {
+      if (index === 1) ac.abort();
+    });
+    let opens = 0;
+    const error = await twoPassPut(
+      ctx,
+      async () => (opens++, streamOf([enc.encode('abcdef')])),
+      f.store,
+      opts({ firstPass: first.stream, signal: ac.signal }),
+    ).catch((e: unknown) => e);
+    expect(error).toBe(ac.signal.reason);
+    expect(first.reasons).toHaveLength(1);
+    expect(opens).toBe(0);
+    expect(f.puts).toHaveLength(0);
+  });
+
+  it('cancels the supplied stream when pass 1 exceeds maxBytes', async () => {
+    const f = fakeStore();
+    const first = spied([new Uint8Array(600), new Uint8Array(600), new Uint8Array(600)]);
+    let opens = 0;
+    await expect(
+      twoPassPut(
+        ctx,
+        async () => (opens++, streamOf([])),
+        f.store,
+        opts({ firstPass: first.stream }),
+      ),
+    ).rejects.toThrow(TwoPassLimitError);
+    expect(first.reasons).toHaveLength(1);
+    expect(opens).toBe(0);
+  });
+
+  it('cancels a supplied stream that is never read', async () => {
+    const f = fakeStore();
+    const ac = new AbortController();
+    ac.abort();
+    const aborted = spied([enc.encode('abc')]);
+    await expect(
+      twoPassPut(
+        ctx,
+        async () => streamOf([]),
+        f.store,
+        opts({ firstPass: aborted.stream, signal: ac.signal }),
+      ),
+    ).rejects.toBe(ac.signal.reason);
+    expect(aborted.reasons).toHaveLength(1);
+
+    const refused = spied([enc.encode('abc')]);
+    await expect(
+      twoPassPut(
+        ctx,
+        async () => streamOf([]),
+        f.store,
+        opts({ firstPass: refused.stream, maxBytes: -1 }),
+      ),
+    ).rejects.toThrow(RangeError);
+    expect(refused.reasons).toHaveLength(1);
+  });
+});

@@ -45,6 +45,11 @@ export interface TwoPassOptions {
   readonly onUpstreamBytes?: Pick<Counter, 'add'>;
   /** Cancels both passes and stops before the next `open()`. */
   readonly signal?: AbortSignal;
+  /**
+   * An already open body read as pass 1 of the first attempt instead of calling `open()`; pass 2
+   * and any retry still call `open()`. It is cancelled when twoPassPut ends without reading it.
+   */
+  readonly firstPass?: ReadableStream<Uint8Array>;
 }
 
 export type TwoPassResult =
@@ -110,13 +115,14 @@ interface Unstable {
 
 async function attempt(
   ctx: OrgContext,
+  openFirst: () => Promise<ReadableStream<Uint8Array>>,
   open: () => Promise<ReadableStream<Uint8Array>>,
   store: BlobStore,
   maxBytes: number,
   options: TwoPassOptions,
 ): Promise<TwoPassResult | Unstable> {
   options.signal?.throwIfAborted();
-  const first = await firstPass(await open(), maxBytes, options);
+  const first = await firstPass(await openFirst(), maxBytes, options);
   if (options.verifyFirstPass !== undefined && !(await options.verifyFirstPass(first))) {
     return { status: 'rejected', digests: first, size: first.size };
   }
@@ -159,8 +165,8 @@ async function attempt(
 }
 
 /**
- * `open()` must return a body that carries its own deadline (the policy fetch does); the pass-2
- * stream is only as bounded as the body it is given.
+ * `open()` must return a body that carries its own deadline (the policy fetch does), and
+ * `firstPass` must carry its own deadline too; each pass is only as bounded as its body.
  */
 export async function twoPassPut(
   ctx: OrgContext,
@@ -168,17 +174,23 @@ export async function twoPassPut(
   store: BlobStore,
   options: TwoPassOptions,
 ): Promise<TwoPassResult> {
-  const maxBytes = options.maxBytes;
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > DEFAULT_MAX_BLOB_BYTES) {
-    throw new RangeError(`maxBytes must be an integer from 0 to ${DEFAULT_MAX_BLOB_BYTES}`);
+  const supplied = options.firstPass;
+  try {
+    const maxBytes = options.maxBytes;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > DEFAULT_MAX_BLOB_BYTES) {
+      throw new RangeError(`maxBytes must be an integer from 0 to ${DEFAULT_MAX_BLOB_BYTES}`);
+    }
+    let cause: unknown;
+    for (let n = 1; n <= MAX_ATTEMPTS; n += 1) {
+      const openFirst = n === 1 && supplied !== undefined ? async () => supplied : open;
+      const result = await attempt(ctx, openFirst, open, store, maxBytes, options);
+      if (!('unstable' in result)) return result;
+      cause = result.cause;
+    }
+    throw new UpstreamUnstableError({ cause });
+  } finally {
+    if (supplied !== undefined && !supplied.locked) await supplied.cancel().catch(() => undefined);
   }
-  let cause: unknown;
-  for (let n = 1; n <= MAX_ATTEMPTS; n += 1) {
-    const result = await attempt(ctx, open, store, maxBytes, options);
-    if (!('unstable' in result)) return result;
-    cause = result.cause;
-  }
-  throw new UpstreamUnstableError({ cause });
 }
 
 function signalOptions(signal: AbortSignal | undefined): { signal?: AbortSignal } {

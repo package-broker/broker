@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { orgContext } from '../../db/port.js';
 import {
+  BlobSizeMismatchError,
+  BlobValidationError,
   createBlobStore,
   createBlobUploadAdmission,
   type BlobMetadataPort,
@@ -22,6 +24,7 @@ import type {
   VersionCandidate,
 } from '../../sources/provider.js';
 import { SnapshotCorruptError } from '../snapshot.js';
+import { UpstreamUnstableError } from '../two-pass-put.js';
 import {
   NPM_INLINE_PARSE_BYTES,
   NpmPackumentError,
@@ -87,7 +90,9 @@ function memoryStore() {
   const byteStore: ByteStore = {
     async putVerified(key, body, input) {
       const bytes = new Uint8Array(await new Response(body).arrayBuffer());
-      if (bytes.length !== input.size || sha256(bytes) !== input.sha256) throw new Error('verify');
+      if (bytes.length !== input.size || sha256(bytes) !== input.sha256) {
+        throw new BlobValidationError();
+      }
       objects.set(key, bytes);
       return { size: bytes.length, mediaType: input.mediaType };
     },
@@ -226,6 +231,12 @@ const fixtures: { name: string; text: string; headers: Record<string, string> }[
   },
 ];
 
+const sameLength = (text: string): string => {
+  const changed = text.replace('"readme":"r"', '"readme":"s"');
+  expect(changed).not.toBe(text);
+  return changed;
+};
+
 function wholeParse(text: string): NpmVersionResult[] {
   const doc = JSON.parse(text) as { versions: Record<string, Json>; time: Json };
   return Object.entries(doc.versions)
@@ -264,7 +275,7 @@ describe('describeNpmPackument: large packuments', () => {
       const description = described(await describeWith());
       expect(description.snapshot.stagedBlob).toBe(sha256(bytes));
       expect(objects.size).toBe(1);
-      expect(requests).toHaveLength(3);
+      expect(requests).toHaveLength(2);
       const expected = wholeParse(text);
       const members = await drain(description);
       expect(inputsOf(members)).toEqual(expected);
@@ -274,7 +285,7 @@ describe('describeNpmPackument: large packuments', () => {
       expect(description.distTags).toEqual(doc['dist-tags']);
 
       const continued = described(await describeWith({ snapshot: description.snapshot }));
-      expect(requests).toHaveLength(3);
+      expect(requests).toHaveLength(2);
       expect(continued.snapshot).toEqual(description.snapshot);
       expect(inputsOf(await drain(continued))).toEqual(expected);
       expect(
@@ -398,13 +409,12 @@ describe('describeNpmPackument: inline packuments', () => {
 describe('describeNpmPackument: round 2', () => {
   const large = (): string => fixtures[1]?.text as string;
 
-  it('reports the staging validators, not those of the cancelled first response', async () => {
+  it('reports the pass-2 validators when pass 2 turns the strong ETag weak', async () => {
     const { describeWith } = setup((_, call) => ({
       body: large(),
       headers: {
         etag: call === 1 ? '"same"' : 'W/"same"',
-        'last-modified':
-          call === 1 ? 'Mon, 01 Jan 2024 00:00:00 GMT' : 'Tue, 02 Jan 2024 00:00:00 GMT',
+        'last-modified': 'Tue, 02 Jan 2024 00:00:00 GMT',
       },
     }));
     const description = described(await describeWith());
@@ -412,6 +422,18 @@ describe('describeNpmPackument: round 2', () => {
     expect(description.validators).toEqual({
       'npm-full': { etag: 'W/"same"', lastModified: 'Tue, 02 Jan 2024 00:00:00 GMT' },
     });
+  });
+
+  it('fails unstable when pass 2 disagrees with the first response on Last-Modified', async () => {
+    const { describeWith } = setup((_, call) => ({
+      body: large(),
+      headers: {
+        etag: '"same"',
+        'last-modified':
+          call === 1 ? 'Mon, 01 Jan 2024 00:00:00 GMT' : 'Tue, 02 Jan 2024 00:00:00 GMT',
+      },
+    }));
+    await expect(describeWith()).rejects.toMatchObject({ code: 'unstable' });
   });
 
   it('fails unstable when the staging passes disagree on validators', async () => {
@@ -431,7 +453,7 @@ describe('describeNpmPackument: round 2', () => {
     expect(described(await describeWith()).snapshot.id).toBe(`sha256:${sha256(bytes)}`);
   });
 
-  it('counts every upstream byte, including the cancelled first read and 404 bodies', async () => {
+  it('counts every upstream byte once, including 404 bodies', async () => {
     const counted = (): { add(value?: number): void; total: number } => {
       const counter = {
         total: 0,
@@ -453,7 +475,7 @@ describe('describeNpmPackument: round 2', () => {
     const c = counted();
     const size = enc.encode(large()).length;
     await setup(() => ({ body: large() }), { onUpstreamBytes: c }).describeWith();
-    expect(c.total).toBeGreaterThan(2 * size + NPM_INLINE_PARSE_BYTES);
+    expect(c.total).toBe(2 * size);
   });
 
   it.each(['null', '[]', '"text"', '1'])(
@@ -507,7 +529,7 @@ describe('describeNpmPackument: round 3', () => {
   });
 
   it('falls back to sha256 of the staged body when staging turns the strong ETag weak', async () => {
-    const before = fixtures[1]?.text as string;
+    const before = sameLength(fixtures[0]?.text as string);
     const after = enc.encode(fixtures[0]?.text as string);
     const { describeWith } = setup((_, call) =>
       call === 1
@@ -534,7 +556,7 @@ describe('describeNpmPackument: round 3', () => {
     expect(description.validators).toEqual(expected);
     const persisted = JSON.parse(JSON.stringify(description.snapshot)) as SnapshotRef;
     const continued = described(await describeWith({ snapshot: persisted }));
-    expect(requests).toHaveLength(3);
+    expect(requests).toHaveLength(2);
     expect(continued.validators).toEqual(expected);
     expect(continued.snapshot.id).toBe(description.snapshot.id);
   });
@@ -549,5 +571,149 @@ describe('versionChunks', () => {
       sizes.push(chunk.length);
     }
     expect(sizes).toEqual([50, 50, 20]);
+  });
+});
+
+describe('describeNpmPackument: first response as pass 1', () => {
+  const big = JSON.stringify(packument(1700, 1600, (i) => `4.${i % 13}.${i}`));
+  const bigBytes = enc.encode(big);
+
+  function spiedBody(bytes: Uint8Array, onPull?: (offset: number) => void) {
+    const reasons: unknown[] = [];
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          onPull?.(offset);
+          if (offset >= bytes.length) controller.close();
+          else {
+            controller.enqueue(bytes.slice(offset, offset + 65_536));
+            offset += 65_536;
+          }
+        },
+        cancel(reason) {
+          reasons.push(reason);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return { body, reasons };
+  }
+
+  it('fetches a 3 MiB packument twice and stages sha256 of the whole body', async () => {
+    expect(bigBytes.length).toBeGreaterThan(3 * 1024 * 1024);
+    const { describeWith, requests, objects } = setup(() => ({ body: bigBytes }));
+    const description = described(await describeWith());
+    expect(requests).toHaveLength(2);
+    expect(description.snapshot.stagedBlob).toBe(sha256(bigBytes));
+    expect([...objects.values()][0]).toEqual(bigBytes);
+    expect(inputsOf(await drain(description))).toEqual(wholeParse(big));
+  }, 60_000);
+
+  it('fetches a 100 KiB packument once', async () => {
+    const text = JSON.stringify(packument(60, 1500, (i) => `1.0.${i}`));
+    expect(enc.encode(text).length).toBeGreaterThan(100 * 1024);
+    expect(enc.encode(text).length).toBeLessThan(NPM_INLINE_PARSE_BYTES);
+    const { describeWith, requests } = setup(() => ({ body: text }));
+    described(await describeWith());
+    expect(requests).toHaveLength(1);
+  });
+
+  it('retries through a new request when pass 2 differs from the first response', async () => {
+    const after = enc.encode(fixtures[0]?.text as string);
+    const { describeWith, requests } = setup((_, call) => ({
+      body: call === 1 ? sameLength(fixtures[0]?.text as string) : after,
+    }));
+    const description = described(await describeWith());
+    expect(requests).toHaveLength(4);
+    expect(description.snapshot.stagedBlob).toBe(sha256(after));
+  });
+
+  it('fails unstable when retry pass 1 changes validators after attempt 1 pass 2', async () => {
+    const original = fixtures[0]?.text as string;
+    const { describeWith, requests, objects } = setup((_, call) => ({
+      body: call === 1 ? sameLength(original) : original,
+      headers: {
+        'last-modified':
+          call <= 2 ? 'Mon, 01 Jan 2024 00:00:00 GMT' : 'Tue, 02 Jan 2024 00:00:00 GMT',
+      },
+    }));
+    await expect(describeWith()).rejects.toMatchObject({ code: 'unstable' });
+    expect(requests).toHaveLength(3);
+    expect(objects.size).toBe(0);
+  });
+
+  it('fails without retry when pass 2 changes size from the first response', async () => {
+    const original = fixtures[0]?.text as string;
+    const { describeWith, requests, objects } = setup((_, call) => ({
+      body: call === 1 ? original : `${original} `,
+    }));
+    await expect(describeWith()).rejects.toBeInstanceOf(BlobSizeMismatchError);
+    expect(requests).toHaveLength(2);
+    expect(objects.size).toBe(0);
+  });
+
+  it('counts downloaded head bytes when aborted on the threshold-crossing chunk', async () => {
+    const controller = new AbortController();
+    let downloaded = 0;
+    let total = 0;
+    const first = spiedBody(bigBytes, (offset) => {
+      downloaded += Math.min(65_536, bigBytes.length - offset);
+      if (downloaded > NPM_INLINE_PARSE_BYTES) controller.abort();
+    });
+    let requests = 0;
+    const fetch: PolicyFetch = async () => {
+      requests += 1;
+      return { status: 200, headers: new Headers(), body: first.body };
+    };
+    const { store } = memoryStore();
+    const error = await describeNpmPackument(
+      {
+        ctx,
+        fetch,
+        store,
+        codecs,
+        signal: controller.signal,
+        onUpstreamBytes: { add: (n = 1) => void (total += n) },
+      },
+      { name: 'example', url: URL_ },
+      {},
+    ).catch((e: unknown) => e);
+    expect(error).toBe(controller.signal.reason);
+    expect(downloaded).toBe(NPM_INLINE_PARSE_BYTES + 65_536);
+    expect(total).toBe(downloaded);
+    expect(first.reasons).toHaveLength(1);
+    expect(requests).toBe(1);
+  });
+
+  it('throws UpstreamUnstableError when the bytes keep changing', async () => {
+    const { describeWith, requests } = setup((_, call) => ({
+      body:
+        call % 2 === 1 ? sameLength(fixtures[0]?.text as string) : (fixtures[0]?.text as string),
+    }));
+    await expect(describeWith()).rejects.toBeInstanceOf(UpstreamUnstableError);
+    expect(requests).toHaveLength(4);
+  });
+
+  it('cancels the first response body when aborted during pass 1', async () => {
+    const controller = new AbortController();
+    const first = spiedBody(bigBytes, (offset) => {
+      if (offset >= 2 * 1024 * 1024) controller.abort();
+    });
+    const requests: UpstreamRequest[] = [];
+    const fetch: PolicyFetch = async (request) => {
+      requests.push(request);
+      return { status: 200, headers: new Headers(), body: first.body };
+    };
+    const { store } = memoryStore();
+    const error = await describeNpmPackument(
+      { ctx, fetch, store, codecs, signal: controller.signal },
+      { name: 'example', url: URL_ },
+      {},
+    ).catch((e: unknown) => e);
+    expect(controller.signal.aborted).toBe(true);
+    expect(error).toBe(controller.signal.reason);
+    expect(first.reasons).toHaveLength(1);
+    expect(requests).toHaveLength(1);
   });
 });

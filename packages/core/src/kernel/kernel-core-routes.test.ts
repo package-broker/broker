@@ -68,15 +68,15 @@ describe('createKernel coreRoutes', () => {
     expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('denies a permissioned core route with the default engine', async () => {
+  it('returns 503 unavailable for a permissioned core route with the default engine', async () => {
     const kernel = await createKernel(
       options([route('/_pb/secret', { permission: 'org:read', boundary: 'organization' })]),
     );
 
     const response = await kernel.fetch(new Request(`${BASE}/_pb/secret`));
 
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ error: { code: 'forbidden' } });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'unavailable' } });
   });
 
   it('hands a permissioned core route to the engine under the plugin label core', async () => {

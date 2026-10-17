@@ -86,6 +86,17 @@ async function expectForbidden(response: Response) {
   });
 }
 
+async function expectUnavailable(response: Response) {
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({
+    error: {
+      code: 'unavailable',
+      message: 'Authorization is temporarily unavailable',
+      requestId: expect.any(String),
+    },
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -127,11 +138,28 @@ describe('kernel engine and hook contract', () => {
     expect(f.handler.mock.calls[0]?.[0]).toMatchObject({ principal, projectId: null });
   });
 
-  it('defaults to deny-all without invoking hooks or the handler', async () => {
+  it('reports the default engine as unavailable without invoking hooks or the handler', async () => {
     const hook = vi.fn<AccessHook>(() => undefined);
     const f = fixture(undefined, [hook]);
     const kernel = await f.kernel();
-    await expectForbidden(await kernel.fetch(new Request(url)));
+    const response = await kernel.fetch(new Request(url, { headers: { accept: 'text/html' } }));
+    const body = await response.clone().text();
+    await expectUnavailable(response);
+    expect(body).not.toContain('administrator');
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        event: 'authz.error',
+        level: 'error',
+        reason_code: 'authz.engine_error',
+      }),
+    );
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        event: 'http.request',
+        status: 503,
+        reason_code: 'authz.engine_error',
+      }),
+    );
     expect(hook).not.toHaveBeenCalled();
     expect(f.handler).not.toHaveBeenCalled();
   });
@@ -238,7 +266,7 @@ describe('kernel engine and hook contract', () => {
     const hook = vi.fn<AccessHook>(() => undefined);
     const f = fixture(engineReturning(value), [hook]);
     const kernel = await f.kernel();
-    await expectForbidden(await kernel.fetch(new Request(url)));
+    await expectUnavailable(await kernel.fetch(new Request(url)));
     expect(hook).not.toHaveBeenCalled();
     expect(f.handler).not.toHaveBeenCalled();
   });

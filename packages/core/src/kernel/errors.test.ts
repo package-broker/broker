@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { defaultLog, envelopeResponse, errorResponse, logError } from './errors.js';
+import { defaultLog, envelopeResponse, errorResponse, logError, responseReason } from './errors.js';
 import type { KernelLog } from './errors.js';
 import { liveResponse, readyResponse } from './health.js';
 import { NotBootstrappedError } from './org.js';
@@ -518,5 +518,35 @@ describe('logError', () => {
 
   it('does not throw when the log throws', () => {
     expect(() => logError(throwingLog(), 'req-83', new Error('x'))).not.toThrow();
+  });
+});
+
+describe('responseReason', () => {
+  it.each([
+    ['not_bootstrapped', new NotBootstrappedError(), 'error.not_bootstrapped'],
+    ['misconfigured', new KernelConfigError(['bad']), 'error.misconfigured'],
+    ['unavailable', new DbError('busy', 'busy: database is locked'), 'error.unavailable'],
+    ['internal', new Error('x'), 'error.internal'],
+  ] as const)('is attached by errorResponse for %s', (_name, error, reason) => {
+    expect(responseReason(errorResponse(error, 'req-r1', () => undefined))).toBe(reason);
+  });
+
+  it('is attached by envelopeResponse only when a reason is given', () => {
+    expect(
+      responseReason(envelopeResponse(503, 'unavailable', 'x', 'r', 'authz.engine_error')),
+    ).toBe('authz.engine_error');
+    expect(responseReason(envelopeResponse(403, 'forbidden', 'x', 'r'))).toBeUndefined();
+  });
+
+  it('is undefined for a response the kernel did not build', () => {
+    expect(responseReason(Response.json({ error: { code: 'unavailable' } }, { status: 503 }))).toBe(
+      undefined,
+    );
+  });
+
+  it('keeps the reason out of the headers and the body', async () => {
+    const response = errorResponse(new Error('x'), 'req-r2', () => undefined);
+    expect(JSON.stringify([...response.headers])).not.toContain('error.internal');
+    expect(await response.text()).not.toContain('error.internal');
   });
 });

@@ -56,6 +56,7 @@ function harness(found: ActiveSession | null = activeSession()): Harness {
   const unexpected = (name: string) => vi.fn(() => Promise.reject(new Error(`unexpected ${name}`)));
   const sessions: SessionRepository = {
     findActive,
+    findActiveById: () => findActive(),
     touch,
     revokeBySecretHash,
     revoke: unexpected('revoke'),

@@ -43,14 +43,14 @@ const GENERATED_ALIAS_PACKAGES = ['runtime-node', 'runtime-cloudflare'];
 const ws = (...names: string[]): string[] => names.map((name) => `${WORKSPACE_PREFIX}${name}`);
 
 const RULES: Readonly<Record<string, Rule>> = {
-  core: { allow: ['hono'], testOnly: ['eslint', 'node', 'typescript', 'vitest'] },
+  core: { allow: ['hono', 'zod'], testOnly: ['eslint', 'node', 'typescript', 'vitest'] },
   'db-sqlite': {
     allow: [...ws('core'), 'kysely'],
     testOnly: [],
     kitAndTests: ['vitest', 'node'],
   },
   'runtime-cloudflare': {
-    allow: [...ws('core', 'db-sqlite'), 'hono'],
+    allow: [...ws('core', 'db-sqlite'), 'hono', '@cloudflare/workers-types'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
     onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },
@@ -451,7 +451,9 @@ const ACCESS_CONTEXT_RULE: ImportRule = {
       'setAccessContext',
       'accessContextOf',
       'organizationActorOf',
+      'authenticatedActorOf',
     ],
+    'packages/core/src/authz/engine': ['engineGrantOf'],
   },
   allowedRoots: [
     'packages/core/src/',

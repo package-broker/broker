@@ -1,3 +1,4 @@
+import type { ActorAccessSnapshot } from './actor.js';
 import { catalogueTokenEligible } from './catalogue.js';
 import { assertCsrfToken, assertSameOrigin, UNSAFE_METHODS } from '../auth/csrf.js';
 import { SESSION_COOKIE, readCookie } from '../auth/cookies.js';
@@ -16,6 +17,20 @@ import { isValidProjectSlug } from './project-path.js';
 import { authenticateToken } from './token-use.js';
 import type { TokenAccessView, TokenUseDeps } from './token-use.js';
 
+export interface EngineGrant {
+  readonly principal: Principal;
+  readonly projectId: string | null;
+  readonly sessionId: string | null;
+  readonly tokenSelector: string | null;
+  readonly actor: ActorAccessSnapshot | null;
+}
+
+const grants = new WeakMap<AuthorizationRequest, EngineGrant>();
+
+export function engineGrantOf(request: AuthorizationRequest): EngineGrant | null {
+  return grants.get(request) ?? null;
+}
+
 export interface EngineProviderAnchor {
   readonly provider: string;
   readonly anchor: string;
@@ -29,6 +44,7 @@ interface EngineAccessCommon {
 }
 
 export interface EngineSessionAccess extends EngineAccessCommon {
+  readonly protectedHolder: boolean;
   readonly session: { readonly id: string; readonly csrfHash: string };
   readonly user: { readonly id: string };
 }
@@ -245,6 +261,24 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         }
       });
     }
+    if (decision.allow) {
+      grants.set(
+        request,
+        Object.freeze({
+          principal: Object.freeze(decision.principal),
+          projectId: decision.projectId,
+          sessionId: found.session.id,
+          tokenSelector: null,
+          actor: Object.freeze({
+            session: Object.freeze({ id: found.session.id, userId: found.user.id }),
+            user: Object.freeze({ id: found.user.id }),
+            organizationPermissions: Object.freeze([...found.organizationPermissions]),
+            projectPermissions: Object.freeze([...found.projectPermissions]),
+            protectedHolder: found.protectedHolder,
+          }),
+        }),
+      );
+    }
     return decision;
   }
 
@@ -295,11 +329,22 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     if (!decision.allow) return decision;
     if (!catalogueTokenEligible(permission)) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
-    return decision;
+    grants.set(
+      request,
+      Object.freeze({
+        principal: Object.freeze(decision.principal),
+        projectId: decision.projectId,
+        sessionId: null,
+        tokenSelector: token.selector,
+        actor: null,
+      }),
+    );
+    return { ...decision, tokenId: found.token.id };
   }
 
   return Object.freeze({
     async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
+      grants.delete(request);
       const { permission, boundary } = request.route;
       if (boundary !== 'organization' && boundary !== 'project') return FORBIDDEN;
       const slug = boundary === 'project' ? request.params['project'] : undefined;

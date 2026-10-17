@@ -145,6 +145,28 @@ function redirect(location: string, cookies: readonly string[]): Response {
   return withCookies(response, cookies);
 }
 
+function prefersJson(request: Request): boolean {
+  const accept = request.headers.get('accept');
+  if (accept === null) return false;
+  for (const part of accept.split(',')) {
+    const [range = '', ...params] = part.split(';').map((piece) => piece.trim().toLowerCase());
+    const q = params.find((param) => param.startsWith('q='));
+    const weight = q === undefined ? 1 : Number(q.slice(2));
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    return range === 'application/json';
+  }
+  return false;
+}
+
+function locationResponse(location: string, cookies: readonly string[]): Response {
+  return withCookies(json(200, { location }), cookies);
+}
+
+function varyOnAccept(response: Response): Response {
+  response.headers.set('vary', 'Accept');
+  return response;
+}
+
 async function readBody(request: Request): Promise<string | null> {
   const declared = request.headers.get('content-length');
   if (declared !== null && Number(declared) > MAX_BODY_BYTES) return null;
@@ -308,6 +330,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     identity: VerifiedIdentity,
     returnTo: string,
     cookies: readonly string[],
+    asLocation = false,
   ): Promise<Response> {
     const outcome = await deps.login(
       orgOf(rc),
@@ -332,7 +355,8 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       userId: outcome.userId,
       sessionId: outcome.sessionId,
     });
-    return redirect(returnTo, [...outcome.cookies, ...cookies]);
+    const issued = [...outcome.cookies, ...cookies];
+    return asLocation ? locationResponse(returnTo, issued) : redirect(returnTo, issued);
   }
 
   async function start(rc: RequestContext): Promise<Response> {
@@ -392,7 +416,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       if ('reason' in verified) {
         return loginFailed(rc, provider.id, verified.reason, [], verified.error);
       }
-      return completeLogin(rc, provider, verified.identity, returnTo, []);
+      return varyOnAccept(
+        await completeLogin(rc, provider, verified.identity, returnTo, [], prefersJson(request)),
+      );
     }
 
     let sealed: string;
@@ -411,7 +437,11 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       }
       throw error;
     }
-    return redirect(started.location, [sealed]);
+    return varyOnAccept(
+      prefersJson(request)
+        ? locationResponse(started.location, [sealed])
+        : redirect(started.location, [sealed]),
+    );
   }
 
   function providerFailed(rc: RequestContext, provider: string, error: unknown): Response {

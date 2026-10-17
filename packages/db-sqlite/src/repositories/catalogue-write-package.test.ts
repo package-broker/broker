@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
 import { catalogueWriteGuard, type CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
+import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
   MAX_DESCRIPTION_BYTES,
@@ -290,6 +291,30 @@ describe('packageUpsertStatements', () => {
     expect(await packages()).toEqual([]);
   });
 
+  it('refuses to update a package held under a source of another ecosystem', async () => {
+    await database.executor.batch([
+      stmt(
+        "INSERT INTO package (id, org_id, source_id, ecosystem, name, description) VALUES ('01J0PKG0000000000000000K01', ?, ?, 'composer', ?, 'A widget')",
+        org.orgId,
+        NPM_SOURCE,
+        KEY,
+      ),
+    ]);
+    const before = await packages();
+    await expect(upsert(input({ sourceId: NPM_SOURCE, description: 'Changed' }))).rejects.toThrow();
+    expect(await packages()).toEqual(before);
+  });
+
+  it('refuses to update a package once its source moved to another ecosystem', async () => {
+    await upsert(input());
+    await database.executor.batch([
+      stmt("UPDATE source SET ecosystem = 'npm' WHERE id = ?", SOURCE),
+    ]);
+    const before = await packages();
+    await expect(upsert(input({ description: 'Changed' }))).rejects.toThrow();
+    expect(await packages()).toEqual(before);
+  });
+
   it('a forged cross-organization attachment does not materialize the package', async () => {
     await database.executor.batch([
       stmt(
@@ -336,6 +361,14 @@ describe('packageUpsertStatements', () => {
     ['non-string description', { description: 7 as never }],
   ])('refuses %s', (_label, overrides) => {
     expect(() => packageUpsertStatements(org, guard, input(overrides))).toThrow(RangeError);
+  });
+
+  it('registers repository-built guards for their organization and rejects empty statements', async () => {
+    const registered = registerCatalogueWriteGuard(org, [...guard]);
+    await upsert(input(), registered);
+    expect(await packages()).toHaveLength(1);
+    expect(() => packageUpsertStatements(other, registered, input())).toThrow(TypeError);
+    expect(() => registerCatalogueWriteGuard(org, [])).toThrow(TypeError);
   });
 
   it('keeps the job guard first in the batch', () => {

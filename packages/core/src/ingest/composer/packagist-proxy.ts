@@ -54,6 +54,7 @@ export function describePackagist(
 ): Promise<ComposerV2Result> {
   return describeComposerV2(fetch, { root: PACKAGIST_ROOT, allowedOrigins: [] }, name, {
     dev: true,
+    redirect: 'error',
     path: options.path,
     probe: NO_PROBE,
     clock: options.clock,

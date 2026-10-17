@@ -1,9 +1,12 @@
+import type { Codecs } from '../../platform/codec.js';
 import {
   UpstreamError,
   type PolicyFetch,
   type UpstreamCredential,
 } from '../../sources/policy-fetch.js';
 import { classifyUrl, type OutboundPolicy } from '../../sources/url-policy.js';
+import { JsonExtractError, extractMembers, type MemberSelector } from '../json-stream.js';
+import { JsonStreamError } from '../json-tokenizer.js';
 
 export type ComposerMode = 'v2' | 'v1-providers' | 'v1-lazy' | 'v1-includes';
 export type ComposerRootErrorCode =
@@ -76,6 +79,14 @@ export interface ComposerRoot {
   readonly mirrors: readonly { readonly distUrl: string; readonly preferred: boolean }[];
 }
 
+export interface ComposerRootStreaming {
+  readonly codecs: Pick<Codecs, 'digestTap'>;
+  /** Largest streamed body; inline members are buffered individually, then dropped. */
+  readonly maxDocumentBytes: number;
+  /** Largest inline package or provider member. Default 1 MiB. */
+  readonly maxMemberBytes?: number;
+}
+
 const DEFAULT_MAX_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_INCLUDES = 1000;
@@ -132,8 +143,10 @@ function resolveTemplate(template: string, base: string): string | null {
   }
 }
 
-function toHex(bytes: ArrayBuffer): string {
-  return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, '0')).join('');
+function toHex(bytes: ArrayBuffer | Uint8Array): string {
+  return Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), (b) =>
+    b.toString(16).padStart(2, '0'),
+  ).join('');
 }
 
 function packagesJsonUrlOf(url: string): string {
@@ -210,10 +223,138 @@ function mirrorsOf(
   return { mirrors: out, refused };
 }
 
+const RETAINED_FIELDS = [
+  'metadata-url',
+  'metadata-changes-url',
+  'available-packages',
+  'available-package-patterns',
+  'providers-url',
+  'providers-lazy-url',
+  'provider-includes',
+  'includes',
+  'mirrors',
+  'warning',
+  'warning-versions',
+  'info',
+  'info-versions',
+  'warnings',
+  'infos',
+] as const;
+
+const STREAM_SELECTORS: readonly MemberSelector[] = [
+  ...RETAINED_FIELDS.map((field) => [field] as const),
+  ['packages', '*'],
+  ['providers', '*'],
+];
+
+function streamError(error: unknown): unknown {
+  if (error instanceof JsonExtractError) {
+    return error.code === 'document_too_large' || error.code === 'member_too_large'
+      ? new ComposerRootError('too_large')
+      : new ComposerRootError('invalid', 'body');
+  }
+  if (error instanceof JsonStreamError) {
+    return new ComposerRootError('invalid', 'body');
+  }
+  return error;
+}
+
+async function* rootChunks(
+  body: ReadableStream<Uint8Array>,
+  maxDocumentBytes: number,
+): AsyncGenerator<Uint8Array> {
+  const reader = body.getReader();
+  const prefix = new Uint8Array(3);
+  let prefixLength = 0;
+  let started = false;
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxDocumentBytes) throw new ComposerRootError('too_large');
+      if (started) {
+        yield value;
+        continue;
+      }
+      const take = Math.min(3 - prefixLength, value.byteLength);
+      prefix.set(value.subarray(0, take), prefixLength);
+      prefixLength += take;
+      if (prefixLength < 3) continue;
+      started = true;
+      if (prefix[0] !== 0xef || prefix[1] !== 0xbb || prefix[2] !== 0xbf) yield prefix;
+      if (value.byteLength > take) yield value.subarray(take);
+    }
+    if (!started && prefixLength > 0) yield prefix.subarray(0, prefixLength);
+  } finally {
+    try {
+      await reader.cancel().catch(() => undefined);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+}
+
+async function streamRoot(
+  body: ReadableStream<Uint8Array>,
+  streaming: ComposerRootStreaming,
+  retainedLimit: number,
+): Promise<{ root: Json; sha256: string }> {
+  const tap = streaming.codecs.digestTap(['sha256']);
+  tap.digests.catch(() => undefined);
+  const root: Json = {};
+  const encoder = new TextEncoder();
+  const maxMemberBytes = streaming.maxMemberBytes ?? DEFAULT_MAX_BYTES;
+  let retained = 0;
+  let packages = false;
+  let providers = false;
+  try {
+    const members = extractMembers(
+      rootChunks(body.pipeThrough(tap.transform), streaming.maxDocumentBytes),
+      STREAM_SELECTORS,
+      {
+        maxDocumentBytes: streaming.maxDocumentBytes,
+        maxMemberBytes: Math.max(maxMemberBytes, retainedLimit),
+      },
+    );
+    for await (const member of members) {
+      const [field] = member.path;
+      const size = encoder.encode(member.raw).byteLength;
+      if (member.path.length === 2) {
+        if (size > maxMemberBytes) throw new ComposerRootError('too_large');
+        if (field === 'packages') packages = true;
+        else providers = true;
+        continue;
+      }
+      retained += size;
+      if (retained > retainedLimit) throw new ComposerRootError('too_large');
+      root[field as string] = JSON.parse(member.raw);
+    }
+    const digest = (await tap.digests).sha256;
+    if (packages) root.packages = { inline: true };
+    if (providers) root.providers = { inline: true };
+    return { root, sha256: toHex(digest) };
+  } catch (error) {
+    throw streamError(error);
+  }
+}
+
 export async function readComposerRoot(
   fetch: PolicyFetch,
   source: ComposerRootSource,
+  streaming?: ComposerRootStreaming,
 ): Promise<ComposerRoot> {
+  if (streaming !== undefined) {
+    for (const value of [
+      streaming.maxDocumentBytes,
+      streaming.maxMemberBytes ?? DEFAULT_MAX_BYTES,
+      source.maxBytes ?? DEFAULT_MAX_BYTES,
+    ]) {
+      if (!Number.isSafeInteger(value) || value <= 0)
+        throw new ComposerRootError('invalid', 'limits');
+    }
+  }
   const allowed = new Set<string>();
   for (const entry of source.allowedOrigins) {
     try {
@@ -253,7 +394,8 @@ export async function readComposerRoot(
 
   const destinations = [rootOrigin, ...allowed];
   let response: Awaited<ReturnType<PolicyFetch>>;
-  let bytes: ArrayBuffer;
+  let bytes: ArrayBuffer | undefined;
+  let streamed: { root: Json; sha256: string } | undefined;
   try {
     response = await fetch({
       url: packagesJsonUrl,
@@ -262,7 +404,7 @@ export async function readComposerRoot(
       ...(source.credential === undefined ? {} : { credential: source.credential }),
       destinations,
       purpose: 'metadata',
-      maxBytes: source.maxBytes ?? DEFAULT_MAX_BYTES,
+      maxBytes: streaming?.maxDocumentBytes ?? source.maxBytes ?? DEFAULT_MAX_BYTES,
       timeoutMs: source.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     });
     if (response.status !== 200) {
@@ -270,7 +412,11 @@ export async function readComposerRoot(
       throw new ComposerRootError('http_status', undefined, response.status);
     }
     if (response.body === null) throw new ComposerRootError('invalid', 'body');
-    bytes = await new Response(response.body).arrayBuffer();
+    if (streaming === undefined) {
+      bytes = await new Response(response.body).arrayBuffer();
+    } else {
+      streamed = await streamRoot(response.body, streaming, source.maxBytes ?? DEFAULT_MAX_BYTES);
+    }
   } catch (error) {
     if (error instanceof UpstreamError) {
       throw new ComposerRootError(error.code, error.reason, error.status);
@@ -278,14 +424,19 @@ export async function readComposerRoot(
     throw error;
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-  } catch {
-    throw new ComposerRootError('invalid', 'body');
+  let root: Json;
+  if (streamed === undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch {
+      throw new ComposerRootError('invalid', 'body');
+    }
+    if (!isObject(parsed)) throw new ComposerRootError('invalid', 'body');
+    root = parsed;
+  } else {
+    root = streamed.root;
   }
-  if (!isObject(parsed)) throw new ComposerRootError('invalid', 'body');
-  const root = parsed;
 
   const base = baseOf(packagesJsonUrl);
   const prefixed = (value: string): string => (value.startsWith('/') ? rootOrigin + value : value);
@@ -411,7 +562,8 @@ export async function readComposerRoot(
     validator: {
       ...(etag === undefined ? {} : { etag }),
       ...(lastModified === undefined ? {} : { lastModified }),
-      sha256: toHex(await crypto.subtle.digest('SHA-256', bytes)),
+      sha256:
+        streamed?.sha256 ?? toHex(await crypto.subtle.digest('SHA-256', bytes as ArrayBuffer)),
     },
     messages,
     mirrors,

@@ -8,10 +8,8 @@ import {
   type NpmStaging,
 } from './npmjs-proxy.js';
 
-/** Registry origin to the storage origins its tarball downloads redirect to, per the registry's own documentation. */
-export const NPM_REGISTRY_STORAGE_HOSTS: Readonly<Record<string, readonly string[]>> = {
-  'https://npm.pkg.github.com': ['https://pkg-npm.githubusercontent.com'],
-};
+const GITHUB_PACKAGES_ORIGIN = 'https://npm.pkg.github.com';
+const GITHUB_PACKAGES_STORAGE = 'https://pkg-npm.githubusercontent.com';
 
 const refused = (reason: string): UpstreamError => new UpstreamError('refused', undefined, reason);
 
@@ -19,6 +17,8 @@ interface Registry {
   readonly url: string;
   readonly origin: string;
   readonly scopes: readonly string[];
+  readonly tarballOrigins: readonly string[];
+  readonly tarballDestinations: readonly string[];
   readonly credential: UpstreamCredential | undefined;
 }
 
@@ -37,10 +37,19 @@ function registryOf(ctx: ProviderContext, source: ProviderSource): Registry {
   ) {
     throw refused('credential');
   }
+  const tarballOrigins = [
+    origin,
+    ...(source.config.distHosts ?? []).map((host) => `https://${host}`),
+  ];
   return {
     url: source.url,
     origin,
     scopes: source.config.scopes,
+    tarballOrigins,
+    tarballDestinations: [
+      ...tarballOrigins,
+      ...(origin === GITHUB_PACKAGES_ORIGIN ? [GITHUB_PACKAGES_STORAGE] : []),
+    ],
     credential: credential ?? undefined,
   };
 }
@@ -69,7 +78,6 @@ function pathHasScope(url: string, origin: string, scope: string): boolean {
 
 export function createNpmRegistryProvider(
   staging: NpmStaging,
-  storageHosts: Readonly<Record<string, readonly string[]>> = NPM_REGISTRY_STORAGE_HOSTS,
   id = 'npm-registry',
 ): SourceProvider {
   return {
@@ -102,14 +110,11 @@ export function createNpmRegistryProvider(
       if (target.url !== null && !pathHasScope(target.url, registry.origin, scope)) {
         throw refused('tarball_url');
       }
-      const storage = Object.hasOwn(storageHosts, registry.origin)
-        ? (storageHosts[registry.origin] ?? [])
-        : [];
       return openNpmTarball(
         ctx,
         target,
-        [registry.origin],
-        [registry.origin, ...storage],
+        registry.tarballOrigins,
+        registry.tarballDestinations,
         registry.credential,
       );
     },

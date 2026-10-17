@@ -395,6 +395,10 @@ VALUES ('REF1', ?, 'RUN1', 'version', 'VERX', 'ext', 'update', ?)`,
     expect(text).toContain('INDEX version_blob');
     expect(text).toContain('INDEX version_revision_blob');
     expect(text).toContain('INDEX import_ref_run_external');
+    expect(text).toContain('INDEX upstream_state_content');
+    expect(text).toContain(
+      'INDEX ingest_session_snapshot_blob (org_id=? AND snapshot_blob_sha256=?)',
+    );
     expect(text.indexOf('import_run')).toBeGreaterThan(-1);
     expect(text.indexOf('import_run')).toBeLessThan(text.indexOf('import_ref_run_external'));
     expect(
@@ -420,5 +424,171 @@ VALUES ('REF1', ?, 'RUN1', 'version', 'VERX', 'ext', 'update', ?)`,
     for (const alias of ['bref_v', 'BREF_V', 'Bref_Ru']) {
       expect(() => blobEligibleCondition(a, alias)).toThrow(TypeError);
     }
+  });
+});
+
+describe('orphan retention', () => {
+  const aged = (days: number) =>
+    `refetchable = 1, published_at = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${days} days')`;
+
+  beforeEach(async () => {
+    await source(a, 'SRC1');
+    await pkg(a, 'PKG1', 'SRC1');
+  });
+
+  it('returns an eight-day-old refetchable orphan with its flag and no override', async () => {
+    const id = await blob(a, 1, aged(8));
+    expect(await reader.candidates(a, { limit: 50 })).toEqual([
+      expect.objectContaining({ id, orphan: true, retentionDaysOverride: null }),
+    ]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(true);
+  });
+
+  it('keeps an old orphan re-published one minute ago', async () => {
+    await blob(
+      a,
+      1,
+      `${aged(30)}, published_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 minute')`,
+    );
+    expect(await shas()).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+  });
+
+  it.each(['version', 'revision'])(
+    'keeps an aged blob referenced by a cross-org %s',
+    async (kind) => {
+      await source(b, 'SRCB');
+      await pkg(b, 'PKGB', 'SRCB');
+      const id = await blob(a, 1, aged(8));
+      if (kind === 'version') await version(b, 'PKGB', id);
+      else await revision(b, await version(b, 'PKGB', null), id);
+      expect(await shas()).toEqual([]);
+      expect(await reader.stillEligible(a, digest(1))).toBe(false);
+    },
+  );
+
+  it('compares publication instants across timestamp formats', async () => {
+    await blob(
+      a,
+      1,
+      `${aged(30)}, published_at = strftime('%Y-%m-%d %H:%M:%f', 'now', '-6 days', '+14 hours') || '+14:00'`,
+    );
+    expect(await shas()).toEqual([]);
+    await run(
+      "UPDATE blob SET published_at = strftime('%Y-%m-%d %H:%M:%f', 'now', '-8 days', '-12 hours') || '-12:00'",
+      [],
+    );
+    expect(await shas()).toEqual([digest(1)]);
+  });
+
+  it('keeps a six-day-old refetchable orphan', async () => {
+    await blob(a, 1, aged(6));
+    expect(await shas()).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+  });
+
+  it('keeps a thirty-day-old non-refetchable orphan', async () => {
+    await blob(a, 1, `${aged(30)}, refetchable = 0`);
+    expect(await shas()).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+  });
+
+  it.each(['running', 'complete', 'abandoned'])(
+    'keeps a snapshot of a %s ingest session',
+    async (state) => {
+      await blob(a, 1, aged(8));
+      await run(
+        `INSERT INTO ingest_session (id, org_id, scope, scope_key, source_id, generation, owner, fence, lease_until, state, snapshot_blob_sha256, started_at, updated_at)
+VALUES ('ING1', ?, 'source', ?, 'SRC1', 1, 'worker', 1, '2000-01-01T00:00:00.000Z', ?, ?, '2000-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z')`,
+        [a.orgId, digest(2), state, digest(1)],
+      );
+      expect(await shas()).toEqual([]);
+      expect(await reader.stillEligible(a, digest(1))).toBe(false);
+    },
+  );
+
+  it('keeps an upstream-state content blob', async () => {
+    await blob(a, 1, aged(8));
+    await run(
+      `INSERT INTO upstream_state (org_id, package_id, form, content_sha256, checked_at, fresh_until)
+VALUES (?, 'PKG1', 'npm-packument', ?, '2000-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z')`,
+      [a.orgId, digest(1)],
+    );
+    expect(await shas()).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+  });
+
+  it.each(['2999-01-01T00:00:00.000Z', null])(
+    'keeps an import before-image expiring at %s',
+    async (expiry) => {
+      const id = await blob(a, 1, aged(8));
+      await run(
+        "INSERT INTO import_run (id, org_id, source_system, before_image_expires_at) VALUES ('RUN1', ?, 'x', ?)",
+        [a.orgId, expiry],
+      );
+      await run(
+        `INSERT INTO import_ref (id, org_id, import_run_id, entity_type, entity_id, external_ref, action, before_image_json)
+VALUES ('REF1', ?, 'RUN1', 'version', 'VERX', 'ext', 'update', ?)`,
+        [a.orgId, JSON.stringify({ blob_id: id })],
+      );
+      expect(await shas()).toEqual([]);
+      expect(await reader.stillEligible(a, digest(1))).toBe(false);
+    },
+  );
+
+  it('keeps an aged blob with an active version reference', async () => {
+    const id = await blob(a, 1, aged(8));
+    await version(a, 'PKG1', id);
+    expect(await shas()).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+  });
+
+  it('keeps an aged blob with an active revision reference', async () => {
+    const id = await blob(a, 1, aged(8));
+    await revision(a, await version(a, 'PKG1', null), id);
+    expect(await shas()).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+  });
+
+  it('finds a scheduled orphan that gains an active reference', async () => {
+    const id = await blob(a, 1, aged(8));
+    await run("UPDATE blob SET purge_after = '2999-01-01T00:00:00.000Z' WHERE id = ?", [id]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(true);
+    expect(await reader.scheduledIneligible(a, { limit: 50 })).toEqual([]);
+    await version(a, 'PKG1', id);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+    expect(await reader.scheduledIneligible(a, { limit: 50 })).toEqual([
+      expect.objectContaining({ id }),
+    ]);
+  });
+
+  it('never returns another organization’s orphan', async () => {
+    await blob(b, 1, aged(8));
+    expect(await shas(a)).toEqual([]);
+    expect(await reader.stillEligible(a, digest(1))).toBe(false);
+    expect(await shas(b)).toEqual([digest(1)]);
+  });
+
+  it('pages mixed orphan and released candidates by created_at and id', async () => {
+    await blob(a, 2, aged(8));
+    const released = await blob(a, 3, `${aged(8)}, refetchable = 0`);
+    await version(a, 'PKG1', released, 'removed_upstream');
+    await blob(a, 1, aged(9));
+    await run(
+      'UPDATE blob SET created_at = (SELECT created_at FROM blob WHERE id = ?) WHERE id = ?',
+      [blobId(2), released],
+    );
+    const first = await reader.candidates(a, { limit: 2 });
+    expect(first.map((row) => row.id)).toEqual([blobId(1), blobId(2)]);
+    const after = first[1];
+    if (after === undefined) throw new Error('missing first-page cursor');
+    const second = await reader.candidates(a, { limit: 2, after });
+    expect(second).toEqual([expect.objectContaining({ id: released, orphan: false })]);
+  });
+
+  it('keeps the eligibility parameter list unchanged and uses the seven-day literal', () => {
+    const condition = blobEligibleCondition(a, 'b');
+    expect(condition.params).toEqual([a.orgId]);
+    expect(condition.sql).toContain("julianday('now', '-7 days')");
   });
 });

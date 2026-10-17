@@ -257,3 +257,63 @@ it.each([
   expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(1);
   expect(console.error).toHaveBeenCalledWith(expected);
 });
+
+async function addManifestRoutes(root: string, routes: unknown): Promise<void> {
+  const manifestPath = join(root, 'generated', 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, routes }));
+}
+
+it('exits 2 and lists the problem before touching the database when a route permission is unknown', async () => {
+  await addManifestRoutes(outDir, [
+    {
+      method: 'GET',
+      path: '/widgets',
+      plugin: 'widgets',
+      permission: 'org:typo',
+      boundary: 'organization',
+    },
+  ]);
+
+  expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(2);
+
+  const printed = vi.mocked(console.error).mock.calls.map((call) => call.join(' '));
+  expect(printed.some((line) => line.startsWith('error: ') && line.includes('org:typo'))).toBe(
+    true,
+  );
+  expect(existsSync(file)).toBe(false);
+});
+
+it('migrates when the routes are valid', async () => {
+  await addManifestRoutes(outDir, [
+    {
+      method: 'GET',
+      path: '/widgets',
+      plugin: 'widgets',
+      permission: 'org:read',
+      boundary: 'organization',
+    },
+  ]);
+
+  expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(0);
+});
+
+it('warns and migrates when the manifest has no route table', async () => {
+  expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(0);
+
+  const printed = vi.mocked(console.error).mock.calls.map((call) => call.join(' '));
+  expect(printed.some((line) => line.startsWith('warning: '))).toBe(true);
+});
+
+it('exits 2 with one fixed message for a manifest built before route boundaries', async () => {
+  await addManifestRoutes(outDir, [
+    { method: 'GET', path: '/widgets', plugin: 'widgets', permission: 'org:read' },
+  ]);
+
+  expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(2);
+
+  expect(vi.mocked(console.error).mock.calls.map((call) => call.join(' '))).toEqual([
+    'error: manifest route table predates route boundaries; run pb build again',
+  ]);
+  expect(existsSync(file)).toBe(false);
+});

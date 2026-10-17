@@ -1,5 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { classifySqliteError } from '@package-broker/core/db/errors';
+import { DbError, classifySqliteError } from '@package-broker/core/db/errors';
 import type {
   SqlExecutor,
   SqlValue,
@@ -11,6 +11,13 @@ export interface OpenedExecutor {
   readonly executor: SqlExecutor;
   close(): Promise<void>;
 }
+
+export interface NodeSqliteExecutorOptions {
+  readonly d1PatternLimit?: boolean;
+}
+
+export const D1_MAX_BOUND_PARAMETERS = 100;
+export const D1_MAX_PATTERN_LENGTH = 50;
 
 const RETURNING = /returning/i;
 
@@ -31,6 +38,12 @@ function assertParam(value: unknown, index: number): void {
 }
 
 function assertParams(params: readonly SqlValue[]): void {
+  if (params.length > D1_MAX_BOUND_PARAMETERS) {
+    throw new DbError(
+      'too_big',
+      `too_big: statement binds ${params.length} parameters, D1 allows at most ${D1_MAX_BOUND_PARAMETERS}`,
+    );
+  }
   for (let index = 0; index < params.length; index += 1) {
     assertParam(params[index], index);
   }
@@ -47,10 +60,22 @@ function toPlainRow(row: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, toPlainValue(value)]));
 }
 
-function openDatabase(path: string): DatabaseSync {
+function openDatabase(path: string, options: NodeSqliteExecutorOptions): DatabaseSync {
   let database: DatabaseSync | undefined;
   try {
-    database = new DatabaseSync(path, { timeout: 5000 });
+    database = new DatabaseSync(path, {
+      timeout: 5000,
+      limits: {
+        variableNumber: D1_MAX_BOUND_PARAMETERS,
+        ...(options.d1PatternLimit === true ? { likePatternLength: D1_MAX_PATTERN_LENGTH } : {}),
+      },
+    });
+    if (
+      options.d1PatternLimit === true &&
+      database.limits?.likePatternLength !== D1_MAX_PATTERN_LENGTH
+    ) {
+      throw new Error('this Node version cannot limit the LIKE/GLOB pattern length');
+    }
     database.exec('PRAGMA foreign_keys = ON');
     if (path !== ':memory:') {
       database.exec('PRAGMA journal_mode = WAL');
@@ -66,8 +91,11 @@ function openDatabase(path: string): DatabaseSync {
   }
 }
 
-export function openNodeSqliteExecutor(path = ':memory:'): OpenedExecutor {
-  const database = openDatabase(path);
+export function openNodeSqliteExecutor(
+  path = ':memory:',
+  options: NodeSqliteExecutorOptions = {},
+): OpenedExecutor {
+  const database = openDatabase(path, options);
 
   const cache = new Map<string, StatementSync>();
   const prepare = (sql: string): StatementSync => {

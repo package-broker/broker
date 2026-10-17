@@ -7,7 +7,8 @@ import type {
   VerifiedIdentity,
 } from '@package-broker/core/identity/port';
 import { isReservedProviderId, isValidProviderId } from '@package-broker/core/identity/port';
-import { domainPolicyProblems, normalizeEmail } from '@package-broker/core/identity/policy';
+import { normalizeEmail } from '@package-broker/core/identity/policy';
+import { checkPolicy } from './config.js';
 import { createJwksCache } from './jwks.js';
 import { JwtError, type JwtFailure, type VerifiedClaims, verifyJwt } from './jwt.js';
 
@@ -25,6 +26,7 @@ const ASSERTION_HEADER = 'Cf-Access-Jwt-Assertion';
 const DEFAULT_DISPLAY_NAME = 'Cloudflare Access';
 const AUDIENCE_PATTERN = /^[0-9a-f]{64}$/;
 const TEAM_DOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/;
+const GROUPS_UNSUPPORTED = 'groups are not supported until spike T172';
 const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'id',
   'kind',
@@ -42,17 +44,27 @@ function unknownKeyProblems(candidate: Record<string, unknown>): string[] {
     keys.add(key);
   }
   for (const key of keys) {
-    const inherited = !Object.hasOwn(candidate, key);
-    if (key !== 'groups' && (typeof key !== 'string' || !ALLOWED_KEYS.has(key) || inherited)) {
+    const hidden =
+      !Object.hasOwn(candidate, key) || !Object.prototype.propertyIsEnumerable.call(candidate, key);
+    if (key !== 'groups' && (typeof key !== 'string' || !ALLOWED_KEYS.has(key) || hidden)) {
       problems.push('unknown configuration key');
     }
   }
   return problems;
 }
 
+interface Inspection {
+  readonly problems: string[];
+  readonly policy: unknown;
+}
+
 export function cloudflareAccessProblems(config: unknown): string[] {
+  return inspect(config).problems;
+}
+
+function inspect(config: unknown): Inspection {
   if (typeof config !== 'object' || config === null || Array.isArray(config)) {
-    return ['configuration must be an object'];
+    return { problems: ['configuration must be an object'], policy: undefined };
   }
   const candidate = config as Record<string, unknown>;
   const problems: string[] = [];
@@ -77,14 +89,13 @@ export function cloudflareAccessProblems(config: unknown): string[] {
   if (typeof trustEmailVerification !== 'boolean') {
     problems.push('trustEmailVerification must be a boolean');
   }
-  for (const problem of domainPolicyProblems(candidate.policy as DomainPolicy)) {
-    problems.push(`policy: ${problem}`);
-  }
-  if ('groups' in candidate) {
-    problems.push('groups are not supported until spike T172');
+  const policy = checkPolicy(candidate.policy);
+  problems.push(...policy.problems.map((problem) => `policy: ${problem}`));
+  if ('groups' in candidate || policy.groups) {
+    problems.push(GROUPS_UNSUPPORTED);
   }
   problems.push(...unknownKeyProblems(candidate));
-  return problems;
+  return { problems, policy: policy.snapshot };
 }
 
 function failure(reason: IdentityFailure): IdentityResult {
@@ -123,14 +134,17 @@ export function createCloudflareAccessProvider(
   config: CloudflareAccessConfig,
   ctx: IdentityContext,
 ): IdentityProvider {
-  const problems = cloudflareAccessProblems(config);
-  if (problems.length > 0) {
-    throw new RangeError(`invalid cloudflare-access configuration: ${problems.join('; ')}`);
+  const inspection = inspect(config);
+  if (inspection.problems.length > 0) {
+    throw new RangeError(
+      `invalid cloudflare-access configuration: ${inspection.problems.join('; ')}`,
+    );
   }
   const { id, teamDomain, audience, trustEmailVerification } = config;
+  const checked = inspection.policy as DomainPolicy;
   const policy: DomainPolicy = Object.freeze({
-    verifiedDomains: Object.freeze([...config.policy.verifiedDomains]),
-    autoJoin: config.policy.autoJoin,
+    verifiedDomains: Object.freeze([...checked.verifiedDomains]),
+    autoJoin: checked.autoJoin,
   });
   const issuer = `https://${teamDomain}`;
   const keys = createJwksCache({ url: `${issuer}/cdn-cgi/access/certs`, ctx });

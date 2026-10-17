@@ -55,13 +55,24 @@ export interface JobLoop {
   stop(): Promise<void>;
 }
 
+export type JobScope = (
+  job: RegisteredJob,
+  claim: { readonly jobId: string; readonly attempt: number },
+) => { readonly ports: PluginPorts; readonly observability: Observability };
+
+export type RunnerObservability = (claim: {
+  readonly jobId: string;
+  readonly attempt: number;
+}) => Observability;
+
 export interface JobLoopInput {
   readonly executor: SqlExecutor;
   readonly jobs: readonly RegisteredJob[];
-  readonly ports: PluginPorts;
+  readonly scope: JobScope;
   readonly maxRunning?: number;
   readonly clock?: Clock;
   readonly observability: Observability;
+  readonly runnerObservability?: RunnerObservability;
 }
 
 interface Active {
@@ -81,7 +92,7 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
     throw new RangeError('maxRunning must be a positive integer');
   }
   const clock = input.clock ?? systemClock;
-  const { observability, ports } = input;
+  const { observability } = input;
   const repository: JobRepository = createJobRepository(input.executor);
   const schedules = createJobScheduleRepository(input.executor);
   const resolveOrg = createOrgResolver(createOrganizationBootstrap(input.executor));
@@ -108,9 +119,15 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let polling: Promise<void> | undefined;
 
-  const log = (level: 'warn' | 'error', event: JobEvent, error: unknown, jobId?: string): void => {
+  const log = (
+    level: 'warn' | 'error',
+    event: JobEvent,
+    error: unknown,
+    jobId?: string,
+    target: Observability = observability,
+  ): void => {
     try {
-      observability.log({
+      target.log({
         level,
         event,
         error_name: safeErrorName(error),
@@ -182,6 +199,17 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
     }
   }
 
+  function runnerFor(claim: JobClaim): Observability {
+    try {
+      return (
+        input.runnerObservability?.({ jobId: claim.id, attempt: claim.attempt }) ?? observability
+      );
+    } catch (error) {
+      log('warn', 'job.handler_failed', error, claim.id);
+      return observability;
+    }
+  }
+
   function run(org: OrgContext, claim: JobClaim): void {
     const controller = new AbortController();
     const guard = { id: claim.id, owner: claim.owner, fence: claim.fence };
@@ -190,6 +218,7 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
     let finished = false;
     let abandoned = false;
     let beat: ReturnType<typeof setTimeout> | undefined;
+    const runner = runnerFor(claim);
     const budget = unref(setTimeout(() => controller.abort(new JobError('timeout')), budgetMs));
     const finish = (): void => {
       finished = true;
@@ -207,7 +236,7 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
           if (clock.now().getTime() - startedAt >= budgetMs) return;
           repository.heartbeat(org, guard).then(heartbeat, (error: unknown) => {
             if (finished) return;
-            log('warn', 'job.heartbeat_failed', error, claim.id);
+            log('warn', 'job.heartbeat_failed', error, claim.id, runner);
             if (error instanceof StaleFenceError) controller.abort(error);
             else heartbeat();
           });
@@ -225,6 +254,13 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
       } catch {
         return { outcome: 'failed', errorCode: 'invalid_payload', permanent: true };
       }
+      let scoped: ReturnType<JobScope>;
+      try {
+        scoped = input.scope(job, { jobId: claim.id, attempt: claim.attempt });
+      } catch (error) {
+        log('warn', 'job.handler_failed', error, claim.id, runner);
+        return { outcome: 'failed', errorCode: 'handler_error', permanent: false };
+      }
       heartbeat();
       try {
         await job.definition.handler(payload, {
@@ -234,12 +270,12 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
           attempt: claim.attempt,
           fence: claim.fence,
           signal: controller.signal,
-          ports,
-          observability,
+          ports: scoped.ports,
+          observability: scoped.observability,
         });
         return { outcome: 'succeeded' };
       } catch (error) {
-        log('warn', 'job.handler_failed', error, claim.id);
+        log('warn', 'job.handler_failed', error, claim.id, runner);
         if (stopping && controller.signal.aborted) return { outcome: 'released', delaySeconds: 0 };
         const errorCode = controller.signal.aborted
           ? jobErrorCode(controller.signal.reason)
@@ -254,9 +290,9 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
         if (abandoned) return;
         try {
           await settle(org, guard, outcome);
-          observability.counter('pb.jobs.settled', { outcome: outcome.outcome });
+          runner.counter('pb.jobs.settled', { outcome: outcome.outcome });
         } catch (error) {
-          log('warn', 'job.settle_failed', error, claim.id);
+          log('warn', 'job.settle_failed', error, claim.id, runner);
         }
       })
       .finally(() => {

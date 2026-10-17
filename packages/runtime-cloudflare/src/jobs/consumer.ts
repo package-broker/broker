@@ -12,7 +12,7 @@ import {
   type JobRepository,
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
-import { JobError, jobErrorCode, type JobDefinition } from '@package-broker/core/platform/jobs';
+import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
 import type { Observability } from '@package-broker/core/platform/observability';
 
 export const JOB_NOTIFICATION_VERSION = 1;
@@ -83,14 +83,23 @@ export interface QueueHandlerLimits {
   readonly settleRetryMs?: number;
 }
 
+export type JobScope = (
+  job: RegisteredJob,
+  claim: { readonly jobId: string; readonly attempt: number },
+) => { readonly ports: PluginPorts; readonly observability: Observability };
+
+export type RunnerObservability = (claim: {
+  readonly jobId: string;
+  readonly attempt: number;
+}) => Observability;
+
 export interface QueueHandlerDeps {
   readonly repository: JobRepository;
   readonly jobs: JobRegistry;
   readonly observability: Observability;
-  readonly ports: PluginPorts;
   readonly limits?: QueueHandlerLimits;
-  /** Observability scoped to one claimed job; `createObservability` takes job_id/attempt only from the scope. */
-  readonly forJob?: (job: { readonly jobId: string; readonly attempt: number }) => Observability;
+  readonly scope: JobScope;
+  readonly runnerObservability?: RunnerObservability;
 }
 
 export type SendJob = (
@@ -221,9 +230,10 @@ async function execute(
   deps: QueueHandlerDeps,
   ctx: OrgContext,
   claim: JobClaim,
-  definition: JobDefinition,
-  observability: Observability,
+  job: RegisteredJob,
+  runner: Observability,
 ): Promise<Execution> {
+  const { definition } = job;
   let payload: unknown;
   try {
     payload = definition.validate(JSON.parse(claim.payloadJson) as unknown);
@@ -234,6 +244,20 @@ async function execute(
       outcome: 'failed',
     };
   }
+
+  let scoped: ReturnType<JobScope>;
+  try {
+    scoped = deps.scope(job, { jobId: claim.id, attempt: claim.attempt });
+  } catch (error) {
+    reportJobEvent(runner, 'warn', 'job.observability_scope_failed', error, {
+      job_id: claim.id,
+    });
+    return {
+      settle: { outcome: 'failed', errorCode: 'handler_error', permanent: false },
+      outcome: 'failed',
+    };
+  }
+  const observability = runner;
 
   const budgetMs = deps.limits?.budgetMs ?? JOB_HANDLER_BUDGET_SECONDS * 1000;
   const heartbeatMs = deps.limits?.heartbeatMs ?? JOB_HEARTBEAT_SECONDS * 1000;
@@ -293,8 +317,8 @@ async function execute(
         attempt: claim.attempt,
         fence: claim.fence,
         signal: controller.signal,
-        ports: deps.ports,
-        observability: observability,
+        ports: scoped.ports,
+        observability: scoped.observability,
       }),
     );
     run.catch(() => undefined);
@@ -352,22 +376,10 @@ async function settleWithRetry(
   }
 }
 
-function scopedFor(deps: QueueHandlerDeps, claim: JobClaim): Observability {
-  if (deps.forJob === undefined) return deps.observability;
-  try {
-    return deps.forJob({ jobId: claim.id, attempt: claim.attempt });
-  } catch (error) {
-    reportJobEvent(deps.observability, 'warn', 'job.observability_scope_failed', error, {
-      job_id: claim.id,
-    });
-    return deps.observability;
-  }
-}
-
 async function deliver(
   deps: QueueHandlerDeps,
   types: readonly string[],
-  definitions: ReadonlyMap<string, JobDefinition>,
+  registered: ReadonlyMap<string, RegisteredJob>,
   message: QueueMessageLike,
 ): Promise<void> {
   const { observability } = deps;
@@ -416,26 +428,34 @@ async function deliver(
     return;
   }
 
-  const jobObservability = scopedFor(deps, claim);
-  const definition = definitions.get(claim.type);
+  const job = registered.get(claim.type);
+  let runner = observability;
+  try {
+    runner =
+      deps.runnerObservability?.({ jobId: claim.id, attempt: claim.attempt }) ?? observability;
+  } catch (error) {
+    reportJobEvent(observability, 'warn', 'job.observability_scope_failed', error, {
+      job_id: claim.id,
+    });
+  }
   const execution: Execution =
-    definition === undefined
+    job === undefined
       ? {
           settle: { outcome: 'released', delaySeconds: QUEUE_RETRY_DELAY_SECONDS },
           outcome: 'released',
         }
-      : await execute(deps, ctx, claim, definition, jobObservability);
+      : await execute(deps, ctx, claim, job, runner);
 
   if (execution.settle === null) {
-    reportJobEvent(jobObservability, 'warn', 'job.lease_lost', undefined, {
+    reportJobEvent(runner, 'warn', 'job.lease_lost', undefined, {
       job_id: claim.id,
       attempt: claim.attempt,
     });
   } else {
     try {
-      await settleWithRetry(deps, ctx, claim, execution.settle, jobObservability);
+      await settleWithRetry(deps, ctx, claim, execution.settle, runner);
     } catch (error) {
-      reportJobEvent(jobObservability, 'error', 'job.settle_failed', error, {
+      reportJobEvent(runner, 'error', 'job.settle_failed', error, {
         job_id: claim.id,
         attempt: claim.attempt,
       });
@@ -447,17 +467,17 @@ async function deliver(
 export function createQueueHandler(
   deps: QueueHandlerDeps,
 ): (batch: QueueBatchLike, env: unknown) => Promise<void> {
-  const definitions = new Map<string, JobDefinition>(
-    deps.jobs.jobs.map((job) => [job.qualifiedName, job.definition]),
+  const registered = new Map<string, RegisteredJob>(
+    deps.jobs.jobs.map((job) => [job.qualifiedName, job]),
   );
-  const types = [...definitions.keys()];
+  const types = [...registered.keys()];
 
   return async (batch) => {
     try {
       const messages = Array.isArray(batch?.messages) ? batch.messages : [];
       for (const message of messages) {
         try {
-          await deliver(deps, types, definitions, message);
+          await deliver(deps, types, registered, message);
         } catch (error) {
           reportJobEvent(deps.observability, 'error', 'job.delivery_failed', error);
         }

@@ -16,6 +16,7 @@ export interface TokenListItem {
   readonly projectCount: number;
   readonly projectId: string | null;
   readonly userId: string | null;
+  readonly createdByUserId: string | null;
   readonly servicePrincipalId: string | null;
   readonly createdAt: string;
   readonly expiresAt: string | null;
@@ -36,6 +37,19 @@ export interface TokenListPage {
 }
 
 export interface TokenReader {
+  getOwn(
+    ctx: OrgContext,
+    userId: string,
+    tokenId: string,
+    now: string,
+  ): Promise<TokenListItem | null>;
+  getProject(
+    ctx: OrgContext,
+    projectId: string,
+    tokenId: string,
+    now: string,
+  ): Promise<TokenListItem | null>;
+  getOrganization(ctx: OrgContext, tokenId: string, now: string): Promise<TokenListItem | null>;
   listOwn(ctx: OrgContext, userId: string, page: TokenListPage): Promise<TokenPage>;
   listProject(ctx: OrgContext, projectId: string, page: TokenListPage): Promise<TokenPage>;
   listOrganization(

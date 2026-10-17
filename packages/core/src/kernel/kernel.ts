@@ -47,7 +47,12 @@ import type { RegisteredJob, Registration } from './registry.js';
 import { bindPluginPorts } from './plugin-ports.js';
 import type { PlatformServices } from './plugin-ports.js';
 import type { PackageVisibilityResolver } from './routes.js';
-import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
+import {
+  routeApiProblems,
+  routeBoundaryProblems,
+  routePathProblem,
+  routesConflict,
+} from './routes.js';
 
 export interface KernelObservability {
   readonly sink: ObsRecordSink;
@@ -233,6 +238,7 @@ function validateCoreRoutes(
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
     );
+    problems.push(...routeApiProblems(route, label));
     if (placeable) eligible.push(route);
   }
   for (let i = 0; i < eligible.length; i++) {

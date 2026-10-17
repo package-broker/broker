@@ -54,7 +54,13 @@ function base(): Doc {
         project: { ref: 'p1' },
         url: null,
         credential_ref: 'op://Vault/Item/field',
-        config: null,
+        config: {
+          provider: 'github',
+          repository: 'acme/widgets',
+          installationId: null,
+          packageName: null,
+          refs: { tags: true, branches: ['develop', 'main'] },
+        },
       },
       {
         type: 'source',
@@ -65,7 +71,7 @@ function base(): Doc {
         project: null,
         url: 'https://npm.example.test/',
         credential_ref: null,
-        config: null,
+        config: { scopes: ['@acme', '@beta'] },
       },
       {
         type: 'source',
@@ -76,7 +82,7 @@ function base(): Doc {
         project: null,
         url: 'https://repo.packagist.org',
         credential_ref: null,
-        config: null,
+        config: { githubToken: false },
       },
       {
         type: 'name',
@@ -489,7 +495,7 @@ describe('source', () => {
       (d) => void (item(d, 's3').url = 'https://proxy.example.test/'),
     ],
     ['a proxy without a url', (d) => void (item(d, 's3').url = null)],
-    ['a non-null config', (d) => void (item(d, 's1').config = {})],
+    ['a config of another source type', (d) => void (item(d, 's1').config = {})],
     ['an uppercase source name', (d) => void (item(d, 's1').name = 'Acme')],
   ];
   for (const [label, change] of bad) {
@@ -501,6 +507,7 @@ describe('source', () => {
       Object.assign(item(d, 's2'), {
         source_type: 'npmjs_proxy',
         url: 'https://registry.npmjs.org',
+        config: {},
         name: 'npmjs',
       }),
     );
@@ -677,5 +684,492 @@ describe('package exports', () => {
       types: './dist/import/*.d.ts',
       default: './dist/import/*.js',
     });
+  });
+});
+
+function details(input: unknown): ReadonlyArray<{ path: string; code: string }> {
+  const result = parseManifest(input);
+  if (result.ok) throw new Error('expected a refusal');
+  return result.details;
+}
+
+function pathOf(doc: Doc, externalRef: string, field: string): string {
+  return `/items/${doc.items.indexOf(item(doc, externalRef))}/${field}`;
+}
+
+describe('refusal paths', () => {
+  const cases: ReadonlyArray<readonly [string, (d: Doc) => string, string]> = [
+    [
+      'a duplicate external_ref',
+      (d) => {
+        d.items.push({ ...item(d, 'p1'), slug: 'other' });
+        return `/items/${d.items.length - 1}/external_ref`;
+      },
+      'duplicate_ref',
+    ],
+    [
+      'a duplicate project slug',
+      (d) => {
+        d.items.push({ ...item(d, 'p1'), external_ref: 'p9' });
+        return `/items/${d.items.length - 1}/slug`;
+      },
+      'duplicate_key',
+    ],
+    [
+      'a duplicate grant',
+      (d) => {
+        d.items.push({ ...item(d, 'g1'), external_ref: 'g9' });
+        return `/items/${d.items.length - 1}/subject`;
+      },
+      'duplicate_key',
+    ],
+    [
+      'a duplicate source name',
+      (d) => {
+        d.items.push({ ...item(d, 's1'), external_ref: 's9' });
+        return `/items/${d.items.length - 1}/name`;
+      },
+      'duplicate_key',
+    ],
+    [
+      'a source ecosystem that differs from its type',
+      (d) => {
+        item(d, 's1').ecosystem = 'npm';
+        return pathOf(d, 's1', 'ecosystem');
+      },
+      'ecosystem_mismatch',
+    ],
+    [
+      'a vcs url',
+      (d) => {
+        item(d, 's1').url = 'https://git.example.test/';
+        return pathOf(d, 's1', 'url');
+      },
+      'invalid_url',
+    ],
+    [
+      'a missing registry url',
+      (d) => {
+        item(d, 's2').url = null;
+        return pathOf(d, 's2', 'url');
+      },
+      'invalid_url',
+    ],
+    [
+      'a config of another type',
+      (d) => {
+        item(d, 's3').config = { scopes: ['@acme'] };
+        return pathOf(d, 's3', 'config');
+      },
+      'config_mismatch',
+    ],
+    [
+      'a proxy credential without githubToken',
+      (d) => {
+        item(d, 's3').credential_ref = 'op://Vault/Item/field';
+        return pathOf(d, 's3', 'credential_ref');
+      },
+      'credential_mismatch',
+    ],
+    [
+      'githubToken without a credential',
+      (d) => {
+        item(d, 's3').config = { githubToken: true };
+        return pathOf(d, 's3', 'credential_ref');
+      },
+      'credential_mismatch',
+    ],
+    [
+      'an npmjs proxy credential',
+      (d) => {
+        Object.assign(item(d, 's2'), {
+          source_type: 'npmjs_proxy',
+          url: 'https://registry.npmjs.org',
+          config: {},
+          credential_ref: 'op://Vault/Item/field',
+        });
+        return pathOf(d, 's2', 'credential_ref');
+      },
+      'credential_mismatch',
+    ],
+    [
+      'a role with a default key',
+      (d) => {
+        item(d, 'r1').key = 'project_developer';
+        return pathOf(d, 'r1', 'key');
+      },
+      'reserved_role_key',
+    ],
+    [
+      'a role with an unknown permission',
+      (d) => {
+        item(d, 'r1').permissions = ['project:read', 'nope:nope'];
+        return pathOf(d, 'r1', 'permissions');
+      },
+      'unknown_permission',
+    ],
+    [
+      'a project grant with a null project',
+      (d) => {
+        item(d, 'g1').project = null;
+        return pathOf(d, 'g1', 'project');
+      },
+      'scope_mismatch',
+    ],
+    [
+      'a grant whose role scope differs',
+      (d) => {
+        item(d, 'g2').role = { ref: 'r1' };
+        return pathOf(d, 'g2', 'role');
+      },
+      'scope_mismatch',
+    ],
+    [
+      'a grant naming no project',
+      (d) => {
+        item(d, 'g1').project = { ref: 'missing' };
+        return pathOf(d, 'g1', 'project');
+      },
+      'unknown_reference',
+    ],
+    [
+      'an existing project equal to an in-manifest slug',
+      (d) => {
+        item(d, 'g1').project = { existing: 'acme' };
+        return pathOf(d, 'g1', 'project');
+      },
+      'shadowed_existing',
+    ],
+    [
+      'a name whose ecosystem differs from its source',
+      (d) => {
+        item(d, 'n1').ecosystem = 'npm';
+        return pathOf(d, 'n1', 'ecosystem');
+      },
+      'ecosystem_mismatch',
+    ],
+    [
+      'a composer name without a vendor',
+      (d) => {
+        item(d, 'n1').pattern = 'widget';
+        return pathOf(d, 'n1', 'pattern');
+      },
+      'invalid_pattern',
+    ],
+    [
+      'an attachment of a project source to another project',
+      (d) => {
+        d.items.push({ type: 'project', external_ref: 'p2', slug: 'beta', name: 'Beta' });
+        Object.assign(item(d, 'a1'), { project: { ref: 'p2' }, source: { ref: 's1' } });
+        return pathOf(d, 'a1', 'source');
+      },
+      'owner_mismatch',
+    ],
+    [
+      'a version_override package outside key form',
+      (d) => {
+        item(d, 'v1').package = 'Acme/Widget';
+        return pathOf(d, 'v1', 'package');
+      },
+      'invalid_package',
+    ],
+    [
+      'a widening entry naming no grant',
+      (d) => {
+        d.widening = [{ type: 'grant', external_ref: 'missing' }];
+        return '/widening/0/external_ref';
+      },
+      'unknown_reference',
+    ],
+    [
+      'a duplicate widening entry',
+      (d) => {
+        d.widening = [
+          { type: 'grant', external_ref: 'g1' },
+          { type: 'grant', external_ref: 'g1' },
+        ];
+        return '/widening/1/external_ref';
+      },
+      'duplicate_ref',
+    ],
+  ];
+  for (const [label, change, code] of cases) {
+    it(`reports the path and code for ${label}`, () => {
+      const doc = structuredClone(base());
+      const path = change(doc);
+      expect(details(doc)).toContainEqual({ path, code });
+    });
+  }
+
+  it('reports a bad item at index 9999 of 10000', () => {
+    const items: Json[] = Array.from({ length: MAX_MANIFEST_ITEMS }, (_, i) => ({
+      type: 'project',
+      external_ref: `p${i}`,
+      slug: `s${i}`,
+      name: `Project ${i}`,
+    }));
+    items[9999] = { ...items[9999], slug: 's0' };
+    expect(details({ version: 1, source_system: 'satis', items, widening: [] })).toEqual([
+      { path: '/items/9999/slug', code: 'duplicate_key' },
+    ]);
+  });
+
+  it('never echoes a value from a structurally valid document', () => {
+    const doc = mutated((d) => {
+      d.items.push({ ...item(d, 'p1'), external_ref: `p-${SENTINEL}` });
+      item(d, 'g1').project = { existing: 'acme' };
+      item(d, 'g2').subject = { type: 'group', provider: 'local', value: SENTINEL };
+      item(d, 'n1').pattern = `@${SENTINEL}`.toLowerCase();
+      item(d, 's2').url = `https://npm.example.test/%zz${SENTINEL}`;
+      item(d, 'v1').package = `Pkg/${SENTINEL}`;
+      d.widening = [{ type: 'grant', external_ref: SENTINEL }];
+    });
+    const result = parseManifest(doc);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.details.some((x) => x.code === 'invalid')).toBe(false);
+    expect(JSON.stringify(result).toLowerCase()).not.toContain(SENTINEL.toLowerCase());
+  });
+
+  it('never echoes a value from a structurally invalid document', () => {
+    const doc = mutated((d) => {
+      item(d, 'p1').slug = `S-${SENTINEL}`;
+      item(d, 's3').config = { githubToken: SENTINEL };
+      item(d, 'g1').subject = { type: 'email', value: `Dev-${SENTINEL}@Example.test` };
+      item(d, 'v1').published_at = SENTINEL;
+    });
+    const result = parseManifest(doc);
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result).toLowerCase()).not.toContain(SENTINEL.toLowerCase());
+  });
+
+  it('refuses a source with an existing project listed before the project item', () => {
+    const doc = mutated((d) => {
+      item(d, 's2').project = { existing: 'acme' };
+      d.items.reverse();
+    });
+    expect(details(doc)).toContainEqual({
+      path: pathOf(doc, 's2', 'project'),
+      code: 'shadowed_existing',
+    });
+  });
+
+  it('reports a duplicate permission as duplicate_key', () => {
+    const doc = mutated((d) => void (item(d, 'r1').permissions = ['project:read', 'project:read']));
+    expect(details(doc)).toContainEqual({
+      path: pathOf(doc, 'r1', 'permissions'),
+      code: 'duplicate_key',
+    });
+  });
+
+  it('does not report a duplicate grant when the project is unknown', () => {
+    const doc = mutated((d) => {
+      item(d, 'g1').project = { ref: 'missing' };
+      d.items.push({ ...item(d, 'g1'), external_ref: 'g9' });
+    });
+    const codes = details(doc).map((x) => x.code);
+    expect(codes).toContain('unknown_reference');
+    expect(codes).not.toContain('duplicate_key');
+  });
+});
+
+describe('url spelling', () => {
+  const bad: ReadonlyArray<readonly [string, string]> = [
+    ['a percent with no digits', 'https://npm.example.test/a%'],
+    ['a percent with one digit', 'https://npm.example.test/a%4'],
+    ['a percent with non-hex digits', 'https://npm.example.test/a%zz'],
+    ['a raw opening bracket', 'https://npm.example.test/a[b'],
+    ['a raw closing bracket', 'https://npm.example.test/a]b'],
+    ['a raw pipe', 'https://npm.example.test/a|b'],
+  ];
+  for (const [label, value] of bad) {
+    it(`refuses ${label} at the url`, () => {
+      const doc = mutated((d) => void (item(d, 's2').url = value));
+      expect(details(doc)).toContainEqual({ path: pathOf(doc, 's2', 'url'), code: 'invalid_url' });
+    });
+  }
+
+  for (const escape of ['%5B', '%5D', '%7C']) {
+    it(`accepts ${escape}`, () => {
+      expect(
+        parseManifest(
+          mutated((d) => void (item(d, 's2').url = `https://npm.example.test/a${escape}b`)),
+        ).ok,
+      ).toBe(true);
+    });
+  }
+
+  it('accepts an IPv6 host', () => {
+    expect(
+      parseManifest(mutated((d) => void (item(d, 's2').url = 'https://[2001:db8::1]/'))).ok,
+    ).toBe(true);
+  });
+});
+
+describe('wildcard runs', () => {
+  it('refuses a run of wildcards in a name pattern', () => {
+    expectRefused(mutated((d) => void (item(d, 'n1').pattern = 'acme/**')));
+    expectRefused(mutated((d) => void (item(d, 'n2').pattern = '@acme/a**b')));
+  });
+
+  it('accepts separated wildcards', () => {
+    expect(parseManifest(mutated((d) => void (item(d, 'n1').pattern = 'a*/b*'))).ok).toBe(true);
+  });
+});
+
+describe('composer names starting with @', () => {
+  it('refuses a composer pattern with a leading @', () => {
+    const doc = mutated((d) => void (item(d, 'n1').pattern = '@acme/widget'));
+    expect(details(doc)).toContainEqual({
+      path: pathOf(doc, 'n1', 'pattern'),
+      code: 'invalid_pattern',
+    });
+  });
+
+  it('refuses a composer wildcard with a leading @', () => {
+    expectRefused(mutated((d) => void (item(d, 'n1').pattern = '@*')));
+  });
+
+  it('still accepts a scoped npm pattern', () => {
+    expect(parseManifest(base()).ok).toBe(true);
+  });
+});
+
+describe('existing source in a project created by the manifest', () => {
+  const refer = (project: string | null, name: string) => (d: Doc) =>
+    void (item(d, 'n1').source = { existing: { project, name } });
+
+  it('refuses an existing source whose project is an in-manifest slug', () => {
+    const doc = mutated(refer('acme', 'legacy'));
+    expect(details(doc)).toContainEqual({
+      path: pathOf(doc, 'n1', 'source'),
+      code: 'shadowed_existing',
+    });
+  });
+
+  it('refuses it on an attachment and a version_override', () => {
+    expectRefused(
+      mutated(
+        (d) => void (item(d, 'a1').source = { existing: { project: 'acme', name: 'legacy' } }),
+      ),
+    );
+    expectRefused(
+      mutated(
+        (d) => void (item(d, 'v1').source = { existing: { project: 'acme', name: 'legacy' } }),
+      ),
+    );
+  });
+
+  it('accepts an existing source of another project or of the organization', () => {
+    expect(parseManifest(mutated(refer('other', 'legacy'))).ok).toBe(true);
+    expect(parseManifest(mutated(refer(null, 'legacy'))).ok).toBe(true);
+  });
+});
+
+describe('reserved group providers', () => {
+  it('refuses a group whose provider is reserved', () => {
+    const doc = mutated(
+      (d) =>
+        void (item(d, 'g2').subject = { type: 'group', provider: 'local', value: 'Engineers' }),
+    );
+    expect(details(doc)).toContainEqual({
+      path: `${pathOf(doc, 'g2', 'subject')}/provider`,
+      code: 'reserved_provider',
+    });
+  });
+
+  it('accepts a group whose provider is not reserved', () => {
+    expect(parseManifest(base()).ok).toBe(true);
+  });
+});
+
+describe('source config', () => {
+  const lists: ReadonlyArray<readonly [string, string, (d: Doc) => void]> = [
+    [
+      'refs.branches',
+      's1',
+      (d) =>
+        void ((item(d, 's1').config as Json).refs = { tags: true, branches: ['main', 'main'] }),
+    ],
+    ['scopes', 's2', (d) => void (item(d, 's2').config = { scopes: ['@acme', '@acme'] })],
+  ];
+  for (const [label, ref, change] of lists) {
+    it(`refuses a duplicate in ${label}`, () => {
+      const doc = mutated(change);
+      expect(parseManifest(doc).ok).toBe(false);
+      expect(details(doc)[0]?.path).toBe(pathOf(doc, ref, 'config'));
+    });
+  }
+
+  it('refuses a missing key and an unknown key', () => {
+    expectRefused(mutated((d) => void delete (item(d, 's1').config as Json).refs));
+    expectRefused(mutated((d) => void ((item(d, 's2').config as Json).extra = 1)));
+  });
+
+  it('refuses null as a config', () => {
+    expectRefused(mutated((d) => void (item(d, 's2').config = null)));
+  });
+
+  it('gives one hash for config lists in another order', async () => {
+    const forward = mutated((d) => void (item(d, 's2').config = { scopes: ['@acme', '@beta'] }));
+    const backward = mutated((d) => void (item(d, 's2').config = { scopes: ['@beta', '@acme'] }));
+    expect(await planHash(parsed(forward))).toBe(await planHash(parsed(backward)));
+    expect(canonicalManifest(parsed(backward))).toContain('"scopes":["@acme","@beta"]');
+  });
+});
+
+describe('parsed manifest immutability', () => {
+  it('returns deeply frozen data and leaves the input alone', () => {
+    const input = base();
+    const data = parsed(input);
+    const frozen = (value: unknown): boolean =>
+      typeof value !== 'object' ||
+      value === null ||
+      (Object.isFrozen(value) && Object.values(value).every(frozen));
+    expect(frozen(data)).toBe(true);
+    expect(Object.isFrozen(input)).toBe(false);
+    expect(Object.isFrozen(input.items[0])).toBe(false);
+  });
+
+  it('refuses mutation in the type and at run time', () => {
+    const data = parsed(base());
+    // @ts-expect-error items is readonly
+    expect(() => data.items.push(data.items[0])).toThrow();
+    // @ts-expect-error fields are readonly
+    expect(() => void (data.version = 1)).toThrow();
+  });
+
+  it('keeps the canonical string and hash after freezing', async () => {
+    const data = parsed(base());
+    expect(canonicalManifest(data)).toBe(canonicalManifest(parsed(base())));
+    expect(await planHash(data)).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('fixed vector with a source config', () => {
+  it('matches the recorded hash', async () => {
+    const doc = parsed({
+      version: 1,
+      source_system: 'satis',
+      items: [
+        {
+          type: 'source',
+          external_ref: 's1',
+          name: 'npm-main',
+          ecosystem: 'npm',
+          source_type: 'npm_registry',
+          project: null,
+          url: 'https://npm.example.test/',
+          credential_ref: null,
+          config: { scopes: ['@b', '@a'] },
+        },
+      ],
+      widening: [],
+    });
+    expect(canonicalManifest(doc)).toBe(
+      '{"items":[{"config":{"scopes":["@a","@b"]},"credential_ref":null,"ecosystem":"npm","external_ref":"s1","name":"npm-main","project":null,"source_type":"npm_registry","type":"source","url":"https://npm.example.test/"}],"source_system":"satis","version":1,"widening":[]}',
+    );
+    expect(await planHash(doc)).toBe(
+      '58de3601ffba73aaa86568bcd84668bf7e6fede6dae0f727b49539a4c4bd7e1c',
+    );
   });
 });

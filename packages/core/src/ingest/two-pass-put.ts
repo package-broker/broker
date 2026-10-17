@@ -1,14 +1,6 @@
 import type { OrgContext } from '../db/port.js';
 import {
-  BlobAdmissionError,
-  BlobBusyError,
-  BlobBytesVanishedError,
-  BlobConflictError,
-  BlobDeadlineError,
-  BlobIdleTimeoutError,
-  BlobRangeError,
-  BlobSizeMismatchError,
-  BlobValidationError,
+  BlobDigestMismatchError,
   DEFAULT_MAX_BLOB_BYTES,
   parseSha256,
   type BlobInfo,
@@ -41,11 +33,15 @@ export interface FirstPass {
 export interface TwoPassOptions {
   readonly mediaType: string;
   readonly refetchable: boolean;
+  /** The store's cap; at most DEFAULT_MAX_BLOB_BYTES. */
   readonly maxBytes: number;
   readonly codecs: Pick<Codecs, 'digestTap'>;
   /** Resolves false to stop before pass 2; nothing is stored. */
   readonly verifyFirstPass?: (first: FirstPass) => boolean | Promise<boolean>;
-  /** Receives the bytes read from upstream by each pass, e.g. the `pb.upstream.bytes` counter. */
+  /**
+   * Receives the bytes read from upstream by each pass, e.g. the `pb.upstream.bytes` counter. The
+   * caller wires that counter: the ingest packets and the source sync jobs pass it in.
+   */
   readonly onUpstreamBytes?: Pick<Counter, 'add'>;
   /** Cancels both passes and stops before the next `open()`. */
   readonly signal?: AbortSignal;
@@ -112,22 +108,6 @@ interface Unstable {
   readonly cause: unknown;
 }
 
-const BLOB_ERRORS = [
-  BlobAdmissionError,
-  BlobBusyError,
-  BlobBytesVanishedError,
-  BlobConflictError,
-  BlobDeadlineError,
-  BlobIdleTimeoutError,
-  BlobRangeError,
-  BlobSizeMismatchError,
-  BlobValidationError,
-];
-
-function isBlobError(error: unknown): boolean {
-  return BLOB_ERRORS.some((type) => error instanceof type);
-}
-
 async function attempt(
   ctx: OrgContext,
   open: () => Promise<ReadableStream<Uint8Array>>,
@@ -145,13 +125,7 @@ async function attempt(
   const body = await open();
   let count = 0;
   const tap = options.codecs.digestTap(['sha256'] as const);
-  const second: { digest: Uint8Array | null } = { digest: null };
-  tap.digests.then(
-    (d) => {
-      second.digest = d.sha256;
-    },
-    () => undefined,
-  );
+  tap.digests.catch(() => undefined);
   const reader = body.pipeThrough(tap.transform, signalOptions(options.signal)).getReader();
   const tapped = new ReadableStream<Uint8Array>(
     {
@@ -177,16 +151,7 @@ async function attempt(
   } catch (error) {
     if (!tapped.locked) await tapped.cancel().catch(() => undefined);
     if (options.signal?.aborted) throw error;
-    const digest = second.digest;
-    if (digest !== null) {
-      if (hex(digest) !== hex(first.sha256)) return { unstable: true, cause: error };
-      throw error;
-    }
-    if (error instanceof BlobSizeMismatchError) {
-      if (count !== first.size) return { unstable: true, cause: error };
-      throw error;
-    }
-    if (!isBlobError(error) && count >= first.size) return { unstable: true, cause: error };
+    if (error instanceof BlobDigestMismatchError) return { unstable: true, cause: error };
     throw error;
   } finally {
     options.onUpstreamBytes?.add(count);
@@ -203,10 +168,10 @@ export async function twoPassPut(
   store: BlobStore,
   options: TwoPassOptions,
 ): Promise<TwoPassResult> {
-  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0) {
-    throw new RangeError('maxBytes must be a non-negative safe integer');
+  const maxBytes = options.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > DEFAULT_MAX_BLOB_BYTES) {
+    throw new RangeError(`maxBytes must be an integer from 0 to ${DEFAULT_MAX_BLOB_BYTES}`);
   }
-  const maxBytes = Math.min(options.maxBytes, DEFAULT_MAX_BLOB_BYTES);
   let cause: unknown;
   for (let n = 1; n <= MAX_ATTEMPTS; n += 1) {
     const result = await attempt(ctx, open, store, maxBytes, options);

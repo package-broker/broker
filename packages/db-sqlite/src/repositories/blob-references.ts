@@ -6,6 +6,7 @@ import type {
 } from '@package-broker/core/db/port';
 
 export const RETENTION_CANDIDATE_LIMIT = 50;
+export const ORPHAN_GRACE_DAYS = 7;
 
 export interface RetentionCursor {
   readonly createdAt: string;
@@ -22,6 +23,7 @@ export interface RetentionBlob extends RetentionCursor {
 }
 
 export interface RetentionCandidate extends RetentionBlob {
+  readonly orphan: boolean;
   readonly retentionDaysOverride: number | null;
 }
 
@@ -37,7 +39,16 @@ export interface BlobReferenceReader {
 }
 
 const ALIAS = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const INNER_ALIASES = new Set(['bref_v', 'bref_p', 'bref_s', 'bref_r', 'bref_ir', 'bref_ru']);
+const INNER_ALIASES = new Set([
+  'bref_v',
+  'bref_p',
+  'bref_s',
+  'bref_r',
+  'bref_ir',
+  'bref_ru',
+  'bref_ing',
+  'bref_up',
+]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const NOW = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
 
@@ -60,6 +71,15 @@ function references(blob: string, columns: string, where: (consistent: string) =
     WHERE bref_r.blob_id = ${blob}.id ${where(viaRevision)}`;
 }
 
+function orphanSql(blob: string): string {
+  return `(NOT EXISTS (
+    SELECT 1 FROM version bref_v
+    WHERE bref_v.blob_id = ${blob}.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM version_revision bref_r
+    WHERE bref_r.blob_id = ${blob}.id))`;
+}
+
 export function blobEligibleCondition(ctx: OrgContext, blobRef: string): EligibleCondition {
   if (
     typeof blobRef !== 'string' ||
@@ -68,13 +88,23 @@ export function blobEligibleCondition(ctx: OrgContext, blobRef: string): Eligibl
   ) {
     invalid();
   }
+  if (!Number.isSafeInteger(ORPHAN_GRACE_DAYS) || ORPHAN_GRACE_DAYS <= 0) invalid();
   const released = (consistent: string) =>
     `COALESCE(${consistent} AND (bref_v.status IN ('tombstoned', 'removed_upstream') OR bref_p.status = 'removed_upstream'), 0)`;
   return {
     sql: `(${blobRef}.org_id = ?
-  AND EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})
+  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})
   AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})
-  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted'`)})
+  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted'`)}))
+  OR (${orphanSql(blobRef)}
+    AND ${blobRef}.refetchable = 1
+    AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')
+    AND NOT EXISTS (
+      SELECT 1 FROM ingest_session bref_ing
+      WHERE bref_ing.org_id = ${blobRef}.org_id AND bref_ing.snapshot_blob_sha256 = ${blobRef}.sha256)
+    AND NOT EXISTS (
+      SELECT 1 FROM upstream_state bref_up
+      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256)))
   AND NOT EXISTS (
     SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external
       ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id
@@ -116,6 +146,7 @@ interface Row {
   readonly id: string;
   readonly sha256: string;
   readonly created_at: string;
+  readonly orphan: number;
   readonly override_days?: number | null;
 }
 
@@ -132,7 +163,7 @@ export function createBlobReferenceReader(executor: ScalarSqlExecutor): BlobRefe
       const eligible = blobEligibleCondition(ctx, 'b');
       const cursor = cursorClause(page);
       const rows = await executor.all<Row>({
-        sql: `SELECT b.id, b.sha256, b.created_at, ${overrideSql('b')} AS override_days
+        sql: `SELECT b.id, b.sha256, b.created_at, ${overrideSql('b')} AS override_days, ${orphanSql('b')} AS orphan
 FROM blob b
 WHERE ${eligible.sql} AND b.purge_after IS NULL AND b.deleted_at IS NULL ${cursor.sql}
 ORDER BY b.created_at, b.id
@@ -142,6 +173,7 @@ LIMIT ?`,
       return rows.map((row) => ({
         ...blob(row),
         retentionDaysOverride: row.override_days ?? null,
+        orphan: row.orphan === 1,
       }));
     },
 

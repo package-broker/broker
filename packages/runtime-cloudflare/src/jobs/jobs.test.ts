@@ -203,7 +203,7 @@ function handlerFor(
     repository: f.repository,
     jobs: { jobs },
     observability,
-    ports,
+    scope: () => ({ ports, observability }),
   });
 }
 
@@ -385,7 +385,7 @@ describe('createQueueHandler on D1', () => {
       repository: f.repository,
       jobs: { jobs: [job] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
       limits: { budgetMs: 20, heartbeatMs: 5 },
     });
     const m = message(jobNotification(f.ctx, id));
@@ -463,12 +463,137 @@ function blockingJob(name: string) {
 }
 
 describe('createQueueHandler transport boundaries', () => {
+  it('takes handler ports and observability from each registered job scope', async () => {
+    const seen = new Map<string, { ports: PluginPorts; observability: Observability }>();
+    const jobs = ['a', 'b'].map((plugin): RegisteredJob => ({
+      plugin,
+      qualifiedName: `${plugin}:work:v1`,
+      definition: {
+        name: 'work',
+        version: 1,
+        validate: (input) => input,
+        handler: (_payload, context) => {
+          seen.set(plugin, context);
+          return Promise.resolve();
+        },
+      },
+    }));
+    const scoped = jobs.map(() => ({
+      ports: { ...ports },
+      observability: recorder().observability,
+    }));
+    const scope = vi.fn((registered: RegisteredJob) => scoped[jobs.indexOf(registered)]!);
+    const claims = jobs.map((registered, index) => ({
+      ...fakeClaim(registered.qualifiedName),
+      id: ulid(),
+      attempt: index + 2,
+    }));
+    const claim = vi.fn<JobRepository['claim']>();
+    for (const row of claims) claim.mockResolvedValueOnce(row);
+    const handle = createQueueHandler({
+      repository: fakeRepository({ claim, settle: () => Promise.resolve() }),
+      jobs: { jobs },
+      observability: recorder().observability,
+      scope,
+    });
+    const messages = claims.map((row) => message(jobNotification(orgA, row.id)));
+    await handle({ messages }, {});
+    for (const [index, registered] of jobs.entries()) {
+      expect(scope).toHaveBeenCalledWith(registered, {
+        jobId: claims[index]?.id,
+        attempt: claims[index]?.attempt,
+      });
+      expect(scope.mock.calls[index]?.[0]).toBe(registered);
+      expect(seen.get(registered.plugin)?.ports).toBe(scoped[index]?.ports);
+      expect(seen.get(registered.plugin)?.observability).toBe(scoped[index]?.observability);
+      expect(messages[index]?.acked()).toBe(1);
+    }
+    expect(scope).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes heartbeat and settle failures through the runner observability with job_id and attempt', async () => {
+    const blocking = blockingJob('boundary');
+    const runnerRecords: ObsRecord[] = [];
+    const scopedRecords: ObsRecord[] = [];
+    const base = { deploymentId: 'test', runtime: 'cloudflare', requestId: null } as const;
+    const registry = (events: readonly string[]) => ({
+      events: new Set<string>(events),
+      reasonCodes: new Set<string>(JOB_REASON_CODES),
+      routeTemplates: new Set<string>(),
+    });
+    const runnerSink = { emit: (record: ObsRecord) => runnerRecords.push(record) };
+    const scopedSink = { emit: (record: ObsRecord) => scopedRecords.push(record) };
+    const handle = createQueueHandler({
+      repository: fakeRepository({
+        claim: () => Promise.resolve(fakeClaim(blocking.job.qualifiedName)),
+        heartbeat: () => Promise.reject(new Error('storage unavailable')),
+        settle: () => Promise.reject(new Error('storage unavailable')),
+      }),
+      jobs: { jobs: [blocking.job] },
+      observability: recorder().observability,
+      scope: () => ({ ports, observability: createObservability(scopedSink, base, registry([])) }),
+      runnerObservability: ({ jobId, attempt }) =>
+        createObservability(runnerSink, { ...base, jobId, attempt }, registry(JOB_EVENTS)),
+      limits: { heartbeatMs: 5, settleRetryMs: 1 },
+    });
+    const runnerLogs = () =>
+      runnerRecords.flatMap((record) => (record.kind === 'log' ? [record.record] : []));
+    const delivery = handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
+    try {
+      await vi.waitFor(() =>
+        expect(runnerLogs()).toContainEqual(
+          expect.objectContaining({ event: 'job.heartbeat_failed', job_id: someJob, attempt: 1 }),
+        ),
+      );
+    } finally {
+      blocking.release();
+      await delivery;
+    }
+    expect(runnerLogs()).toContainEqual(
+      expect.objectContaining({ event: 'job.settle_failed', job_id: someJob, attempt: 1 }),
+    );
+    expect(scopedRecords).toEqual([]);
+  });
+
+  it('fails retryably and acks without running the handler when scope throws', async () => {
+    const { job, calls } = counting('scope-error');
+    const settle = vi.fn(() => Promise.resolve());
+    const recorded = recorder();
+    const handle = createQueueHandler({
+      repository: fakeRepository({
+        claim: () => Promise.resolve(fakeClaim(job.qualifiedName)),
+        settle,
+      }),
+      jobs: { jobs: [job] },
+      observability: recorded.observability,
+      scope: () => {
+        throw new Error('scope failure');
+      },
+    });
+    const m = message(jobNotification(orgA, someJob));
+    await handle({ messages: [m] }, {});
+    expect(calls).toEqual([]);
+    expect(settle).toHaveBeenCalledWith(orgA, expect.anything(), {
+      outcome: 'failed',
+      errorCode: 'handler_error',
+      permanent: false,
+    });
+    expect(recorded.logs).toContainEqual(
+      expect.objectContaining({ event: 'job.observability_scope_failed' }),
+    );
+    expect(recorded.logs.filter((l) => l.event === 'job.observability_scope_failed')).toHaveLength(
+      1,
+    );
+    expect(m.acked()).toBe(1);
+    expect(m.retried()).toEqual([]);
+  });
+
   it('retries with the queue retry delay when the claim fails in transport', async () => {
     const handle = createQueueHandler({
       repository: fakeRepository({ claim: () => Promise.reject(new Error('D1 network')) }),
       jobs: { jobs: [counting('t').job] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
     });
     const m = message(jobNotification(orgA, someJob));
     await handle({ messages: [m] }, {});
@@ -484,7 +609,7 @@ describe('createQueueHandler transport boundaries', () => {
       repository: fakeRepository({ claim }),
       jobs: { jobs: [counting('t').job] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
     });
     const broken = message(jobNotification(orgA, someJob), { throwOnAck: true });
     const healthy = message(jobNotification(orgA, '01J00000000000000000000J0C'));
@@ -500,7 +625,7 @@ describe('createQueueHandler transport boundaries', () => {
       repository: fakeRepository({}),
       jobs: { jobs: [] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
     });
     await expect(handle(null as never, {})).resolves.toBeUndefined();
     await expect(handle({ messages: null } as never, {})).resolves.toBeUndefined();
@@ -520,7 +645,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [job] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
       limits: { settleRetryMs: 1 },
     });
     const m = message(jobNotification(orgA, someJob));
@@ -547,7 +672,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [job] },
       observability: recorded.observability,
-      ports,
+      scope: () => ({ ports, observability: recorded.observability }),
       limits: { settleRetryMs: 1 },
     });
     const m = message(jobNotification(orgA, someJob));
@@ -570,7 +695,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [job] },
       observability: recorded.observability,
-      ports,
+      scope: () => ({ ports, observability: recorded.observability }),
       limits: { settleRetryMs: 1 },
     });
     const m = message(jobNotification(orgA, someJob));
@@ -598,7 +723,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [job] },
       observability: recorded.observability,
-      ports,
+      scope: () => ({ ports, observability: recorded.observability }),
       limits: { settleRetryMs: 1 },
     });
     const m = message(jobNotification(orgA, someJob));
@@ -621,7 +746,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [blocking.job] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
       limits: { heartbeatMs: 5 },
     });
     const m = message(jobNotification(orgA, someJob));
@@ -649,7 +774,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [blocking.job] },
       observability: recorded.observability,
-      ports,
+      scope: () => ({ ports, observability: recorded.observability }),
       limits: { heartbeatMs: 5 },
     });
     const m = message(jobNotification(orgA, someJob));
@@ -679,7 +804,7 @@ describe('createQueueHandler transport boundaries', () => {
       }),
       jobs: { jobs: [job] },
       observability: recorder().observability,
-      ports,
+      scope: () => ({ ports, observability: recorder().observability }),
       limits: { heartbeatMs: 5 },
     });
     await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
@@ -1050,7 +1175,7 @@ describe('observability registry', () => {
         repository: fakeRepository({ claim: () => Promise.reject(new Error('D1 network')) }),
         jobs: { jobs: [job] },
         observability,
-        ports,
+        scope: () => ({ ports, observability }),
       }),
       createQueueHandler({
         repository: fakeRepository({
@@ -1060,7 +1185,7 @@ describe('observability registry', () => {
         }),
         jobs: { jobs: [failing] },
         observability,
-        ports,
+        scope: () => ({ ports, observability }),
         limits: { settleRetryMs: 1 },
       }),
       createQueueHandler({
@@ -1073,7 +1198,7 @@ describe('observability registry', () => {
         }),
         jobs: { jobs: [blocking.job] },
         observability,
-        ports,
+        scope: () => ({ ports, observability }),
         limits: { heartbeatMs: 5 },
       }),
     ];
@@ -1158,9 +1283,9 @@ describe('observability registry', () => {
       }),
       jobs: { jobs: [failing] },
       observability: createObservability(sink, scope, registry),
-      forJob: ({ jobId, attempt }) =>
+      scope: () => ({ ports, observability: createObservability(sink, scope, registry) }),
+      runnerObservability: ({ jobId, attempt }) =>
         createObservability(sink, { ...scope, jobId, attempt }, registry),
-      ports,
     });
     await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
 

@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { parseSourceConfig } from '../sources/config.js';
+import { createOutboundPolicy } from '../sources/url-policy.js';
 import { MAX_KEY_LENGTH, packageKey } from './names.js';
 import {
+  MAX_PATTERN_BYTES,
   MAX_PATTERNS_PER_RULE,
+  isPatternSyntax,
   PatternError,
   PATTERN_ALPHABET,
   isValidPattern,
@@ -20,7 +24,7 @@ describe('isValidPattern', () => {
     '*',
     'a*b*c*d',
     '!j!s!o!n!stream',
-    packageKey(longName, { ecosystem: 'npm', legacyCase: true }),
+    'a'.repeat(50),
   ])('accepts %s', (pattern) => {
     expect(isValidPattern(pattern)).toBe(true);
   });
@@ -32,21 +36,24 @@ describe('isValidPattern', () => {
     ['close bracket', 'acme/a]'],
     ['five wildcards', 'a*b*c*d*e*'],
     ['empty', ''],
-    ['over-long', 'a'.repeat(MAX_KEY_LENGTH + 1)],
+    ['51 bytes', 'a'.repeat(51)],
+    ['51 bytes with wildcards', `${'a'.repeat(49)}**`],
     ['space', 'acme /x'],
     ['backslash', 'acme\\x'],
   ])('refuses %s', (_label, pattern) => {
     expect(isValidPattern(pattern)).toBe(false);
   });
 
-  it('accepts the key of a fully capitalised 214-character name at 428 characters', () => {
+  it('matches the key of a fully capitalised 214-character name at 428 characters', () => {
     const key = packageKey(longName, { ecosystem: 'npm', legacyCase: true });
     expect(key).toHaveLength(MAX_KEY_LENGTH);
-    expect(isValidPattern(key)).toBe(true);
+    expect(isPatternSyntax(key, MAX_KEY_LENGTH)).toBe(true);
+    expect(matchesPattern(key, key)).toBe(true);
   });
 
   it('accepts the maximum length', () => {
-    expect(isValidPattern('a'.repeat(MAX_KEY_LENGTH))).toBe(true);
+    expect(MAX_PATTERN_BYTES).toBe(50);
+    expect(isValidPattern('a'.repeat(MAX_PATTERN_BYTES))).toBe(true);
   });
 });
 
@@ -170,4 +177,28 @@ describe('key alphabet', () => {
       expect(PATTERN_ALPHABET.test(`a${ch}b`)).toBe(false);
     }
   });
+});
+
+it('refuses a 51-byte Composer selection pattern through parseSourceConfig', () => {
+  const result = parseSourceConfig(
+    'composer_repository',
+    'composer',
+    'https://repo.example.test',
+    JSON.stringify({ selection: { patterns: [`acme/${'a'.repeat(46)}`] } }),
+    {
+      runtime: 'node',
+      hasCredential: false,
+      policy: createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+    },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error('expected invalid selection');
+  expect(result.problems).toEqual(
+    expect.arrayContaining([expect.objectContaining({ field: 'selection.patterns' })]),
+  );
+});
+
+it('rejects syntax above the matching limit', () => {
+  expect(isPatternSyntax('a'.repeat(MAX_KEY_LENGTH + 1), MAX_KEY_LENGTH)).toBe(false);
+  expect(() => matchesPattern('a'.repeat(MAX_KEY_LENGTH + 1), 'a')).toThrow(PatternError);
 });

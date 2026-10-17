@@ -25,6 +25,7 @@ export interface VisibilityPackage {
   readonly id: string;
   readonly orgId: string;
   readonly sourceId: string;
+  readonly ecosystem: NameEcosystem;
   readonly key: string;
   readonly status: VisibilityPackageStatus;
   readonly visible: 0 | 1;
@@ -93,7 +94,11 @@ export function deriveVisibility(config: VisibilityConfig): VisibilityRow[] {
       continue;
     }
     for (const p of config.packages) {
-      if (p.sourceId !== source.id || p.orgId !== source.orgId) {
+      if (
+        p.sourceId !== source.id ||
+        p.orgId !== source.orgId ||
+        p.ecosystem !== source.ecosystem
+      ) {
         continue;
       }
       const slot = `${project.id}\0${p.id}`;
@@ -125,13 +130,12 @@ function proxyBlocked(
   ecosystem: NameEcosystem,
   key: string,
 ): boolean {
-  const nonProxy = new Set(
-    config.sources
-      .filter((s) => s.orgId === orgId && s.ecosystem === ecosystem && !isProxy(s))
-      .map((s) => s.id),
-  );
+  const nonProxy = new Set(config.sources.filter((s) => !isProxy(s)).map((s) => s.id));
   return (
-    config.packages.some((p) => p.orgId === orgId && p.key === key && nonProxy.has(p.sourceId)) ||
+    config.packages.some(
+      (p) =>
+        p.orgId === orgId && p.ecosystem === ecosystem && p.key === key && nonProxy.has(p.sourceId),
+    ) ||
     config.registeredNames.some(
       (r) => r.orgId === orgId && r.ecosystem === ecosystem && patternHits(r.pattern, key),
     )
@@ -167,12 +171,7 @@ export function resolveWinner(
     const live =
       pkg.status === 'active' ||
       (pkg.status === 'removed_upstream' && source.removalPolicy === 'flag');
-    if (
-      pkg.key === key &&
-      source.ecosystem === ecosystem &&
-      live &&
-      !(isProxy(source) && blocked)
-    ) {
+    if (pkg.key === key && pkg.ecosystem === ecosystem && live && !(isProxy(source) && blocked)) {
       candidates.push({ pkg, source, precedence: precedence.get(source.id) ?? 0 });
     }
   }

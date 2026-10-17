@@ -168,6 +168,23 @@ describe('classifyUrl', () => {
     });
   });
 
+  it.each([
+    ['p443.internal:443', 'http://p443.internal:443/'],
+    ['p443.internal', 'http://p443.internal:443/'],
+    ['p443.internal:443', 'http://p443.internal:443/x?y=1'],
+  ])('refuses http on port 443 under the entry %s for %s', (entry, url) => {
+    const policy = createOutboundPolicy({
+      allowPrivateHosts: [entry],
+      runtime: 'node',
+      selfOrigins: [],
+    });
+    expect(classifyUrl(url, policy)).toEqual({ ok: false, reason: 'scheme' });
+  });
+
+  it('refuses http on port 443 for a public host without an allowlist', () => {
+    expect(classifyUrl('http://example.com:443/', node)).toEqual({ ok: false, reason: 'scheme' });
+  });
+
   describe('explicit ports for HTTP allowlist entries', () => {
     const policyFor = (entry: string) =>
       createOutboundPolicy({ allowPrivateHosts: [entry], runtime: 'node', selfOrigins: [] });

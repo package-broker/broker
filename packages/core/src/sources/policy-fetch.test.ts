@@ -288,7 +288,60 @@ describe('createPolicyFetch redirects and credentials', () => {
     const run = createPolicyFetch({ fetchImpl: f.fetchImpl, policy: lax, userAgent: 'pb-test/1' });
     const error = await failure(run(request()));
     expect(error.code).toBe('refused');
+    expect(error.reason).toBe('downgrade');
     expect(f.hops).toHaveLength(1);
+  });
+
+  it('refuses http on port 443 under a host:443 entry before requesting it', async () => {
+    const f = fake({ 'http://plain.example.com:443/x': new Response('ok') });
+    const run = createPolicyFetch({
+      fetchImpl: f.fetchImpl,
+      policy: createOutboundPolicy({
+        allowPrivateHosts: ['plain.example.com:443'],
+        runtime: 'node',
+        selfOrigins: [],
+      }),
+      userAgent: 'pb-test/1',
+    });
+    const error = await failure(run(request({ url: 'http://plain.example.com:443/x' })));
+    expect(error.code).toBe('refused');
+    expect(error.reason).toBe('scheme');
+    expect(f.hops).toHaveLength(0);
+  });
+
+  it('refuses a redirect to http on port 443 under a host:443 entry', async () => {
+    const f = fake({
+      'https://plain.example.com/a': redirect('http://plain.example.com:443/b'),
+      'http://plain.example.com:443/b': new Response('ok'),
+    });
+    const run = createPolicyFetch({
+      fetchImpl: f.fetchImpl,
+      policy: createOutboundPolicy({
+        allowPrivateHosts: ['plain.example.com:443'],
+        runtime: 'node',
+        selfOrigins: [],
+      }),
+      userAgent: 'pb-test/1',
+    });
+    const error = await failure(run(request({ url: 'https://plain.example.com/a' })));
+    expect(error.code).toBe('refused');
+    expect(error.reason).toBe('scheme');
+    expect(f.hops).toHaveLength(1);
+  });
+
+  it('allows https on port 443 under a host:443 entry', async () => {
+    const f = fake({ 'https://plain.example.com/x': new Response('ok') });
+    const run = createPolicyFetch({
+      fetchImpl: f.fetchImpl,
+      policy: createOutboundPolicy({
+        allowPrivateHosts: ['plain.example.com:443'],
+        runtime: 'node',
+        selfOrigins: [],
+      }),
+      userAgent: 'pb-test/1',
+    });
+    const response = await run(request({ url: 'https://plain.example.com/x' }));
+    expect(response.status).toBe(200);
   });
 
   it('refuses an HTTP redirect under a bare allowlist entry before requesting it', async () => {

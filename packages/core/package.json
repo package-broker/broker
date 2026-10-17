@@ -63,6 +63,10 @@
       "types": "./dist/sources/*.d.ts",
       "default": "./dist/sources/*.js"
     },
+    "./api/*": {
+      "types": "./dist/api/*.d.ts",
+      "default": "./dist/api/*.js"
+    },
     "./registry/*": {
       "types": "./dist/registry/*.d.ts",
       "default": "./dist/registry/*.js"
@@ -73,6 +77,7 @@
     "!dist/**/*.test.*"
   ],
   "dependencies": {
-    "hono": "catalog:"
+    "hono": "catalog:",
+    "zod": "catalog:"
   }
 }

@@ -31,15 +31,15 @@ import type {
   DenyLogger,
 } from './authorize.js';
 import { denialResponse } from './denial-page.js';
-import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
+import { defaultLog, envelopeResponse, errorResponse, responseReason } from './errors.js';
 import type { KernelLog } from './errors.js';
 import { reportableErrorName } from './error-name.js';
 import { liveResponse, readyResponse } from './health.js';
 import {
   denyReason,
   engineStatusReason,
-  envelopeReason,
   hookErrorReason,
+  isEngineFailure,
   KERNEL_EVENTS,
   KERNEL_REASON_CODES,
 } from './obs-codes.js';
@@ -141,15 +141,6 @@ function hookPlugin(label: string): string {
   return label.startsWith('core:') ? CORE_PLUGIN : label;
 }
 
-async function failureReason(response: Response): Promise<string> {
-  try {
-    const body = (await response.clone().json()) as { error?: { code?: unknown } };
-    return typeof body.error?.code === 'string' ? body.error.code : 'internal';
-  } catch {
-    return 'internal';
-  }
-}
-
 function frozenSet(values: Iterable<string>): ReadonlySet<string> {
   const set = new Set(values);
   for (const method of ['add', 'delete', 'clear'] as const) {
@@ -187,13 +178,23 @@ async function failed(
 ): Promise<Response> {
   try {
     const response = errorResponse(error, requestId, log);
-    guard.reason(envelopeReason(await failureReason(response)));
+    guard.reason(responseReason(response) ?? 'http.handler_status');
     return response;
   } catch {
     log({ level: 'error', event: 'http.error', error_name: 'Error' });
     guard.reason('error.internal');
     return envelopeResponse(500, 'internal', 'Internal error', requestId);
   }
+}
+
+function authorizationUnavailable(requestId: string): Response {
+  return envelopeResponse(
+    503,
+    'unavailable',
+    'Authorization is temporarily unavailable',
+    requestId,
+    'authz.engine_error',
+  );
 }
 
 function withRequestId(response: Response, requestId: string): Response {
@@ -409,6 +410,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     if (!(response instanceof Response)) {
       throw new TypeError(`route ${route.method} ${route.path} did not return a Response`);
     }
+    if (response.status >= 400) {
+      c.env.guard.reason(responseReason(response) ?? 'http.handler_status');
+    }
     return response;
   }
 
@@ -439,8 +443,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     const org = await resolveOrg();
     let accepted: EngineCopy | undefined;
     let engineOpen = true;
+    let engineFailed = false;
     const observedEngine: AuthorizationEngine = {
       async authorize(input) {
+        if (engine === denyAllEngine) throw new TypeError('authorization engine is not configured');
         const raw: unknown = await engine.authorize(input);
         const copy = engineOpen ? dataCopy(raw) : undefined;
         if (copy === undefined) return raw as AuthorizationDecision;
@@ -458,11 +464,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     };
     const onHookError: HookErrorHandler = (event) => {
       const reason = hookErrorReason(event.plugin, ENGINE_PLUGIN);
+      const failure = isEngineFailure(reason);
+      if (failure) engineFailed = true;
       if (event.plugin === ENGINE_PLUGIN) engineOpen = false;
       if (event.plugin !== ENGINE_PLUGIN && event.plugin !== INPUT_PLUGIN) afterEngineAllow();
       guard.reason(reason);
       scope.obs({ plugin: hookPlugin(event.plugin) }).log({
-        level: 'warn',
+        level: failure ? 'error' : 'warn',
         event: 'authz.error',
         error_name: reportableErrorName(event.error),
         reason_code: reason,
@@ -499,6 +507,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     );
     engineOpen = false;
     if (!decision.allow) {
+      if (engineFailed) return authorizationUnavailable(requestId);
       guard.reason(engineStatusReason(decision.status));
       if (decision.status === 401) {
         return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);

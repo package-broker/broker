@@ -10,6 +10,7 @@ import {
 } from '../plugin.js';
 import type { ObsRecord, ObsRecordSink } from '../platform/observability.js';
 import type { AuthorizationDecision, AuthorizationEngine, authorizeRoute } from './authorize.js';
+import { envelopeResponse } from './errors.js';
 import { createKernel } from './kernel.js';
 import type { KernelOptions } from './kernel.js';
 import { KernelConfigError } from './registry.js';
@@ -462,7 +463,7 @@ describe('kernel authorization records', () => {
     await vi.advanceTimersByTimeAsync(2001);
     const response = await pending;
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(503);
     expect(logs).toEqual([
       expect.objectContaining({
         event: 'authz.error',
@@ -705,7 +706,7 @@ describe('kernel engine decision copy', () => {
 
     const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(503);
     expect(logs).toEqual([
       expect.objectContaining({ event: 'authz.error', reason_code: 'authz.engine_error' }),
       expect.objectContaining({ event: 'http.request', token_id: null }),
@@ -722,7 +723,7 @@ describe('kernel engine decision copy', () => {
 
     const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(503);
     expect(logs.map((entry) => entry['event'])).toEqual(['authz.error', 'http.request']);
   });
 
@@ -759,7 +760,7 @@ describe('kernel engine decision copy', () => {
     const response = await pending;
     await vi.advanceTimersByTimeAsync(5000);
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(503);
     expect(logs.map((entry) => entry['event'])).toEqual(['authz.error', 'http.request']);
     expect(JSON.stringify(logs)).not.toContain('tok_late');
   });
@@ -884,5 +885,247 @@ describe('kernel onDeny hook_error', () => {
     await kernel.fetch(new Request(`${BASE}/secure/1`));
 
     expect(logs.map((entry) => entry['event'])).toEqual(['authz.error', 'http.request']);
+  });
+});
+
+describe('engine failure versus policy denial', () => {
+  const failures: ReadonlyArray<readonly [string, AuthorizationEngine]> = [
+    ['a rejecting engine', { authorize: () => Promise.reject(new Error('engine down')) }],
+    ['a missing authorize method', {} as AuthorizationEngine],
+    ['a malformed decision', engineReturning({ allow: false, status: 404, x: 1 } as never)],
+  ];
+
+  it.each(failures)('answers 503 without admin text for %s', async (_label, authorization) => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(
+      options([plugin('alpha', [protectedItem])], logs, { authorization }),
+    );
+
+    const response = await kernel.fetch(
+      new Request(`${BASE}/secure/1`, { headers: { accept: 'text/html' } }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('content-type')).toMatch(/^application\/json/);
+    const text = await response.text();
+    expect(text).not.toMatch(/administrator/i);
+    expect(JSON.parse(text)).toMatchObject({ error: { code: 'unavailable' } });
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: 'authz.error',
+        level: 'error',
+        reason_code: 'authz.engine_error',
+      }),
+      expect.objectContaining({
+        event: 'http.request',
+        status: 503,
+        reason_code: 'authz.engine_error',
+      }),
+    ]);
+  });
+
+  it('answers 503 on an engine timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const logs: Entry[] = [];
+    const kernel = await createKernel(
+      options([plugin('alpha', [protectedItem])], logs, {
+        authorization: { authorize: () => new Promise<never>(() => undefined) },
+      }),
+    );
+
+    const pending = kernel.fetch(
+      new Request(`${BASE}/secure/7`, { headers: { accept: 'text/html' } }),
+    );
+    await vi.advanceTimersByTimeAsync(2001);
+    const response = await pending;
+
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toMatch(/administrator/i);
+  });
+
+  it('keeps the 403 page for a policy denial by the engine', async () => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(
+      options([plugin('alpha', [protectedItem])], logs, {
+        authorization: engineReturning({ allow: false, status: 403 }),
+      }),
+    );
+
+    const response = await kernel.fetch(
+      new Request(`${BASE}/secure/1`, { headers: { accept: 'text/html' } }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).toMatch(/administrator/i);
+  });
+
+  it('keeps the 403 page for a policy denial by a hook', async () => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(
+      options(
+        [
+          plugin('alpha', [protectedItem]),
+          denyingHook('guard', () => ({ deny: true, reason: 'no' })),
+        ],
+        logs,
+        { authorization: allowWithToken },
+      ),
+    );
+
+    const response = await kernel.fetch(
+      new Request(`${BASE}/secure/1`, { headers: { accept: 'text/html' } }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).toMatch(/administrator/i);
+  });
+
+  it('keeps the 403 for a throwing hook', async () => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(
+      options(
+        [
+          plugin('alpha', [protectedItem]),
+          denyingHook('broken', () => {
+            throw new RangeError('boom');
+          }),
+        ],
+        logs,
+        { authorization: allowWithToken },
+      ),
+    );
+
+    const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
+
+    expect(response.status).toBe(403);
+  });
+});
+
+describe('handler status and envelope reason', () => {
+  const teapot: RouteDefinition = {
+    method: 'GET',
+    path: '/teapot',
+    permission: null,
+    handler: () => new Response('short and stout', { status: 418 }),
+  };
+
+  it('records http.handler_status for a plugin 418 without a reason code', async () => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(options([plugin('alpha', [teapot])], logs));
+
+    const response = await kernel.fetch(new Request(`${BASE}/teapot`));
+
+    expect(response.status).toBe(418);
+    expect(completions(logs)[0]).toMatchObject({ status: 418, reason_code: 'http.handler_status' });
+  });
+
+  it('records no reason for a plugin success', async () => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(options([plugin('alpha', [publicItem])], logs));
+
+    await kernel.fetch(new Request(`${BASE}/items/1`));
+
+    expect(completions(logs)[0]).not.toHaveProperty('reason_code');
+  });
+
+  it.each(['error.unavailable', undefined] as const)(
+    'uses the attached core-route reason (%s) or http.handler_status without reading the body',
+    async (reason) => {
+      const logs: Entry[] = [];
+      const kernel = await createKernel(
+        options([], logs, {
+          coreRoutes: [
+            {
+              method: 'GET',
+              path: '/_pb/unavailable',
+              permission: null,
+              handler: (ctx) =>
+                envelopeResponse(503, 'unavailable', 'Try again later', ctx.requestId, reason),
+            },
+          ],
+        }),
+      );
+      const json = vi.spyOn(Response.prototype, 'json');
+      const text = vi.spyOn(Response.prototype, 'text');
+      try {
+        const response = await kernel.fetch(new Request(`${BASE}/_pb/unavailable`));
+
+        expect(response.status).toBe(503);
+        expect(completions(logs)[0]).toMatchObject({
+          reason_code: reason ?? 'http.handler_status',
+        });
+        expect(json).not.toHaveBeenCalled();
+        expect(text).not.toHaveBeenCalled();
+      } finally {
+        json.mockRestore();
+        text.mockRestore();
+      }
+    },
+  );
+
+  it('does not read the body of a kernel envelope response', async () => {
+    const json = vi.spyOn(Response.prototype, 'json');
+    const text = vi.spyOn(Response.prototype, 'text');
+    try {
+      const logs: Entry[] = [];
+      const kernel = await createKernel(
+        options(
+          [
+            plugin('alpha', [
+              {
+                method: 'GET',
+                path: '/boom',
+                permission: null,
+                handler: () => {
+                  throw new Error('x');
+                },
+              },
+            ]),
+          ],
+          logs,
+        ),
+      );
+
+      const response = await kernel.fetch(new Request(`${BASE}/boom`));
+
+      expect(response.status).toBe(500);
+      expect(completions(logs)[0]).toMatchObject({ reason_code: 'error.internal' });
+      expect(json).not.toHaveBeenCalled();
+      expect(text).not.toHaveBeenCalled();
+    } finally {
+      json.mockRestore();
+      text.mockRestore();
+    }
+  });
+});
+
+describe('denial logging', () => {
+  const SENTINEL = 'sentinel-secret-9f3a';
+
+  it.each([
+    ['a denying hook', () => ({ deny: true as const, reason: SENTINEL })],
+    [
+      'a throwing hook',
+      () => {
+        throw new RangeError(SENTINEL);
+      },
+    ],
+  ])('logs the denial of %s without the sentinel', async (_label, handler) => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(
+      options([plugin('alpha', [protectedItem]), denyingHook('guard', handler)], logs, {
+        authorization: allowWithToken,
+      }),
+    );
+
+    const response = await kernel.fetch(
+      new Request(`${BASE}/secure/7`, { headers: { accept: 'text/html' } }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain(SENTINEL);
+    expect(logs.filter((entry) => String(entry['event']).startsWith('authz.'))).toHaveLength(1);
+    expect(completions(logs)).toHaveLength(1);
+    expect(JSON.stringify(logs)).not.toContain(SENTINEL);
   });
 });

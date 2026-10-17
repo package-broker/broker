@@ -193,7 +193,7 @@ describe('package boundary at request time', () => {
   async function serve(
     headers: Record<string, string>,
     authorization?: AuthorizationEngine,
-  ): Promise<{ status: number; handled: number }> {
+  ): Promise<{ status: number; handled: number; response: Response }> {
     let handled = 0;
     const plugin: PluginDefinition = {
       id: 'pkgplugin',
@@ -224,7 +224,7 @@ describe('package boundary at request time', () => {
     const response = await kernel.fetch(
       new Request('https://broker.test/p/demo/pkg/vendor-x', { headers }),
     );
-    return { status: response.status, handled };
+    return { status: response.status, handled, response };
   }
 
   it.each([
@@ -239,9 +239,10 @@ describe('package boundary at request time', () => {
     expect(lookups).toEqual([]);
   });
 
-  it('denies a registered package route under the default engine', async () => {
-    const { status, handled } = await serve({});
-    expect(status).toBe(403);
+  it('returns 503 unavailable for a registered package route under the default engine', async () => {
+    const { status, handled, response } = await serve({});
+    expect(status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'unavailable' } });
     expect(handled).toBe(0);
   });
 });

@@ -201,10 +201,13 @@ describe('kernel with the live authorization engine', () => {
     });
   });
 
-  it('denies the same protected route without an engine (denyAllEngine)', async () => {
+  it('returns 503 unavailable for protected routes without an engine (denyAllEngine)', async () => {
     const k = await kernel();
-    expect((await k.fetch(call('/p/demo', { headers: cookie }))).status).toBe(403);
-    expect((await k.fetch(call('/org', { headers: cookie }))).status).toBe(403);
+    for (const path of ['/p/demo', '/org']) {
+      const response = await k.fetch(call(path, { headers: cookie }));
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ error: { code: 'unavailable' } });
+    }
   });
 
   it('serves a public route without consulting the engine', async () => {
@@ -276,7 +279,7 @@ describe('kernel with the live authorization engine', () => {
     expect(response.status).toBe(200);
   });
 
-  it('authorizes HEAD as GET and strips the body', async () => {
+  it('authorizes HEAD as GET, strips the body, and returns 503 without an engine', async () => {
     const access = state();
     const k = await kernel(liveEngine(access));
     const allowed = await k.fetch(call('/p/demo', { method: 'HEAD', headers: cookie }));
@@ -286,9 +289,9 @@ describe('kernel with the live authorization engine', () => {
     expect(denied.status).toBe(401);
     expect(await denied.text()).toBe('');
     const noEngine = await kernel();
-    expect(
-      (await noEngine.fetch(call('/p/demo', { method: 'HEAD', headers: cookie }))).status,
-    ).toBe(403);
+    const unavailable = await noEngine.fetch(call('/p/demo', { method: 'HEAD', headers: cookie }));
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.text()).toBe('');
   });
 });
 

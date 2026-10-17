@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CSRF_COOKIE, LOGIN_COOKIE, SESSION_COOKIE } from './cookies.js';
-import { sealLoginState } from './login-state.js';
+import { openLoginState, sealLoginState } from './login-state.js';
 import type { LoginOutcome } from './identity-login.js';
 import { createSsoRoutes } from './routes-sso.js';
 import type { ReauthOutcome, SsoRouteDeps } from './routes-sso.js';
@@ -24,7 +24,6 @@ const ORG = orgContext('01J0ORGA00000000000000000A');
 const USER_ID = '01J0USERA0000000000000000A';
 const EMAIL = 'ada@example.test';
 const PROVIDER_ERROR_TEXT = 'upstream said: super-secret-detail';
-const CHALLENGE = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
 
 type Log = Readonly<Record<string, unknown>>;
 
@@ -396,6 +395,27 @@ describe('SSO login through start and callback', () => {
     expect(app.logs).toContainEqual(
       expect.objectContaining({ event: 'auth.login.succeeded', provider: 'dex' }),
     );
+  });
+
+  it('seals a login state without a challenge field', async () => {
+    const app = await build();
+    const start = await app.kernel.fetch(startRequest('dex'));
+    const login = `${LOGIN_COOKIE}=${cookieValue(start, LOGIN_COOKIE) ?? ''}`;
+    const state = await openLoginState(
+      app.cipher,
+      new Request(`${ORIGIN}/`, { headers: { cookie: login } }),
+      { provider: 'dex', sessionId: null },
+      NOW,
+    );
+    expect(state).not.toBeNull();
+    expect(Object.keys(state ?? {}).sort()).toEqual([
+      'data',
+      'issuedAt',
+      'provider',
+      'purpose',
+      'returnTo',
+      'sessionId',
+    ]);
   });
 
   it('passes the sealed provider state to finish and a callback URL from the public origin', async () => {
@@ -1283,7 +1303,6 @@ describe('re-authentication', () => {
       returnTo: '/',
       issuedAt: NOW,
       sessionId: '01J0SESSIONOTHER0000000000',
-      challenge: CHALLENGE,
       data: {},
     });
     const login = pairOf(setCookie);

@@ -3,6 +3,37 @@ import type { IdentityContext } from '@package-broker/core/identity/port';
 export type BoundedFetchFailure =
   'redirect' | 'status' | 'content_type' | 'too_large' | 'timeout' | 'network' | 'bad_json';
 
+export type TokenEndpointError =
+  | 'invalid_grant'
+  | 'invalid_client'
+  | 'invalid_request'
+  | 'unauthorized_client'
+  | 'unsupported_grant_type'
+  | 'invalid_scope'
+  | 'token_endpoint_error';
+
+const TOKEN_ERRORS: ReadonlySet<string> = new Set<TokenEndpointError>([
+  'invalid_grant',
+  'invalid_client',
+  'invalid_request',
+  'unauthorized_client',
+  'unsupported_grant_type',
+  'invalid_scope',
+]);
+
+export function tokenEndpointError(json: unknown): TokenEndpointError | 'status' {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+    return 'status';
+  }
+  const code = Object.hasOwn(json, 'error')
+    ? (json as Record<string, unknown>)['error']
+    : undefined;
+  if (typeof code !== 'string') {
+    return 'status';
+  }
+  return TOKEN_ERRORS.has(code) ? (code as TokenEndpointError) : 'token_endpoint_error';
+}
+
 export class BoundedFetchError extends Error {
   readonly reason: BoundedFetchFailure;
 
@@ -16,6 +47,7 @@ export class BoundedFetchError extends Error {
 export interface FetchLimits {
   readonly maxBytes: number;
   readonly timeoutMs: number;
+  readonly readErrorBody?: boolean;
 }
 
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -116,24 +148,28 @@ export async function fetchBounded(
       discardBody(response);
       throw new BoundedFetchError('redirect');
     }
-    if (response.status < 200 || response.status >= 300) {
+    const success = response.status >= 200 && response.status < 300;
+    if (!success && limits.readErrorBody !== true) {
       discardBody(response);
       throw new BoundedFetchError('status');
     }
     if (!hasJsonContentType(response)) {
       discardBody(response);
-      throw new BoundedFetchError('content_type');
+      throw new BoundedFetchError(success ? 'content_type' : 'status');
     }
     let bytes: Uint8Array;
     try {
       bytes = await readBounded(response, limits.maxBytes, within);
     } catch (error) {
+      if (!success && error instanceof BoundedFetchError && error.reason === 'too_large') {
+        throw new BoundedFetchError('status');
+      }
       throw error instanceof BoundedFetchError ? error : new BoundedFetchError('network');
     }
     try {
       return { status: response.status, json: JSON.parse(utf8.decode(bytes)) as unknown };
     } catch {
-      throw new BoundedFetchError('bad_json');
+      throw new BoundedFetchError(success ? 'bad_json' : 'status');
     }
   } finally {
     clearTimeout(timer);

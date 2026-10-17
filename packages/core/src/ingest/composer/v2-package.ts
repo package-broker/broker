@@ -2,7 +2,11 @@ import { packageKey, PackageNameError } from '../../catalogue/names.js';
 import { isValidPattern, matchesPattern } from '../../catalogue/patterns.js';
 import type { VersionInput } from '../../db/catalogue.js';
 import { isoTimestamp, type Clock } from '../../ids.js';
-import { expandVersions, type ExpansionLimits } from '../../registry/composer/minify.js';
+import {
+  expandVersions,
+  ExpansionLimitError,
+  type ExpansionLimits,
+} from '../../registry/composer/minify.js';
 import {
   composerVersionInput,
   type ComposerVersionSkip,
@@ -13,6 +17,7 @@ import {
   type PolicyFetch,
   type UpstreamCredential,
   type UpstreamResponse,
+  type UpstreamRequest,
 } from '../../sources/policy-fetch.js';
 import {
   createPackageDescription,
@@ -24,7 +29,7 @@ import {
   type Validators,
   type VersionCandidate,
 } from '../../sources/provider.js';
-import { extractMembers } from '../json-stream.js';
+import { ARRAY_ELEMENTS, extractMembers } from '../json-stream.js';
 import type { ComposerRoot } from './root.js';
 
 export type ComposerV2ErrorCode =
@@ -51,6 +56,7 @@ export interface ComposerV2Source {
 }
 
 export interface ComposerV2Options {
+  readonly redirect?: UpstreamRequest['redirects'];
   readonly dev?: boolean;
   readonly validators?: DocumentValidators;
   /** The request path never sleeps; jobs honour Retry-After and recheck authenticated 404s. */
@@ -70,9 +76,9 @@ export type ComposerV2Candidate = VersionCandidate & {
 export type ComposerV2Result =
   DescribeResult | { readonly kind: 'busy'; readonly retryAfterSeconds: number | null };
 
-/** Peak memory per call is about two buffered documents plus one captured version array. */
+/** Peak memory per call is about two buffered documents plus the parsed versions of one. */
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
-const MAX_MEMBER_BYTES = 8 * 1024 * 1024;
+const MAX_VERSION_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_EXPANSION: ExpansionLimits = { maxVersions: 20_000 };
 const MAX_RETRY_AFTER_SECONDS = 60;
@@ -232,6 +238,7 @@ export async function describeComposerV2(
           headers,
           ...(source.credential === undefined ? {} : { credential: source.credential }),
           destinations,
+          ...(options.redirect === undefined ? {} : { redirects: options.redirect }),
           purpose: 'metadata',
           maxBytes,
           timeoutMs: source.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -358,31 +365,49 @@ export async function describeComposerV2(
   const snapshot = await digest(strong ? 'composer-v2-etag' : 'composer-v2-body', parts);
 
   const expansion = source.expansion ?? DEFAULT_EXPANSION;
-  const maxMemberBytes = Math.min(maxBytes, MAX_MEMBER_BYTES);
+  const maxMemberBytes = Math.min(maxBytes, expansion.maxVersionBytes ?? MAX_VERSION_BYTES);
   let keyMissing = false;
   async function* members(): AsyncGenerator<ComposerV2Candidate> {
+    const { maxVersions } = expansion;
+    if (!Number.isSafeInteger(maxVersions) || maxVersions < 1) {
+      throw new RangeError('maxVersions must be a positive integer');
+    }
     const importedAt = isoTimestamp(options.clock.now());
     let ordinal = 0;
     for (const { form, bytes } of bodies) {
-      let list: unknown;
+      let list: unknown[] = [];
+      let current: unknown[] = [];
       let found = 0;
+      let nonArray = false;
       let minified = false;
-      for await (const member of extractMembers(chunks(bytes), [['packages', '*'], ['minified']], {
-        maxMemberBytes,
-        maxDocumentBytes: maxBytes,
-      })) {
+      for await (const member of extractMembers(
+        chunks(bytes),
+        [['packages', '*', ARRAY_ELEMENTS], ['minified']],
+        { maxMemberBytes, maxDocumentBytes: maxBytes, nonArray: 'report' },
+      )) {
         if (member.path[0] === 'minified') {
           minified = JSON.parse(member.raw) === 'composer/2.0';
-        } else if (member.path[1]?.toLowerCase() === key) {
+        } else if (member.path[1]?.toLowerCase() !== key) {
+          continue;
+        } else if (member.end === true) {
           found++;
-          list = JSON.parse(member.raw);
+          list = current;
+          current = [];
+        } else if (member.notArray === true) {
+          found++;
+          nonArray = true;
+        } else if (member.index !== undefined) {
+          if (current.length >= maxVersions) {
+            throw new ExpansionLimitError('versions', null, current.length + 1);
+          }
+          current.push(JSON.parse(member.raw));
         }
       }
       if (found !== 1) {
         keyMissing = true;
         continue;
       }
-      if (!Array.isArray(list)) throw new ComposerV2Error('unsupported');
+      if (nonArray) throw new ComposerV2Error('unsupported');
       const versions: unknown[] = minified
         ? expandVersions(list as Record<string, unknown>[], expansion)
         : list;

@@ -3,7 +3,6 @@ import type { LoginOutcome, LoginRefusal } from './identity-login.js';
 import type { ReauthRefusal } from './identity-reauth.js';
 import { clearLoginState, openLoginState, safeReturnTo, sealLoginState } from './login-state.js';
 import type { LoginState } from './login-state.js';
-import { randomToken } from './primitives.js';
 import { sessionMetaOf } from './session.js';
 import type { AuthenticatedSession, SessionMeta, SessionService } from './session.js';
 import type { OrgContext } from '../db/port.js';
@@ -404,7 +403,6 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
         returnTo,
         issuedAt: clock.now().getTime(),
         sessionId: session === null ? null : session.session.id,
-        challenge: randomToken(32),
         data: started.state,
       });
     } catch (error) {

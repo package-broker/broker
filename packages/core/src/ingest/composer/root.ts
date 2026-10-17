@@ -63,6 +63,7 @@ export interface ComposerRoot {
   readonly includes?: readonly ComposerRootInclude[];
   readonly inlineProviders: boolean;
   readonly partialPackages: boolean;
+  readonly inlinePackages: boolean;
   readonly availablePackages?: readonly string[];
   readonly availablePatterns?: readonly string[];
   readonly validator: {
@@ -144,9 +145,10 @@ function packagesJsonUrlOf(url: string): string {
   return parsed.href;
 }
 
-function baseOf(packagesJsonUrl: string): string {
+export function baseOf(packagesJsonUrl: string): string {
   const parsed = new URL(packagesJsonUrl);
   parsed.search = '';
+  parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/[^/]*$/, '');
   return parsed.href.replace(/\/+$/, '');
 }
@@ -403,6 +405,7 @@ export async function readComposerRoot(
     ...(includes === undefined ? {} : { includes }),
     inlineProviders,
     partialPackages,
+    inlinePackages: hasInline,
     ...(availablePackages === undefined ? {} : { availablePackages }),
     ...(availablePatterns === undefined ? {} : { availablePatterns }),
     validator: {

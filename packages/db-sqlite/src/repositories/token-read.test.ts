@@ -19,6 +19,7 @@ const HASH_SENTINEL = 'f'.repeat(64);
 const SELECTOR_SENTINEL = 'zzzzzzzzzzzz';
 const KEYS = [
   'createdAt',
+  'createdByUserId',
   'expiresAt',
   'id',
   'kind',
@@ -65,6 +66,7 @@ interface Seed {
   selects?: string[];
   selector?: string;
   hash?: string;
+  createdBy?: string;
 }
 
 async function seed(options: Seed = {}): Promise<string> {
@@ -91,7 +93,7 @@ async function seed(options: Seed = {}): Promise<string> {
     kind === 'svc' ? (options.sp ?? SP1) : null,
     customer,
     options.project ?? null,
-    USER,
+    options.createdBy ?? USER,
     kind === 'cst'
       ? null
       : options.expiresAt === undefined
@@ -408,3 +410,167 @@ describe('token reader validation', () => {
     expect(all).not.toHaveBeenCalled();
   });
 });
+
+describe('token reader single read', () => {
+  const MISSING = tid(999);
+
+  it('getOwn returns exactly the documented keys and never a hash or selector', async () => {
+    const id = await seed({ hash: HASH_SENTINEL, selector: SELECTOR_SENTINEL, selects: [P1] });
+    const item = await reader.getOwn(a, USER, id, NOW);
+    expect(Object.keys(item!).sort()).toEqual(KEYS);
+    expect(item).toMatchObject({ id, kind: 'pat', userId: USER, createdByUserId: USER });
+    const text = JSON.stringify(item);
+    expect(text).not.toContain(HASH_SENTINEL);
+    expect(text).not.toContain(SELECTOR_SENTINEL);
+  });
+
+  it('getProject returns exactly the documented keys and never a hash or selector', async () => {
+    const id = await seed({
+      kind: 'svc',
+      project: P1,
+      hash: HASH_SENTINEL,
+      selector: SELECTOR_SENTINEL,
+    });
+    const item = await reader.getProject(a, P1, id, NOW);
+    expect(Object.keys(item!).sort()).toEqual(KEYS);
+    expect(item).toMatchObject({ id, kind: 'svc', projectId: P1, servicePrincipalId: SP1 });
+    const text = JSON.stringify(item);
+    expect(text).not.toContain(HASH_SENTINEL);
+    expect(text).not.toContain(SELECTOR_SENTINEL);
+  });
+
+  it('getOrganization returns a pat and an svc with the documented keys, no hash or selector', async () => {
+    const pat = await seed({ hash: HASH_SENTINEL, selector: SELECTOR_SENTINEL });
+    const svc = await seed({ kind: 'svc', project: P1, hash: HASH_SENTINEL });
+    for (const id of [pat, svc]) {
+      const item = await reader.getOrganization(a, id, NOW);
+      expect(Object.keys(item!).sort()).toEqual(KEYS);
+      const text = JSON.stringify(item);
+      expect(text).not.toContain(HASH_SENTINEL);
+      expect(text).not.toContain(SELECTOR_SENTINEL);
+    }
+  });
+
+  it('getProject of a service token of another project equals the result for an absent id', async () => {
+    const id = await seed({ kind: 'svc', project: P2, sp: SP2 });
+    const other = await reader.getProject(a, P1, id, NOW);
+    const absent = await reader.getProject(a, P1, MISSING, NOW);
+    expect(other).toBeNull();
+    expect(other).toEqual(absent);
+  });
+
+  it('getProject omits a PAT', async () => {
+    const id = await seed({ project: P1, selects: [P1] });
+    expect(await reader.getProject(a, P1, id, NOW)).toBeNull();
+  });
+
+  it('getOwn of another user PAT returns null', async () => {
+    const id = await seed({ user: OTHER_USER });
+    expect(await reader.getOwn(a, USER, id, NOW)).toBeNull();
+  });
+
+  it('getOwn omits a service token', async () => {
+    const id = await seed({ kind: 'svc', project: P1 });
+    expect(await reader.getOwn(a, USER, id, NOW)).toBeNull();
+  });
+
+  it('getOrganization of a customer token returns null', async () => {
+    const id = await seed({ kind: 'cst' });
+    expect(await reader.getOrganization(a, id, NOW)).toBeNull();
+  });
+
+  it('getOwn of a token of another organization returns null', async () => {
+    const id = await seed({ org: b });
+    expect(await reader.getOwn(a, USER, id, NOW)).toBeNull();
+  });
+
+  it('getProject of a token of another organization returns null', async () => {
+    const id = await seed({ kind: 'svc', project: P1, org: b });
+    expect(await reader.getProject(a, P1, id, NOW)).toBeNull();
+  });
+
+  it('getOrganization of a token of another organization returns null', async () => {
+    const id = await seed({ org: b });
+    expect(await reader.getOrganization(a, id, NOW)).toBeNull();
+  });
+
+  it('returns null for an absent id from all three', async () => {
+    expect(await reader.getOwn(a, USER, MISSING, NOW)).toBeNull();
+    expect(await reader.getProject(a, P1, MISSING, NOW)).toBeNull();
+    expect(await reader.getOrganization(a, MISSING, NOW)).toBeNull();
+  });
+
+  it('getProject names the issuing user after grants are deleted and the issuer is suspended', async () => {
+    await run(
+      "INSERT INTO role (id, org_id, key, name, scope) VALUES ('role1', ?, 'r', 'r', 'organization')",
+      a.orgId,
+    );
+    await run(
+      "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES ('g1', ?, 'email', 'u2@example.test', 'organization', 'role1')",
+      a.orgId,
+    );
+    const id = await seed({ kind: 'svc', project: P1, createdBy: OTHER_USER });
+    expect((await reader.getProject(a, P1, id, NOW))?.createdByUserId).toBe(OTHER_USER);
+    await run('DELETE FROM access_grant WHERE org_id = ?', a.orgId);
+    expect((await reader.getProject(a, P1, id, NOW))?.createdByUserId).toBe(OTHER_USER);
+    await run(
+      "UPDATE user_account SET status = 'suspended' WHERE org_id = ? AND id = ?",
+      a.orgId,
+      OTHER_USER,
+    );
+    expect((await reader.getProject(a, P1, id, NOW))?.createdByUserId).toBe(OTHER_USER);
+  });
+
+  it('lists carry createdByUserId', async () => {
+    await seed({ createdBy: OTHER_USER });
+    expect((await reader.listOwn(a, USER, page())).items[0]?.createdByUserId).toBe(OTHER_USER);
+  });
+
+  it.each(rowsForGet())('get classifies %s at now', async (_label, options, expected) => {
+    const id = await seed(options);
+    expect((await reader.getOwn(a, USER, id, NOW))?.status).toBe(expected);
+    expect((await reader.getOrganization(a, id, NOW))?.status).toBe(expected);
+  });
+
+  it.each(['pat', 'svc'] as const)('get classifies the same %s across its expiry', async (kind) => {
+    const expiresAt = '2026-06-02T00:00:00.000Z';
+    const id = await seed({ kind, project: kind === 'svc' ? P1 : null, expiresAt });
+    for (const [now, expected] of [
+      [NOW, 'active'],
+      [expiresAt, 'expired'],
+      ['2026-06-03T00:00:00.000Z', 'expired'],
+    ] as const) {
+      const item =
+        kind === 'pat'
+          ? await reader.getOwn(a, USER, id, now)
+          : await reader.getProject(a, P1, id, now);
+      expect(item?.status).toBe(expected);
+      expect((await reader.getOrganization(a, id, now))?.status).toBe(expected);
+    }
+  });
+
+  it('validates before SQL', async () => {
+    const all = vi.spyOn(executor, 'all');
+    await expect(reader.getOwn(a, '', tid(1), NOW)).rejects.toThrow(TypeError);
+    await expect(reader.getOwn(a, USER, '', NOW)).rejects.toThrow(TypeError);
+    await expect(reader.getProject(a, '', tid(1), NOW)).rejects.toThrow(TypeError);
+    await expect(reader.getProject(a, P1, '', NOW)).rejects.toThrow(TypeError);
+    await expect(reader.getOrganization(a, '', NOW)).rejects.toThrow(TypeError);
+    for (const now of ['2026-06-01T12:00:00Z', '2026-02-30T12:00:00.000Z', 'now', '']) {
+      await expect(reader.getOwn(a, USER, tid(1), now)).rejects.toThrow(TypeError);
+      await expect(reader.getProject(a, P1, tid(1), now)).rejects.toThrow(TypeError);
+      await expect(reader.getOrganization(a, tid(1), now)).rejects.toThrow(TypeError);
+    }
+    expect(all).not.toHaveBeenCalled();
+  });
+});
+
+function rowsForGet(): [string, Seed, string][] {
+  return [
+    ['revoked', { revokedAt: '2026-05-02T00:00:00.000Z' }, 'revoked'],
+    ['expired', { expiresAt: '2026-05-03T00:00:00.000Z' }, 'expired'],
+    ['expiry boundary', { expiresAt: NOW }, 'expired'],
+    ['active before historical expiry', { expiresAt: '2026-06-02T00:00:00.000Z' }, 'active'],
+    ['active', { expiresAt: '2026-12-01T00:00:00.000Z' }, 'active'],
+  ];
+}

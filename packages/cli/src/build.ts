@@ -5,7 +5,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
 import { validatePlatformPorts } from '@package-broker/core/platform/port-config';
-import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import {
+  collectRegistrations,
+  KernelConfigError,
+  type Registration,
+} from '@package-broker/core/kernel/registry';
 import type { Platform } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
 import {
@@ -17,7 +21,13 @@ import {
   toManifestMigrations,
   writeOutputPackageJson,
 } from './build-artifacts.js';
-import { orderPlugins, renderManifestJson, validatePlugins } from './manifest.js';
+import {
+  diagnoseRoutes,
+  isRouteProblem,
+  orderPlugins,
+  renderManifestJson,
+  validatePluginShape,
+} from './manifest.js';
 import { collectMigrations, defaultResolvePackageDir } from './migrations-collect.js';
 
 export interface BuildOptions {
@@ -36,6 +46,16 @@ export interface BuildResult {
   migrations: string;
   buildInfo: string;
   metafile: Metafile;
+}
+
+export class BuildDiagnosticsError extends Error {
+  readonly problems: readonly string[];
+
+  constructor(problems: readonly string[]) {
+    super(`invalid broker config:\n${problems.join('\n')}`);
+    this.name = 'BuildDiagnosticsError';
+    this.problems = problems;
+  }
 }
 
 async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig> {
@@ -90,7 +110,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const config = await loadConfig(configPath, cwd);
   const target = options.target ?? config.platform;
 
-  const errors = validatePlugins(config.plugins, target);
+  const errors = validatePluginShape(config.plugins, target);
   errors.push(...validatePlatformPorts(config.platformPorts, target));
   const stanza =
     typeof config.platformPorts === 'object' &&
@@ -102,7 +122,16 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   errors.push(...credentialProblems(platformPorts, target));
   if (errors.length > 0) throw new Error(`invalid broker config:\n${errors.join('\n')}`);
   const plugins = orderPlugins(config.plugins);
-  const registration = collectRegistrations(plugins);
+  let registration: Registration;
+  try {
+    registration = collectRegistrations(plugins);
+  } catch (error) {
+    if (!(error instanceof KernelConfigError)) throw error;
+    if (error.problems.every(isRouteProblem)) throw new BuildDiagnosticsError(error.problems);
+    throw new Error(`invalid broker config:\n${error.problems.join('\n')}`, { cause: error });
+  }
+  const routeProblems = diagnoseRoutes(registration.routes);
+  if (routeProblems.length > 0) throw new BuildDiagnosticsError(routeProblems);
   if (registration.jobs.length > 0 && platformPorts === null) {
     throw new Error(
       `invalid broker config:\njobs: registered but platformPorts.${target} is not configured`,

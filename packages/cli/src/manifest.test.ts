@@ -1,7 +1,14 @@
 import { definePlugin } from '@package-broker/core/plugin';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { orderPlugins, renderManifestTs, validatePlugins, type Manifest } from './manifest.js';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import {
+  orderPlugins,
+  renderManifestJson,
+  renderManifestTs,
+  validatePlugins,
+  type Manifest,
+} from './manifest.js';
 
 const plugin = (id: string, extra: { dependsOn?: string[]; apiVersion?: number } = {}) =>
   definePlugin({
@@ -65,4 +72,40 @@ describe('manifest', () => {
 
 it('types the optional build manifest platform ports description', () => {
   expectTypeOf<Manifest['platformPorts']>().toEqualTypeOf<PlatformPortConfig | null | undefined>();
+});
+
+describe('manifest routes', () => {
+  const routed = definePlugin({
+    id: 'widgets',
+    package: '@package-broker/plugin-widgets',
+    apiVersion: 3,
+    platforms: ['node'],
+    register: (registrar) => {
+      registrar.route({
+        method: 'GET',
+        path: '/widgets',
+        permission: 'org:read',
+        boundary: 'organization',
+        handler: () => new Response(null),
+      });
+      registrar.route({
+        method: 'GET',
+        path: '/ping',
+        permission: null,
+        needsOrg: false,
+        handler: () => new Response(null),
+      });
+    },
+  });
+
+  it('carries boundary and needsOrg in a fixed key order and omits what is undeclared', () => {
+    const registration = collectRegistrations([routed]);
+    const manifest = renderManifestJson([routed], new Map(), 'node', { registration });
+    expect(manifest.routes.map((route) => Object.keys(route))).toEqual([
+      ['method', 'path', 'plugin', 'permission', 'boundary'],
+      ['method', 'path', 'plugin', 'permission', 'needsOrg'],
+    ]);
+    expect(manifest.routes[0]?.boundary).toBe('organization');
+    expect(manifest.routes[1]?.needsOrg).toBe(false);
+  });
 });

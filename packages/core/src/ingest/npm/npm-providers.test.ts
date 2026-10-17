@@ -23,6 +23,8 @@ import { createNpmRegistryProvider } from './scoped-registry.js';
 const TOKEN = 'npm-test-token-value-0123';
 const GH = 'https://npm.pkg.github.com';
 const GH_STORAGE = 'https://pkg-npm.githubusercontent.com';
+const ACME = 'https://npm.acme.example';
+const CDN = 'https://cdn.acme.example';
 const policy = createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] });
 const org = orgContext('01J0ACME000000000000000000');
 
@@ -92,9 +94,21 @@ const ghSource: ProviderSource = {
   ecosystem: 'npm',
   url: GH,
   type: 'npm_registry',
-  config: { scopes: ['@acme'] },
+  config: { scopes: ['@acme'], distHosts: [] },
   providerId: 'npm-registry',
 };
+
+const acmeSource = (distHosts: readonly string[]): ProviderSource => ({
+  id: 'src-acme',
+  ecosystem: 'npm',
+  url: ACME,
+  type: 'npm_registry',
+  config: { scopes: ['@acme'], distHosts },
+  providerId: 'npm-registry',
+});
+
+const acmeToken = (): UpstreamCredential =>
+  bindCredential(parseCredentialMaterial('npm_token', JSON.stringify({ token: TOKEN })), [ACME]);
 
 const ghToken = (): UpstreamCredential =>
   bindCredential(parseCredentialMaterial('npm_token', JSON.stringify({ token: TOKEN })), [GH]);
@@ -452,5 +466,93 @@ describe('npm registry provider (GitHub Packages)', () => {
       provider.openDist(context(fetch, ghToken()), ghSource, dist(other, '@acme/widget')),
     ).rejects.toMatchObject({ code: 'refused', reason: 'tarball_url' });
     expect(hops).toHaveLength(0);
+  });
+});
+
+describe('npm registry provider (distHosts)', () => {
+  const provider = createNpmRegistryProvider(staging);
+  const tgz = `${ACME}/download/@acme/widget/1.0.0/abc123`;
+  const cdnTgz = `${CDN}/widget-1.0.0.tgz`;
+  const pkgUrl = `${ACME}/@acme%2fwidget`;
+
+  it('fetches a tarball redirect to a listed distHosts origin without Authorization', async () => {
+    const { hops, fetch } = upstream({ [tgz]: redirect(cdnTgz), [cdnTgz]: tarball });
+    const stream = await provider.openDist(
+      context(fetch, acmeToken()),
+      acmeSource(['cdn.acme.example']),
+      dist(tgz, '@acme/widget'),
+    );
+    await new Response(stream.body).arrayBuffer();
+    expect(hops.map((h) => h.url)).toEqual([tgz, cdnTgz]);
+    expect(hops[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+    expect(hops[1]?.headers.get('authorization')).toBeNull();
+  });
+
+  it('refuses a tarball redirect to an unlisted host', async () => {
+    const { hops, fetch } = upstream({ [tgz]: redirect(cdnTgz), [cdnTgz]: tarball });
+    await expect(
+      provider.openDist(context(fetch, acmeToken()), acmeSource([]), dist(tgz, '@acme/widget')),
+    ).rejects.toMatchObject({ code: 'refused', reason: 'destination' });
+    expect(hops.map((h) => h.url)).toEqual([tgz]);
+  });
+
+  it('refuses a packument redirect to a listed distHosts origin', async () => {
+    const foreign = `${CDN}/@acme%2fwidget`;
+    const { hops, fetch } = upstream({
+      [pkgUrl]: redirect(foreign),
+      [foreign]: json(packument('@acme/widget', tgz)),
+    });
+    await expect(
+      provider.describe(
+        context(fetch, acmeToken()),
+        acmeSource(['cdn.acme.example']),
+        '@acme/widget',
+        {},
+      ),
+    ).rejects.toMatchObject({ code: 'refused', reason: 'destination' });
+    expect(hops.map((h) => h.url)).toEqual([pkgUrl]);
+  });
+
+  it('fetches a direct tarball url on a listed distHosts origin without Authorization', async () => {
+    const { hops, fetch } = upstream({ [cdnTgz]: tarball });
+    const stream = await provider.openDist(
+      context(fetch, acmeToken()),
+      acmeSource(['cdn.acme.example']),
+      dist(cdnTgz, '@acme/widget'),
+    );
+    await new Response(stream.body).arrayBuffer();
+    expect(hops.map((h) => h.url)).toEqual([cdnTgz]);
+    expect(hops[0]?.headers.get('authorization')).toBeNull();
+  });
+
+  it('refuses a direct tarball url on an unlisted host before any request', async () => {
+    const { hops, fetch } = upstream({ [cdnTgz]: tarball });
+    await expect(
+      provider.openDist(context(fetch, acmeToken()), acmeSource([]), dist(cdnTgz, '@acme/widget')),
+    ).rejects.toMatchObject({ code: 'refused', reason: 'foreign_tarball_host' });
+    expect(hops).toHaveLength(0);
+  });
+
+  it('keeps the GitHub Packages storage host without any distHosts entry', async () => {
+    const gh = `${GH}/download/@acme/widget/1.0.0/abc123`;
+    const { hops, fetch } = upstream({
+      [gh]: redirect(`${GH_STORAGE}/x.tgz`),
+      [`${GH_STORAGE}/x.tgz`]: tarball,
+    });
+    const stream = await provider.openDist(
+      context(fetch, ghToken()),
+      ghSource,
+      dist(gh, '@acme/widget'),
+    );
+    await new Response(stream.body).arrayBuffer();
+    expect(hops).toHaveLength(2);
+  });
+
+  it('does not extend the GitHub storage host to other registries', async () => {
+    const storage = `${GH_STORAGE}/x.tgz`;
+    const { fetch } = upstream({ [tgz]: redirect(storage), [storage]: tarball });
+    await expect(
+      provider.openDist(context(fetch, acmeToken()), acmeSource([]), dist(tgz, '@acme/widget')),
+    ).rejects.toMatchObject({ code: 'refused', reason: 'destination' });
   });
 });

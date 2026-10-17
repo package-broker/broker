@@ -296,14 +296,17 @@ describe('createKernel', () => {
   });
 
   describe('protected routes', () => {
-    it('deny with 403 under the default engine', async () => {
+    it('return 503 unavailable under the default engine', async () => {
       const h = harness([plugin('alpha', [protectedItem])]);
       const kernel = await createKernel(h.options);
 
       const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
 
-      expect(response.status).toBe(403);
-      expect(await envelope(response)).toMatchObject({ code: 'forbidden', message: 'Forbidden' });
+      expect(response.status).toBe(503);
+      expect(await envelope(response)).toMatchObject({
+        code: 'unavailable',
+        message: 'Authorization is temporarily unavailable',
+      });
     });
 
     it('hand the principal and project to the handler when the engine allows and no hook denies', async () => {
@@ -381,11 +384,14 @@ describe('createKernel', () => {
         expect(response.status).toBe(403);
         expect(await response.text()).not.toContain(SENTINEL);
         expect(JSON.stringify(h.logs)).not.toContain(SENTINEL);
+        expect(h.logs.some((e) => String(e['event']).startsWith('authz.'))).toBe(true);
       }
     });
 
     it('answers a browser 403 with the static page and a JSON client with the envelope', async () => {
-      const h = harness([plugin('alpha', [protectedItem])]);
+      const h = harness([plugin('alpha', [protectedItem])], {
+        authorization: engineReturning({ allow: false, status: 403 }),
+      });
       const kernel = await createKernel(h.options);
 
       const page = await kernel.fetch(
@@ -456,15 +462,15 @@ describe('createKernel', () => {
 
       const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(503);
       expect(h.logs).toEqual([
         expect.objectContaining({
-          level: 'warn',
+          level: 'error',
           event: 'authz.error',
           plugin: 'core',
           error_name: 'TypeError',
         }),
-        expect.objectContaining({ event: 'http.request', status: 403 }),
+        expect.objectContaining({ event: 'http.request', status: 503 }),
       ]);
     });
 
@@ -511,7 +517,9 @@ describe('createKernel', () => {
 
   describe('HEAD', () => {
     it('is authorized like GET on a protected route and has an empty body', async () => {
-      const h = harness([plugin('alpha', [protectedItem])]);
+      const h = harness([plugin('alpha', [protectedItem])], {
+        authorization: engineReturning({ allow: false, status: 403 }),
+      });
       const kernel = await createKernel(h.options);
 
       const response = await kernel.fetch(new Request(`${BASE}/secure/1`, { method: 'HEAD' }));

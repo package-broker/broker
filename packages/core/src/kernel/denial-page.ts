@@ -20,14 +20,22 @@ const PAGE = `<!doctype html>
 </html>
 `;
 
+const QVALUE = /^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/;
+
+function weight(params: readonly string[]): number | undefined {
+  const q = params.find((param) => param.startsWith('q='));
+  if (q === undefined) return 1;
+  const value = q.slice(2);
+  return QVALUE.test(value) ? Number(value) : undefined;
+}
+
 function quality(accept: string, types: readonly string[]): number {
   let best = 0;
   for (const part of accept.split(',')) {
     const [range = '', ...params] = part.split(';').map((piece) => piece.trim().toLowerCase());
     if (!types.includes(range)) continue;
-    const q = params.find((param) => param.startsWith('q='));
-    const value = q === undefined ? 1 : Number(q.slice(2));
-    if (Number.isFinite(value) && value >= 0 && value <= 1 && value > best) best = value;
+    const value = weight(params);
+    if (value !== undefined && value > best) best = value;
   }
   return best;
 }

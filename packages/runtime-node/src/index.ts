@@ -8,8 +8,9 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import type { Kernel } from '@package-broker/core/kernel/kernel';
+import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
+import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts, RouteDefinition } from '@package-broker/core/plugin';
@@ -31,6 +32,8 @@ export interface NodeServerOptions {
   readonly auth?: NodeAuthOptions;
   readonly closeDatabase?: () => Promise<void>;
   readonly log?: KernelLog;
+  readonly observability?: KernelObservability;
+  readonly platformServices?: PlatformServices;
   readonly authorization?: AuthorizationEngine;
 }
 
@@ -98,6 +101,10 @@ export function createNodeServer(
       resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
       health: async () => (await bootstrap.findSingleton()) !== null,
       log,
+      ...(options.observability === undefined ? {} : { observability: options.observability }),
+      ...(options.platformServices === undefined
+        ? {}
+        : { platformServices: options.platformServices }),
       ...(auth === undefined
         ? {}
         : { coreRoutes: authRoutes(registration, plugins, auth, executor, log) }),

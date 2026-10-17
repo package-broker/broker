@@ -1,4 +1,5 @@
 import * as accessContext from '../authz/access-context.js';
+import * as engineModule from '../authz/engine.js';
 import {
   accessContextOf,
   authenticatedActorOf,
@@ -22,7 +23,7 @@ import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
 import type { AuthorizationEngine } from './authorize.js';
-import { createKernel } from './kernel.js';
+import { AUTHORIZATION_RETRY_AFTER_SECONDS, createKernel } from './kernel.js';
 
 const ORIGIN = 'https://broker.test';
 const ORG = orgContext('org-1');
@@ -417,12 +418,68 @@ describe('kernel access snapshots', () => {
         },
       };
       const { k, contexts, logs } = await snapshotKernel(engine);
-      expect((await k.fetch(call('/probe', { headers: cookie }))).status).toBe(403);
+      const response = await k.fetch(call('/probe', { headers: cookie }));
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe(String(AUTHORIZATION_RETRY_AFTER_SECONDS));
+      expect(await response.text()).not.toContain('administrator');
       expect(contexts).toHaveLength(0);
-      expect(JSON.stringify(logs)).toContain('authz.error');
+      expect(logs).toContainEqual(
+        expect.objectContaining({ level: 'error', event: 'authz.error' }),
+      );
       expect(JSON.stringify(logs)).not.toContain('sess-1');
     },
   );
+
+  it('answers a package-boundary route that holds an engine grant with the denial page, not 503', async () => {
+    const spy = vi.spyOn(engineModule, 'engineGrantOf').mockReturnValue({
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: 'proj-1',
+      sessionId: 'sess-1',
+      tokenSelector: null,
+      actor: null,
+    });
+    try {
+      const contexts: RequestContext[] = [];
+      const pkgPlugin: PluginDefinition = {
+        ...plugin,
+        register(registry) {
+          registry.route({
+            method: 'GET',
+            path: '/p/:project/pkg/:name',
+            permission: 'project:packages:read',
+            boundary: 'package',
+            package: { ecosystem: 'composer', name: (params) => params['name'] ?? null },
+            handler(ctx) {
+              contexts.push(ctx);
+              return new Response('ok');
+            },
+          });
+        },
+      };
+      const k = await createKernel({
+        platform: 'node',
+        plugins: [pkgPlugin],
+        ports,
+        authorization: {
+          authorize: async () => ({
+            allow: true,
+            principal: { kind: 'user', id: 'user-1' },
+            projectId: 'proj-1',
+          }),
+        },
+        packageResolver: { isVisible: () => true },
+        resolveOrg: async () => ORG,
+        health: async () => true,
+        log: () => undefined,
+      });
+      const response = await k.fetch(call('/p/demo/pkg/vendor-x', { headers: cookie }));
+      expect(response.status).toBe(403);
+      expect(response.headers.has('retry-after')).toBe(false);
+      expect(contexts).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 
   it('never applies a grant after an access hook denies', async () => {
     const spy = vi.spyOn(accessContext, 'setAccessContext');
@@ -442,9 +499,14 @@ describe('kernel access snapshots', () => {
     });
     try {
       const { k, contexts, logs } = await snapshotKernel(liveEngine(state()));
-      expect((await k.fetch(call('/probe', { headers: cookie }))).status).toBe(403);
+      const response = await k.fetch(call('/probe', { headers: cookie }));
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe(String(AUTHORIZATION_RETRY_AFTER_SECONDS));
+      expect(await response.text()).not.toContain('administrator');
       expect(contexts).toHaveLength(0);
-      expect(JSON.stringify(logs)).toContain('authz.error');
+      expect(logs).toContainEqual(
+        expect.objectContaining({ level: 'error', event: 'authz.error' }),
+      );
     } finally {
       spy.mockRestore();
     }

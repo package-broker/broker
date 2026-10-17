@@ -678,3 +678,10 @@ describe('round 2', () => {
     expect(await held(long)).toBe(0);
   });
 });
+
+it('refuses a 51-byte registered name without writing a row', async () => {
+  const before = await snapshot();
+  expect(await add(orgFence(), NAME_1, SRC_ORG, `acme/${'a'.repeat(45)}*`)).toBe('invalid_pattern');
+  expect(await rows('SELECT id FROM registered_name')).toEqual([]);
+  expect(await snapshot()).toBe(before);
+});

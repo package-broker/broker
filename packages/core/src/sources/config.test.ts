@@ -628,7 +628,7 @@ describe('round 3', () => {
       problems(parse('composer_repository', 'composer', 'http://repo.example.com', {})),
     ).toEqual(['url']);
     const allow = createOutboundPolicy({
-      allowPrivateHosts: ['repo.corp.internal'],
+      allowPrivateHosts: ['repo.corp.internal:80'],
       runtime: 'node',
       selfOrigins: [],
     });

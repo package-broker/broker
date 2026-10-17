@@ -65,6 +65,7 @@ function root(extra: Partial<ComposerRoot> = {}): ComposerRoot {
     metadataUrl: `${ORIGIN}/p2/%package%.json`,
     inlineProviders: false,
     partialPackages: false,
+    inlinePackages: false,
     validator: { sha256: 'a'.repeat(64) },
     messages: [],
     mirrors: [],

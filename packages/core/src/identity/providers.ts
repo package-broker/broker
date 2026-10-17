@@ -125,20 +125,28 @@ function snapshotPolicy(raw: unknown): {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return { policy: raw as DomainPolicy, problems: domainPolicyProblems(raw as DomainPolicy) };
   }
-  const source = raw as { verifiedDomains?: unknown; autoJoin?: unknown };
-  const domains = source.verifiedDomains;
-  let verifiedDomains: unknown = domains;
-  if (Array.isArray(domains)) {
-    const length = readLength(domains as unknown[]);
-    if (length === null || length > MAX_DOMAINS) {
-      return {
-        policy: { verifiedDomains: [], autoJoin: false },
-        problems: [`verifiedDomains must be an array of at most ${MAX_DOMAINS} entries`],
-      };
+  const source = raw as {
+    verifiedDomains?: unknown;
+    emailAuthoritativeDomains?: unknown;
+    autoJoin?: unknown;
+  };
+  const snapshot: Record<string, unknown> = {};
+  for (const key of ['verifiedDomains', 'emailAuthoritativeDomains'] as const) {
+    const domains = source[key];
+    if (Array.isArray(domains)) {
+      const length = readLength(domains as unknown[]);
+      if (length === null || length > MAX_DOMAINS) {
+        return {
+          policy: { verifiedDomains: [], autoJoin: false },
+          problems: [`${key} must be an array of at most ${MAX_DOMAINS} entries`],
+        };
+      }
+      snapshot[key] = copyIndexed(domains as unknown[], length);
+    } else {
+      snapshot[key] = domains;
     }
-    verifiedDomains = copyIndexed(domains as unknown[], length);
   }
-  const policy = { verifiedDomains, autoJoin: source.autoJoin } as DomainPolicy;
+  const policy = { ...snapshot, autoJoin: source.autoJoin } as unknown as DomainPolicy;
   return { policy, problems: domainPolicyProblems(policy) };
 }
 
@@ -193,6 +201,7 @@ function wrap(
     ...fields,
     policy: Object.freeze({
       verifiedDomains: Object.freeze(policy.verifiedDomains.slice()),
+      emailAuthoritativeDomains: Object.freeze((policy.emailAuthoritativeDomains ?? []).slice()),
       autoJoin: policy.autoJoin,
     }),
     start: (input: Parameters<IdentityProvider['start']>[0]) =>

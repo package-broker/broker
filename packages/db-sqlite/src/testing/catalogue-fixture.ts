@@ -604,6 +604,7 @@ export function toVisibilityInputs(config: CatalogueConfig): VisibilityConfig {
       id: p.id,
       orgId: p.orgId,
       sourceId: p.sourceId,
+      ecosystem: p.ecosystem,
       key: p.key,
       status: p.status,
       visible: p.visible,

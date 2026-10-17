@@ -20,6 +20,10 @@ import {
   type CatalogueConfig,
 } from './catalogue-fixture.js';
 import { openMigratedDatabase } from './migrated-database.js';
+import { orgContext } from '@package-broker/core/db/port';
+import { createCatalogueReader } from '../repositories/catalogue-read.js';
+import { createProxyAdmission } from '../repositories/proxy-admission.js';
+import { rederiveStatements } from '../repositories/visibility-derive.js';
 
 type Row = Record<string, unknown>;
 
@@ -486,4 +490,77 @@ describe('catalogue fixture', () => {
     await expect(seedDerivedRows(executor as never, clash)).rejects.toThrow(derived!.packageId);
     expect(calls).toBe(0);
   });
+  it('18: a package seeded under a source of another ecosystem is invisible to the oracle and SQL alike', async () => {
+    let cases = 0;
+    for (let seed = 1; seed <= 40; seed += 1) {
+      const base = randomCatalogueConfig(seed, 6);
+      const sources = new Map(base.sources.map((s) => [s.id, s]));
+      const visible = new Set(deriveVisibility(toVisibilityInputs(base)).map((r) => r.packageId));
+      const target = base.packages.find(
+        (p) => visible.has(p.id) && !sources.get(p.sourceId)?.type.endsWith('_proxy'),
+      );
+      if (target === undefined) continue;
+      cases += 1;
+      const flipped = target.ecosystem === 'composer' ? 'npm' : 'composer';
+      const held = new Set(base.explicit.map((e) => `${e.projectId}\0${e.packageId}`));
+      const config: CatalogueConfig = {
+        ...base,
+        packages: base.packages.map((p) => (p.id === target.id ? { ...p, ecosystem: flipped } : p)),
+        explicit: [
+          ...base.explicit,
+          ...base.attachments
+            .filter(
+              (a) =>
+                a.sourceId === target.sourceId &&
+                a.orgId === target.orgId &&
+                !held.has(`${a.projectId}\0${target.id}`),
+            )
+            .map((a) => ({ orgId: a.orgId, projectId: a.projectId, packageId: target.id })),
+        ],
+      };
+      const inputs = toVisibilityInputs(config);
+      const oracle = deriveVisibility(inputs);
+      expect(oracle.filter((r) => r.packageId === target.id)).toEqual([]);
+      const database = await openMigratedDatabase();
+      try {
+        await seedCatalogue(database.executor, config, { maxStatements: Infinity });
+        for (const project of config.projects) {
+          await database.executor.batch(
+            rederiveStatements(orgContext(project.orgId), {
+              kind: 'project',
+              projectId: project.id,
+            }),
+          );
+        }
+        const derived = await select(
+          database.executor,
+          "SELECT project_id AS projectId, package_id AS packageId, origin FROM project_package WHERE origin <> 'explicit'",
+        );
+        expect(derived.sort(byJson)).toEqual(
+          oracle.filter((r) => r.origin !== 'explicit').sort(byJson),
+        );
+        const reader = createCatalogueReader(database.executor);
+        const proxies = createProxyAdmission(database.executor);
+        for (const project of config.projects) {
+          const ctx = orgContext(project.orgId);
+          for (const ecosystem of ['composer', 'npm'] as const) {
+            const query = { projectId: project.id, ecosystem, key: target.key };
+            const winner = resolveWinner(inputs, project.id, ecosystem, target.key);
+            const read = await reader.resolveVersions(ctx, { ...query, limit: 1 });
+            const label = `${seed} ${project.id} ${ecosystem}`;
+            expect(winner?.packageId, label).not.toBe(target.id);
+            expect(read !== null && 'pkg' in read ? read.pkg.packageId : null, label).toBe(
+              winner?.packageId ?? null,
+            );
+            expect(await proxies.admitProxy(ctx, query), label).toEqual(
+              admitProxy(inputs, project.id, ecosystem, target.key),
+            );
+          }
+        }
+      } finally {
+        await database.close();
+      }
+    }
+    expect(cases).toBeGreaterThan(20);
+  }, 60_000);
 });

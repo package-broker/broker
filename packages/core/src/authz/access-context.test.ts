@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { orgContext } from '../db/port.js';
 import * as pluginEntry from '../plugin.js';
 import type { Principal, RequestContext } from '../plugin.js';
-import { accessContextOf, organizationActorOf, setAccessContext } from './access-context.js';
+import {
+  accessContextOf,
+  authenticatedActorOf,
+  organizationActorOf,
+  setAccessContext,
+} from './access-context.js';
 import type { AccessContextSnapshot } from './access-context.js';
 
 const USER: Principal = { kind: 'user', id: 'user-1' };
@@ -470,4 +475,45 @@ describe('access context isolation (source probe)', () => {
     setAccessContext(ctx, snapshot());
     expect(Reflect.ownKeys(ctx)).toEqual(before);
   });
+});
+
+describe('authenticated actor', () => {
+  it('mints a frozen actor from a stored session snapshot', () => {
+    const ctx = requestContext();
+    setAccessContext(ctx, snapshot());
+    const built = authenticatedActorOf(ctx);
+    expect(built).toEqual({ userId: 'user-1', sessionId: 'session-1' });
+    expect(Object.isFrozen(built)).toBe(true);
+  });
+
+  it('returns null without a stored snapshot', () => {
+    expect(authenticatedActorOf(requestContext())).toBeNull();
+  });
+
+  it.each(['pat', 'service', 'public', 'missing actor', 'missing session'] as const)(
+    'returns null for %s',
+    (kind) => {
+      const ctx =
+        kind === 'service'
+          ? requestContext(SERVICE)
+          : kind === 'public'
+            ? requestContext(null, null)
+            : requestContext();
+      const value =
+        kind === 'service'
+          ? serviceSnapshot()
+          : kind === 'public'
+            ? snapshot({
+                principal: null,
+                projectId: null,
+                boundary: 'none',
+                sessionId: null,
+                actor: null,
+                rateKey: { stage: 'anonymous', ip: null, routeClass: 'none' },
+              })
+            : snapshot({ actor: null, sessionId: kind === 'missing actor' ? 'session-1' : null });
+      setAccessContext(ctx, value);
+      expect(authenticatedActorOf(ctx)).toBeNull();
+    },
+  );
 });

@@ -72,13 +72,13 @@ async function runTouch(deps: TokenUseDeps, tokenId: string, kind: 'pat' | 'svc'
 }
 
 export function deferredDispatch(run: () => Promise<void>): void {
-  setImmediate(() => {
+  setTimeout(() => {
     try {
       run().catch(() => undefined);
     } catch {
       return;
     }
-  });
+  }, 0);
 }
 
 function dispatchTouch(deps: TokenUseDeps, tokenId: string, kind: 'pat' | 'svc'): void {

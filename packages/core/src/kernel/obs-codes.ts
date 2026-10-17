@@ -44,6 +44,7 @@ const REASON_CODES = [
   'db.unknown',
   'health.not_ready',
   'request.aborted',
+  'http.handler_status',
 ] as const;
 
 export type KernelReasonCode = (typeof REASON_CODES)[number];
@@ -54,6 +55,10 @@ export function engineStatusReason(status: number): KernelReasonCode {
   if (status === 401) return 'authz.unauthenticated';
   if (status === 404) return 'authz.not_found';
   return 'authz.forbidden';
+}
+
+export function isEngineFailure(code: KernelReasonCode): boolean {
+  return code === 'authz.engine_error' || code === 'authz.input_invalid';
 }
 
 export function denyReason(reason: string): KernelReasonCode {

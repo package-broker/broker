@@ -46,4 +46,26 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: ['packages/core/src/**/*.ts'],
+    ignores: ['**/*.test.ts'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        ...[
+          'Buffer',
+          'process',
+          'require',
+          'module',
+          '__dirname',
+          '__filename',
+          'global',
+          'setImmediate',
+        ].map((name) => ({
+          name,
+          message: 'core runs on Workers; use a port or a web API',
+        })),
+      ],
+    },
+  },
 );

@@ -1,23 +1,42 @@
+import { createHash } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { Duplex, Writable } from 'node:stream';
+import { createDeflateRaw } from 'node:zlib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DigestAlgorithm } from '../../platform/codec.js';
+import { FLUSH, GitRemoteError, encodePkt } from '../../sources/git/pkt-line.js';
 import { GitFetchError, type FileAtRef, type GitFetchContext } from '../../sources/git/fetch.js';
-import type { GitRef } from '../../sources/git/refs.js';
+import { UpstreamError } from '../../sources/policy-fetch.js';
+import { GitRefsError, type GitRef } from '../../sources/git/refs.js';
 import { bindCredential, parseCredentialMaterial } from '../../sources/credentials.js';
 import type { ProviderContext, ProviderSource } from '../../sources/provider.js';
 
 const lsRefs = vi.fn();
+const discoverCapabilities = vi.fn();
+const { lsRefs: actualLsRefs } = await vi.importActual<typeof import('../../sources/git/refs.js')>(
+  '../../sources/git/refs.js',
+);
 const readFileAtRefs = vi.fn();
 const readTreeAtCommit = vi.fn();
 const createGitBlobReader = vi.fn();
 const buildZipFromTree = vi.fn();
 
-vi.mock('../../sources/git/refs.js', () => ({ lsRefs: (...args: unknown[]) => lsRefs(...args) }));
+vi.mock('../../sources/git/refs.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../sources/git/refs.js')>()),
+  lsRefs: (...args: unknown[]) => lsRefs(...args),
+  discoverCapabilities: (...args: unknown[]) => discoverCapabilities(...args),
+}));
 vi.mock('../../sources/git/fetch.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../sources/git/fetch.js')>()),
   readFileAtRefs: (...args: unknown[]) => readFileAtRefs(...args),
   readTreeAtCommit: (...args: unknown[]) => readTreeAtCommit(...args),
   createGitBlobReader: (...args: unknown[]) => createGitBlobReader(...args),
 }));
-vi.mock('../../sources/git/archive.js', () => ({
+vi.mock('../../sources/git/archive.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../sources/git/archive.js')>()),
   buildZipFromTree: (...args: unknown[]) => buildZipFromTree(...args),
 }));
 
@@ -101,6 +120,7 @@ async function members(
 beforeEach(() => {
   vi.clearAllMocks();
   counters.length = 0;
+  discoverCapabilities.mockResolvedValue({ filter: false });
   lsRefs.mockResolvedValue({ refs: REFS, skipped: 0 });
   manifests({});
 });
@@ -535,5 +555,566 @@ describe('git provider archives', () => {
         sourceRef: oid(3),
       }),
     ).rejects.toMatchObject({ code: 'not_refetchable' });
+  });
+});
+
+describe('git provider smart-HTTP capabilities', () => {
+  const ADVERT = 'application/x-git-upload-pack-advertisement';
+  const RESULT = 'application/x-git-upload-pack-result';
+  const pkts = (...parts: (string | Uint8Array)[]): Uint8Array => {
+    const chunks = parts.map((part) => (typeof part === 'string' ? encodePkt(part) : part));
+    const out = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
+  };
+
+  function serverAdvertising(fetchCapability: string): ProviderContext {
+    const fetch = vi.fn(async (request: { method?: string }) =>
+      request.method === 'POST'
+        ? new Response(
+            pkts(
+              `${oid(1)} HEAD symref-target:refs/heads/main\n`,
+              `${oid(1)} refs/heads/main\n`,
+              FLUSH,
+            ),
+            { headers: { 'content-type': RESULT } },
+          )
+        : new Response(
+            pkts(
+              '# service=git-upload-pack\n',
+              FLUSH,
+              'version 2\n',
+              'ls-refs=unborn\n',
+              `${fetchCapability}\n`,
+              FLUSH,
+            ),
+            { headers: { 'content-type': ADVERT } },
+          ),
+    );
+    return { ...ctx, fetch } as unknown as ProviderContext;
+  }
+
+  async function capabilitiesSeen(fetchCapability: string) {
+    lsRefs.mockImplementation(async (...args: Parameters<typeof actualLsRefs>) =>
+      actualLsRefs(...args),
+    );
+    await createGitProvider({ runtime: 'docker' }).describe(
+      serverAdvertising(fetchCapability),
+      source({ packageName: NAME }),
+      NAME,
+      {},
+    );
+    return (readFileAtRefs.mock.calls[0]![0] as GitFetchContext).capabilities;
+  }
+
+  it('passes filter support when the server advertises filter', async () => {
+    expect(await capabilitiesSeen('fetch=shallow filter')).toEqual({ filter: true });
+  });
+
+  it('passes no filter support when the server does not advertise filter', async () => {
+    expect(await capabilitiesSeen('fetch=shallow')).toEqual({ filter: false });
+  });
+
+  it.each([true, false])('sends filter packets only when advertised (%s)', async (filter) => {
+    const { readFileAtRefs: real } = await vi.importActual<
+      typeof import('../../sources/git/fetch.js')
+    >('../../sources/git/fetch.js');
+    const context = serverAdvertising(filter ? 'fetch=shallow filter' : 'fetch=shallow');
+    const server = context.fetch;
+    const bodies: string[] = [];
+    const fetch: ProviderContext['fetch'] = async (request) => {
+      const body = new TextDecoder().decode(request.body as Uint8Array);
+      if (body.includes('command=fetch')) {
+        bodies.push(body);
+        return new Response(encodePkt('ERR unavailable\n'), {
+          headers: { 'content-type': RESULT },
+        });
+      }
+      return server(request);
+    };
+    lsRefs.mockImplementation(actualLsRefs);
+    readFileAtRefs.mockImplementation(real);
+    await expect(
+      createGitProvider({ runtime: 'docker' }).describe(
+        { ...context, fetch },
+        source({ packageName: NAME }),
+        NAME,
+        {},
+      ),
+    ).rejects.toBeInstanceOf(GitRemoteError);
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) expect(body.includes('filter ')).toBe(filter);
+  });
+
+  it('discovers capabilities before building an unfiltered archive', async () => {
+    discoverCapabilities.mockImplementation(
+      (
+        await vi.importActual<typeof import('../../sources/git/refs.js')>(
+          '../../sources/git/refs.js',
+        )
+      ).discoverCapabilities,
+    );
+    readTreeAtCommit.mockResolvedValue({ entries: [], skipped: 0 });
+    buildZipFromTree.mockResolvedValue({});
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      serverAdvertising('fetch=shallow'),
+      source(),
+      oid(1),
+    );
+    expect(readTreeAtCommit.mock.calls[0]![0].capabilities).toEqual({ filter: false });
+  });
+
+  it('sends no filter packet when fetching an archive from a server without filter', async () => {
+    const { readTreeAtCommit: real } = await vi.importActual<
+      typeof import('../../sources/git/fetch.js')
+    >('../../sources/git/fetch.js');
+    const context = serverAdvertising('fetch=shallow');
+    const bodies: string[] = [];
+    const fetch: ProviderContext['fetch'] = async (request) => {
+      const body = new TextDecoder().decode(request.body as Uint8Array);
+      if (body.includes('command=fetch')) {
+        bodies.push(body);
+        return new Response(encodePkt('ERR unavailable\n'), {
+          headers: { 'content-type': RESULT },
+        });
+      }
+      return context.fetch(request);
+    };
+    discoverCapabilities.mockImplementation(
+      (
+        await vi.importActual<typeof import('../../sources/git/refs.js')>(
+          '../../sources/git/refs.js',
+        )
+      ).discoverCapabilities,
+    );
+    readTreeAtCommit.mockImplementation(real);
+    await expect(
+      createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+        { ...context, fetch },
+        source(),
+        oid(1),
+      ),
+    ).rejects.toBeInstanceOf(GitRemoteError);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toContain('filter ');
+  });
+
+  it('builds archives without listing refs even when the listing exceeds its budget', async () => {
+    lsRefs.mockRejectedValue(new GitRefsError('too_large'));
+    const actual = await vi.importActual<typeof import('../../sources/git/refs.js')>(
+      '../../sources/git/refs.js',
+    );
+    discoverCapabilities.mockImplementation(actual.discoverCapabilities);
+    const context = serverAdvertising('fetch=shallow filter');
+    readTreeAtCommit.mockResolvedValue({ entries: [], skipped: 0 });
+    buildZipFromTree.mockResolvedValue({});
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      context,
+      source(),
+      oid(1),
+    );
+    expect(lsRefs).not.toHaveBeenCalled();
+    expect(context.fetch).toHaveBeenCalledTimes(1);
+    expect(readTreeAtCommit.mock.calls[0]![0].capabilities).toEqual({ filter: true });
+  });
+
+  it('leaves capabilities unset when the listing reports none', async () => {
+    await createGitProvider({ runtime: 'docker' }).describe(ctx, source(), NAME, {});
+    expect((readFileAtRefs.mock.calls[0]![0] as GitFetchContext).capabilities).toBeUndefined();
+  });
+});
+
+describe('git provider next-tag fallback', () => {
+  const refsWithAlias: GitRef[] = [...REFS, { name: 'refs/tags/1.0.0', oid: oid(11) }];
+
+  beforeEach(() => {
+    lsRefs.mockResolvedValue({ refs: refsWithAlias, skipped: 0 });
+  });
+
+  it('resolves a version from the next candidate tag when the winning tag is unreadable', async () => {
+    manifests({ 'refs/tags/1.0.0': 'missing' });
+    const { members: found, description } = await members(createGitProvider({ runtime: 'docker' }));
+    const fallback = found.find((m) => JSON.parse(m.raw).version_normalized === '1.0.0.0')!;
+    expect(fallback.version).toBe('v1.0.0');
+    expect(JSON.parse(fallback.raw).dist.reference).toBe(oid(10));
+    expect(description.upstreamComplete).toBe(false);
+    expect(counters).toContainEqual({
+      name: 'git_provider_ref_skipped',
+      labels: { reason: 'missing' },
+    });
+  });
+
+  it.each([new GitFetchError('missing_object'), new GitRemoteError('remote_error')])(
+    'isolates a thrown ref failure and tries its alias (%s)',
+    async (error) => {
+      const real = readFileAtRefs.getMockImplementation()!;
+      readFileAtRefs.mockImplementation(async (c, u, refs: GitRef[], path) => {
+        if (refs.some((ref) => ref.name === 'refs/tags/1.0.0')) throw error;
+        return real(c, u, refs, path);
+      });
+      const { members: found, description } = await members(
+        createGitProvider({ runtime: 'docker' }),
+      );
+      expect(found.map((m) => m.version)).toContain('v1.0.0');
+      expect(found.map((m) => m.version)).toContain('v1.1.0');
+      expect(description.upstreamComplete).toBe(false);
+      expect(counters).toContainEqual({
+        name: 'git_provider_ref_skipped',
+        labels: { reason: error.code },
+      });
+    },
+  );
+
+  it.each([new GitFetchError('missing_object'), new UpstreamError('timeout')])(
+    'keeps resolved versions when a fallback batch fails (%s)',
+    async (error) => {
+      manifests({ 'refs/tags/1.0.0': 'missing' });
+      const real = readFileAtRefs.getMockImplementation()!;
+      readFileAtRefs.mockImplementation(async (c, u, refs: GitRef[], path) => {
+        if (refs.some((ref) => ref.name === 'refs/tags/v1.0.0')) throw error;
+        return real(c, u, refs, path);
+      });
+      const { members: found, description } = await members(
+        createGitProvider({ runtime: 'docker' }),
+      );
+      expect(found.map((m) => m.version)).toContain('v1.1.0');
+      expect(found.map((m) => m.version)).not.toContain('v1.0.0');
+      expect(description.upstreamComplete).toBe(false);
+      expect(counters).toContainEqual({
+        name: 'git_provider_ref_skipped',
+        labels: { reason: error.code },
+      });
+    },
+  );
+
+  it.each([new GitFetchError('bad_response'), new UpstreamError('refused')])(
+    'skips all refs in a failed fallback batch and retains resolved versions (%s)',
+    async (error) => {
+      lsRefs.mockResolvedValue({
+        refs: [...refsWithAlias, { name: 'refs/tags/1.1.0', oid: oid(12) }],
+        skipped: 0,
+      });
+      manifests({ 'refs/tags/1.0.0': 'missing', 'refs/tags/1.1.0': 'missing' });
+      const real = readFileAtRefs.getMockImplementation()!;
+      readFileAtRefs.mockImplementation(async (c, u, refs: GitRef[], path) => {
+        if (refs.some((ref) => ref.name === 'refs/tags/v1.0.0')) {
+          expect(refs.map((ref) => ref.name)).toEqual(['refs/tags/v1.0.0', 'refs/tags/v1.1.0']);
+          throw error;
+        }
+        return real(c, u, refs, path);
+      });
+      const { members: found, description } = await members(
+        createGitProvider({ runtime: 'docker' }),
+      );
+      expect(found.map((m) => m.version)).toEqual(['v2.0.0-beta1', 'dev-main']);
+      expect(description.upstreamComplete).toBe(false);
+      expect(counters.filter((c) => c.labels?.reason === error.code)).toHaveLength(2);
+    },
+  );
+
+  it.each([
+    new GitFetchError('missing_object'),
+    new GitRemoteError('remote_error'),
+    new UpstreamError('timeout'),
+  ])('propagates a single initial ref fetch failure (%s)', async (error) => {
+    lsRefs.mockResolvedValue({ refs: [{ name: 'refs/tags/1.0.0', oid: oid(11) }], skipped: 0 });
+    readFileAtRefs.mockRejectedValue(error);
+    await expect(
+      createGitProvider({ runtime: 'docker' }).describe(
+        ctx,
+        source({ packageName: NAME }),
+        NAME,
+        {},
+      ),
+    ).rejects.toBe(error);
+    expect(readFileAtRefs).toHaveBeenCalledTimes(1);
+    expect(counters).toEqual([]);
+  });
+
+  it('propagates cancellation during fallback and makes no further requests', async () => {
+    lsRefs.mockResolvedValue({
+      refs: ['1.0.0', 'v1.0.0', 'v1.0.0.0'].map((tag, n) => ({
+        name: `refs/tags/${tag}`,
+        oid: oid(n + 20),
+      })),
+      skipped: 0,
+    });
+    manifests({ 'refs/tags/1.0.0': 'missing' });
+    const real = readFileAtRefs.getMockImplementation()!;
+    const controller = new AbortController();
+    const reason = new Error('cancelled');
+    readFileAtRefs.mockImplementation(async (c, u, refs: GitRef[], path) => {
+      if (refs.some((ref) => ref.name === 'refs/tags/v1.0.0')) {
+        controller.abort(reason);
+        throw new UpstreamError('timeout');
+      }
+      return real(c, u, refs, path);
+    });
+    await expect(
+      createGitProvider({ runtime: 'docker' }).describe(
+        { ...ctx, signal: controller.signal },
+        source({ packageName: NAME }),
+        NAME,
+        {},
+      ),
+    ).rejects.toBe(reason);
+    expect(readFileAtRefs).toHaveBeenCalledTimes(2);
+    expect(counters).toHaveLength(1);
+  });
+
+  it('bisects an initial batch to isolate one bad ref in logarithmic requests', async () => {
+    const count = 64;
+    const refs = Array.from({ length: count }, (_, n) => ({
+      name: `refs/tags/1.${n}.0`,
+      oid: oid(n + 20),
+    }));
+    lsRefs.mockResolvedValue({ refs, skipped: 0 });
+    const real = readFileAtRefs.getMockImplementation()!;
+    readFileAtRefs.mockImplementation(async (c, u, batch: GitRef[], path) => {
+      if (batch.some((ref) => ref.name === refs[21]!.name)) {
+        throw new GitFetchError('missing_object');
+      }
+      return real(c, u, batch, path);
+    });
+    const { members: found, description } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 1);
+    expect(description.upstreamComplete).toBe(false);
+    expect(readFileAtRefs.mock.calls.length).toBeLessThanOrEqual(1 + 2 * Math.log2(count));
+    expect(readFileAtRefs.mock.calls[1]![2]).toHaveLength(32);
+    expect(counters).toEqual([
+      { name: 'git_provider_ref_skipped', labels: { reason: 'missing_object' } },
+    ]);
+  });
+
+  it('exhausts more than four aliases before resolving a version', async () => {
+    const aliases = ['1.0', '1.0.0', '1.0.0.0', 'v1.0', 'v1.0.0', 'v1.0.0.0'];
+    lsRefs.mockResolvedValue({
+      refs: aliases.map((tag, n) => ({ name: `refs/tags/${tag}`, oid: oid(n + 20) })),
+      skipped: 0,
+    });
+    manifests(
+      Object.fromEntries(aliases.slice(0, -1).map((tag) => [`refs/tags/${tag}`, 'missing'])),
+    );
+    const { members: found } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found.map((m) => m.version)).toEqual(['v1.0.0.0']);
+    expect(counters).toHaveLength(5);
+  });
+
+  it('falls back when the winning tag manifest is unparsable', async () => {
+    manifests({});
+    const real = readFileAtRefs.getMockImplementation()!;
+    readFileAtRefs.mockImplementation(async (c, u, refs: GitRef[], path) =>
+      (await real(c, u, refs, path)).map((file: FileAtRef) =>
+        file.ref === 'refs/tags/1.0.0' ? { ...file, text: '{' } : file,
+      ),
+    );
+    const { members: found } = await members(createGitProvider({ runtime: 'docker' }));
+    expect(found.map((m) => m.version)).toContain('v1.0.0');
+    expect(counters).toContainEqual({
+      name: 'git_provider_ref_skipped',
+      labels: { reason: 'bad_manifest' },
+    });
+  });
+
+  it('skips the version when every candidate tag is unreadable', async () => {
+    manifests({ 'refs/tags/1.0.0': 'missing', 'refs/tags/v1.0.0': 'too_large' });
+    const { members: found, description } = await members(createGitProvider({ runtime: 'docker' }));
+    expect(found.map((m) => JSON.parse(m.raw).version_normalized)).not.toContain('1.0.0.0');
+    expect(description.upstreamComplete).toBe(false);
+    expect(counters.filter((c) => c.name === 'git_provider_ref_skipped')).toEqual([
+      { name: 'git_provider_ref_skipped', labels: { reason: 'missing' } },
+      { name: 'git_provider_ref_skipped', labels: { reason: 'too_large' } },
+    ]);
+  });
+
+  it('does not fall back from a readable tag that names another package', async () => {
+    manifests({ 'refs/tags/1.0.0': { name: 'evil/other' } });
+    const { members: found } = await members(createGitProvider({ runtime: 'docker' }));
+    expect(found.map((m) => JSON.parse(m.raw).version_normalized)).not.toContain('1.0.0.0');
+    expect(counters).toContainEqual({
+      name: 'git_provider_ref_skipped',
+      labels: { reason: 'foreign_name' },
+    });
+  });
+
+  it('keeps the non-definitive not_found for an unreadable default branch', async () => {
+    manifests({ 'refs/heads/main': 'missing' });
+    expect(
+      await createGitProvider({ runtime: 'docker' }).describe(ctx, source(), NAME, {}),
+    ).toEqual({ kind: 'not_found', definitive: false });
+  });
+});
+
+describe('git provider blob plan', () => {
+  const sha1 = (text: string): string =>
+    createHash('sha1')
+      .update(`blob ${Buffer.byteLength(text)}\0`)
+      .update(text)
+      .digest('hex');
+  const ATTRIBUTES = 'docs export-ignore\n*.md export-ignore\n';
+  const contents: Record<string, string> = {
+    '.gitattributes': ATTRIBUTES,
+    'a.php': '<?php // a\n',
+    'README.md': '# readme\n',
+    'docs/guide.txt': 'guide\n',
+    'src/b.php': '<?php // b\n',
+    'src/NOTES.md': 'notes\n',
+  };
+  const entries = Object.entries(contents).map(([path, text]) => ({
+    path,
+    mode: '100644',
+    type: 'blob',
+    oid: sha1(text),
+  }));
+  const tree = { commit: oid(3), committedAt: '2025-06-01T10:00:00.000Z', skipped: 0, entries };
+  const byOid = new Map(Object.values(contents).map((text) => [sha1(text), text]));
+  const oidOf = (path: string): string => sha1(contents[path]!);
+
+  function servingReader(log: string[] = []) {
+    return (_ctx: unknown, _url: string, plan: readonly string[]) => ({
+      read: async (id: string) => {
+        if (!plan.includes(id)) throw new GitFetchError('missing_object');
+        log.push(id);
+        const bytes = new TextEncoder().encode(byOid.get(id)!);
+        return { size: bytes.length, body: new Blob([bytes]).stream() };
+      },
+    });
+  }
+
+  it('leaves export-ignored blobs out of the plan and keeps their siblings', async () => {
+    readTreeAtCommit.mockResolvedValue(tree);
+    createGitBlobReader.mockImplementation(servingReader());
+    buildZipFromTree.mockResolvedValue({});
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      ctx,
+      source(),
+      oid(3),
+    );
+    const plan = createGitBlobReader.mock.calls.at(-1)![2] as string[];
+    expect(plan).toEqual(expect.arrayContaining([oidOf('a.php'), oidOf('src/b.php')]));
+    for (const ignored of ['README.md', 'docs/guide.txt', 'src/NOTES.md'])
+      expect(plan).not.toContain(oidOf(ignored));
+  });
+
+  it('never plans attributes beneath an export-ignored directory', async () => {
+    const ignored = { path: 'docs/.gitattributes', mode: '100644', type: 'blob', oid: oid(99) };
+    readTreeAtCommit.mockResolvedValue({ ...tree, entries: [...entries, ignored] });
+    createGitBlobReader.mockImplementation(servingReader());
+    buildZipFromTree.mockResolvedValue({});
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      ctx,
+      source(),
+      oid(3),
+    );
+    for (const call of createGitBlobReader.mock.calls) expect(call[2]).not.toContain(ignored.oid);
+  });
+
+  it('keeps an attributes file in the plan even when a rule ignores it', async () => {
+    const text = '.gitattributes export-ignore\n';
+    const attributes = { path: '.gitattributes', mode: '100644', type: 'blob', oid: sha1(text) };
+    byOid.set(sha1(text), text);
+    readTreeAtCommit.mockResolvedValue({ ...tree, entries: [attributes, entries[1]] });
+    createGitBlobReader.mockImplementation(servingReader());
+    buildZipFromTree.mockResolvedValue({});
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      ctx,
+      source(),
+      oid(3),
+    );
+    const plan = createGitBlobReader.mock.calls.at(-1)![2] as string[];
+    expect(plan).toEqual([sha1(text), oidOf('a.php')]);
+  });
+
+  it('keeps the full plan when the tree has no attributes file', async () => {
+    readTreeAtCommit.mockResolvedValue({ ...tree, entries: entries.slice(1) });
+    createGitBlobReader.mockImplementation(servingReader());
+    buildZipFromTree.mockResolvedValue({});
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      ctx,
+      source(),
+      oid(3),
+    );
+    expect(createGitBlobReader).toHaveBeenCalledTimes(1);
+    expect(createGitBlobReader.mock.calls[0]![2]).toEqual(entries.slice(1).map((e) => e.oid));
+  });
+
+  it('plans exactly the blobs the real archive builder reads', async () => {
+    const { buildZipFromTree: real } = await vi.importActual<
+      typeof import('../../sources/git/archive.js')
+    >('../../sources/git/archive.js');
+    const dir = await mkdtemp(path.join(tmpdir(), 'pb-git-provider-'));
+    let n = 0;
+    const staging = {
+      create() {
+        const file = path.join(dir, `zip-${n++}.tmp`);
+        const stream = createWriteStream(file);
+        return Promise.resolve({
+          path: file,
+          writable: Writable.toWeb(stream) as WritableStream<Uint8Array>,
+          discard: () => rm(file, { force: true }),
+        });
+      },
+    };
+    const codecs = {
+      digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
+        const hashes = algs.map((alg) => [alg, createHash(alg)] as const);
+        let done!: (v: Record<A, Uint8Array>) => void;
+        const digests = new Promise<Record<A, Uint8Array>>((resolve) => {
+          done = resolve;
+        });
+        const transform = new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            for (const [, h] of hashes) h.update(chunk);
+            controller.enqueue(chunk);
+          },
+          flush() {
+            done(
+              Object.fromEntries(hashes.map(([a, h]) => [a, new Uint8Array(h.digest())])) as Record<
+                A,
+                Uint8Array
+              >,
+            );
+          },
+        });
+        return { transform, digests };
+      },
+      deflateRaw: () =>
+        Duplex.toWeb(createDeflateRaw()) as unknown as TransformStream<Uint8Array, Uint8Array>,
+    };
+    const archiveReads: string[] = [];
+    const readers: string[][] = [];
+    readTreeAtCommit.mockResolvedValue(tree);
+    createGitBlobReader.mockImplementation((c: unknown, u: string, plan: readonly string[]) => {
+      const log: string[] = [];
+      readers.push(log);
+      return servingReader(log)(c, u, plan);
+    });
+    buildZipFromTree.mockImplementation(real);
+    try {
+      const built = await createGitProvider({ runtime: 'docker', staging }).buildArchive(
+        { ...ctx, codecs } as unknown as ProviderContext,
+        source(),
+        oid(3),
+      );
+      archiveReads.push(...readers.at(-1)!);
+      const plan = new Set(createGitBlobReader.mock.calls.at(-1)![2] as string[]);
+      expect(new Set(archiveReads)).toEqual(plan);
+      const zip = (await readFile(built.path)).toString('latin1');
+      expect(zip).toContain('src/b.php');
+      expect(zip).not.toContain('README.md');
+      expect(zip).not.toContain('docs/guide.txt');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

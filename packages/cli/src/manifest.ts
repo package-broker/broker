@@ -5,6 +5,7 @@ import {
   collectRegistrations,
   type Registration,
 } from '@package-broker/core/kernel/registry';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
 export function validatePlugins(plugins: readonly PluginDefinition[], target: Platform): string[] {
@@ -120,6 +121,7 @@ export interface ManifestMigration {
 }
 
 export interface Manifest {
+  platformPorts?: PlatformPortConfig | null;
   schemaVersion: 1;
   platform: Platform;
   plugins: ManifestPlugin[];

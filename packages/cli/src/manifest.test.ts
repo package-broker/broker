@@ -1,6 +1,7 @@
 import { definePlugin } from '@package-broker/core/plugin';
-import { describe, expect, it } from 'vitest';
-import { orderPlugins, renderManifestTs, validatePlugins } from './manifest.js';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import { orderPlugins, renderManifestTs, validatePlugins, type Manifest } from './manifest.js';
 
 const plugin = (id: string, extra: { dependsOn?: string[]; apiVersion?: number } = {}) =>
   definePlugin({
@@ -60,4 +61,8 @@ describe('manifest', () => {
       "import plugin0 from '@package-broker/plugin-a';",
     );
   });
+});
+
+it('types the optional build manifest platform ports description', () => {
+  expectTypeOf<Manifest['platformPorts']>().toEqualTypeOf<PlatformPortConfig | null | undefined>();
 });

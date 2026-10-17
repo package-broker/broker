@@ -34,8 +34,6 @@ const MAX_MANIFEST_BYTES = 1024 * 1024;
 const SSH_URL = /^ssh:\/\/(?:([^@/:[\]]+)@)?(\[[^\]/]*\]|[^/:[\]]+)(?::(\d{1,5}))?\/(.+)$/;
 const SCP_LIKE = /^(?:([^@/:[\]]+)@)?(\[[^\]/]*\]|[^/:[\]]+):(.+)$/;
 const SAFE_REF = /^refs\/(?:heads|tags)\/[A-Za-z0-9._/+-]+$/;
-const ZIP_LOCAL_HEADER = 0x04034b50;
-const ZIP_EXTENDED_TIME = 0x5455;
 const PLACEHOLDER_SHA1 = '0'.repeat(40);
 
 export interface SshArchiveRecord {
@@ -50,7 +48,26 @@ export interface SshBuiltArchive extends SshArchiveRecord {
   readonly zip: Uint8Array;
 }
 
-/** The store persists each built archive with `refetchable = 0`; a found record is never rebuilt. */
+/**
+ * Immutable archives built during SSH source ingestion, bound to one organization.
+ * Implementations must include the organization, source.id, canonical package name,
+ * normalized version and commit in every storage key. Names are opaque key components,
+ * never filesystem paths; a hash of the tuple is suitable for filesystem naming.
+ *
+ * `store` is the put operation. It resolves only after the complete ZIP and its SHA-1
+ * and commit time are durable and atomically visible together. Readers must see either
+ * no record or the complete archive, including during concurrent writes. Repeating a
+ * put for an existing key preserves the first published archive; it is never rebuilt.
+ * Persist catalogue archives with `refetchable = 0`.
+ *
+ * `find` is the metadata get and existence check: null means absent; a record means
+ * the complete ZIP is available. Storage failures reject, rather than report absence.
+ * Returned records must not expose mutable internal state.
+ *
+ * Implementations enforce their configured ZIP byte cap before publishing. An oversized
+ * archive or failed write rejects without publishing a record, preserves any prior
+ * archive and removes temporary files. Errors must not contain request or credential data.
+ */
 export interface SshArchiveStore {
   find(
     source: ProviderSource,
@@ -112,10 +129,16 @@ interface SelectedRefs {
   readonly tags: Map<string, RefEntry>;
   readonly branches: Map<string, RefEntry>;
   readonly snapshot: SnapshotRef;
+  readonly defaultBranch: string | null;
 }
 
 function selectRefs(config: VcsConfig, refs: readonly RemoteRef[]): SelectedRefs {
-  const listed = refs.map((ref) => `${ref.name} ${ref.peeled ?? ref.sha}`).sort();
+  const listed = refs
+    .map(
+      (ref) =>
+        `${ref.name} ${ref.peeled ?? ref.sha}${ref.symref === undefined ? '' : ` ${ref.symref}`}`,
+    )
+    .sort();
   const digest = createHash('sha256').update(listed.join('\n')).digest('hex');
   const allBranches = config.refs.branches.length === 0 || config.refs.branches.includes('*');
   const tags = new Map<string, RefEntry>();
@@ -130,11 +153,17 @@ function selectRefs(config: VcsConfig, refs: readonly RemoteRef[]): SelectedRefs
       if (allBranches || config.refs.branches.includes(branch)) branches.set(branch, entry);
     }
   }
-  return { tags, branches, snapshot: snapshotRef(`sha256:${digest}`) };
+  const target = refs.find((ref) => ref.name === 'HEAD')?.symref;
+  const defaultBranch = target?.startsWith('refs/heads/')
+    ? target.slice('refs/heads/'.length)
+    : null;
+  return { tags, branches, snapshot: snapshotRef(`sha256:${digest}`), defaultBranch };
 }
 
 function nameOrder(selected: SelectedRefs): string[] {
-  const preferred = ['main', 'master'].flatMap((branch) => selected.branches.get(branch) ?? []);
+  const preferred = [selected.defaultBranch, 'main', 'master'].flatMap((branch) =>
+    branch === null ? [] : (selected.branches.get(branch) ?? []),
+  );
   const entries = [...preferred, ...selected.branches.values(), ...selected.tags.values()];
   return [...new Set(entries.map((entry) => entry.commit))];
 }
@@ -173,27 +202,6 @@ function manifestName(manifest: Record<string, unknown> | null): string | null {
   } catch {
     return null;
   }
-}
-
-/** git archive writes the commit time as a Unix mtime in each entry's extended-timestamp field. */
-function archiveTime(zip: Uint8Array): string | null {
-  const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
-  if (zip.byteLength < 30 || view.getUint32(0, true) !== ZIP_LOCAL_HEADER) return null;
-  const nameLength = view.getUint16(26, true);
-  const extraLength = view.getUint16(28, true);
-  let offset = 30 + nameLength;
-  const end = Math.min(offset + extraLength, zip.byteLength);
-  while (offset + 4 <= end) {
-    const id = view.getUint16(offset, true);
-    const size = view.getUint16(offset + 2, true);
-    if (id === ZIP_EXTENDED_TIME && size >= 5 && offset + 9 <= end) {
-      if ((view.getUint8(offset + 4) & 1) === 0) return null;
-      const seconds = view.getUint32(offset + 5, true);
-      return new Date(seconds * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
-    }
-    offset += 4 + size;
-  }
-  return null;
 }
 
 function isDev(version: RefVersion): boolean {
@@ -360,7 +368,7 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
       const { versions } = versionsFromRefs(
         [...selected.tags.keys()],
         [...selected.branches.keys()],
-        null,
+        selected.defaultBranch,
       );
       const commitOf = (version: RefVersion): string | undefined =>
         (version.kind === 'tag' ? selected.tags : selected.branches).get(version.ref)?.commit;
@@ -418,6 +426,7 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
         [...byCommit.keys()],
         ctx.signal,
         async (session, commit) => {
+          const time = (await session.commitTime(commit)).replace(/\.\d{3}Z$/, '+00:00');
           for (const planned of byCommit.get(commit) ?? []) {
             const zip = new Uint8Array(await session.archiveZip(commit));
             const built: SshBuiltArchive = {
@@ -426,7 +435,7 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
               commit,
               zip,
               sha1: createHash('sha1').update(zip).digest('hex'),
-              time: archiveTime(zip),
+              time,
             };
             await options.archives.store(source, key, built);
             planned.record = { sha1: built.sha1, time: built.time };

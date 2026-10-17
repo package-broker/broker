@@ -1,5 +1,25 @@
-import { describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { ulid } from '@package-broker/core/ids';
+import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { migrate } from '@package-broker/db-sqlite/migrations/runner';
+import { createD1Executor } from './db/d1-executor.js';
+import { orgContext } from '@package-broker/core/db/port';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
+import { definePlugin, requirePlatformPorts } from '@package-broker/core/plugin';
+import type { PluginPorts } from '@package-broker/core/plugin';
+import type { R2BucketLike } from './blob/r2.js';
+import type { CacheStorageLike } from './cache/cache-api.js';
+import type { D1DatabaseLike, D1PreparedStatementLike } from './db/d1-executor.js';
+import type { QueueLike } from './jobs/consumer.js';
+import type { AnalyticsEngineLike } from './observability/workers.js';
 import { createWorker, unboundExecutor } from './index.js';
+import type { Env } from './index.js';
 
 describe('runtime-cloudflare', () => {
   it('answers unknown routes with the error envelope', async () => {
@@ -39,5 +59,912 @@ describe('runtime-cloudflare', () => {
       vi.doUnmock('@package-broker/core/kernel/kernel');
       vi.resetModules();
     }
+  });
+});
+
+const KEY_V1 = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+
+const STANZA: PlatformPortConfig = {
+  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 * 1024 },
+  cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
+  jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
+  observability: {
+    adapter: 'workers',
+    analyticsBinding: 'ANALYTICS',
+    deploymentIdEnv: 'DEPLOYMENT_ID',
+    endpointEnv: 'PB_OTLP_ENDPOINT',
+  },
+};
+
+function fakeD1(): D1DatabaseLike {
+  const statement: D1PreparedStatementLike = {
+    bind: () => statement,
+    all: () => Promise.resolve({ results: [] }),
+  };
+  return {
+    prepare: () => statement,
+    batch: (statements) => Promise.resolve(statements.map(() => ({ results: [] }))),
+  };
+}
+
+function fakeBucket(): R2BucketLike {
+  return {
+    head: () => Promise.resolve(null),
+    get: () => Promise.resolve(null),
+    put: () => Promise.resolve(null),
+    delete: () => Promise.resolve(),
+  } as unknown as R2BucketLike;
+}
+
+function fakeQueue(): QueueLike & { sent: unknown[] } {
+  const sent: unknown[] = [];
+  return {
+    sent,
+    send: (body) => {
+      sent.push(body);
+      return Promise.resolve();
+    },
+    sendBatch: (messages) => {
+      sent.push(...messages.map((message) => message.body));
+      return Promise.resolve();
+    },
+  };
+}
+
+function fakeAnalytics(): AnalyticsEngineLike & { points: unknown[] } {
+  const points: unknown[] = [];
+  return { points, writeDataPoint: (point) => void points.push(point) };
+}
+
+function fakeCaches(): CacheStorageLike {
+  return {
+    open: () =>
+      Promise.resolve({
+        match: () => Promise.resolve(undefined),
+        put: () => Promise.resolve(),
+        delete: () => Promise.resolve(false),
+      }),
+  };
+}
+
+function boundEnv(overrides: Record<string, unknown> = {}): Env {
+  return {
+    DB: fakeD1(),
+    STORAGE: fakeBucket(),
+    JOBS: fakeQueue(),
+    ANALYTICS: fakeAnalytics(),
+    DEPLOYMENT_ID: 'test-deployment',
+    PB_MASTER_KEY: KEY_V1,
+    PB_PUBLIC_URL: 'https://broker.test',
+    PB_OTLP_ENDPOINT: 'https://collector.test',
+    ...overrides,
+  } as Env;
+}
+
+function probe(onInit: (ports: PluginPorts) => void | Promise<void> = () => undefined) {
+  return definePlugin({
+    id: 'probe',
+    package: 'test/probe',
+    platforms: ['cloudflare'],
+    apiVersion: 3,
+    init: onInit,
+  });
+}
+
+const quiet = { log: () => undefined, console: { log: () => undefined, error: () => undefined } };
+
+function otlpFetch() {
+  const calls: string[] = [];
+  const impl = (input: string | URL | Request): Promise<Response> => {
+    calls.push(String(input instanceof Request ? input.url : input));
+    return Promise.resolve(new Response('{}', { status: 200 }));
+  };
+  return { calls, impl };
+}
+
+function context() {
+  const promises: Promise<unknown>[] = [];
+  return { promises, waitUntil: (promise: Promise<unknown>) => void promises.push(promise) };
+}
+
+describe('runtime-cloudflare platform assembly', () => {
+  it('hands the kernel all four services when the cloudflare stanza is bound', async () => {
+    let seen: PluginPorts | undefined;
+    const worker = createWorker([probe((ports) => void (seen = ports))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const response = await worker.fetch(new Request('https://broker.test/nope'), boundEnv());
+    expect(response.status).toBe(404);
+    const platform = requirePlatformPorts(seen as PluginPorts);
+    expect(typeof platform.blob.put).toBe('function');
+    expect(typeof platform.cache.get).toBe('function');
+    expect(typeof platform.jobs.enqueue).toBe('function');
+    expect(typeof platform.observability.log).toBe('function');
+  });
+
+  it('keeps platform services disabled without a stanza', async () => {
+    let seen: PluginPorts | undefined;
+    const worker = createWorker([probe((ports) => void (seen = ports))], quiet);
+    await worker.fetch(new Request('https://broker.test/nope'), boundEnv());
+    expect(seen?.platform).toBeUndefined();
+  });
+
+  it('runs queue and scheduled events through the application the fetch built', async () => {
+    let inits = 0;
+    const worker = createWorker([probe(() => void (inits += 1))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    const acked: number[] = [];
+    const message = {
+      body: { v: 1, org: '01J0WWWWWWWWWWWWWWWWWW0001', job: '01J0WWWWWWWWWWWWWWWWWW0002' },
+      ack: () => void acked.push(1),
+      retry: () => undefined,
+    };
+    await worker.queue({ messages: [message] }, { ...env });
+    await worker.scheduled({ cron: '* * * * *' }, { ...env });
+    expect(inits).toBe(1);
+    expect(acked).toEqual([1]);
+    expect((env.JOBS as unknown as { sent: unknown[] }).sent).toEqual([]);
+  });
+
+  it('rejects enqueue of a job type nobody registered', async () => {
+    let seen: PluginPorts | undefined;
+    const worker = createWorker([probe((ports) => void (seen = ports))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    const { jobs } = requirePlatformPorts(seen as PluginPorts);
+    await expect(
+      jobs.enqueue(
+        orgContext('01J0WWWWWWWWWWWWWWWWWW0001'),
+        'probe:missing:v1',
+        {},
+        {
+          idempotencyKey: 'k',
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'JobError', code: 'unknown_job_type' });
+    expect((env.JOBS as unknown as { sent: unknown[] }).sent).toEqual([]);
+  });
+
+  it('builds distinct kernels for envs sharing DB but differing in STORAGE, JOBS or DEPLOYMENT_ID', async () => {
+    let inits = 0;
+    const worker = createWorker([probe(() => void (inits += 1))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const base = boundEnv();
+    const request = () => new Request('https://broker.test/nope');
+    await worker.fetch(request(), base);
+    await worker.fetch(request(), { ...base, STORAGE: fakeBucket() });
+    await worker.fetch(request(), { ...base, JOBS: fakeQueue() });
+    await worker.fetch(request(), { ...base, DEPLOYMENT_ID: 'other-deployment' });
+    expect(inits).toBe(4);
+  });
+
+  it('reuses the kernel for a new env object carrying the same bindings', async () => {
+    let inits = 0;
+    const worker = createWorker([probe(() => void (inits += 1))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const base = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), base);
+    await worker.fetch(new Request('https://broker.test/nope'), { ...base });
+    expect(inits).toBe(1);
+  });
+
+  it('shares one pending initialization between concurrent cold requests', async () => {
+    let inits = 0;
+    const worker = createWorker([probe(() => void (inits += 1))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const base = boundEnv();
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        worker.fetch(new Request('https://broker.test/nope'), { ...base }),
+      ),
+    );
+    expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404, 404]);
+    expect(inits).toBe(1);
+  });
+
+  it('evicts a rejected initialization so the next request rebuilds', async () => {
+    let inits = 0;
+    const worker = createWorker(
+      [
+        probe(() => {
+          inits += 1;
+          if (inits === 1) throw new Error('first init fails');
+        }),
+      ],
+      { ...quiet, platformPorts: STANZA, cacheStorage: fakeCaches(), otlpFetch: otlpFetch().impl },
+    );
+    const base = boundEnv();
+    const first = await worker.fetch(new Request('https://broker.test/nope'), base);
+    expect(first.status).toBe(500);
+    const second = await worker.fetch(new Request('https://broker.test/nope'), base);
+    expect(second.status).toBe(404);
+    expect(inits).toBe(2);
+  });
+
+  it.each([
+    ['STORAGE', { STORAGE: undefined }],
+    ['JOBS', { JOBS: undefined }],
+    ['ANALYTICS', { ANALYTICS: undefined }],
+    ['DEPLOYMENT_ID', { DEPLOYMENT_ID: undefined }],
+    ['a malformed DEPLOYMENT_ID', { DEPLOYMENT_ID: 'not a deployment id' }],
+    ['DB', { DB: undefined }],
+    ['the OTLP endpoint variable', { PB_OTLP_ENDPOINT: undefined }],
+    ['a STORAGE string instead of a bucket', { STORAGE: 'bucket' }],
+  ])('answers 503 misconfigured when %s is missing', async (_name, overrides) => {
+    let inits = 0;
+    const worker = createWorker([probe(() => void (inits += 1))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const response = await worker.fetch(
+      new Request('https://broker.test/nope'),
+      boundEnv(overrides),
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('misconfigured');
+    expect(inits).toBe(0);
+  });
+
+  it('answers 503 misconfigured when the Cache API is unavailable', async () => {
+    const worker = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: null,
+      otlpFetch: otlpFetch().impl,
+    });
+    const response = await worker.fetch(new Request('https://broker.test/nope'), boundEnv());
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      'misconfigured',
+    );
+  });
+
+  it('returns without throwing from queue and scheduled when bindings are missing', async () => {
+    const worker = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv({ JOBS: undefined });
+    await expect(worker.queue({ messages: [] }, env)).resolves.toBeUndefined();
+    await expect(worker.scheduled({}, env)).resolves.toBeUndefined();
+  });
+
+  it('defers the OTLP export to waitUntil and never flushes eagerly', async () => {
+    const otlp = otlpFetch();
+    const worker = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlp.impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    expect(otlp.calls).toEqual([]);
+
+    const ctx = context();
+    const response = await worker.fetch(new Request('https://broker.test/nope'), env, ctx);
+    expect(response.status).toBe(404);
+    expect(ctx.promises).toHaveLength(1);
+    await Promise.all(ctx.promises);
+    expect(otlp.calls).toContain('https://collector.test/v1/logs');
+    expect(otlp.calls).toContain('https://collector.test/v1/traces');
+  });
+
+  it('writes metric points to Analytics Engine and drops pb.http lines without it', async () => {
+    const lines: unknown[] = [];
+    const stanza: PlatformPortConfig = {
+      ...STANZA,
+      observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
+    };
+    const worker = createWorker([], {
+      log: () => undefined,
+      console: { log: (value) => void lines.push(value), error: (value) => void lines.push(value) },
+      platformPorts: stanza,
+      cacheStorage: fakeCaches(),
+    });
+    await worker.fetch(new Request('https://broker.test/nope'), boundEnv({ ANALYTICS: undefined }));
+    const names = lines.map((line) => (line as { name?: string; event?: string }).name);
+    expect(names.some((name) => typeof name === 'string' && name.startsWith('pb.http.'))).toBe(
+      false,
+    );
+    expect(lines.some((line) => (line as { event?: string }).event === 'http.request')).toBe(true);
+
+    const analytics = fakeAnalytics();
+    const withAnalytics = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    await withAnalytics.fetch(
+      new Request('https://broker.test/nope'),
+      boundEnv({ ANALYTICS: analytics }),
+    );
+    expect(analytics.points.length).toBeGreaterThan(0);
+  });
+});
+
+const mf = new Miniflare(
+  convertV4MiniflareOptions({
+    modules: true,
+    script: 'export default { fetch() { return new Response("ok") } }',
+    compatibilityDate: '2026-10-01',
+    d1Databases: ['IDB0'],
+  } as Parameters<typeof convertV4MiniflareOptions>[0]),
+);
+
+afterAll(async () => {
+  await mf.dispose();
+});
+
+const requireFromHere = createRequire(import.meta.url);
+const migrationsDirectory = join(
+  dirname(requireFromHere.resolve('@package-broker/db-sqlite/package.json')),
+  'migrations',
+);
+
+async function migratedDatabase(): Promise<{ db: D1DatabaseLike; orgId: string }> {
+  const db = (await mf.getD1Database('IDB0')) as unknown as D1DatabaseLike;
+  const sources: MigrationSource[] = await Promise.all(
+    [
+      '0001_init.sql',
+      '0003_access_model.sql',
+      '0004_cache_epoch.sql',
+      '0005_admin_permission_topup.sql',
+      '0006_ports.sql',
+    ].map(async (name) =>
+      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
+    ),
+  );
+  await migrate(createD1Executor(db), sources, { holder: 'index-test' });
+  const orgId = ulid();
+  await createOrganizationBootstrap(createD1Executor(db)).bootstrap({
+    id: orgId,
+    slug: 'acme',
+    name: 'Acme',
+    now: new Date().toISOString(),
+  });
+  return { db, orgId };
+}
+
+describe('runtime-cloudflare job path', () => {
+  it('commits to D1, notifies the queue and gives runner events job_id and attempt', async () => {
+    let ports: PluginPorts | undefined;
+    const plugin = definePlugin({
+      id: 'probe',
+      package: 'test/probe',
+      platforms: ['cloudflare'],
+      apiVersion: 3,
+      register(registry) {
+        registry.job({
+          name: 'work',
+          version: 1,
+          validate: (input) => input,
+          handler: () => Promise.reject(new Error('handler exploded')),
+        });
+      },
+      init(initPorts) {
+        ports = initPorts;
+      },
+    });
+    const lines: unknown[] = [];
+    const worker = createWorker([plugin], {
+      log: () => undefined,
+      console: { log: (value) => void lines.push(value), error: (value) => void lines.push(value) },
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const { db, orgId } = await migratedDatabase();
+    const env = boundEnv({ DB: db });
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+
+    const queued = await requirePlatformPorts(ports as PluginPorts).jobs.enqueue(
+      orgContext(orgId),
+      'probe:work:v1',
+      { n: 1 },
+      { idempotencyKey: 'once' },
+    );
+    expect(queued.created).toBe(true);
+    const sent = (env.JOBS as unknown as { sent: { job: string }[] }).sent;
+    expect(sent).toHaveLength(1);
+
+    const acked: number[] = [];
+    await worker.queue(
+      { messages: [{ body: sent[0], ack: () => void acked.push(1), retry: () => undefined }] },
+      { ...env },
+    );
+    expect(acked).toEqual([1]);
+
+    const failure = lines
+      .map((line) =>
+        typeof line === 'string' ? (JSON.parse(line) as Record<string, unknown>) : line,
+      )
+      .find((line) => (line as { event?: string }).event === 'job.handler_failed') as
+      { job_id?: string; attempt?: number } | undefined;
+    expect(failure?.job_id).toBe(queued.id);
+    expect(failure?.attempt).toBe(1);
+  });
+});
+
+function recordingLog() {
+  const entries: Record<string, unknown>[] = [];
+  return {
+    entries,
+    log: (entry: Readonly<Record<string, unknown>>) => void entries.push({ ...entry }),
+  };
+}
+
+function messageProbe(body: unknown) {
+  const calls = { ack: 0, retry: [] as unknown[] };
+  return {
+    calls,
+    message: {
+      body,
+      ack: () => void (calls.ack += 1),
+      retry: (options?: unknown) => void calls.retry.push(options),
+    },
+  };
+}
+
+describe('runtime-cloudflare event delivery', () => {
+  it('retries every message and acks none when the organization lookup fails', async () => {
+    const lines: unknown[] = [];
+    const record = (value: unknown) => void lines.push(value);
+    const worker = createWorker([], {
+      log: () => undefined,
+      console: { log: record, error: record },
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    let failing = false;
+    const healthy = fakeD1();
+    const db: D1DatabaseLike = {
+      prepare: (sql) => {
+        if (failing) throw new Error('database unavailable');
+        return healthy.prepare(sql);
+      },
+      batch: (statements) => healthy.batch(statements),
+    };
+    const env = boundEnv({ DB: db });
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    failing = true;
+    const first = messageProbe({ v: 1, org: ulid(), job: ulid() });
+    const second = messageProbe({ v: 1, org: ulid(), job: ulid() });
+    await worker.queue({ messages: [first.message, second.message] }, { ...env });
+    for (const probeCalls of [first.calls, second.calls]) {
+      expect(probeCalls.ack).toBe(0);
+      expect(probeCalls.retry).toEqual([{ delaySeconds: 30 }]);
+    }
+    const events = lines.map((line) =>
+      typeof line === 'string'
+        ? (JSON.parse(line) as { event?: string }).event
+        : (line as { event?: string }).event,
+    );
+    expect(events).toContain('job.batch_failed');
+    expect(events).not.toContain('http.error');
+  });
+
+  it('retries every message and acks none when the application cannot be built', async () => {
+    const { entries, log } = recordingLog();
+    const worker = createWorker([], {
+      ...quiet,
+      log,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const first = messageProbe({ v: 1, org: ulid(), job: ulid() });
+    const second = messageProbe({ v: 1, org: ulid(), job: ulid() });
+    second.message.retry = () => {
+      throw new Error('retry rejected');
+    };
+    await worker.queue(
+      { messages: [first.message, second.message] },
+      boundEnv({ JOBS: undefined }),
+    );
+    expect(first.calls.ack).toBe(0);
+    expect(first.calls.retry).toEqual([{ delaySeconds: 30 }]);
+    expect(second.calls.ack).toBe(0);
+    expect(entries.some((entry) => entry.event === 'job.batch_failed')).toBe(true);
+    expect(entries.some((entry) => entry.event === 'job.retry_failed')).toBe(true);
+    expect(entries.some((entry) => entry.event === 'http.error')).toBe(false);
+  });
+
+  it('logs job.cron_failed when the scheduled event cannot build the application', async () => {
+    const { entries, log } = recordingLog();
+    const worker = createWorker([], {
+      ...quiet,
+      log,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    await worker.scheduled({ cron: '* * * * *' }, boundEnv({ JOBS: undefined }));
+    expect(entries.some((entry) => entry.event === 'job.cron_failed')).toBe(true);
+    expect(entries.some((entry) => entry.event === 'http.error')).toBe(false);
+  });
+
+  it('rejects a foreign-org notification on a bootstrapped deployment without running the consumer', async () => {
+    let ports: PluginPorts | undefined;
+    let ran = 0;
+    const plugin = definePlugin({
+      id: 'probe',
+      package: 'test/probe',
+      platforms: ['cloudflare'],
+      apiVersion: 3,
+      register(registry) {
+        registry.job({
+          name: 'work',
+          version: 1,
+          validate: (input) => input,
+          handler: () => {
+            ran += 1;
+            return Promise.resolve();
+          },
+        });
+      },
+      init(initPorts) {
+        ports = initPorts;
+      },
+    });
+    const worker = createWorker([plugin], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const { db } = await migratedDatabase();
+    const bootstrapped = await createOrganizationBootstrap(createD1Executor(db)).findSingleton();
+    const env = boundEnv({ DB: db });
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    await requirePlatformPorts(ports as PluginPorts).jobs.enqueue(
+      orgContext((bootstrapped as { id: string }).id),
+      'probe:work:v1',
+      {},
+      { idempotencyKey: 'foreign' },
+    );
+    const sent = (env.JOBS as unknown as { sent: { org: string; job: string }[] }).sent;
+    const foreign = messageProbe({ ...sent[0], org: ulid() });
+    await worker.queue({ messages: [foreign.message] }, { ...env });
+    expect(foreign.calls.ack).toBe(1);
+    expect(foreign.calls.retry).toEqual([]);
+    expect(ran).toBe(0);
+
+    const own = messageProbe(sent[0]);
+    await worker.queue({ messages: [own.message] }, { ...env });
+    expect(own.calls.ack).toBe(1);
+    expect(ran).toBe(1);
+  });
+});
+
+describe('runtime-cloudflare application cache', () => {
+  function counting() {
+    let inits = 0;
+    const worker = createWorker([probe(() => void (inits += 1))], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    return {
+      worker,
+      inits: () => inits,
+      hit: (env: Env) => worker.fetch(new Request('https://broker.test/nope'), env),
+    };
+  }
+
+  it('builds distinct kernels for envs differing only in PB_PUBLIC_URL', async () => {
+    const { hit, inits } = counting();
+    const base = boundEnv();
+    await hit(base);
+    await hit({ ...base });
+    expect(inits()).toBe(1);
+    await hit({ ...base, PB_PUBLIC_URL: 'https://other.test' } as Env);
+    expect(inits()).toBe(2);
+  });
+
+  it('evicts the least recently used application, not the oldest inserted', async () => {
+    const { hit, inits } = counting();
+    const base = boundEnv();
+    const keyed = (index: number): Env => ({ ...base, DEPLOYMENT_ID: `deployment-${index}` });
+    for (let index = 0; index < 8; index += 1) await hit(keyed(index));
+    expect(inits()).toBe(8);
+    await hit(keyed(0));
+    expect(inits()).toBe(8);
+    await hit(keyed(8));
+    expect(inits()).toBe(9);
+    await hit(keyed(0));
+    expect(inits()).toBe(9);
+    await hit(keyed(1));
+    expect(inits()).toBe(10);
+  });
+
+  it('logs the names of failed bindings once per failed build and keeps them out of the 503 body', async () => {
+    const { entries, log } = recordingLog();
+    const worker = createWorker([], {
+      ...quiet,
+      log,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv({ JOBS: undefined, PB_OTLP_ENDPOINT: undefined });
+    const response = await worker.fetch(new Request('https://broker.test/nope'), env);
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toMatch(/STORAGE|JOBS|DEPLOYMENT_ID|PB_OTLP/);
+    const logged = entries.filter((entry) => entry.event === 'startup.misconfigured');
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.problems).toEqual([
+      'jobs.binding: JOBS is not bound',
+      'observability.endpointEnv: PB_OTLP_ENDPOINT is not set',
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(KEY_V1);
+  });
+});
+
+function within(promise: Promise<unknown>, ms = 300): Promise<'settled' | 'hung'> {
+  return Promise.race([
+    promise.then(() => 'settled' as const),
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), ms)),
+  ]);
+}
+
+function heldPuts() {
+  const releases: (() => void)[] = [];
+  let hold = false;
+  const caches: CacheStorageLike = {
+    open: () =>
+      Promise.resolve({
+        match: () => Promise.resolve(undefined),
+        put: () =>
+          hold ? new Promise<void>((resolve) => void releases.push(resolve)) : Promise.resolve(),
+        delete: () => Promise.resolve(false),
+      }),
+  };
+  return {
+    caches,
+    releases,
+    hold: (value: boolean) => void (hold = value),
+  };
+}
+
+const CACHE_KEY = {
+  projectId: 'p',
+  sourceId: 's',
+  kind: 'metadata',
+  digest: 'a'.repeat(64),
+} as const;
+
+function cacheEntry() {
+  const later = new Date(Date.now() + 300_000).toISOString();
+  return {
+    value: new Uint8Array([1]),
+    freshUntil: later,
+    staleUntil: later,
+    negative: false,
+    insertedAt: new Date().toISOString(),
+  };
+}
+
+function cachePlugin(onInit: (ports: PluginPorts) => void) {
+  let ports: PluginPorts | undefined;
+  return definePlugin({
+    id: 'putter',
+    package: 'test/putter',
+    platforms: ['cloudflare'],
+    apiVersion: 3,
+    register(registry) {
+      registry.route({
+        method: 'GET',
+        path: '/put',
+        permission: null,
+        needsOrg: false,
+        handler: async () => {
+          await requirePlatformPorts(ports as PluginPorts).cache.set(
+            orgContext('o'),
+            CACHE_KEY,
+            cacheEntry(),
+          );
+          return Response.json({ ok: true });
+        },
+      });
+      registry.route({
+        method: 'GET',
+        path: '/none',
+        permission: null,
+        needsOrg: false,
+        handler: () => Response.json({ ok: true }),
+      });
+    },
+    init(initPorts) {
+      ports = initPorts;
+      onInit(initPorts);
+    },
+  });
+}
+
+describe('runtime-cloudflare deferred work per request', () => {
+  it('lets a request settle without waiting for another request flush', async () => {
+    const releases: (() => void)[] = [];
+    let hold = false;
+    const impl = (): Promise<Response> =>
+      hold
+        ? new Promise((resolve) => {
+            releases.push(() => resolve(new Response('{}', { status: 200 })));
+          })
+        : Promise.resolve(new Response('{}', { status: 200 }));
+    const worker = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+
+    hold = true;
+    const slow = context();
+    await worker.fetch(new Request('https://broker.test/nope'), { ...env }, slow);
+    expect(releases.length).toBeGreaterThan(0);
+    hold = false;
+    const quick = context();
+    await worker.fetch(new Request('https://broker.test/nope'), { ...env }, quick);
+
+    expect(await within(Promise.all(quick.promises))).toBe('settled');
+    expect(await within(Promise.all(slow.promises), 50)).toBe('hung');
+    for (const release of releases) release();
+    expect(await within(Promise.all(slow.promises))).toBe('settled');
+  });
+
+  it('keeps a held cache put with the request that created it', async () => {
+    const puts = heldPuts();
+    const worker = createWorker([cachePlugin(() => undefined)], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: puts.caches,
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/none'), env);
+
+    puts.hold(true);
+    const first = context();
+    expect(
+      (await worker.fetch(new Request('https://broker.test/put'), { ...env }, first)).status,
+    ).toBe(200);
+    puts.hold(false);
+    const second = context();
+    await worker.fetch(new Request('https://broker.test/none'), { ...env }, second);
+
+    expect(await within(Promise.all(second.promises))).toBe('settled');
+    expect(await within(Promise.all(first.promises), 50)).toBe('hung');
+    for (const release of puts.releases) release();
+    expect(await within(Promise.all(first.promises))).toBe('settled');
+  });
+
+  it('logs a cache put with no live request once, without key or value', async () => {
+    const lines: unknown[] = [];
+    const record = (value: unknown) => void lines.push(value);
+    let seen: PluginPorts | undefined;
+    const worker = createWorker([cachePlugin((ports) => void (seen = ports))], {
+      log: () => undefined,
+      console: { log: record, error: record },
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    await worker.fetch(new Request('https://broker.test/none'), boundEnv());
+    const { cache } = requirePlatformPorts(seen as PluginPorts);
+    await cache.set(orgContext('o'), CACHE_KEY, cacheEntry());
+    await cache.set(orgContext('o'), CACHE_KEY, cacheEntry());
+    const untracked = lines
+      .map((line) => (typeof line === 'string' ? line : JSON.stringify(line)))
+      .filter((line) => line.includes('cache.put_untracked'));
+    expect(untracked).toHaveLength(1);
+    expect(untracked[0]).not.toContain('a'.repeat(64));
+  });
+});
+
+describe('runtime-cloudflare event delivery without a stanza', () => {
+  it('retries every message instead of returning silently', async () => {
+    const worker = createWorker([], quiet);
+    const first = messageProbe({ v: 1 });
+    const second = messageProbe({ v: 1 });
+    await worker.queue({ messages: [first.message, second.message] }, boundEnv());
+    for (const calls of [first.calls, second.calls]) {
+      expect(calls.ack).toBe(0);
+      expect(calls.retry).toEqual([{ delaySeconds: 30 }]);
+    }
+  });
+});
+
+describe('runtime-cloudflare fingerprint memo', () => {
+  it('computes the configuration digest once for one env object', async () => {
+    const digest = vi.spyOn(crypto.subtle, 'digest');
+    try {
+      const worker = createWorker([], {
+        ...quiet,
+        platformPorts: STANZA,
+        cacheStorage: fakeCaches(),
+        otlpFetch: otlpFetch().impl,
+      });
+      const env = boundEnv();
+      await worker.fetch(new Request('https://broker.test/nope'), env);
+      const afterFirst = digest.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0);
+      await worker.fetch(new Request('https://broker.test/nope'), env);
+      await worker.fetch(new Request('https://broker.test/nope'), env);
+      expect(digest.mock.calls.length).toBe(afterFirst);
+    } finally {
+      digest.mockRestore();
+    }
+  });
+});
+
+describe('runtime-cloudflare handler failure reporting', () => {
+  it('reports a queue handler failure through the application observability', async () => {
+    const lines: unknown[] = [];
+    const record = (value: unknown) => void lines.push(value);
+    const logged: unknown[] = [];
+    const worker = createWorker([], {
+      log: (entry) => void logged.push(entry),
+      console: { log: record, error: record },
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    const poisoned = {
+      messages: new Proxy([], {
+        get(target, key, receiver) {
+          if (key === Symbol.iterator) throw new Error('batch exploded');
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      }),
+    };
+    await worker.queue(poisoned, { ...env });
+    const events = lines.map((line) =>
+      typeof line === 'string'
+        ? (JSON.parse(line) as { event?: string }).event
+        : (line as { event?: string }).event,
+    );
+    expect(events).toContain('job.batch_failed');
+    expect(logged.some((entry) => (entry as { event?: string }).event === 'job.batch_failed')).toBe(
+      false,
+    );
   });
 });

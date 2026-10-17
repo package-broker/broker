@@ -21,7 +21,7 @@ export class SnapshotStagingRejectedError extends Error {
 
 export interface StageSnapshotOptions extends Pick<
   TwoPassOptions,
-  'maxBytes' | 'codecs' | 'onUpstreamBytes' | 'signal'
+  'maxBytes' | 'codecs' | 'onUpstreamBytes' | 'signal' | 'firstPass'
 > {
   /** A strong upstream ETag to use as the snapshot id instead of `sha256:<digest>`. */
   readonly id?: string;
@@ -56,7 +56,14 @@ export async function stageSnapshot(
   store: BlobStore,
   options: StageSnapshotOptions,
 ): Promise<SnapshotRef> {
-  if (options.id !== undefined) snapshotRef(options.id);
+  if (options.id !== undefined) {
+    try {
+      snapshotRef(options.id);
+    } catch (error) {
+      await options.firstPass?.cancel().catch(() => undefined);
+      throw error;
+    }
+  }
   const result = await twoPassPut(ctx, open, store, {
     maxBytes: options.maxBytes,
     codecs: options.codecs,
@@ -64,6 +71,7 @@ export async function stageSnapshot(
     refetchable: true,
     ...(options.onUpstreamBytes === undefined ? {} : { onUpstreamBytes: options.onUpstreamBytes }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.firstPass === undefined ? {} : { firstPass: options.firstPass }),
   });
   if (result.status !== 'stored') throw new SnapshotStagingRejectedError();
   const digest = parseSha256(hex(result.digests.sha256));

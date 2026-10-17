@@ -362,20 +362,31 @@ describe('SystemFence boundary', () => {
     ).toEqual([]);
   });
 
-  it('only packages/cli and bootstrap modules import system-fence', () => {
-    expect(
-      scan(
-        /system-fence/,
-        (relative, name) => relative.startsWith('cli/') || /bootstrap/.test(name),
-        'authz/system-fence.ts',
-      ),
-    ).toEqual([]);
+  it('only packages/cli and the listed modules import system-fence', () => {
+    expect(scan(/system-fence/, mayImportSystemFence, 'authz/system-fence.ts')).toEqual([]);
+  });
+
+  it('does not allow a file by its name alone', () => {
+    expect(mayImportSystemFence('cli/src/main.ts')).toBe(true);
+    expect(mayImportSystemFence('core/src/kernel/bootstrap-helper.ts')).toBe(false);
+    expect(mayImportSystemFence('db-sqlite/src/repositories/admin-bootstrap.ts')).toBe(false);
+    expect(mayImportSystemFence('plugin-x/src/cli/a.ts')).toBe(false);
   });
 });
 
+const SYSTEM_FENCE_IMPORTER_PREFIXES = ['cli/'];
+const SYSTEM_FENCE_IMPORTER_MODULES: readonly string[] = [];
+
+function mayImportSystemFence(relative: string): boolean {
+  return (
+    SYSTEM_FENCE_IMPORTER_PREFIXES.some((prefix) => relative.startsWith(prefix)) ||
+    SYSTEM_FENCE_IMPORTER_MODULES.includes(relative)
+  );
+}
+
 function scan(
   pattern: RegExp,
-  allowed: (relative: string, name: string) => boolean,
+  allowed: (relative: string) => boolean,
   definingFile: string,
 ): string[] {
   const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -388,7 +399,7 @@ function scan(
       } else if (full.endsWith('.ts') && !full.endsWith('.test.ts')) {
         const relative = path.relative(root, full);
         if (relative.endsWith(definingFile)) continue;
-        if (!allowed(relative, entry.name) && pattern.test(readFileSync(full, 'utf8'))) {
+        if (!allowed(relative) && pattern.test(readFileSync(full, 'utf8'))) {
           offenders.push(relative);
         }
       }

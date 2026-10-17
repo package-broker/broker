@@ -113,17 +113,17 @@ async function migrateAll(): Promise<void> {
 }
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 47 tables, expand phase for 0002', async () => {
+  it('1: a fresh database gets every core migration: 49 tables, expand phase for 0002', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
     expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
-    expect(ids.at(-1)).toBe('core:0009_upstream_state_content_index');
+    expect(ids.at(-1)).toBe('core:0011_api_audit');
     expect(result.applied).toEqual(ids);
-    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none, 0007: 4; 0008 and 0009 add none
-    expect(await countTables()).toBe(47);
+    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none, 0007: 4; 0008, 0009 and 0010 add none; 0011 adds 2
+    expect(await countTables()).toBe(49);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -155,8 +155,8 @@ describe('core migrations', () => {
 
     expect(result.applied).toEqual(sources.slice(1).map((source) => source.id));
     expect(result.skipped).toEqual(['core:0001_init']);
-    // 0002, 0003, 0004 and 0007 add 10 tables to the 37 of 0001
-    expect(await countTables()).toBe(47);
+    // 0002, 0003, 0004, 0007 and 0011 add 12 tables to the 37 of 0001
+    expect(await countTables()).toBe(49);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );

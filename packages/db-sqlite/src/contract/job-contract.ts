@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { orgContext, type OrgContext, type SqlExecutor } from '@package-broker/core/db/port';
+import {
+  orgContext,
+  type OrgContext,
+  type SqlExecutor,
+  type Statement,
+  type StatementResult,
+} from '@package-broker/core/db/port';
 import {
   IdempotencyConflictError,
   StaleFenceError,
@@ -8,10 +14,67 @@ import {
   type JobRepository,
 } from '@package-broker/core/platform/job-repository';
 import { JobError, retryDelaySeconds } from '@package-broker/core/platform/jobs';
+import { createJobRepository } from '../repositories/job.js';
 import { jobLeaseGuard } from '../repositories/job-lease-guard.js';
-import type { JobScheduleRepository } from '../repositories/job-schedule.js';
+import {
+  createJobScheduleRepository,
+  type JobScheduleRepository,
+} from '../repositories/job-schedule.js';
 
 export { jobLeaseGuard };
+
+/** Called before statement `index` of a batch runs; a thrown error aborts and rolls back the batch. */
+export type StatementHook = (index: number, sql: string) => void | Promise<void>;
+
+/** Thrown by a case that needs a capability the fixture does not offer; the runner reports a skip. */
+export class JobContractUnsupported extends Error {
+  constructor(what: string) {
+    super(`unsupported by this fixture: ${what}`);
+    this.name = 'JobContractUnsupported';
+  }
+}
+
+async function totalChanges(executor: SqlExecutor): Promise<number> {
+  const rows = await executor.all<{ n: number }>({
+    sql: 'SELECT total_changes() AS n',
+    params: [],
+  });
+  return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * Runs each batch statement by statement inside one transaction on a single connection, calling
+ * the hook first. The hook may write through the wrapped executor's own `all` and sees the open
+ * transaction. For drivers that expose BEGIN and COMMIT (node:sqlite, better-sqlite3).
+ */
+export function interceptBatches(base: SqlExecutor, onStatement: StatementHook): SqlExecutor {
+  return {
+    driver: base.driver,
+    all: (statement) => base.all(statement),
+    async batch(statements) {
+      if (statements.length === 0) return [];
+      await base.all({ sql: 'BEGIN IMMEDIATE', params: [] });
+      try {
+        const results: StatementResult[] = [];
+        for (const [index, statement] of statements.entries()) {
+          await onStatement(index, statement.sql);
+          const before = await totalChanges(base);
+          const rows = await base.all(statement);
+          results.push({ changes: (await totalChanges(base)) - before, rows });
+        }
+        await base.all({ sql: 'COMMIT', params: [] });
+        return results;
+      } catch (error) {
+        try {
+          await base.all({ sql: 'ROLLBACK', params: [] });
+        } catch {
+          // the transaction already ended; the original error wins
+        }
+        throw error;
+      }
+    },
+  };
+}
 
 /**
  * Every `make()` call returns a new, empty database holding the two organizations of
@@ -32,6 +95,12 @@ export interface JobContractFixture {
   readonly setRunAt: (jobId: string, iso: string) => Promise<void>;
   /** Optional: a repository on connection a whose backoff jitter draws from the given source. */
   readonly random?: (draw: () => number) => JobRepository;
+  /**
+   * Optional: wraps an executor of this fixture so that `onStatement` runs before each statement
+   * of a batch, inside the batch's transaction. Absent where a batch cannot be split (D1); the
+   * cases that need it then report themselves unsupported.
+   */
+  readonly intercept?: (executor: SqlExecutor, onStatement: StatementHook) => SqlExecutor;
 }
 
 type Case = (fixture: JobContractFixture) => Promise<void>;
@@ -649,6 +718,259 @@ const syncConflictRollsBack: Case = async ({ schedule }) => {
   expect((await schedule.tick(ORG_A)).map((item) => item.name)).toEqual([added]);
 };
 
+function interceptOf(fixture: JobContractFixture) {
+  if (fixture.intercept === undefined) throw new JobContractUnsupported('statement interception');
+  return fixture.intercept;
+}
+
+function once(pattern: RegExp, action: () => Promise<void>): StatementHook {
+  let done = false;
+  return async (_index, sql) => {
+    if (done || !pattern.test(sql)) return;
+    done = true;
+    await action();
+  };
+}
+
+async function brokenRunningJobs(executor: SqlExecutor): Promise<number> {
+  const rows = await executor.all<{ n: number }>({
+    sql: `SELECT count(*) AS n FROM job WHERE
+      (state = 'running' AND (lease_owner IS NULL OR lease_until IS NULL OR NOT EXISTS (
+        SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence
+          AND a.worker = job.lease_owner AND a.outcome = 'running')))
+      OR (state <> 'running' AND (lease_owner IS NOT NULL OR lease_until IS NOT NULL))`,
+    params: [],
+  });
+  return Number(rows[0]?.n ?? 0);
+}
+
+async function expireNow(executor: SqlExecutor, jobId: string): Promise<void> {
+  await executor.all({
+    sql: 'UPDATE job SET lease_until = ? WHERE id = ?',
+    params: [PAST, jobId],
+  });
+}
+
+const REQUEUE_EXPIRED = /^UPDATE job SET\s+state = CASE/;
+const EXPIRE_ATTEMPTS = /^UPDATE job_attempt SET outcome = 'lease_expired'/;
+const INSERT_ATTEMPT = /^INSERT INTO job_attempt/;
+
+const leaseExpiresBetweenClaimStatements: Case = async (fixture) => {
+  const { a, b, executorA } = fixture;
+  const intercept = interceptOf(fixture);
+  const intercepted = (hook: StatementHook) => createJobRepository(intercept(executorA, hook));
+
+  const held = await enqueued(a, { resourceKey: 'shared', runAt: PAST });
+  const next = await enqueued(a, { resourceKey: 'shared', runAt: PAST_PLUS_ONE });
+  const holder = present(await claimOf(a, 1), 'the first claim');
+  expect(holder.id).toBe(held.id);
+
+  const late = intercepted(once(REQUEUE_EXPIRED, () => expireNow(executorA, holder.id)));
+  expect(await claimOf(late, 2)).toBeNull();
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+  expect(await stateOf(a, held.id)).toMatchObject({ state: 'running', attempts: 1 });
+  expect(await stateOf(a, next.id)).toMatchObject({ state: 'queued', attempts: 0, history: [] });
+
+  const taken = present(await claimOf(b, 3), 'the takeover on the next claim');
+  expect(taken.id).toBe(next.id);
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+  const status = await stateOf(a, held.id);
+  expect(status.state).toBe('queued');
+  expect(status.history.map((attempt) => attempt.outcome)).toEqual(['lease_expired']);
+  await rejectsStale(a.settle(ORG_A, holder, { outcome: 'succeeded' }));
+
+  const second = await enqueued(a, { resourceKey: 'other', runAt: PAST });
+  const third = await enqueued(a, { resourceKey: 'other', runAt: PAST_PLUS_ONE });
+  const lapsing = present(await claimOf(a, 4, { id: second.id }), 'a claim');
+  const early = intercepted(once(EXPIRE_ATTEMPTS, () => expireNow(executorA, lapsing.id)));
+  expect(present(await claimOf(early, 5), 'a takeover inside one claim').id).toBe(third.id);
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+  expect((await stateOf(a, second.id)).state).toBe('queued');
+};
+
+const leaseExpiresRightAfterGrant: Case = async (fixture) => {
+  const { a, b, executorA } = fixture;
+  const intercept = interceptOf(fixture);
+  const row = await enqueued(a);
+  let granted: string | undefined;
+  const repo = createJobRepository(
+    intercept(
+      executorA,
+      once(INSERT_ATTEMPT, async () => {
+        granted = row.id;
+        await expireNow(executorA, row.id);
+      }),
+    ),
+  );
+  const claim = present(await claimOf(repo, 1), 'a claim whose lease lapsed at once');
+  expect(granted).toBe(row.id);
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+  expect(await stateOf(a, row.id)).toMatchObject({ state: 'running', attempts: 1 });
+  expect(await b.reap(ORG_A, 10)).toBe(1);
+  await rejectsStale(a.settle(ORG_A, claim, { outcome: 'succeeded' }));
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+};
+
+const faultMidClaimRollsBack: Case = async (fixture) => {
+  const { a, executorA } = fixture;
+  const intercept = interceptOf(fixture);
+  const row = await enqueued(a);
+  const fault = new Error('injected fault');
+  const repo = createJobRepository(
+    intercept(
+      executorA,
+      once(INSERT_ATTEMPT, () => {
+        throw fault;
+      }),
+    ),
+  );
+  await expect(claimOf(repo, 1)).rejects.toBe(fault);
+  expect(await stateOf(a, row.id)).toMatchObject({ state: 'queued', attempts: 0, history: [] });
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+  expect(present(await claimOf(a, 2), 'a claim once the fault clears').id).toBe(row.id);
+};
+
+const slotBoundaryInsideTick: Case = async (fixture) => {
+  const { a, executorA } = fixture;
+  const intercept = interceptOf(fixture);
+  const before = '2020-01-01T00:01:59.999Z';
+  const after = '2020-01-01T00:02:00.001Z';
+  await executorA.all({
+    sql: 'CREATE TEMP TABLE job_contract_clock (iso TEXT NOT NULL)',
+    params: [],
+  });
+  await executorA.all({ sql: 'INSERT INTO job_contract_clock VALUES (?)', params: [before] });
+  const atDatabaseTime = (statement: Statement): Statement => ({
+    ...statement,
+    sql: statement.sql.replaceAll("'now'", '(SELECT iso FROM temp.job_contract_clock)'),
+  });
+  const clock: SqlExecutor = {
+    driver: executorA.driver,
+    all: (statement) => executorA.all(atDatabaseTime(statement)),
+    batch: (statements) => executorA.batch(statements.map(atDatabaseTime)),
+  };
+  let injections = 0;
+  const repo = createJobScheduleRepository(
+    intercept(
+      clock,
+      once(/^UPDATE job_schedule SET\s+last_slot/, async () => {
+        injections += 1;
+        await executorA.all({ sql: 'UPDATE job_contract_clock SET iso = ?', params: [after] });
+      }),
+    ),
+  );
+  const name = 'core:slot-boundary:v1';
+  await repo.sync(ORG_A, [{ name, everySeconds: 60, nextRunAt: PAST }]);
+  const fired = await repo.tick(ORG_A);
+  expect(injections).toBe(1);
+  expect(fired).toHaveLength(1);
+  const jobs = await executorA.all<{ idempotency_key: string }>({
+    sql: 'SELECT idempotency_key FROM job WHERE org_id = ? AND type = ?',
+    params: [ORG_A.orgId, name],
+  });
+  expect(jobs.map((row) => row.idempotency_key)).toEqual([
+    `schedule:${name}:2020-01-01T00:01:00.000Z`,
+  ]);
+  const stored = await executorA.all<{ next_run_at: string; last_slot: string }>({
+    sql: 'SELECT next_run_at, last_slot FROM job_schedule WHERE org_id = ? AND name = ?',
+    params: [ORG_A.orgId, name],
+  });
+  expect(stored[0]).toMatchObject({
+    last_slot: '2020-01-01T00:01:00.000Z',
+    next_run_at: '2020-01-01T00:02:00.000Z',
+  });
+  expect(present(await claimOf(a, 10, { types: [name] }), 'the slot job').id).toBe(
+    present(fired[0], 'a fired job').jobId,
+  );
+};
+
+async function corruptPayload(executor: SqlExecutor, jobId: string, raw: string): Promise<void> {
+  try {
+    await executor.all({ sql: 'PRAGMA ignore_check_constraints = ON', params: [] });
+    await executor.all({
+      sql: 'UPDATE job SET payload_json = ? WHERE id = ?',
+      params: [raw, jobId],
+    });
+  } catch (error) {
+    throw new JobContractUnsupported(`writing past the payload CHECK (${String(error)})`);
+  } finally {
+    await executor.all({ sql: 'PRAGMA ignore_check_constraints = OFF', params: [] });
+  }
+}
+
+const corruptedPayloadAtClaim: Case = async ({ a, b, executorA }) => {
+  const broken = await enqueued(a, { runAt: PAST });
+  const sound = await enqueued(a, { runAt: PAST_PLUS_ONE });
+  await corruptPayload(executorA, broken.id, '{"a":');
+  const checked = await executorA.all<{ ok: number }>({
+    sql: 'SELECT json_valid(payload_json) AS ok FROM job WHERE id = ?',
+    params: [broken.id],
+  });
+  expect(checked[0]?.ok).toBe(0);
+
+  const claim = present(await claimOf(a, 1), 'the claim behind the corrupted row');
+  expect(claim.id).toBe(sound.id);
+  expect(() => JSON.parse(claim.payloadJson)).not.toThrow();
+  const status = await stateOf(a, broken.id);
+  expect(status).toMatchObject({ state: 'dead', attempts: 0, lastErrorCode: 'invalid_payload' });
+  expect(await claimOf(b, 2, { id: broken.id })).toBeNull();
+  expect(await claimOf(b, 3)).toBeNull();
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+  await a.settle(ORG_A, claim, { outcome: 'succeeded' });
+
+  const targeted = await enqueued(a, { runAt: PAST });
+  await corruptPayload(executorA, targeted.id, 'nope');
+  expect(await claimOf(a, 4, { id: targeted.id })).toBeNull();
+  expect(await stateOf(a, targeted.id)).toMatchObject({
+    state: 'dead',
+    lastErrorCode: 'invalid_payload',
+  });
+};
+
+const corruptPayloadBehindBlockedRows: Case = async ({ a, executorA }) => {
+  const held = await enqueued(a, { resourceKey: 'blocked', runAt: PAST });
+  expect(present(await claimOf(a, 1), 'the resource holder').id).toBe(held.id);
+  const blocked = [];
+  for (let index = 0; index < 10; index += 1) {
+    blocked.push(await enqueued(a, { resourceKey: 'blocked', runAt: PAST }));
+  }
+  const broken = await enqueued(a, { runAt: PAST_PLUS_ONE });
+  await corruptPayload(executorA, broken.id, '{');
+  const sound = await enqueued(a, { runAt: PAST_PLUS_ONE });
+  expect(present(await claimOf(a, 2), 'an independent claim').id).toBe(sound.id);
+  expect(await stateOf(a, broken.id)).toMatchObject({
+    state: 'dead',
+    attempts: 0,
+    lastErrorCode: 'invalid_payload',
+    history: [],
+  });
+  for (const row of blocked) {
+    expect(await stateOf(a, row.id)).toMatchObject({ state: 'queued', attempts: 0 });
+  }
+};
+
+const sqliteOnlyPayloadAtClaim: Case = async ({ a, executorA }) => {
+  const raw = '{}\u0000garbage';
+  expect(() => JSON.parse(raw)).toThrow();
+  const checked = await executorA.all<{ ok: number }>({
+    sql: 'SELECT json_valid(?) AS ok',
+    params: [raw],
+  });
+  expect(checked[0]?.ok).toBe(1);
+  const broken = await enqueued(a, { runAt: PAST });
+  await corruptPayload(executorA, broken.id, raw);
+  const sound = await enqueued(a, { runAt: PAST_PLUS_ONE });
+  expect(present(await claimOf(a, 1), 'a JavaScript-readable claim').id).toBe(sound.id);
+  expect(await stateOf(a, broken.id)).toMatchObject({
+    state: 'dead',
+    attempts: 0,
+    lastErrorCode: 'invalid_payload',
+    history: [],
+  });
+  expect(await claimOf(a, 2, { id: broken.id })).toBeNull();
+  expect(await brokenRunningJobs(executorA)).toBe(0);
+};
+
 export const jobContractCases: ReadonlyMap<string, Case> = new Map<string, Case>([
   ['concurrent claims', concurrentClaims],
   ['same-resource exclusivity', sameResourceExclusivity],
@@ -679,6 +1001,25 @@ export const jobContractCases: ReadonlyMap<string, Case> = new Map<string, Case>
   ['settle after expiry without takeover succeeds', settleAfterExpiry],
   ['schedule sync without conflict succeeds', syncWithoutConflict],
   ['schedule sync with a conflicting interval rolls back', syncConflictRollsBack],
+  [
+    'lease expiry between the statements of a claim stays consistent',
+    leaseExpiresBetweenClaimStatements,
+  ],
+  [
+    'a lease that lapses right after the grant leaves a reapable claim',
+    leaseExpiresRightAfterGrant,
+  ],
+  ['a fault between claim statements rolls the claim back', faultMidClaimRollsBack],
+  ['a slot boundary inside a tick fires exactly one slot', slotBoundaryInsideTick],
+  [
+    'corrupt payload scan progresses past valid resource-blocked rows',
+    corruptPayloadBehindBlockedRows,
+  ],
+  ['a stored payload accepted only by SQLite is dead before claim', sqliteOnlyPayloadAtClaim],
+  [
+    'a corrupted queued payload is dead with invalid_payload and the queue moves',
+    corruptedPayloadAtClaim,
+  ],
 ]);
 
 export function assertJobFixture(
@@ -706,10 +1047,15 @@ export function describeJobContract(name: string, make: () => Promise<JobContrac
     for (const [caseName, run] of jobContractCases) {
       it(
         caseName,
-        async () => {
+        async (context) => {
           const fixture = await make();
           assertJobFixture(fixture);
-          await run(fixture);
+          try {
+            await run(fixture);
+          } catch (error) {
+            if (error instanceof JobContractUnsupported) context.skip(error.message);
+            throw error;
+          }
         },
         CASE_TIMEOUT_MS,
       );

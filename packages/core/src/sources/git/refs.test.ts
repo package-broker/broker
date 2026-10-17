@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createPolicyFetch, type UpstreamCredential } from '../policy-fetch.js';
 import { createOutboundPolicy } from '../url-policy.js';
 import { DELIM, FLUSH, GitRemoteError, encodePkt } from './pkt-line.js';
-import { GitRefsError, MAX_LS_REFS_BYTES, lsRefs } from './refs.js';
+import { GitRefsError, MAX_LS_REFS_BYTES, discoverCapabilities, lsRefs } from './refs.js';
 
 const SECRET = 'sek-ret-token-123';
 const REPO = 'https://git.example.com/acme/lib.git';
@@ -540,5 +540,66 @@ describe('lsRefs', () => {
     const { policyFetch } = harness(advertResponse(advertisement(), 'text/plain'));
     const error = await lsRefs(policyFetch, REPO, credential).catch((e: Error) => e);
     expect(String((error as Error).message)).not.toContain(SECRET);
+  });
+});
+
+describe('lsRefs advertised capabilities', () => {
+  const report = async (caps?: string[]) => {
+    const seen: unknown[] = [];
+    const { policyFetch } = harness(advertResponse(advertisement(caps)));
+    await lsRefs(policyFetch, REPO, undefined, (capabilities) => seen.push(capabilities));
+    return seen;
+  };
+
+  it('reports filter support when the fetch capability lists filter', async () => {
+    expect(await report(['ls-refs=unborn', 'fetch=shallow wait-for-done filter'])).toEqual([
+      { filter: true },
+    ]);
+  });
+
+  it('reports no filter support when the fetch capability omits it', async () => {
+    expect(await report(['ls-refs=unborn', 'fetch=shallow'])).toEqual([{ filter: false }]);
+  });
+
+  it('reports no filter support when fetch is not advertised', async () => {
+    expect(await report(['ls-refs=unborn'])).toEqual([{ filter: false }]);
+  });
+
+  it('does not report capabilities when discovery fails', async () => {
+    const seen: unknown[] = [];
+    const { policyFetch } = harness(advertResponse(advertisement(), 'text/plain'));
+    await expect(
+      lsRefs(policyFetch, REPO, undefined, (capabilities) => seen.push(capabilities)),
+    ).rejects.toBeInstanceOf(GitRefsError);
+    expect(seen).toEqual([]);
+  });
+});
+
+describe('discoverCapabilities', () => {
+  it.each([true, false])(
+    'discovers filter=%s with only an advertisement request',
+    async (filter) => {
+      const { policyFetch, hops } = harness(
+        advertResponse(
+          advertisement(['ls-refs', filter ? 'fetch=shallow filter' : 'fetch=shallow']),
+        ),
+        () => {
+          throw new Error('must not list refs');
+        },
+      );
+      expect(await discoverCapabilities(policyFetch, REPO, credential)).toEqual({ filter });
+      expect(hops).toHaveLength(1);
+      expect(hops[0]!.method).toBe('GET');
+      expect(hops[0]!.headers.has('authorization')).toBe(true);
+    },
+  );
+
+  it('normalizes malformed discovery packets without listing refs', async () => {
+    const { policyFetch, hops } = harness(advertResponse(new TextEncoder().encode('0030abc')));
+    await expect(discoverCapabilities(policyFetch, REPO)).rejects.toMatchObject({
+      name: 'GitRefsError',
+      code: 'bad_response',
+    });
+    expect(hops).toHaveLength(1);
   });
 });

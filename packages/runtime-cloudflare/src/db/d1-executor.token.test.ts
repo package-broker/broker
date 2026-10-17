@@ -260,3 +260,28 @@ describe('D1 token lookup scope mutation', () => {
     }
   }, 120_000);
 });
+
+describe('D1 token lookup SQL mutation', () => {
+  it('catches a null project_token_max_scope selected by lookupToken', async () => {
+    let mutations = 0;
+    await expect(
+      tokenContractCases.projectCap(openTokenContractDatabase, (executor): SqlExecutor => ({
+        driver: executor.driver,
+        batch: executor.batch.bind(executor),
+        all: (statement) => {
+          if (statement.sql.includes('"p"."token_max_scope" as "project_token_max_scope"')) {
+            mutations += 1;
+          }
+          return executor.all({
+            ...statement,
+            sql: statement.sql.replace(
+              '"p"."token_max_scope" as "project_token_max_scope"',
+              'null as "project_token_max_scope"',
+            ),
+          });
+        },
+      })),
+    ).rejects.toThrow(/to deeply equal/);
+    expect(mutations).toBeGreaterThan(0);
+  }, 120_000);
+});

@@ -1,3 +1,4 @@
+import type { AuthenticatedActor } from './fence.js';
 import type { Principal, RequestContext, RouteBoundary } from '../plugin.js';
 import { buildOrganizationActor } from './actor.js';
 import type { ActorAccessSnapshot, OrganizationActor } from './actor.js';
@@ -181,4 +182,19 @@ export function organizationActorOf(ctx: RequestContext): OrganizationActor | nu
   const actor = buildOrganizationActor('organization', snapshot.actor);
   if (actor === null) return null;
   return Object.freeze({ ...actor, permissions: readOnlyView(actor.permissions) });
+}
+
+export function authenticatedActorOf(ctx: RequestContext): AuthenticatedActor | null {
+  const snapshot = snapshots.get(ctx);
+  if (
+    snapshot?.principal?.kind !== 'user' ||
+    snapshot.sessionId === null ||
+    snapshot.actor == null ||
+    snapshot.actor.user.id !== snapshot.principal.id
+  )
+    return null;
+  return Object.freeze({
+    userId: snapshot.principal.id,
+    sessionId: snapshot.sessionId,
+  }) as AuthenticatedActor;
 }

@@ -1,3 +1,6 @@
+import { setAccessContext } from '../authz/access-context.js';
+import type { AccessContextSnapshot } from '../authz/access-context.js';
+import { engineGrantOf } from '../authz/engine.js';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { OrgContext } from '../db/port.js';
@@ -21,7 +24,12 @@ import type {
 import { forPlugin, noopObservability, safeRecord } from '../platform/observability.js';
 import type { HookErrorHandler } from './access.js';
 import { authorizeRoute, denyAllEngine, ENGINE_PLUGIN, INPUT_PLUGIN } from './authorize.js';
-import type { AuthorizationDecision, AuthorizationEngine, DenyLogger } from './authorize.js';
+import type {
+  AuthorizationDecision,
+  AuthorizationEngine,
+  AuthorizationRequest,
+  DenyLogger,
+} from './authorize.js';
 import { denialResponse } from './denial-page.js';
 import { defaultLog, envelopeResponse, errorResponse } from './errors.js';
 import type { KernelLog } from './errors.js';
@@ -368,6 +376,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     org: OrgContext | null,
     principal: Principal | null,
     projectId: string | null,
+    snapshot: AccessContextSnapshot | null,
   ): Promise<Response> {
     const context: RequestContext = Object.freeze({
       request: c.req.raw,
@@ -382,6 +391,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         initiator: { projectId, tokenId: c.env.scope.fields().tokenId ?? null },
       }),
     });
+    if (snapshot !== null) {
+      try {
+        setAccessContext(context, snapshot);
+      } catch (error) {
+        c.env.guard.reason(hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN));
+        c.env.scope.obs({ plugin: hookPlugin(ENGINE_PLUGIN) }).log({
+          level: 'warn',
+          event: 'authz.error',
+          error_name: reportableErrorName(error),
+          reason_code: hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN),
+        });
+        return denialResponse(c.req.raw, c.env.requestId);
+      }
+    }
     const response: unknown = await route.handler(context);
     if (!(response instanceof Response)) {
       throw new TypeError(`route ${route.method} ${route.path} did not return a Response`);
@@ -403,7 +426,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
     if (permission === null) {
       const org = route.needsOrg === false ? null : await resolveOrg();
-      return invoke(route, c, org, null, null);
+      return invoke(route, c, org, null, null, {
+        principal: null,
+        projectId: null,
+        boundary: 'none',
+        sessionId: null,
+        actor: null,
+        rateKey: { stage: 'anonymous', ip: null, routeClass: 'none' },
+      });
     }
 
     const org = await resolveOrg();
@@ -448,19 +478,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         reason_code: reason,
       });
     };
-    const decision = await authorizeRoute(
-      {
-        request: c.req.raw,
-        org,
-        route: {
-          plugin: route.plugin,
-          method: route.method,
-          path: route.path,
-          permission,
-          ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
-        },
-        params: Object.freeze({ ...c.req.param() }),
+    const authorizationRequest: AuthorizationRequest = {
+      request: c.req.raw,
+      org,
+      route: {
+        plugin: route.plugin,
+        method: route.method,
+        path: route.path,
+        permission,
+        ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
       },
+      params: Object.freeze({ ...c.req.param() }),
+    };
+    const decision = await authorizeRoute(
+      authorizationRequest,
       observedEngine,
       accessChecks,
       onHookError,
@@ -476,7 +507,31 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       return denialResponse(c.req.raw, requestId);
     }
     scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
-    return invoke(route, c, org, decision.principal, decision.projectId);
+    const grant = engineGrantOf(authorizationRequest);
+    if (grant === null) return invoke(route, c, org, decision.principal, decision.projectId, null);
+    if (
+      route.boundary === 'package' ||
+      grant.principal.kind !== decision.principal.kind ||
+      grant.principal.id !== decision.principal.id ||
+      grant.projectId !== decision.projectId
+    ) {
+      onHookError({ plugin: ENGINE_PLUGIN, error: new TypeError('inconsistent engine grant') });
+      return denialResponse(c.req.raw, requestId);
+    }
+    const snapshot: AccessContextSnapshot = {
+      principal: grant.principal,
+      projectId: grant.projectId,
+      boundary: route.boundary ?? 'none',
+      sessionId: grant.sessionId,
+      actor: grant.actor,
+      rateKey: {
+        stage: 'authenticated',
+        tokenSelector: grant.tokenSelector,
+        principalId: grant.principal.id,
+        routeClass: route.boundary ?? 'none',
+      },
+    };
+    return invoke(route, c, org, decision.principal, decision.projectId, snapshot);
   }
 
   const app = new Hono<KernelEnv>();

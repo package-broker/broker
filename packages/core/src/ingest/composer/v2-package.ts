@@ -1,5 +1,5 @@
 import { packageKey, PackageNameError } from '../../catalogue/names.js';
-import { isValidPattern, matchesPattern } from '../../catalogue/patterns.js';
+import { isPatternSyntax, matchesPattern } from '../../catalogue/patterns.js';
 import type { VersionInput } from '../../db/catalogue.js';
 import { isoTimestamp, type Clock } from '../../ids.js';
 import {
@@ -112,7 +112,7 @@ function listing(root: ComposerRoot, key: string): boolean | null {
   if (patterns.length > MAX_UPSTREAM_PATTERNS) return null;
   for (const raw of patterns) {
     const pattern = raw.toLowerCase();
-    if (pattern.length > MAX_UPSTREAM_PATTERN_LENGTH || !isValidPattern(pattern)) return null;
+    if (!isPatternSyntax(pattern, MAX_UPSTREAM_PATTERN_LENGTH)) return null;
     if (matchesPattern(pattern, key)) return true;
   }
   return false;

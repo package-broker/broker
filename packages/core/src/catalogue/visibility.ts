@@ -1,6 +1,6 @@
 import type { CatalogueSourceType } from '../db/catalogue.js';
 import type { NameEcosystem } from './names.js';
-import { matchesPattern, patternAdmits } from './patterns.js';
+import { isValidPattern, matchesPattern, patternAdmits } from './patterns.js';
 
 export type VisibilityOrigin = 'explicit' | 'pattern' | 'subscription';
 export type VisibilityPackageStatus = 'active' | 'removed_upstream';
@@ -75,11 +75,7 @@ const servesProject = (source: VisibilitySource, project: VisibilityProject): bo
 const compare = (a: string | number, b: string | number): number => (a < b ? -1 : a > b ? 1 : 0);
 
 function patternHits(pattern: string, key: string): boolean {
-  try {
-    return matchesPattern(pattern, key);
-  } catch {
-    return true;
-  }
+  return !isValidPattern(pattern) || matchesPattern(pattern, key);
 }
 
 export function deriveVisibility(config: VisibilityConfig): VisibilityRow[] {

@@ -5,21 +5,38 @@ import type {
   Statement,
   StatementResult,
 } from '@package-broker/core/db/port';
+import type {
+  D1Database,
+  D1PreparedStatement,
+  D1Result as WorkersD1Result,
+} from '@cloudflare/workers-types';
 
-export interface D1Result {
-  readonly results?: unknown[];
-  readonly meta?: { readonly changes?: number };
-}
+export type D1Result = Partial<Pick<WorkersD1Result, 'results'>> & {
+  readonly meta?: Partial<Pick<WorkersD1Result['meta'], 'changes'>>;
+};
 
-export interface D1PreparedStatementLike {
-  bind(...values: unknown[]): D1PreparedStatementLike;
-  all(): Promise<D1Result>;
-}
+type D1PortValue<T> = T extends D1PreparedStatement
+  ? D1PreparedStatementLike
+  : T extends WorkersD1Result
+    ? D1Result
+    : T extends Promise<infer Value>
+      ? Promise<D1PortValue<Value>>
+      : T extends (infer Value)[]
+        ? D1PortValue<Value>[]
+        : T;
 
-export interface D1DatabaseLike {
-  prepare(sql: string): D1PreparedStatementLike;
-  batch(statements: D1PreparedStatementLike[]): Promise<D1Result[]>;
-}
+// Preserve method variance so the real binding can accept the reduced statement port.
+type D1PortMethods<T> = {
+  [Key in keyof T]: T[Key] extends (...args: infer Args) => infer Result
+    ? {
+        method(...args: { [Index in keyof Args]: D1PortValue<Args[Index]> }): D1PortValue<Result>;
+      }['method']
+    : never;
+};
+
+export type D1PreparedStatementLike = D1PortMethods<Pick<D1PreparedStatement, 'bind' | 'all'>>;
+
+export type D1DatabaseLike = D1PortMethods<Pick<D1Database, 'prepare' | 'batch'>>;
 
 export const D1_MAX_BOUND_PARAMETERS = 100;
 

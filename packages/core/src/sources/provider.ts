@@ -119,6 +119,12 @@ export interface FormEvidence {
   readonly validators: Validators;
 }
 
+/** A selected member the description left out of `members`. */
+export interface SkippedMember {
+  readonly version: string;
+  readonly reason: 'member_too_large';
+}
+
 declare const descriptionBrand: unique symbol;
 const created = new WeakSet<object>();
 
@@ -130,8 +136,13 @@ export interface PackageDescription {
   readonly members: AsyncIterable<VersionCandidate>;
   readonly distTags?: Readonly<Record<string, string>>;
   readonly validators: DocumentValidators;
-  /** Read after `members` is exhausted; true only if every requested document was returned and parsed fully. */
+  /**
+   * Read after `members` is exhausted; true only if every requested document was returned and
+   * parsed fully and no member was skipped.
+   */
   readonly upstreamComplete: boolean;
+  /** Read after `members` is exhausted. */
+  readonly skippedMembers: readonly SkippedMember[];
 }
 
 export function isPackageDescription(value: unknown): value is PackageDescription {
@@ -218,6 +229,8 @@ export interface PackageDescriptionInput {
   readonly validators: DocumentValidators;
   /** Every requested document came back 200 or 304 and parsed fully; a function is read after the members are drained. */
   readonly documentsComplete: boolean | (() => boolean);
+  /** Default empty; a function is read after the members are drained. */
+  readonly skippedMembers?: readonly SkippedMember[] | (() => readonly SkippedMember[]);
 }
 
 export function createPackageDescription(input: PackageDescriptionInput): PackageDescription {
@@ -264,6 +277,13 @@ export function createPackageDescription(input: PackageDescriptionInput): Packag
       };
     },
   };
+  const skippedMembers = (): readonly SkippedMember[] => {
+    const listed =
+      typeof input.skippedMembers === 'function'
+        ? input.skippedMembers()
+        : (input.skippedMembers ?? []);
+    return Object.freeze(listed.map(({ version, reason }) => Object.freeze({ version, reason })));
+  };
   const description = {
     name: input.name,
     snapshot: input.snapshot,
@@ -276,7 +296,10 @@ export function createPackageDescription(input: PackageDescriptionInput): Packag
         typeof input.documentsComplete === 'function'
           ? input.documentsComplete()
           : input.documentsComplete;
-      return documents && exhausted && !failed;
+      return documents && exhausted && !failed && skippedMembers().length === 0;
+    },
+    get skippedMembers() {
+      return skippedMembers();
     },
   } as PackageDescription;
   created.add(description);

@@ -299,7 +299,7 @@ export interface JobScheduleTable {
   enabled: Generated<number>;
 }
 
-/** Mirrors `blob` in `migrations/0001_init.sql` and `migrations/0006_ports.sql`. */
+/** Mirrors `blob` in `migrations/0001_init.sql`, `migrations/0006_ports.sql` and `migrations/0009_upstream_state_content_index.sql`. */
 export interface BlobTable {
   id: string;
   org_id: string;
@@ -316,6 +316,7 @@ export interface BlobTable {
   created_at: Generated<string>;
   purge_generation: string | null;
   purge_lease_until: string | null;
+  published_at: string | null;
 }
 
 export type Ecosystem = 'composer' | 'npm';

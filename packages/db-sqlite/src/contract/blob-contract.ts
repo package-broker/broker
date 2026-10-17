@@ -3,6 +3,7 @@ import type { OrgContext } from '@package-broker/core/db/port';
 import {
   BlobBusyError,
   BlobConflictError,
+  BlobDigestMismatchError,
   BlobRangeError,
   BlobSizeMismatchError,
   BlobValidationError,
@@ -397,7 +398,7 @@ export function describeBlobContract(name: string, make: () => Promise<BlobContr
       const error = await rejection(
         f.store.put(org, claimed, streamOf(wrong), { size: wrong.length, ...PLAIN }),
       );
-      expectErrorOf(error, ...DIGEST_ERRORS);
+      expect(error).toBeInstanceOf(BlobDigestMismatchError);
       expect(await f.store.head(org, claimed)).toBeNull();
       expect(await f.store.get(org, claimed)).toBeNull();
       expect(await f.stagedObjects()).toBe(0);
@@ -411,7 +412,7 @@ export function describeBlobContract(name: string, make: () => Promise<BlobContr
       const error = await rejection(
         f.store.put(org, key, streamOf(bytes('evil bytes')), { size: good.length, ...PLAIN }),
       );
-      expectErrorOf(error, ...DIGEST_ERRORS);
+      expect(error).toBeInstanceOf(BlobDigestMismatchError);
       expect(await readText(f.store, org, key)).toBe('good bytes');
     });
 

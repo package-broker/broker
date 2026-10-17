@@ -5,7 +5,7 @@ import { MigrationLockedError } from '@package-broker/db-sqlite/migrations/lock'
 import { migrate, MigrationChecksumError } from '@package-broker/db-sqlite/migrations/runner';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
-import { BuiltManifestError, loadBuiltMigrations } from './built-manifest.js';
+import { BuiltManifestError, loadBuiltMigrations, routesAreValid } from './built-manifest.js';
 
 function reportError(error: unknown): void {
   const name = (error as { name?: unknown } | null | undefined)?.name;
@@ -24,6 +24,7 @@ export async function runMigrateSqlite(o: {
 }): Promise<number> {
   try {
     const sources = await loadBuiltMigrations(o.outDir);
+    if (!(await routesAreValid(o.outDir))) return 2;
     const opened = openBetterSqliteExecutor(o.file);
     try {
       const result = await migrate(opened.executor, sources, { holder: ulid(), dryRun: o.dryRun });

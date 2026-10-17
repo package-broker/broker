@@ -1,6 +1,9 @@
 export type DbErrorKind =
   'unique' | 'foreign_key' | 'not_null' | 'check' | 'busy' | 'too_big' | 'unknown';
 
+/** UNIQUE constraint raised by every access_mutation_guard insert: fence guards, assertCheck postconditions and the cache epoch bump check. */
+export const ACCESS_MUTATION_GUARD_CONSTRAINT = 'access_mutation_guard.key';
+
 export interface DbErrorOptions {
   readonly cause?: unknown;
   readonly constraint?: string | undefined;

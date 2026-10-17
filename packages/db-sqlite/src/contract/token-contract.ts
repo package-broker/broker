@@ -6,6 +6,7 @@ import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { createAccessRepository } from '../repositories/access.js';
+import { createGrantRepository } from '../repositories/grant.js';
 import { createTokenRepository } from '../repositories/token.js';
 import { seedTwoOrganizations } from './two-organizations.js';
 
@@ -244,13 +245,32 @@ const creatorRemoved: Case = (open, wrap) =>
       const plaintext = await insertToken(executor, ctx, 'svc');
       const before = await lookup(executor, ctx, 'alpha');
       expect(before?.projectPermissions).toEqual(PERMISSIONS);
+      const beforeDecision = await decision(executor, ctx, plaintext, 'alpha');
+      expect(beforeDecision).toMatchObject({
+        allow: true,
+        principal: { kind: 'service', id: SERVICE },
+      });
       await executor.batch([
         st(
-          'DELETE FROM access_grant WHERE org_id = ? AND subject_value = ?',
+          "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'contract-role', 'org:grants:write')",
           ctx.orgId,
-          'contract@example.test',
         ),
       ]);
+      const grants = createGrantRepository(executor, {
+        holderInput: () => ({ kind: 'fresh', now: iso(0), providers: anchors }),
+      });
+      const [grant] = await grants.listOrganization(ctx);
+      expect(grant).toBeDefined();
+      expect(
+        await grants.deleteOrganization(
+          ctx,
+          mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
+            grant: grant!.revision,
+          }),
+          grant!.id,
+          'contract-remove-creator',
+        ),
+      ).toBe('deleted');
       expect(
         await executor.all(st('SELECT id FROM access_grant WHERE org_id = ?', ctx.orgId)),
       ).toEqual([]);
@@ -258,10 +278,7 @@ const creatorRemoved: Case = (open, wrap) =>
         { status: 'active' },
       ]);
       expect(await lookup(executor, ctx, 'alpha')).toEqual(before);
-      expect(await decision(executor, ctx, plaintext, 'alpha')).toMatchObject({
-        allow: true,
-        principal: { kind: 'service', id: SERVICE },
-      });
+      expect(await decision(executor, ctx, plaintext, 'alpha')).toEqual(beforeDecision);
     },
     wrap,
   );

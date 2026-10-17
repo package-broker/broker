@@ -595,3 +595,89 @@ describe('finish', () => {
     expect(seen[0]?.url).toBe(CERTS_URL);
   });
 });
+
+describe('configuration key hardening', () => {
+  const GROUPS = 'groups are not supported until spike T172';
+
+  it('refuses an allowed key that is inherited (inherited key)', () => {
+    const { audience, ...rest } = config() as unknown as Record<string, unknown>;
+    const inherited = Object.create({ audience }) as Record<string, unknown>;
+    Object.assign(inherited, rest);
+    expect(cloudflareAccessProblems(inherited)).toContain('unknown configuration key');
+  });
+
+  it('refuses an allowed key that is non-enumerable (non-enumerable key)', () => {
+    const hidden = config() as unknown as Record<string, unknown>;
+    Object.defineProperty(hidden, 'audience', { value: AUDIENCE, enumerable: false });
+    expect(cloudflareAccessProblems(hidden)).toContain('unknown configuration key');
+  });
+
+  it('refuses a groups key inside the policy (policy.groups)', () => {
+    const policy = { verifiedDomains: ['example.test'], autoJoin: false, groups: ['staff'] };
+    expect(cloudflareAccessProblems(config({ policy }))).toContain(GROUPS);
+  });
+
+  it('refuses an inherited or non-enumerable groups key inside the policy', () => {
+    const inherited = Object.create({ groups: ['staff'] }) as Record<string, unknown>;
+    Object.assign(inherited, { verifiedDomains: ['example.test'], autoJoin: false });
+    expect(cloudflareAccessProblems(config({ policy: inherited }))).toContain(GROUPS);
+    const hidden: Record<string, unknown> = { verifiedDomains: ['example.test'], autoJoin: false };
+    Object.defineProperty(hidden, 'groups', { value: [], enumerable: false });
+    expect(cloudflareAccessProblems(config({ policy: hidden }))).toContain(GROUPS);
+  });
+
+  it('refuses an over-cap verifiedDomains list before reading its entries', () => {
+    const domains = Array.from({ length: 33 }, (_v, index) => `d${index}.example.test`);
+    let reads = 0;
+    const watched = new Proxy(domains, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) {
+          reads += 1;
+        }
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    const problems = cloudflareAccessProblems(
+      config({ policy: { verifiedDomains: watched, autoJoin: false } }),
+    );
+    expect(problems).toContain('policy: verifiedDomains must list at most 32 domains');
+    expect(reads).toBe(0);
+  });
+});
+
+describe('policy snapshot', () => {
+  const ctx: IdentityContext = {
+    clock: { now: () => new Date(0) },
+    env: () => undefined,
+    fetch: () => Promise.reject(new Error('no network')),
+  };
+
+  it('refuses an unknown policy key', () => {
+    const policy = { verifiedDomains: ['example.test'], autoJoin: false, extra: true };
+    expect(cloudflareAccessProblems(config({ policy }))).toContain(
+      'policy: unsupported key "extra"',
+    );
+  });
+
+  it('refuses an inherited policy key', () => {
+    const policy = Object.create({ autoJoin: false }) as Record<string, unknown>;
+    policy['verifiedDomains'] = ['example.test'];
+    expect(cloudflareAccessProblems(config({ policy }))).toContain(
+      'policy: keys must be own, enumerable string keys',
+    );
+  });
+
+  it('reads verifiedDomains once and builds the provider from that snapshot', () => {
+    let reads = 0;
+    const policy = {
+      autoJoin: false,
+      get verifiedDomains(): string[] {
+        reads += 1;
+        return reads === 1 ? ['example.test'] : ['evil.example'];
+      },
+    };
+    const provider = createCloudflareAccessProvider(config({ policy }), ctx);
+    expect(reads).toBe(1);
+    expect(provider.policy.verifiedDomains).toEqual(['example.test']);
+  });
+});

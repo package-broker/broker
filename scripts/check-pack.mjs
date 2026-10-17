@@ -17,7 +17,9 @@ const CORE_PACKAGE = '@package-broker/core';
 const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc']);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
-const STATIC_REQUIRED_FILES = {};
+const STATIC_REQUIRED_FILES = {
+  'db-sqlite': ['migrations/0010_job_claim_index.sql'],
+};
 const MIGRATION_PACKAGES = ['db-sqlite'];
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };
 

@@ -189,6 +189,7 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
 
   return {
     async issue(ctx, authenticated, fence, request) {
+      if (authenticated.principal.kind !== 'user') return fail('forbidden');
       const input = {
         name: request.name,
         scope: request.scope,

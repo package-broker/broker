@@ -213,3 +213,73 @@ export function routeBoundaryProblems(
   }
   return problems;
 }
+
+const API_EXEMPT_PATHS: ReadonlySet<string> = new Set([
+  '/_pb/ui',
+  '/_pb/ui/assets/:file',
+  '/_pb/mcp',
+  '/_pb/openapi.json',
+]);
+
+export function routeApiProblems(
+  route: { readonly path: unknown; readonly method: unknown; readonly api?: unknown },
+  label: string,
+  options: { requireApi?: boolean } = {},
+): string[] {
+  const underApi = typeof route.path === 'string' && route.path.startsWith('/_pb/');
+  if (route.api === undefined) {
+    return underApi && options.requireApi === true ? [`${label}: api is required under /_pb/`] : [];
+  }
+  if (!underApi) return [`${label}: api is only allowed under /_pb/`];
+  if (typeof route.api !== 'object' || route.api === null || Array.isArray(route.api)) {
+    return [`${label}: api must be an API slot or exemption`];
+  }
+  const slot = route.api as Record<string, unknown>;
+  if ('exempt' in slot) {
+    if (Reflect.ownKeys(slot).some((key) => key !== 'exempt')) {
+      return [`${label}: api exemption must only contain exempt`];
+    }
+    if (!API_EXEMPT_PATHS.has(route.path as string)) {
+      return [`${label}: api exemption is only allowed on non-API core routes`];
+    }
+    if (typeof slot.exempt !== 'string' || slot.exempt.length < 1 || slot.exempt.length > 120) {
+      return [`${label}: api exemption reason must be 1 to 120 characters`];
+    }
+    return [];
+  }
+  const problems: string[] = [];
+  const fail = (message: string): void => {
+    problems.push(`${label}: ${message}`);
+  };
+  if (typeof slot.operationId !== 'string' || !/^[a-z][A-Za-z0-9]{2,63}$/.test(slot.operationId)) {
+    fail('api operationId must match ^[a-z][A-Za-z0-9]{2,63}$');
+  }
+  if (typeof slot.summary !== 'string' || slot.summary.length < 1 || slot.summary.length > 120) {
+    fail('api summary must be 1 to 120 characters');
+  }
+  if (
+    !Array.isArray(slot.tags) ||
+    slot.tags.length < 1 ||
+    slot.tags.length > 8 ||
+    !slot.tags.every((tag: unknown) => typeof tag === 'string' && tag.length > 0)
+  ) {
+    fail('api tags must contain 1 to 8 non-empty strings');
+  }
+  if (
+    typeof slot.responses !== 'object' ||
+    slot.responses === null ||
+    Array.isArray(slot.responses)
+  ) {
+    fail('api responses must be a status-code record');
+  } else {
+    const keys = Object.keys(slot.responses);
+    if (!keys.every((key) => /^[1-5][0-9]{2}$/.test(key))) {
+      fail('api response keys must be integers from 100 to 599');
+    }
+    if (!keys.some((key) => /^2[0-9]{2}$/.test(key))) {
+      fail('api responses must include a 2xx response');
+    }
+  }
+  if (slot.mcp === true && route.method !== 'GET') fail('api mcp true requires GET');
+  return problems;
+}

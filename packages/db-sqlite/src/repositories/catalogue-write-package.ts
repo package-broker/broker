@@ -1,9 +1,13 @@
 import { sql, type SqlBool } from 'kysely';
-import { catalogueWriteGuard, type CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
+import { type CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
 import { MAX_KEY_LENGTH, type NameEcosystem } from '@package-broker/core/catalogue/names';
 import type { JobGuard } from '@package-broker/core/platform/job-repository';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
+import {
+  registerCatalogueWriteGuard,
+  assertCatalogueWriteGuard,
+} from '../internal/catalogue-write-guard.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { rederiveStatements } from './visibility-derive.js';
 
@@ -27,12 +31,8 @@ export interface PackageUpsertPlan {
   readonly statements: readonly Statement[];
 }
 
-const guardOrgs = new WeakMap<CatalogueWriteGuard, string>();
-
 export function createCatalogueWriteGuard(ctx: OrgContext, guard: JobGuard): CatalogueWriteGuard {
-  const built = catalogueWriteGuard(jobLeaseGuard(ctx, guard));
-  guardOrgs.set(built, ctx.orgId);
-  return built;
+  return registerCatalogueWriteGuard(ctx, jobLeaseGuard(ctx, guard));
 }
 
 function validated(input: PackageUpsertInput): PackageUpsertInput {
@@ -80,11 +80,7 @@ export function packageUpsertStatements(
   guard: CatalogueWriteGuard,
   input: PackageUpsertInput,
 ): PackageUpsertPlan {
-  if (guardOrgs.get(guard) !== ctx.orgId) {
-    throw new TypeError(
-      'the catalogue write guard was not built by createCatalogueWriteGuard for this organization',
-    );
-  }
+  assertCatalogueWriteGuard(ctx, guard);
   const { sourceId, ecosystem, key, description } = validated(input);
   const candidateId = newOpId();
 

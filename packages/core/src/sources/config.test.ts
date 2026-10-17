@@ -694,7 +694,7 @@ describe('round 3', () => {
     );
     const patterns = Array.from(
       { length: 64 },
-      (_, i) => `v${String(i).padStart(2, '0')}/${'q'.repeat(190)}*`,
+      (_, i) => `v${String(i).padStart(2, '0')}/${'q'.repeat(45)}*`,
     );
     const hosts = Array.from(
       { length: 64 },
@@ -715,6 +715,16 @@ describe('round 3', () => {
       },
     );
     expect(r.ok, JSON.stringify(!r.ok && r.problems)).toBe(true);
+  });
+
+  it('refuses a 51-byte selection pattern', () => {
+    expect(
+      problems(
+        parse('composer_repository', 'composer', 'https://repo.example.com', {
+          selection: { packages: [], patterns: [`v00/${'q'.repeat(46)}*`] },
+        }),
+      ),
+    ).toEqual(['selection.patterns']);
   });
 
   it('names the config limit in characters', () => {

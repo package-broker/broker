@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DbError, classifySqliteError } from '../db/errors.js';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError, classifySqliteError } from '../db/errors.js';
 import type { SqlExecutor, Statement, StatementResult } from '../db/port.js';
 import {
   classifyFailure,
@@ -752,5 +752,29 @@ describe('runFenced with every fence kind', () => {
     await expect(
       runFenced(executor, issuedFences().delegated, fenceGuard([]), [rename], {}),
     ).rejects.toThrow(TypeError);
+  });
+});
+
+describe('guard constraint on a real node:sqlite database', () => {
+  it('names the guard constraint access_mutation_guard.key', () => {
+    expect(ACCESS_MUTATION_GUARD_CONSTRAINT).toBe('access_mutation_guard.key');
+  });
+
+  it('a forced guard failure carries the guard constraint', async () => {
+    const h = harness();
+    const error = await h.executor.batch([...revisionGuard(99)]).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(DbError);
+    expect((error as DbError).kind).toBe('unique');
+    expect((error as DbError).constraint).toBe(ACCESS_MUTATION_GUARD_CONSTRAINT);
+  });
+
+  it('another unique failure carries its own constraint', async () => {
+    const h = harness();
+    const dup: Statement = {
+      sql: "INSERT INTO target (id, revision, name) VALUES ('r1', 1, 'dup')",
+      params: [],
+    };
+    const error = await h.executor.batch([dup]).catch((caught: unknown) => caught);
+    expect((error as DbError).constraint).toBe('target.id');
   });
 });

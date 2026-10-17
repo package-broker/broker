@@ -244,6 +244,6 @@ describe('authenticateToken', () => {
     deferredDispatch(() => {
       throw new Error('sync');
     });
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   });
 });

@@ -9,27 +9,39 @@ const EMPTY_SLOT = -1;
 const INITIAL_SLOTS = 8;
 const NO_BYTES = new Uint8Array(0);
 
+/** Final selector segment that selects each element of the array at the preceding path. */
+export const ARRAY_ELEMENTS = '[]';
+
 export type JsonExtractErrorCode =
   | 'member_too_large'
   | 'document_too_large'
   | 'too_many_members'
   | 'duplicate_key'
   | 'not_object'
+  | 'not_array'
   | 'invalid_member';
 
 export class JsonExtractError extends Error {
   readonly code: JsonExtractErrorCode;
   readonly offset: number;
+  /** Set for `not_array`: the path of the offending value. Never part of the message. */
+  readonly path: readonly string[] | undefined;
 
-  constructor(code: JsonExtractErrorCode, offset: number) {
+  constructor(code: JsonExtractErrorCode, offset: number, path?: readonly string[]) {
     super(`Invalid JSON member extraction (${code}) at byte ${offset}`);
     this.name = 'JsonExtractError';
     this.code = code;
     this.offset = offset;
+    this.path = path;
   }
 }
 
-/** Object key names from the document root; '*' matches any key. Arrays are never entered. */
+/**
+ * Object key names from the document root; '*' matches any key but never an array element.
+ * `ARRAY_ELEMENTS` as the last segment, and only there, selects each element of the array at
+ * the preceding path; an object key spelled `[]` is matched only by '*'. No other arrays are
+ * entered.
+ */
 export type MemberSelector = readonly string[];
 
 export interface ExtractLimits {
@@ -37,8 +49,20 @@ export interface ExtractLimits {
   readonly maxMemberBytes?: number;
   /** Largest size of the whole document. Default 32 MiB. */
   readonly maxDocumentBytes?: number;
-  /** Most distinct keys tracked for duplicate detection in one object. Default 400000. */
+  /**
+   * Most distinct keys tracked for duplicate detection in one object, and most elements in one
+   * array selected with `ARRAY_ELEMENTS`. Default 400000.
+   */
   readonly maxMembersPerLevel?: number;
+}
+
+export interface ExtractOptions extends ExtractLimits {
+  /**
+   * What a value that is not an array does at a path selected with `ARRAY_ELEMENTS`: 'throw'
+   * (default) throws `not_array`; 'report' yields a `notArray` record decided by the value's
+   * first token and skips the value without retaining it.
+   */
+  readonly nonArray?: 'throw' | 'report';
 }
 
 interface ResolvedLimits {
@@ -47,18 +71,60 @@ interface ResolvedLimits {
   readonly maxMembers: number;
 }
 
-export interface ExtractedMember {
+/**
+ * A selected object member (`path`, `raw`), an array element (`index` set, `path` ends with the
+ * decimal index), after the last element of an element-selected array its end record
+ * (`end: true`, `raw` is '[]', `path` is the array path, `count` its number of elements) or, with
+ * `nonArray: 'report'`, a non-array at an element-selected path (`notArray: true`, `raw` is '').
+ */
+export type ExtractedMember =
+  | {
+      readonly path: readonly string[];
+      readonly raw: string;
+      readonly index?: undefined;
+      readonly end?: undefined;
+      readonly count?: undefined;
+      readonly notArray?: undefined;
+    }
+  | {
+      readonly path: readonly string[];
+      readonly raw: string;
+      readonly index: number;
+      readonly end?: undefined;
+      readonly count?: undefined;
+      readonly notArray?: undefined;
+    }
+  | {
+      readonly path: readonly string[];
+      readonly raw: '[]';
+      readonly index?: undefined;
+      readonly end: true;
+      readonly count: number;
+      readonly notArray?: undefined;
+    }
+  | {
+      readonly path: readonly string[];
+      readonly raw: '';
+      readonly index?: undefined;
+      readonly end?: undefined;
+      readonly count?: undefined;
+      readonly notArray: true;
+    };
+
+interface Elements {
   readonly path: readonly string[];
-  readonly raw: string;
+  count: number;
 }
 
 interface Capture {
   readonly path: readonly string[];
+  readonly index?: number;
+  lead?: boolean;
   buffer: Uint8Array;
   length: number;
   from: number;
   depth: number;
-  readonly origin: number;
+  origin: number;
   scopes: (KeyTable | null | undefined)[];
 }
 
@@ -124,7 +190,7 @@ function overlaps(left: MemberSelector, right: MemberSelector): boolean {
   for (let index = 0; index < shared; index += 1) {
     const a = left[index];
     const b = right[index];
-    if (a !== b && a !== '*' && b !== '*') {
+    if (a !== b && a !== '*' && b !== '*' && a !== ARRAY_ELEMENTS && b !== ARRAY_ELEMENTS) {
       return false;
     }
   }
@@ -139,7 +205,14 @@ function positive(name: string, value: number): number {
 }
 
 function isNoise(byte: number): boolean {
-  return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x3a;
+  return (
+    byte === 0x20 ||
+    byte === 0x09 ||
+    byte === 0x0a ||
+    byte === 0x0d ||
+    byte === 0x3a ||
+    byte === 0x2c
+  );
 }
 
 function hashKey(text: string): number {
@@ -190,7 +263,7 @@ async function* chunksOf(
 export function extractMembers(
   source: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>,
   selectors: readonly MemberSelector[],
-  limits: ExtractLimits = {},
+  limits: ExtractOptions = {},
 ): AsyncGenerator<ExtractedMember> {
   const maxMember = positive('maxMemberBytes', limits.maxMemberBytes ?? DEFAULT_MAX_MEMBER_BYTES);
   const maxDocument = positive(
@@ -204,6 +277,12 @@ export function extractMembers(
   if (selectors.length === 0 || selectors.some((selector) => selector.length === 0)) {
     throw new TypeError('Selectors must be non-empty');
   }
+  for (const selector of selectors) {
+    const at = selector.indexOf(ARRAY_ELEMENTS);
+    if (at === 0 || (at !== -1 && at !== selector.length - 1)) {
+      throw new TypeError('ARRAY_ELEMENTS must be the single last segment after an object key');
+    }
+  }
   for (let left = 0; left < selectors.length; left += 1) {
     for (let right = left + 1; right < selectors.length; right += 1) {
       if (overlaps(selectors[left] as MemberSelector, selectors[right] as MemberSelector)) {
@@ -212,28 +291,50 @@ export function extractMembers(
     }
   }
 
-  return extract(source, selectors, { maxMember, maxDocument, maxMembers });
+  const nonArray = limits.nonArray ?? 'throw';
+  if (nonArray !== 'throw' && nonArray !== 'report') {
+    throw new TypeError('nonArray must be throw or report');
+  }
+  return extract(source, selectors, { maxMember, maxDocument, maxMembers }, nonArray);
 }
 
 async function* extract(
   source: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>,
   selectors: readonly MemberSelector[],
   { maxMember, maxDocument, maxMembers }: ResolvedLimits,
+  nonArray: 'throw' | 'report',
 ): AsyncGenerator<ExtractedMember> {
   const tokenizer = new JsonTokenizer({ maxStringBytes: KEY_LIMIT_BYTES });
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  const plain = selectors.filter((selector) => selector.at(-1) !== ARRAY_ELEMENTS);
+  const arrays = selectors
+    .filter((selector) => selector.at(-1) === ARRAY_ELEMENTS)
+    .map((selector) => selector.slice(0, -1));
   const ready: ExtractedMember[] = [];
   const levels: KeyTable[] = [];
   const names: string[] = [];
   let pending: string | null = null;
   let ignoring = 0;
   let capture: Capture | null = null;
+  let awaiting: readonly string[] | null = null;
+  let elements: Elements | null = null;
   let chunk: Uint8Array = NO_BYTES;
   let chunkBase = 0;
 
   const take = (active: Capture, to: number): void => {
-    const start = Math.max(active.from, chunkBase) - chunkBase;
+    let start = Math.max(active.from, chunkBase) - chunkBase;
     const end = to - chunkBase;
+    if (active.lead === true) {
+      while (start < end && isNoise(chunk[start] as number)) {
+        start += 1;
+      }
+      if (start >= end) {
+        active.from = Math.max(active.from, to);
+        return;
+      }
+      active.lead = false;
+      active.origin = chunkBase + start;
+    }
     if (end <= start) {
       return;
     }
@@ -267,7 +368,25 @@ async function* extract(
     } catch {
       throw new JsonExtractError('invalid_member', end);
     }
-    ready.push({ path: active.path, raw });
+    ready.push(
+      active.index === undefined
+        ? { path: active.path, raw }
+        : { path: active.path, raw, index: active.index },
+    );
+  };
+
+  const nextElement = (array: Elements, from: number): void => {
+    capture = {
+      path: [...array.path, String(array.count)],
+      index: array.count,
+      lead: true,
+      buffer: NO_BYTES,
+      length: 0,
+      from,
+      origin: from,
+      depth: 0,
+      scopes: [],
+    };
   };
 
   const track = (seen: KeyTable, name: string, at: number): void => {
@@ -283,8 +402,14 @@ async function* extract(
 
   const onKey = (name: string, end: number, at: number): void => {
     const path = [...names, name];
-    const whole = selectors.some((selector) => selects(selector, path, true));
-    if (!whole && !selectors.some((selector) => selects(selector, path, false))) {
+    const whole = plain.some((selector) => selects(selector, path, true));
+    const array = !whole && arrays.some((selector) => selects(selector, path, true));
+    if (
+      !whole &&
+      !array &&
+      !plain.some((selector) => selects(selector, path, false)) &&
+      !arrays.some((selector) => selects(selector, path, false))
+    ) {
       pending = null;
       tokenizer.skipNext();
       return;
@@ -294,12 +419,26 @@ async function* extract(
     if (whole) {
       pending = null;
       capture = { path, buffer: NO_BYTES, length: 0, from: end, origin: end, depth: 0, scopes: [] };
+    } else if (array) {
+      pending = null;
+      awaiting = path;
     } else {
       pending = name;
     }
   };
 
   const onCaptured = (active: Capture, token: JsonToken): void => {
+    if (active.index !== undefined && active.depth === 0 && elements !== null) {
+      if (token.type === 'endArray') {
+        capture = null;
+        ready.push({ path: elements.path, raw: '[]', end: true, count: elements.count });
+        elements = null;
+        return;
+      }
+      if (elements.count >= maxMembers) {
+        throw new JsonExtractError('too_many_members', token.start);
+      }
+    }
     if (token.type === 'key') {
       const top = active.scopes.length - 1;
       const seen = active.scopes[top] ?? new KeyTable();
@@ -316,6 +455,10 @@ async function* extract(
     }
     if (active.depth === 0) {
       finish(active, token.end);
+      if (active.index !== undefined && elements !== null) {
+        elements.count += 1;
+        nextElement(elements, token.end);
+      }
     }
   };
 
@@ -330,6 +473,23 @@ async function* extract(
       } else if (token.type === 'endObject' || token.type === 'endArray') {
         ignoring -= 1;
       }
+      return;
+    }
+    if (awaiting !== null) {
+      if (token.type !== 'beginArray') {
+        if (nonArray === 'throw') {
+          throw new JsonExtractError('not_array', token.start, awaiting);
+        }
+        ready.push({ path: awaiting, raw: '', notArray: true });
+        awaiting = null;
+        if (token.type === 'beginObject') {
+          ignoring = 1;
+        }
+        return;
+      }
+      elements = { path: awaiting, count: 0 };
+      awaiting = null;
+      nextElement(elements, token.end);
       return;
     }
     if (levels.length === 0) {

@@ -8,13 +8,13 @@ import { describeMigrationContract, type OpenedPair } from './migration-contract
 async function openPair(): Promise<OpenedPair> {
   const directory = await mkdtemp(join(tmpdir(), 'pb-migration-contract-'));
   const path = join(directory, 'contract.sqlite');
-  const first = openNodeSqliteExecutor(path);
+  const first = openNodeSqliteExecutor(path, { d1PatternLimit: true });
   const opened: OpenedExecutor[] = [first];
 
   return {
     executor: first.executor,
     async second() {
-      const second = openNodeSqliteExecutor(path);
+      const second = openNodeSqliteExecutor(path, { d1PatternLimit: true });
       opened.push(second);
       return second.executor;
     },

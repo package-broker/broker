@@ -1,4 +1,4 @@
-import { classifySqliteError } from '@package-broker/core/db/errors';
+import { DbError, classifySqliteError } from '@package-broker/core/db/errors';
 import type {
   SqlExecutor,
   SqlValue,
@@ -21,6 +21,8 @@ export interface D1DatabaseLike {
   batch(statements: D1PreparedStatementLike[]): Promise<D1Result[]>;
 }
 
+export const D1_MAX_BOUND_PARAMETERS = 100;
+
 const SELECT = /^\s*select\b/i;
 
 function assertParam(value: unknown, index: number): void {
@@ -40,6 +42,12 @@ function assertParam(value: unknown, index: number): void {
 }
 
 function assertParams(params: readonly SqlValue[]): void {
+  if (params.length > D1_MAX_BOUND_PARAMETERS) {
+    throw new DbError(
+      'too_big',
+      `too_big: statement binds ${params.length} parameters, D1 allows at most ${D1_MAX_BOUND_PARAMETERS}`,
+    );
+  }
   for (let index = 0; index < params.length; index += 1) {
     assertParam(params[index], index);
   }

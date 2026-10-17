@@ -1,0 +1,36 @@
+name: Plugin proposal
+description: Propose a plugin port or hook, or an adapter built on one
+title: 'plugin: '
+labels: ['plugin']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security vulnerabilities through the [private reporting form](https://github.com/package-broker/broker/security/advisories/new), not through an issue.
+  - type: dropdown
+    id: target
+    attributes:
+      label: Port or hook targeted
+      options:
+        - source (port)
+        - identity (port)
+        - access.check (hook)
+        - auth.resolveIdentity (hook)
+        - auth.mapGroups (hook)
+        - Route
+        - Job
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: First adapter or use case
+    validations:
+      required: true
+  - type: textarea
+    id: in-repository
+    attributes:
+      label: Why it cannot live outside this repository
+    validations:
+      required: true

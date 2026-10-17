@@ -201,7 +201,7 @@ describe('only an organization-kind actor holds organization authority', () => {
 describe('isOrganizationAdmin is read once and must be exactly true', () => {
   it('a false string leaves delete and rename inside the subset rule', async () => {
     const s = setup();
-    s.roles.get.mockResolvedValue(roleOf('r1', ['org:read', 'org:members:write']));
+    s.roles.get.mockResolvedValue(roleOf('r1', ['org:read', 'org:users:write']));
     const actor = {
       kind: 'organization',
       userId: 'actor-1',

@@ -232,8 +232,8 @@ describe('plugin api version and boundary', () => {
     ).not.toThrow();
   });
 
-  it('refuses API 4', () => {
-    expect(() => collectRegistrations([pluginWith([protectedRoute], 4)])).toThrow(/apiVersion 4/);
+  it('refuses API 5', () => {
+    expect(() => collectRegistrations([pluginWith([protectedRoute], 5)])).toThrow(/apiVersion 5/);
   });
 });
 

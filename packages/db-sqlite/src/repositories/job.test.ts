@@ -265,6 +265,66 @@ describe('job repository', () => {
       });
     });
 
+    describe('payload validation parity with json_valid', () => {
+      const nested = (depth: number) => '['.repeat(depth) + ']'.repeat(depth);
+      const sqliteAccepts = async (value: string) =>
+        (await all<{ ok: number }>(executor, 'SELECT json_valid(?) AS ok', [value]))[0]?.ok === 1;
+      const parses = (value: string) => {
+        try {
+          JSON.parse(value);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      it('a payload nested beyond the SQLite depth limit is invalid_payload, not DbError', async () => {
+        const deep = nested(2000);
+        expect(parses(deep)).toBe(true);
+        expect(await sqliteAccepts(deep)).toBe(false);
+        const row = job({ payloadJson: deep });
+        await expect(repo.enqueue(a, row)).rejects.toBeInstanceOf(JobError);
+        await expect(repo.enqueue(a, row)).rejects.toMatchObject({ code: 'invalid_payload' });
+        const [count] = await all<{ n: number }>(executor, 'SELECT count(*) AS n FROM job');
+        expect(count?.n).toBe(0);
+      });
+
+      it('a payload at the SQLite depth limit is stored', async () => {
+        const edge = nested(900);
+        expect(await sqliteAccepts(edge)).toBe(true);
+        expect(await repo.enqueue(a, job({ payloadJson: edge }))).toMatchObject({ created: true });
+      });
+
+      it.each([
+        ['a lone high surrogate escape', '"\\ud800"'],
+        ['a lone low surrogate escape', '{"k":"\\udc00"}'],
+        ['a duplicated key', '{"a":1,"a":2}'],
+        ['an out-of-range number', '1e999'],
+        ['trailing whitespace', '{"a":1} '],
+        ['an escaped NUL', '"\\u0000"'],
+      ])('%s is accepted by both parsers and stored', async (_name, value) => {
+        expect(parses(value)).toBe(true);
+        expect(await sqliteAccepts(value)).toBe(true);
+        expect(await repo.enqueue(a, job({ payloadJson: value }))).toMatchObject({ created: true });
+      });
+
+      it.each([
+        ['a byte order mark', '\ufeff{}'],
+        ['a raw newline in a string', '"a\nb"'],
+        ['a trailing comma', '[1,]'],
+        ['a JSON5 key', '{a:1}'],
+        ['NaN', 'NaN'],
+        ['a hex number', '0x1F'],
+        ['a comment', '/*x*/1'],
+      ])('%s is rejected by both parsers as invalid_payload', async (_name, value) => {
+        expect(parses(value)).toBe(false);
+        expect(await sqliteAccepts(value)).toBe(false);
+        await expect(repo.enqueue(a, job({ payloadJson: value }))).rejects.toMatchObject({
+          code: 'invalid_payload',
+        });
+      });
+    });
+
     it('a reused id under a new key raises instead of being swallowed', async () => {
       const row = job();
       await repo.enqueue(a, row);

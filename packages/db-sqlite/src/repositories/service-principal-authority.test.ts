@@ -2,11 +2,15 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { ActorContext } from '@package-broker/core/authz/administration';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
+import { createServicePrincipalService } from '@package-broker/core/authz/service-principal-service';
+import { fixedClock } from '@package-broker/core/ids';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { ProtectedHolderProvider } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
+  createServicePrincipalAuthority,
   servicePrincipalAuthorityGuard,
   type ServicePrincipalGuardInput,
 } from './service-principal-authority.js';
@@ -527,5 +531,309 @@ describe('servicePrincipalAuthorityGuard', () => {
       expect(await racing).toBe('conflict');
       expect(await statusOf()).toEqual([{ status: 'suspended', revision: 2 }]);
     });
+  });
+});
+
+describe('createServicePrincipalAuthority', () => {
+  const GROUP_ROLE = '01J0ROLEGROUP0000000000A1';
+
+  function groupGrant(id: string, roleId: string, projectId: string | null) {
+    return stmt(
+      'INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      id,
+      a.orgId,
+      'group',
+      'deployers',
+      'oidc',
+      projectId === null ? 'organization' : 'project',
+      projectId,
+      roleId,
+      NOW,
+      NOW,
+    );
+  }
+
+  function membership(refreshedAt: string) {
+    return stmt(
+      'INSERT INTO user_group (org_id, user_id, provider, group_name, refreshed_at) VALUES (?, ?, ?, ?, ?)',
+      a.orgId,
+      USER,
+      'oidc',
+      'deployers',
+      refreshedAt,
+    );
+  }
+
+  const live = (projectId: string | null, anchors = ANCHORS) =>
+    createServicePrincipalAuthority({ executor, providerAnchors: anchors }).livePermissions(
+      a,
+      fence(),
+      projectId,
+    );
+
+  it('requires the provider anchors and accepts an explicitly empty list', () => {
+    expect(() =>
+      createServicePrincipalAuthority({ executor } as unknown as Parameters<
+        typeof createServicePrincipalAuthority
+      >[0]),
+    ).toThrow(TypeError);
+    expect(() => createServicePrincipalAuthority({ executor, providerAnchors: [] })).not.toThrow();
+  });
+
+  it('reads organization grants for null and adds the project grants for a project', async () => {
+    await executor.batch([grant('G1', ORG_OPS_ROLE, null), grant('G2', MANAGER_ROLE, PA)]);
+    expect([...(await live(null))].sort()).toEqual([
+      'org:read',
+      'org:service-principals:write',
+      'project:packages:read',
+    ]);
+    expect([...(await live(PA))].sort()).toEqual([
+      'org:read',
+      'org:service-principals:write',
+      'project:packages:read',
+      'project:read',
+      'project:service-principals:write',
+    ]);
+  });
+
+  it('keeps the project grants of an archived project', async () => {
+    await executor.batch([
+      grant('G1', MANAGER_ROLE, PA),
+      stmt("UPDATE project SET status = 'archived' WHERE id = ?", PA),
+    ]);
+    expect((await live(PA)).has('project:service-principals:write')).toBe(true);
+  });
+
+  it('counts a group grant backed by fresh evidence', async () => {
+    await executor.batch([
+      ...role(GROUP_ROLE, 'project', 0, ['project:service-principals:write', 'project:read']),
+      groupGrant('G1', GROUP_ROLE, PA),
+      membership(new Date(Date.now() - 60_000).toISOString()),
+    ]);
+    expect((await live(PA)).has('project:service-principals:write')).toBe(true);
+  });
+
+  it('drops a group grant whose membership evidence is older than 24 hours', async () => {
+    await executor.batch([
+      ...role(GROUP_ROLE, 'project', 0, ['project:service-principals:write', 'project:read']),
+      groupGrant('G1', GROUP_ROLE, PA),
+      membership(new Date(Date.now() - 25 * 3_600_000).toISOString()),
+    ]);
+    expect([...(await live(PA))]).toEqual([]);
+  });
+
+  it('drops the grants of an identity at a provider whose anchor changed', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    expect((await live(PA)).has('project:service-principals:write')).toBe(true);
+    await executor.batch([
+      stmt(
+        'UPDATE identity_provider_binding SET anchor = ? WHERE org_id = ? AND provider = ?',
+        'oidc:https://other-idp.example.test',
+        a.orgId,
+        'oidc',
+      ),
+    ]);
+    expect([...(await live(PA))]).toEqual([]);
+  });
+
+  it('answers nothing for another user, another organization or a suspended actor', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    const authority = createServicePrincipalAuthority({ executor, providerAnchors: ANCHORS });
+    const b = database.orgs?.b;
+    if (b === undefined) throw new Error('two organizations were not seeded');
+    expect([...(await authority.livePermissions(b, fence(), PA))]).toEqual([]);
+    expect([
+      ...(await authority.livePermissions(a, fence('01J0USER000000000000000009'), PA)),
+    ]).toEqual([]);
+    await executor.batch([stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", USER)]);
+    expect([...(await authority.livePermissions(a, fence(), PA))]).toEqual([]);
+  });
+
+  it('reads the live set in one statement within the 100 bound-parameter limit', async () => {
+    const seen: Statement[] = [];
+    const counting: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => {
+        seen.push(statement);
+        return executor.all(statement);
+      },
+      batch: (statements) => executor.batch(statements),
+    };
+    const many = Array.from({ length: 40 }, (_, index) => ({
+      provider: `p${index}`,
+      anchor: `p${index}:https://idp.example.test`,
+      emailAuthoritative: true,
+    }));
+    await createServicePrincipalAuthority({
+      executor: counting,
+      providerAnchors: [...ANCHORS, ...many],
+    }).livePermissions(a, fence(), PA);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.params.length ?? 0).toBeLessThanOrEqual(100);
+  });
+
+  it('guards with the configured anchors', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    const f = fence();
+    const requirement = {
+      permission: 'project:service-principals:write',
+      projectId: PA,
+      organizationAdmin: false,
+      covers: ['project:packages:read'],
+    };
+    const input = {
+      id: SP,
+      name: 'ci',
+      projectId: PA,
+      createdByUserId: USER,
+      permissions: ['project:packages:read'],
+      now: NOW,
+      opId: 'op-create',
+    };
+    const unanchored = createServicePrincipalAuthority({ executor, providerAnchors: [] });
+    expect(await principals.create(a, f, unanchored.guard(a, f, requirement), input)).toBe(
+      'authority',
+    );
+    const anchored = createServicePrincipalAuthority({ executor, providerAnchors: ANCHORS });
+    expect(await principals.create(a, f, anchored.guard(a, f, requirement), input)).toBe('created');
+  });
+});
+
+describe('the core service-principal service over the db-sqlite adapters', () => {
+  const manager: ActorContext = {
+    kind: 'organization',
+    userId: USER,
+    permissions: new Set(['org:read']),
+    isOrganizationAdmin: false,
+  };
+  const admin: ActorContext = { ...manager, isOrganizationAdmin: true };
+
+  function compose() {
+    const log: Record<string, unknown>[] = [];
+    let next = 0;
+    const service = createServicePrincipalService({
+      principals,
+      authority: createServicePrincipalAuthority({ executor, providerAnchors: ANCHORS }),
+      directory: principals,
+      clock: fixedClock(NOW),
+      ids: { ulid: () => `01J0GENERATED${String(next++).padStart(13, '0')}` },
+      log: (entry) => log.push({ ...entry }),
+    });
+    return { service, log };
+  }
+
+  const events = (log: readonly Record<string, unknown>[], name: string) =>
+    log.filter((entry) => entry['event'] === name);
+
+  it('creates a project principal from the manager live project permissions', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    const { service } = compose();
+    const result = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        id: '01J0GENERATED0000000000000',
+        permissions: ['project:packages:read', 'project:read'],
+      },
+    });
+    expect(await principals.get(a, '01J0GENERATED0000000000000')).toMatchObject({
+      projectId: PA,
+      createdByUserId: USER,
+      permissions: ['project:packages:read', 'project:read'],
+    });
+  });
+
+  it('refuses a create without the management permission and stores nothing', async () => {
+    await executor.batch([
+      ...role('01J0ROLEREADER0000000000A1', 'project', 0, ['project:packages:read']),
+      grant('G1', '01J0ROLEREADER0000000000A1', PA),
+    ]);
+    const { service, log } = compose();
+    expect(await service.create(a, manager, fence(), { name: 'ci', projectId: PA })).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(await stored()).toBe(0);
+    expect(events(log, 'admin.denied')).toHaveLength(1);
+  });
+
+  it('creates an organization-wide principal for a live admin only', async () => {
+    await executor.batch([grant('G1', ORG_OPS_ROLE, null)]);
+    const { service } = compose();
+    expect(await service.create(a, admin, fence(), { name: 'ops', projectId: null })).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(await stored()).toBe(0);
+    await executor.batch([
+      stmt('UPDATE access_grant SET role_id = ? WHERE id = ?', ADMIN_ROLE, 'G1'),
+    ]);
+    const created = await service.create(a, admin, fence(), { name: 'ops', projectId: null });
+    expect(created.ok).toBe(true);
+    expect(await stored()).toBe(1);
+  });
+
+  it('narrows, suspends and restores against the stored revision', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    const { service } = compose();
+    const created = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    if (!created.ok) throw new Error('create failed');
+    const id = created.value.id;
+    expect(
+      await service.setPermissions(a, manager, fence(USER, SESSION, { service_principal: 1 }), id, [
+        'project:packages:read',
+      ]),
+    ).toEqual({ ok: true, value: null });
+    expect(
+      await service.setPermissions(a, manager, fence(USER, SESSION, { service_principal: 2 }), id, [
+        'project:packages:read',
+        'project:sources:read',
+      ]),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    expect(await service.suspend(a, manager, fence(), id)).toEqual({ ok: true, value: null });
+    const suspended = await principals.get(a, id);
+    expect(suspended?.status).toBe('suspended');
+    expect(
+      await service.restore(
+        a,
+        manager,
+        fence(USER, SESSION, { service_principal: suspended?.revision ?? -1 }),
+        id,
+      ),
+    ).toEqual({ ok: true, value: null });
+    expect((await principals.get(a, id))?.status).toBe('active');
+  });
+
+  it('suspends a principal of an archived project', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    const { service } = compose();
+    const created = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    if (!created.ok) throw new Error('create failed');
+    await executor.batch([stmt("UPDATE project SET status = 'archived' WHERE id = ?", PA)]);
+    expect(await service.suspend(a, manager, fence(), created.value.id)).toEqual({
+      ok: true,
+      value: null,
+    });
+  });
+
+  it('records creator offboarding per created principal and changes none of them', async () => {
+    await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
+    const { service, log } = compose();
+    const created = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    if (!created.ok) throw new Error('create failed');
+    const before = JSON.stringify(await rows('SELECT * FROM service_principal ORDER BY id'));
+    await service.creatorOffboarded(a, { userId: USER, cause: 'suspended' });
+    expect(events(log, 'service_principal.creator_offboarded')).toEqual([
+      {
+        level: 'info',
+        event: 'service_principal.creator_offboarded',
+        orgId: a.orgId,
+        servicePrincipalId: created.value.id,
+        projectId: PA,
+        userId: USER,
+        cause: 'suspended',
+      },
+    ]);
+    expect(JSON.stringify(await rows('SELECT * FROM service_principal ORDER BY id'))).toBe(before);
   });
 });

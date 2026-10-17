@@ -115,6 +115,10 @@ async function build(options: Options = {}) {
           : null,
       );
     },
+    findActiveById: (ctx, id, cutoffs) => {
+      const entry = [...rows].find(([, row]) => row.session.id === id);
+      return repository.findActive(ctx, entry?.[0] ?? '', cutoffs);
+    },
     touch: () => Promise.resolve(),
     revokeBySecretHash: (_ctx, hash) => {
       if (revokeFails) return Promise.reject(new Error('database offline'));

@@ -2,8 +2,9 @@ import { sql, type Kysely, type SqlBool } from 'kysely';
 import type { FenceGuard, MutationFence } from '@package-broker/core/authz/fence';
 import { catalogueTokenEligible } from '@package-broker/core/authz/catalogue';
 import { isPermission } from '@package-broker/core/authz/permissions';
-import type { OrgContext } from '@package-broker/core/db/port';
-import { assertGuard, db, type ProtectedHolderProvider } from '../kysely.js';
+import type { ServicePrincipalAuthority } from '@package-broker/core/authz/service-principal-service';
+import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import { assertGuard, compile, db, type ProtectedHolderProvider } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
 import { permissionRows } from './access.js';
 
@@ -24,6 +25,16 @@ export interface ServicePrincipalGuardInput {
   readonly coversStoredOf?: string;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
   readonly allowArchived?: boolean;
+}
+
+function localSession(ctx: OrgContext, fence: MutationFence) {
+  return sql<SqlBool>`exists ${loose
+    .selectFrom('session as sa_session')
+    .select(sql.lit(1).as('one'))
+    .where('sa_session.org_id', '=', ctx.orgId)
+    .where('sa_session.id', '=', fence.sessionId)
+    .where('sa_session.revoked_at', 'is', null)
+    .where('sa_session.identity_id', 'is', null)}`;
 }
 
 /**
@@ -60,13 +71,7 @@ export function servicePrincipalAuthorityGuard(
     providerAnchors: input.providerAnchors,
     ...(input.allowArchived === true ? { allowArchived: true } : {}),
   });
-  const localAdmin = sql<SqlBool>`exists ${loose
-    .selectFrom('session as sa_session')
-    .select(sql.lit(1).as('one'))
-    .where('sa_session.org_id', '=', ctx.orgId)
-    .where('sa_session.id', '=', fence.sessionId)
-    .where('sa_session.revoked_at', 'is', null)
-    .where('sa_session.identity_id', 'is', null)}`;
+  const localAdmin = localSession(ctx, fence);
   const admin = input.organizationAdmin
     ? sql<SqlBool>`exists ${loose
         .selectFrom(
@@ -95,4 +100,48 @@ export function servicePrincipalAuthorityGuard(
           where stored.org_id = ${ctx.orgId} and stored.service_principal_id = ${input.coversStoredOf}
             and stored.permission not in (select sa_stored.permission from ${live('sa_stored')}))`;
   return assertGuard(sql<SqlBool>`(${held} and ${admin} and ${covered} and ${storedCovered})`, ctx);
+}
+
+export interface ServicePrincipalAuthorityOptions {
+  readonly executor: ScalarSqlExecutor;
+  /** Required; pass an empty list only for a deployment with no identity provider. */
+  readonly providerAnchors: readonly ProtectedHolderProvider[];
+}
+
+/**
+ * The production `ServicePrincipalAuthority`: the guard is `servicePrincipalAuthorityGuard` with the
+ * configured anchors; `livePermissions` reads the fence user's effective permissions through
+ * `permissionRows`, so stale group evidence and identities at a re-anchored provider drop out. It
+ * ignores project status, so narrowing and suspension stay possible on an archived project.
+ */
+export function createServicePrincipalAuthority(
+  options: ServicePrincipalAuthorityOptions,
+): ServicePrincipalAuthority {
+  const { executor, providerAnchors } = options;
+  if (!Array.isArray(providerAnchors)) {
+    throw new TypeError('providerAnchors must be a list');
+  }
+  const anchors = Object.freeze([...providerAnchors]);
+  return {
+    guard: (ctx, fence, requirement) =>
+      servicePrincipalAuthorityGuard(ctx, fence, { ...requirement, providerAnchors: anchors }),
+
+    async livePermissions(ctx, fence, projectId) {
+      if (projectId !== null && (typeof projectId !== 'string' || projectId === '')) {
+        throw new TypeError('projectId must be null or a non-empty string');
+      }
+      const rows = permissionRows(ctx, fence.userId, projectId, anchors, {
+        localAdmin: localSession(ctx, fence),
+      }).as('sp_live' as never);
+      const found = await executor.all<{ permission: string }>(
+        compile(
+          loose
+            .selectFrom(rows as never)
+            .select(sql<string>`sp_live.permission`.as('permission'))
+            .distinct(),
+        ) as ScalarStatement,
+      );
+      return new Set(found.map((row) => row.permission));
+    },
+  };
 }

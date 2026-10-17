@@ -33,6 +33,12 @@ function assertMaxOutput(maxOutput: number): void {
   }
 }
 
+function assertExpectedSize(expectedSize: number): void {
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) {
+    throw new RangeError('expectedSize must be a non-negative safe integer');
+  }
+}
+
 function digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
   const taps = algs.map((alg) => {
     const stream = createDigestStream(alg);
@@ -84,19 +90,32 @@ function digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
   return { transform, digests };
 }
 
-function inflateConsumed(input: Uint8Array, maxOutput: number) {
+function inflateConsumed(input: Uint8Array, maxOutput: number, expectedSize?: number) {
   assertMaxOutput(maxOutput);
+  if (expectedSize !== undefined) assertExpectedSize(expectedSize);
   try {
+    if (expectedSize !== undefined && expectedSize > maxOutput) {
+      throw new CodecLimitError('inflate', maxOutput);
+    }
+    const limit = expectedSize ?? maxOutput;
     const options: ZlibOptions & { info: true } = {
       info: true,
-      maxOutputLength: Math.min(Math.max(1, maxOutput), bufferConstants.MAX_LENGTH),
+      maxOutputLength: Math.min(Math.max(1, limit), bufferConstants.MAX_LENGTH),
+      ...(expectedSize === undefined ? {} : { chunkSize: Math.max(64, expectedSize + 1) }),
     };
     const { buffer, engine } = inflateSync(input, options) as unknown as {
       buffer: Uint8Array;
       engine: { bytesWritten: number };
     };
-    if (buffer.length > maxOutput) throw new CodecLimitError('inflate', maxOutput);
-    return { data: new Uint8Array(buffer), consumed: engine.bytesWritten };
+    if (buffer.length > limit) throw new CodecLimitError('inflate', maxOutput);
+    if (expectedSize !== undefined && buffer.length !== expectedSize) {
+      throw new CodecCorruptError('inflate');
+    }
+    const exact =
+      buffer.byteOffset === 0 && buffer.buffer.byteLength === buffer.length
+        ? new Uint8Array(buffer.buffer, 0, buffer.length)
+        : new Uint8Array(buffer);
+    return { data: exact, consumed: engine.bytesWritten };
   } catch (error) {
     throw mapZlibError(error, 'inflate', maxOutput);
   }
@@ -114,7 +133,7 @@ function mapZlibError(error: unknown, operation: CodecOperation, maxOutput: numb
 function gunzipTransform(
   engine: ReturnType<typeof createGunzip>,
   maxOutput: number,
-): TransformStream<Uint8Array, Uint8Array> {
+): ReadableWritablePair<Uint8Array, Uint8Array> {
   const operation: CodecOperation = 'gunzip';
   let produced = 0;
   let fed = 0;
@@ -209,6 +228,68 @@ function gunzipTransform(
   return { readable, writable };
 }
 
+function deflateRawPair(): ReadableWritablePair<Uint8Array, Uint8Array> {
+  const compression = new CompressionStream('deflate-raw');
+  const reader = compression.readable.getReader();
+  const writer = compression.writable.getWriter();
+  let sink!: ReadableStreamDefaultController<Uint8Array>;
+  let failed = false;
+
+  const fail = (): CodecCorruptError => {
+    const error = new CodecCorruptError('deflate');
+    if (!failed) {
+      failed = true;
+      sink.error(error);
+      reader.cancel(error).catch(() => undefined);
+    }
+    return error;
+  };
+
+  const readable = new ReadableStream<Uint8Array>({
+    start(controller) {
+      sink = controller;
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (failed) return;
+        if (done) controller.close();
+        else controller.enqueue(value);
+      } catch {
+        fail();
+      }
+    },
+    cancel(reason) {
+      failed = true;
+      return reader.cancel(reason);
+    },
+  });
+
+  const writable = new WritableStream<Uint8Array>({
+    async write(chunk) {
+      try {
+        await writer.write(chunk);
+      } catch {
+        throw fail();
+      }
+    },
+    async close() {
+      try {
+        await writer.close();
+      } catch {
+        throw fail();
+      }
+    },
+    abort(reason) {
+      failed = true;
+      sink.error(reason);
+      return writer.abort(reason);
+    },
+  });
+
+  return { readable, writable };
+}
+
 export const workersCodecs: Codecs = {
   digestTap,
   inflateConsumed,
@@ -216,5 +297,5 @@ export const workersCodecs: Codecs = {
     assertMaxOutput(maxOutput);
     return gunzipTransform(createGunzip(), maxOutput);
   },
-  deflateRaw: () => new CompressionStream('deflate-raw'),
+  deflateRaw: deflateRawPair,
 };

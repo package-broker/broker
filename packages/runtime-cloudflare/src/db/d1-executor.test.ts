@@ -3,6 +3,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { DbError } from '@package-broker/core/db/errors';
 import { describeExecutorContract } from '@package-broker/db-sqlite/contract/executor-contract';
 import {
+  D1_MAX_BOUND_PARAMETERS,
   createD1Executor,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
@@ -98,5 +99,53 @@ describe('createD1Executor with a fake database', () => {
     expect(results[0]?.rows[0]?.['bin']).toBeInstanceOf(Uint8Array);
     expect(Array.from(results[0]?.rows[0]?.['bin'] as Uint8Array)).toEqual([1, 2, 255]);
     expect(results[1]?.changes).toBe(0);
+  });
+});
+
+function sumOf(count: number): { sql: string; params: number[] } {
+  return {
+    sql: `SELECT ${Array.from({ length: count }, () => '?').join(' + ')} AS total`,
+    params: Array.from({ length: count }, () => 1),
+  };
+}
+
+async function freshD1(): Promise<D1DatabaseLike> {
+  const binding = bindings[next];
+  next += 1;
+  if (binding === undefined) throw new Error('out of D1 bindings');
+  return (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
+}
+
+describe('createD1Executor bound parameter limit', () => {
+  it('runs exactly 100 bound parameters on miniflare D1', async () => {
+    expect(D1_MAX_BOUND_PARAMETERS).toBe(100);
+    const executor = createD1Executor(await freshD1());
+
+    await expect(executor.all(sumOf(100))).resolves.toEqual([{ total: 100 }]);
+    await expect(executor.batch([sumOf(100)])).resolves.toHaveLength(1);
+  });
+
+  it('refuses 101 bound parameters before preparing anything, naming the count only', async () => {
+    const prepare = vi.fn();
+    const batch = vi.fn(async () => [] as D1Result[]);
+    const executor = createD1Executor(fakeDb({ prepare, batch }));
+    const secret = 'secret-value';
+    const statement = {
+      sql: `SELECT ${Array.from({ length: 101 }, () => '?').join(', ')}`,
+      params: Array.from({ length: 101 }, () => secret),
+    };
+
+    for (const attempt of [executor.all(statement), executor.batch([sumOf(1), statement])]) {
+      const error: unknown = await attempt.then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(DbError);
+      expect((error as DbError).kind).toBe('too_big');
+      expect((error as DbError).message).toContain('101');
+      expect((error as DbError).message).not.toContain(secret);
+    }
+    expect(prepare).not.toHaveBeenCalled();
+    expect(batch).not.toHaveBeenCalled();
   });
 });

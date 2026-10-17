@@ -1,5 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
+import { diagnoseRoutes } from '../manifest.js';
+import type { DiagnosticRoute } from '@package-broker/core/authz/catalogue-diagnostics';
+import type { PackageRouteBinding, RouteBoundary } from '@package-broker/core/plugin';
 import { planMigrations } from '@package-broker/db-sqlite/migrations/plan';
 import {
   loadMigrationSource,
@@ -10,6 +13,13 @@ export class BuiltManifestError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'BuiltManifestError';
+  }
+}
+
+export class LegacyRouteTableError extends BuiltManifestError {
+  constructor() {
+    super('manifest route table predates route boundaries; run pb build again');
+    this.name = 'LegacyRouteTableError';
   }
 }
 
@@ -124,4 +134,82 @@ export async function loadBuiltMigrations(outDir: string): Promise<MigrationSour
   } catch (error) {
     throw new BuiltManifestError(error instanceof Error ? error.message : String(error));
   }
+}
+
+const PACKAGE_PLACEHOLDER: PackageRouteBinding = { ecosystem: 'composer', name: () => null };
+
+function parseRoute(raw: unknown, index: number): DiagnosticRoute {
+  const label = `route ${index}`;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new BuiltManifestError(`${label}: must be an object`);
+  }
+  const { method, path, plugin, permission, boundary, needsOrg } = raw as Record<string, unknown>;
+  const flag = (raw as Record<string, unknown>).package;
+  if (typeof method !== 'string') throw new BuiltManifestError(`${label}: method must be a string`);
+  if (typeof path !== 'string') throw new BuiltManifestError(`${label}: path must be a string`);
+  if (typeof plugin !== 'string') throw new BuiltManifestError(`${label}: plugin must be a string`);
+  if (permission !== null && typeof permission !== 'string') {
+    throw new BuiltManifestError(`${label}: permission must be a string or null`);
+  }
+  if (boundary !== undefined && typeof boundary !== 'string') {
+    throw new BuiltManifestError(`${label}: boundary must be a string`);
+  }
+  if (needsOrg !== undefined && typeof needsOrg !== 'boolean') {
+    throw new BuiltManifestError(`${label}: needsOrg must be a boolean`);
+  }
+  if (flag !== undefined && flag !== true) {
+    throw new BuiltManifestError(`${label}: package must be true when present`);
+  }
+  return {
+    method: method as DiagnosticRoute['method'],
+    path,
+    plugin,
+    permission,
+    handler: () => new Response(null),
+    ...(boundary === undefined ? {} : { boundary: boundary as RouteBoundary }),
+    ...(needsOrg === undefined ? {} : { needsOrg }),
+    ...(flag === true ? { package: PACKAGE_PLACEHOLDER } : {}),
+  };
+}
+
+export async function loadBuiltRoutes(outDir: string): Promise<DiagnosticRoute[] | null> {
+  const path = resolve(outDir, 'generated', 'manifest.json');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    throw new BuiltManifestError(
+      `cannot read manifest ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const routes = (parsed as { routes?: unknown } | null)?.routes;
+  if (routes === undefined) return null;
+  if (!Array.isArray(routes)) throw new BuiltManifestError('manifest routes must be an array');
+  const entries = routes.map((raw, index) => parseRoute(raw, index));
+  if (entries.some((route) => route.permission !== null && route.boundary === undefined)) {
+    throw new LegacyRouteTableError();
+  }
+  return entries;
+}
+
+export async function builtRouteProblems(outDir: string): Promise<string[] | null> {
+  const routes = await loadBuiltRoutes(outDir);
+  return routes === null ? null : diagnoseRoutes(routes);
+}
+
+export async function routesAreValid(outDir: string): Promise<boolean> {
+  let problems: string[] | null;
+  try {
+    problems = await builtRouteProblems(outDir);
+  } catch (error) {
+    if (!(error instanceof LegacyRouteTableError)) throw error;
+    console.error(`error: ${error.message}`);
+    return false;
+  }
+  if (problems === null) {
+    console.error('warning: manifest has no route table; route permissions were not checked');
+    return true;
+  }
+  for (const problem of problems) console.error(`error: ${problem}`.replace(/[\r\n]+/g, ' '));
+  return problems.length === 0;
 }

@@ -1,3 +1,5 @@
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { reportableErrorName } from '../kernel/error-name.js';
 import {
@@ -744,5 +746,118 @@ describe('JsonTokenizer structureOnlyNext', () => {
         },
       ),
     ).toThrow(JsonStreamError);
+  });
+});
+
+describe('JsonTokenizer lone-surrogate decoding', () => {
+  function seeded(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state / 0x100000000;
+    };
+  }
+
+  function randomText(next: () => number): string {
+    const parts: string[] = [];
+    const count = Math.floor(next() * 24);
+    for (let index = 0; index < count; index += 1) {
+      const pick = Math.floor(next() * 7);
+      const hex = (base: number, span: number): string =>
+        (base + Math.floor(next() * span)).toString(16).padStart(4, '0');
+      if (pick === 0) {
+        parts.push(`\\u${hex(0xd800, 0x400)}\\u${hex(0xdc00, 0x400)}`);
+      } else if (pick === 1) {
+        parts.push(`\\u${hex(0xd800, 0x400)}`);
+      } else if (pick === 2) {
+        parts.push(`\\u${hex(0xdc00, 0x400)}`);
+      } else if (pick === 3) {
+        parts.push(String.fromCodePoint(0x80 + Math.floor(next() * 0x700)));
+      } else if (pick === 4) {
+        parts.push(String.fromCodePoint(0x800 + Math.floor(next() * 0x4000)));
+      } else if (pick === 5) {
+        parts.push(String.fromCodePoint(0x10000 + Math.floor(next() * 0x10000)));
+      } else {
+        parts.push(String.fromCharCode(0x61 + Math.floor(next() * 26)));
+      }
+    }
+    return parts.join('');
+  }
+
+  it('matches JSON.parse over 10,000 seeded strings at mixed chunk sizes', () => {
+    const next = seeded(582);
+    for (let round = 0; round < 10_000; round += 1) {
+      const text = `"${randomText(next)}"`;
+      const expected = JSON.parse(text) as string;
+      const chunk = 1 + Math.floor(next() * 9);
+      const tokens = tokenize(encoder.encode(text), chunk);
+      expect(tokens).toHaveLength(1);
+      expect((tokens[0] as { value: string }).value).toBe(expected);
+    }
+  });
+
+  it('keeps peak live growth within 4x output bytes + 2 MiB for 1 MiB of alternating lone surrogates', (context) => {
+    let collectGarbage: () => void;
+    try {
+      v8.setFlagsFromString('--expose-gc');
+      collectGarbage = vm.runInNewContext('gc') as () => void;
+    } catch {
+      context.skip();
+      return;
+    }
+    const MiB = 1024 * 1024;
+    const units = MiB;
+    const bytes = encoder.encode(`"${'\\ud800a'.repeat(units / 2)}"`);
+    for (let warm = 0; warm < 2; warm += 1) {
+      tokenize(bytes, 65_536, { maxStringBytes: 8 * MiB });
+    }
+    const used = (): number => {
+      const usage = process.memoryUsage();
+      return usage.heapUsed + usage.arrayBuffers;
+    };
+    const measure = (): number => {
+      const fromCharCode = String.fromCharCode;
+      const join = Array.prototype.join;
+      collectGarbage();
+      const baseline = used();
+      let peak = 0;
+      let constructedUnits = 0;
+      let samples = 0;
+      const sample = (): void => {
+        collectGarbage();
+        peak = Math.max(peak, used() - baseline);
+        samples += 1;
+      };
+      try {
+        String.fromCharCode = (...codes: number[]): string => {
+          const result = fromCharCode(...codes);
+          const previous = constructedUnits;
+          constructedUnits += codes.length;
+          if (Math.floor(previous / 131_072) < Math.floor(constructedUnits / 131_072)) sample();
+          return result;
+        };
+        Array.prototype.join = function (this: unknown[], separator?: string): string {
+          const decoding = constructedUnits > 0 && separator === '';
+          if (decoding) sample();
+          const result = join.call(this, separator);
+          if (decoding) sample();
+          return result;
+        };
+        const tokens = tokenize(bytes, 65_536, { maxStringBytes: 8 * MiB }, () => sample());
+        const value = (tokens[0] as { value: string }).value;
+        expect(value).toHaveLength(units);
+        expect(value.charCodeAt(0)).toBe(0xd800);
+        expect(value.charCodeAt(units - 1)).toBe(0x61);
+      } finally {
+        String.fromCharCode = fromCharCode;
+        Array.prototype.join = join;
+      }
+      expect(samples).toBeGreaterThan(1);
+      return peak;
+    };
+    const peaks = Array.from({ length: 3 }, () => measure());
+    expect(Math.max(...peaks), `Peak live growth in bytes: ${peaks.join(', ')}`).toBeLessThan(
+      units * 2 * 4 + 2 * MiB,
+    );
   });
 });

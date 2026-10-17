@@ -525,6 +525,43 @@ describe('s3 fake round 1', () => {
     expect(fake.keys()).toEqual(['a']);
   });
 
+  it('returns the stored checksum on HEAD and GET only in checksum mode', async () => {
+    const fake = startS3Fake({ credentials: CREDENTIALS });
+    const digest = createHash('sha256').update('data').digest('base64');
+    await sendPut(fake, 'with', 'data', { headers: { 'x-amz-checksum-sha256': digest } });
+    await sendPut(fake, 'without', 'data');
+    const request = (key: string, method: string, mode: boolean) =>
+      fake.fetch(
+        ...signed(objectUrl(key), {
+          method,
+          ...(mode ? { headers: { 'x-amz-checksum-mode': 'ENABLED' } } : {}),
+        }),
+      );
+    for (const method of ['HEAD', 'GET']) {
+      expect((await request('with', method, true)).headers.get('x-amz-checksum-sha256')).toBe(
+        digest,
+      );
+      expect(
+        (await request('with', method, false)).headers.get('x-amz-checksum-sha256'),
+      ).toBeNull();
+      const bare = await request('without', method, true);
+      expect(bare.status).toBe(200);
+      expect(bare.headers.get('x-amz-checksum-sha256')).toBeNull();
+    }
+  });
+
+  it('rejects a checksum mode other than ENABLED and on non-read methods', async () => {
+    const fake = startS3Fake({ credentials: CREDENTIALS });
+    await sendPut(fake, 'k', 'data');
+    const other = await fake.fetch(
+      ...signed(objectUrl('k'), { method: 'HEAD', headers: { 'x-amz-checksum-mode': 'DISABLED' } }),
+    );
+    const onPut = await sendPut(fake, 'j', 'data', {
+      headers: { 'x-amz-checksum-mode': 'ENABLED' },
+    });
+    expect([other.status, onPut.status]).toEqual([501, 501]);
+  });
+
   it('accepts redirect error mode', async () => {
     const fake = startS3Fake({ credentials: CREDENTIALS });
     const [url, init] = signed(objectUrl('none'));

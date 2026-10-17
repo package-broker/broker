@@ -147,8 +147,8 @@ describe('plugin route boundary contract', () => {
 describe('plugin api transition', () => {
   const protectedRoute = route({ permission: 'org:read', boundary: 'organization' });
 
-  it('supports exactly API 3', () => {
-    expect(SUPPORTED_PLUGIN_API).toEqual([3, 3]);
+  it('supports API 3 to 4', () => {
+    expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
   });
 
   it('accepts a bounded protected route on API 3', () => {
@@ -175,7 +175,7 @@ describe('plugin api transition', () => {
     ).toEqual([]);
   });
 
-  it.each([1, 4])('refuses API %i', (version) => {
+  it.each([1, 5])('refuses API %i', (version) => {
     expect(() => collectRegistrations([pluginWith([protectedRoute], version)])).toThrow(
       KernelConfigError,
     );
@@ -241,7 +241,7 @@ describe('plugin boundary contract, round 2', () => {
 
   it.each([
     [1, 'apiVersion 1'],
-    [4, 'apiVersion 4'],
+    [5, 'apiVersion 5'],
   ])('refuses out-of-range API %i on a public route and names the plugin', (version, fragment) => {
     const problems = problemsOf([route({ permission: null })], undefined, version);
     expect(problems.join('\n')).toContain(fragment);

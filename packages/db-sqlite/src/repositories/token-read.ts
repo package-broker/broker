@@ -33,6 +33,7 @@ interface Row {
   readonly project_count: number;
   readonly project_id: string | null;
   readonly user_id: string | null;
+  readonly created_by_user_id: string | null;
   readonly service_principal_id: string | null;
   readonly created_at: string;
   readonly expires_at: string | null;
@@ -52,15 +53,19 @@ function requireId(value: unknown, name: string): void {
   }
 }
 
-function requirePage(page: TokenListPage): void {
+function requireNow(now: unknown): void {
   if (
-    typeof page.now !== 'string' ||
-    !TIMESTAMP.test(page.now) ||
-    Number.isNaN(Date.parse(page.now)) ||
-    new Date(page.now).toISOString() !== page.now
+    typeof now !== 'string' ||
+    !TIMESTAMP.test(now) ||
+    Number.isNaN(Date.parse(now)) ||
+    new Date(now).toISOString() !== now
   ) {
     throw new TypeError('now must be an ISO timestamp with milliseconds and Z');
   }
+}
+
+function requirePage(page: TokenListPage): void {
+  requireNow(page.now);
   if (page.after !== null) requireId(page.after, 'after');
   if (page.status !== undefined && !['active', 'expired', 'revoked'].includes(page.status)) {
     throw new TypeError('status must be active, expired or revoked');
@@ -70,7 +75,7 @@ function requirePage(page: TokenListPage): void {
   }
 }
 
-function statement(ctx: OrgContext, filter: Filter, page: TokenListPage) {
+function baseQuery(ctx: OrgContext, filter: Filter) {
   let query = reads
     .selectFrom('token as t')
     .leftJoin('service_principal as sp', (join) =>
@@ -89,6 +94,7 @@ function statement(ctx: OrgContext, filter: Filter, page: TokenListPage) {
       ),
       't.project_id as project_id',
       't.user_id as user_id',
+      't.created_by_user_id as created_by_user_id',
       't.service_principal_id as service_principal_id',
       't.created_at as created_at',
       't.expires_at as expires_at',
@@ -100,6 +106,11 @@ function statement(ctx: OrgContext, filter: Filter, page: TokenListPage) {
     .where('t.kind', 'in', [...filter.kinds]);
   if (filter.userId !== undefined) query = query.where('t.user_id', '=', filter.userId);
   if (filter.projectId !== undefined) query = query.where('t.project_id', '=', filter.projectId);
+  return query;
+}
+
+function statement(ctx: OrgContext, filter: Filter, page: TokenListPage) {
+  let query = baseQuery(ctx, filter);
   if (page.after !== null) query = query.where('t.id', '>', page.after);
   if (page.status === 'revoked') query = query.where('t.revoked_at', 'is not', null);
   if (page.status === 'expired') {
@@ -142,6 +153,7 @@ function toItem(row: Row, now: string): TokenListItem {
     projectCount: Number(row.project_count),
     projectId: row.project_id,
     userId: row.user_id,
+    createdByUserId: row.created_by_user_id,
     servicePrincipalId: row.service_principal_id,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
@@ -158,7 +170,26 @@ export function createTokenReader(executor: SqlExecutor): TokenReader {
     return { items, next: more ? (items[items.length - 1]?.id ?? null) : null };
   }
 
+  async function get(ctx: OrgContext, filter: Filter, tokenId: string, now: string) {
+    requireId(tokenId, 'tokenId');
+    requireNow(now);
+    const query = baseQuery(ctx, filter).where('t.id', '=', tokenId).limit(1);
+    const rows = await executor.all<Row>(compile(query));
+    return rows[0] === undefined ? null : toItem(rows[0], now);
+  }
+
   return {
+    async getOwn(ctx, userId, tokenId, now) {
+      requireId(userId, 'userId');
+      return get(ctx, { kinds: ['pat'], userId }, tokenId, now);
+    },
+    async getProject(ctx, projectId, tokenId, now) {
+      requireId(projectId, 'projectId');
+      return get(ctx, { kinds: ['svc'], projectId }, tokenId, now);
+    },
+    async getOrganization(ctx, tokenId, now) {
+      return get(ctx, { kinds: ['pat', 'svc'] }, tokenId, now);
+    },
     async listOwn(ctx, userId, page) {
       requireId(userId, 'userId');
       requirePage(page);

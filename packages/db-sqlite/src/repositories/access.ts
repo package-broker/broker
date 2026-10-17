@@ -133,6 +133,13 @@ export interface TokenAccess {
   readonly projectPermissions: readonly string[];
   readonly protectedHolder: boolean;
   /**
+   * The principal's own grants (a user's, or a service principal's stored permissions and
+   * project binding) reach the requested active project, whatever the token's scope, read-only
+   * flag or project selection. False on an organization boundary and for an expired, revoked,
+   * inactive or stale credential.
+   */
+  readonly projectVisible: boolean;
+  /**
    * Non-enumerable, so spreading, cloning (`{ ...access }`, `structuredClone`), logging or
    * serializing the envelope never carries the hash. Read it from the original object before any
    * copy; a copy has no verifier.
@@ -157,8 +164,9 @@ export interface AccessRepository {
    * One `executor.all`. Null when the selector is unknown, not a personal or service token, or in
    * another organization. Expired, revoked, suspended and stale tokens still return the envelope,
    * with empty permission arrays. A project that is unknown, archived or not covered by the token
-   * returns `project: null` and empty arrays, identical for every cause. On an organization
-   * boundary only `organizationPermissions` is filled; on a project boundary only
+   * returns `project: null` and empty arrays; `projectVisible` distinguishes principal visibility
+   * independently of token coverage. On an organization boundary only `organizationPermissions`
+   * is filled; on a project boundary only
    * `projectPermissions`, holding the organization and project rows. Never writes.
    */
   lookupToken(ctx: OrgContext, input: TokenLookupInput): Promise<TokenAccess | null>;
@@ -602,6 +610,7 @@ interface AccessJson {
   readonly organization?: unknown;
   readonly project?: unknown;
   readonly holder?: unknown;
+  readonly visible?: unknown;
 }
 
 function names(value: unknown): string[] {
@@ -674,6 +683,8 @@ interface TokenRow {
   readonly principal_status: string | null;
   readonly binding_ok: number;
   readonly principal_project_id: string | null;
+  readonly visible_project_id: string | null;
+  readonly service_visible: number;
   readonly project_id: string | null;
   readonly project_slug: string | null;
   readonly project_name: string | null;
@@ -708,19 +719,21 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
   const nowSeconds = sql`unixepoch('now', 'subsec')`;
 
   const projectOperand: ProjectOperand = withProject
-    ? (looseEb.ref('p.id') as unknown as Expression<string | null>)
+    ? (looseEb.ref('vp.id') as unknown as Expression<string | null>)
     : null;
   const userOperand = looseEb.ref('t.user_id') as unknown as Expression<string>;
   const rows = permissionRows(ctx, userOperand, projectOperand, input.providerAnchors, {
     localAdmin: sql<SqlBool>`t.validation_kind = 'local'`,
   });
+  const projectNames = sql.join(literals(KNOWN_PROJECT_PERMISSIONS));
   const access = loose
     .selectFrom(rows.as('pr'))
     .select(
       sql<string>`json_object(
       'organization', json_group_array(distinct pr.permission) filter (where pr.scope = 'organization'),
       'project', json_group_array(distinct pr.permission) filter (where pr.scope = 'project'),
-      'holder', coalesce(max(pr.scope = 'organization' and pr.protects = 1), 0)
+      'holder', coalesce(max(pr.scope = 'organization' and pr.protects = 1), 0),
+      'visible', coalesce(max(pr.permission in (${projectNames})), 0)
     )`.as('access'),
     )
     .where(sql<SqlBool>`t.kind = 'pat'`);
@@ -786,7 +799,25 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
         sql`null`.as('project_require_publish_approval'),
         sql`null`.as('project_revision'),
       ];
+  const visibilityColumns = withProject
+    ? [
+        'vp.id as visible_project_id',
+        sql<number>`case when t.kind = 'svc' and vp.id is not null
+          and (sp.project_id is null or sp.project_id = vp.id)
+          and exists (
+            select 1 from service_principal_permission spv
+            where spv.org_id = t.org_id and spv.service_principal_id = t.service_principal_id
+              and spv.permission in (${projectNames})
+          ) then 1 else 0 end`.as('service_visible'),
+      ]
+    : [sql`null`.as('visible_project_id'), sql`0`.as('service_visible')];
   if (withProject) {
+    query = query.leftJoin('project as vp', (join) =>
+      join
+        .onRef('vp.org_id', '=', 't.org_id')
+        .on('vp.slug', '=', input.projectSlug as string)
+        .on('vp.status', '=', sql.lit('active')),
+    );
     query = query.leftJoin('project as p', (join) =>
       join
         .onRef('p.org_id', '=', 't.org_id')
@@ -835,6 +866,7 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
         'binding_ok',
       ),
       'sp.project_id as principal_project_id',
+      ...visibilityColumns,
       ...projectColumns,
       access.as('access'),
       servicePermissions.as('service_permissions'),
@@ -887,6 +919,19 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
   let organizationPermissions: string[] = [];
   let projectPermissions: string[] = [];
   let protectedHolder = false;
+  let projectVisible = false;
+  if (
+    boundary === 'project' &&
+    row.visible_project_id !== null &&
+    !expired &&
+    !revoked &&
+    principalActive &&
+    (isService || row.validation_fresh === 1)
+  ) {
+    projectVisible = isService
+      ? row.service_visible === 1
+      : (JSON.parse(row.access) as AccessJson).visible === 1;
+  }
   if (
     !expired &&
     !revoked &&
@@ -959,6 +1004,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
     organizationPermissions,
     projectPermissions,
     protectedHolder,
+    projectVisible,
   };
   return Object.defineProperty(envelope, 'verifier', {
     value: { secretHash: row.hash, pepperVersion: row.pepper_version },

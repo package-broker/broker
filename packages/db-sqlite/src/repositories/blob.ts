@@ -93,6 +93,10 @@ export function createBlobRepository(
   }
 
   return {
+    /**
+     * Returns a generation that is stored on the row, or throws `BlobBusyError` under a purge lease.
+     * An absent digest returns an unstored token: publish inserts the row with it.
+     */
     async reserve(ctx, key) {
       const sha256 = parseSha256(key);
       const bump = db
@@ -102,14 +106,14 @@ export function createBlobRepository(
         .where('sha256', '=', sha256)
         .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
         .returning('purge_generation');
-      const probe = db
-        .selectFrom(sql<{ one: number }>`(select 1 as one)`.as('probe'))
-        .select([
-          FRESH.as('fresh'),
-          sql<number>`exists (select 1 from blob where org_id = ${ctx.orgId} and sha256 = ${sha256} and ${leaseLive('purge_lease_until')})`.as(
-            'busy',
-          ),
-        ]);
+      const probe = db.selectFrom(sql<{ one: number }>`(select 1 as one)`.as('probe')).select([
+        FRESH.as('fresh'),
+        // Runs after the bump, which clears the lease whenever it changes the row; a lease still set
+        // means the bump refused it, so the probe must not read the clock a second time.
+        sql<number>`exists (select 1 from blob where org_id = ${ctx.orgId} and sha256 = ${sha256} and purge_lease_until is not null)`.as(
+          'busy',
+        ),
+      ]);
       const [bumped, fresh] = await executor.batch([statement(bump), statement(probe)]);
       const generation = (bumped?.rows[0] as { purge_generation: string } | undefined)
         ?.purge_generation;

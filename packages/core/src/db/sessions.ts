@@ -40,12 +40,21 @@ export interface SessionRepository {
   /**
    * One statement. TypeError unless `secretHash` is 64 lowercase hex characters and every timestamp
    * parameter (here and in the other methods) is `YYYY-MM-DDTHH:MM:SS.mmmZ`. Null for an unknown
-   * hash, another organization, a revoked, expired or idle session (idle:
-   * `coalesce(last_seen_at, created_at)` not after `idleSince`) and a suspended user.
+   * hash, another organization, a revoked, expired, 12-hour-old or idle session (idle:
+   * `coalesce(last_seen_at, created_at)` not after `idleSince`) and an inactive user. Malformed stored liveness timestamps fail closed.
    */
   findActive(
     ctx: OrgContext,
     secretHash: string,
+    cutoffs: SessionCutoffs,
+  ): Promise<ActiveSession | null>;
+  /**
+   * Same liveness and timestamp contract as `findActive`, keyed by session id. Null for an unknown
+   * id or another organization. TypeError unless `id` is a non-empty string, before any query.
+   */
+  findActiveById(
+    ctx: OrgContext,
+    id: string,
     cutoffs: SessionCutoffs,
   ): Promise<ActiveSession | null>;
   /**

@@ -23,6 +23,7 @@ const pkg = (
   over: Partial<VisibilityPackage> & { id: string; sourceId: string },
 ): VisibilityPackage => ({
   orgId: 'o1',
+  ecosystem: 'composer',
   key: 'acme/lib',
   status: 'active',
   visible: 1,
@@ -369,5 +370,47 @@ describe('admitProxy', () => {
       source({ id: 's2', type: 'npmjs_proxy', ecosystem: 'npm' }),
     ];
     expect(admit(proxyConfig({ sources }))).toEqual([]);
+  });
+});
+
+describe('a package whose ecosystem differs from its source ecosystem', () => {
+  const npmSource = [source({ id: 's1', ecosystem: 'npm', type: 'npm_registry' })];
+
+  it('derives no subscription row', () => {
+    expect(rows(config({ sources: npmSource }))).toEqual([]);
+  });
+
+  it('derives no explicit row', () => {
+    const c = config({ sources: npmSource, explicit: [{ projectId: 'p1', packageId: 'k1' }] });
+    expect(rows(c)).toEqual([]);
+  });
+
+  it('derives no pattern row', () => {
+    const c = config({ sources: npmSource, attachments: [att('s1', { includes: ['acme/*'] })] });
+    expect(rows(c)).toEqual([]);
+  });
+
+  it('wins in neither ecosystem', () => {
+    const c = config({ sources: npmSource });
+    expect(resolveWinner(c, 'p1', 'composer', 'acme/lib')).toBeNull();
+    expect(resolveWinner(c, 'p1', 'npm', 'acme/lib')).toBeNull();
+  });
+
+  it('resolves by the package ecosystem', () => {
+    const c = config({ packages: [pkg({ id: 'k1', sourceId: 's1', ecosystem: 'npm' })] });
+    expect(rows(c)).toEqual([]);
+    expect(resolveWinner(c, 'p1', 'npm', 'acme/lib')).toBeNull();
+    expect(resolveWinner(c, 'p1', 'composer', 'acme/lib')).toBeNull();
+  });
+
+  it('blocks proxies of the package ecosystem, not of the source ecosystem', () => {
+    const sources = [
+      source({ id: 's1', ecosystem: 'npm', type: 'npm_registry' }),
+      source({ id: 's2', type: 'packagist_proxy' }),
+      source({ id: 's3', ecosystem: 'npm', type: 'npmjs_proxy' }),
+    ];
+    const c = config({ sources, attachments: [att('s1'), att('s2'), att('s3')] });
+    expect(admitProxy(c, 'p1', 'composer', 'acme/lib')).toEqual([]);
+    expect(admitProxy(c, 'p1', 'npm', 'acme/lib')).toEqual(['s3']);
   });
 });

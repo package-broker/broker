@@ -435,6 +435,22 @@ describe('describeComposerV2 names and listings', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('uses a 200-byte available pattern to match its package and reject an unlisted package', async () => {
+    const name = `acme/${'a'.repeat(194)}z`;
+    const pattern = `acme/${'a'.repeat(194)}*`;
+    expect(pattern).toHaveLength(200);
+    const url = `${ORIGIN}/p2/${name}.json`;
+    const body = p2Body([{ name, version: '1.0.0' }], false, name);
+    const { fetch, calls } = setup({ [url]: [ok(body, '"s1"')] });
+    const scoped = source({ root: root({ availablePatterns: [pattern] }) });
+    expect((await describeComposerV2(fetch, scoped, name, opts())).kind).toBe('found');
+    expect(await describeComposerV2(fetch, scoped, NAME, opts())).toEqual({
+      kind: 'not_found',
+      definitive: false,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
   it('matches available-package-patterns case-insensitively', async () => {
     const { fetch } = setup({ [P2]: [ok(stable, '"s1"')] });
     const scoped = source({ root: root({ availablePackages: [], availablePatterns: ['ACME/*'] }) });

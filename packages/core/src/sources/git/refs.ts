@@ -5,6 +5,7 @@ import {
   type UpstreamResponse,
 } from '../policy-fetch.js';
 import { DELIM, FLUSH, PktLineError, PktLineReader, encodePkt } from './pkt-line.js';
+import type { GitCapabilities } from './fetch.js';
 import type { Packet } from './pkt-line.js';
 
 export const MAX_LS_REFS_BYTES = 8 * 1024 * 1024;
@@ -149,7 +150,7 @@ async function discover(
   policyFetch: PolicyFetch,
   base: string,
   credential: UpstreamCredential | undefined,
-): Promise<{ agent: boolean; used: number }> {
+): Promise<{ agent: boolean; used: number; filter: boolean }> {
   const response = await policyFetch({
     url: `${base}/info/refs?service=git-upload-pack`,
     method: 'GET',
@@ -187,7 +188,13 @@ async function discover(
     if (format !== undefined && format !== 'object-format=sha1') {
       throw new GitRefsError('unsupported_protocol');
     }
-    return { agent: caps.some((c) => c.startsWith('agent=')), used: reader.consumedBytes };
+    return {
+      agent: caps.some((c) => c.startsWith('agent=')),
+      used: reader.consumedBytes,
+      filter: caps.some(
+        (c) => c.startsWith('fetch=') && c.slice('fetch='.length).split(' ').includes('filter'),
+      ),
+    };
   } finally {
     cancel();
   }
@@ -230,9 +237,11 @@ async function run(
   policyFetch: PolicyFetch,
   repoUrl: string,
   credential: UpstreamCredential | undefined,
+  onCapabilities: ((capabilities: GitCapabilities) => void) | undefined,
 ): Promise<GitRefs> {
   const base = baseUrl(repoUrl);
-  const { agent, used } = await discover(policyFetch, base, credential);
+  const { agent, used, filter } = await discover(policyFetch, base, credential);
+  onCapabilities?.({ filter });
   const budget = MAX_LS_REFS_BYTES - used;
   if (budget <= 0) throw new GitRefsError('too_large');
 
@@ -285,21 +294,41 @@ async function run(
   }
 }
 
+/** Discovers fetch capabilities without listing refs or spending the listing budget. */
+export async function discoverCapabilities(
+  policyFetch: PolicyFetch,
+  repoUrl: string,
+  credential?: UpstreamCredential,
+): Promise<GitCapabilities> {
+  try {
+    const { filter } = await discover(policyFetch, baseUrl(repoUrl), credential);
+    return { filter };
+  } catch (error) {
+    rethrowRefsError(error);
+  }
+}
+
+function rethrowRefsError(error: unknown): never {
+  if (error instanceof UpstreamError && error.code === 'too_large') {
+    throw new GitRefsError('too_large');
+  }
+  if (error instanceof PktLineError) {
+    throw error.code === 'total_cap' ? new GitRefsError('too_large') : bad();
+  }
+  throw error;
+}
+
+/** `onCapabilities` runs once, after discovery succeeds and before the refs are listed. */
 export async function lsRefs(
   policyFetch: PolicyFetch,
   repoUrl: string,
   credential?: UpstreamCredential,
+  onCapabilities?: (capabilities: GitCapabilities) => void,
 ): Promise<GitRefs> {
   try {
-    return await run(policyFetch, repoUrl, credential);
+    return await run(policyFetch, repoUrl, credential, onCapabilities);
   } catch (error) {
-    if (error instanceof UpstreamError && error.code === 'too_large') {
-      throw new GitRefsError('too_large');
-    }
-    if (error instanceof PktLineError) {
-      throw error.code === 'total_cap' ? new GitRefsError('too_large') : bad();
-    }
-    throw error;
+    rethrowRefsError(error);
   }
 }
 

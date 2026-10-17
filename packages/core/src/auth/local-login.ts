@@ -57,6 +57,10 @@ interface Verified {
   readonly nowMs: number;
 }
 
+function strings(...values: readonly unknown[]): boolean {
+  return values.every((value) => typeof value === 'string');
+}
+
 function usable(snapshot: LocalLoginSnapshot): boolean {
   return (
     snapshot.userActive &&
@@ -184,6 +188,7 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
 
   return {
     async login(ctx, input, meta) {
+      if (!strings(input.email, input.password, input.code)) return REFUSED;
       const verified = await attempt(ctx, input.email, input.password, input.code, null);
       if (verified === null) return REFUSED;
       const { snapshot, step, rehash, nowMs } = verified;
@@ -217,6 +222,7 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
     },
 
     async reauth(ctx, authenticated, input) {
+      if (!strings(input.password, input.code)) return REFUSED;
       const { session } = authenticated;
       if (session.identityId !== null) {
         await check(ctx, null, input.password, input.code, clock.now().getTime());

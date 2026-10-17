@@ -522,3 +522,45 @@ it('19. prints no lock holder on a dry run', async () => {
     await close();
   }
 });
+
+async function addManifestRoutes(root: string, routes: unknown): Promise<void> {
+  const manifestPath = join(root, 'generated', 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, routes }));
+}
+
+it('exits 2 with zero requests when a route permission is unknown', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  await addManifestRoutes(outDir, [
+    {
+      method: 'GET',
+      path: '/widgets',
+      plugin: 'widgets',
+      permission: 'org:typo',
+      boundary: 'organization',
+    },
+  ]);
+  const { harness, close } = await createHarness();
+  try {
+    expect(await migrate(harness.fetch)).toBe(2);
+    expect(harness.requests).toHaveLength(0);
+    const printed = vi.mocked(console.error).mock.calls.map((call) => call.join(' '));
+    expect(printed.some((line) => line.startsWith('error: ') && line.includes('org:typo'))).toBe(
+      true,
+    );
+  } finally {
+    await close();
+  }
+});
+
+it('warns and migrates when the manifest has no route table', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  const { harness, close } = await createHarness();
+  try {
+    expect(await migrate(harness.fetch)).toBe(0);
+    const printed = vi.mocked(console.error).mock.calls.map((call) => call.join(' '));
+    expect(printed.some((line) => line.startsWith('warning: '))).toBe(true);
+  } finally {
+    await close();
+  }
+});

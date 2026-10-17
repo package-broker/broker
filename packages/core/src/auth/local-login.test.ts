@@ -222,6 +222,7 @@ async function build(options: Options = {}) {
   const sessions = createSessionService({
     sessions: {
       findActive: () => Promise.reject(new Error('unexpected findActive')),
+      findActiveById: () => Promise.reject(new Error('unexpected findActiveById')),
       touch: () => Promise.reject(new Error('unexpected touch')),
       markReauthenticatedByIdentity: () => Promise.reject(new Error('unexpected mark')),
       revoke: () => Promise.reject(new Error('unexpected revoke')),
@@ -617,5 +618,43 @@ describe('reauth', () => {
       code: harness.code,
     });
     expect(harness.reader.findByEmail.mock.calls[0]?.[0]).toBe(OTHER_ORG);
+  });
+});
+
+describe('non-string body fields', () => {
+  const NON_STRINGS: readonly unknown[] = [42, { value: 'x' }, ['x'], null];
+
+  it.each(
+    (['email', 'password', 'code'] as const).flatMap((field) =>
+      NON_STRINGS.map((value) => [field, value] as const),
+    ),
+  )('login refuses %s as %j without throwing or reserving', async (field, value) => {
+    const harness = await build();
+    const input = { email: EMAIL, password: PASSWORD, code: harness.code, [field]: value };
+    const result = await harness.service.login(
+      ORG,
+      input as unknown as { email: string; password: string; code: string },
+      META,
+    );
+    expect(result).toStrictEqual({ ok: false });
+    expect(harness.reader.reserveAttempt).not.toHaveBeenCalled();
+    expect(harness.writer.succeed).not.toHaveBeenCalled();
+  });
+
+  it.each(
+    (['password', 'code'] as const).flatMap((field) =>
+      NON_STRINGS.map((value) => [field, value] as const),
+    ),
+  )('reauth refuses %s as %j without throwing or reserving', async (field, value) => {
+    const harness = await build();
+    const input = { password: PASSWORD, code: harness.code, [field]: value };
+    const result = await harness.service.reauth(
+      ORG,
+      activeSession(),
+      input as unknown as { password: string; code: string },
+    );
+    expect(result).toStrictEqual({ ok: false });
+    expect(harness.reader.reserveAttempt).not.toHaveBeenCalled();
+    expect(harness.writer.succeed).not.toHaveBeenCalled();
   });
 });

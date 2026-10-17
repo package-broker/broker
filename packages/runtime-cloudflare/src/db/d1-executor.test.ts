@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { DbError } from '@package-broker/core/db/errors';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import { describeExecutorContract } from '@package-broker/db-sqlite/contract/executor-contract';
 import {
   D1_MAX_BOUND_PARAMETERS,
@@ -147,5 +147,32 @@ describe('createD1Executor bound parameter limit', () => {
     }
     expect(prepare).not.toHaveBeenCalled();
     expect(batch).not.toHaveBeenCalled();
+  });
+});
+
+describe('createD1Executor guard constraint on miniflare', () => {
+  it('a forced guard failure carries the guard constraint', async () => {
+    const binding = bindings[next];
+    next += 1;
+    if (binding === undefined) throw new Error('out of D1 bindings');
+    const executor = createD1Executor(
+      (await mf.getD1Database(binding)) as unknown as D1DatabaseLike,
+    );
+    await executor.batch([
+      {
+        sql: 'CREATE TABLE access_mutation_guard (key TEXT NOT NULL PRIMARY KEY CHECK(length(key) BETWEEN 1 AND 64)) STRICT',
+        params: [],
+      },
+    ]);
+    const guard = {
+      sql: 'INSERT INTO access_mutation_guard (key) SELECT ? WHERE (0) IS NOT 1',
+      params: ['K1'],
+    };
+
+    const error = await executor.batch([guard, guard]).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DbError);
+    expect((error as DbError).kind).toBe('unique');
+    expect((error as DbError).constraint).toBe(ACCESS_MUTATION_GUARD_CONSTRAINT);
   });
 });

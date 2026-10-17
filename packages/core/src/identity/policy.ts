@@ -87,5 +87,34 @@ export function domainPolicyProblems(policy: DomainPolicy): string[] {
       problems.push(`verifiedDomains[${index}] duplicates verifiedDomains[${first}]`);
     }
   }
+  const authoritative: unknown = policy.emailAuthoritativeDomains;
+  if (authoritative !== undefined) {
+    if (!Array.isArray(authoritative)) {
+      problems.push('emailAuthoritativeDomains must be an array');
+    } else {
+      const seenAuthoritative = new Map<string, number>();
+      for (let index = 0; index < authoritative.length; index += 1) {
+        const domain: unknown = authoritative[index];
+        if (typeof domain !== 'string') {
+          problems.push(`emailAuthoritativeDomains[${index}] must be a string`);
+          continue;
+        }
+        if (!isValidDomain(domain)) {
+          problems.push(`emailAuthoritativeDomains[${index}] must be a valid lowercase domain`);
+        }
+        if (!domains.includes(domain)) {
+          problems.push(`emailAuthoritativeDomains[${index}] must appear in verifiedDomains`);
+        }
+        const first = seenAuthoritative.get(domain);
+        if (first === undefined) {
+          seenAuthoritative.set(domain, index);
+        } else {
+          problems.push(
+            `emailAuthoritativeDomains[${index}] duplicates emailAuthoritativeDomains[${first}]`,
+          );
+        }
+      }
+    }
+  }
   return problems;
 }

@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +58,7 @@ export interface RemoteRef {
   readonly name: string;
   readonly sha: string;
   readonly peeled?: string;
+  readonly symref?: string;
 }
 
 export interface FetchOptions {
@@ -69,9 +70,13 @@ export interface SshGitSession {
   lsRemote(): Promise<RemoteRef[]>;
   fetchRefs(refs: readonly string[], options: FetchOptions): Promise<void>;
   catFile(ref: string, path: string): Promise<Buffer>;
+  commitTime(ref: string): Promise<string>;
   archiveZip(ref: string): Promise<Buffer>;
   close(): Promise<void>;
 }
+
+const QUIET_CONFIG = '[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n\tautoDetach = false\n';
+const QUIET_ARGS = ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false'];
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_STDOUT = 64 * 1024 * 1024;
@@ -84,6 +89,7 @@ const USER = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 const REPO_PATH = /^[A-Za-z0-9._/-]+$/;
 const SAFE_TEMP = /^[A-Za-z0-9/._-]+$/;
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const ADVERTISED = /^(?:HEAD|refs\/(?:heads|tags)\/.+)$/;
 const REF_NAME = /^refs\/(?:heads|tags)\/[A-Za-z0-9._/+-]+$/;
 
 const STDERR_REASONS: readonly [RegExp, SshGitReason][] = [
@@ -297,14 +303,21 @@ export async function openSshGitSession(
   let partial = false;
   let repoReady: Promise<void> | undefined;
 
-  function run(args: readonly string[], watchSize = false): Promise<Buffer> {
+  function run(
+    args: readonly string[],
+    watchSize = false,
+    extraEnv: Record<string, string> = {},
+  ): Promise<Buffer> {
     if (closing) return Promise.reject(new SshGitError('closed'));
     const address = addresses[addressIndex] ?? addresses[0] ?? '';
     return new Promise<Buffer>((resolve, reject) => {
-      const child = spawn('git', args, {
+      const gitArgs = args[0]?.startsWith('--git-dir=')
+        ? [args[0], ...QUIET_ARGS, ...args.slice(1)]
+        : [...QUIET_ARGS, ...args];
+      const child = spawn('git', gitArgs, {
         shell: false,
         detached: true,
-        env: envFor(address),
+        env: { ...envFor(address), ...extraEnv },
         cwd: root,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -372,6 +385,7 @@ export async function openSshGitSession(
   function ensureRepo(): Promise<void> {
     repoReady ??= (async () => {
       await run(['init', '--bare', '--quiet', repo]);
+      await appendFile(join(repo, 'config'), `\n${QUIET_CONFIG}`);
       await run([gitDir, 'remote', 'add', 'origin', url]);
     })();
     return repoReady;
@@ -394,12 +408,29 @@ export async function openSshGitSession(
     lsRemote() {
       return guarded(async () => {
         const out = await overAddresses(() =>
-          run(['-c', 'protocol.version=2', 'ls-remote', '--heads', '--tags', url]),
+          run([
+            '-c',
+            'protocol.version=2',
+            'ls-remote',
+            '--symref',
+            url,
+            'HEAD',
+            'refs/heads/*',
+            'refs/tags/*',
+          ]),
         );
-        const refs = new Map<string, { sha: string; peeled?: string }>();
+        const refs = new Map<string, { sha: string; peeled?: string; symref?: string }>();
+        const symrefs = new Map<string, string>();
         for (const line of out.toString('utf8').split('\n')) {
           const [sha, name] = line.split('\t');
-          if (!sha || !name || !OBJECT_ID.test(sha)) continue;
+          if (!sha || !name) continue;
+          if (sha.startsWith('ref: ')) {
+            const target = sha.slice(5);
+            if (name === 'HEAD' && REF_NAME.test(target)) symrefs.set(name, target);
+            continue;
+          }
+          if (!OBJECT_ID.test(sha)) continue;
+          if (!ADVERTISED.test(name.endsWith('^{}') ? name.slice(0, -3) : name)) continue;
           if (name.endsWith('^{}')) {
             const base = refs.get(name.slice(0, -3));
             if (base) base.peeled = sha;
@@ -407,7 +438,11 @@ export async function openSshGitSession(
             refs.set(name, { sha });
           }
         }
-        return [...refs].map(([name, ref]) => ({ name, ...ref }));
+        return [...refs].map(([name, ref]) => ({
+          name,
+          ...ref,
+          ...(symrefs.has(name) ? { symref: symrefs.get(name)! } : {}),
+        }));
       });
     },
 
@@ -423,8 +458,6 @@ export async function openSshGitSession(
               gitDir,
               '-c',
               'protocol.version=2',
-              '-c',
-              'gc.auto=0',
               '-c',
               'fetch.fsckObjects=true',
               '-c',
@@ -453,6 +486,23 @@ export async function openSshGitSession(
         const out = await run([gitDir, 'cat-file', 'blob', `${ref}:${path}`], partial);
         if (partial) await assertRepoSize();
         return out;
+      });
+    },
+
+    async commitTime(ref) {
+      assertRef(ref);
+      return guarded(async () => {
+        await ensureRepo();
+        const out = await run(
+          [gitDir, 'show', '--no-patch', '--format=%cI', `${ref}^{commit}`, '--'],
+          false,
+          { GIT_NO_LAZY_FETCH: '1' },
+        );
+        const time = out.toString('utf8').trim();
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/.test(time)) {
+          throw new SshGitError('git_failed');
+        }
+        return new Date(time).toISOString();
       });
     },
 

@@ -69,20 +69,23 @@ const IDENTITY_FAILURES: ReadonlySet<string> = new Set<IdentityFailure>([
   'provider_error',
   'email_missing',
 ]);
-const LOGIN_REFUSALS: ReadonlySet<string> = new Set<LoginRefusal>([
-  'email_missing',
-  'email_unverified',
-  'domain_not_verified',
-  'not_invited',
-  'user_suspended',
-  'hook_denied',
-  'too_many_groups',
-  'already_linked',
-  'invalid_identity',
-  'provider_rebound',
-  'email_changed',
-  'conflict',
-]);
+const LOGIN_REFUSALS: ReadonlySet<string> = new Set(
+  Object.keys({
+    email_missing: true,
+    email_unverified: true,
+    domain_not_verified: true,
+    not_invited: true,
+    user_suspended: true,
+    hook_denied: true,
+    too_many_groups: true,
+    already_linked: true,
+    link_requires_admin: true,
+    invalid_identity: true,
+    provider_rebound: true,
+    email_changed: true,
+    conflict: true,
+  } satisfies Record<LoginRefusal, true>),
+);
 const REAUTH_REFUSALS: ReadonlySet<string> = new Set(
   Object.keys({
     not_sso_session: true,
@@ -140,6 +143,28 @@ function redirect(location: string, cookies: readonly string[]): Response {
     headers: { location, 'cache-control': 'no-store' },
   });
   return withCookies(response, cookies);
+}
+
+function prefersJson(request: Request): boolean {
+  const accept = request.headers.get('accept');
+  if (accept === null) return false;
+  for (const part of accept.split(',')) {
+    const [range = '', ...params] = part.split(';').map((piece) => piece.trim().toLowerCase());
+    const q = params.find((param) => param.startsWith('q='));
+    const weight = q === undefined ? 1 : Number(q.slice(2));
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    return range === 'application/json';
+  }
+  return false;
+}
+
+function locationResponse(location: string, cookies: readonly string[]): Response {
+  return withCookies(json(200, { location }), cookies);
+}
+
+function varyOnAccept(response: Response): Response {
+  response.headers.set('vary', 'Accept');
+  return response;
 }
 
 async function readBody(request: Request): Promise<string | null> {
@@ -305,6 +330,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     identity: VerifiedIdentity,
     returnTo: string,
     cookies: readonly string[],
+    asLocation = false,
   ): Promise<Response> {
     const outcome = await deps.login(
       orgOf(rc),
@@ -329,7 +355,8 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       userId: outcome.userId,
       sessionId: outcome.sessionId,
     });
-    return redirect(returnTo, [...outcome.cookies, ...cookies]);
+    const issued = [...outcome.cookies, ...cookies];
+    return asLocation ? locationResponse(returnTo, issued) : redirect(returnTo, issued);
   }
 
   async function start(rc: RequestContext): Promise<Response> {
@@ -389,7 +416,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       if ('reason' in verified) {
         return loginFailed(rc, provider.id, verified.reason, [], verified.error);
       }
-      return completeLogin(rc, provider, verified.identity, returnTo, []);
+      return varyOnAccept(
+        await completeLogin(rc, provider, verified.identity, returnTo, [], prefersJson(request)),
+      );
     }
 
     let sealed: string;
@@ -408,7 +437,11 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       }
       throw error;
     }
-    return redirect(started.location, [sealed]);
+    return varyOnAccept(
+      prefersJson(request)
+        ? locationResponse(started.location, [sealed])
+        : redirect(started.location, [sealed]),
+    );
   }
 
   function providerFailed(rc: RequestContext, provider: string, error: unknown): Response {

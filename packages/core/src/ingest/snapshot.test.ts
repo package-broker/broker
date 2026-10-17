@@ -296,6 +296,28 @@ describe('stageSnapshot options', () => {
     ).rejects.toThrow(TypeError);
   });
 
+  it('cancels the supplied first pass when the snapshot id is invalid', async () => {
+    const m = memoryStore();
+    let cancels = 0;
+    let opens = 0;
+    const firstPass = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancels += 1;
+      },
+    });
+    await expect(
+      stageSnapshot(ctx, async () => (opens++, streamOf(packument)), m.store, {
+        ...options,
+        id: 'W/"x"',
+        firstPass,
+      }),
+    ).rejects.toThrow(TypeError);
+    expect(cancels).toBe(1);
+    expect(opens).toBe(0);
+    expect(m.objects.size).toBe(0);
+    expect(m.published).toHaveLength(0);
+  });
+
   it('passes upstream byte counts through', async () => {
     const m = memoryStore();
     let total = 0;
@@ -304,6 +326,17 @@ describe('stageSnapshot options', () => {
       onUpstreamBytes: { add: (n = 1) => void (total += n) },
     });
     expect(total).toBe(packument.length * 2);
+  });
+
+  it('reads pass 1 from a supplied first pass and opens only for pass 2', async () => {
+    const m = memoryStore();
+    let opens = 0;
+    const ref = await stageSnapshot(ctx, async () => (opens++, streamOf(packument)), m.store, {
+      ...options,
+      firstPass: streamOf(packument),
+    });
+    expect(ref.stagedBlob).toBe(sha256(packument));
+    expect(opens).toBe(1);
   });
 
   it('passes the abort signal through', async () => {

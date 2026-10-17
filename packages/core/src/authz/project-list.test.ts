@@ -81,6 +81,7 @@ function engineFor(w: World) {
           : null;
       return {
         session: { id: 's1', csrfHash: 'x' },
+        protectedHolder: false,
         user: { id: 'u1' },
         project: project === null ? null : { id: project.id },
         organizationPermissions: w.organizationPermissions,

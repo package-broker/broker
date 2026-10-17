@@ -222,6 +222,7 @@ async function build(options: Options = {}) {
   const sessions = createSessionService({
     sessions: {
       findActive: () => Promise.reject(new Error('unexpected findActive')),
+      findActiveById: () => Promise.reject(new Error('unexpected findActiveById')),
       touch: () => Promise.reject(new Error('unexpected touch')),
       markReauthenticatedByIdentity: () => Promise.reject(new Error('unexpected mark')),
       revoke: () => Promise.reject(new Error('unexpected revoke')),

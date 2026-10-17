@@ -9,6 +9,7 @@ import type { IdentityProvider } from '../identity/port.js';
 import { normalizeEmail } from '../identity/policy.js';
 import type { MutationFence } from './fence.js';
 import { DEFAULT_ROLES, rolePermissionProblems } from './permissions.js';
+import type { CreatorOffboardingCause } from './service-principal-service.js';
 
 export type AdminError =
   | 'invalid_permission'
@@ -119,6 +120,11 @@ export interface AdministrationDeps {
   readonly clock: Clock;
   readonly ids: { ulid(): string };
   readonly log: AdminLog;
+  /** Runs after a user is suspended; production passes `ServicePrincipalService.creatorOffboarded`. */
+  readonly onCreatorOffboarded?: (
+    ctx: OrgContext,
+    input: { readonly userId: string; readonly cause: CreatorOffboardingCause },
+  ) => Promise<void> | void;
 }
 
 const GROUP_VALUE_MAX_LENGTH = 256;
@@ -230,6 +236,31 @@ export function createAdministration(deps: AdministrationDeps): Administration {
 
   const userEvent = (ctx: OrgContext, actor: Actor, action: string, userId: string): void =>
     emit({ event: 'user.changed', action, orgId: ctx.orgId, userId, actorUserId: actor.userId });
+
+  async function creatorOffboarded(
+    ctx: OrgContext,
+    userId: string,
+    cause: CreatorOffboardingCause,
+  ): Promise<void> {
+    const callback = deps.onCreatorOffboarded;
+    if (callback === undefined) return;
+    try {
+      await callback(ctx, { userId, cause });
+    } catch (error) {
+      try {
+        deps.log({
+          level: 'warn',
+          event: 'user.offboarding_callback_failed',
+          orgId: ctx.orgId,
+          userId,
+          cause,
+          error: error instanceof Error ? error.name : typeof error,
+        });
+      } catch {
+        // The suspension is stored; neither the callback nor the sink may report it as failed.
+      }
+    }
+  }
 
   function deny(ctx: OrgContext, actor: Actor | null, action: string): AdminResult<never> {
     emit({ event: 'admin.denied', action, orgId: ctx.orgId, actorUserId: actor?.userId ?? null });
@@ -552,6 +583,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         if (result === 'unchanged') return OK;
         if (result !== 'suspended') return fail(result);
         userEvent(ctx, actor, 'suspended', userId);
+        await creatorOffboarded(ctx, userId, 'suspended');
         return OK;
       }),
 

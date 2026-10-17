@@ -3,7 +3,7 @@ import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp, isUlid } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
-import type { AdminLog, AdminResult } from './administration.js';
+import type { AdminLog, AdminResult, AdministrationDeps } from './administration.js';
 import type { MutationFence } from './fence.js';
 import type { ProjectActor } from './project-actor.js';
 
@@ -58,7 +58,13 @@ export interface ProjectGrantStore {
       readonly projectId: string;
       readonly providerAnchors: readonly ProviderAnchor[];
     },
-  ): Promise<'deleted' | 'forbidden' | 'not_found' | 'conflict' | 'indeterminate'>;
+  ): Promise<
+    | { readonly status: 'deleted'; readonly offboardedUserId: string | null }
+    | 'forbidden'
+    | 'not_found'
+    | 'conflict'
+    | 'indeterminate'
+  >;
 }
 
 export interface ProjectGrantInput {
@@ -106,6 +112,7 @@ export interface ProjectAdministration {
 }
 
 export interface ProjectAdministrationDeps {
+  readonly onCreatorOffboarded?: AdministrationDeps['onCreatorOffboarded'];
   readonly grants: ProjectGrantStore;
   readonly providers: Pick<ReadonlyMap<string, unknown>, 'has'>;
   readonly providerAnchors: readonly ProviderAnchor[];
@@ -239,7 +246,9 @@ export function createProjectAdministration(
     action: string,
     answer: Exclude<
       Awaited<ReturnType<ProjectGrantStore[keyof ProjectGrantStore]>>,
-      'created' | 'updated' | 'deleted'
+      | 'created'
+      | 'updated'
+      | { readonly status: 'deleted'; readonly offboardedUserId: string | null }
     >,
   ): AdminResult<never> {
     switch (answer) {
@@ -307,8 +316,28 @@ export function createProjectAdministration(
       if (!isUlid(grantId)) return fail('not_found');
       if (!expects(fence, `access_grant:${grantId}`)) return fail('invalid_revision');
       const answer = await grants.delete(ctx, fence, { id: grantId, projectId, providerAnchors });
-      if (answer !== 'deleted') return refused(ctx, actor, action, answer);
+      if (typeof answer === 'string') return refused(ctx, actor, action, answer);
       changed(ctx, actor, 'revoke', grantId);
+      if (answer.offboardedUserId !== null && deps.onCreatorOffboarded !== undefined) {
+        const userId = answer.offboardedUserId;
+        const cause = 'membership_removed';
+        try {
+          await deps.onCreatorOffboarded(ctx, { userId, cause });
+        } catch (error) {
+          try {
+            deps.log({
+              level: 'warn',
+              event: 'user.offboarding_callback_failed',
+              orgId: ctx.orgId,
+              userId,
+              cause,
+              error: error instanceof Error ? error.name : typeof error,
+            });
+          } catch {
+            // The grant is deleted; callback and sink failures must not change the result.
+          }
+        }
+      }
       return OK_NULL;
     },
   };

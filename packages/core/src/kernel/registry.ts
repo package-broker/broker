@@ -9,7 +9,14 @@ import {
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
 import type { SourceProvider } from '../sources/provider.js';
-import { JobError, defineJob, qualifyJobName, type JobDefinition } from '../platform/jobs.js';
+import {
+  JobError,
+  assertPluginId,
+  defineJob,
+  isReservedPluginId,
+  qualifyJobName,
+  type JobDefinition,
+} from '../platform/jobs.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityResolver } from './routes.js';
 import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
@@ -23,6 +30,14 @@ export interface RegisteredJob {
   readonly qualifiedName: string;
   readonly definition: JobDefinition;
 }
+
+declare const coreJobBrand: unique symbol;
+
+export interface RegisteredCoreJob extends RegisteredJob {
+  readonly [coreJobBrand]: true;
+}
+
+const issuedCoreJobs = new WeakSet<RegisteredCoreJob>();
 
 export interface Registration {
   readonly routes: readonly RegisteredRoute[];
@@ -40,7 +55,7 @@ export interface Registration {
 
 export interface RegistrationOptions {
   readonly packageResolver?: PackageVisibilityResolver;
-  readonly coreJobs?: readonly RegisteredJob[];
+  readonly coreJobs?: readonly RegisteredCoreJob[];
 }
 
 export class KernelConfigError extends Error {
@@ -105,10 +120,16 @@ function jobProblemCode(error: unknown): string {
 }
 
 /** Kernel-internal: `core` is rejected as a plugin id, so core job types are qualified here. */
-export function registerCoreJob(definition: JobDefinition): RegisteredJob {
+export function registerCoreJob(definition: JobDefinition): RegisteredCoreJob {
   const frozen = defineJob(definition);
   const qualifiedName = `core:${frozen.name}:v${frozen.version}`;
-  return Object.freeze({ plugin: 'core', qualifiedName, definition: frozen });
+  const job = Object.freeze({
+    plugin: 'core',
+    qualifiedName,
+    definition: frozen,
+  }) as RegisteredCoreJob;
+  issuedCoreJobs.add(job);
+  return job;
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -130,7 +151,7 @@ export function collectRegistrations(
     'auth.resolveIdentity': [],
     'auth.mapGroups': [],
   };
-  const jobs: RegisteredJob[] = [...(options.coreJobs ?? [])];
+  const jobs: RegisteredJob[] = [];
   const jobNames = new Set<string>();
   const bindings = new Map<PortName, string>();
   let identityFactory: IdentityProviderFactory | null = null;
@@ -138,7 +159,12 @@ export function collectRegistrations(
   const sourceProviderOwners = new Map<string, string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 
-  for (const core of jobs) {
+  for (const [index, core] of (options.coreJobs ?? []).entries()) {
+    if (!issuedCoreJobs.has(core)) {
+      problems.push(`core job was not issued by registerCoreJob (coreJobs entry ${index})`);
+      continue;
+    }
+    jobs.push(core);
     if (jobNames.has(core.qualifiedName)) {
       problems.push(`job "${core.qualifiedName}" is registered more than once`);
     }
@@ -148,13 +174,17 @@ export function collectRegistrations(
   for (const plugin of plugins) {
     const id = plugin.id;
 
-    if (!(plugin.apiVersion >= minApi && plugin.apiVersion <= maxApi)) {
+    if (!Number.isInteger(plugin.apiVersion)) {
+      problems.push(`plugin "${id}" apiVersion must be an integer`);
+    } else if (!(plugin.apiVersion >= minApi && plugin.apiVersion <= maxApi)) {
       problems.push(
         `plugin "${id}" has apiVersion ${plugin.apiVersion}, core supports ${minApi} to ${maxApi}`,
       );
     }
-    if (id === 'core') {
-      problems.push('plugin id "core" is reserved');
+    let validId: boolean | undefined;
+    if (isReservedPluginId(id)) {
+      validId = false;
+      problems.push(`plugin id "${id}" is reserved`);
     }
     for (const key of Reflect.ownKeys(plugin)) {
       if (typeof key === 'symbol' || !DEFINITION_KEYS.has(key)) {
@@ -241,6 +271,16 @@ export function collectRegistrations(
         },
         job: (definition) => {
           assertOpen();
+          if (validId === undefined) {
+            try {
+              assertPluginId(id);
+              validId = true;
+            } catch (error) {
+              validId = false;
+              problems.push(`plugin "${id}" id is invalid: ${jobProblemCode(error)}`);
+            }
+          }
+          if (!validId) return;
           try {
             const frozen = defineJob(definition);
             const qualifiedName = qualifyJobName(id, frozen.name, frozen.version);

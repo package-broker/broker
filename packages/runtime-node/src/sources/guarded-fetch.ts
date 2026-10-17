@@ -150,7 +150,7 @@ export function createGuardedFetch(
     const secure = url.protocol === 'https:';
     const hostname = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
     const port = url.port === '' ? (secure ? 443 : 80) : Number(url.port);
-    const target = guard.forTarget(url.hostname, port);
+    const target = guard.forTarget(url.hostname, port, secure ? 'https' : 'http');
     const literal = isIP(hostname) !== 0;
 
     let connectHost = hostname;

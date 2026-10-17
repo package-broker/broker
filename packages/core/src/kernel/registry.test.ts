@@ -1,7 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition, type RouteDefinition } from '../plugin.js';
 import type { JobDefinition } from '../platform/jobs.js';
-import { KernelConfigError, collectRegistrations, registerCoreJob } from './registry.js';
+import {
+  KernelConfigError,
+  collectRegistrations,
+  registerCoreJob,
+  type RegistrationOptions,
+  type RegisteredCoreJob,
+  type RegisteredJob,
+} from './registry.js';
 
 const handler = () => new Response('ok');
 
@@ -296,6 +303,16 @@ describe('collectRegistrations', () => {
     expect(() => collectRegistrations([plugin('legacy', { apiVersion: 3 })])).not.toThrow();
   });
 
+  it.each([2.5, Number.NaN])('rejects non-integer apiVersion %s', (apiVersion) => {
+    expect(problemsOf([plugin('alpha', { apiVersion })])).toEqual([
+      'plugin "alpha" apiVersion must be an integer',
+    ]);
+  });
+
+  it('refuses the reserved schedule plugin id without jobs', () => {
+    expect(problemsOf([plugin('schedule')])).toEqual(['plugin id "schedule" is reserved']);
+  });
+
   it('collects three problems from one set', () => {
     const a = plugin('a', { apiVersion: 99, binds: ['source'], sourceProviders: () => [] });
     const b = withRoutes(
@@ -359,7 +376,7 @@ describe('collectRegistrations', () => {
       expect(collectRegistrations([plugin('alpha')]).jobs).toEqual([]);
     });
 
-    it('rejects a duplicate qualified name within and across plugins', () => {
+    it('rejects duplicate qualified names within a plugin and separates plugin namespaces', () => {
       expect(problemsOf([withJobs('alpha', job(), job())])).toEqual([
         'job "alpha:sync:v1" is registered more than once',
       ]);
@@ -373,8 +390,10 @@ describe('collectRegistrations', () => {
       const badValidate = job({ name: 'other', validate: 1 as never });
       const problems = problemsOf([withJobs('alpha', badHandler, badValidate)]);
       expect(problems).toHaveLength(2);
-      expect(problems[0]).toContain('plugin "alpha" job');
-      expect(problems[0]).toContain('invalid_definition');
+      expect(problems).toEqual([
+        'plugin "alpha" job is invalid: invalid_definition',
+        'plugin "alpha" job is invalid: invalid_definition',
+      ]);
     });
 
     it('rejects an invalid interval', () => {
@@ -433,6 +452,34 @@ describe('collectRegistrations', () => {
         'alpha:sync:v1',
       ]);
       expect(() => registerCoreJob(job({ name: 'Bad' }))).toThrow();
+    });
+
+    it('reports an invalid plugin id once and skips all three jobs', () => {
+      expect(problemsOf([withJobs('Bad:Id', job({ name: 'Bad' }), job(), job())])).toEqual([
+        'plugin "Bad:Id" id is invalid: invalid_name',
+      ]);
+    });
+
+    it('rejects a structurally identical core job not issued by registerCoreJob', () => {
+      const issued = registerCoreJob(job());
+      const forged: RegisteredJob = { ...issued };
+      expectTypeOf<RegisteredJob>().not.toExtend<
+        NonNullable<RegistrationOptions['coreJobs']>[number]
+      >();
+      expect(() =>
+        collectRegistrations([], {
+          // @ts-expect-error Only registerCoreJob output can be supplied as a core job.
+          coreJobs: [forged],
+        }),
+      ).toThrow('core job was not issued by registerCoreJob');
+    });
+
+    it('rejects a spread copy typed as a registered core job and reports its entry index', () => {
+      const issued = registerCoreJob(job());
+      const copied: RegisteredCoreJob = { ...issued };
+      expect(() => collectRegistrations([], { coreJobs: [issued, copied] })).toThrow(
+        'core job was not issued by registerCoreJob (coreJobs entry 1)',
+      );
     });
 
     it('rejects a duplicate core job', () => {

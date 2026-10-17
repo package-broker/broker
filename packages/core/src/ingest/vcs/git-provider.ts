@@ -7,20 +7,25 @@ import {
 } from '../../sources/credentials.js';
 import { versionsFromRefs } from '../../registry/composer/version-rules.js';
 import {
+  MAX_ATTRIBUTES_FILE_BYTES,
   buildZipFromTree,
   type ArchiveStaging,
   type BuiltArchive,
 } from '../../sources/git/archive.js';
+import { ExportIgnore } from '../../sources/git/export-ignore.js';
 import {
   GitFetchError,
   createGitBlobReader,
   readFileAtRefs,
   readTreeAtCommit,
   type FileAtRef,
+  type GitCapabilities,
   type GitFetchContext,
+  type GitTreeEntry,
 } from '../../sources/git/fetch.js';
-import { lsRefs, type GitRef } from '../../sources/git/refs.js';
-import type { PolicyFetch } from '../../sources/policy-fetch.js';
+import { discoverCapabilities, lsRefs } from '../../sources/git/refs.js';
+import { UpstreamError, type PolicyFetch } from '../../sources/policy-fetch.js';
+import { GitRemoteError } from '../../sources/git/pkt-line.js';
 import {
   createPackageDescription,
   snapshotRef,
@@ -61,6 +66,15 @@ export interface GitProvider extends SourceProvider {
 const SHA = /^[a-f0-9]{40}$/;
 const TAGS = 'refs/tags/';
 const HEADS = 'refs/heads/';
+const ATTRIBUTES_FILE = '.gitattributes';
+
+function isFetchFailure(error: unknown): error is GitFetchError | GitRemoteError | UpstreamError {
+  return (
+    error instanceof GitFetchError ||
+    error instanceof GitRemoteError ||
+    error instanceof UpstreamError
+  );
+}
 
 function repository(source: ProviderSource) {
   if (
@@ -89,6 +103,7 @@ function fetchContext(
   ctx: ProviderContext,
   options: GitProviderOptions,
   url: string,
+  capabilities?: GitCapabilities,
 ): { git: GitFetchContext; url: string } {
   const policyFetch: PolicyFetch = (request) =>
     ctx.fetch({
@@ -103,6 +118,7 @@ function fetchContext(
       codecs: ctx.codecs,
       runtime: options.runtime,
       ...(ctx.credential === null ? {} : { credential: ctx.credential }),
+      ...(capabilities === undefined ? {} : { capabilities }),
     },
   };
 }
@@ -173,8 +189,18 @@ async function sha256Hex(text: string): Promise<string> {
 export function createGitProvider(options: GitProviderOptions): GitProvider {
   async function listRefs(ctx: ProviderContext, source: ProviderSource) {
     const repo = repository(source);
-    const { git, url } = fetchContext(ctx, options, repo.url);
-    const listing = await lsRefs(git.policyFetch, url, git.credential);
+    const base = fetchContext(ctx, options, repo.url);
+    let capabilities: GitCapabilities | undefined;
+    const listing = await lsRefs(
+      base.git.policyFetch,
+      base.url,
+      base.git.credential,
+      (advertised) => {
+        capabilities = advertised;
+      },
+    );
+    const { git, url } =
+      capabilities === undefined ? base : fetchContext(ctx, options, repo.url, capabilities);
     const { config } = repo;
     const refs = listing.refs.filter(
       (ref) =>
@@ -236,33 +262,97 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
       if (canonical !== wanted) {
         return { kind: 'not_found', definitive: true };
       }
-      const versions = versionsFromRefs(
-        s.refs.filter((ref) => ref.name.startsWith(TAGS)).map((ref) => ref.name.slice(TAGS.length)),
-        s.refs
-          .filter((ref) => ref.name.startsWith(HEADS))
-          .map((ref) => ref.name.slice(HEADS.length)),
-        s.defaultBranch,
-      );
       const refName = (kind: 'tag' | 'branch', ref: string): string =>
         `${kind === 'tag' ? TAGS : HEADS}${ref}`;
-      const winning = new Set(versions.versions.map((v) => refName(v.kind, v.ref)));
-      const winningRefs: GitRef[] = s.refs.filter((ref) => winning.has(ref.name));
-      const files = await readFileAtRefs(s.git, s.url, winningRefs, 'composer.json');
-      const byRef = new Map(files.map((file) => [file.ref, file]));
+      const tags = s.refs
+        .filter((ref) => ref.name.startsWith(TAGS))
+        .map((ref) => ref.name.slice(TAGS.length));
+      const branches = s.refs
+        .filter((ref) => ref.name.startsWith(HEADS))
+        .map((ref) => ref.name.slice(HEADS.length));
+      const rank = (dead: ReadonlySet<string>) =>
+        versionsFromRefs(
+          tags.filter((tag) => !dead.has(`${TAGS}${tag}`)),
+          branches.filter((branch) => !dead.has(`${HEADS}${branch}`)),
+          s.defaultBranch,
+        );
       let complete = true;
+      const dead = new Set<string>();
+      const files = new Map<string, FileAtRef>();
+      const failures = new Map<string, string>();
+      let versions = rank(dead);
+      for (let round = 0; ; round++) {
+        const winning = new Set(versions.versions.map((v) => refName(v.kind, v.ref)));
+        const unread = s.refs.filter((ref) => winning.has(ref.name) && !files.has(ref.name));
+        if (unread.length > 0) {
+          const read = async (refs: typeof unread) => {
+            for (const file of await readFileAtRefs(s.git, s.url, refs, 'composer.json')) {
+              files.set(file.ref, file);
+            }
+          };
+          const fail = (refs: typeof unread, error: unknown) => {
+            ctx.signal.throwIfAborted();
+            if (!isFetchFailure(error)) throw error;
+            for (const ref of refs) failures.set(ref.name, error.code);
+          };
+          try {
+            await read(unread);
+          } catch (error) {
+            ctx.signal.throwIfAborted();
+            if (round === 0) {
+              if (
+                unread.length === 1 ||
+                !(error instanceof GitFetchError || error instanceof GitRemoteError)
+              ) {
+                throw error;
+              }
+              let succeeded = false;
+              const isolate = async (refs: typeof unread): Promise<void> => {
+                ctx.signal.throwIfAborted();
+                try {
+                  await read(refs);
+                  succeeded = true;
+                } catch (error) {
+                  ctx.signal.throwIfAborted();
+                  if (!isFetchFailure(error)) throw error;
+                  if (refs.length > 1 && !(error instanceof UpstreamError)) {
+                    const middle = Math.floor(refs.length / 2);
+                    await isolate(refs.slice(0, middle));
+                    await isolate(refs.slice(middle));
+                  } else {
+                    fail(refs, error);
+                  }
+                }
+              };
+              const middle = Math.floor(unread.length / 2);
+              await isolate(unread.slice(0, middle));
+              await isolate(unread.slice(middle));
+              if (!succeeded) throw error;
+            } else {
+              fail(unread, error);
+            }
+          }
+        }
+        ctx.signal.throwIfAborted();
+        const unreadable = [...winning].filter(
+          (name) => unreadableReason(files.get(name)) !== undefined,
+        );
+        if (unreadable.length === 0) break;
+        for (const name of unreadable) {
+          dead.add(name);
+          complete = false;
+          skipped(ctx, failures.get(name) ?? (unreadableReason(files.get(name)) as string));
+        }
+        versions = rank(dead);
+      }
       const candidates: VersionCandidate[] = [];
       const origin = { probe: probeFor(ctx, s.url), importedAt: ctx.clock.now().toISOString() };
       for (const version of versions.versions) {
-        const file = byRef.get(refName(version.kind, version.ref));
+        const file = files.get(refName(version.kind, version.ref));
         const manifest = file === undefined ? undefined : parseManifest(file);
-        const reason = !file
-          ? 'missing'
-          : (file.reason ??
-            (manifest === undefined
-              ? 'bad_manifest'
-              : keyOf(manifest.name) === wanted
-                ? undefined
-                : 'foreign_name'));
+        const reason =
+          unreadableReason(file) ??
+          (manifest !== undefined && keyOf(manifest.name) !== wanted ? 'foreign_name' : undefined);
         if (reason !== undefined || file === undefined || manifest === undefined) {
           complete = false;
           skipped(ctx, reason ?? 'bad_manifest');
@@ -321,13 +411,15 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
       if (!SHA.test(commit) || options.staging === undefined) {
         throw new GitProviderError('invalid_request');
       }
-      const { git, url } = fetchContext(ctx, options, repo.url);
-      const tree = await readTreeAtCommit(git, url, commit);
-      const blobs = createGitBlobReader(
-        git,
-        url,
-        tree.entries.filter((entry) => entry.type === 'blob').map((entry) => entry.oid),
+      const base = fetchContext(ctx, options, repo.url);
+      const capabilities = await discoverCapabilities(
+        base.git.policyFetch,
+        base.url,
+        base.git.credential,
       );
+      const { git, url } = fetchContext(ctx, options, repo.url, capabilities);
+      const tree = await readTreeAtCommit(git, url, commit);
+      const blobs = createGitBlobReader(git, url, await blobPlan(git, url, tree.entries));
       return buildZipFromTree(tree, ctx.codecs, { blobs, staging: options.staging });
     },
   };
@@ -344,6 +436,57 @@ function parseManifest(
     return undefined;
   }
   return record(value) && typeof value.name === 'string' ? { name: value.name, value } : undefined;
+}
+
+const ARCHIVED_MODES = new Set(['100644', '100755']);
+const attributesDecoder = new TextDecoder();
+
+/**
+ * Blobs the archive reads: everything except export-ignored paths, plus the attribute files the
+ * archive builder loads itself. Any failure while evaluating the rules returns the full plan so
+ * the archive build reports it.
+ */
+async function blobPlan(
+  git: GitFetchContext,
+  url: string,
+  entries: readonly GitTreeEntry[],
+): Promise<string[]> {
+  const blobs = entries.filter((entry) => entry.type === 'blob');
+  const sources = blobs
+    .filter(
+      (entry) =>
+        ARCHIVED_MODES.has(entry.mode) &&
+        (entry.path === ATTRIBUTES_FILE || entry.path.endsWith(`/${ATTRIBUTES_FILE}`)),
+    )
+    .map((entry) => ({ entry, dir: entry.path.slice(0, -(ATTRIBUTES_FILE.length + 1)) }))
+    .sort((a, b) => depth(a.dir) - depth(b.dir));
+  const full = blobs.map((entry) => entry.oid);
+  if (sources.length === 0) return full;
+  try {
+    const rules = new ExportIgnore();
+    const loaded = new Set<string>();
+    for (const { entry, dir } of sources) {
+      if (dir !== '' && rules.dirIgnored(dir)) continue;
+      const reader = createGitBlobReader(git, url, [entry.oid]);
+      const { body } = await reader.read(entry.oid, MAX_ATTRIBUTES_FILE_BYTES);
+      rules.add(dir, attributesDecoder.decode(await new Response(body).arrayBuffer()));
+      loaded.add(entry.path);
+    }
+    return blobs
+      .filter((entry) => loaded.has(entry.path) || !rules.ignored(entry.path))
+      .map((entry) => entry.oid);
+  } catch {
+    return full;
+  }
+}
+
+function depth(dir: string): number {
+  return dir === '' ? 0 : dir.split('/').length;
+}
+
+function unreadableReason(file: FileAtRef | undefined): string | undefined {
+  if (file === undefined) return 'missing';
+  return file.reason ?? (parseManifest(file) === undefined ? 'bad_manifest' : undefined);
 }
 
 function manifestName(file: FileAtRef | undefined): string | null {

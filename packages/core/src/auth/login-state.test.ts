@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { base64urlDecode, base64urlEncode } from './primitives.js';
 import { LOGIN_COOKIE } from './cookies.js';
 import {
@@ -14,7 +14,7 @@ import { createKeyring } from '../secrets/keyring.js';
 import type { MasterKey } from '../secrets/master-key.js';
 
 const NOW = 1_800_000_000_000;
-const CHALLENGE = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
+const LEGACY_CHALLENGE = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
 const encoder = new TextEncoder();
 
 function masterKey(version: number, start: number): MasterKey {
@@ -37,7 +37,6 @@ function loginState(overrides: Partial<LoginState> = {}): LoginState {
     returnTo: '/projects/a',
     issuedAt: NOW,
     sessionId: null,
-    challenge: CHALLENGE,
     data: { state: 'abc', nonce: 'def', verifier: 'ghi' },
     ...overrides,
   };
@@ -167,8 +166,6 @@ describe('sealLoginState', () => {
       { returnTo: '/a\\b' },
       { issuedAt: Number.NaN },
       { issuedAt: 1.5 },
-      { challenge: 'short' },
-      { challenge: `${CHALLENGE}=` },
       { purpose: 'reauth', sessionId: null },
       { data: { key: 1 } as unknown as Record<string, string> },
     ];
@@ -313,7 +310,6 @@ describe('openLoginState', () => {
       'not json',
       '[]',
       'null',
-      { ...valid, challenge: 'short' },
       { ...valid, purpose: 'other' },
       { ...valid, returnTo: '//evil.example' },
       { ...valid, issuedAt: '1800000000000' },
@@ -330,6 +326,31 @@ describe('openLoginState', () => {
     expect(await openLoginState(ONLY_V1(), await forgedCookie(valid), EXPECT_DEX, NOW)).toEqual(
       valid,
     );
+  });
+
+  it('opens a state sealed with the legacy challenge field and drops the field', async () => {
+    const valid = loginState();
+    for (const challenge of [LEGACY_CHALLENGE, 'short', 7]) {
+      const opened = await openLoginState(
+        ONLY_V1(),
+        await forgedCookie({ ...valid, challenge }),
+        EXPECT_DEX,
+        NOW,
+      );
+      expect(opened).toStrictEqual(valid);
+    }
+  });
+
+  it('seals without a challenge field', async () => {
+    const legacy = { ...loginState(), challenge: LEGACY_CHALLENGE } as LoginState;
+    const cipher = ONLY_V1();
+    const seal = vi.fn(cipher.seal);
+    await sealLoginState({ ...cipher, seal }, legacy);
+    expect(seal).toHaveBeenCalledOnce();
+    const plaintext = seal.mock.calls[0]![0];
+    const payload: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+    expect(payload).not.toHaveProperty('challenge');
+    expect(payload).toStrictEqual(loginState());
   });
 
   describe('re-authentication', () => {

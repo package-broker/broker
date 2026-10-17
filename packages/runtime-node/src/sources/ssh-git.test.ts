@@ -503,7 +503,7 @@ describe('operations and cleanup', () => {
 
   it('kills the whole process group on timeout', async () => {
     await setMode('grandchild');
-    const session = await openSshGitSession(remote, options({ timeoutMs: 500 }));
+    const session = await openSshGitSession(remote, options({ timeoutMs: 1500 }));
     await expect(session.fetchRefs([SHA], { filter: 'none', depth: 1 })).rejects.toMatchObject({
       reason: 'timeout',
     });
@@ -551,5 +551,30 @@ describe('operations and cleanup', () => {
     expect(text).not.toContain('id_key');
     expect(text).not.toContain('Load key');
     expect(text).not.toContain(tmpRoot);
+  });
+});
+
+describe('quiet scratch repositories', () => {
+  it('disables maintenance and GC in every invocation and persists scratch config', async () => {
+    const spawnSpy = spySpawn();
+    await withSshGitSession(remote, options({ spawn: spawnSpy }), async (session) => {
+      await session.lsRemote();
+      await session.fetchRefs([SHA], { filter: 'blob:none', depth: 1 });
+      await session.catFile(SHA, 'composer.json');
+      await session.archiveZip(SHA);
+      const scratch = join(tmpRoot, (await readdir(tmpRoot))[0] ?? '');
+      const config = await readFile(join(scratch, 'repo.git', 'config'), 'utf8');
+      expect(config).toContain('[maintenance]');
+      expect(config).toContain('auto = false');
+      expect(config).toContain('auto = 0');
+      expect(config).toContain('autoDetach = false');
+    });
+    for (const [, args] of spawnSpy.mock.calls) {
+      for (const setting of ['maintenance.auto=false', 'gc.auto=0', 'gc.autoDetach=false']) {
+        const index = args.indexOf(setting);
+        expect(index).toBeGreaterThan(0);
+        expect(args[index - 1]).toBe('-c');
+      }
+    }
   });
 });

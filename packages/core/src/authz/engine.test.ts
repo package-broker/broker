@@ -7,7 +7,7 @@ import type { AuthorizationRequest } from '../kernel/authorize.js';
 import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
-import { createAuthorizationEngine, patValidationGate } from './engine.js';
+import { createAuthorizationEngine, engineGrantOf, patValidationGate } from './engine.js';
 import type { AuthorizationEngineDeps, EngineSessionAccess, EngineTokenAccess } from './engine.js';
 
 const ORIGIN = 'https://broker.test';
@@ -110,6 +110,7 @@ function deps(
         const found: EngineSessionAccess = {
           session: { id: 'sess-1', csrfHash: await sha256Hex(CSRF) },
           user: { id: 'user-1' },
+          protectedHolder: false,
           project: input.boundary === 'project' ? state.sessionProject : null,
           organizationPermissions: state.sessionOrg,
           projectPermissions:
@@ -508,6 +509,7 @@ describe('token', () => {
       allow: true,
       principal: { kind: 'user', id: 'user-1' },
       projectId: 'proj-1',
+      tokenId: 'tok-1',
     });
     state.token.kind = 'svc';
     state.token.hashOf = SVC;
@@ -515,6 +517,7 @@ describe('token', () => {
       allow: true,
       principal: { kind: 'service', id: 'svc-1' },
       projectId: 'proj-1',
+      tokenId: 'tok-1',
     });
   });
 
@@ -790,7 +793,12 @@ describe('token', () => {
       await engine.authorize(
         req({ headers: bearer(PAT), boundary: 'organization', permission: 'org:read', params: {} }),
       ),
-    ).toEqual({ allow: true, principal: { kind: 'user', id: 'user-1' }, projectId: null });
+    ).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+      tokenId: 'tok-1',
+    });
   });
 });
 
@@ -818,5 +826,129 @@ describe('with the kernel', () => {
     ];
     expect(await authorizeRoute(req(), engine, hooks)).toEqual({ allow: false, status: 401 });
     expect(ran).toBe(false);
+  });
+});
+
+describe('engine grants', () => {
+  it.each([true, false])(
+    'copies and freezes the session snapshot (protected=%s)',
+    async (protectedHolder) => {
+      const state = freshState();
+      const base = deps(state);
+      const engine = createAuthorizationEngine({
+        ...base,
+        access: {
+          ...base.access,
+          lookupSession: async (ctx, input) => {
+            const found = await base.access.lookupSession(ctx, input);
+            return found && { ...found, protectedHolder };
+          },
+        },
+      });
+      const request = req({ headers: cookie });
+      const decision = await engine.authorize(request);
+      expect(Object.keys(decision).sort()).toEqual(['allow', 'principal', 'projectId']);
+      const grant = engineGrantOf(request)!;
+      expect(grant).toMatchObject({
+        principal: { kind: 'user', id: 'user-1' },
+        projectId: 'proj-1',
+        sessionId: 'sess-1',
+        tokenSelector: null,
+        actor: {
+          session: { id: 'sess-1', userId: 'user-1' },
+          user: { id: 'user-1' },
+          organizationPermissions: ['org:read'],
+          projectPermissions: ['project:read', 'project:packages:read'],
+          protectedHolder,
+        },
+      });
+      for (const value of [
+        grant,
+        grant.principal,
+        grant.actor,
+        grant.actor!.session,
+        grant.actor!.user,
+        grant.actor!.organizationPermissions,
+        grant.actor!.projectPermissions,
+      ])
+        expect(Object.isFrozen(value)).toBe(true);
+      state.sessionOrg.push('org:users:write');
+      state.sessionProjectPermissions.length = 0;
+      expect(grant.actor!.organizationPermissions).toEqual(['org:read']);
+      expect(grant.actor!.projectPermissions).toEqual(['project:read', 'project:packages:read']);
+      expect(engineGrantOf({ ...request })).toBeNull();
+    },
+  );
+
+  it.each(['pat', 'svc'] as const)(
+    'records a %s selector and passes the token id through authorizeRoute',
+    async (kind) => {
+      const state = freshState();
+      state.token.kind = kind;
+      state.token.hashOf = kind === 'pat' ? PAT : SVC;
+      const request = req({ headers: bearer(state.token.hashOf) });
+      const decision = await authorizeRoute(request, createAuthorizationEngine(deps(state)), []);
+      expect(decision).toMatchObject({ allow: true, tokenId: 'tok-1' });
+      expect(Object.keys(decision).sort()).toEqual(['allow', 'principal', 'projectId', 'tokenId']);
+      expect(engineGrantOf(request)).toEqual({
+        principal:
+          kind === 'pat' ? { kind: 'user', id: 'user-1' } : { kind: 'service', id: 'svc-1' },
+        projectId: 'proj-1',
+        sessionId: null,
+        actor: null,
+        tokenSelector: kind === 'pat' ? SELECTOR : 'mnopqrstuvwx',
+      });
+    },
+  );
+
+  it.each([
+    ['401', () => req(), 401],
+    ['403', () => req({ headers: cookie, permission: 'project:settings:write' }), 403],
+    ['404', () => req({ headers: cookie, params: { project: 'BAD' } }), 404],
+    ['CSRF refusal', () => req({ headers: { ...cookie, origin: ORIGIN }, method: 'POST' }), 403],
+    [
+      'Origin refusal',
+      () =>
+        req({
+          headers: { ...cookie, origin: 'https://foreign.test', 'x-csrf-token': CSRF },
+          method: 'POST',
+        }),
+      403,
+    ],
+    [
+      'Basic without Origin',
+      () => req({ headers: { authorization: `Basic ${btoa(`${PAT}:x`)}` }, method: 'POST' }),
+      401,
+    ],
+    [
+      'session-only token permission',
+      () => req({ headers: bearer(PAT), permission: 'project:settings:write' }),
+      403,
+    ],
+  ] as const)('records nothing for %s', async (_name, makeRequest, status) => {
+    const state = freshState();
+    state.token.projectPermissions.push('project:settings:write');
+    const request = makeRequest();
+    expect(await createAuthorizationEngine(deps(state)).authorize(request)).toEqual({
+      allow: false,
+      status,
+    });
+    expect(engineGrantOf(request)).toBeNull();
+  });
+
+  it('records nothing when a lookup throws', async () => {
+    const base = deps(freshState());
+    const engine = createAuthorizationEngine({
+      ...base,
+      access: {
+        ...base.access,
+        lookupSession: async () => {
+          throw new Error('unavailable');
+        },
+      },
+    });
+    const request = req({ headers: cookie });
+    await expect(engine.authorize(request)).rejects.toThrow('unavailable');
+    expect(engineGrantOf(request)).toBeNull();
   });
 });

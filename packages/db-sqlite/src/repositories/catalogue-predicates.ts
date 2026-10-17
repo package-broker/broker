@@ -20,7 +20,7 @@ export interface WinnerRefs {
 
 const PROXY_TYPES = sql`('packagist_proxy', 'npmjs_proxy')`;
 
-const MAX_PATTERN_LENGTH = 428;
+const MAX_PATTERN_LENGTH = 50;
 const MAX_PATTERN_WILDCARDS = 4;
 const MAX_PATTERNS_PER_RULE = 64;
 
@@ -124,7 +124,7 @@ export function proxyEligibleCondition(pkg: PackageRefs): Expression<SqlBool> {
         select 1 from registered_name as ${sql.id(a.r)}
         where ${at(a.r, 'org_id')} = ${p('org_id')}
           and ${at(a.r, 'ecosystem')} = ${p('ecosystem')}
-          and (${p('name')} glob ${at(a.r, 'pattern')} or ${invalidPattern(at(a.r, 'pattern'))})
+          and (case when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)
       )
     )
   )`;

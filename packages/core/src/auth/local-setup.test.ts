@@ -214,6 +214,7 @@ async function harness(
   const sessionService = createSessionService({
     sessions: {
       findActive: unexpected('findActive'),
+      findActiveById: unexpected('findActiveById'),
       touch: unexpected('touch'),
       markReauthenticatedByIdentity: unexpected('markReauthenticatedByIdentity'),
       revoke: unexpected('revoke'),

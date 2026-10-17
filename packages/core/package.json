@@ -67,6 +67,10 @@
       "types": "./dist/audit/*.d.ts",
       "default": "./dist/audit/*.js"
     },
+    "./import/*": {
+      "types": "./dist/import/*.d.ts",
+      "default": "./dist/import/*.js"
+    },
     "./api/*": {
       "types": "./dist/api/*.d.ts",
       "default": "./dist/api/*.js"

@@ -196,6 +196,51 @@ export function revokeAllForUserStatement(
 }
 
 export function createSessionRepository(executor: SqlExecutor): SessionRepository {
+  async function findActiveSession(
+    ctx: OrgContext,
+    key: 'session.id' | 'session.secret_hash',
+    value: string,
+    cutoffs: SessionCutoffs,
+  ): Promise<ActiveSession | null> {
+    const rows = await run<ActiveSessionRow>(
+      executor,
+      db
+        .selectFrom('session')
+        .innerJoin('user_account', (join) =>
+          join
+            .onRef('user_account.id', '=', 'session.user_id')
+            .onRef('user_account.org_id', '=', 'session.org_id'),
+        )
+        .select([
+          'session.id',
+          'session.user_id',
+          'session.identity_id',
+          'session.csrf_hash',
+          'session.created_at',
+          'session.expires_at',
+          'session.last_seen_at',
+          'session.reauth_at',
+          'user_account.email as user_email',
+          'user_account.display_name as user_display_name',
+        ])
+        .where(key, '=', value)
+        .where('session.org_id', '=', ctx.orgId)
+        .where('session.revoked_at', 'is', null)
+        .where(
+          sql<boolean>`unixepoch(session.expires_at, 'subsec') > unixepoch(${cutoffs.now}, 'subsec')`,
+        )
+        .where(
+          sql<boolean>`unixepoch(coalesce(session.last_seen_at, session.created_at), 'subsec') > unixepoch(${cutoffs.idleSince}, 'subsec')`,
+        )
+        .where(
+          sql<boolean>`unixepoch(session.created_at, 'subsec') > unixepoch(${cutoffs.now}, 'subsec') - 43200`,
+        )
+        .where('user_account.status', '=', 'active'),
+    );
+    const row = rows[0];
+    return row === undefined ? null : toActiveSession(row);
+  }
+
   return {
     async findActive(
       ctx: OrgContext,
@@ -205,40 +250,16 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
       secretHashOf(secretHash);
       timestamp('now', cutoffs.now);
       timestamp('idleSince', cutoffs.idleSince);
-      const rows = await run<ActiveSessionRow>(
-        executor,
-        db
-          .selectFrom('session')
-          .innerJoin('user_account', (join) =>
-            join
-              .onRef('user_account.id', '=', 'session.user_id')
-              .onRef('user_account.org_id', '=', 'session.org_id'),
-          )
-          .select([
-            'session.id',
-            'session.user_id',
-            'session.identity_id',
-            'session.csrf_hash',
-            'session.created_at',
-            'session.expires_at',
-            'session.last_seen_at',
-            'session.reauth_at',
-            'user_account.email as user_email',
-            'user_account.display_name as user_display_name',
-          ])
-          .where('session.secret_hash', '=', secretHash)
-          .where('session.org_id', '=', ctx.orgId)
-          .where('session.revoked_at', 'is', null)
-          .where('session.expires_at', '>', cutoffs.now)
-          .where(
-            (eb) => eb.fn.coalesce('session.last_seen_at', 'session.created_at'),
-            '>',
-            cutoffs.idleSince,
-          )
-          .where('user_account.status', '=', 'active'),
-      );
-      const row = rows[0];
-      return row === undefined ? null : toActiveSession(row);
+      return findActiveSession(ctx, 'session.secret_hash', secretHash, cutoffs);
+    },
+
+    async findActiveById(ctx, id, cutoffs): Promise<ActiveSession | null> {
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new TypeError('id must be a non-empty string');
+      }
+      timestamp('now', cutoffs.now);
+      timestamp('idleSince', cutoffs.idleSince);
+      return findActiveSession(ctx, 'session.id', id, cutoffs);
     },
 
     async touch(ctx: OrgContext, id: string, now: string, staleBefore: string): Promise<void> {
@@ -252,8 +273,10 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
           .where('org_id', '=', ctx.orgId)
           .where('id', '=', id)
           .where('revoked_at', 'is', null)
-          .where('expires_at', '>', now)
-          .where((eb) => eb.fn.coalesce('last_seen_at', 'created_at'), '<', staleBefore)
+          .where(sql<boolean>`unixepoch(expires_at, 'subsec') > unixepoch(${now}, 'subsec')`)
+          .where(
+            sql<boolean>`unixepoch(coalesce(last_seen_at, created_at), 'subsec') < unixepoch(${staleBefore}, 'subsec')`,
+          )
           .returning('id'),
       );
     },
@@ -278,9 +301,14 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
           .where('org_id', '=', ctx.orgId)
           .where('id', '=', input.sessionId)
           .where('revoked_at', 'is', null)
-          .where('expires_at', '>', input.now)
+          .where(sql<boolean>`unixepoch(expires_at, 'subsec') > unixepoch(${input.now}, 'subsec')`)
           .where('identity_id', 'is', input.identityId)
-          .where((eb) => eb.or([eb('reauth_at', 'is', null), eb('reauth_at', '<', input.authTime)]))
+          .where((eb) =>
+            eb.or([
+              eb('reauth_at', 'is', null),
+              sql<boolean>`unixepoch(reauth_at, 'subsec') < unixepoch(${input.authTime}, 'subsec')`,
+            ]),
+          )
           .returning('id'),
       );
       return rows.length > 0;

@@ -2,7 +2,8 @@ import { DbError } from '../db/errors.js';
 import { errorEnvelope } from '../envelope.js';
 import { SecretsConfigError } from '../secrets/master-key.js';
 import { reportableErrorName } from './error-name.js';
-import { dbReason } from './obs-codes.js';
+import { dbReason, envelopeReason } from './obs-codes.js';
+import type { KernelReasonCode } from './obs-codes.js';
 import { NotBootstrappedError } from './org.js';
 import { KernelConfigError } from './registry.js';
 
@@ -12,13 +13,21 @@ export const defaultLog: KernelLog = (entry) => {
   console.error(JSON.stringify(entry));
 };
 
+const REASONS = new WeakMap<Response, KernelReasonCode>();
+
+/** The reason code the kernel attached when it built `response`; undefined for any other response. */
+export function responseReason(response: Response): KernelReasonCode | undefined {
+  return REASONS.get(response);
+}
+
 export function envelopeResponse(
   status: number,
   code: string,
   message: string,
   requestId: string,
+  reason?: KernelReasonCode,
 ): Response {
-  return Response.json(errorEnvelope(code, message, requestId), {
+  const response = Response.json(errorEnvelope(code, message, requestId), {
     status,
     headers: {
       'content-type': 'application/json',
@@ -26,6 +35,8 @@ export function envelopeResponse(
       'x-request-id': requestId,
     },
   });
+  if (reason !== undefined) REASONS.set(response, reason);
+  return response;
 }
 
 interface Mapping {
@@ -65,5 +76,5 @@ export function logError(log: KernelLog, requestId: string, error: unknown): voi
 export function errorResponse(error: unknown, requestId: string, log: KernelLog): Response {
   const { status, code, message } = mappingOf(error);
   if (status >= 500) logError(log, requestId, error);
-  return envelopeResponse(status, code, message, requestId);
+  return envelopeResponse(status, code, message, requestId, envelopeReason(code));
 }

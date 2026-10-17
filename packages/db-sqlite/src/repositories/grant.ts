@@ -1,4 +1,14 @@
-import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
+import {
+  AliasNode,
+  ExpressionWrapper,
+  IdentifierNode,
+  OperationNodeTransformer,
+  sql,
+  type Compilable,
+  type ExpressionBuilder,
+  type Kysely,
+  type SqlBool,
+} from 'kysely';
 import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type {
@@ -16,6 +26,8 @@ import {
   compile,
   db,
   existsGuard,
+  EVIDENCE_MAX_AGE_MS,
+  EVIDENCE_FUTURE_SKEW_MS,
   protectedHolder,
   runOrgFenced,
   type Database,
@@ -102,11 +114,16 @@ export type {
 } from '../kysely.js';
 
 export interface GrantRepositoryOptions {
+  readonly providerAnchors: readonly ProtectedHolderProvider[];
   readonly holderInput: (ctx: OrgContext) => ProtectedHolderInput | Promise<ProtectedHolderInput>;
 }
 
 export interface ProtectedGrantRepository extends GrantRepository {
-  isProtectedHolder(ctx: OrgContext, userId: string, input: ProtectedHolderInput): Promise<boolean>;
+  isProtectedHolder(
+    ctx: OrgContext,
+    userId: string,
+    input?: ProtectedHolderInput,
+  ): Promise<boolean>;
   countProtectedHoldersFor(ctx: OrgContext, input: ProtectedHolderInput): Promise<number>;
 }
 
@@ -144,10 +161,6 @@ function organizationRoleExists(ctx: OrgContext, roleId: string) {
 type LooseDatabase = Record<string, Record<string, unknown>>;
 
 const loose = db as unknown as Kysely<LooseDatabase>;
-
-function providersOf(input: ProtectedHolderInput): readonly ProtectedHolderProvider[] {
-  return input.kind === 'fresh' ? input.providers : [];
-}
 
 function requireNonEmpty(value: string, label: string): void {
   if (typeof value !== 'string' || value === '') {
@@ -428,10 +441,35 @@ function statusRefusal(
   return 'conflict';
 }
 
+/** Replaces the predicate's bound freshness limits with statement-stable database time. */
+class HolderDatabaseTime extends OperationNodeTransformer {
+  protected override transformAlias(node: AliasNode): AliasNode {
+    if (IdentifierNode.is(node.alias)) {
+      const offset =
+        node.alias.name === 'lower_ms'
+          ? -EVIDENCE_MAX_AGE_MS
+          : node.alias.name === 'upper_ms'
+            ? EVIDENCE_FUTURE_SKEW_MS
+            : undefined;
+      if (offset !== undefined) {
+        return {
+          ...node,
+          node: sql`cast(round(unixepoch('now', 'subsec') * 1000) as integer) + ${offset}`.toOperationNode(),
+        };
+      }
+    }
+    return super.transformAlias(node);
+  }
+}
+
 export function createGrantRepository(
   executor: ScalarSqlExecutor,
   options: GrantRepositoryOptions,
 ): ProtectedGrantRepository {
+  if (!Array.isArray(options?.providerAnchors)) {
+    throw new TypeError('providerAnchors must be supplied explicitly');
+  }
+  const providers = options.providerAnchors;
   return {
     async listOrganization(ctx: OrgContext): Promise<OrganizationGrant[]> {
       const rows = await executor.all<GrantRow>(
@@ -503,11 +541,17 @@ export function createGrantRepository(
           .expression(source)
           .returning('id'),
       );
-      const providers = providersOf(await options.holderInput(ctx));
-      const authority = grantAuthority(ctx, fence, providers, {
-        roleId: input.roleId,
-        subset: true,
-      });
+
+      const holders = await options.holderInput(ctx);
+      const authority = grantAuthority(
+        ctx,
+        fence,
+        holders.kind === 'local_recovery' ? [] : providers,
+        {
+          roleId: input.roleId,
+          subset: true,
+        },
+      );
       const roleHolds = targetRoleHolds(ctx, input.roleId);
       const creatorHolds =
         createdBy === null
@@ -560,10 +604,15 @@ export function createGrantRepository(
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
       const holders = await options.holderInput(ctx);
-      const authority = grantAuthority(ctx, fence, providersOf(holders), {
-        grantId: id,
-        subset: false,
-      });
+      const authority = grantAuthority(
+        ctx,
+        fence,
+        holders.kind === 'local_recovery' ? [] : providers,
+        {
+          grantId: id,
+          subset: false,
+        },
+      );
       const revision = grantRevisionHolds(ctx, id, expected);
       const lastHolder = sql<SqlBool>`(not ${grantOnProtectedRole(ctx, id)} or ${anotherHolder(ctx, holders, { grantId: id })})`;
       const outcome = await runOrgFenced(
@@ -605,11 +654,16 @@ export function createGrantRepository(
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
       const holders = await options.holderInput(ctx);
-      const authority = grantAuthority(ctx, fence, providersOf(holders), {
-        grantId: id,
-        roleId,
-        subset: true,
-      });
+      const authority = grantAuthority(
+        ctx,
+        fence,
+        holders.kind === 'local_recovery' ? [] : providers,
+        {
+          grantId: id,
+          roleId,
+          subset: true,
+        },
+      );
       const revision = grantRevisionHolds(ctx, id, expected);
       const roleHolds = targetRoleHolds(ctx, roleId);
       const lastHolder = sql<SqlBool>`(not ${grantOnProtectedRole(ctx, id)} or ${roleProtects(ctx, roleId)} or ${anotherHolder(ctx, holders, { grantId: id })})`;
@@ -664,7 +718,11 @@ export function createGrantRepository(
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
-      const evidence = actorEvidence(ctx, fence, providersOf(holders));
+      const evidence = actorEvidence(
+        ctx,
+        fence,
+        holders.kind === 'local_recovery' ? [] : providers,
+      );
       const live = evidence.live('org:users:write');
       const targetHolds = holdsProtectedRole(ctx, userId, holders);
       const reach = sql<SqlBool>`(${evidence.isAdmin} or not ${targetHolds})`;
@@ -715,7 +773,11 @@ export function createGrantRepository(
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
-      const evidence = actorEvidence(ctx, fence, providersOf(holders));
+      const evidence = actorEvidence(
+        ctx,
+        fence,
+        holders.kind === 'local_recovery' ? [] : providers,
+      );
       const live = evidence.live('org:users:write');
       const wouldHold = holdsProtectedRole(ctx, userId, holders, { includeSuspended: true });
       const reach = sql<SqlBool>`(${evidence.isAdmin} or not ${wouldHold})`;
@@ -772,6 +834,21 @@ export function createGrantRepository(
     },
 
     async isProtectedHolder(ctx, userId, input) {
+      const predicate = protectedHolder(
+        ctx,
+        sql.ref('holder.id'),
+        input ?? {
+          kind: 'fresh',
+          now: '1970-01-01T00:00:00.000Z',
+          providers,
+        },
+      );
+      const holder =
+        input === undefined
+          ? new ExpressionWrapper<Database, 'user_account', SqlBool>(
+              new HolderDatabaseTime().transformNode(predicate.toOperationNode()),
+            )
+          : predicate;
       const rows = await executor.all<IdRow>(
         scalar(
           db
@@ -779,7 +856,7 @@ export function createGrantRepository(
             .select('holder.id')
             .where('holder.org_id', '=', ctx.orgId)
             .where('holder.id', '=', userId)
-            .where((eb) => protectedHolder(ctx, eb.ref('holder.id'), input)),
+            .where(holder),
         ),
       );
       return rows.length > 0;

@@ -391,7 +391,7 @@ describe('project roles never protect a last holder', () => {
       'OP-ORG-LAST',
     );
 
-    expect(removed).toBe('deleted');
+    expect(removed).toMatchObject({ status: 'deleted' });
     expect(refused).toBe('last_holder');
     expect(await holders()).toBe(1);
   });

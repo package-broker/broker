@@ -143,11 +143,13 @@ export function createBlobRepository(
           media_type: input.mediaType,
           refetchable: input.refetchable ? 1 : 0,
           purge_generation: input.generation,
+          published_at: NOW,
         })
         .onConflict((conflict) =>
           conflict
             .columns(['org_id', 'sha256'])
             .doUpdateSet({
+              published_at: NOW,
               refetchable: sql<number>`case when blob.deleted_at is not null then excluded.refetchable else min(blob.refetchable, excluded.refetchable) end`,
               upstream_url: sql<
                 string | null

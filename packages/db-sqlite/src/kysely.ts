@@ -631,6 +631,8 @@ export function assertCheck(condition: Guard): readonly Statement[] {
   return [compile(insert)];
 }
 
+export { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors';
+
 const guardOrgs = new WeakMap<object, string>();
 
 /** Replaces the organization's cache_epoch version, then fails the batch unless exactly one row changed. */

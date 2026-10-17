@@ -788,3 +788,47 @@ describe('round 2 additions', () => {
     ).toEqual(['distHosts']);
   });
 });
+
+describe('distHosts across source types', () => {
+  const sources = [
+    ['composer_repository', 'composer', 'https://repo.example.com', {}],
+    ['npm_registry', 'npm', 'https://npm.example.com', { scopes: ['@acme'] }],
+  ] as const;
+
+  it('parses npm_registry distHosts and defaults them to empty', () => {
+    const listed = parse('npm_registry', 'npm', 'https://npm.example.com', {
+      scopes: ['@acme'],
+      distHosts: ['cdn.acme.example'],
+    });
+    expect(listed.ok && listed.config).toEqual({
+      scopes: ['@acme'],
+      distHosts: ['cdn.acme.example'],
+    });
+    const absent = parse('npm_registry', 'npm', 'https://npm.example.com', { scopes: ['@acme'] });
+    expect(absent.ok && absent.config).toEqual({ scopes: ['@acme'], distHosts: [] });
+  });
+
+  it.each([
+    ['a url instead of a hostname', ['https://x.com']],
+    ['a private ip', ['127.0.0.1']],
+    ['an internal name', ['a.local']],
+    ['a duplicate', ['A.example.com', 'a.example.com']],
+    ['more than 64 entries', Array.from({ length: 65 }, (_, i) => `h${i}.example.com`)],
+    ['an entry over 200 characters', [`${'a'.repeat(201)}.com`]],
+    ['a non-array value', 'cdn.example.com'],
+  ])('refuses %s for every source type', (_label, distHosts) => {
+    for (const [type, ecosystem, url, base] of sources) {
+      expect(problems(parse(type, ecosystem, url, { ...base, distHosts })), type).toEqual([
+        'distHosts',
+      ]);
+    }
+  });
+
+  it('lowercases npm_registry distHosts', () => {
+    const r = parse('npm_registry', 'npm', 'https://npm.example.com', {
+      scopes: ['@acme'],
+      distHosts: ['CDN.Acme.Example'],
+    });
+    expect(r.ok && r.config).toMatchObject({ distHosts: ['cdn.acme.example'] });
+  });
+});

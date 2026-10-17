@@ -176,6 +176,17 @@ export const APPROVED_ERROR_NAMES = [
   'BuiltManifestError',
   'JobError',
   'JsonStreamError',
+  'JsonExtractError',
+  'LeaseLostError',
+  'CoalesceDoneCheckError',
+  'SnapshotCorruptError',
+  'SnapshotStagingRejectedError',
+  'UpstreamUnstableError',
+  'TwoPassLimitError',
+  'NpmPackumentError',
+  'ComposerRootError',
+  'ComposerV2Error',
+  'PackagistBusyError',
 ] as const;
 
 export type ErrorName = (typeof APPROVED_ERROR_NAMES)[number];

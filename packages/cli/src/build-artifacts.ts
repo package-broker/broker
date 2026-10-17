@@ -1,6 +1,7 @@
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import type { Platform } from '@package-broker/core/plugin';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
+import { looksLikeCredential } from '@package-broker/core/platform/credential';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
 export const GENERATED_PACKAGE_MARKER = 'pbGenerated';
@@ -99,27 +100,6 @@ const DESCRIBED_KEYS: Record<keyof PlatformPortConfig, readonly string[]> = {
   jobs: ['adapter', 'binding', 'maxRunning'],
   observability: ['adapter', 'analyticsBinding', 'deploymentIdEnv', 'endpointEnv', 'headersEnv'],
 };
-
-const ACCESS_KEY_ID = /^(AKIA|ASIA)[A-Z0-9]{16}$/;
-const BASE32_RUN = /^(?=[A-Z2-7]*[2-7])[A-Z2-7]{16,}$/;
-const HEX_RUN = /^[0-9A-F]{16,}$/;
-const VOWEL = /[AEIOU]/i;
-
-function looksLikeCredential(value: string): boolean {
-  const upper = value.toUpperCase();
-  if (ACCESS_KEY_ID.test(upper)) return true;
-  let mixed = 0;
-  for (const word of upper.split(/[_.-]/)) {
-    if (BASE32_RUN.test(word) || HEX_RUN.test(word)) return true;
-    if (word.length >= 24) return true;
-    if (word.length >= 8 && !VOWEL.test(word)) return true;
-  }
-  for (const word of value.split(/[_.-]/)) {
-    if (word.length >= 20 && /[0-9]/.test(word) && /[A-Z]/.test(word)) return true;
-    if (word.length >= 4 && /[0-9]/.test(word) && /[A-Z]/.test(word)) mixed += 1;
-  }
-  return mixed >= 2;
-}
 
 export function credentialProblems(
   described: PlatformPortConfig | null,

@@ -33,6 +33,7 @@ const PACKAGIST_ROOT: ComposerRoot = {
   metadataChangesUrl: 'https://packagist.org/metadata/changes.json',
   inlineProviders: false,
   partialPackages: false,
+  inlinePackages: false,
   validator: { sha256: PROXY_ROOT_NO_DIGEST },
   messages: [],
   mirrors: [],

@@ -5,9 +5,23 @@ import type {
   IdentityResult,
   LoginStateData,
 } from '@package-broker/core/identity/port';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CryptoKey } from './jwt.js';
-import { createOidcProvider, type OidcConfig } from './oidc.js';
+import { createOidcProvider, tokenEndpointError, type OidcConfig } from './oidc.js';
+
+const mapped = vi.hoisted(() => ({ results: [] as unknown[] }));
+
+vi.mock('./http.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./http.js')>();
+  return {
+    ...actual,
+    tokenEndpointError: (json: unknown) => {
+      const result = actual.tokenEndpointError(json);
+      mapped.results.push(result);
+      return result;
+    },
+  };
+});
 
 const ISSUER = 'https://dex.example.com/dex';
 const CALLBACK = 'https://broker.example.com/auth/oidc/dex/callback';
@@ -715,5 +729,86 @@ describe('finish secret handling', () => {
     for (const spy of spies) {
       expect(spy).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('token endpoint error bodies', () => {
+  const DESCRIPTION = 'refresh-secret-4c1d leaked in error_description';
+
+  function captureConsole(): unknown[][] {
+    const records: unknown[][] = [];
+    for (const method of ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        records.push(args);
+      });
+    }
+    return records;
+  }
+
+  beforeEach(() => {
+    mapped.results.length = 0;
+  });
+
+  async function failWith(response: () => Response): Promise<IdentityResult> {
+    const s = scenario();
+    const p = provider(s);
+    const stored = await begin(p);
+    s.token = response;
+    return finish(p, callback({ code: 'the-code', state: stored.state as string }), stored);
+  }
+
+  it('refuses a 400 invalid_grant body without exposing error_description', async () => {
+    const records = captureConsole();
+    const result = await failWith(() =>
+      json({ error: 'invalid_grant', error_description: DESCRIPTION }, { status: 400 }),
+    );
+    expect(result).toEqual({ ok: false, reason: 'provider_error' });
+    expect(mapped.results).toEqual(['invalid_grant']);
+    expect(JSON.stringify(result)).not.toContain('refresh-secret');
+    expect(JSON.stringify(records)).not.toContain('refresh-secret');
+  });
+
+  it('does not consult the error mapper for a successful token response', async () => {
+    identityOf(await login(scenario()));
+    expect(mapped.results).toEqual([]);
+  });
+
+  it.each([
+    'invalid_grant',
+    'invalid_client',
+    'invalid_request',
+    'unauthorized_client',
+    'unsupported_grant_type',
+    'invalid_scope',
+  ])('maps the %s error code to itself', (code) => {
+    expect(tokenEndpointError({ error: code, error_description: DESCRIPTION })).toBe(code);
+  });
+
+  it('maps an unknown error code to token_endpoint_error', () => {
+    expect(tokenEndpointError({ error: 'temporarily_unavailable' })).toBe('token_endpoint_error');
+    expect(tokenEndpointError({ error: DESCRIPTION })).toBe('token_endpoint_error');
+  });
+
+  it.each([
+    ['a body without an error member', {}],
+    ['a non-string error member', { error: 7 }],
+    ['an array body', ['invalid_grant']],
+    ['a string body', 'invalid_grant'],
+  ])('maps %s to the status failure', (_name, body) => {
+    expect(tokenEndpointError(body)).toBe('status');
+  });
+
+  it.each([
+    ['a non-JSON body', () => new Response('<html>no</html>', { status: 400 })],
+    ['an unparseable JSON body', () => json('{"error":', { status: 400 })],
+    [
+      'an over-cap body',
+      () => json({ error: 'invalid_grant', pad: 'x'.repeat(70 * 1024) }, { status: 400 }),
+    ],
+    ['an unknown error code', () => json({ error: 'slow_down' }, { status: 400 })],
+  ])('refuses %s as provider_error', async (_name, response) => {
+    const records = captureConsole();
+    expect(await failWith(response)).toEqual({ ok: false, reason: 'provider_error' });
+    expect(records).toEqual([]);
   });
 });

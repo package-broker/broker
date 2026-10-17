@@ -1,4 +1,5 @@
 import type { Platform } from '../plugin.js';
+import { containsCredentialToken, looksLikeCredential } from '../platform/credential.js';
 
 export const MAX_METADATA_BYTES = 32 * 1024 * 1024;
 export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
@@ -71,14 +72,12 @@ const SECTION_KEYS = {
 const MAX_STRING_LENGTH = 200;
 const MAX_KEY_LENGTH = 64;
 const SAFE_KEY = /^[A-Za-z0-9_.-]+$/;
-const ACCESS_KEY_ID = /(AKIA|ASIA)[A-Z0-9]{16}/;
 const MAX_EXTRA_SELF_ORIGINS = 16;
 const TIMER_LIMITS = {
   metadataTtlSeconds: 86400,
   negativeTtlSeconds: 86400,
   waitBudgetMs: 25000,
 } as const;
-const TOKEN_RUN = /[A-Za-z0-9_-]{32,}/;
 const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
 const PORT = /^[1-9][0-9]{0,4}$/;
 const MAILTO = /^mailto:[^\s@?#,]+@[^\s@?#,]+\.[^\s@?#,]+$/;
@@ -95,27 +94,9 @@ function own(object: Obj, key: string): unknown {
   return Object.hasOwn(object, key) ? object[key] : undefined;
 }
 
-const BASE32_RUN = /^(?=[A-Z2-7]*[2-7])[A-Z2-7]{16,}$/;
-const HEX_RUN = /^[0-9A-F]{16,}$/;
-const VOWEL = /[AEIOU]/i;
-
-function looksLikeCredential(value: string): boolean {
-  if (ACCESS_KEY_ID.test(value) || TOKEN_RUN.test(value)) return true;
-  let mixed = 0;
-  for (const word of value.split('_')) {
-    if (BASE32_RUN.test(word) || HEX_RUN.test(word)) return true;
-    if (word.length >= 24) return true;
-    if (word.length >= 20 && /[0-9]/.test(word) && /[A-Z]/.test(word)) return true;
-    if (word.length >= 8 && !VOWEL.test(word)) return true;
-    if (word.length >= 4 && /[0-9]/.test(word) && /[A-Z]/.test(word)) mixed += 1;
-  }
-  return mixed >= 2;
-}
-
 function agentLooksLikeCredential(value: string): boolean {
   return (
-    ACCESS_KEY_ID.test(value) ||
-    TOKEN_RUN.test(value) ||
+    containsCredentialToken(value) ||
     value
       .split(/[\s/;,()]+/)
       .filter(Boolean)

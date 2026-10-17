@@ -76,12 +76,16 @@ export function createLruCache(options: LruCacheOptions = {}): Cache {
         if (slot === undefined) return Promise.resolve(null);
         const { envelope } = slot;
         const now = Date.now();
-        const expiry = Date.parse(envelope.staleUntil ?? envelope.freshUntil);
+        const freshUntil = Date.parse(envelope.freshUntil);
+        const expiry = Math.max(
+          freshUntil,
+          envelope.staleUntil === null ? freshUntil : Date.parse(envelope.staleUntil),
+        );
         if (!(expiry > now)) {
           remove(id);
           return Promise.resolve(null);
         }
-        const state = Date.parse(envelope.freshUntil) > now ? 'fresh' : 'stale';
+        const state = freshUntil > now ? 'fresh' : 'stale';
         slots.delete(id);
         slots.set(id, slot);
         return Promise.resolve({

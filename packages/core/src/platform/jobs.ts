@@ -20,6 +20,7 @@ const EMAIL_VALUE_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const PRINTABLE_ASCII = /^[\u0020-\u007e]+$/;
 const NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
 const RESERVED_NAME = 'core';
+const RESERVED_PLUGIN_IDS: ReadonlySet<string> = new Set([RESERVED_NAME, 'schedule']);
 const RESERVED_KEY_PREFIX = 'schedule:';
 const RUN_AT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/;
 
@@ -155,6 +156,15 @@ function assertName(value: unknown): asserts value is string {
   }
 }
 
+export function isReservedPluginId(value: string): boolean {
+  return RESERVED_PLUGIN_IDS.has(value);
+}
+
+export function assertPluginId(value: string): void {
+  assertName(value);
+  if (isReservedPluginId(value)) throw new JobError('invalid_name');
+}
+
 function assertVersion(value: unknown): asserts value is number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
     throw new JobError('invalid_version');
@@ -162,7 +172,7 @@ function assertVersion(value: unknown): asserts value is number {
 }
 
 export function qualifyJobName(pluginId: string, name: string, version: number): string {
-  assertName(pluginId);
+  assertPluginId(pluginId);
   assertName(name);
   assertVersion(version);
   return `${pluginId}:${name}:v${version}`;
@@ -408,7 +418,7 @@ export function assertQualifiedJobName(qualified: string): void {
  * this; this module only supplies the check.
  */
 export function assertJobOwnedBy(pluginId: string, qualifiedType: string): void {
-  assertName(pluginId);
+  assertPluginId(pluginId);
   if (parseQualifiedJobName(qualifiedType).pluginId !== pluginId) {
     throw new JobError('invalid_name');
   }

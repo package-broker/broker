@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Hex } from '@package-broker/db-sqlite/migrations/source';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BuiltManifestError, loadBuiltMigrations } from './built-manifest.js';
+import {
+  BuiltManifestError,
+  loadBuiltMigrations,
+  loadBuiltRoutes,
+  LegacyRouteTableError,
+} from './built-manifest.js';
 
 interface Entry {
   id: string;
@@ -177,5 +182,85 @@ describe('loadBuiltMigrations', () => {
     await expect(loadBuiltMigrations(outDir)).rejects.toBeInstanceOf(BuiltManifestError);
     await rm(join(outDir, 'generated', 'manifest.json'));
     await expect(loadBuiltMigrations(outDir)).rejects.toBeInstanceOf(BuiltManifestError);
+  });
+});
+
+describe('loadBuiltRoutes', () => {
+  async function withRoutes(routes: unknown): Promise<string> {
+    return build((core) => ({ schemaVersion: 1, migrations: [core], routes }));
+  }
+
+  it('returns null when the manifest has no route table', async () => {
+    const outDir = await build((core) => ({ schemaVersion: 1, migrations: [core] }));
+    expect(await loadBuiltRoutes(outDir)).toBeNull();
+  });
+
+  it('returns the routes with boundary, needsOrg and the package flag', async () => {
+    const outDir = await withRoutes([
+      {
+        method: 'GET',
+        path: '/a',
+        plugin: 'a',
+        permission: 'org:read',
+        boundary: 'organization',
+        needsOrg: true,
+      },
+      { method: 'GET', path: '/b', plugin: 'b', permission: null },
+    ]);
+    const routes = await loadBuiltRoutes(outDir);
+    expect(
+      routes?.map(({ method, path, plugin, permission, boundary, needsOrg }) => ({
+        method,
+        path,
+        plugin,
+        permission,
+        boundary,
+        needsOrg,
+      })),
+    ).toEqual([
+      {
+        method: 'GET',
+        path: '/a',
+        plugin: 'a',
+        permission: 'org:read',
+        boundary: 'organization',
+        needsOrg: true,
+      },
+      {
+        method: 'GET',
+        path: '/b',
+        plugin: 'b',
+        permission: null,
+        boundary: undefined,
+        needsOrg: undefined,
+      },
+    ]);
+  });
+
+  it('rejects a routes value that is not an array', async () => {
+    await expect(loadBuiltRoutes(await withRoutes({}))).rejects.toBeInstanceOf(BuiltManifestError);
+  });
+
+  it('rejects a route entry with a non-string path', async () => {
+    const outDir = await withRoutes([{ method: 'GET', path: 3, plugin: 'a', permission: null }]);
+    await expect(loadBuiltRoutes(outDir)).rejects.toBeInstanceOf(BuiltManifestError);
+  });
+});
+
+describe('legacy route tables', () => {
+  it('fails with a fixed message when a protected route has no boundary', async () => {
+    const outDir = await build((core) => ({
+      schemaVersion: 1,
+      migrations: [core],
+      routes: [{ method: 'GET', path: '/a', plugin: 'a', permission: 'org:read' }],
+    }));
+    const failure = await loadBuiltRoutes(outDir).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(LegacyRouteTableError);
+    expect((failure as Error).message).toBe(
+      'manifest route table predates route boundaries; run pb build again',
+    );
   });
 });

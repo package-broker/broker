@@ -294,7 +294,7 @@ describe('setPermissions', () => {
     const { service, principals } = setup({ live: ['project:read'] });
     expect(await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'])).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
     expect(principals.setPermissions).not.toHaveBeenCalled();
   });
@@ -326,7 +326,7 @@ describe('setPermissions', () => {
     });
     expect(await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['org:read'])).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
     expect(principals.setPermissions).not.toHaveBeenCalled();
     expect(
@@ -430,12 +430,12 @@ describe('suspend and restore', () => {
     const none = setup({ live: ['project:read'] });
     expect(await none.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
     const wide = setup({ existing: principal({ projectId: null, permissions: ['org:read'] }) });
     expect(await wide.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
     expect(await wide.service.restore(ctx, admin, fenceOf(), 'sp-1')).toEqual({
       ok: true,
@@ -508,16 +508,16 @@ describe('suspend and restore', () => {
     expect(principals.setPermissions).not.toHaveBeenCalled();
   });
 
-  it('treats an empty or non-string id as unknown, forbidden for an actor who manages nothing', async () => {
+  it('treats an empty or non-string id as unknown, not_found for an actor who manages nothing', async () => {
     const { service } = setup({ live: ['project:read'] });
     for (const id of ['', 7 as unknown as string]) {
       expect(await service.suspend(ctx, actor, fenceOf({}), id)).toEqual({
         ok: false,
-        error: 'forbidden',
+        error: 'not_found',
       });
       expect(await service.setPermissions(ctx, actor, fenceOf(), id, ['project:read'])).toEqual({
         ok: false,
-        error: 'forbidden',
+        error: 'not_found',
       });
     }
   });
@@ -537,19 +537,19 @@ describe('suspend and restore', () => {
     expect(events(log, 'service_principal.changed')).toHaveLength(0);
   });
 
-  it('answers forbidden, not not_found, for an unknown id when the actor manages nothing', async () => {
+  it('answers not_found for an unknown id when the actor manages nothing', async () => {
     const { service } = setup({ existing: null, live: ['project:read'] });
     expect(await service.suspend(ctx, actor, fenceOf({}), 'nope')).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
     expect(await service.restore(ctx, actor, fenceOf(), 'nope')).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
     expect(await service.setPermissions(ctx, actor, fenceOf(), 'nope', ['project:read'])).toEqual({
       ok: false,
-      error: 'forbidden',
+      error: 'not_found',
     });
   });
 
@@ -648,5 +648,82 @@ describe('the actor must be organization-kind', () => {
     for (const entry of events(log, 'admin.denied')) {
       expect(entry).toMatchObject({ orgId: 'org-a', actorUserId: null });
     }
+  });
+});
+
+describe('existence of organization-wide principals', () => {
+  const projectManager = ['project:read', 'project:service-principals:write'];
+  const wide = principal({ projectId: null, permissions: ['org:read'] });
+
+  it('answers any actor who cannot manage the same for an existing organization-wide id and a missing one', async () => {
+    const existing = setup({ existing: wide, live: projectManager });
+    const absent = setup({ existing: null, live: projectManager });
+    const results = [
+      [
+        await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1'),
+        await absent.service.suspend(ctx, actor, fenceOf({}), 'nope'),
+      ],
+      [
+        await existing.service.restore(ctx, actor, fenceOf(), 'sp-1'),
+        await absent.service.restore(ctx, actor, fenceOf(), 'nope'),
+      ],
+      [
+        await existing.service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read']),
+        await absent.service.setPermissions(ctx, actor, fenceOf(), 'nope', ['project:read']),
+      ],
+    ];
+    for (const [found, missing] of results) expect(found).toEqual(missing);
+    for (const [found] of results) expect(found).toEqual({ ok: false, error: 'not_found' });
+    expect(existing.principals.suspend).not.toHaveBeenCalled();
+  });
+
+  it('answers a non-admin holding the organization permission the same for both ids', async () => {
+    const existing = setup({ existing: wide });
+    const absent = setup({ existing: null });
+    expect(await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual(
+      await absent.service.suspend(ctx, actor, fenceOf({}), 'nope'),
+    );
+    expect(await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+  });
+
+  it('costs the same lookups for a missing, a hidden org-wide and a hidden project-bound id', async () => {
+    const cases = [
+      setup({ existing: null, live: projectManager }),
+      setup({ existing: wide, live: projectManager }),
+      setup({ existing: principal(), live: ['project:read'] }),
+    ];
+    for (const { service } of cases) await service.suspend(ctx, actor, fenceOf({}), 'sp-1');
+    for (const { principals, authority } of cases) {
+      expect(principals.get).toHaveBeenCalledTimes(1);
+      expect(authority.livePermissions).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('keeps a full manager mistyped id out of the denial log', async () => {
+    const { service, log } = setup({ existing: null });
+    expect(await service.suspend(ctx, admin, fenceOf({}), 'nope')).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(events(log, 'admin.denied')).toEqual([]);
+  });
+
+  it('logs the same denial for both ids', async () => {
+    const existing = setup({ existing: wide, live: projectManager });
+    const absent = setup({ existing: null, live: projectManager });
+    await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1');
+    await absent.service.suspend(ctx, actor, fenceOf({}), 'nope');
+    expect(events(existing.log, 'admin.denied')).toEqual(events(absent.log, 'admin.denied'));
+  });
+
+  it('keeps not_found for a missing id when the actor manages at organization scope', async () => {
+    const { service } = setup({ existing: null });
+    expect(await service.suspend(ctx, admin, fenceOf({}), 'nope')).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
   });
 });

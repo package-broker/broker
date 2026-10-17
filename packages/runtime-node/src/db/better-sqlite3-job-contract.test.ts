@@ -7,6 +7,7 @@ import { afterAll } from 'vitest';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import {
   describeJobContract,
+  interceptBatches,
   type JobContractFixture,
 } from '@package-broker/db-sqlite/contract/job-contract';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
@@ -75,6 +76,7 @@ async function make(): Promise<JobContractFixture> {
     schedule: createJobScheduleRepository(executorA),
     scheduleB: createJobScheduleRepository(executorB),
     random: (draw) => createJobRepository(executorA, { random: draw }),
+    intercept: interceptBatches,
     async setLease(jobId, iso) {
       await update('UPDATE job SET lease_until = ? WHERE id = ?', jobId, iso);
     },

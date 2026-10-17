@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   APPROVED_ERROR_NAMES,
   DROPPED_SIGNALS,
   metricLabelValueAllowed,
   HTTP_REQUEST_EVENT,
+  LOG_FIELDS,
+  type SafeLogRecord,
+  projectLogFields,
   type ObsRecord,
   type ObsRecordSink,
   type ObservabilityScope,
@@ -15,6 +18,16 @@ import {
   safeRecord,
 } from './observability.js';
 import type { Observability } from './observability.js';
+
+import { reportableErrorName } from '../kernel/error-name.js';
+import { JsonExtractError } from '../ingest/json-stream.js';
+import { LeaseLostError, CoalesceDoneCheckError } from '../ingest/coalesce.js';
+import { SnapshotCorruptError, SnapshotStagingRejectedError } from '../ingest/snapshot.js';
+import { UpstreamUnstableError, TwoPassLimitError } from '../ingest/two-pass-put.js';
+import { NpmPackumentError } from '../ingest/npm/packument.js';
+import { ComposerRootError } from '../ingest/composer/root.js';
+import { ComposerV2Error } from '../ingest/composer/v2-package.js';
+import { PackagistBusyError } from '../ingest/composer/packagist-proxy.js';
 
 const SECRET = 'sk_live_TOP-SECRET-4242';
 const REQUEST_ID = '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11';
@@ -42,6 +55,28 @@ const REGISTRY: ObsRegistry = {
 function logs(records: readonly ObsRecord[]): Record<string, unknown>[] {
   return records.flatMap((r) => (r.kind === 'log' ? [{ ...r.record }] : []));
 }
+
+describe('ingest error names', () => {
+  it.each([
+    [new JsonExtractError('invalid_member', 0), 'JsonExtractError'],
+    [new LeaseLostError(), 'LeaseLostError'],
+    [new CoalesceDoneCheckError(), 'CoalesceDoneCheckError'],
+    [new SnapshotCorruptError(), 'SnapshotCorruptError'],
+    [new SnapshotStagingRejectedError(), 'SnapshotStagingRejectedError'],
+    [new UpstreamUnstableError(), 'UpstreamUnstableError'],
+    [new TwoPassLimitError(1), 'TwoPassLimitError'],
+    [new NpmPackumentError('invalid'), 'NpmPackumentError'],
+    [new ComposerRootError('invalid'), 'ComposerRootError'],
+    [new ComposerV2Error('unsupported'), 'ComposerV2Error'],
+    [new PackagistBusyError(null), 'PackagistBusyError'],
+  ] as const)('preserves %s as %s across reporting boundaries', (error, expectedName) => {
+    expect(reportableErrorName(error)).toBe(expectedName);
+    expect(safeErrorName(error)).toBe(expectedName);
+    expect(
+      safeRecord({ level: 'error', event: 'ingest.failed', error_name: error.name })?.error_name,
+    ).toBe(expectedName);
+  });
+});
 
 describe('safeRecord', () => {
   it('keeps allowlisted fields and drops unknown ones', () => {
@@ -552,6 +587,65 @@ describe('HTTP_REQUEST_EVENT', () => {
     expect(HTTP_REQUEST_EVENT).toBe('http.request');
     expect(HTTP_REQUEST_EVENT).toMatch(/^[a-z][a-z0-9_.]{0,63}$/);
     expect(safeRecord({ level: 'info', event: HTTP_REQUEST_EVENT })?.event).toBe('http.request');
+  });
+});
+
+describe('LOG_FIELDS', () => {
+  it('covers exactly the keys of SafeLogRecord', () => {
+    expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
+    const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
+    expect(missing).toHaveLength(20);
+    expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
+  });
+
+  it('rejects a list that omits a key or adds an extra entry', () => {
+    type Exhaustive<T extends readonly (keyof SafeLogRecord)[]> = [
+      Exclude<keyof SafeLogRecord, T[number]>,
+    ] extends [never]
+      ? T
+      : never;
+    expectTypeOf<Exhaustive<typeof LOG_FIELDS>>().toEqualTypeOf<typeof LOG_FIELDS>();
+    expectTypeOf<Exhaustive<readonly ['level']>>().toEqualTypeOf<never>();
+    // @ts-expect-error an entry that is not a SafeLogRecord key
+    const extra: readonly (keyof SafeLogRecord)[] = [...LOG_FIELDS, 'message'];
+    expect(extra).toContain('message');
+  });
+});
+
+describe('projectLogFields', () => {
+  it('drops unknown keys and undefined values', () => {
+    expect(
+      projectLogFields({
+        level: 'info',
+        event: 'a.b',
+        message: 'x',
+        email: 'e',
+        status: undefined,
+      }),
+    ).toEqual({ level: 'info', event: 'a.b' });
+  });
+
+  it('does not invoke getters', () => {
+    let called = false;
+    const record = {
+      level: 'info',
+      get event(): string {
+        called = true;
+        return 'a.b';
+      },
+    };
+    expect(projectLogFields(record)).toEqual({ level: 'info' });
+    expect(called).toBe(false);
+  });
+
+  it('ignores inherited properties', () => {
+    const record = Object.create({ event: 'a.b' }, { level: { value: 'info', enumerable: true } });
+    expect(projectLogFields(record as object)).toEqual({ level: 'info' });
+  });
+
+  it('orders keys by LOG_FIELDS', () => {
+    const out = projectLogFields({ reason_code: 'r', event: 'a.b', level: 'info' });
+    expect(Object.keys(out)).toEqual(['level', 'event', 'reason_code']);
   });
 });
 

@@ -54,6 +54,12 @@ export interface ExtractLimits {
    * array selected with `ARRAY_ELEMENTS`. Default 400000.
    */
   readonly maxMembersPerLevel?: number;
+  /**
+   * When set, a selected member over `maxMemberBytes` is not yielded: its bytes are released, the
+   * rest of it is still tokenized and validated, and this runs once with its path in document
+   * order relative to yielded members.
+   */
+  readonly onOversizedMember?: (path: readonly string[]) => void;
 }
 
 export interface ExtractOptions extends ExtractLimits {
@@ -69,6 +75,7 @@ interface ResolvedLimits {
   readonly maxMember: number;
   readonly maxDocument: number;
   readonly maxMembers: number;
+  readonly onOversized: ((path: readonly string[]) => void) | undefined;
 }
 
 /**
@@ -120,12 +127,13 @@ interface Capture {
   readonly path: readonly string[];
   readonly index?: number;
   lead?: boolean;
+  skipped?: boolean;
   buffer: Uint8Array;
   length: number;
   from: number;
   depth: number;
   origin: number;
-  scopes: (KeyTable | null | undefined)[];
+  scopes: (KeyTable | number | null | undefined)[];
 }
 
 class KeyTable {
@@ -295,13 +303,17 @@ export function extractMembers(
   if (nonArray !== 'throw' && nonArray !== 'report') {
     throw new TypeError('nonArray must be throw or report');
   }
-  return extract(source, selectors, { maxMember, maxDocument, maxMembers }, nonArray);
+  const onOversized = limits.onOversizedMember;
+  if (onOversized !== undefined && typeof onOversized !== 'function') {
+    throw new TypeError('onOversizedMember must be a function');
+  }
+  return extract(source, selectors, { maxMember, maxDocument, maxMembers, onOversized }, nonArray);
 }
 
 async function* extract(
   source: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>,
   selectors: readonly MemberSelector[],
-  { maxMember, maxDocument, maxMembers }: ResolvedLimits,
+  { maxMember, maxDocument, maxMembers, onOversized }: ResolvedLimits,
   nonArray: 'throw' | 'report',
 ): AsyncGenerator<ExtractedMember> {
   const tokenizer = new JsonTokenizer({ maxStringBytes: KEY_LIMIT_BYTES });
@@ -310,7 +322,16 @@ async function* extract(
   const arrays = selectors
     .filter((selector) => selector.at(-1) === ARRAY_ELEMENTS)
     .map((selector) => selector.slice(0, -1));
-  const ready: ExtractedMember[] = [];
+  const ready: (ExtractedMember | { readonly skipped: readonly string[] })[] = [];
+  function* drain(): Generator<ExtractedMember> {
+    for (const record of ready.splice(0)) {
+      if ('skipped' in record) {
+        onOversized?.(record.skipped);
+      } else {
+        yield record;
+      }
+    }
+  }
   const levels: KeyTable[] = [];
   const names: string[] = [];
   let pending: string | null = null;
@@ -338,9 +359,23 @@ async function* extract(
     if (end <= start) {
       return;
     }
+    if (active.skipped === true) {
+      active.from = to;
+      return;
+    }
     const need = active.length + (end - start);
     if (need > maxMember) {
-      throw new JsonExtractError('member_too_large', to);
+      if (onOversized === undefined) {
+        throw new JsonExtractError('member_too_large', to);
+      }
+      active.skipped = true;
+      active.buffer = NO_BYTES;
+      active.length = 0;
+      active.scopes = active.scopes.map((scope) =>
+        scope instanceof KeyTable ? scope.size : scope,
+      );
+      active.from = to;
+      return;
     }
     if (need > active.buffer.length) {
       const grown = new Uint8Array(
@@ -356,6 +391,11 @@ async function* extract(
 
   const finish = (active: Capture, end: number): void => {
     take(active, end);
+    if (active.skipped === true) {
+      capture = null;
+      ready.push({ skipped: active.path });
+      return;
+    }
     let first = 0;
     while (first < active.length && isNoise(active.buffer[first] as number)) {
       first += 1;
@@ -439,16 +479,28 @@ async function* extract(
         throw new JsonExtractError('too_many_members', token.start);
       }
     }
+    take(active, token.end);
     if (token.type === 'key') {
       const top = active.scopes.length - 1;
-      const seen = active.scopes[top] ?? new KeyTable();
-      active.scopes[top] = seen;
-      track(seen, token.value, token.start);
+      const scope = active.scopes[top];
+      if (active.skipped === true) {
+        const count = typeof scope === 'number' ? scope : 0;
+        if (count >= maxMembers) {
+          throw new JsonExtractError('too_many_members', token.start);
+        }
+        active.scopes[top] = count + 1;
+      } else {
+        const seen = scope instanceof KeyTable ? scope : new KeyTable();
+        active.scopes[top] = seen;
+        track(seen, token.value, token.start);
+      }
       return;
     }
     if (token.type === 'beginObject' || token.type === 'beginArray') {
       active.depth += 1;
-      active.scopes.push(token.type === 'beginObject' ? undefined : null);
+      active.scopes.push(
+        token.type === 'beginObject' ? (active.skipped === true ? 0 : undefined) : null,
+      );
     } else if (token.type === 'endObject' || token.type === 'endArray') {
       active.depth -= 1;
       active.scopes.pop();
@@ -539,9 +591,9 @@ async function* extract(
     if (capture !== null) {
       take(capture, seenBytes);
     }
-    yield* ready.splice(0);
+    yield* drain();
   }
   chunk = NO_BYTES;
   tokenizer.end(sink);
-  yield* ready.splice(0);
+  yield* drain();
 }

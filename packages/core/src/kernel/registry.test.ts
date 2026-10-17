@@ -1,4 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
+import { fixedClock } from '../ids.js';
+import { createKernel } from './kernel.js';
+import { routeApiProblems } from './routes.js';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition, type RouteDefinition } from '../plugin.js';
 import type { JobDefinition } from '../platform/jobs.js';
 import {
@@ -298,7 +301,7 @@ describe('collectRegistrations', () => {
     }
     expect(thrown).toBeInstanceOf(KernelConfigError);
     expect((thrown as KernelConfigError).problems).toEqual([
-      'plugin "legacy" has apiVersion 2, core supports 3 to 3',
+      'plugin "legacy" has apiVersion 2, core supports 3 to 4',
     ]);
     expect(() => collectRegistrations([plugin('legacy', { apiVersion: 3 })])).not.toThrow();
   });
@@ -486,5 +489,97 @@ describe('collectRegistrations', () => {
       const core = registerCoreJob(job({ name: 'session-cleanup' }));
       expect(() => collectRegistrations([], { coreJobs: [core, core] })).toThrow(KernelConfigError);
     });
+  });
+});
+
+describe('route API registration', () => {
+  const api = {
+    operationId: 'getUsers',
+    summary: 'Get users',
+    tags: ['users'],
+    responses: { 200: null },
+  };
+
+  it('rejects the same api problem as the standalone validator', () => {
+    const route: RouteDefinition = { method: 'GET', path: '/p2/x', permission: null, handler, api };
+    expect(problemsOf([withRoutes('p', [route])])).toEqual(
+      routeApiProblems(route, 'plugin "p" route GET /p2/x'),
+    );
+    const plain = { method: route.method, path: route.path, permission: route.permission, handler };
+    expect(collectRegistrations([withRoutes('p', [plain])]).routes).toHaveLength(1);
+  });
+
+  it('rejects a plugin claiming the reserved API namespace', () => {
+    expect(
+      problemsOf([
+        withRoutes('p', [{ method: 'GET', path: '/_pb/users', permission: null, handler, api }]),
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('accepts plugin API version 4', () => {
+    expect(() => collectRegistrations([plugin('p', { apiVersion: 4 })])).not.toThrow();
+  });
+
+  it('rejects plugin API version 5', () => {
+    expect(problemsOf([plugin('p', { apiVersion: 5 })])).toEqual([
+      'plugin "p" has apiVersion 5, core supports 3 to 4',
+    ]);
+  });
+
+  const options = {
+    platform: 'node' as const,
+    plugins: [],
+    ports: {
+      organizations: { get: () => Promise.resolve(null) },
+      clock: fixedClock('2026-10-17T00:00:00.000Z'),
+      ids: { ulid: () => '01JA0000000000000000000000' },
+    },
+    resolveOrg: () => Promise.reject(new Error('unexpected org resolution')),
+    health: () => Promise.resolve(true),
+    log: () => undefined,
+  };
+
+  it('rejects invalid API metadata on core routes', async () => {
+    await expect(
+      createKernel({
+        ...options,
+        coreRoutes: [
+          {
+            method: 'GET',
+            path: '/_pb/users',
+            permission: null,
+            handler,
+            api: { ...api, operationId: 'Bad-Id' },
+          },
+        ],
+      }),
+    ).rejects.toThrow(KernelConfigError);
+  });
+
+  it('dispatches identically with and without API metadata', async () => {
+    const results = [];
+    for (const slot of [undefined, api]) {
+      let calls = 0;
+      const route: RouteDefinition = {
+        method: 'GET',
+        path: '/_pb/users',
+        permission: null,
+        needsOrg: false,
+        ...(slot === undefined ? {} : { api: slot }),
+        handler: () => {
+          calls++;
+          return new Response('users', { status: 202 });
+        },
+      };
+      const kernel = await createKernel({ ...options, coreRoutes: [route] });
+      const response = await kernel.fetch(new Request('https://broker.test/_pb/users'));
+      results.push({ status: response.status, body: await response.text() });
+      expect(calls).toBe(1);
+    }
+    expect(results).toEqual([
+      { status: 202, body: 'users' },
+      { status: 202, body: 'users' },
+    ]);
   });
 });

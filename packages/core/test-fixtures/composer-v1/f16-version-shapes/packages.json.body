@@ -1,0 +1,1 @@
+{"packages":[],"providers-url":"/f16-version-shapes/p/%package%$%hash%.json","providers":{"fx/shapes":{"sha256":"4379b9d76d904b0e7fee41bf7388e2ca46dbf09780aaa1cebe5f04fa8c71db3c"},"fx/eager1":{"sha256":"b5921f9a8cd8eba781ba8d336c0f1ea006e7ab44e1c4f59c48f432fd3e0ce2fa"},"fx/eager2":{"sha256":"ad913c05ef6274dc5377003b30bee3bb4736d05dc7c798acb7feaf3ded4cd65a"}}}

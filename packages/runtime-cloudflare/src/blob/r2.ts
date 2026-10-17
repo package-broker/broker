@@ -1,32 +1,50 @@
 import { BlobSizeMismatchError, BlobValidationError } from '@package-broker/core/platform/blob';
 import type { ByteRange, ByteStore } from '@package-broker/core/platform/blob';
+import type {
+  FixedLengthStream,
+  R2Bucket,
+  R2GetOptions,
+  R2Object,
+  R2ObjectBody,
+  R2PutOptions,
+} from '@cloudflare/workers-types';
 
-export interface R2BucketLike {
+type R2Result<T> = T extends R2ObjectBody
+  ? Pick<T, 'size' | 'httpMetadata' | 'range' | 'body'>
+  : T extends R2Object
+    ? Pick<T, 'size' | 'httpMetadata' | 'range'>
+    : T;
+
+export type R2BucketLike = {
   put(
-    key: string,
-    value: ReadableStream,
-    options?: { sha256?: string | ArrayBuffer; httpMetadata?: { contentType?: string } },
-  ): Promise<unknown>;
-  get(key: string, options?: { range?: { offset: number; length: number } }): Promise<unknown>;
-  head(key: string): Promise<unknown>;
-  delete(key: string): Promise<void>;
-}
+    key: Parameters<R2Bucket['put']>[0],
+    value: Parameters<R2Bucket['put']>[1],
+    options?: Pick<R2PutOptions, 'sha256' | 'httpMetadata'>,
+  ): Promise<R2Result<Awaited<ReturnType<R2Bucket['put']>>>>;
+  get(
+    key: Parameters<R2Bucket['get']>[0],
+    options?: Pick<R2GetOptions, 'range'>,
+  ): Promise<R2Result<Awaited<ReturnType<R2Bucket['get']>>>>;
+  head(
+    ...args: Parameters<R2Bucket['head']>
+  ): Promise<R2Result<Awaited<ReturnType<R2Bucket['head']>>>>;
+  delete: R2Bucket['delete'];
+};
 
-export interface FixedLengthStreamLike {
-  readonly readable: ReadableStream<Uint8Array>;
-  readonly writable: WritableStream<Uint8Array>;
-}
+export type FixedLengthStreamLike = Pick<FixedLengthStream, 'readable' | 'writable'>;
 
 export interface R2ByteStoreOptions {
   readonly fixedLengthStream?: (size: number) => FixedLengthStreamLike;
 }
 
-interface R2ObjectLike {
-  readonly size: number;
-  readonly httpMetadata?: { readonly contentType?: string };
-  readonly range?: { readonly offset?: number; readonly length?: number };
-  readonly body?: ReadableStream<Uint8Array>;
-}
+type R2ObjectLike = Pick<R2Object, 'size' | 'httpMetadata'> &
+  Partial<Pick<R2ObjectBody, 'body'>> & {
+    readonly range?: Exclude<NonNullable<R2Object['range']>, { suffix: number }>;
+  };
+
+// Workers and Node disagree on the done reader result; the core port uses Node's stream type.
+type ByteStoreObject = Omit<R2ObjectLike, 'body'> &
+  Partial<Pick<NonNullable<Awaited<ReturnType<ByteStore['get']>>>, 'body'>>;
 
 const DEFAULT_MEDIA_TYPE = 'application/octet-stream';
 const BAD_DIGEST = /\(10037\)|SHA-256 checksum you specified did not match/;
@@ -39,14 +57,14 @@ function defaultFixedLengthStream(size: number): FixedLengthStreamLike {
   return new factory(size);
 }
 
-function asObject(value: unknown): R2ObjectLike | null {
+function asObject(value: unknown): ByteStoreObject | null {
   if (value === null || value === undefined) return null;
   const candidate = value as Partial<R2ObjectLike>;
   if (typeof candidate.size !== 'number') throw new TypeError('unexpected R2 object shape');
-  return candidate as R2ObjectLike;
+  return candidate as unknown as ByteStoreObject;
 }
 
-const mediaTypeOf = (object: R2ObjectLike): string =>
+const mediaTypeOf = (object: Pick<R2ObjectLike, 'httpMetadata'>): string =>
   object.httpMetadata?.contentType ?? DEFAULT_MEDIA_TYPE;
 
 function countingStream(

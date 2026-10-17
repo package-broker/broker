@@ -84,7 +84,7 @@ function streamOf(bytes: Uint8Array, chunk = 65_536): ReadableStream<Uint8Array>
   });
 }
 
-function memoryStore() {
+function memoryStore(chunkSize = 65_536) {
   const objects = new Map<string, Uint8Array>();
   const rows = new Map<string, BlobInfo>();
   const byteStore: ByteStore = {
@@ -103,7 +103,7 @@ function memoryStore() {
         size: bytes.length,
         mediaType: 'application/json',
         range: null,
-        body: streamOf(bytes),
+        body: streamOf(bytes, chunkSize),
       };
     },
     async head(key) {
@@ -716,4 +716,88 @@ describe('describeNpmPackument: first response as pass 1', () => {
     expect(first.reasons).toHaveLength(1);
     expect(requests).toHaveLength(1);
   });
+});
+
+describe('describeNpmPackument: oversized version manifests', () => {
+  const MiB = 1024 * 1024;
+
+  function oversized(): string {
+    const doc = packument(3, 10, (i) => `1.0.${i}`) as { versions: Record<string, Json> };
+    doc.versions['1.0.0'] = manifest('1.0.0', 0, 10, { readme: 'x'.repeat(2 * MiB) });
+    return JSON.stringify(doc);
+  }
+
+  it('skips a 2 MiB manifest, yields the other versions and records the skip', async () => {
+    const text = oversized();
+    const { describeWith } = setup(() => ({ body: text, headers: { etag: '"big-1"' } }));
+    const description = described(await describeWith());
+    expect(description.snapshot.stagedBlob).toBeDefined();
+    const members = await drain(description);
+    expect(members.map((m) => m.version)).toEqual(['1.0.1', '1.0.2']);
+    expect(members.map((m) => m.ordinal)).toEqual([1, 2]);
+    expect(description.skippedMembers).toEqual([{ version: '1.0.0', reason: 'member_too_large' }]);
+    expect(description.upstreamComplete).toBe(false);
+
+    const continued = described(await describeWith({ snapshot: description.snapshot }));
+    expect((await drain(continued)).map((m) => m.version)).toEqual(['1.0.1', '1.0.2']);
+    expect(continued.skippedMembers).toEqual([{ version: '1.0.0', reason: 'member_too_large' }]);
+    expect(continued.upstreamComplete).toBe(false);
+  }, 60_000);
+
+  it('keeps document ordinals when an oversized manifest is in the middle', async () => {
+    const doc = packument(3, 10, (i) => `1.0.${i}`) as { versions: Record<string, Json> };
+    doc.versions['1.0.1'] = manifest('1.0.1', 1, 10, { readme: 'x'.repeat(2 * MiB) });
+    for (const chunkSize of [4096, 4 * MiB]) {
+      const { store } = memoryStore(chunkSize);
+      const { fetch } = fakeFetch(() => ({ body: JSON.stringify(doc) }));
+      const description = described(
+        await describeNpmPackument(
+          { ctx, store, fetch, codecs },
+          { name: 'example', url: URL_ },
+          {},
+        ),
+      );
+      const members = await drain(description);
+      expect(members.map((m) => m.version)).toEqual(['1.0.0', '1.0.2']);
+      expect(members.map((m) => m.ordinal)).toEqual([0, 2]);
+      expect(description.skippedMembers).toEqual([
+        { version: '1.0.1', reason: 'member_too_large' },
+      ]);
+      expect(description.upstreamComplete).toBe(false);
+    }
+  }, 60_000);
+
+  it('has no skipped members and stays complete without an oversized manifest', async () => {
+    const text = fixtures[0]?.text as string;
+    const { describeWith } = setup(() => ({ body: text }));
+    const description = described(await describeWith());
+    await drain(description);
+    expect(description.skippedMembers).toEqual([]);
+    expect(description.upstreamComplete).toBe(true);
+  }, 60_000);
+
+  it('has no skipped members for an inline packument', async () => {
+    const { describeWith } = setup(() => ({
+      body: JSON.stringify(packument(3, 10, (i) => `1.0.${i}`)),
+    }));
+    const description = described(await describeWith());
+    await drain(description);
+    expect(description.skippedMembers).toEqual([]);
+    expect(description.upstreamComplete).toBe(true);
+  });
+
+  it('still fails the describe on a time map over 8 MiB', async () => {
+    const doc = packument(3, 10, (i) => `1.0.${i}`) as { time: Json };
+    for (let index = 0; index < 270_000; index += 1) {
+      doc.time[`0.0.${index}-padding.${index}`] = '2020-01-02T00:00:00.000Z';
+    }
+    const text = JSON.stringify(doc);
+    expect(JSON.stringify(doc.time).length).toBeGreaterThan(8 * MiB);
+    const { describeWith } = setup(() => ({ body: text }));
+    const error = await describeWith().then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect((error as { code?: unknown }).code).toBe('member_too_large');
+  }, 60_000);
 });

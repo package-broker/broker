@@ -626,3 +626,49 @@ describe('createProviderRegistry', () => {
     }
   });
 });
+
+describe('createPackageDescription: skipped members', () => {
+  it('defaults to an empty frozen list and leaves completeness unchanged', async () => {
+    const description = createPackageDescription({
+      ...base,
+      members: members(2),
+      documentsComplete: true,
+    });
+    await drain(description.members);
+    expect(description.skippedMembers).toEqual([]);
+    expect(Object.isFrozen(description.skippedMembers)).toBe(true);
+    expect(description.upstreamComplete).toBe(true);
+  });
+
+  it('reads deferred skipped members after the drain and reports incomplete', async () => {
+    const skipped: { version: string; reason: 'member_too_large' }[] = [];
+    const description = createPackageDescription({
+      ...base,
+      members: (async function* () {
+        yield* members(1);
+        skipped.push({ version: '2.0.0', reason: 'member_too_large' });
+      })(),
+      documentsComplete: true,
+      skippedMembers: () => skipped,
+    });
+    await drain(description.members);
+    const listed = description.skippedMembers;
+    expect(listed).toEqual([{ version: '2.0.0', reason: 'member_too_large' }]);
+    expect(Object.isFrozen(listed)).toBe(true);
+    expect(Object.isFrozen(listed[0])).toBe(true);
+    skipped.push({ version: '3.0.0', reason: 'member_too_large' });
+    expect(listed).toHaveLength(1);
+    expect(description.upstreamComplete).toBe(false);
+  });
+
+  it('reports incomplete for a fixed non-empty skipped list', async () => {
+    const description = createPackageDescription({
+      ...base,
+      members: members(1),
+      documentsComplete: true,
+      skippedMembers: [{ version: '1.0.9', reason: 'member_too_large' }],
+    });
+    await drain(description.members);
+    expect(description.upstreamComplete).toBe(false);
+  });
+});

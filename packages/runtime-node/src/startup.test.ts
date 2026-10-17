@@ -1,23 +1,35 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
+import {
+  SUPPORTED_PLUGIN_API,
+  type PluginDefinition,
+  type PluginPorts,
+} from '@package-broker/core/plugin';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { MigrationChecksumError } from '@package-broker/db-sqlite/migrations/runner';
 import {
   loadMigrationSource,
   type MigrationSource,
 } from '@package-broker/db-sqlite/migrations/source';
-import { AlreadyBootstrappedError, startNode } from './startup.js';
+import {
+  AlreadyBootstrappedError,
+  StartupConfigError,
+  startNode,
+  type StartOptions,
+} from './startup.js';
+import type { StdioStream } from './observability/stdio.js';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import type { NodeBroker } from './index.js';
 
 const recorded = vi.hoisted(() => ({
   closes: [] as string[],
   events: [] as Array<Readonly<Record<string, unknown>>>,
+  usesAfterClose: 0,
 }));
 
 vi.mock('./db/better-sqlite3-executor.js', async (importOriginal) => {
@@ -26,9 +38,21 @@ vi.mock('./db/better-sqlite3-executor.js', async (importOriginal) => {
     ...actual,
     openBetterSqliteExecutor: (path: string, options?: { readonly busyTimeoutMs?: number }) => {
       const opened = actual.openBetterSqliteExecutor(path, options);
+      let closed = false;
+      const executor = new Proxy(opened.executor, {
+        get(target, property, receiver): unknown {
+          const member: unknown = Reflect.get(target, property, receiver);
+          if (typeof member !== 'function') return member;
+          return (...args: unknown[]): unknown => {
+            if (closed) recorded.usesAfterClose += 1;
+            return (member as (...inner: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      });
       return {
-        executor: opened.executor,
+        executor,
         close: async (): Promise<void> => {
+          closed = true;
           recorded.closes.push(path);
           await opened.close();
         },
@@ -58,6 +82,13 @@ async function errorCode(response: Response): Promise<string> {
   return body.error.code;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
+}
+
 function healthyPlugin(): PluginDefinition {
   return {
     id: 'healthy',
@@ -75,6 +106,7 @@ describe('startNode', () => {
     directory = await mkdtemp(join(tmpdir(), 'pb-startup-'));
     recorded.closes.length = 0;
     recorded.events.length = 0;
+    recorded.usesAfterClose = 0;
   });
 
   afterEach(async () => {
@@ -295,5 +327,362 @@ describe('startNode', () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toBe('PB_ORG_SLUG and PB_ORG_NAME must be set together');
     expect(recorded.closes).toEqual([path]);
+  });
+
+  describe('platform ports', () => {
+    const MASTER = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+    const ports: PlatformPortConfig = {
+      blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1_048_576 },
+      cache: { adapter: 'lru', maxBytes: 1_048_576 },
+      jobs: { adapter: 'database', maxRunning: 1 },
+      observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
+    };
+
+    let blobRoot = '';
+
+    beforeEach(async () => {
+      blobRoot = join(await realpath(directory), 'blobs');
+      seen = {};
+    });
+
+    function capture(): { lines: () => Record<string, unknown>[]; stream: StdioStream } {
+      const chunks: string[] = [];
+      return {
+        lines: () => chunks.flatMap((chunk) => chunk.split('\n').filter(Boolean)).map(parseLine),
+        stream: {
+          write(chunk: string) {
+            chunks.push(chunk);
+            return true;
+          },
+          on: () => undefined,
+        },
+      };
+    }
+
+    function parseLine(line: string): Record<string, unknown> {
+      return JSON.parse(line) as Record<string, unknown>;
+    }
+
+    function env(path: string, extra: Record<string, string> = {}): Record<string, string> {
+      return {
+        PB_SQLITE_PATH: path,
+        PB_ORG_SLUG: 'acme',
+        PB_ORG_NAME: 'Acme',
+        PB_MASTER_KEY: MASTER,
+        PB_PUBLIC_URL: 'http://127.0.0.1',
+        PB_BLOB_ROOT: blobRoot,
+        DEPLOYMENT_ID: 'test-deployment',
+        ...extra,
+      };
+    }
+
+    let seen: { blob?: boolean; cache?: boolean; platform?: boolean; handler?: PluginPorts } = {};
+
+    function probePlugin(): PluginDefinition {
+      return {
+        id: 'worker',
+        package: '@test/worker',
+        apiVersion: SUPPORTED_PLUGIN_API[0],
+        platforms: ['node'],
+        register(registry) {
+          registry.job({
+            name: 'x',
+            version: 1,
+            validate: (input: unknown) => input,
+            handler: async (_payload, context) => {
+              seen.handler = context.ports;
+              context.observability.log({ level: 'info', event: 'http.error' });
+              throw new Error('handler secret-value');
+            },
+          });
+          registry.route({
+            method: 'GET',
+            path: '/probe/run',
+            permission: null,
+            handler: async (ctx) => {
+              seen.platform = ctx.ports.platform !== undefined;
+              seen.blob = ctx.ports.platform?.blob !== undefined;
+              seen.cache = ctx.ports.platform?.cache !== undefined;
+              const enqueued =
+                ctx.org === null || ctx.ports.platform === undefined
+                  ? null
+                  : await ctx.ports.platform.jobs.enqueue(
+                      ctx.org,
+                      'worker:x:v1',
+                      {},
+                      {
+                        idempotencyKey: 'probe-1',
+                      },
+                    );
+              return Response.json({ enqueued: enqueued !== null });
+            },
+          });
+        },
+      };
+    }
+
+    async function start(
+      extraEnv: Record<string, string>,
+      platformPorts: PlatformPortConfig | null | undefined,
+      extra: Partial<StartOptions> = {},
+    ): Promise<NodeBroker> {
+      return startNode({
+        plugins: [probePlugin()],
+        migrations: [await initSource(), ...(await epochSources())],
+        env: env(databasePath(), extraEnv),
+        ...(platformPorts === undefined ? {} : { platformPorts }),
+        ...extra,
+      });
+    }
+
+    it('7: builds blob, cache, jobs and observability and scopes them per plugin on both paths', async () => {
+      const out = capture();
+      const err = capture();
+      const broker = await start({}, ports, { stdout: out.stream, stderr: err.stream });
+      const base = await listen(broker);
+
+      const response = await fetch(`${base}/probe/run`);
+      expect(await response.json()).toEqual({ enqueued: true });
+      expect(seen).toMatchObject({ platform: true, blob: true, cache: true });
+
+      await vi.waitFor(
+        () => {
+          expect(err.lines().some((line) => line['event'] === 'job.handler_failed')).toBe(true);
+        },
+        { timeout: 5000, interval: 50 },
+      );
+      expect(seen.handler?.platform).toBeDefined();
+      const all = [...out.lines(), ...err.lines()];
+      const pluginRecord = all.find((line) => line['event'] === 'http.error');
+      expect(pluginRecord).toMatchObject({ plugin: 'worker', deployment_id: 'test-deployment' });
+      expect(pluginRecord?.['job_id']).toEqual(expect.any(String));
+      const runnerRecord = err.lines().find((line) => line['event'] === 'job.handler_failed');
+      expect(runnerRecord).toMatchObject({
+        job_id: pluginRecord?.['job_id'],
+        error_name: 'Error',
+        deployment_id: 'test-deployment',
+      });
+      expect(JSON.stringify(all)).not.toContain('secret-value');
+    });
+
+    it('8: platformPorts omitted or null leaves platform services disabled', async () => {
+      for (const platformPorts of [undefined, null] as const) {
+        const broker = await startNode({
+          plugins: [
+            {
+              ...healthyPlugin(),
+              register: (registry) => {
+                registry.route({
+                  method: 'GET',
+                  path: '/probe/platform',
+                  permission: null,
+                  handler: (ctx) => Response.json({ platform: ctx.ports.platform !== undefined }),
+                });
+              },
+            },
+          ],
+          migrations: [await initSource(), ...(await epochSources())],
+          env: { ...env(databasePath(`n-${String(platformPorts)}.sqlite`)), DEPLOYMENT_ID: '' },
+          ...(platformPorts === undefined ? {} : { platformPorts }),
+        });
+        const base = await listen(broker);
+        expect(await (await fetch(`${base}/probe/platform`)).json()).toEqual({ platform: false });
+        await broker.close();
+      }
+    });
+
+    it('9: a missing or unusable configured service fails startup and closes the database', async () => {
+      const s3Blob = {
+        adapter: 's3',
+        endpointEnv: 'PB_S3_ENDPOINT',
+        regionEnv: 'PB_S3_REGION',
+        bucketEnv: 'PB_S3_BUCKET',
+        accessKeyIdEnv: 'PB_S3_KEY',
+        secretAccessKeyEnv: 'PB_S3_SECRET',
+        maxBytes: 1_048_576,
+      } as const;
+      const blank = (name: string): Record<string, string> => ({ [name]: '' });
+      const cases: Array<[string, Record<string, string>, PlatformPortConfig, string]> = [
+        ['blob root unset', blank('PB_BLOB_ROOT'), ports, 'PB_BLOB_ROOT'],
+        ['deployment id unset', blank('DEPLOYMENT_ID'), ports, 'DEPLOYMENT_ID'],
+        ['deployment id invalid', { DEPLOYMENT_ID: 'has space' }, ports, 'DEPLOYMENT_ID'],
+        ['s3 variables unset', {}, { ...ports, blob: s3Blob }, 'PB_S3_ENDPOINT'],
+        [
+          's3 session token variable unset',
+          {
+            PB_S3_ENDPOINT: 'https://s3.example.com',
+            PB_S3_REGION: 'eu-west-1',
+            PB_S3_BUCKET: 'bucket',
+            PB_S3_KEY: 'key',
+            PB_S3_SECRET: 'secret',
+          },
+          { ...ports, blob: { ...s3Blob, sessionTokenEnv: 'PB_S3_TOKEN' } },
+          'PB_S3_TOKEN',
+        ],
+        [
+          's3 session token variable empty',
+          {
+            PB_S3_ENDPOINT: 'https://s3.example.com',
+            PB_S3_REGION: 'eu-west-1',
+            PB_S3_BUCKET: 'bucket',
+            PB_S3_KEY: 'key',
+            PB_S3_SECRET: 'secret',
+            PB_S3_TOKEN: '',
+          },
+          { ...ports, blob: { ...s3Blob, sessionTokenEnv: 'PB_S3_TOKEN' } },
+          'PB_S3_TOKEN',
+        ],
+        ['stanza for another target', {}, { ...ports, cache: { adapter: 'cache-api' } }, 'cache'],
+      ];
+      for (const [name, extra, stanza, variable] of cases) {
+        recorded.closes.length = 0;
+        const path = databasePath(`m-${name.replaceAll(' ', '-')}.sqlite`);
+        const failure = await rejection(
+          startNode({
+            plugins: [probePlugin()],
+            migrations: [await initSource(), ...(await epochSources())],
+            env: env(path, extra),
+            platformPorts: stanza,
+          }),
+        );
+        expect(failure, name).toBeInstanceOf(StartupConfigError);
+        expect((failure as StartupConfigError).message, name).toContain(variable);
+        expect(recorded.closes, name).toEqual([path]);
+      }
+    });
+
+    it('10: an unusable blob root fails startup', async () => {
+      const file = join(directory, 'not-a-directory');
+      await writeFile(file, 'x');
+      const failure = await rejection(start({ PB_BLOB_ROOT: file }, ports));
+      expect(failure).toBeInstanceOf(StartupConfigError);
+      expect((failure as StartupConfigError).variable).toBe('PB_BLOB_ROOT');
+    });
+
+    it('11: flushes OTLP on a 1 s timer and before the database closes', async () => {
+      const calls: Array<{ url: string; closesAtCall: number }> = [];
+      const fetchImpl = (url: string | Request | URL): Promise<Response> => {
+        calls.push({ url: String(url), closesAtCall: recorded.closes.length });
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      };
+      const withOtlp: PlatformPortConfig = {
+        ...ports,
+        observability: {
+          adapter: 'stdio',
+          deploymentIdEnv: 'DEPLOYMENT_ID',
+          endpointEnv: 'PB_OTLP_ENDPOINT',
+          headersEnv: 'PB_OTLP_HEADERS',
+        },
+      };
+      const broker = await start(
+        { PB_OTLP_ENDPOINT: 'http://127.0.0.1:4318', PB_OTLP_HEADERS: '{"x-token":"abc"}' },
+        withOtlp,
+        { fetch: fetchImpl, stdout: capture().stream, stderr: capture().stream },
+      );
+      await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0), {
+        timeout: 4000,
+        interval: 50,
+      });
+      expect(calls[0]?.url.startsWith('http://127.0.0.1:4318/v1/')).toBe(true);
+
+      const base = await listen(broker);
+      expect((await fetch(`${base}/health/ready`)).status).toBe(200);
+      const before = calls.length;
+      await broker.close();
+
+      expect(calls.length).toBeGreaterThan(before);
+      expect(calls.slice(before).every((call) => call.closesAtCall === 0)).toBe(true);
+      expect(calls.every((call) => call.closesAtCall === 0)).toBe(true);
+      expect(recorded.closes).toHaveLength(1);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(recorded.usesAfterClose).toBe(0);
+    });
+
+    it('13: the flush timer and the job loop are gone after close()', async () => {
+      const calls: string[] = [];
+      const fetchImpl = (url: string | Request | URL): Promise<Response> => {
+        calls.push(String(url));
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      };
+      const withOtlp: PlatformPortConfig = {
+        ...ports,
+        observability: {
+          adapter: 'stdio',
+          deploymentIdEnv: 'DEPLOYMENT_ID',
+          endpointEnv: 'PB_OTLP_ENDPOINT',
+        },
+      };
+      const broker = await start({ PB_OTLP_ENDPOINT: 'http://127.0.0.1:4318' }, withOtlp, {
+        fetch: fetchImpl,
+        stdout: capture().stream,
+        stderr: capture().stream,
+      });
+      await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0), {
+        timeout: 4000,
+        interval: 50,
+      });
+      await broker.close();
+      const settled = calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 2300));
+      expect(calls.length).toBe(settled);
+      expect(recorded.usesAfterClose).toBe(0);
+    });
+
+    it('14: a keyring error leaves no blob staging directory behind', async () => {
+      const failure = await rejection(start({ PB_MASTER_KEY: 'not-a-key' }, ports));
+      expect(failure).toBeInstanceOf(Error);
+      expect(await pathExists(join(blobRoot, '.staging'))).toBe(false);
+      expect(await pathExists(blobRoot)).toBe(false);
+    });
+
+    it('15: a relative or non-normalized blob root fails startup with a path-free reason', async () => {
+      for (const root of ['relative/blobs', `${blobRoot}/../blobs`]) {
+        const failure = await rejection(start({ PB_BLOB_ROOT: root }, ports));
+        expect(failure).toBeInstanceOf(StartupConfigError);
+        expect((failure as StartupConfigError).variable).toBe('PB_BLOB_ROOT');
+        expect((failure as Error).message).toContain('must be a normalized absolute path');
+        expect((failure as Error).message).not.toContain(root);
+      }
+    });
+
+    it('16: invalid PB_OTLP_HEADERS names the variable and never echoes the value', async () => {
+      const withOtlp: PlatformPortConfig = {
+        ...ports,
+        observability: {
+          adapter: 'stdio',
+          deploymentIdEnv: 'DEPLOYMENT_ID',
+          endpointEnv: 'PB_OTLP_ENDPOINT',
+          headersEnv: 'PB_OTLP_HEADERS',
+        },
+      };
+      const failure = await rejection(
+        start(
+          {
+            PB_OTLP_ENDPOINT: 'http://127.0.0.1:4318',
+            PB_OTLP_HEADERS: '{"x-token": secret-value',
+          },
+          withOtlp,
+        ),
+      );
+      expect(failure).toBeInstanceOf(StartupConfigError);
+      expect((failure as StartupConfigError).variable).toBe('PB_OTLP_HEADERS');
+      expect((failure as Error).message).not.toContain('secret-value');
+    });
+
+    it('12: a bad OTLP configuration fails startup without leaking the value', async () => {
+      const withOtlp: PlatformPortConfig = {
+        ...ports,
+        observability: {
+          adapter: 'stdio',
+          deploymentIdEnv: 'DEPLOYMENT_ID',
+          endpointEnv: 'PB_OTLP_ENDPOINT',
+        },
+      };
+      const failure = await rejection(
+        start({ PB_OTLP_ENDPOINT: 'http://collector.example.com/secret-path' }, withOtlp),
+      );
+      expect(failure).toBeInstanceOf(StartupConfigError);
+      expect((failure as Error).message).not.toContain('secret-path');
+    });
   });
 });

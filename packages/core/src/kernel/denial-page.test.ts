@@ -85,3 +85,38 @@ describe('denialResponse', () => {
     expect(headers.get('referrer-policy')).toBe('no-referrer');
   });
 });
+
+describe('Accept negotiation (RFC 9110 qvalues)', () => {
+  it.each([
+    'text/html;q=0, */*',
+    'text/html;q=0.000,application/json',
+    'text/html;q=1.0001',
+    'text/html;q=1.1',
+    'text/html;q=0.1234',
+    'text/html;q=.5',
+    'text/html;q=',
+    'text/html;q=0.5abc',
+    'text/html;q=1e0',
+    'text/html;q=-0',
+    'text/html;q=+1',
+  ])('returns the envelope for Accept %s', async (accept) => {
+    const response = denialResponse(req(accept), 'rid-q');
+    expect(response.headers.get('content-type')).toMatch(/^application\/json/);
+  });
+
+  it.each([
+    'text/html;q=0.9, application/json;q=0.8',
+    'text/html;q=1, application/json;q=0.999',
+    'text/html;q=1.000',
+    'text/html;q=1.',
+    'text/html;q=0.001',
+    'text/html;level=1;q=0.5',
+    'text/html;q=0.5;ext=1',
+    'TEXT/HTML;Q=0.5',
+    'application/json;q=1.0001, text/html;q=0.1',
+    'application/json;q=0, text/html;q=0.1',
+  ])('returns the page for Accept %s', (accept) => {
+    const response = denialResponse(req(accept), 'rid-q');
+    expect(response.headers.get('content-type')).toMatch(/^text\/html/);
+  });
+});

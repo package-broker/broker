@@ -34,6 +34,7 @@ async function access(overrides: Overrides = {}): Promise<TokenAccessView> {
       revoked: overrides.revoked ?? false,
       lastUsedAt: overrides.lastUsedAt === undefined ? null : overrides.lastUsedAt,
     },
+    projectVisible: false,
     principalStatus: overrides.principalStatus ?? 'active',
   };
   return Object.defineProperty(envelope, 'verifier', {

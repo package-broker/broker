@@ -9,6 +9,8 @@ export type TokenUseDiagnostic =
 
 /** The part of the repository's token envelope this gate reads. */
 export interface TokenAccessView {
+  /** Whether the principal can see the project independently of token scope or binding. */
+  readonly projectVisible: boolean;
   readonly token: {
     readonly id: string;
     readonly kind: 'pat' | 'svc';

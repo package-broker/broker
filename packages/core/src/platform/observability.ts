@@ -41,6 +41,46 @@ export interface SafeLogRecord {
   readonly reason_code?: string;
 }
 
+export const LOG_FIELDS = [
+  'level',
+  'event',
+  'timestamp',
+  'service',
+  'deployment_id',
+  'runtime',
+  'request_id',
+  'trace_id',
+  'span_id',
+  'plugin',
+  'route',
+  'method',
+  'status',
+  'duration_ms',
+  'project_id',
+  'token_id',
+  'job_id',
+  'attempt',
+  'error_name',
+  'reason_code',
+] as const satisfies readonly (keyof SafeLogRecord)[];
+
+export type LogField = (typeof LOG_FIELDS)[number];
+
+type AssertNever<T extends never> = T;
+export type LogFieldsExhaustive = AssertNever<Exclude<keyof SafeLogRecord, LogField>>;
+
+export function projectLogFields(record: object): Record<string, unknown> {
+  const descriptors = Object.getOwnPropertyDescriptors(record);
+  const out: Record<string, unknown> = {};
+  for (const key of LOG_FIELDS) {
+    const descriptor = descriptors[key];
+    if (descriptor !== undefined && 'value' in descriptor && descriptor.value !== undefined) {
+      out[key] = descriptor.value;
+    }
+  }
+  return out;
+}
+
 export type ObsRecord =
   | { readonly kind: 'log'; readonly record: SafeLogRecord }
   | {
@@ -77,6 +117,16 @@ export interface ObservabilityScope {
 
 export const MAX_RECORD_BYTES = 8192;
 export const DROPPED_COUNTER = 'pb.obs.dropped';
+export const DROPPED_SIGNALS = [
+  'log',
+  'counter',
+  'histogram',
+  'unregistered',
+  'cardinality',
+  'kind_conflict',
+  'export',
+] as const;
+export type DroppedSignal = (typeof DROPPED_SIGNALS)[number];
 export const HTTP_REQUEST_EVENT = 'http.request';
 
 export const APPROVED_ERROR_NAMES = [
@@ -180,7 +230,11 @@ const nullable =
   (v: unknown): boolean =>
     v === null || check(v);
 
-const FIELD_CHECKS: Readonly<Record<string, (v: unknown) => boolean>> = {
+type FieldCheck = (v: unknown) => boolean;
+
+const FIELD_CHECKS: Readonly<
+  Record<Exclude<LogField, 'level' | 'event' | 'error_name'>, FieldCheck>
+> = {
   timestamp: matches(TIMESTAMP),
   service: (v) => v === 'package-broker',
   deployment_id: matches(DEPLOYMENT_ID),
@@ -199,6 +253,8 @@ const FIELD_CHECKS: Readonly<Record<string, (v: unknown) => boolean>> = {
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),
 };
+
+const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;
 
 const SCOPE_ONLY = [
   'timestamp',
@@ -342,7 +398,7 @@ function assertScope(scope: ObservabilityScope): void {
     throw new RangeError('Invalid observability scope');
   const fields = scopeFields(scope);
   for (const [key, value] of Object.entries(fields)) {
-    const check = FIELD_CHECKS[key];
+    const check = CHECKS_BY_NAME[key];
     if (check === undefined || !check(value)) {
       throw new RangeError(`Invalid observability scope field: ${key}`);
     }
@@ -371,7 +427,7 @@ export function createObservability(
       return;
     }
   };
-  const dropped = (signal: 'log' | 'counter' | 'histogram' | 'unregistered'): void =>
+  const dropped = (signal: DroppedSignal): void =>
     emit({ kind: 'counter', name: DROPPED_COUNTER, labels: { signal }, value: 1 });
   const validName = (name: unknown): name is string => isString(name) && CODE.test(name);
 

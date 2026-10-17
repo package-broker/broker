@@ -1,5 +1,5 @@
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
-import { SESSION_ABSOLUTE_MS, SESSION_IDLE_MS } from '@package-broker/core/auth/session';
+import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type {
   GrantRepository,
@@ -26,6 +26,7 @@ import {
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { revokeAllForUserStatement } from './session.js';
+import { liveSessionCondition } from './session-liveness.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_GROUP_LENGTH = 256;
@@ -140,12 +141,6 @@ function organizationRoleExists(ctx: OrgContext, roleId: string) {
     );
 }
 
-const DB_TIME = sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
-
-function dbTimeAgo(ms: number) {
-  return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms / 1000} seconds`})`;
-}
-
 type LooseDatabase = Record<string, Record<string, unknown>>;
 
 const loose = db as unknown as Kysely<LooseDatabase>;
@@ -212,10 +207,8 @@ function actorEvidence(
       select 1 from user_account au
       join session s on s.org_id = au.org_id and s.user_id = au.id
       where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
-        and s.id = ${fence.sessionId} and s.revoked_at is null
-        and s.expires_at > ${DB_TIME}
-        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
-        and coalesce(s.last_seen_at, s.created_at) > ${dbTimeAgo(SESSION_IDLE_MS)})
+        and s.id = ${fence.sessionId}
+        and ${liveSessionCondition('s', SESSION_IDLE_MS / 1000)})
     and ${holdsPermission(ctx, {
       userId: fence.userId,
       permission,

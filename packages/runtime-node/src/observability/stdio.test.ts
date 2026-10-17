@@ -142,3 +142,18 @@ describe('createStdioSink', () => {
     expect(() => createStdioSink({ deploymentId: 'dep_1.a-b' })).not.toThrow();
   });
 });
+
+describe('createStdioSink field allowlist', () => {
+  it('drops fields outside the shared allowlist', () => {
+    const stdout = fakeStream();
+    const sink = createStdioSink({ deploymentId: 'dep-1', stdout, stderr: fakeStream() });
+    sink.emit({
+      kind: 'log',
+      record: { level: 'info', event: 'req.done', message: 'secret text', email: 'a@b.c' },
+    } as ObsRecord);
+    const line = stdout.lines.join('');
+    expect(line).not.toContain('message');
+    expect(line).not.toContain('email');
+    expect(line).toContain('req.done');
+  });
+});

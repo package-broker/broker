@@ -107,7 +107,6 @@ export function createLocalSetupService(deps: LocalSetupDeps): LocalSetupService
           userId: snapshot.userId,
           setupHash,
           credential,
-          opId: ids.ulid(),
           now: credential.now,
         });
         if (!staged) return REFUSED;
@@ -175,7 +174,6 @@ export function createLocalSetupService(deps: LocalSetupDeps): LocalSetupService
         credentialRev: snapshot.credentialRev,
         passwordHash,
         step: totp.step,
-        opId: ids.ulid(),
         session: {
           id: ids.ulid(),
           userId: snapshot.userId,

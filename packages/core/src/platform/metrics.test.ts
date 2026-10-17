@@ -5,7 +5,7 @@ import {
   type Observability,
   createObservability,
 } from './observability.js';
-import { createMetricsRegistry } from './metrics.js';
+import { HISTOGRAM_BOUNDS, METRIC_NAMES, createMetricsRegistry } from './metrics.js';
 
 interface Call {
   readonly kind: 'counter' | 'histogram';
@@ -226,5 +226,18 @@ describe('pb.upstream.bytes', () => {
       // @ts-expect-error package_name is not an allowed label key
       registry.counter('pb.upstream.bytes', { package_name: 'left-pad' }),
     ).toThrow(RangeError);
+  });
+});
+
+describe('HISTOGRAM_BOUNDS', () => {
+  it('gives ascending bounds for every duration histogram name', () => {
+    const names = METRIC_NAMES.filter((name) => name.endsWith('_ms'));
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
+      const bounds = (HISTOGRAM_BOUNDS as Record<string, readonly number[] | undefined>)[name];
+      expect(bounds, name).toBeDefined();
+      expect([...bounds!].sort((a, b) => a - b)).toEqual([...bounds!]);
+    }
+    expect(Object.isFrozen(HISTOGRAM_BOUNDS)).toBe(true);
   });
 });

@@ -1,0 +1,1 @@
+{"packages":[],"providers-url":"/f24-stale-and-corrupt-hash/p/%package%$%hash%.json","providers":{"fx/lib":{"sha256":"8c08161083965ead2e7c0712d34a268842d6d2cd6b07382b0a2953b5be4fbc5c"},"fx/bad":{"sha256":"3a85e99d1448d9dcf2681b9682d8f33df78d85bd1bbfa4f7e0256f232c9df1ec"},"fx/broken":{"sha256":"e34cb9e34d3d297b0e120b9de08d8e6354dee406327e0648c5a3c3587ef96124"}}}

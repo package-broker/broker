@@ -146,6 +146,7 @@ function engine(state: State) {
           project: project === null ? null : { id: project.id },
           organizationPermissions: [],
           projectPermissions: granted,
+          protectedHolder: false,
         };
         return found;
       },

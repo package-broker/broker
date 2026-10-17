@@ -1097,7 +1097,10 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       const beforeLeft = await rowOf(scenario.left);
       const beforeRight = await rowOf(scenario.right);
       const [firstExecutor, secondExecutor] = gatedPair(pair.executor, other);
-      const options = { holderInput: currentHolderInput };
+      const options = {
+        holderInput: currentHolderInput,
+        providerAnchors: [{ provider: HOLDER_PROVIDER, anchor: ANCHOR, emailAuthoritative: true }],
+      };
       const first = createGrantRepository(wrap(firstExecutor), options);
       const second = createGrantRepository(wrap(secondExecutor), options);
       const outcomes = await race(

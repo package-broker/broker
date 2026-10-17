@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
-import { ComposerRootError, readComposerRoot, type ComposerRootSource } from './root.js';
+import { baseOf, ComposerRootError, readComposerRoot, type ComposerRootSource } from './root.js';
 
 const policy = createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] });
 const SHA = 'a'.repeat(64);
@@ -447,6 +447,30 @@ describe('readComposerRoot origins and limits', () => {
     expect(root.includes?.[0]?.url).toBe('https://r.example.com/a%24b$c.json');
   });
 
+  it.each(['p/a?b.json', 'p/a#b.json', 'p/a\\b.json'])(
+    'still refuses include key %s',
+    async (key) => {
+      const { fetch } = setup({ packages: { 'a/b': {} }, includes: { [key]: {} } });
+      await expect(readComposerRoot(fetch, source('https://r.example.com'))).rejects.toMatchObject({
+        code: 'invalid',
+        field: 'includes',
+      });
+    },
+  );
+
+  it('reports inlinePackages for every mode', async () => {
+    const inline = { packages: { 'a/b': {} } };
+    const read = async (body: unknown) =>
+      readComposerRoot(setup(body).fetch, source('https://r.example.com'));
+    expect((await read(inline)).inlinePackages).toBe(true);
+    expect((await read({ packages: {} })).inlinePackages).toBe(false);
+    expect((await read({})).inlinePackages).toBe(false);
+    const v2 = await read({ 'metadata-url': '/p2/%package%.json', ...inline });
+    expect(v2).toMatchObject({ inlinePackages: true, partialPackages: true });
+    const lazy = await read({ 'providers-lazy-url': '/p/%package%.json', ...inline });
+    expect(lazy.inlinePackages).toBe(true);
+  });
+
   it('reads available-package-patterns only for metadata-url roots', async () => {
     const { fetch } = setup({
       'providers-url': '/p/%package%$%hash%.json',
@@ -525,4 +549,16 @@ describe('readComposerRoot mirrors and allowed origins', () => {
       expect(requests).toHaveLength(0);
     },
   );
+});
+
+describe('baseOf', () => {
+  it.each([
+    ['https://r.example.com/packages.json', 'https://r.example.com'],
+    ['https://r.example.com/repo/packages.json', 'https://r.example.com/repo'],
+    ['https://r.example.com/repo/', 'https://r.example.com/repo'],
+    ['https://r.example.com/repo//', 'https://r.example.com/repo'],
+    ['https://r.example.com/repo/packages.json?token=x#frag', 'https://r.example.com/repo'],
+  ])('derives the base of %s', (input, expected) => {
+    expect(baseOf(input)).toBe(expected);
+  });
 });

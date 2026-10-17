@@ -108,6 +108,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       `invalid broker config:\njobs: registered but platformPorts.${target} is not configured`,
     );
   }
+  if (platformPorts === null) {
+    console.warn(
+      `warning: no platformPorts stanza for ${target}; blob, cache, jobs and observability ports are disabled`,
+    );
+  }
   const sources = await collectMigrations(plugins, defaultResolvePackageDir(cwd));
 
   const outDir = path.resolve(cwd, options.outDir ?? path.join('.pb', target));

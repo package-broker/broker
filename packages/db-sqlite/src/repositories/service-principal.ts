@@ -5,6 +5,7 @@ import {
   type FenceGuard,
   type MutationFence,
 } from '@package-broker/core/authz/fence';
+import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { assertCheck, compile, db, existsGuard, runOrgFenced } from '../kysely.js';
 
@@ -150,9 +151,58 @@ function requireNonEmpty(value: string, label: string): void {
   }
 }
 
+const GUARD_CONSTRAINT = 'access_mutation_guard.key';
+
 const ALWAYS: FailureProbes = {
   authority: { sql: 'SELECT 1 AS refused', params: [] },
 };
+
+function isGuardFailure(error: DbError): boolean {
+  return (
+    error.kind === 'unique' &&
+    (error.constraint === undefined || error.constraint === GUARD_CONSTRAINT)
+  );
+}
+
+function isPrincipalCollision(error: DbError): boolean {
+  return error.kind === 'unique' && error.constraint?.startsWith('service_principal.') === true;
+}
+
+function isDataFailure(error: DbError): boolean {
+  return (
+    error.kind === 'foreign_key' ||
+    error.kind === 'check' ||
+    error.kind === 'not_null' ||
+    (error.kind === 'unique' && !isGuardFailure(error))
+  );
+}
+
+/**
+ * Records the constraint error of the fenced batch and answers the failure probes with nothing when
+ * the batch failed on data rather than on the guard, so a data failure is never read as authority.
+ */
+function watched(executor: ScalarSqlExecutor, probes: FailureProbes) {
+  const probeStatements = new Set<unknown>(Object.values(probes));
+  let failure: DbError | null = null;
+  const wrapped: ScalarSqlExecutor = {
+    driver: executor.driver,
+    async batch(statements) {
+      try {
+        return await executor.batch(statements);
+      } catch (error) {
+        failure = error instanceof DbError ? error : null;
+        throw error;
+      }
+    },
+    all(statement) {
+      if (failure !== null && probeStatements.has(statement) && isDataFailure(failure)) {
+        return Promise.resolve([]);
+      }
+      return executor.all(statement);
+    },
+  };
+  return { executor: wrapped, failure: (): DbError | null => failure };
+}
 
 function failed(outcome: { readonly reason: string }): 'authority' | 'conflict' | 'indeterminate' {
   if (
@@ -257,6 +307,26 @@ export function createServicePrincipalRepository(
     return found.length > 0;
   }
 
+  async function clashes(
+    ctx: OrgContext,
+    input: { readonly id: string; readonly name: string },
+  ): Promise<boolean> {
+    const found = await executor.all(
+      scalar(
+        db
+          .selectFrom('service_principal')
+          .select('id')
+          .where((eb) =>
+            eb.or([
+              eb('id', '=', input.id),
+              eb.and([eb('org_id', '=', ctx.orgId), eb('name', '=', input.name)]),
+            ]),
+          ),
+      ),
+    );
+    return found.length > 0;
+  }
+
   return {
     get: load,
 
@@ -323,7 +393,6 @@ export function createServicePrincipalRepository(
               ),
             ),
         )
-        .onConflict((conflict) => conflict.doNothing())
         .returning('id');
 
       const permissions = insertPermissions(ctx, input.id, input.permissions, (source) =>
@@ -334,7 +403,27 @@ export function createServicePrincipalRepository(
           .where('sp.updated_at', '=', now)
           .where('sp.revision', '=', 1)
           .where('sp.last_op_id', '=', input.opId)
-          .where(sql<boolean>`changes() = 1`)
+          .where((eb) =>
+            eb.exists(
+              eb
+                .selectFrom('user_account as creator')
+                .select(sql.lit(1).as('one'))
+                .where('creator.id', '=', input.createdByUserId)
+                .where('creator.org_id', '=', ctx.orgId),
+            ),
+          )
+          .$if(projectBound, (q) =>
+            q.where((eb) =>
+              eb.exists(
+                eb
+                  .selectFrom('project')
+                  .select(sql.lit(1).as('one'))
+                  .where('project.id', '=', input.projectId)
+                  .where('project.org_id', '=', ctx.orgId)
+                  .where('project.status', '=', 'active'),
+              ),
+            ),
+          )
           .where((eb) =>
             input.projectId === null
               ? eb('sp.project_id', 'is', null)
@@ -352,22 +441,36 @@ export function createServicePrincipalRepository(
           ),
       );
 
+      const observed = watched(executor, ALWAYS);
       const outcome = await runOrgFenced(
-        executor,
+        observed.executor,
         ctx,
         fence,
         guard,
         [scalar(principal), permissions],
         ALWAYS,
       );
-      if (!outcome.ok)
+      if (!outcome.ok) {
+        if (outcome.reason === 'indeterminate') return 'indeterminate';
+        const error = observed.failure();
+        if (error !== null && isPrincipalCollision(error)) return 'duplicate';
+        if (error !== null && isDataFailure(error)) return 'indeterminate';
+        if (
+          error !== null &&
+          error.kind === 'unique' &&
+          error.constraint === undefined &&
+          (await clashes(ctx, input))
+        ) {
+          return 'duplicate';
+        }
         return failed({ reason: outcome.reason }) === 'indeterminate'
           ? 'indeterminate'
           : 'authority';
+      }
       const inserted = outcome.results[guard.length];
       if (inserted !== undefined && inserted.rows.length > 0) return 'created';
 
-      const [creator, project, clash] = await Promise.all([
+      const [creator, project] = await Promise.all([
         executor.all(
           scalar(
             db
@@ -389,24 +492,10 @@ export function createServicePrincipalRepository(
                   .where('status', '=', 'active'),
               ),
             ),
-        executor.all(
-          scalar(
-            db
-              .selectFrom('service_principal')
-              .select('id')
-              .where((eb) =>
-                eb.or([
-                  eb('id', '=', input.id),
-                  eb.and([eb('org_id', '=', ctx.orgId), eb('name', '=', input.name)]),
-                ]),
-              ),
-          ),
-        ),
       ]);
       if (creator.length === 0)
         throw new TypeError('createdByUserId must be a user of the organization');
       if (project.length === 0) return 'project_mismatch';
-      if (clash.length > 0) return 'duplicate';
       throw new TypeError('service principal was not stored');
     },
 
@@ -443,8 +532,9 @@ export function createServicePrincipalRepository(
         ),
       );
 
+      const observed = watched(executor, probes);
       const outcome = await runOrgFenced(
-        executor,
+        observed.executor,
         ctx,
         fence,
         guard,
@@ -468,7 +558,10 @@ export function createServicePrincipalRepository(
         probes,
       );
       if (outcome.ok) return 'updated';
+      if (outcome.reason === 'indeterminate') return 'indeterminate';
       if (outcome.reason === 'unclassified' && !(await exists(ctx, id))) return 'not_found';
+      const error = observed.failure();
+      if (error !== null && isDataFailure(error)) return 'indeterminate';
       return failed(outcome);
     },
 
@@ -484,7 +577,23 @@ export function createServicePrincipalRepository(
         'suspended',
         'suspended',
       );
-      return result === 'not_suspended' ? 'unchanged' : result;
+      if (result === 'not_suspended') return 'unchanged';
+      if (result !== 'conflict') return result;
+      const current = await load(ctx, id);
+      if (current?.status !== 'suspended') return result;
+      const again = await transition(
+        ctx,
+        fence,
+        guard,
+        id,
+        now,
+        opId,
+        'active',
+        'suspended',
+        'suspended',
+        current.revision,
+      );
+      return again === 'not_suspended' ? 'unchanged' : again;
     },
 
     async restore(ctx, fence, guard, id, now, opId) {
@@ -502,11 +611,12 @@ export function createServicePrincipalRepository(
     from: 'active' | 'suspended',
     to: 'active' | 'suspended',
     done: Done,
+    revisionOverride?: number,
   ): Promise<Done | 'not_found' | 'not_suspended' | 'conflict' | 'authority' | 'indeterminate'> {
     requireNonEmpty(id, 'id');
     requireNonEmpty(opId, 'opId');
     const stamp = timestamp(now);
-    const expected = fence.expected['service_principal'];
+    const expected = revisionOverride ?? fence.expected['service_principal'];
     const revision = (comparison: '=' | '<>') =>
       scalar(
         db
@@ -515,6 +625,17 @@ export function createServicePrincipalRepository(
           .where('org_id', '=', ctx.orgId)
           .where('id', '=', id),
       );
+    const present = scalar(
+      db
+        .selectFrom('service_principal')
+        .select(sql<number>`1`.as('present'))
+        .where('org_id', '=', ctx.orgId)
+        .where('id', '=', id),
+    );
+    const probes: FailureProbes =
+      expected === undefined
+        ? { authority: present }
+        : { authority: revision('='), conflict: revision('<>') };
     const cas =
       expected === undefined
         ? []
@@ -528,8 +649,9 @@ export function createServicePrincipalRepository(
                 .where('revision', '=', expected),
             ),
           );
+    const observed = watched(executor, probes);
     const outcome = await runOrgFenced(
-      executor,
+      observed.executor,
       ctx,
       fence,
       guard,
@@ -552,10 +674,13 @@ export function createServicePrincipalRepository(
             .where('id', '=', id),
         ),
       ],
-      expected === undefined ? ALWAYS : { authority: revision('='), conflict: revision('<>') },
+      probes,
     );
     if (!outcome.ok) {
+      if (outcome.reason === 'indeterminate') return 'indeterminate';
       if (outcome.reason === 'unclassified' && !(await exists(ctx, id))) return 'not_found';
+      const error = observed.failure();
+      if (error !== null && isDataFailure(error)) return 'indeterminate';
       const reason = failed({ reason: outcome.reason });
       return reason === 'conflict' && expected !== undefined
         ? 'conflict'

@@ -837,3 +837,88 @@ describe('input validation', () => {
     expect(() => revokePreviousStatement(a, 'raw-cookie', 'new-session', NOW)).toThrow(TypeError);
   });
 });
+
+describe('active session reads by hash and id', () => {
+  it.each([
+    ['exactly idle', { lastSeenAt: IDLE_SINCE }, false],
+    ['one millisecond inside idle', { lastSeenAt: '2026-10-15T11:00:00.001Z' }, true],
+    ['expired', { expiresAt: PAST }, false],
+    ['exact expiry', { expiresAt: NOW }, false],
+    ['one millisecond before expiry', { expiresAt: '2026-10-15T12:00:00.001Z' }, true],
+    ['absolute cap reached', { createdAt: '2026-10-15T00:00:00.000Z' }, false],
+    ['one second before absolute cap', { createdAt: '2026-10-15T00:00:01.000Z' }, true],
+    ['revoked', { revokedAt: PAST }, false],
+    ['inactive user', { userId: SUSPENDED }, false],
+    ['malformed expiry', { expiresAt: 'z-invalid' }, false],
+    ['malformed last seen', { lastSeenAt: 'z-invalid' }, false],
+    ['malformed creation', { createdAt: 'z-invalid' }, false],
+    ['offset expiry already elapsed', { expiresAt: '2026-10-15T13:00:00.000+02:00' }, false],
+    ['space-formatted live last seen', { lastSeenAt: '2026-10-15 11:30:00.000' }, true],
+  ] satisfies readonly (readonly [string, Partial<Seed>, boolean])[])(
+    '%s has the same liveness through both keys',
+    async (_label, overrides, live) => {
+      await seed({ id: 's1', lastSeenAt: RECENT, ...overrides });
+      const counted = countCalls(executor);
+      const repository = createSessionRepository(counted.executor);
+      const byHash = await repository.findActive(a, hash('s1'), CUTOFFS);
+      const byId = await repository.findActiveById(a, 's1', CUTOFFS);
+      expect(byId).toEqual(byHash);
+      if (live) expect(byId?.id).toBe('s1');
+      else expect(byId).toBeNull();
+      expect(counted.counts()).toEqual({ all: 2, batch: 0 });
+    },
+  );
+
+  it('returns null by id for an unknown session', async () => {
+    expect(
+      await createSessionRepository(executor).findActiveById(a, 'unknown', CUTOFFS),
+    ).toBeNull();
+  });
+
+  it('returns null by id across organizations', async () => {
+    await seed({ id: 's1', lastSeenAt: RECENT });
+    expect(await createSessionRepository(executor).findActiveById(b, 's1', CUTOFFS)).toBeNull();
+  });
+
+  it.each(['', null, undefined, 123, {}])('rejects id %j before querying', async (id) => {
+    const counted = countCalls(executor);
+    await expect(
+      createSessionRepository(counted.executor).findActiveById(a, id as string, CUTOFFS),
+    ).rejects.toThrow(TypeError);
+    expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+  });
+});
+
+describe('session writer epoch comparisons', () => {
+  it.each([
+    ['malformed expiry', { expiresAt: 'z-invalid' }],
+    ['malformed last seen', { lastSeenAt: '!invalid' }],
+    ['malformed creation fallback', { createdAt: '!invalid', lastSeenAt: null }],
+    ['offset expiry already elapsed', { expiresAt: '2026-10-15T13:00:00.000+02:00' }],
+    ['space-formatted recent last seen', { lastSeenAt: '2026-10-15 11:59:00.000' }],
+  ] satisfies readonly (readonly [string, Partial<Seed>])[])(
+    'touch leaves %s unchanged',
+    async (_label, overrides) => {
+      await seed({ id: 's1', lastSeenAt: PAST, ...overrides });
+      const before = await row('s1');
+      await createSessionRepository(executor).touch(a, 's1', NOW, RECENT);
+      expect(await row('s1')).toEqual(before);
+    },
+  );
+
+  it.each(['z-invalid', '2026-10-15T13:00:00.000+02:00'])(
+    'reauthentication refuses expiry %s',
+    async (expiresAt) => {
+      await seed({ id: 's1', expiresAt });
+      expect(
+        await createSessionRepository(executor).markReauthenticatedByIdentity(a, {
+          sessionId: 's1',
+          identityId: null,
+          authTime: RECENT,
+          now: NOW,
+        }),
+      ).toBe(false);
+      expect((await row('s1'))?.reauth_at).toBeNull();
+    },
+  );
+});

@@ -19,6 +19,16 @@ import {
 } from './observability.js';
 import type { Observability } from './observability.js';
 
+import { reportableErrorName } from '../kernel/error-name.js';
+import { JsonExtractError } from '../ingest/json-stream.js';
+import { LeaseLostError, CoalesceDoneCheckError } from '../ingest/coalesce.js';
+import { SnapshotCorruptError, SnapshotStagingRejectedError } from '../ingest/snapshot.js';
+import { UpstreamUnstableError, TwoPassLimitError } from '../ingest/two-pass-put.js';
+import { NpmPackumentError } from '../ingest/npm/packument.js';
+import { ComposerRootError } from '../ingest/composer/root.js';
+import { ComposerV2Error } from '../ingest/composer/v2-package.js';
+import { PackagistBusyError } from '../ingest/composer/packagist-proxy.js';
+
 const SECRET = 'sk_live_TOP-SECRET-4242';
 const REQUEST_ID = '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11';
 
@@ -45,6 +55,28 @@ const REGISTRY: ObsRegistry = {
 function logs(records: readonly ObsRecord[]): Record<string, unknown>[] {
   return records.flatMap((r) => (r.kind === 'log' ? [{ ...r.record }] : []));
 }
+
+describe('ingest error names', () => {
+  it.each([
+    [new JsonExtractError('invalid_member', 0), 'JsonExtractError'],
+    [new LeaseLostError(), 'LeaseLostError'],
+    [new CoalesceDoneCheckError(), 'CoalesceDoneCheckError'],
+    [new SnapshotCorruptError(), 'SnapshotCorruptError'],
+    [new SnapshotStagingRejectedError(), 'SnapshotStagingRejectedError'],
+    [new UpstreamUnstableError(), 'UpstreamUnstableError'],
+    [new TwoPassLimitError(1), 'TwoPassLimitError'],
+    [new NpmPackumentError('invalid'), 'NpmPackumentError'],
+    [new ComposerRootError('invalid'), 'ComposerRootError'],
+    [new ComposerV2Error('unsupported'), 'ComposerV2Error'],
+    [new PackagistBusyError(null), 'PackagistBusyError'],
+  ] as const)('preserves %s as %s across reporting boundaries', (error, expectedName) => {
+    expect(reportableErrorName(error)).toBe(expectedName);
+    expect(safeErrorName(error)).toBe(expectedName);
+    expect(
+      safeRecord({ level: 'error', event: 'ingest.failed', error_name: error.name })?.error_name,
+    ).toBe(expectedName);
+  });
+});
 
 describe('safeRecord', () => {
   it('keeps allowlisted fields and drops unknown ones', () => {

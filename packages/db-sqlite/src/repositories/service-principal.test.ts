@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mutationFence,
   type AuthenticatedActor,
   type FenceGuard,
 } from '@package-broker/core/authz/fence';
+import { DbError, classifySqliteError } from '@package-broker/core/db/errors';
 import {
   orgContext,
   type OrgContext,
@@ -12,6 +14,8 @@ import {
 } from '@package-broker/core/db/port';
 import type { ServicePrincipalStore } from '@package-broker/core/authz/service-principal-service';
 import { assertGuard, existsGuard } from '../kysely.js';
+import { describeServicePrincipalContract } from '../contract/service-principal-contract.js';
+import { openNodeSqliteExecutor } from '../testing/node-sqlite-executor.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
   createServicePrincipalRepository,
@@ -775,5 +779,333 @@ describe('createdBy', () => {
   it('answers an empty list for a user who created nothing', async () => {
     await executor.batch([principalRow(SP1, a.orgId, 'ci', PROJECT, U1)]);
     expect(await principals.createdBy(a, '01J0USER000000000000000009')).toEqual([]);
+  });
+});
+
+describe('replay gate', () => {
+  it('never reads changes() of the previous statement', () => {
+    const source = readFileSync(new URL('./service-principal.ts', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/changes\(\)/);
+  });
+
+  it('adds no permission rows when an empty create is replayed with the same op id', async () => {
+    expect(await create({ permissions: [] })).toBe('created');
+    const before = await snapshot();
+    expect(await create({ permissions: ['project:packages:read'] })).toBe('duplicate');
+    expect(await snapshot()).toBe(before);
+  });
+});
+
+describe('a create that inserts no principal', () => {
+  it('writes no permissions when the project was archived before the same-op replay', async () => {
+    expect(await create({ permissions: [] })).toBe('created');
+    await executor.batch([stmt("UPDATE project SET status = 'archived' WHERE id = ?", PROJECT)]);
+    const before = await snapshot();
+    expect(await create({ permissions: ['project:packages:read'] })).toBe('project_mismatch');
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT 1 FROM service_principal_permission')).toEqual([]);
+  });
+});
+
+describe('node:sqlite service principal contract', () => {
+  describeServicePrincipalContract('node:sqlite', async () => {
+    const opened = openNodeSqliteExecutor();
+    return { executor: opened.executor, close: opened.close };
+  });
+});
+
+interface Hooks {
+  beforeBatch?: () => Promise<void>;
+  failBatch?: DbError;
+}
+
+function instrumented(
+  inner: SqlExecutor,
+  hooks: Hooks,
+): { executor: SqlExecutor; reads: string[] } {
+  const reads: string[] = [];
+  let failed = false;
+  let latched = false;
+  return {
+    reads,
+    executor: {
+      driver: inner.driver,
+      async all(statement: Statement) {
+        reads.push(statement.sql);
+        return inner.all(statement);
+      },
+      async batch(statements: readonly Statement[]) {
+        if (hooks.beforeBatch !== undefined && !latched) {
+          latched = true;
+          await hooks.beforeBatch();
+        }
+        if (hooks.failBatch !== undefined && !failed) {
+          failed = true;
+          throw hooks.failBatch;
+        }
+        return inner.batch(statements);
+      },
+    } as SqlExecutor,
+  };
+}
+
+const FOREIGN_KEY = classifySqliteError(new Error('FOREIGN KEY constraint failed'));
+const CHECK = classifySqliteError(new Error('CHECK constraint failed: status'));
+const AUTHORITY_PROBE = 'SELECT 1 AS refused';
+
+describe('constraint failures', () => {
+  function over(hooks: Hooks) {
+    const wrapped = instrumented(executor, hooks);
+    return { ...wrapped, repository: createServicePrincipalRepository(wrapped.executor) };
+  }
+
+  const input = {
+    opId: 'op-create',
+    id: SP1,
+    name: 'ci',
+    projectId: PROJECT,
+    createdByUserId: U1,
+    permissions: ['project:packages:read'],
+    now: NOW,
+  };
+
+  it('answers a foreign key failure in create as indeterminate without asking the authority probe', async () => {
+    const { repository, reads } = over({ failBatch: FOREIGN_KEY });
+    expect(await repository.create(a, NO_REVISION(), actorGuard(), input)).toBe('indeterminate');
+    expect(reads).not.toContain(AUTHORITY_PROBE);
+    expect(await rows('SELECT id FROM service_principal')).toEqual([]);
+  });
+
+  it('answers a check failure in create as indeterminate without asking the authority probe', async () => {
+    const { repository, reads } = over({ failBatch: CHECK });
+    expect(await repository.create(a, NO_REVISION(), actorGuard(), input)).toBe('indeterminate');
+    expect(reads).not.toContain(AUTHORITY_PROBE);
+  });
+
+  it('still answers authority and asks the probe when the guard is what failed', async () => {
+    const { repository, reads } = over({});
+    expect(
+      await repository.create(a, NO_REVISION(), actorGuard('01J0USER0000000000000000ZZ'), input),
+    ).toBe('authority');
+    expect(reads).toContain(AUTHORITY_PROBE);
+  });
+
+  it('does not look for a clash after a failure that is not a unique violation', async () => {
+    await create();
+    const busy = classifySqliteError(new Error('SQLITE_BUSY: database is locked'));
+    const { repository } = over({ failBatch: busy });
+    await expect(
+      repository.create(a, NO_REVISION(), actorGuard(), { ...input, id: SP2 }),
+    ).rejects.toThrow(/unclassified/);
+  });
+
+  it('answers duplicate, not authority, for a name clash', async () => {
+    await create();
+    const { repository, reads } = over({});
+    expect(await repository.create(a, NO_REVISION(), actorGuard(), { ...input, id: SP2 })).toBe(
+      'duplicate',
+    );
+    expect(reads).not.toContain(AUTHORITY_PROBE);
+  });
+
+  it('answers a foreign key failure in suspend, restore and setPermissions as indeterminate with no probe', async () => {
+    await create();
+    for (const run of [
+      (r: ServicePrincipalRepository) =>
+        r.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop'),
+      (r: ServicePrincipalRepository) =>
+        r.restore(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-resume'),
+      (r: ServicePrincipalRepository) =>
+        r.setPermissions(
+          a,
+          mutationFence(actor(), { service_principal: 1 }),
+          actorGuard(),
+          SP1,
+          ['project:packages:read'],
+          LATER,
+          'op-set',
+        ),
+    ]) {
+      const { repository, reads } = over({ failBatch: FOREIGN_KEY });
+      expect(await run(repository)).toBe('indeterminate');
+      expect(reads.filter((sql) => /"holds"|"present"/.test(sql))).toEqual([]);
+    }
+  });
+
+  it('answers authority for a refusing guard on a transition with no expected revision', async () => {
+    await create();
+    const { repository } = over({});
+    expect(
+      await repository.suspend(
+        a,
+        NO_REVISION(),
+        actorGuard('01J0USER0000000000000000ZZ'),
+        SP1,
+        LATER,
+        'op-stop',
+      ),
+    ).toBe('authority');
+  });
+});
+
+describe('a principal deleted between the load and the batch', () => {
+  const remove = async (): Promise<void> => {
+    await executor.batch([stmt('DELETE FROM service_principal WHERE id = ?', SP1)]);
+  };
+
+  function latched() {
+    return createServicePrincipalRepository(
+      instrumented(executor, { beforeBatch: remove }).executor,
+    );
+  }
+
+  it('answers not_found from suspend without a revision', async () => {
+    await create();
+    expect(await latched().suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop')).toBe(
+      'not_found',
+    );
+  });
+
+  it('answers not_found from restore without a revision', async () => {
+    await create();
+    expect(await latched().restore(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-resume')).toBe(
+      'not_found',
+    );
+  });
+
+  it('answers not_found from suspend and restore with a revision', async () => {
+    await create();
+    const fence = mutationFence(actor(), { service_principal: 1 });
+    expect(await latched().suspend(a, fence, actorGuard(), SP1, LATER, 'op-stop')).toBe(
+      'not_found',
+    );
+    await create();
+    expect(await latched().restore(a, fence, actorGuard(), SP1, LATER, 'op-resume')).toBe(
+      'not_found',
+    );
+  });
+
+  it('answers not_found from setPermissions', async () => {
+    await create();
+    expect(
+      await latched().setPermissions(
+        a,
+        mutationFence(actor(), { service_principal: 1 }),
+        actorGuard(),
+        SP1,
+        ['project:packages:read'],
+        LATER,
+        'op-set',
+      ),
+    ).toBe('not_found');
+  });
+});
+
+describe('suspending an already suspended principal', () => {
+  it('answers unchanged for a stale revision and rewrites nothing', async () => {
+    await create();
+    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    const before = await snapshot();
+    expect(
+      await principals.suspend(
+        a,
+        mutationFence(actor(), { service_principal: 1 }),
+        actorGuard(),
+        SP1,
+        '2026-10-15T14:00:00.000Z',
+        'op-again',
+      ),
+    ).toBe('unchanged');
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('answers authority, not unchanged, when the guard refuses a stale-revision suspend', async () => {
+    await create();
+    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    const before = await snapshot();
+    expect(
+      await principals.suspend(
+        a,
+        mutationFence(actor(), { service_principal: 1 }),
+        actorGuard('01J0USER0000000000000000ZZ'),
+        SP1,
+        LATER,
+        'op-again',
+      ),
+    ).toBe('authority');
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('answers conflict and writes nothing when a restore commits between the status read and the rerun', async () => {
+    await create();
+    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    let batches = 0;
+    const racing = createServicePrincipalRepository({
+      driver: executor.driver,
+      all: (statement: Statement) => executor.all(statement),
+      async batch(statements: readonly Statement[]) {
+        batches += 1;
+        if (batches === 2) {
+          expect(
+            await principals.restore(
+              a,
+              mutationFence(actor(), { service_principal: 2 }),
+              actorGuard(),
+              SP1,
+              LATER,
+              'op-resume',
+            ),
+          ).toBe('restored');
+        }
+        return executor.batch(statements);
+      },
+    } as SqlExecutor);
+    expect(
+      await racing.suspend(
+        a,
+        mutationFence(actor(), { service_principal: 1 }),
+        actorGuard(),
+        SP1,
+        LATER,
+        'op-again',
+      ),
+    ).toBe('conflict');
+    expect(batches).toBe(2);
+    const found = await principals.get(a, SP1);
+    expect(found?.status).toBe('active');
+    expect(found?.revision).toBe(3);
+  });
+
+  it('still answers conflict for a stale revision on an active principal', async () => {
+    await create();
+    await executor.batch([stmt('UPDATE service_principal SET revision = 5 WHERE id = ?', SP1)]);
+    expect(
+      await principals.suspend(
+        a,
+        mutationFence(actor(), { service_principal: 1 }),
+        actorGuard(),
+        SP1,
+        LATER,
+        'op-stop',
+      ),
+    ).toBe('conflict');
+  });
+});
+
+describe('creator retention control', () => {
+  it('deletes a user who created no principal', async () => {
+    const other = '01J0USER000000000000000002';
+    await executor.batch([
+      stmt(
+        'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+        other,
+        a.orgId,
+        'u2@example.test',
+      ),
+    ]);
+    await create();
+    await executor.batch([stmt('DELETE FROM user_account WHERE id = ?', other)]);
+    expect(await rows('SELECT id FROM user_account WHERE id = ?', other)).toEqual([]);
+    expect(await rows('SELECT id FROM user_account WHERE id = ?', U1)).toHaveLength(1);
   });
 });

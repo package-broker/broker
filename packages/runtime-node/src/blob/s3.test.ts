@@ -830,6 +830,83 @@ describe('createS3ByteStore round 3', () => {
     expect(calls.some(isCopy)).toBe(false);
   });
 
+  it('confirms a 5 MiB duplicate put with HEAD only', async () => {
+    const big = new Uint8Array(5 * 1024 * 1024).fill(7);
+    const bigInput = { sha256: digestOf(big), size: big.length, mediaType: 'application/zip' };
+    const { calls, store } = setup();
+    const key = finalKeyOf(big);
+    await store.putVerified(key, chunked(split(big, 1024 * 1024)), bigInput);
+    calls.length = 0;
+    await store.putVerified(key, chunked(split(big, 1024 * 1024)), bigInput);
+    expect(calls.filter((c) => isFinal(c, 'HEAD'))).toHaveLength(1);
+    expect(calls.some((c) => isFinal(c, 'GET'))).toBe(false);
+  });
+
+  it('falls back to GET and hash when the store returns no checksum', async () => {
+    const { calls, store } = setup({}, {}, (call, s3) =>
+      isFinal(call, 'HEAD') ? withoutChecksum(call, s3) : undefined,
+    );
+    const key = finalKeyOf(body);
+    await store.putVerified(key, chunked([body]), input);
+    calls.length = 0;
+    await store.putVerified(key, chunked([body]), input);
+    expect(calls.filter((c) => isFinal(c, 'HEAD'))).toHaveLength(1);
+    expect(calls.filter((c) => isFinal(c, 'GET'))).toHaveLength(1);
+  });
+
+  for (const status of [400, 501]) {
+    it(`retries the HEAD once without the header on ${status}, hashes via GET and skips the header afterwards`, async () => {
+      const key = finalKeyOf(body);
+      let armed = false;
+      const { fake, calls, store } = setup({}, {}, (call, s3) => {
+        if (!armed || !isFinal(call, 'HEAD')) return undefined;
+        if (call.headers.has('x-amz-checksum-mode')) return new Response(null, { status });
+        return withoutChecksum(call, s3);
+      });
+      await store.putVerified(key, chunked([body]), input);
+      armed = true;
+      calls.length = 0;
+      await expect(store.putVerified(key, chunked([body]), input)).resolves.toEqual({
+        size: body.length,
+        mediaType: 'application/zip',
+      });
+      const heads = calls.filter((c) => isFinal(c, 'HEAD'));
+      expect(heads.map((c) => c.headers.has('x-amz-checksum-mode'))).toEqual([true, false]);
+      expect(calls.filter((c) => isFinal(c, 'GET'))).toHaveLength(1);
+      calls.length = 0;
+      await store.putVerified(key, chunked([body]), input);
+      const later = calls.filter((c) => isFinal(c, 'HEAD'));
+      expect(later.map((c) => c.headers.has('x-amz-checksum-mode'))).toEqual([false]);
+      expect(fake.keys()).toEqual([key]);
+    });
+  }
+
+  it('keeps sending the header on a store that never rejected it', async () => {
+    const { calls, store } = setup();
+    const key = finalKeyOf(body);
+    await store.putVerified(key, chunked([body]), input);
+    await store.putVerified(key, chunked([body]), input);
+    await store.putVerified(key, chunked([body]), input);
+    const heads = calls.filter((c) => isFinal(c, 'HEAD'));
+    expect(heads).toHaveLength(3);
+    expect(heads.every((c) => c.headers.get('x-amz-checksum-mode') === 'ENABLED')).toBe(true);
+  });
+
+  it('does not retry the HEAD on other error statuses', async () => {
+    const key = finalKeyOf(body);
+    let armed = false;
+    const { calls, store } = setup({}, {}, (call) =>
+      armed && isFinal(call, 'HEAD') ? new Response(null, { status: 403 }) : undefined,
+    );
+    await store.putVerified(key, chunked([body]), input);
+    armed = true;
+    calls.length = 0;
+    await expect(store.putVerified(key, chunked([body]), input)).rejects.toMatchObject({
+      status: 403,
+    });
+    expect(calls.filter((c) => isFinal(c, 'HEAD'))).toHaveLength(1);
+  });
+
   it('the fake returns the stored checksum only in checksum mode', async () => {
     const { fake, store } = setup();
     const key = finalKeyOf(body);

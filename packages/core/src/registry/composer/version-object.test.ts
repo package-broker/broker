@@ -3,6 +3,8 @@ import { validateVersion } from '../../catalogue/versions.js';
 import {
   composerVersionInput,
   InvalidComposerOriginError,
+  MAX_RELEASE_SKEW_MS,
+  MIN_COMPOSER_RELEASE_TIME,
   type ComposerVersionOrigin,
 } from './version-object.js';
 
@@ -337,6 +339,73 @@ describe('composerVersionInput', () => {
       ok: false,
       reason: 'credential_echo',
     });
+  });
+
+  describe('release date bounds', () => {
+    const importedMs = Date.parse(ORIGIN.importedAt);
+    const fellBack = (time: string) => {
+      const input = ok(raw({ time }));
+      expect(input.upstreamReleasedAt).toBeNull();
+      expect(input.history).toEqual({
+        basis: 'import_time',
+        at: ORIGIN.importedAt,
+        noOtherDate: true,
+      });
+    };
+
+    it('exports the bounds', () => {
+      expect(MAX_RELEASE_SKEW_MS).toBe(24 * 60 * 60 * 1000);
+      expect(MIN_COMPOSER_RELEASE_TIME).toBe('2011-01-01T00:00:00.000Z');
+    });
+
+    it('keeps importedAt plus 24 h and falls back one millisecond later', () => {
+      const edge = new Date(importedMs + MAX_RELEASE_SKEW_MS).toISOString();
+      expect(ok(raw({ time: edge })).upstreamReleasedAt).toBe(edge);
+      fellBack(new Date(importedMs + MAX_RELEASE_SKEW_MS + 1).toISOString());
+    });
+
+    it('applies the upper bound to Unix-seconds times', () => {
+      const edgeSeconds = (importedMs + MAX_RELEASE_SKEW_MS) / 1000;
+      expect(ok(raw({ time: String(edgeSeconds) })).upstreamReleasedAt).toBe(
+        new Date(edgeSeconds * 1000).toISOString(),
+      );
+      fellBack(String(edgeSeconds + 1));
+    });
+
+    it('keeps the lower bound and falls back before it', () => {
+      expect(ok(raw({ time: '2011-01-01T00:00:00Z' })).upstreamReleasedAt).toBe(
+        MIN_COMPOSER_RELEASE_TIME,
+      );
+      fellBack('2010-12-31T23:59:59Z');
+      fellBack('1970-01-01T00:00:00Z');
+      fellBack('0');
+    });
+
+    it('falls back for a far-future year', () => {
+      fellBack('9999-12-31T23:59:59Z');
+    });
+  });
+
+  it('ignores a credential echo in a field outside the allowlist', () => {
+    const result = composerVersionInput(
+      KEY,
+      raw({
+        'notification-url': 'https://example.test/n?access_token=zzz',
+        'installation-source': 's3cr3t-token-value',
+      }),
+      ORIGIN,
+    );
+    expect(result.ok && result.stripped).toBe(0);
+  });
+
+  it('counts an echo stripped from an allowlisted field', () => {
+    const result = composerVersionInput(
+      KEY,
+      raw({ support: { source: 'https://example.test/s?access_token=zzz' } }),
+      ORIGIN,
+    );
+    expect(result.ok && result.stripped).toBe(1);
+    expect(result.ok && result.input.metadata.json).not.toContain('zzz');
   });
 
   it('rejects a non-canonical importedAt', () => {

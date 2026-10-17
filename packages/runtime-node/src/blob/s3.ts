@@ -355,12 +355,20 @@ export function createS3ByteStore(options: S3ByteStoreOptions): ByteStore {
     if (!allowed.includes(response.status)) throw new S3RequestError(response.status);
   }
 
-  async function headObject(storageKey: string, checksumMode = false): Promise<ObjectHead | null> {
+  let checksumModeSupported = true;
+
+  async function headObject(storageKey: string, askChecksum = false): Promise<ObjectHead | null> {
+    const checksumMode = askChecksum && checksumModeSupported;
     const response = await send(
       'HEAD',
       storageKey,
       checksumMode ? { 'x-amz-checksum-mode': 'ENABLED' } : {},
     );
+    if (checksumMode && (response.status === 400 || response.status === 501)) {
+      await discard(response);
+      checksumModeSupported = false;
+      return headObject(storageKey);
+    }
     await expectStatus(response, [200, 404]);
     if (response.status === 404) return null;
     return {

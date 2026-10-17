@@ -4,7 +4,11 @@ import { fixedClock } from '../ids.js';
 import type { ActorContext } from './administration.js';
 import { mutationFence, type AuthenticatedActor, type MutationFence } from './fence.js';
 import type { ProjectActor } from './project-actor.js';
-import { createProjectAdministration, type ProjectGrantStore } from './project-administration.js';
+import {
+  createProjectAdministration,
+  type ProjectGrantStore,
+  type ProjectAdministrationDeps,
+} from './project-administration.js';
 
 const ctx = orgContext('org-a');
 const NOW = '2026-10-16T08:00:00.000Z';
@@ -38,11 +42,13 @@ const grantFence = (): MutationFence =>
 
 type Answers = { [K in keyof ProjectGrantStore]?: Awaited<ReturnType<ProjectGrantStore[K]>> };
 
-function setup(answers: Answers = {}) {
+function setup(answers: Answers = {}, extra: Partial<ProjectAdministrationDeps> = {}) {
   const store = {
     create: vi.fn<ProjectGrantStore['create']>(async () => answers.create ?? 'created'),
     changeRole: vi.fn<ProjectGrantStore['changeRole']>(async () => answers.changeRole ?? 'updated'),
-    delete: vi.fn<ProjectGrantStore['delete']>(async () => answers.delete ?? 'deleted'),
+    delete: vi.fn<ProjectGrantStore['delete']>(
+      async () => answers.delete ?? { status: 'deleted', offboardedUserId: null },
+    ),
   } satisfies ProjectGrantStore;
   const log = vi.fn();
   const service = createProjectAdministration({
@@ -52,6 +58,7 @@ function setup(answers: Answers = {}) {
     clock: fixedClock(NOW),
     ids: { ulid: () => NEW_ID },
     log,
+    ...extra,
   });
   return { service, store, log };
 }
@@ -298,6 +305,98 @@ describe('changeRole', () => {
 });
 
 describe('revoke', () => {
+  it('notifies once when the deleted grant ends project membership', async () => {
+    const callback = vi.fn();
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      { onCreatorOffboarded: callback },
+    );
+    expect(await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(callback).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'member-1',
+      cause: 'membership_removed',
+    });
+  });
+
+  it('does not notify when the store reports no offboarded user', async () => {
+    const callback = vi.fn();
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: null } },
+      { onCreatorOffboarded: callback },
+    );
+    expect(await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it.each(['forbidden', 'not_found', 'conflict', 'indeterminate'] as const)(
+    'does not notify after a %s refusal',
+    async (answer) => {
+      const callback = vi.fn();
+      const { service } = setup({ delete: answer }, { onCreatorOffboarded: callback });
+      expect(await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID)).toEqual({
+        ok: false,
+        error: answer,
+      });
+      expect(callback).not.toHaveBeenCalled();
+    },
+  );
+
+  it('allows a missing callback after offboarding', async () => {
+    const { service } = setup({ delete: { status: 'deleted', offboardedUserId: 'member-1' } });
+    expect(await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID)).toEqual({
+      ok: true,
+      value: null,
+    });
+  });
+
+  it('logs a throwing callback by name and preserves success', async () => {
+    const { service, log } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      {
+        onCreatorOffboarded: () => {
+          throw new TypeError('private detail');
+        },
+      },
+    );
+    expect(await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'user.offboarding_callback_failed',
+      orgId: ctx.orgId,
+      userId: 'member-1',
+      cause: 'membership_removed',
+      error: 'TypeError',
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private detail');
+  });
+
+  it('preserves success when the callback and logger both throw', async () => {
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      {
+        onCreatorOffboarded: async () => {
+          throw new Error('private detail');
+        },
+        log: () => {
+          throw new Error('sink unavailable');
+        },
+      },
+    );
+    expect(await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID)).toEqual({
+      ok: true,
+      value: null,
+    });
+  });
+
   it('deletes under the fence with only write authority, never reading a role', async () => {
     const { service, store } = setup();
     const fence = fenceOf({ [`access_grant:${GRANT_ID}`]: 3 });
@@ -323,7 +422,7 @@ describe('revoke', () => {
   });
 
   it('succeeds when the last Project Owner grant is the one removed', async () => {
-    const { service, store } = setup({ delete: 'deleted' });
+    const { service, store } = setup({ delete: { status: 'deleted', offboardedUserId: null } });
     const result = await service.revoke(
       ctx,
       projectActor(),
@@ -336,7 +435,7 @@ describe('revoke', () => {
   });
 
   it('applies no archived-state pre-check; the store decides', async () => {
-    const { service, store } = setup({ delete: 'deleted' });
+    const { service, store } = setup({ delete: { status: 'deleted', offboardedUserId: null } });
     const result = await service.revoke(
       ctx,
       projectActor(),

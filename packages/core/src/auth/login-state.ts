@@ -13,7 +13,6 @@ export interface LoginState {
   readonly returnTo: string;
   readonly issuedAt: number;
   readonly sessionId: string | null;
-  readonly challenge: string;
   readonly data: LoginStateData;
 }
 
@@ -26,7 +25,6 @@ const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const KEY_VERSION_PATTERN = /^[1-9][0-9]{0,8}$/;
 const PROVIDER_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
-const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const RETURN_TO_PATTERN = /^\/(?![/\\])[\x21-\x7E]*$/;
 const PATH_END = /[?#]/;
 const DOT_SEGMENT = /^(?:\.|%2e)(?:\.|%2e)?$/i;
@@ -73,7 +71,7 @@ function parseData(value: unknown): LoginStateData | null {
 
 function parseState(value: unknown): LoginState | null {
   if (!isRecord(value)) return null;
-  const { provider, purpose, returnTo, issuedAt, sessionId, challenge } = value;
+  const { provider, purpose, returnTo, issuedAt, sessionId } = value;
   const data = parseData(value['data']);
   if (
     typeof provider !== 'string' ||
@@ -84,14 +82,12 @@ function parseState(value: unknown): LoginState | null {
     typeof issuedAt !== 'number' ||
     !Number.isSafeInteger(issuedAt) ||
     (sessionId !== null && (typeof sessionId !== 'string' || sessionId.length === 0)) ||
-    typeof challenge !== 'string' ||
-    !CHALLENGE_PATTERN.test(challenge) ||
     data === null ||
     (purpose === 'reauth' && sessionId === null)
   ) {
     return null;
   }
-  return { provider, purpose, returnTo, issuedAt, sessionId, challenge, data };
+  return { provider, purpose, returnTo, issuedAt, sessionId, data };
 }
 
 export async function sealLoginState(cipher: SecretCipher, state: LoginState): Promise<string> {

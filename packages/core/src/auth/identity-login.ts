@@ -4,7 +4,7 @@ import type { IdentityReauthDeps } from './identity-reauth.js';
 import type { OrgContext } from '../db/port.js';
 import type { LoginLookup, LoginPlan, LoginWriter, UserRepository } from '../db/users.js';
 import type { Clock } from '../ids.js';
-import { evaluateDomainPolicy, normalizeEmail } from '../identity/policy.js';
+import { emailDomain, evaluateDomainPolicy, normalizeEmail } from '../identity/policy.js';
 import { runMapGroupsHooks, runResolveIdentityHooks } from '../identity/hooks.js';
 import {
   isReservedProviderId,
@@ -34,6 +34,7 @@ export type LoginRefusal =
   | 'hook_denied'
   | 'too_many_groups'
   | 'already_linked'
+  | 'link_requires_admin'
   | 'invalid_identity'
   | 'provider_rebound'
   | 'email_changed'
@@ -173,7 +174,7 @@ function groupsFit(groups: readonly string[]): LoginRefusal | undefined {
 interface ProviderSnapshot {
   readonly id: string;
   readonly trustAnchor: string;
-  readonly policy: DomainPolicy;
+  readonly policy: Required<DomainPolicy>;
 }
 
 const INVALID_PROVIDER = 'identity provider has an invalid id, trust anchor or policy';
@@ -182,6 +183,21 @@ function ownValue(target: object, key: string): unknown {
   const entry = dataValue(target, key);
   if (entry === undefined) throw new TypeError(INVALID_PROVIDER);
   return entry.value;
+}
+
+function copyDomains(domains: unknown): string[] {
+  if (!Array.isArray(domains)) throw new TypeError(INVALID_PROVIDER);
+  const length = ownValue(domains, 'length');
+  if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) {
+    throw new TypeError(INVALID_PROVIDER);
+  }
+  const copy: string[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const domain = ownValue(domains, String(index));
+    if (typeof domain !== 'string') throw new TypeError(INVALID_PROVIDER);
+    copy.push(domain);
+  }
+  return copy;
 }
 
 function snapshotProvider(provider: unknown): ProviderSnapshot {
@@ -201,22 +217,17 @@ function snapshotProvider(provider: unknown): ProviderSnapshot {
     ) {
       throw new TypeError(INVALID_PROVIDER);
     }
-    const domains = ownValue(policy, 'verifiedDomains');
-    if (!Array.isArray(domains)) throw new TypeError(INVALID_PROVIDER);
-    const length = ownValue(domains, 'length');
-    if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) {
-      throw new TypeError(INVALID_PROVIDER);
-    }
-    const verifiedDomains: string[] = [];
-    for (let index = 0; index < length; index += 1) {
-      const domain = ownValue(domains, String(index));
-      if (typeof domain !== 'string') throw new TypeError(INVALID_PROVIDER);
-      verifiedDomains.push(domain);
-    }
+    const verifiedDomains = copyDomains(ownValue(policy, 'verifiedDomains'));
+    const authoritative = ownValue(policy, 'emailAuthoritativeDomains');
+    const emailAuthoritativeDomains = authoritative === undefined ? [] : copyDomains(authoritative);
     return {
       id,
       trustAnchor,
-      policy: { verifiedDomains, autoJoin: ownValue(policy, 'autoJoin') === true },
+      policy: {
+        verifiedDomains,
+        emailAuthoritativeDomains,
+        autoJoin: ownValue(policy, 'autoJoin') === true,
+      },
     };
   } catch {
     throw new TypeError(INVALID_PROVIDER);
@@ -254,6 +265,9 @@ async function attempt(
   } else if (found.userByEmail !== null) {
     if (found.userByEmail.status === 'suspended') return refuse('user_suspended');
     if (found.userByEmail.linkedAtProvider) return refuse('already_linked');
+    if (!provider.policy.emailAuthoritativeDomains.includes(emailDomain(candidate.email))) {
+      return refuse('link_requires_admin');
+    }
     userId = found.userByEmail.id;
   } else if (candidate.mayCreate || found.invited) {
     userId = deps.ids.ulid();

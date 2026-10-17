@@ -20,7 +20,14 @@ import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { openBetterSqliteExecutor } from '../db/better-sqlite3-executor.js';
-import { createJobLoop, JOB_DRAIN_MS, JOB_EVENTS, type JobLoop } from './loop.js';
+import {
+  createJobLoop,
+  JOB_DRAIN_MS,
+  JOB_EVENTS,
+  type JobLoop,
+  type JobScope,
+  type RunnerObservability,
+} from './loop.js';
 
 const require = createRequire(import.meta.url);
 const migrationsDirectory = join(
@@ -33,6 +40,23 @@ const ports = {
   clock: systemClock,
   ids: { ulid },
 } as unknown as PluginPorts;
+
+const NODE_SCOPE = { deploymentId: 'test', runtime: 'node', requestId: null } as const;
+
+function realObservability(records: ObsRecord[], events: readonly string[]) {
+  return {
+    sink: { emit: (record: ObsRecord) => records.push(record) },
+    registry: {
+      events: new Set(events),
+      reasonCodes: new Set<string>(),
+      routeTemplates: new Set<string>(),
+    },
+  };
+}
+
+function logsOf(records: readonly ObsRecord[]) {
+  return records.flatMap((record) => (record.kind === 'log' ? [record.record] : []));
+}
 
 const cleanup: (() => Promise<void>)[] = [];
 
@@ -48,7 +72,13 @@ interface Harness {
   enqueue(type: string, key: string): Promise<string>;
   status(id: string): ReturnType<ReturnType<typeof createJobRepository>['status']>;
   set(column: 'run_at' | 'lease_until', id: string, iso: string): Promise<void>;
-  loop(jobs: readonly RegisteredJob[], executor?: SqlExecutor, clock?: Clock): JobLoop;
+  loop(
+    jobs: readonly RegisteredJob[],
+    executor?: SqlExecutor,
+    clock?: Clock,
+    scope?: JobScope,
+    runnerObservability?: RunnerObservability,
+  ): JobLoop;
 }
 
 async function harness(): Promise<Harness> {
@@ -111,12 +141,13 @@ async function harness(): Promise<Harness> {
         { sql: `UPDATE job SET ${column} = ? WHERE id = ?`, params: [iso, id] },
       ]);
     },
-    loop(jobs, override, clock) {
+    loop(jobs, override, clock, scope, runnerObservability) {
       const loop = createJobLoop({
         executor: override ?? executor,
         jobs,
-        ports,
+        scope: scope ?? (() => ({ ports, observability })),
         observability,
+        ...(runnerObservability === undefined ? {} : { runnerObservability }),
         ...(clock === undefined ? {} : { clock }),
       });
       loops.push(loop);
@@ -144,6 +175,148 @@ const PAST = '2000-01-01T00:00:00.000Z';
 const WAIT = { timeout: 8000, interval: 20 };
 
 describe('createJobLoop', () => {
+  it('takes handler ports and observability from each registered job scope', async () => {
+    const h = await harness();
+    const seen = new Map<string, JobContext>();
+    const jobs = ['a', 'b'].map((plugin): RegisteredJob => ({
+      plugin,
+      qualifiedName: `${plugin}:work:v1`,
+      definition: job('work', (_payload, context) => {
+        seen.set(plugin, context);
+        return Promise.resolve();
+      }).definition,
+    }));
+    const scoped = jobs.map(() => ({
+      ports: { ...ports },
+      observability: { ...h.observability },
+    }));
+    const scope = vi.fn((registered: RegisteredJob) => scoped[jobs.indexOf(registered)]!);
+    const ids = await Promise.all(
+      jobs.map((registered) => h.enqueue(registered.qualifiedName, 'one')),
+    );
+    h.loop(jobs, undefined, undefined, scope).start();
+    for (const [index, registered] of jobs.entries()) {
+      await vi.waitFor(
+        async () => expect((await h.status(ids[index]!))?.state).toBe('succeeded'),
+        WAIT,
+      );
+      expect(scope).toHaveBeenCalledWith(registered, { jobId: ids[index], attempt: 1 });
+      expect(scope.mock.calls[index]?.[0]).toBe(registered);
+      expect(seen.get(registered.plugin)?.ports).toBe(scoped[index]?.ports);
+      expect(seen.get(registered.plugin)?.observability).toBe(scoped[index]?.observability);
+    }
+    expect(scope).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes heartbeat and settle failures through the runner observability with job_id and attempt', async () => {
+    const h = await harness();
+    const id = await h.enqueue('core:boundary:v1', 'one');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const runnerRecords: ObsRecord[] = [];
+    const scopedRecords: ObsRecord[] = [];
+    const runtime = realObservability(runnerRecords, JOB_EVENTS);
+    const handlerSide = realObservability(scopedRecords, []);
+    const gate = deferred();
+    let started = false;
+    const flaky = new Proxy(h.executor, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof value !== 'function') return value;
+        if (property !== 'batch') return (value as (...args: unknown[]) => unknown).bind(target);
+        return (statements: Parameters<SqlExecutor['batch']>[0]) => {
+          if (
+            statements.some((item) =>
+              /lease_until = max\(lease_until|outcome = 'succeeded'/.test(item.sql),
+            )
+          ) {
+            return Promise.reject(new Error('storage unavailable'));
+          }
+          return target.batch(statements);
+        };
+      },
+    });
+    h.loop(
+      [
+        job('boundary', async () => {
+          started = true;
+          await gate.promise;
+        }),
+      ],
+      flaky,
+      undefined,
+      () => ({
+        ports,
+        observability: createObservability(handlerSide.sink, NODE_SCOPE, handlerSide.registry),
+      }),
+      ({ jobId, attempt }) =>
+        createObservability(runtime.sink, { ...NODE_SCOPE, jobId, attempt }, runtime.registry),
+    ).start();
+    await vi.waitFor(() => expect(started).toBe(true), WAIT);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(logsOf(runnerRecords)).toContainEqual(
+      expect.objectContaining({ event: 'job.heartbeat_failed', job_id: id, attempt: 1 }),
+    );
+    gate.resolve();
+    await vi.waitFor(
+      () =>
+        expect(logsOf(runnerRecords)).toContainEqual(
+          expect.objectContaining({ event: 'job.settle_failed', job_id: id, attempt: 1 }),
+        ),
+      WAIT,
+    );
+    expect(scopedRecords).toEqual([]);
+    expect(h.logs).toEqual([]);
+  });
+
+  it('logs handler_failed with job_id and attempt through the runner observability', async () => {
+    const h = await harness();
+    const id = await h.enqueue('core:boom:v1', 'one');
+    const runnerRecords: ObsRecord[] = [];
+    const scopedRecords: ObsRecord[] = [];
+    const runtime = realObservability(runnerRecords, JOB_EVENTS);
+    const handlerSide = realObservability(scopedRecords, []);
+    h.loop(
+      [job('boom', () => Promise.reject(new Error('boom')))],
+      undefined,
+      undefined,
+      () => ({
+        ports,
+        observability: createObservability(handlerSide.sink, NODE_SCOPE, handlerSide.registry),
+      }),
+      ({ jobId, attempt }) =>
+        createObservability(runtime.sink, { ...NODE_SCOPE, jobId, attempt }, runtime.registry),
+    ).start();
+    await vi.waitFor(() => expect(logsOf(runnerRecords).length).toBeGreaterThan(0), WAIT);
+    expect(logsOf(runnerRecords)).toContainEqual(
+      expect.objectContaining({ event: 'job.handler_failed', job_id: id, attempt: 1 }),
+    );
+    expect(scopedRecords).toEqual([]);
+  });
+
+  it('fails retryably without running the handler when scope throws', async () => {
+    const h = await harness();
+    const handler = vi.fn(() => Promise.resolve());
+    const id = await h.enqueue('core:scope-error:v1', 'one');
+    h.loop([job('scope-error', handler)], undefined, undefined, () => {
+      throw new Error('scope failure');
+    }).start();
+    await vi.waitFor(
+      async () =>
+        expect(await h.status(id)).toMatchObject({
+          state: 'queued',
+          lastErrorCode: 'handler_error',
+          attempts: 1,
+        }),
+      WAIT,
+    );
+    expect(handler).not.toHaveBeenCalled();
+    expect((await h.status(id))?.history[0]?.outcome).toBe('failed');
+    expect(h.logs).toContainEqual(
+      expect.objectContaining({ event: 'job.handler_failed', job_id: id }),
+    );
+    expect(h.logs.filter((l) => l.event === 'job.handler_failed')).toHaveLength(1);
+  });
+
   it('claims due jobs and runs at most maxRunning (2) handlers concurrently', async () => {
     const h = await harness();
     const gate = deferred();
@@ -512,7 +685,7 @@ describe('createJobLoop', () => {
         job('fine', () => Promise.resolve()),
         job('fails', () => Promise.reject(new Error('no'))),
       ],
-      ports,
+      scope: () => ({ ports, observability: real }),
       observability: real,
     });
     loop.start();
@@ -618,7 +791,7 @@ describe('createJobLoop', () => {
       createJobLoop({
         executor: {} as SqlExecutor,
         jobs: [],
-        ports,
+        scope: () => ({ ports, observability: {} as Observability }),
         maxRunning: 0,
         observability: {
           log: () => undefined,

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { orgContext } from '../db/port.js';
@@ -6,6 +8,7 @@ import {
   BlobAdmissionError,
   BlobBusyError,
   BlobBytesVanishedError,
+  BlobDigestMismatchError,
   BlobDeadlineError,
   BlobIdleTimeoutError,
   BlobConflictError,
@@ -1558,5 +1561,141 @@ describe('createBlobProbe', () => {
     await expect(
       createBlobProbe(stalled, f.metadata, hasher, { idleTimeoutMs: 30 }).probe(ctx, key),
     ).rejects.toThrow(BlobIdleTimeoutError);
+  });
+});
+
+describe('digest mismatch', () => {
+  const stubStore = (fail: (body: ReadableStream<Uint8Array>) => Promise<never>): ByteStore => ({
+    putVerified: (_k, body) => fail(body),
+    get: async () => null,
+    head: async () => null,
+    remove: async () => undefined,
+  });
+  const metadata = fixture().metadata;
+
+  it('throws the typed error when the adapter rejects a fully read body', async () => {
+    const bytes = enc.encode('hello');
+    const key = sha(enc.encode('other'));
+    const byteStore = stubStore(async (body) => {
+      await drain(body);
+      throw new BlobValidationError();
+    });
+    const store = createBlobStore(byteStore, metadata, opts());
+    const error = await store
+      .put(ctx, key, streamOf([bytes]), { size: bytes.length, ...input })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BlobDigestMismatchError);
+    expect((error as BlobDigestMismatchError).expected).toBe(key);
+    expect((error as Error).message).not.toContain('hello');
+    expect(JSON.stringify(error)).not.toContain('hello');
+  });
+
+  it('keeps a generic adapter failure after the last byte as it is', async () => {
+    const failure = new Error('disk');
+    const bytes = enc.encode('hello');
+    const store = createBlobStore(
+      stubStore(async (body) => {
+        await drain(body);
+        throw failure;
+      }),
+      metadata,
+      opts(),
+    );
+    await expect(
+      store.put(ctx, sha(bytes), streamOf([bytes]), { size: bytes.length, ...input }),
+    ).rejects.toBe(failure);
+  });
+
+  it('keeps a validation failure before the body was read to the end as it is', async () => {
+    const bytes = enc.encode('hello');
+    const store = createBlobStore(
+      stubStore(async () => {
+        throw new BlobValidationError();
+      }),
+      metadata,
+      opts(),
+    );
+    await expect(
+      store.put(ctx, sha(bytes), streamOf([bytes]), { size: bytes.length, ...input }),
+    ).rejects.toBeInstanceOf(BlobValidationError);
+  });
+
+  it('reports the verified actual digest', async () => {
+    const bytes = enc.encode('hello');
+    const key = sha(enc.encode('other'));
+    const store = createBlobStore(
+      stubStore(async (body) => {
+        await drain(body);
+        throw new BlobValidationError();
+      }),
+      metadata,
+      opts(),
+    );
+    await expect(
+      store.put(ctx, key, streamOf([bytes]), { size: bytes.length, ...input }),
+    ).rejects.toMatchObject({ expected: key, actual: sha(bytes) });
+  });
+
+  it.each([true, false])(
+    'preserves an upstream validation error after the declared bytes (matching=%s)',
+    async (matching) => {
+      const bytes = enc.encode('hello');
+      const failure = new BlobValidationError();
+      let sent = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (!sent) {
+              sent = true;
+              controller.enqueue(bytes);
+            } else controller.error(failure);
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const store = createBlobStore(
+        stubStore(async (stream) => {
+          await drain(stream);
+          throw new Error('unreachable');
+        }),
+        metadata,
+        opts(),
+      );
+      await expect(
+        store.put(ctx, matching ? sha(bytes) : sha(enc.encode('other')), body, {
+          size: bytes.length,
+          ...input,
+        }),
+      ).rejects.toBe(failure);
+    },
+  );
+
+  it('preserves a validation error after clean EOF with matching bytes', async () => {
+    const bytes = enc.encode('hello');
+    const failure = new BlobValidationError();
+    const store = createBlobStore(
+      stubStore(async (body) => {
+        await drain(body);
+        throw failure;
+      }),
+      metadata,
+      opts(),
+    );
+    await expect(
+      store.put(ctx, sha(bytes), streamOf([bytes]), { size: bytes.length, ...input }),
+    ).rejects.toBe(failure);
+  });
+
+  it('loads blob.ts with strip-only TypeScript support', () => {
+    expect(() =>
+      stripTypeScriptTypes(readFileSync(new URL('./blob.ts', import.meta.url), 'utf8')),
+    ).not.toThrow();
+  });
+
+  it('carries only hex digests in its fields', () => {
+    const error = new BlobDigestMismatchError('a'.repeat(64), 'b'.repeat(64));
+    expect(error.name).toBe('BlobDigestMismatchError');
+    expect(Object.keys(error).sort()).toEqual(['actual', 'expected', 'name']);
+    expect(error.message).toBe('blob digest mismatch');
   });
 });

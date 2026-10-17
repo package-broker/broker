@@ -1,5 +1,6 @@
 const MAX_DEPTH = 64;
 const DEFAULT_MAX_STRING_BYTES = 1024 * 1024;
+const DECODE_CHUNK_UNITS = 8192;
 const DEFAULT_MAX_SCALAR_BYTES = 1024;
 const MAX_LITERAL_BYTES = 5;
 
@@ -427,19 +428,43 @@ export class JsonTokenizer {
       if (this.#loneCount === 0) {
         return this.#decoder.decode(this.#buffer.subarray(0, this.#length));
       }
-      let text = '';
-      let from = 0;
-      for (let index = 0; index < this.#loneCount; index += 1) {
-        const at = this.#loneAt[index] as number;
-        text +=
-          this.#decoder.decode(this.#buffer.subarray(from, at)) +
-          String.fromCharCode(this.#loneUnit[index] as number);
-        from = at + 3;
-      }
-      return text + this.#decoder.decode(this.#buffer.subarray(from, this.#length));
+      return this.#decodeLoneChunks().join('');
     } catch {
       throw new JsonStreamError('invalid_utf8', this.#lexemeStart);
     }
+  }
+
+  #decodeLoneChunks(): string[] {
+    const units = new Uint16Array(this.#length - 2 * this.#loneCount);
+    let size = 0;
+    let from = 0;
+    const copy = (to: number): void => {
+      if (to > from) {
+        const segment = this.#decoder.decode(this.#buffer.subarray(from, to));
+        for (let offset = 0; offset < segment.length; offset += 1) {
+          units[size + offset] = segment.charCodeAt(offset);
+        }
+        size += segment.length;
+      }
+    };
+    for (let index = 0; index < this.#loneCount; index += 1) {
+      const at = this.#loneAt[index] as number;
+      copy(at);
+      units[size] = this.#loneUnit[index] as number;
+      size += 1;
+      from = at + 3;
+    }
+    copy(this.#length);
+    const chunks: string[] = [];
+    for (let start = 0; start < size; start += DECODE_CHUNK_UNITS) {
+      chunks.push(
+        String.fromCharCode.apply(
+          null,
+          units.subarray(start, Math.min(start + DECODE_CHUNK_UNITS, size)) as unknown as number[],
+        ),
+      );
+    }
+    return chunks;
   }
 
   #flushDecoder(at: number): void {

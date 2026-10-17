@@ -784,3 +784,144 @@ describe('oidcProblems', () => {
     expect(oidcProblems(hostile).length).toBeGreaterThan(0);
   });
 });
+
+describe('issuer canonical form', () => {
+  it.each([
+    ['https default port', 'https://idp.example.com:443'],
+    ['https default port with path', 'https://idp.example.com:443/dex'],
+    ['http loopback default port', 'http://localhost:80/dex'],
+  ])('refuses a %s (%s)', (_name, issuer) => {
+    const problems = oidcProblems(config({ issuer }));
+    expect(problems).toContain('issuer must not name the default port');
+    expect(problems.join('\n')).not.toContain('idp.example.com');
+  });
+
+  it('refuses an issuer that does not serialise back to itself', () => {
+    const problems = oidcProblems(config({ issuer: 'https://idp.example.com/{tenant}' }));
+    expect(problems).toContain('issuer must be in canonical URL form');
+    expect(problems.join('\n')).not.toContain('tenant');
+  });
+
+  it.each([
+    ['trailing-dot host', 'https://idp.example.com./dex'],
+    ['escaped unreserved character', 'https://idp.example.com/%7Euser'],
+    ['lowercase hex escape', 'https://idp.example.com/a%2fb'],
+    ['empty path segment', 'https://idp.example.com//dex'],
+  ])('refuses a %s (%s)', (_name, issuer) => {
+    const problems = oidcProblems(config({ issuer }));
+    expect(problems).toContain('issuer must be in canonical URL form');
+  });
+
+  it('accepts an uppercase escape of a reserved character', () => {
+    expect(oidcProblems(config({ issuer: 'https://idp.example.com/a%2Fb' }))).toEqual([]);
+  });
+
+  it('keeps a non-default port and a canonical path', () => {
+    expect(oidcProblems(config({ issuer: 'https://idp.example.com:8443/dex' }))).toEqual([]);
+    expect(oidcProblems(config({ issuer: 'http://localhost:5556' }))).toEqual([]);
+  });
+});
+
+describe('discovery endpoint query and fragment', () => {
+  async function detailFor(overrides: Record<string, unknown>): Promise<string> {
+    const h = harness(() => jsonResponse(doc(overrides)));
+    return failureOf(start(provider(h)));
+  }
+
+  it.each([
+    ['token_endpoint with ?x=1', { token_endpoint: `${ISSUER}/token?x=1` }],
+    ['token_endpoint with an empty query', { token_endpoint: `${ISSUER}/token?` }],
+    ['token_endpoint with #f', { token_endpoint: `${ISSUER}/token#f` }],
+    ['jwks_uri with ?x=1', { jwks_uri: `${ISSUER}/keys?x=1` }],
+    ['jwks_uri with #f', { jwks_uri: `${ISSUER}/keys#f` }],
+  ])('refuses %s', async (_name, overrides) => {
+    expect(await detailFor(overrides)).toBe('discovery_invalid');
+  });
+
+  it('keeps accepting a query on authorization_endpoint', async () => {
+    const h = harness(() => jsonResponse(doc({ authorization_endpoint: `${ISSUER}/auth?x=1` })));
+    const { url } = await redirectOf(start(provider(h)));
+    expect(url.searchParams.get('x')).toBe('1');
+  });
+});
+
+describe('list caps before copying', () => {
+  function watched(length: number, entry: (index: number) => string) {
+    const reads = { count: 0 };
+    const list = new Proxy(
+      Array.from({ length }, (_v, index) => entry(index)),
+      {
+        get(target, key, receiver) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) {
+            reads.count += 1;
+          }
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      },
+    );
+    return { list, reads };
+  }
+
+  it.each(['scopes', 'trustedAudiences', 'trustedEndpointOrigins'])(
+    'refuses an over-cap %s list without reading its entries',
+    (key) => {
+      const { list, reads } = watched(33, (index) => `https://o${index}.example.net`);
+      const problems = oidcProblems({ ...config(), [key]: list });
+      expect(problems).toContain(`${key} must be an array of 1 to 32 entries`);
+      expect(reads.count).toBe(0);
+    },
+  );
+
+  it('refuses an over-cap verifiedDomains list without reading its entries', () => {
+    const { list, reads } = watched(33, (index) => `d${index}.example.com`);
+    const problems = oidcProblems(config({ policy: { verifiedDomains: list, autoJoin: false } }));
+    expect(problems).toContain('policy: verifiedDomains must list at most 32 domains');
+    expect(reads.count).toBe(0);
+  });
+
+  it.each([
+    ['scopes', ['openid', 's'.repeat(256)]],
+    ['trustedAudiences', ['a'.repeat(256)]],
+  ])('refuses an over-long %s entry', (key, value) => {
+    const problems = oidcProblems({ ...config(), [key]: value });
+    expect(problems.some((problem) => problem.startsWith(`${key}[`))).toBe(true);
+  });
+});
+
+describe('hidden configuration keys', () => {
+  it('refuses an inherited key', () => {
+    const { clientId, ...rest } = config();
+    const inherited = Object.create({ clientId }) as Record<string, unknown>;
+    Object.assign(inherited, rest);
+    expect(oidcProblems(inherited)).toContain(
+      'configuration keys must be own, enumerable string keys',
+    );
+  });
+
+  it('refuses a non-enumerable key', () => {
+    const hidden = config() as unknown as Record<string, unknown>;
+    Object.defineProperty(hidden, 'displayName', { value: 'Hidden', enumerable: false });
+    expect(oidcProblems(hidden)).toContain(
+      'configuration keys must be own, enumerable string keys',
+    );
+  });
+
+  it('refuses a symbol key', () => {
+    expect(oidcProblems({ ...config(), [Symbol('x')]: 1 })).toContain(
+      'configuration keys must be own, enumerable string keys',
+    );
+  });
+
+  it('refuses an inherited policy key', () => {
+    const policy = Object.create({ autoJoin: false }) as Record<string, unknown>;
+    policy['verifiedDomains'] = ['example.com'];
+    expect(oidcProblems(config({ policy: policy as unknown as DomainPolicy }))).toContain(
+      'policy: keys must be own, enumerable string keys',
+    );
+  });
+
+  it('refuses a groups key in the policy', () => {
+    const policy = { ...POLICY, groups: ['staff'] } as DomainPolicy;
+    expect(oidcProblems(config({ policy }))).toContain('policy: unsupported key "groups"');
+  });
+});

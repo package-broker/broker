@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { orgContext } from '../db/port.js';
 import {
+  BlobDigestMismatchError,
   BlobSizeMismatchError,
   createBlobStore,
   createBlobUploadAdmission,
@@ -80,7 +81,8 @@ function fakeStore(): { store: BlobStore; stored: Map<string, Uint8Array>; puts:
       puts.push(input.size);
       const bytes = await drain(body);
       if (bytes.length !== input.size) throw new BlobSizeMismatchError();
-      if (hex('sha256', bytes) !== key) throw new Error('digest');
+      if (hex('sha256', bytes) !== key)
+        throw new BlobDigestMismatchError(key, hex('sha256', bytes));
       stored.set(key, bytes);
       return { sha256: key, size: bytes.length, mediaType: input.mediaType, purgeAfter: null };
     },
@@ -159,7 +161,7 @@ describe('twoPassPut', () => {
     let opens = 0;
     const open = async (): Promise<ReadableStream<Uint8Array>> => {
       const n = opens++;
-      return streamOf([enc.encode(n === 1 ? 'drifted' : 'steady')]);
+      return streamOf([enc.encode(n === 1 ? 'drifte' : 'steady')]);
     };
     const result = await twoPassPut(ctx, open, f.store, opts());
     expect(result.status).toBe('stored');
@@ -214,13 +216,13 @@ describe('twoPassPut', () => {
     expect(seen).toBe(parseSha256(hex('sha256', enc.encode('x'))));
   });
 
-  it('treats pass-2 growth past maxBytes as instability', async () => {
+  it('propagates pass-2 growth past maxBytes as a size mismatch', async () => {
     const f = fakeStore();
     let opens = 0;
     const open = async (): Promise<ReadableStream<Uint8Array>> =>
       streamOf([new Uint8Array(opens++ % 2 === 0 ? 100 : 2000)]);
-    await expect(twoPassPut(ctx, open, f.store, opts())).rejects.toThrow(UpstreamUnstableError);
-    expect(opens).toBe(4);
+    await expect(twoPassPut(ctx, open, f.store, opts())).rejects.toThrow(BlobSizeMismatchError);
+    expect(opens).toBe(2);
     expect(f.stored.size).toBe(0);
   });
 
@@ -260,23 +262,90 @@ describe('twoPassPut', () => {
     },
   );
 
-  it('clamps maxBytes to the platform blob cap', async () => {
+  it('refuses a maxBytes above the platform blob cap', async () => {
     const f = fakeStore();
-    const big = 64 * 1024 * 1024 + 1;
+    let opens = 0;
     await expect(
       twoPassPut(
         ctx,
-        async () =>
-          new ReadableStream<Uint8Array>({
-            pull(c) {
-              c.enqueue(new Uint8Array(big));
-              c.close();
-            },
-          }),
+        async () => (opens++, streamOf([enc.encode('a')])),
         f.store,
-        opts({ maxBytes: Number.MAX_SAFE_INTEGER }),
+        opts({ maxBytes: 64 * 1024 * 1024 + 1 }),
       ),
-    ).rejects.toThrow(TwoPassLimitError);
+    ).rejects.toThrow(RangeError);
+    expect(opens).toBe(0);
+  });
+
+  it('refuses a missing maxBytes', async () => {
+    const f = fakeStore();
+    const rest = { ...base, maxBytes: undefined } as unknown as TwoPassOptions;
+    await expect(
+      twoPassPut(ctx, async () => streamOf([enc.encode('a')]), f.store, rest),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it('surfaces a generic store failure after the last byte instead of calling it unstable', async () => {
+    const failure = new Error('commit');
+    const store: BlobStore = {
+      put: async (_c, _k, body) => {
+        await drain(body);
+        throw failure;
+      },
+      get: async () => null,
+      head: async () => null,
+    };
+    let opens = 0;
+    await expect(
+      twoPassPut(ctx, async () => (opens++, streamOf([enc.encode('abc')])), store, opts()),
+    ).rejects.toBe(failure);
+    expect(opens).toBe(2);
+  });
+
+  it.each([
+    ['generic failure with differing bytes', () => new Error('disk'), 'xyz'],
+    ['size mismatch with longer bytes', () => new BlobSizeMismatchError(), 'abcdef'],
+    ['size mismatch with shorter bytes', () => new BlobSizeMismatchError(), 'a'],
+  ] as const)('propagates %s without retrying', async (_name, makeError, second) => {
+    const failure = makeError();
+    const store: BlobStore = {
+      put: async (_c, _k, body) => {
+        await drain(body);
+        throw failure;
+      },
+      get: async () => null,
+      head: async () => null,
+    };
+    let opens = 0;
+    await expect(
+      twoPassPut(
+        ctx,
+        async () => streamOf([enc.encode(opens++ === 0 ? 'abc' : second)]),
+        store,
+        opts(),
+      ),
+    ).rejects.toBe(failure);
+    expect(opens).toBe(2);
+  });
+
+  it('treats a typed digest mismatch from the store as instability', async () => {
+    const store: BlobStore = {
+      put: async (_c, _k, body) => {
+        await body.cancel();
+        throw new BlobDigestMismatchError('a'.repeat(64), 'b'.repeat(64));
+      },
+      get: async () => null,
+      head: async () => null,
+    };
+    let opens = 0;
+    const err = await twoPassPut(
+      ctx,
+      async () => (opens++, streamOf([enc.encode('abc')])),
+      store,
+      opts(),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UpstreamUnstableError);
+    expect((err as Error).cause).toBeInstanceOf(BlobDigestMismatchError);
+    expect(opens).toBe(4);
   });
 
   it('stops on abort before opening again', async () => {
@@ -312,7 +381,7 @@ describe('twoPassPut', () => {
           if (r.done) break;
           got += r.value.length;
         }
-        throw new Error('digest');
+        throw new BlobDigestMismatchError('a'.repeat(64), 'b'.repeat(64));
       },
       get: async () => null,
       head: async () => null,
@@ -387,15 +456,16 @@ describe('twoPassPut', () => {
     }
 
     it.each([
-      ['longer', 'abcdefgh'],
-      ['shorter', 'ab'],
-      ['same-size', 'abcX'],
-    ])('stores nothing when pass 2 is %s', async (_n, drift) => {
+      ['longer', 'abcdefgh', BlobSizeMismatchError],
+      ['shorter', 'ab', BlobSizeMismatchError],
+      ['same-size', 'abcX', Error],
+    ])('stores nothing when pass 2 is %s', async (_n, drift, errorType) => {
       const r = realStore();
       let opens = 0;
       const open = async (): Promise<ReadableStream<Uint8Array>> =>
         streamOf([enc.encode(opens++ % 2 === 0 ? 'abcd' : drift)]);
-      await expect(twoPassPut(ctx, open, r.store, opts())).rejects.toThrow(UpstreamUnstableError);
+      await expect(twoPassPut(ctx, open, r.store, opts())).rejects.toThrow(errorType);
+      expect(opens).toBe(2);
       expect(r.objects.size).toBe(0);
       expect(await r.store.head(ctx, parseSha256(hex('sha256', enc.encode('abcd'))))).toBeNull();
       expect(await r.find(parseSha256(hex('sha256', enc.encode('abcd'))))).toBeNull();

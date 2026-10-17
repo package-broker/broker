@@ -37,6 +37,7 @@ export interface PackagistProxyConfig {
 export type NpmjsProxyConfig = Record<string, never>;
 export interface NpmRegistryConfig {
   readonly scopes: readonly string[];
+  readonly distHosts: readonly string[];
 }
 
 export type SourceConfig =
@@ -290,6 +291,19 @@ function parseVcs(
   };
 }
 
+function parseDistHosts(c: Collector, obj: Obj, policy: OutboundPolicy): string[] {
+  if (obj.distHosts === undefined) return [];
+  const hosts = stringList(c, 'distHosts', obj.distHosts, (h) => {
+    const host = h.toLowerCase();
+    return HOSTNAME.test(host) && classifyUrl(`https://${host}/`, policy).ok;
+  }).map((h) => h.toLowerCase());
+  if (new Set(hosts).size !== hosts.length) {
+    c.add('distHosts', 'contains duplicate entries');
+    return [];
+  }
+  return hosts;
+}
+
 function parseComposerRepository(
   c: Collector,
   obj: Obj,
@@ -326,17 +340,7 @@ function parseComposerRepository(
       }
     }
   }
-  let distHosts: string[] = [];
-  if (obj.distHosts !== undefined) {
-    distHosts = stringList(c, 'distHosts', obj.distHosts, (h) => {
-      const host = h.toLowerCase();
-      return HOSTNAME.test(host) && classifyUrl(`https://${host}/`, policy).ok;
-    }).map((h) => h.toLowerCase());
-    if (new Set(distHosts).size !== distHosts.length) {
-      c.add('distHosts', 'contains duplicate entries');
-      distHosts = [];
-    }
-  }
+  const distHosts = parseDistHosts(c, obj, policy);
   let mirrorsFallback = false;
   if (obj.mirrorsFallback !== undefined) {
     if (typeof obj.mirrorsFallback === 'boolean') mirrorsFallback = obj.mirrorsFallback;
@@ -414,9 +418,10 @@ export function parseSourceConfig(
       if (!hasUrl || sourceUrl(url, policy) === null) {
         c.add('url', 'must be an allowed URL without userinfo, query or fragment');
       }
-      rejectUnknown(c, parsed, ['scopes']);
+      rejectUnknown(c, parsed, ['scopes', 'distHosts']);
       const scopes = stringList(c, 'scopes', parsed.scopes, (s) => NPM_SCOPE.test(s), 1);
-      return c.problems.length > 0 ? fail() : { ok: true, config: { scopes } };
+      const distHosts = parseDistHosts(c, parsed, policy);
+      return c.problems.length > 0 ? fail() : { ok: true, config: { scopes, distHosts } };
     }
     case 'packagist_proxy': {
       if (url !== UPSTREAM_DEFAULTS.packagist.url)

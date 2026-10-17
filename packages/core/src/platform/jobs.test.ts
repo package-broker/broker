@@ -36,6 +36,12 @@ describe('qualifyJobName', () => {
     expect(qualifyJobName('p1', 'a', 12)).toBe('p1:a:v12');
   });
 
+  it('rejects the reserved schedule plugin id', () => {
+    expect(codeOf(() => qualifyJobName('schedule', 'x', 1))).toBe('invalid_name');
+    expect(codeOf(() => assertJobOwnedBy('schedule', 'schedule:x:v1'))).toBe('invalid_name');
+    expect(qualifyJobName('p', 'schedule', 1)).toBe('p:schedule:v1');
+  });
+
   it('rejects the reserved core name and core plugin id', () => {
     expect(codeOf(() => qualifyJobName('p', 'core', 1))).toBe('invalid_name');
     expect(codeOf(() => qualifyJobName('core', 'x', 1))).toBe('invalid_name');

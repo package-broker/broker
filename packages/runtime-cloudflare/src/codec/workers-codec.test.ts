@@ -121,13 +121,33 @@ export default {
         out.pulls = pulls;
         await reader.cancel();
       } else if (spec.op === 'inflate') {
-        const r = workersCodecs.inflateConsumed(chunks[0], spec.max);
+        const r = workersCodecs.inflateConsumed(chunks[0], spec.max, spec.expected);
         out.data = toBase64(r.data);
         out.consumed = r.consumed;
         out.exact = r.data.buffer.byteLength === r.data.length;
       } else if (spec.op === 'gunzip' || spec.op === 'deflateRaw') {
         const t = spec.op === 'gunzip' ? workersCodecs.gunzip(spec.max) : workersCodecs.deflateRaw();
         out.output = toBase64(await drain(source(chunks, {}).pipeThrough(t), spec.slow));
+      } else if (spec.op === 'deflateFails') {
+        const t = workersCodecs.deflateRaw();
+        const writer = t.writable.getWriter();
+        out.write = await writer.write(5).then(() => 'written', (e) => 'rejected:' + e?.name);
+        const reading = drain(t.readable).then(
+          () => 'done',
+          (e) => {
+            Object.assign(out, failure(e));
+            out.operation = e?.operation;
+            return 'errored';
+          },
+        );
+        out.outcome = await Promise.race([
+          reading,
+          new Promise((resolve) => setTimeout(() => resolve('timeout'), 2000)),
+        ]);
+      } else if (spec.op === 'plainPair') {
+        const t = workersCodecs.deflateRaw();
+        out.isTransform = t instanceof TransformStream;
+        out.hasPair = t.readable instanceof ReadableStream && t.writable instanceof WritableStream;
       } else if (spec.op === 'digestTransformFails') {
         const tap = workersCodecs.digestTap(['sha256', 'sha512']);
         const writer = tap.transform.writable.getWriter();
@@ -208,6 +228,9 @@ interface Outcome {
   digestsOutcome?: string;
   write?: string;
   abort?: string;
+  operation?: string;
+  isTransform?: boolean;
+  hasPair?: boolean;
 }
 
 const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
@@ -330,6 +353,34 @@ describe('workersCodecs inflateConsumed', () => {
     expect(r.error).toBe('CodecTruncatedError');
   });
 
+  describe('with an expected size', () => {
+    it('returns one exact-size buffer', async () => {
+      const r = await run('inflate', [stream], { max: 10_000, expected: payload.length });
+      expect(fromB64(r.data)).toEqual(payload);
+      expect(r.exact).toBe(true);
+    });
+
+    it('throws CodecLimitError when the output is larger than expected', async () => {
+      const r = await run('inflate', [stream], { max: 10_000, expected: payload.length - 1 });
+      expect(r.error).toBe('CodecLimitError');
+    });
+
+    it('throws CodecCorruptError when the output is smaller than expected', async () => {
+      const r = await run('inflate', [stream], { max: 10_000, expected: payload.length + 1 });
+      expect(r.error).toBe('CodecCorruptError');
+    });
+
+    it('throws CodecLimitError for one output byte with expected size 0', async () => {
+      const r = await run('inflate', [deflateSync(Buffer.from('x'))], { max: 100, expected: 0 });
+      expect(r.error).toBe('CodecLimitError');
+    });
+
+    it('accepts an empty stream with expected size 0 and maxOutput 0', async () => {
+      const r = await run('inflate', [deflateSync(Buffer.alloc(0))], { max: 0, expected: 0 });
+      expect(fromB64(r.data).length).toBe(0);
+    });
+  });
+
   it('throws CodecCorruptError for invalid data and for raw deflate', async () => {
     expect((await run('inflate', [Buffer.from('zzzzzzzz')], { max: 100 })).error).toBe(
       'CodecCorruptError',
@@ -407,5 +458,18 @@ describe('workersCodecs deflateRaw', () => {
   it('produces a raw deflate stream that inflates back', async () => {
     const r = await run('deflateRaw', [message.subarray(0, 30), message.subarray(30)]);
     expect(new Uint8Array(inflateRawSync(fromB64(r.output)))).toEqual(message);
+  });
+});
+
+describe('workersCodecs deflateRaw errors', () => {
+  it('labels a compression failure as deflate', async () => {
+    const r = await run('deflateFails', []);
+    expect(r.error).toBe('CodecCorruptError');
+    expect(r.operation).toBe('deflate');
+  });
+
+  it('returns a readable/writable pair', async () => {
+    const r = await run('plainPair', []);
+    expect(r.hasPair).toBe(true);
   });
 });

@@ -1,7 +1,11 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import { seedTwoOrganizations, type TwoOrganizations } from '../contract/two-organizations.js';
-import { openNodeSqliteExecutor, type OpenedExecutor } from './node-sqlite-executor.js';
+import {
+  openNodeSqliteExecutor,
+  type NodeSqliteExecutorOptions,
+  type OpenedExecutor,
+} from './node-sqlite-executor.js';
 import { migrate } from '../migrations/runner.js';
 import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
 
@@ -11,6 +15,7 @@ const HOLDER = 'testing-migrated-database';
 export interface MigratedDatabaseOptions {
   readonly twoOrganizations?: boolean;
   readonly file?: string;
+  readonly d1PatternLimit?: boolean;
 }
 
 export interface MigratedDatabase {
@@ -42,7 +47,10 @@ export async function openMigratedDatabase(
   options: MigratedDatabaseOptions = {},
 ): Promise<MigratedDatabase> {
   const file = normalizeFile(options.file);
-  const opened = openNodeSqliteExecutor(file);
+  const executorOptions: NodeSqliteExecutorOptions = {
+    d1PatternLimit: options.d1PatternLimit === true,
+  };
+  const opened = openNodeSqliteExecutor(file, executorOptions);
   const connections: OpenedExecutor[] = [opened];
   let closed = false;
 
@@ -62,7 +70,7 @@ export async function openMigratedDatabase(
         if (file === undefined) {
           throw new Error('second() needs the database to be opened from a file');
         }
-        const extra = openNodeSqliteExecutor(file);
+        const extra = openNodeSqliteExecutor(file, executorOptions);
         connections.push(extra);
         return extra.executor;
       },

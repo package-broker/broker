@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { fixedClock } from '../../ids.js';
+import { ExpansionLimitError } from '../../registry/composer/minify.js';
 import type { DocumentValidators, PackageDescription } from '../../sources/provider.js';
 import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
+import { JsonExtractError } from '../json-stream.js';
 import type { ComposerRoot } from './root.js';
 import {
   ComposerV2Error,
@@ -63,6 +65,7 @@ function root(extra: Partial<ComposerRoot> = {}): ComposerRoot {
     metadataUrl: `${ORIGIN}/p2/%package%.json`,
     inlineProviders: false,
     partialPackages: false,
+    inlinePackages: false,
     validator: { sha256: 'a'.repeat(64) },
     messages: [],
     mirrors: [],
@@ -591,5 +594,181 @@ describe('describeComposerV2 retries and failures', () => {
     await expect(
       describeComposerV2(fetch, source({ maxBytes: 64 }), NAME, opts()),
     ).rejects.toMatchObject({ name: 'ComposerV2Error', code: 'too_large' });
+  });
+});
+
+describe('describeComposerV2 version elements', () => {
+  const versionsOf = (count: number, pad: number): Record<string, unknown>[] =>
+    Array.from({ length: count }, (_, index) => ({
+      name: NAME,
+      version: `1.0.${index}`,
+      description: 'd'.repeat(pad),
+      dist: dist(`1.0.${index}`),
+    }));
+
+  it('expands a p2 document whose minified marker follows packages', async () => {
+    const body = JSON.stringify({
+      packages: {
+        [NAME]: [
+          { name: NAME, version: '1.1.0', license: ['MIT'], dist: dist('1.1.0') },
+          { version: '1.0.0', dist: dist('1.0.0') },
+        ],
+      },
+      minified: 'composer/2.0',
+    });
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    const members = await drain(description);
+    expect(members.map((m) => m.version)).toEqual(['1.1.0', '1.0.0']);
+    expect(members[1]?.input.license).not.toBeNull();
+    expect(description.upstreamComplete).toBe(true);
+  });
+
+  it('finds an empty version array with zero candidates', async () => {
+    const { fetch } = setup({ [P2]: [ok(p2Body([]), '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    expect(await drain(description)).toEqual([]);
+    expect(description.upstreamComplete).toBe(true);
+  });
+
+  it('keeps keyMissing for two arrays whose keys differ only by case', async () => {
+    const list = JSON.stringify([{ name: NAME, version: '1.0.0', dist: dist('1.0.0') }]);
+    const body = `{"packages":{"${NAME}":${list},"Acme/Widget":${list}}}`;
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    expect(await drain(description)).toEqual([]);
+    expect(description.upstreamComplete).toBe(false);
+  });
+
+  it('fails a version array longer than maxVersions before the document ends', async () => {
+    const list = JSON.stringify(versionsOf(2000, 50));
+    expect(list.length).toBeGreaterThan(2 * 64 * 1024);
+    const body = `{"packages":{"${NAME}":${list},"broken":}`;
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(
+      await describeComposerV2(fetch, source({ expansion: { maxVersions: 3 } }), NAME, opts()),
+    );
+    const error = await drain(description).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ExpansionLimitError);
+    expect((error as ExpansionLimitError).reason).toBe('versions');
+    expect(description.upstreamComplete).toBe(false);
+  });
+
+  it('fails a single version over the 1 MiB per-version cap', async () => {
+    const body = p2Body(versionsOf(1, 1024 * 1024 + 16), false);
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    const error = await drain(description).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(JsonExtractError);
+    expect((error as JsonExtractError).code).toBe('member_too_large');
+  });
+
+  it('answers unsupported for a non-array version value', async () => {
+    const body = JSON.stringify({ packages: { [NAME]: { '1.0.0': { version: '1.0.0' } } } });
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    const error = await drain(description).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ComposerV2Error);
+    expect((error as ComposerV2Error).code).toBe('unsupported');
+  });
+
+  it('streams a 2,000-version document larger than the per-version cap', async () => {
+    const body = p2Body(versionsOf(2000, 600), false);
+    expect(body.length).toBeGreaterThan(1024 * 1024);
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    const members = await drain(description);
+    expect(members).toHaveLength(2000);
+    expect(members.map((m) => m.ordinal)).toEqual(Array.from({ length: 2000 }, (_, i) => i));
+    expect(description.upstreamComplete).toBe(true);
+  });
+});
+
+describe('describeComposerV2 non-array package values', () => {
+  const list = JSON.stringify([{ name: NAME, version: '1.0.0', dist: dist('1.0.0') }]);
+
+  it('skips a non-array sibling package value', async () => {
+    for (const body of [
+      `{"packages":{"acme/other":{"1.0.0":{}},"${NAME}":${list}}}`,
+      `{"packages":{"${NAME}":${list},"acme/other":"x"}}`,
+    ]) {
+      const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+      const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+      expect((await drain(description)).map((m) => m.version)).toEqual(['1.0.0']);
+      expect(description.upstreamComplete).toBe(true);
+    }
+  });
+
+  it('keeps keyMissing for a case twin whose value is not an array', async () => {
+    for (const body of [
+      `{"packages":{"${NAME}":${list},"Acme/Widget":{"1.0.0":{}}}}`,
+      `{"packages":{"Acme/Widget":null,"${NAME}":${list}}}`,
+    ]) {
+      const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+      const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+      expect(await drain(description)).toEqual([]);
+      expect(description.upstreamComplete).toBe(false);
+    }
+  });
+
+  it('caps a version at expansion.maxVersionBytes when it is set', async () => {
+    const body = p2Body(
+      [{ name: NAME, version: '1.0.0', description: 'd'.repeat(5000), dist: dist('1.0.0') }],
+      false,
+    );
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(
+      await describeComposerV2(
+        fetch,
+        source({ expansion: { maxVersions: 10, maxVersionBytes: 4096 } }),
+        NAME,
+        opts(),
+      ),
+    );
+    const error = await drain(description).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect((error as JsonExtractError).code).toBe('member_too_large');
+  });
+
+  it('rejects an invalid maxVersions before reading versions', async () => {
+    const { fetch } = setup({ [P2]: [ok(stable, '"s1"')] });
+    const description = await found(
+      await describeComposerV2(fetch, source({ expansion: { maxVersions: 0 } }), NAME, opts()),
+    );
+    await expect(drain(description)).rejects.toThrow(RangeError);
+  });
+});
+
+describe('describeComposerV2 large non-array package values', () => {
+  it('answers unsupported for a 2 MiB string at the package key', async () => {
+    const body = `{"packages":{"${NAME}":"${'x'.repeat(2 * 1024 * 1024)}"}}`;
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    const error = await drain(description).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ComposerV2Error);
+    expect((error as ComposerV2Error).code).toBe('unsupported');
+  });
+
+  it('skips a 2 MiB non-array sibling', async () => {
+    const list = JSON.stringify([{ name: NAME, version: '1.0.0', dist: dist('1.0.0') }]);
+    const body = `{"packages":{"acme/other":{"k":"${'x'.repeat(2 * 1024 * 1024)}"},"${NAME}":${list}}}`;
+    const { fetch } = setup({ [P2]: [ok(body, '"s1"')] });
+    const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
+    expect((await drain(description)).map((m) => m.version)).toEqual(['1.0.0']);
+    expect(description.upstreamComplete).toBe(true);
   });
 });

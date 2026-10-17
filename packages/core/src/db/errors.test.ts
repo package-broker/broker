@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DbError, classifySqliteError } from './errors.js';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError, classifySqliteError } from './errors.js';
 import type { DbErrorKind } from './errors.js';
 
 const cases: readonly (readonly [string, DbErrorKind, string | undefined])[] = [
@@ -105,4 +105,17 @@ describe('classifySqliteError', () => {
       expect(error).toBeInstanceOf(Error);
     },
   );
+});
+
+describe('ACCESS_MUTATION_GUARD_CONSTRAINT', () => {
+  it.each([
+    'D1_ERROR: UNIQUE constraint failed: access_mutation_guard.key: SQLITE_CONSTRAINT',
+    'UNIQUE constraint failed: access_mutation_guard.key',
+    'UNIQUE constraint failed: access_mutation_guard.key: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_PRIMARYKEY) [code: 1555]',
+  ])('is the constraint parsed from %j', (message) => {
+    const error = classifySqliteError(new Error(message));
+
+    expect(error.kind).toBe('unique');
+    expect(error.constraint).toBe(ACCESS_MUTATION_GUARD_CONSTRAINT);
+  });
 });

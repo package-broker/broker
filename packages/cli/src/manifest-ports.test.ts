@@ -93,7 +93,13 @@ describe('renderManifestJson', () => {
     expect(manifest.plugins[0]?.binds).toEqual(['source']);
     expect(manifest.bindings).toEqual([{ port: 'source', plugin: 'a' }]);
     expect(manifest.routes).toEqual([
-      { method: 'GET', path: '/a', plugin: 'a', permission: 'org:read' },
+      {
+        method: 'GET',
+        path: '/a',
+        plugin: 'a',
+        permission: 'org:read',
+        boundary: 'organization',
+      },
     ]);
     expect(manifest.migrations).toEqual([
       { id: 'core/0001_init', name: '0001_init.sql', checksum: 'abc', phase: 'expand' },

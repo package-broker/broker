@@ -50,7 +50,7 @@ const RULES: Readonly<Record<string, Rule>> = {
     kitAndTests: ['vitest', 'node'],
   },
   'runtime-cloudflare': {
-    allow: [...ws('core', 'db-sqlite'), 'hono'],
+    allow: [...ws('core', 'db-sqlite'), 'hono', '@cloudflare/workers-types'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
     onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },
@@ -461,7 +461,11 @@ const ACCESS_CONTEXT_RULE: ImportRule = {
     'packages/runtime-cloudflare/src/',
   ],
 };
-const LITERAL_LOADS_ONLY = ['core', 'runtime-node', 'runtime-cloudflare'];
+const LITERAL_LOADS_ONLY = new Set(['core', 'runtime-node', 'runtime-cloudflare', 'ui']);
+const isLiteralLoadsOnly = (relativePath: string): boolean => {
+  const dir = relativePath.split('/')[1] ?? '';
+  return LITERAL_LOADS_ONLY.has(dir) || dir.startsWith('plugin-');
+};
 const MODULE_EXTENSION = /\.(?:d\.ts|[cm]?ts|[cm]?js)$/;
 
 const WORKSPACE_DIRS = new Map(
@@ -495,11 +499,11 @@ function moduleIds(fromFile: string, specifier: string, imports: PackageImports)
   return [strip(`packages/${dir}/src/${parts.slice(2).join('/')}`)];
 }
 
-function isCreateRequire(node: ts.Node): boolean {
+function isCreateRequire(node: ts.Node, names: ReadonlySet<string>): boolean {
   if (!ts.isCallExpression(node)) return false;
   const callee = node.expression;
   return (
-    (ts.isIdentifier(callee) && callee.text === 'createRequire') ||
+    (ts.isIdentifier(callee) && names.has(callee.text)) ||
     (ts.isPropertyAccessExpression(callee) && callee.name.text === 'createRequire')
   );
 }
@@ -517,10 +521,21 @@ function findMintViolations(
     );
   const allowedAll = (names: readonly string[]): boolean => names.every(allowedFor);
   const unrestricted = allowedAll(Object.values(rule.modules).flat());
-  const literalLoadsOnly =
-    rule === MINT_RULE && LITERAL_LOADS_ONLY.includes(relativePath.split('/')[1] ?? '');
+  const literalLoadsOnly = rule === MINT_RULE && isLiteralLoadsOnly(relativePath);
   const requireAliases = new Set<string>();
+  const createRequireNames = new Set(['createRequire']);
   const sourceFile = ts.createSourceFile(relativePath, text, ts.ScriptTarget.Latest, true);
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const bound = statement.importClause?.namedBindings;
+    if (bound && ts.isNamedImports(bound)) {
+      for (const element of bound.elements) {
+        if ((element.propertyName ?? element.name).text === 'createRequire') {
+          createRequireNames.add(element.name.text);
+        }
+      }
+    }
+  }
   const found: string[] = [];
   const mintedLocals = new Set<string>();
   const report = (node: ts.Node, what: string): void => {
@@ -576,7 +591,11 @@ function findMintViolations(
       const exported = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
       for (const declaration of node.declarationList.declarations) {
         const init = declaration.initializer;
-        if (init && isCreateRequire(init) && ts.isIdentifier(declaration.name)) {
+        if (
+          init &&
+          isCreateRequire(init, createRequireNames) &&
+          ts.isIdentifier(declaration.name)
+        ) {
           requireAliases.add(declaration.name.text);
         }
         if (exported && init && ts.isIdentifier(init) && mintedLocals.has(init.text)) {
@@ -589,7 +608,7 @@ function findMintViolations(
         callee.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isIdentifier(callee) &&
           (callee.text === 'require' || requireAliases.has(callee.text))) ||
-        isCreateRequire(callee);
+        isCreateRequire(callee, createRequireNames);
       const argument = node.arguments[0];
       if (isLoader && literalLoadsOnly && !(argument && ts.isStringLiteral(argument))) {
         report(node, 'dynamic load with a computed specifier');
@@ -711,6 +730,59 @@ describe('minting modules', () => {
     expect(findMintViolations('packages/runtime-cloudflare/src/a.ts', 'require(`x`);')).toEqual([
       'packages/runtime-cloudflare/src/a.ts:1: dynamic load with a computed specifier',
     ]);
+  });
+
+  it('applies the literal-loads rule to every plugin package and ui', () => {
+    const pluginDirs = packageNames().filter((dir) => dir.startsWith('plugin-'));
+    expect(pluginDirs.length).toBeGreaterThan(0);
+    for (const dir of [...pluginDirs, 'plugin-future-added', 'ui']) {
+      const file = `packages/${dir}/src/a.ts`;
+      expect(findMintViolations(file, "const m = await import('../' + name);")).toEqual([
+        `${file}:1: dynamic load with a computed specifier`,
+      ]);
+      expect(findMintViolations(file, 'await import(name);')).toEqual([
+        `${file}:1: dynamic load with a computed specifier`,
+      ]);
+    }
+  });
+
+  it('flags a loader bound to a renamed createRequire', () => {
+    const file = 'packages/plugin-x/src/a.ts';
+    const text = [
+      "import { createRequire as cr } from 'node:module';",
+      'const req = cr(import.meta.url);',
+      'const a = req(name);',
+      "const b = cr(import.meta.url)('../x' + y);",
+    ].join('\n');
+    expect(findMintViolations(file, text)).toEqual([
+      `${file}:3: dynamic load with a computed specifier`,
+      `${file}:4: dynamic load with a computed specifier`,
+    ]);
+  });
+
+  it.each([
+    ["import { createRequire } from 'node:module';", 'createRequire'],
+    ["import { createRequire as cr } from 'node:module';", 'cr'],
+    ["import * as module from 'node:module';", 'module.createRequire'],
+  ])('flags loaders used before the hoisted import %s', (declaration, factory) => {
+    const file = 'packages/plugin-x/src/a.ts';
+    const text = [
+      `const req = ${factory}(import.meta.url);`,
+      'req(name);',
+      `${factory}(import.meta.url)(name);`,
+      declaration,
+    ].join('\n');
+    expect(findMintViolations(file, text)).toEqual([
+      `${file}:2: dynamic load with a computed specifier`,
+      `${file}:3: dynamic load with a computed specifier`,
+    ]);
+  });
+
+  it('flags a namespace value re-export from a minting module inside db-sqlite', () => {
+    const file = 'packages/db-sqlite/src/index.ts';
+    expect(
+      findMintViolations(file, "export * as guards from '@package-broker/core/db/catalogue';"),
+    ).toEqual([`${file}:1: export * as of a minting module`]);
   });
 
   it('checks literal loads elsewhere and leaves computed ones to the boundary rule', () => {

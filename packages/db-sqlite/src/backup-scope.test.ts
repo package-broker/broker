@@ -76,6 +76,8 @@ describe('backup scope manifest', () => {
       bundle: 'include',
       bundle_item: 'include',
       audit_event: 'include',
+      audit_pending: 'include',
+      api_idempotency: 'exclude',
       import_run: 'include',
       import_ref: 'include',
       schema_migration: 'include',

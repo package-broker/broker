@@ -1,4 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { migrate } from '../migrations/runner.js';
+import { loadMigrationSource } from '../migrations/source.js';
+import { openNodeSqliteExecutor } from '../testing/node-sqlite-executor.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import type { RepresentationForm } from '../schema.js';
@@ -34,9 +38,11 @@ afterEach(async () => {
 
 const input = (validator: string, form: RepresentationForm = 'composer-p2') => ({
   projectId: PROJECT,
+  packageId: 'package-a',
   keyHash: KEY,
   form,
   validator,
+  rev: 0,
 });
 
 const rows = () =>
@@ -73,6 +79,147 @@ function counting(): {
 }
 
 describe('representation clock repository', () => {
+  it('advances when package B at rev 1 replaces package A at rev 9 and when A wins again', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 9 });
+    const second = await clock.advance(ctx, { ...input(V2), packageId: 'package-b', rev: 1 });
+    expect(second.stale).toBe(false);
+    expect(second.validator).toBe(V2);
+    expect(Date.parse(second.lastModified) - Date.parse(first.lastModified)).toBeGreaterThanOrEqual(
+      1000,
+    );
+    const third = await clock.advance(ctx, { ...input(V1), rev: 9 });
+    expect(third.stale).toBe(false);
+    expect(third.validator).toBe(V1);
+    expect(Date.parse(third.lastModified) - Date.parse(second.lastModified)).toBeGreaterThanOrEqual(
+      1000,
+    );
+    expect(
+      await database.executor.all({
+        sql: 'SELECT package_id, rev FROM representation_clock',
+        params: [],
+      }),
+    ).toEqual([{ package_id: 'package-a', rev: 9 }]);
+  });
+
+  it('advances for a package change even if the validator is unchanged', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 9 });
+    const second = await clock.advance(ctx, { ...input(V1), packageId: 'package-b', rev: 1 });
+    expect(second.stale).toBe(false);
+    expect(Date.parse(second.lastModified) - Date.parse(first.lastModified)).toBeGreaterThanOrEqual(
+      1000,
+    );
+  });
+
+  it('keeps rev 5 and its time when rev 4 has another validator', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 5 });
+    const before = await rows();
+    const second = await clock.advance(ctx, { ...input(V2), rev: 4 });
+    expect(second).toEqual({ ...first, stale: true });
+    expect(await rows()).toEqual(before);
+    expect(
+      await database.executor.all({ sql: 'SELECT rev FROM representation_clock', params: [] }),
+    ).toEqual([{ rev: 5 }]);
+  });
+
+  it('guards a stale write even when the initial read misses the row', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 5 });
+    const executor = {
+      ...database.executor,
+      all: vi.fn(async () => []),
+    };
+    const second = await createRepresentationClock(executor).advance(ctx, { ...input(V2), rev: 4 });
+    expect(second).toEqual({ ...first, stale: true });
+    expect((await rows())[0]?.validator).toBe(V1);
+  });
+
+  it('advances rev 5 to rev 6 by at least one second', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 5 });
+    const second = await clock.advance(ctx, { ...input(V2), rev: 6 });
+    expect(second.stale).toBe(false);
+    expect(second.validator).toBe(V2);
+    expect(Date.parse(second.lastModified) - Date.parse(first.lastModified)).toBeGreaterThanOrEqual(
+      1000,
+    );
+    expect(
+      await database.executor.all({ sql: 'SELECT rev FROM representation_clock', params: [] }),
+    ).toEqual([{ rev: 6 }]);
+  });
+
+  it('advances a different validator at equal rev', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 5 });
+    const second = await clock.advance(ctx, { ...input(V2), rev: 5 });
+    expect(second.stale).toBe(false);
+    expect(second.validator).toBe(V2);
+    expect(Date.parse(second.lastModified) - Date.parse(first.lastModified)).toBeGreaterThanOrEqual(
+      1000,
+    );
+  });
+
+  it('stores a newer rev even when the validator is unchanged', async () => {
+    const first = await clock.advance(ctx, { ...input(V1), rev: 5 });
+    const second = await clock.advance(ctx, { ...input(V1), rev: 6 });
+    expect(second).toEqual(first);
+    expect((await clock.advance(ctx, { ...input(V2), rev: 5 })).stale).toBe(true);
+  });
+
+  it.each([
+    ['negative', -1, RangeError],
+    ['non-integer', 1.5, RangeError],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 1, RangeError],
+    ['non-number', '5' as unknown as number, TypeError],
+  ])('rejects a %s rev before any SQL', async (_, rev, error) => {
+    const all = vi.fn();
+    const batch = vi.fn();
+    const checked = createRepresentationClock({ driver: database.executor.driver, all, batch });
+    await expect(checked.advance(ctx, { ...input(V1), rev })).rejects.toThrow(error);
+    expect(all).not.toHaveBeenCalled();
+    expect(batch).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1])('upgrades a pre-migration row and advances it at rev %i', async (rev) => {
+    const opened = openNodeSqliteExecutor();
+    try {
+      const url = new URL('../../migrations/', import.meta.url);
+      const sources = await Promise.all(
+        readdirSync(url)
+          .filter((name) => name.endsWith('.sql'))
+          .sort()
+          .map((name) =>
+            loadMigrationSource('core', name, readFileSync(new URL(name, url), 'utf8')),
+          ),
+      );
+      await migrate(
+        opened.executor,
+        sources.filter((source) => source.sequence < 8),
+        { holder: 'pre-rev' },
+      );
+      await opened.executor.all({
+        sql: 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)',
+        params: [ctx.orgId, 'old', 'Old'],
+      });
+      await opened.executor.all({
+        sql: 'INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)',
+        params: [PROJECT, ctx.orgId, 'p', 'P'],
+      });
+      await opened.executor.all({
+        sql: 'INSERT INTO representation_clock (org_id, project_id, key_hash, form, validator, last_modified) VALUES (?, ?, ?, ?, ?, ?)',
+        params: [ctx.orgId, PROJECT, KEY, 'composer-p2', V1, '2000-01-01T00:00:00Z'],
+      });
+      await migrate(opened.executor, sources, { holder: 'rev' });
+      expect(
+        await opened.executor.all({ sql: 'SELECT rev FROM representation_clock', params: [] }),
+      ).toEqual([{ rev: 0 }]);
+      const reading = await createRepresentationClock(opened.executor).advance(ctx, {
+        ...input(V2),
+        rev,
+      });
+      expect(reading.stale).toBe(false);
+      expect(reading.validator).toBe(V2);
+    } finally {
+      await opened.close();
+    }
+  });
+
   it('stores the validator and a whole-second time on first use', async () => {
     const reading = await clock.advance(ctx, input(V1));
     expect(reading.validator).toBe(V1);

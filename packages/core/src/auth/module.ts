@@ -10,6 +10,10 @@ import { createLocalRoutes } from './routes-local.js';
 import { createSsoRoutes } from './routes-sso.js';
 import { createSessionService } from './session.js';
 import type { SessionService } from './session.js';
+import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
+import type { AuthorizationEngineDeps } from '../authz/engine.js';
+import { createUnlinkService } from '../authz/unlink-service.js';
+import type { UnlinkService, UnlinkServiceDeps } from '../authz/unlink-service.js';
 import type { CredentialRepository } from '../db/credentials.js';
 import type {
   LocalLoginReader,
@@ -22,6 +26,8 @@ import type { LoginWriter, UserRepository } from '../db/users.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import type { HookErrorHandler } from '../kernel/access.js';
+import { denyAllEngine } from '../kernel/authorize.js';
+import type { AuthorizationEngine } from '../kernel/authorize.js';
 import { reportableErrorName } from '../kernel/error-name.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { Registration } from '../kernel/registry.js';
@@ -50,12 +56,18 @@ export interface AuthModuleOptions {
   readonly providers: ProviderMap;
   readonly hooks: Registration['hooks'];
   readonly log: KernelLog;
+  readonly access?: Pick<AuthorizationEngineDeps, 'access' | 'providerAnchors'> & {
+    readonly dispatch: AuthorizationEngineDeps['tokenUse']['dispatch'];
+  };
+  readonly unlink?: Pick<UnlinkServiceDeps, 'unlinks' | 'providers'>;
 }
 
 export interface AuthModule {
   readonly coreRoutes: readonly RouteDefinition[];
   readonly sessions: SessionService;
   readonly credentials: CredentialStore;
+  readonly authorization: AuthorizationEngine;
+  readonly unlink: UnlinkService | null;
 }
 
 /** Only the provider list is answerable without an organization; every other route reads one. */
@@ -167,6 +179,25 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     clock,
     publicOrigin,
   });
+  const authorization =
+    options.access === undefined
+      ? denyAllEngine
+      : createAuthorizationEngine({
+          access: options.access.access,
+          providerAnchors: options.access.providerAnchors,
+          publicOrigin,
+          patValidation: patValidationGate,
+          tokenUse: {
+            keyring,
+            nowMs: () => clock.now().getTime(),
+            dispatch: options.access.dispatch,
+            log: (event) => log({ level: 'warn', event }),
+          },
+        });
+  const unlink =
+    options.unlink === undefined
+      ? null
+      : createUnlinkService({ ...options.unlink, sessions, clock, log });
   const credentials = createCredentialStore({
     repository: repositories.credentials,
     cipher: createSecretCipher(keyring, 'credential-encryption'),
@@ -256,5 +287,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     coreRoutes: Object.freeze([...sso, ...localRoutes].map(withNeedsOrg)),
     sessions,
     credentials,
+    authorization,
+    unlink,
   });
 }

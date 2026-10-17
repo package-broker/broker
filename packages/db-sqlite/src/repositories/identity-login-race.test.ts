@@ -24,7 +24,11 @@ const provider: IdentityProvider = {
   kind: 'oidc',
   displayName: 'Dex',
   trustAnchor: 'oidc:https://dex.example.test',
-  policy: { verifiedDomains: ['example.test'], autoJoin: false },
+  policy: {
+    verifiedDomains: ['example.test'],
+    emailAuthoritativeDomains: ['example.test'],
+    autoJoin: false,
+  },
   supportsReauth: false,
   start: () => Promise.reject(new Error('unused')),
   finish: () => Promise.reject(new Error('unused')),

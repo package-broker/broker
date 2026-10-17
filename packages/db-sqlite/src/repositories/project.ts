@@ -30,6 +30,7 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
+import { attachSourceStatements } from './visibility-attach.js';
 import {
   DEFAULT_IDLE_SECONDS,
   liveSessionCondition,
@@ -557,6 +558,7 @@ export function createProjectRepository(
                   ]),
               ),
           ),
+          ...attachSourceStatements(ctx, input.id),
         ],
         {
           authority: authorityProbe(authority),

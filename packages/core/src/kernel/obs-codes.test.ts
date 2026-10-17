@@ -7,6 +7,7 @@ import {
   dbReason,
   denyReason,
   engineStatusReason,
+  isEngineFailure,
   envelopeReason,
   hookErrorReason,
   mostSpecificReason,
@@ -22,7 +23,7 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 22 reason codes', () => {
+  it('has exactly the 23 reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
         'authz.unauthenticated',
@@ -47,9 +48,10 @@ describe('vocabularies', () => {
         'db.unknown',
         'health.not_ready',
         'request.aborted',
+        'http.handler_status',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(22);
+    expect(KERNEL_REASON_CODES.size).toBe(23);
   });
 
   it('matches the port CODE pattern for every value', () => {
@@ -87,6 +89,18 @@ describe('mapping functions', () => {
     ['', 'hook.denied'],
   ])('maps deny reason %j to %s without carrying the text', (reason, code) => {
     expect(denyReason(reason)).toBe(code);
+  });
+
+  it.each([
+    ['authz.engine_error', true],
+    ['authz.input_invalid', true],
+    ['authz.forbidden', false],
+    ['authz.unauthenticated', false],
+    ['authz.not_found', false],
+    ['hook.error', false],
+    ['hook.denied', false],
+  ] as const)('classifies %s as an engine failure: %s', (code, failure) => {
+    expect(isEngineFailure(code)).toBe(failure);
   });
 
   it('maps hook error plugin labels', () => {

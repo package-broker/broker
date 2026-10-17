@@ -1,7 +1,12 @@
+import {
+  describeTokenContract,
+  tokenContractCases,
+} from '@package-broker/db-sqlite/contract/token-contract';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import * as scope from '@package-broker/core/authz/scope';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor } from '@package-broker/core/authz/fence';
@@ -217,5 +222,66 @@ describe('d1 token issuance', () => {
     expect(result).toEqual({ status: 'refused', reason: 'unclassified' });
     expect(await count(executor, 'token')).toBe(0);
     expect(await count(executor, 'token_project')).toBe(0);
+  }, 120_000);
+});
+
+async function openTokenContractDatabase() {
+  const isolated = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok") } }',
+      compatibilityDate: '2026-10-01',
+      d1Databases: ['CONTRACT'],
+    } as Parameters<typeof convertV4MiniflareOptions>[0]),
+  );
+  const executor = createD1Executor(
+    (await isolated.getD1Database('CONTRACT')) as unknown as D1DatabaseLike,
+  );
+  await migrate(executor, await loadSources(), { holder: 'token-contract' });
+  return { executor, close: () => isolated.dispose() };
+}
+
+describeTokenContract('Miniflare D1', openTokenContractDatabase);
+
+describe('D1 token lookup scope mutation', () => {
+  it('catches removal of the project cap intersection', async () => {
+    const effective = scope.tokenEffectivePermissions;
+    const spy = vi
+      .spyOn(scope, 'tokenEffectivePermissions')
+      .mockImplementation((input) =>
+        effective(input.boundary === 'project' ? { ...input, tokenMaxScope: 'full' } : input),
+      );
+    try {
+      await expect(tokenContractCases.projectCap(openTokenContractDatabase)).rejects.toThrow(
+        /to deeply equal/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  }, 120_000);
+});
+
+describe('D1 token lookup SQL mutation', () => {
+  it('catches a null project_token_max_scope selected by lookupToken', async () => {
+    let mutations = 0;
+    await expect(
+      tokenContractCases.projectCap(openTokenContractDatabase, (executor): SqlExecutor => ({
+        driver: executor.driver,
+        batch: executor.batch.bind(executor),
+        all: (statement) => {
+          if (statement.sql.includes('"p"."token_max_scope" as "project_token_max_scope"')) {
+            mutations += 1;
+          }
+          return executor.all({
+            ...statement,
+            sql: statement.sql.replace(
+              '"p"."token_max_scope" as "project_token_max_scope"',
+              'null as "project_token_max_scope"',
+            ),
+          });
+        },
+      })),
+    ).rejects.toThrow(/to deeply equal/);
+    expect(mutations).toBeGreaterThan(0);
   }, 120_000);
 });

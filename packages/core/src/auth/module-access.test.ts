@@ -23,6 +23,7 @@ function fixture(wired = true) {
         project: null,
         organizationPermissions: ['org:read'],
         projectPermissions: [],
+        protectedHolder: false,
       }),
     ),
     lookupToken: vi.fn(() => Promise.resolve(null)),
@@ -100,10 +101,12 @@ describe('auth module access wiring', () => {
     },
   );
 
-  it('denies protected routes without access wiring', async () => {
+  it('returns 503 unavailable for protected routes without access wiring', async () => {
     const { auth, findActive } = fixture(false);
     const kernel = await kernelFor(auth);
-    expect((await kernel.fetch(request())).status).toBe(403);
+    const response = await kernel.fetch(request());
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'unavailable' } });
     expect(findActive).not.toHaveBeenCalled();
     expect(auth.unlink).toBeNull();
   });

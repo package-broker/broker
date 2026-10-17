@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
 import { catalogueWriteGuard, type CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
+import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
   MAX_DESCRIPTION_BYTES,
@@ -336,6 +337,14 @@ describe('packageUpsertStatements', () => {
     ['non-string description', { description: 7 as never }],
   ])('refuses %s', (_label, overrides) => {
     expect(() => packageUpsertStatements(org, guard, input(overrides))).toThrow(RangeError);
+  });
+
+  it('registers repository-built guards for their organization and rejects empty statements', async () => {
+    const registered = registerCatalogueWriteGuard(org, [...guard]);
+    await upsert(input(), registered);
+    expect(await packages()).toHaveLength(1);
+    expect(() => packageUpsertStatements(other, registered, input())).toThrow(TypeError);
+    expect(() => registerCatalogueWriteGuard(org, [])).toThrow(TypeError);
   });
 
   it('keeps the job guard first in the batch', () => {

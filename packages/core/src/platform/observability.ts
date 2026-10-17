@@ -137,6 +137,7 @@ export const APPROVED_ERROR_NAMES = [
   'SecretsConfigError',
   'KernelConfigError',
   'BlobRangeError',
+  'BlobDigestMismatchError',
   'StaleFenceError',
   'PlatformUnavailableError',
   'UnknownJobType',

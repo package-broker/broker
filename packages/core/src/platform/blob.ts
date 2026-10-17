@@ -40,8 +40,10 @@ export interface BlobStore {
 /**
  * Runtime-only physical store. Contract duties of every implementation:
  * - `putVerified` hashes the whole stream with SHA-256 and counts it, and publishes the final key
- *   only when digest and size both match. A new bad upload is never accepted because a good object
- *   already exists, and a final object is never replaced with different bytes.
+ *   only when digest and size both match. It reads the stream to its end before reporting a digest
+ *   mismatch, and reports it as BlobValidationError; `createBlobStore` verifies the consumed
+ *   bytes and turns a confirmed mismatch into BlobDigestMismatchError. A new bad upload is never
+ *   accepted because a good object already exists, and a final object is never replaced with different bytes.
  * - `get` and `head` report `size` as the total object size, also for a ranged read.
  * - `get` with a range echoes the range actually served in `range` (null for a full read).
  */
@@ -105,9 +107,10 @@ export interface BlobMetadataPort {
 
 /**
  * Runtime-only; never on the plugin ports. Owns scheduling and physical deletion.
- * - `softDelete` sets `purge_after` to the observed removal time plus the organization's
- *   `retention_removed_upstream_days` read from the organization row, using database time. The
- *   caller supplies no retention window, and a repeated removal never shortens a deadline.
+ * - `softDelete` sets `purge_after` once, at the first soft delete, to the database time then plus
+ *   the organization's `retention_removed_upstream_days`. The caller supplies no retention window.
+ *   A later retention change does not move rows already scheduled, and a repeated soft delete
+ *   keeps the first deadline. A backdated `removedAt` is accepted; a future one is refused.
  * - `claimPurge` takes an exclusive lease with an expiry. While it is live, `reserve` refuses with
  *   BlobBusyError and `find` hides the row, so no put can publish between the references recheck
  *   and the physical removal. Only `markDeleted`, `cancelPurge` or lease expiry end the lease.
@@ -225,6 +228,17 @@ export class BlobDeadlineError extends Error {
   }
 }
 
+export class BlobDigestMismatchError extends Error {
+  override name = 'BlobDigestMismatchError';
+  readonly expected: string;
+  readonly actual: string;
+  constructor(expected: string, actual: string) {
+    super('blob digest mismatch');
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 export class BlobSizeMismatchError extends Error {
   override name = 'BlobSizeMismatchError';
   constructor() {
@@ -291,6 +305,7 @@ interface Bounded {
   readonly stream: ReadableStream<Uint8Array>;
   readonly cancel: () => Promise<void>;
   readonly consumed: () => number;
+  readonly verifiedDigest: () => Promise<string | null>;
 }
 
 interface Timeouts {
@@ -302,9 +317,12 @@ function boundedStream(
   source: ReadableStream<Uint8Array>,
   expected: number,
   timeouts: Timeouts = {},
+  hash = false,
 ): Bounded {
   const reader = source.getReader();
   let count = 0;
+  let eof = false;
+  const bytes = hash ? new Uint8Array(expected) : null;
   let pending: Uint8Array | null = null;
   const cancel = (reason?: unknown): Promise<void> => reader.cancel(reason).catch(() => undefined);
   const startedAt = Date.now();
@@ -342,6 +360,7 @@ function boundedStream(
               return;
             }
             if (result.done) {
+              eof = true;
               if (count !== expected) controller.error(new BlobSizeMismatchError());
               else controller.close();
               return;
@@ -352,6 +371,7 @@ function boundedStream(
               controller.error(new BlobSizeMismatchError());
               return;
             }
+            bytes?.set(result.value, count - result.value.length);
             pending = result.value;
           }
           const chunk: Uint8Array = pending;
@@ -369,7 +389,10 @@ function boundedStream(
                   controller.error(error);
                   return;
                 }
-                if (tail.done) break;
+                if (tail.done) {
+                  eof = true;
+                  break;
+                }
                 if (tail.value.length > 0) {
                   await cancel();
                   controller.error(new BlobSizeMismatchError());
@@ -389,7 +412,15 @@ function boundedStream(
     },
     { highWaterMark: 0 },
   );
-  return { stream, cancel, consumed: () => count };
+  return {
+    stream,
+    cancel,
+    consumed: () => count,
+    verifiedDigest: async () => {
+      if (!eof || count !== expected || bytes === null) return null;
+      return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+    },
+  };
 }
 
 function validatePutInput(input: BlobPutInput, maxBytes: number): void {
@@ -439,12 +470,23 @@ export function createBlobStore(
       let bounded: Bounded | null = null;
       try {
         let generation = await metadata.reserve(ctx, digest);
-        bounded = boundedStream(body, input.size, { idleMs, totalMs });
-        const stored = await byteStore.putVerified(storageKey, bounded.stream, {
-          sha256: digest,
-          size: input.size,
-          mediaType: input.mediaType,
-        });
+        bounded = boundedStream(body, input.size, { idleMs, totalMs }, true);
+        let stored: Awaited<ReturnType<ByteStore['putVerified']>>;
+        try {
+          stored = await byteStore.putVerified(storageKey, bounded.stream, {
+            sha256: digest,
+            size: input.size,
+            mediaType: input.mediaType,
+          });
+        } catch (error) {
+          if (error instanceof BlobValidationError) {
+            const actual = await bounded.verifiedDigest();
+            if (actual !== null && actual !== digest) {
+              throw new BlobDigestMismatchError(digest, actual);
+            }
+          }
+          throw error;
+        }
         if (stored.size !== input.size || bounded.consumed() !== input.size) {
           throw new BlobSizeMismatchError();
         }

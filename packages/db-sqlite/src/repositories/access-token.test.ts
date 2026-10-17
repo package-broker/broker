@@ -1,3 +1,4 @@
+import { describeTokenContract } from '../contract/token-contract.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
@@ -1114,3 +1115,5 @@ describe('bound parameters', () => {
     });
   }
 });
+
+describeTokenContract('node:sqlite', () => openMigratedDatabase());

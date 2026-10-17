@@ -661,7 +661,11 @@ describe('plugin hooks and identity fetch', () => {
       kind: 'cloudflare-access',
       displayName: 'Access',
       trustAnchor: `access:team.example.com/${'ab'.repeat(32)}`,
-      policy: { verifiedDomains: ['example.test'], autoJoin: false },
+      policy: {
+        verifiedDomains: ['example.test'],
+        emailAuthoritativeDomains: ['example.test'],
+        autoJoin: false,
+      },
       supportsReauth: false,
       start: () => Promise.resolve({ kind: 'direct' }),
       finish: () =>

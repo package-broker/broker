@@ -36,7 +36,7 @@ async function rows<R>(sql: string, ...params: (string | number)[]): Promise<R[]
   return executor.all<R>({ sql, params });
 }
 
-async function exec(sql: string, ...params: (string | number)[]): Promise<void> {
+async function exec(sql: string, ...params: (string | number | null)[]): Promise<void> {
   await executor.batch([{ sql, params }]);
 }
 
@@ -136,6 +136,7 @@ describe('BlobTable columns', () => {
       ['created_at', 'TEXT', 1],
       ['purge_generation', 'TEXT', 0],
       ['purge_lease_until', 'TEXT', 0],
+      ['published_at', 'TEXT', 0],
     ]);
   });
 });
@@ -197,6 +198,33 @@ describe('publish', () => {
     expect(await repo.inspect(a, D1)).toEqual({ info, purging: false });
     const stored = await rows<{ storage_key: string }>('SELECT storage_key FROM blob');
     expect(stored[0]?.storage_key).toMatch(/^sha256\/[0-9a-f]+\/aa\/a+$/);
+  });
+
+  it.each([false, true])(
+    'refreshes publication time on re-publish (deleted: %s)',
+    async (deleted) => {
+      const repo = createBlobRepository(executor);
+      await publish(repo);
+      await exec(
+        "UPDATE blob SET created_at = '2000-01-01T00:00:00.000Z', published_at = '2000-01-01T00:00:00.000Z', deleted_at = ?",
+        deleted ? '2000-01-02T00:00:00.000Z' : null,
+      );
+      expect((await publish(repo)).info).not.toBeNull();
+      const stored = await rows<{ created_at: string; recent: number; deleted_at: string | null }>(
+        "SELECT created_at, julianday(published_at) >= julianday('now', '-1 minute') AS recent, deleted_at FROM blob",
+      );
+      expect(stored).toEqual([
+        { created_at: '2000-01-01T00:00:00.000Z', recent: 1, deleted_at: null },
+      ]);
+    },
+  );
+
+  it('sets publication time on the first publish', async () => {
+    await publish();
+    const stored = await rows<{ recent: number }>(
+      "SELECT julianday(published_at) >= julianday('now', '-1 minute') AS recent FROM blob",
+    );
+    expect(stored).toEqual([{ recent: 1 }]);
   });
 
   it('is idempotent for the same digest and size', async () => {

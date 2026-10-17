@@ -577,6 +577,85 @@ describe('twoPassPut with a supplied first pass', () => {
     expect(opens).toBe(0);
   });
 
+  it('awaits supplied-stream cancellation on abort in 200 consecutive runs', async () => {
+    for (let run = 0; run < 200; run++) {
+      const ac = new AbortController();
+      const reasons: unknown[] = [];
+      let pulls = 0;
+      const firstPass = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (++pulls === 2) ac.abort();
+            controller.enqueue(enc.encode('ab'));
+          },
+          async cancel(reason) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            reasons.push(reason);
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const f = fakeStore();
+      let opens = 0;
+      const error = await twoPassPut(
+        ctx,
+        async () => (opens++, streamOf([])),
+        f.store,
+        opts({ firstPass, signal: ac.signal }),
+      ).catch((error: unknown) => error);
+      expect(error).toBe(ac.signal.reason);
+      expect(reasons).toEqual([ac.signal.reason]);
+      expect(firstPass.locked).toBe(false);
+      expect(opens).toBe(0);
+      expect(f.puts).toHaveLength(0);
+    }
+  });
+
+  it.each(['abort', 'store failure'] as const)(
+    'awaits upstream cancellation during pass 2 on %s even when the store holds its lock',
+    async (failureMode) => {
+      const ac = new AbortController();
+      const failure = new Error('disk');
+      const reasons: unknown[] = [];
+      const upstream = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            controller.enqueue(enc.encode('ab'));
+          },
+          async cancel(reason) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            reasons.push(reason);
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const store: BlobStore = {
+        async put(_ctx, _key, body) {
+          const reader = body.getReader();
+          await reader.read();
+          if (failureMode === 'abort') {
+            ac.abort();
+            await reader.read();
+            ac.signal.throwIfAborted();
+          }
+          throw failure;
+        },
+        get: async () => null,
+        head: async () => null,
+      };
+      const result = twoPassPut(
+        ctx,
+        async () => upstream,
+        store,
+        opts({ firstPass: streamOf([enc.encode('abcd')]), signal: ac.signal }),
+      );
+      const error = await result.catch((error: unknown) => error);
+      expect(error).toBe(failureMode === 'abort' ? ac.signal.reason : failure);
+      expect(reasons).toHaveLength(1);
+      expect(upstream.locked).toBe(false);
+    },
+  );
+
   it('cancels a supplied stream that is never read', async () => {
     const f = fakeStore();
     const ac = new AbortController();

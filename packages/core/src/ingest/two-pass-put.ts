@@ -69,42 +69,48 @@ function hex(bytes: Uint8Array): string {
   return out;
 }
 
-function counter(maxBytes: number): {
-  transform: TransformStream<Uint8Array, Uint8Array>;
-  count: () => number;
-} {
-  let total = 0;
-  const transform = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      total += chunk.length;
-      if (total > maxBytes) controller.error(new TwoPassLimitError(maxBytes));
-      else controller.enqueue(chunk);
-    },
-  });
-  return { transform, count: () => total };
-}
-
 async function firstPass(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,
   options: TwoPassOptions,
 ): Promise<FirstPass> {
-  const bound = counter(maxBytes);
   const tap = options.codecs.digestTap(['sha1', 'sha256', 'sha512'] as const);
+  tap.digests.catch(() => undefined);
+  const reader = body.getReader();
+  const writer = tap.transform.writable.getWriter();
+  let count = 0;
+  const draining = tap.transform.readable.pipeTo(
+    new WritableStream<Uint8Array>(),
+    signalOptions(options.signal),
+  );
+  const pumping = (async () => {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      count += next.value.length;
+      if (count > maxBytes) throw new TwoPassLimitError(maxBytes);
+      await writer.write(next.value);
+    }
+    await writer.close();
+  })();
   try {
-    await body
-      .pipeThrough(bound.transform)
-      .pipeThrough(tap.transform)
-      .pipeTo(new WritableStream<Uint8Array>(), signalOptions(options.signal));
+    await Promise.all([pumping, draining]);
     const digests = await tap.digests;
     return {
       sha1: digests.sha1,
       sha256: digests.sha256,
       sha512: digests.sha512,
-      size: bound.count(),
+      size: count,
     };
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    await writer.abort(error).catch(() => undefined);
+    await Promise.allSettled([pumping, draining]);
+    throw error;
   } finally {
-    options.onUpstreamBytes?.add(bound.count());
+    reader.releaseLock();
+    writer.releaseLock();
+    options.onUpstreamBytes?.add(count);
   }
 }
 
@@ -132,21 +138,34 @@ async function attempt(
   let count = 0;
   const tap = options.codecs.digestTap(['sha256'] as const);
   tap.digests.catch(() => undefined);
-  const reader = body.pipeThrough(tap.transform, signalOptions(options.signal)).getReader();
+  const reader = body.getReader();
+  // Own the upstream reader so cleanup does not wait for cancellation to cross the transform.
+  const input = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const next = await reader.read();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const tappedReader = input.pipeThrough(tap.transform, signalOptions(options.signal)).getReader();
   const tapped = new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
-        const r = await reader.read();
+        const r = await tappedReader.read();
         if (r.done) controller.close();
         else {
           count += r.value.length;
           controller.enqueue(r.value);
         }
       },
-      cancel: (reason) => reader.cancel(reason),
+      cancel: (reason) => tappedReader.cancel(reason),
     },
     { highWaterMark: 0 },
   );
+  let failure: unknown;
   try {
     const info = await store.put(ctx, parseSha256(hex(first.sha256)), tapped, {
       size: first.size,
@@ -155,11 +174,15 @@ async function attempt(
     });
     return { status: 'stored', info, digests: first, size: first.size };
   } catch (error) {
-    if (!tapped.locked) await tapped.cancel().catch(() => undefined);
+    failure = error;
     if (options.signal?.aborted) throw error;
     if (error instanceof BlobDigestMismatchError) return { unstable: true, cause: error };
     throw error;
   } finally {
+    await reader.cancel(failure).catch(() => undefined);
+    await tappedReader.cancel(failure).catch(() => undefined);
+    reader.releaseLock();
+    tappedReader.releaseLock();
     options.onUpstreamBytes?.add(count);
   }
 }
@@ -175,6 +198,7 @@ export async function twoPassPut(
   options: TwoPassOptions,
 ): Promise<TwoPassResult> {
   const supplied = options.firstPass;
+  let suppliedUnused = supplied;
   try {
     const maxBytes = options.maxBytes;
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > DEFAULT_MAX_BLOB_BYTES) {
@@ -182,14 +206,20 @@ export async function twoPassPut(
     }
     let cause: unknown;
     for (let n = 1; n <= MAX_ATTEMPTS; n += 1) {
-      const openFirst = n === 1 && supplied !== undefined ? async () => supplied : open;
+      const openFirst =
+        n === 1 && supplied !== undefined
+          ? async () => {
+              suppliedUnused = undefined;
+              return supplied;
+            }
+          : open;
       const result = await attempt(ctx, openFirst, open, store, maxBytes, options);
       if (!('unstable' in result)) return result;
       cause = result.cause;
     }
     throw new UpstreamUnstableError({ cause });
   } finally {
-    if (supplied !== undefined && !supplied.locked) await supplied.cancel().catch(() => undefined);
+    await suppliedUnused?.cancel().catch(() => undefined);
   }
 }
 

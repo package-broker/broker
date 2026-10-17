@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createProjectAdministration } from '@package-broker/core/authz/project-administration';
+import { fixedClock } from '@package-broker/core/ids';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
 import type { ProtectedHolderProvider } from '../kysely.js';
@@ -838,6 +840,164 @@ describe('project grant change role', () => {
 describe('project grant delete', () => {
   const fence = (revision = 1, id = G_TARGET) => actorFence({ [projectGrantKey(id)]: revision });
 
+  async function revokeWithCallback() {
+    const callback = vi.fn();
+    const service = createProjectAdministration({
+      grants: repository,
+      providers: new Map(ANCHORS.map(({ provider }) => [provider, {}])),
+      providerAnchors: ANCHORS,
+      clock: fixedClock(NOW),
+      ids: { ulid: () => G_NEW },
+      log: vi.fn(),
+      onCreatorOffboarded: callback,
+    });
+    const result = await service.revoke(
+      a,
+      {
+        kind: 'project',
+        userId: ACTOR,
+        orgId: a.orgId,
+        projectId: P1,
+        permissions: new Set(['project:grants:write']),
+      },
+      fence(),
+      P1,
+      G_TARGET,
+    );
+    expect(result).toEqual({ ok: true, value: null });
+    expect(await grantRow(G_TARGET)).toBeUndefined();
+    return callback;
+  }
+
+  it('suppresses the callback when an organization email grant retains access', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      grant(a, G_NEW, 'target@example.test', ORG_PLAIN, null),
+    ]);
+    expect(await revokeWithCallback()).not.toHaveBeenCalled();
+  });
+
+  it('suppresses the callback when an organization group grant retains access', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      groupGrant(G_NEW, 'oidc', 'team', ORG_PLAIN),
+      stmt("UPDATE access_grant SET scope = 'organization', project_id = NULL WHERE id = ?", G_NEW),
+      member(OTHER + 'target', 'oidc', 'team'),
+    ]);
+    expect(await revokeWithCallback()).not.toHaveBeenCalled();
+  });
+
+  it('does not retain a user through group membership in another organization', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      groupGrant(G_NEW, 'oidc', 'team'),
+      member(OTHER + 'target', 'oidc', 'team', ago(60_000), b),
+    ]);
+    expect(
+      await repository.delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: OTHER + 'target' });
+  });
+
+  it('does not retain a user through a group grant in another project', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      groupGrant(G_NEW, 'oidc', 'team'),
+      stmt('UPDATE access_grant SET project_id = ? WHERE id = ?', P2, G_NEW),
+      member(OTHER + 'target', 'oidc', 'team'),
+    ]);
+    expect(
+      await repository.delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: OTHER + 'target' });
+  });
+
+  it('defaults a missing offboarding row to null after a committed deletion', async () => {
+    await executor.batch([user(a, OTHER + 'target', 'target@example.test')]);
+    const missingRow: SqlExecutor = {
+      ...executor,
+      batch: async (statements) => {
+        const results = await executor.batch(statements);
+        return results.map((result, index) =>
+          statements[index]?.sql.includes('offboarded_user_id') ? { ...result, rows: [] } : result,
+        );
+      },
+    };
+    expect(
+      await createProjectGrantRepository(missingRow).delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: null });
+    expect(await grantRow(G_TARGET)).toBeUndefined();
+  });
+
+  it('reports the last email grant user despite a grant in another project', async () => {
+    await executor.batch([user(a, OTHER + 'target', 'target@example.test')]);
+    const statements: Statement[] = [];
+    const checked: SqlExecutor = {
+      ...executor,
+      all: () => {
+        throw new Error('successful deletion must not read outside the batch');
+      },
+      batch: async (batch) => {
+        statements.push(...batch);
+        return executor.batch(batch);
+      },
+    };
+    const result = await createProjectGrantRepository(checked).delete(a, fence(), {
+      id: G_TARGET,
+      projectId: P1,
+      providerAnchors: ANCHORS,
+    });
+    expect(result).toEqual({ status: 'deleted', offboardedUserId: OTHER + 'target' });
+    expect(statements.every((statement) => statement.params.length <= 100)).toBe(true);
+  });
+
+  it('reports null when another group grant retains project membership', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      groupGrant(G_NEW, 'oidc', 'team'),
+      member(OTHER + 'target', 'oidc', 'team'),
+    ]);
+    expect(
+      await repository.delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: null });
+  });
+
+  it('reports null for a group grant', async () => {
+    await executor.batch([groupGrant(G_NEW, 'oidc', 'team'), member(OTHER, 'oidc', 'team')]);
+    expect(
+      await repository.delete(a, fence(1, G_NEW), {
+        id: G_NEW,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: null });
+  });
+
+  it('reports null for an email with no account in the organization', async () => {
+    await executor.batch([user(b, OTHER + 'target', 'target@example.test')]);
+    expect(
+      await repository.delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: null });
+  });
+
   it('deletes the grant', async () => {
     expect(
       await repository.delete(a, fence(), {
@@ -845,7 +1005,7 @@ describe('project grant delete', () => {
         projectId: P1,
         providerAnchors: ANCHORS,
       }),
-    ).toBe('deleted');
+    ).toEqual({ status: 'deleted', offboardedUserId: null });
     expect(await grantRow(G_TARGET)).toBeUndefined();
     expect(await rows('SELECT count(*) AS n FROM epoch_log')).toEqual([{ n: 1 }]);
     expect(await rows('SELECT * FROM access_mutation_guard')).toEqual([]);
@@ -895,7 +1055,7 @@ describe('project grant delete', () => {
         projectId: P_ARCHIVED,
         providerAnchors: ANCHORS,
       }),
-    ).toBe('deleted');
+    ).toEqual({ status: 'deleted', offboardedUserId: null });
   });
 
   it('answers not_found for a missing grant, an organization grant and another project', async () => {

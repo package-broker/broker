@@ -51,6 +51,7 @@ export function createWorkersSink(options: {
       }
       const { kind, name, labels, value } = record;
       if (analytics === undefined) {
+        if (name.startsWith('pb.http.')) return;
         out.log({
           kind,
           name,

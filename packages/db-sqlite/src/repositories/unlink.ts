@@ -1,5 +1,5 @@
 import { sql, type Compilable, type Kysely, type SqlBool } from 'kysely';
-import { SESSION_ABSOLUTE_MS, SESSION_IDLE_MS } from '@package-broker/core/auth/session';
+import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { isValidProviderId, isValidTrustAnchor } from '@package-broker/core/identity/port';
@@ -23,10 +23,6 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 type LooseDatabase = Record<string, Record<string, unknown>>;
 
 const loose = db as unknown as Kysely<LooseDatabase>;
-
-function dbTimeAgo(ms: number) {
-  return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms / 1000} seconds`})`;
-}
 
 export interface UnlinkIdentityInput {
   readonly identityId: string;
@@ -143,7 +139,6 @@ function actorAuthority(
       join session s on s.org_id = au.org_id and s.user_id = au.id
       where au.org_id = ${ctx.orgId} and au.id = ${fence.userId} and au.status = 'active'
         and s.id = ${fence.sessionId}
-        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
         and ${liveSessionCondition('s', SESSION_IDLE_MS / 1000)})
     and ${holdsPermission(ctx, {
       userId: fence.userId,

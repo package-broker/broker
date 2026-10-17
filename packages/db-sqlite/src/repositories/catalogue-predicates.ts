@@ -1,4 +1,5 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
+import { MAX_PATTERN_BYTES } from '@package-broker/core/catalogue/patterns';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { guardAliases } from '../kysely.js';
 
@@ -20,7 +21,6 @@ export interface WinnerRefs {
 
 const PROXY_TYPES = sql`('packagist_proxy', 'npmjs_proxy')`;
 
-const MAX_PATTERN_LENGTH = 50;
 const MAX_PATTERN_WILDCARDS = 4;
 const MAX_PATTERNS_PER_RULE = 64;
 
@@ -28,7 +28,7 @@ const MAX_PATTERNS_PER_RULE = 64;
 function invalidPattern(pattern: Expression<unknown>): Expression<SqlBool> {
   return sql<SqlBool>`(
     length(cast(${pattern} as blob)) <> length(${pattern})
-    or length(${pattern}) not between 1 and ${sql.lit(MAX_PATTERN_LENGTH)}
+    or length(${pattern}) not between 1 and ${sql.lit(MAX_PATTERN_BYTES)}
     or ${pattern} glob '*[^a-z0-9._~@!/*-]*'
     or length(${pattern}) - length(replace(${pattern}, '*', '')) > ${sql.lit(MAX_PATTERN_WILDCARDS)}
   )`;

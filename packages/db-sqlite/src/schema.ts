@@ -554,7 +554,38 @@ export interface RepresentationClockTable {
   package_id: Generated<string>;
 }
 
+/** Mirrors `audit_pending` in `migrations/0011_api_audit.sql`. */
+export interface AuditPendingTable {
+  id: string;
+  org_id: string;
+  created_at: string;
+  actor_type: 'user' | 'service_principal' | 'customer' | 'system';
+  actor_id: string | null;
+  token_selector: string | null;
+  source_ip: string | null;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  project_id: string | null;
+  payload_json: Generated<string>;
+}
+
+/** Mirrors `api_idempotency` in `migrations/0011_api_audit.sql`. */
+export interface ApiIdempotencyTable {
+  org_id: string;
+  principal_key: string;
+  key: string;
+  route: string;
+  request_hash: string;
+  status: number;
+  response_json: string;
+  created_at: string;
+  expires_at: string;
+}
+
 export interface Database {
+  audit_pending: AuditPendingTable;
+  api_idempotency: ApiIdempotencyTable;
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
   migration_lock: MigrationLockTable;

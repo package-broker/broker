@@ -34,6 +34,7 @@ async function access(overrides: Overrides = {}): Promise<TokenAccessView> {
       revoked: overrides.revoked ?? false,
       lastUsedAt: overrides.lastUsedAt === undefined ? null : overrides.lastUsedAt,
     },
+    projectVisible: false,
     principalStatus: overrides.principalStatus ?? 'active',
   };
   return Object.defineProperty(envelope, 'verifier', {
@@ -244,6 +245,6 @@ describe('authenticateToken', () => {
     deferredDispatch(() => {
       throw new Error('sync');
     });
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   });
 });

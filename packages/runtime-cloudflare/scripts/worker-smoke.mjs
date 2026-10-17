@@ -209,7 +209,14 @@ async function run() {
         scriptPath: basename(workerScript),
         compatibilityDate: '2026-10-01',
         d1Databases: ['DB'],
-        bindings: { PB_MASTER_KEY: MASTER_KEY, PB_PUBLIC_URL: PUBLIC_ORIGIN },
+        r2Buckets: ['STORAGE'],
+        queueProducers: { JOBS: 'pb-smoke-jobs' },
+        analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
+        bindings: {
+          PB_MASTER_KEY: MASTER_KEY,
+          PB_PUBLIC_URL: PUBLIC_ORIGIN,
+          DEPLOYMENT_ID: 'smoke',
+        },
       }),
     );
 

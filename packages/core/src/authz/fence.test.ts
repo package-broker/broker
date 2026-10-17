@@ -3,10 +3,33 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DbError, classifySqliteError } from '../db/errors.js';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError, classifySqliteError } from '../db/errors.js';
 import type { SqlExecutor, Statement, StatementResult } from '../db/port.js';
-import { classifyFailure, fenceGuard, mutationFence, runFenced } from './fence.js';
-import type { AuthenticatedActor, FailureProbes, FenceGuard, MutationFence } from './fence.js';
+import {
+  classifyFailure,
+  delegatedMutationFence,
+  fenceGuard,
+  fenceKind,
+  mutationFence,
+  runFenced,
+  systemMutationFence,
+  tokenMutationFence,
+} from './fence.js';
+import type {
+  AnyMutationFence,
+  AuthenticatedActor,
+  AuthenticatedTokenActor,
+  DelegatedMutationFence,
+  FailureProbes,
+  FenceGuard,
+  FenceKind,
+  MutationFence,
+  SystemMutationFence,
+  SystemWriter,
+  TokenMutationFence,
+} from './fence.js';
+import { PERMISSIONS } from './permissions.js';
+import type { JobGuard } from '../platform/job-repository.js';
 import { systemFence } from './system-fence.js';
 import type { SystemFence } from './system-fence.js';
 
@@ -374,3 +397,384 @@ function scan(
   walk(root);
   return offenders;
 }
+
+const job: JobGuard = { id: 'j1', owner: 'o1', fence: 3 };
+const tokenActor = {
+  tokenId: 't1',
+  tokenKind: 'pat',
+  principalId: 'p1',
+} as unknown as AuthenticatedTokenActor;
+const tokenPermission = 'project:packages:write';
+const issuedFences = (): Record<FenceKind, AnyMutationFence> => ({
+  session: mutationFence(actor, { 'role:r1': 1 }),
+  system: systemMutationFence('audit-seal', job, { 'audit:head': 1 }),
+  token: tokenMutationFence(tokenActor, tokenPermission, {}),
+  delegated: delegatedMutationFence('u1', 'run1', job, { 'import:run1': 2 }),
+});
+
+describe('session fence shape', () => {
+  it('keeps exactly userId, sessionId and expected', () => {
+    expect(Object.keys(mutationFence(actor, { k: 1 }))).toEqual([
+      'userId',
+      'sessionId',
+      'expected',
+    ]);
+  });
+});
+
+describe('fence kind separation at compile time', () => {
+  const { system, token, delegated } = issuedFences() as {
+    system: SystemMutationFence;
+    token: TokenMutationFence;
+    delegated: DelegatedMutationFence;
+  };
+  const session = fence;
+
+  it('a SystemMutationFence is not a MutationFence', () => {
+    // @ts-expect-error a job fence must not satisfy a session writer
+    const asSession: MutationFence = system;
+    expect(asSession).toBeDefined();
+  });
+
+  it('a TokenMutationFence is not a MutationFence', () => {
+    // @ts-expect-error a token fence must not satisfy a session writer
+    const asSession: MutationFence = token;
+    expect(asSession).toBeDefined();
+  });
+
+  it('a DelegatedMutationFence is not a MutationFence', () => {
+    // @ts-expect-error a delegated fence must not satisfy a session writer
+    const asSession: MutationFence = delegated;
+    expect(asSession).toBeDefined();
+  });
+
+  it('the bootstrap SystemFence is not a SystemMutationFence or any other new fence', () => {
+    const bootstrap: SystemFence = systemFence();
+    // @ts-expect-error the bootstrap fence is not a job fence
+    const asSystem: SystemMutationFence = bootstrap;
+    // @ts-expect-error the bootstrap fence is not a token fence
+    const asToken: TokenMutationFence = bootstrap;
+    // @ts-expect-error the bootstrap fence is not a delegated fence
+    const asDelegated: DelegatedMutationFence = bootstrap;
+    // @ts-expect-error the bootstrap fence is not accepted by runFenced
+    const asAny: AnyMutationFence = bootstrap;
+    expect([asSystem, asToken, asDelegated, asAny]).toHaveLength(4);
+  });
+
+  it('a SystemMutationFence is not a token or delegated fence', () => {
+    // @ts-expect-error system is not token
+    const asToken: TokenMutationFence = system;
+    // @ts-expect-error system is not delegated
+    const asDelegated: DelegatedMutationFence = system;
+    expect([asToken, asDelegated]).toHaveLength(2);
+  });
+
+  it('a TokenMutationFence is not a system or delegated fence', () => {
+    // @ts-expect-error token is not system
+    const asSystem: SystemMutationFence = token;
+    // @ts-expect-error token is not delegated
+    const asDelegated: DelegatedMutationFence = token;
+    expect([asSystem, asDelegated]).toHaveLength(2);
+  });
+
+  it('a DelegatedMutationFence is not a system or token fence', () => {
+    // @ts-expect-error delegated is not system
+    const asSystem: SystemMutationFence = delegated;
+    // @ts-expect-error delegated is not token
+    const asToken: TokenMutationFence = delegated;
+    expect([asSystem, asToken]).toHaveLength(2);
+  });
+
+  it('a MutationFence is not a system, token or delegated fence', () => {
+    // @ts-expect-error session is not system
+    const asSystem: SystemMutationFence = session;
+    // @ts-expect-error session is not token
+    const asToken: TokenMutationFence = session;
+    // @ts-expect-error session is not delegated
+    const asDelegated: DelegatedMutationFence = session;
+    expect([asSystem, asToken, asDelegated]).toHaveLength(3);
+  });
+
+  it('a session actor is not a token actor, and plain data is neither', () => {
+    // @ts-expect-error a session actor cannot issue a token fence
+    expect(() => tokenMutationFence(actor, tokenPermission, {})).toThrow(TypeError);
+    expect(() =>
+      // @ts-expect-error plain data is not an AuthenticatedTokenActor
+      tokenMutationFence({ tokenId: 't', tokenKind: 'pat', principalId: 'p' }, tokenPermission, {}),
+    ).not.toThrow();
+  });
+
+  it('SystemWriter is a closed union', () => {
+    // @ts-expect-error an unknown writer name does not compile
+    const unknown: SystemWriter = 'import-apply';
+    expect(unknown).toBe('import-apply');
+  });
+});
+
+describe('systemMutationFence', () => {
+  it('issues a frozen system fence carrying the writer, lease and revisions', () => {
+    const expected = { 'audit:head': 4 };
+    const made = systemMutationFence('ingest-finalize', job, expected);
+    expected['audit:head'] = 9;
+    expect(made.writer).toBe('ingest-finalize');
+    expect(made.job).toEqual(job);
+    expect(made.expected).toEqual({ 'audit:head': 4 });
+    expect(Object.isFrozen(made)).toBe(true);
+    expect(Object.isFrozen(made.job)).toBe(true);
+    expect(Object.isFrozen(made.expected)).toBe(true);
+  });
+
+  it('accepts every design writer', () => {
+    for (const writer of ['ingest-finalize', 'purge', 'audit-seal', 'audit-verify', 'verifier']) {
+      expect(fenceKind(systemMutationFence(writer as SystemWriter, job, {}))).toBe('system');
+    }
+  });
+
+  it('rejects an unknown writer', () => {
+    expect(() => systemMutationFence('import-apply' as SystemWriter, job, {})).toThrow(TypeError);
+  });
+
+  it('rejects an empty job id', () => {
+    expect(() => systemMutationFence('purge', { ...job, id: '' }, {})).toThrow(TypeError);
+  });
+
+  it('rejects an empty job owner', () => {
+    expect(() => systemMutationFence('purge', { ...job, owner: '' }, {})).toThrow(TypeError);
+  });
+
+  it('rejects a non-integer job fence', () => {
+    for (const bad of [1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => systemMutationFence('purge', { ...job, fence: bad }, {})).toThrow(TypeError);
+    }
+  });
+
+  it('rejects a job fence below 1', () => {
+    for (const bad of [0, -1]) {
+      expect(() => systemMutationFence('purge', { ...job, fence: bad }, {})).toThrow(TypeError);
+      expect(() => delegatedMutationFence('u1', 'run1', { ...job, fence: bad }, {})).toThrow(
+        TypeError,
+      );
+    }
+  });
+
+  it('rejects invalid expected revisions', () => {
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      expect(() => systemMutationFence('purge', job, { k: bad })).toThrow(TypeError);
+    }
+  });
+});
+
+describe('tokenMutationFence', () => {
+  const sessionOnly = PERMISSIONS.filter((info) => info.sessionOnly).map((info) => info.name);
+  const reads = PERMISSIONS.filter((info) => !info.sessionOnly && info.name.endsWith(':read')).map(
+    (info) => info.name,
+  );
+  const tokenAllowed = PERMISSIONS.filter(
+    (info) => !info.sessionOnly && !info.name.endsWith(':read'),
+  ).map((info) => info.name);
+
+  it('the catalogue has both kinds of permission', () => {
+    expect(sessionOnly.length).toBeGreaterThan(0);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(tokenAllowed.length).toBeGreaterThan(0);
+  });
+
+  it.each(sessionOnly)('refuses session-only permission %s', (name) => {
+    expect(() => tokenMutationFence(tokenActor, name, {})).toThrow(TypeError);
+  });
+
+  it.each(reads)('refuses read permission %s', (name) => {
+    expect(() => tokenMutationFence(tokenActor, name, {})).toThrow(TypeError);
+  });
+
+  it.each(tokenAllowed)('issues a token fence for %s', (name) => {
+    const made = tokenMutationFence(tokenActor, name, { k: 1 });
+    expect(made.permission).toBe(name);
+    expect(fenceKind(made)).toBe('token');
+  });
+
+  it('refuses an unknown permission', () => {
+    expect(() => tokenMutationFence(tokenActor, 'project:packages:launch', {})).toThrow(TypeError);
+  });
+
+  it('refuses an empty token id', () => {
+    const blank = { ...tokenActor, tokenId: '' } as AuthenticatedTokenActor;
+    expect(() => tokenMutationFence(blank, tokenPermission, {})).toThrow(TypeError);
+  });
+
+  it('refuses an empty principal id', () => {
+    const blank = { ...tokenActor, principalId: '' } as AuthenticatedTokenActor;
+    expect(() => tokenMutationFence(blank, tokenPermission, {})).toThrow(TypeError);
+  });
+
+  it('refuses an unknown token kind', () => {
+    const odd = { ...tokenActor, tokenKind: 'session' } as unknown as AuthenticatedTokenActor;
+    expect(() => tokenMutationFence(odd, tokenPermission, {})).toThrow(TypeError);
+  });
+
+  it('refuses invalid expected revisions', () => {
+    expect(() => tokenMutationFence(tokenActor, tokenPermission, { k: 0 })).toThrow(TypeError);
+  });
+
+  it('issues a frozen fence with the token identity', () => {
+    const made = tokenMutationFence(tokenActor, tokenPermission, {});
+    expect(made).toMatchObject({ tokenId: 't1', tokenKind: 'pat', principalId: 'p1' });
+    expect(Object.isFrozen(made)).toBe(true);
+    expect(Object.isFrozen(made.expected)).toBe(true);
+  });
+});
+
+describe('delegatedMutationFence', () => {
+  it('issues a frozen fence carrying approver, run and lease', () => {
+    const made = delegatedMutationFence('u1', 'run1', job, { 'import:run1': 2 });
+    expect(made).toMatchObject({ approverUserId: 'u1', runId: 'run1', job });
+    expect(Object.isFrozen(made)).toBe(true);
+    expect(Object.isFrozen(made.job)).toBe(true);
+    expect(Object.isFrozen(made.expected)).toBe(true);
+  });
+
+  it('rejects an empty approver', () => {
+    expect(() => delegatedMutationFence('', 'run1', job, {})).toThrow(TypeError);
+  });
+
+  it('rejects an empty run id', () => {
+    expect(() => delegatedMutationFence('u1', '', job, {})).toThrow(TypeError);
+  });
+
+  it('rejects an empty job id or owner', () => {
+    expect(() => delegatedMutationFence('u1', 'run1', { ...job, id: '' }, {})).toThrow(TypeError);
+    expect(() => delegatedMutationFence('u1', 'run1', { ...job, owner: '' }, {})).toThrow(
+      TypeError,
+    );
+  });
+
+  it('rejects a non-integer job fence', () => {
+    expect(() => delegatedMutationFence('u1', 'run1', { ...job, fence: 2.5 }, {})).toThrow(
+      TypeError,
+    );
+  });
+
+  it('rejects invalid expected revisions', () => {
+    expect(() => delegatedMutationFence('u1', 'run1', job, { k: -1 })).toThrow(TypeError);
+  });
+});
+
+describe('fenceKind', () => {
+  it('names the kind of every issued fence', () => {
+    for (const [kind, made] of Object.entries(issuedFences())) {
+      expect(fenceKind(made)).toBe(kind);
+      expect(Object.isFrozen(made)).toBe(true);
+    }
+  });
+
+  it('throws for a forged object of every shape', () => {
+    for (const made of Object.values(issuedFences())) {
+      const forged = JSON.parse(JSON.stringify(made)) as AnyMutationFence;
+      expect(() => fenceKind(forged)).toThrow(TypeError);
+    }
+    expect(() => fenceKind(systemFence() as unknown as AnyMutationFence)).toThrow(TypeError);
+    expect(() => fenceKind(null as unknown as AnyMutationFence)).toThrow(TypeError);
+  });
+});
+
+describe('runFenced with every fence kind', () => {
+  it.each(Object.keys(issuedFences()) as FenceKind[])('runs a %s fence batch', async (kind) => {
+    const h = harness();
+    const outcome = await runFenced(
+      h.executor,
+      issuedFences()[kind],
+      revisionGuard(1),
+      [rename],
+      probes(),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(nameOf(h)).toBe('new');
+  });
+
+  it.each(Object.keys(issuedFences()) as FenceKind[])(
+    'refuses a structurally identical %s fence that was not issued',
+    async (kind) => {
+      const h = harness();
+      const forged = { ...issuedFences()[kind] } as AnyMutationFence;
+      await expect(runFenced(h.executor, forged, revisionGuard(1), [rename], {})).rejects.toThrow(
+        TypeError,
+      );
+      expect(nameOf(h)).toBe('old');
+    },
+  );
+
+  it('refuses the bootstrap SystemFence', async () => {
+    const h = harness();
+    const bootstrap = systemFence() as unknown as AnyMutationFence;
+    await expect(runFenced(h.executor, bootstrap, revisionGuard(1), [rename], {})).rejects.toThrow(
+      TypeError,
+    );
+  });
+
+  it('keeps conflict classification for a token fence', async () => {
+    const h = harness();
+    h.database.exec("UPDATE target SET revision = 2 WHERE id = 'r1'");
+    const outcome = await runFenced(
+      h.executor,
+      issuedFences().token,
+      revisionGuard(1),
+      [rename],
+      probes(),
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'conflict' });
+  });
+
+  it('keeps indeterminate without probes for a system fence', async () => {
+    let probed = false;
+    const executor: SqlExecutor = {
+      driver: 'node-sqlite',
+      all: async <R>() => {
+        probed = true;
+        return [] as R[];
+      },
+      batch: async () => {
+        throw new DbError('unknown', 'lost');
+      },
+    };
+    const outcome = await runFenced(
+      executor,
+      issuedFences().system,
+      revisionGuard(1),
+      [rename],
+      probes(),
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'indeterminate' });
+    expect(probed).toBe(false);
+  });
+
+  it('keeps the guard size limit for a delegated fence', async () => {
+    const executor = stub(async () => []);
+    await expect(
+      runFenced(executor, issuedFences().delegated, fenceGuard([]), [rename], {}),
+    ).rejects.toThrow(TypeError);
+  });
+});
+
+describe('guard constraint on a real node:sqlite database', () => {
+  it('names the guard constraint access_mutation_guard.key', () => {
+    expect(ACCESS_MUTATION_GUARD_CONSTRAINT).toBe('access_mutation_guard.key');
+  });
+
+  it('a forced guard failure carries the guard constraint', async () => {
+    const h = harness();
+    const error = await h.executor.batch([...revisionGuard(99)]).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(DbError);
+    expect((error as DbError).kind).toBe('unique');
+    expect((error as DbError).constraint).toBe(ACCESS_MUTATION_GUARD_CONSTRAINT);
+  });
+
+  it('another unique failure carries its own constraint', async () => {
+    const h = harness();
+    const dup: Statement = {
+      sql: "INSERT INTO target (id, revision, name) VALUES ('r1', 1, 'dup')",
+      params: [],
+    };
+    const error = await h.executor.batch([dup]).catch((caught: unknown) => caught);
+    expect((error as DbError).constraint).toBe('target.id');
+  });
+});

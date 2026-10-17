@@ -280,7 +280,7 @@ describe('createPolicyFetch redirects and credentials', () => {
 
   it('refuses https to http even when http is allowlisted', async () => {
     const lax = createOutboundPolicy({
-      allowPrivateHosts: ['plain.example.com'],
+      allowPrivateHosts: ['plain.example.com:80'],
       runtime: 'node',
       selfOrigins: [],
     });
@@ -289,6 +289,33 @@ describe('createPolicyFetch redirects and credentials', () => {
     const error = await failure(run(request()));
     expect(error.code).toBe('refused');
     expect(f.hops).toHaveLength(1);
+  });
+
+  it('refuses an HTTP redirect under a bare allowlist entry before requesting it', async () => {
+    const f = fake({
+      'https://repo.corp.internal/a': redirect('http://repo.corp.internal/b', 302),
+      'http://repo.corp.internal/b': new Response('ok'),
+    });
+    const run = createPolicyFetch({
+      fetchImpl: f.fetchImpl,
+      policy: createOutboundPolicy({
+        allowPrivateHosts: ['repo.corp.internal'],
+        runtime: 'node',
+        selfOrigins: [],
+      }),
+      userAgent: 'pb-test/1',
+    });
+    const error = await failure(
+      run(
+        request({
+          url: 'https://repo.corp.internal/a',
+          destinations: ['https://repo.corp.internal', 'http://repo.corp.internal'],
+        }),
+      ),
+    );
+    expect(error.code).toBe('refused');
+    expect(error.reason).toBe('scheme');
+    expect(f.hops.map((hop) => hop.url)).toEqual(['https://repo.corp.internal/a']);
   });
 
   it('refuses the start URL when it is classified as blocked', async () => {

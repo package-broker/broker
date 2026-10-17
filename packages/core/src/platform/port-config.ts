@@ -1,5 +1,6 @@
 import type { Platform } from '../plugin.js';
 import { DEFAULT_MAX_BLOB_BYTES } from './blob.js';
+import { looksLikeCredential } from './credential.js';
 
 export const MAX_JOBS_RUNNING = 2;
 export const MAX_CACHE_BYTES = 32 * 1024 * 1024;
@@ -134,10 +135,6 @@ const RESERVED_WORKER_NAMES = ['DB', 'DEPLOYMENT_ID'];
 const ENV_NAME = /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$/;
 const BINDING_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 const NAMESPACE = /^[a-z0-9][a-z0-9._-]*$/;
-const ACCESS_KEY_ID = /^(AKIA|ASIA)[A-Z0-9]{16}$/;
-const BASE32_RUN = /^(?=[A-Z2-7]*[2-7])[A-Z2-7]{16,}$/;
-const HEX_RUN = /^[0-9A-F]{16,}$/;
-const VOWEL = /[AEIOU]/i;
 const SAFE_KEY = /^[A-Za-z0-9_.-]+$/;
 
 type Obj = Record<string, unknown>;
@@ -148,19 +145,6 @@ function isObject(value: unknown): value is Obj {
 
 function own(object: Obj, key: string): unknown {
   return Object.hasOwn(object, key) ? object[key] : undefined;
-}
-
-function looksLikeCredential(value: string): boolean {
-  if (ACCESS_KEY_ID.test(value)) return true;
-  let mixed = 0;
-  for (const word of value.split('_')) {
-    if (BASE32_RUN.test(word) || HEX_RUN.test(word)) return true;
-    if (word.length >= 24) return true;
-    if (word.length >= 20 && /[0-9]/.test(word) && /[A-Z]/.test(word)) return true;
-    if (word.length >= 8 && !VOWEL.test(word)) return true;
-    if (word.length >= 4 && /[0-9]/.test(word) && /[A-Z]/.test(word)) mixed += 1;
-  }
-  return mixed >= 2;
 }
 
 function safeKey(key: string): string {

@@ -4,9 +4,12 @@ import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.
 import type { Clock } from './ids.js';
 import type { BlobStore } from './platform/blob.js';
 import type { Cache } from './platform/cache.js';
+import { PlatformUnavailableError } from './platform/errors.js';
 import type { JobDefinition, Jobs } from './platform/jobs.js';
 import type { Observability } from './platform/observability.js';
 import type { SourceProvider } from './sources/provider.js';
+
+export { PlatformUnavailableError } from './platform/errors.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
@@ -121,13 +124,6 @@ export interface PlatformPorts {
   readonly cache: Cache;
   readonly jobs: Jobs;
   readonly observability: Observability;
-}
-
-export class PlatformUnavailableError extends Error {
-  constructor() {
-    super('Platform services are not enabled');
-    this.name = 'PlatformUnavailableError';
-  }
 }
 
 export function requirePlatformPorts(ports: PluginPorts): PlatformPorts {

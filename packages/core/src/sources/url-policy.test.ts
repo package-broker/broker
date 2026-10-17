@@ -151,7 +151,7 @@ describe('classifyUrl', () => {
       selfOrigins: [],
     });
     expect(classifyUrl('https://plain.internal/', policy).ok).toBe(true);
-    expect(classifyUrl('http://plain.internal/', policy).ok).toBe(true);
+    expect(classifyUrl('http://plain.internal/', policy)).toEqual({ ok: false, reason: 'scheme' });
     expect(classifyUrl('https://plain.internal:8443/', policy)).toEqual({
       ok: false,
       reason: 'blocked_host',
@@ -165,6 +165,62 @@ describe('classifyUrl', () => {
     expect(classifyUrl('http://p443.internal/', policy)).toEqual({
       ok: false,
       reason: 'scheme',
+    });
+  });
+
+  describe('explicit ports for HTTP allowlist entries', () => {
+    const policyFor = (entry: string) =>
+      createOutboundPolicy({ allowPrivateHosts: [entry], runtime: 'node', selfOrigins: [] });
+
+    it('refuses implicit HTTP port 80 with a bare entry', () => {
+      expect(classifyUrl('http://repo.corp.internal/', policyFor('repo.corp.internal'))).toEqual({
+        ok: false,
+        reason: 'scheme',
+      });
+    });
+
+    it('refuses explicit HTTP port 80 with a bare entry', () => {
+      expect(classifyUrl('http://repo.corp.internal:80/', policyFor('repo.corp.internal'))).toEqual(
+        {
+          ok: false,
+          reason: 'scheme',
+        },
+      );
+    });
+
+    it('allows default HTTPS with a bare entry', () => {
+      expect(classifyUrl('https://repo.corp.internal/', policyFor('repo.corp.internal'))).toEqual({
+        ok: true,
+        origin: 'https://repo.corp.internal',
+      });
+    });
+
+    it.each(['http://repo.corp.internal/', 'http://repo.corp.internal:80/'])(
+      'allows %s with an explicit port 80 entry',
+      (url) => {
+        expect(classifyUrl(url, policyFor('repo.corp.internal:80'))).toEqual({
+          ok: true,
+          origin: 'http://repo.corp.internal',
+        });
+      },
+    );
+
+    it('allows HTTP on the explicit custom port', () => {
+      expect(
+        classifyUrl('http://repo.corp.internal:8080/', policyFor('repo.corp.internal:8080')),
+      ).toEqual({
+        ok: true,
+        origin: 'http://repo.corp.internal:8080',
+      });
+    });
+
+    it('refuses default HTTP with only a custom port entry', () => {
+      expect(
+        classifyUrl('http://repo.corp.internal/', policyFor('repo.corp.internal:8080')),
+      ).toEqual({
+        ok: false,
+        reason: 'scheme',
+      });
     });
   });
 

@@ -222,6 +222,34 @@ describe('domainPolicyProblems', () => {
     expect(domainPolicyProblems({ verifiedDomains: ['example.com'], autoJoin: false })).toEqual([]);
   });
 
+  it('accepts authoritative domains that are verified', () => {
+    expect(
+      domainPolicyProblems({
+        verifiedDomains: ['example.com'],
+        emailAuthoritativeDomains: ['example.com'],
+        autoJoin: false,
+      }),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['unverified', ['other.com']],
+    ['duplicate', ['example.com', 'example.com']],
+    ['invalid', ['SecretCorp']],
+    ['uppercase', ['Example.com']],
+    ['non-string', [42]],
+    ['non-array', 'example.com'],
+  ])('rejects an authoritative domain list that is %s without echoing values', (_name, domains) => {
+    const problems = domainPolicyProblems({
+      verifiedDomains: ['example.com'],
+      emailAuthoritativeDomains: domains,
+      autoJoin: false,
+    } as never);
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.join(' ')).toContain('emailAuthoritativeDomains');
+    expect(problems.join(' ')).not.toMatch(/SecretCorp|other\.com|Example\.com|42/);
+  });
+
   it('accepts several distinct domains', () => {
     expect(
       domainPolicyProblems({ verifiedDomains: ['example.com', 'example.org'], autoJoin: true }),

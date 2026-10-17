@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CSRF_COOKIE, LOGIN_COOKIE, SESSION_COOKIE } from './cookies.js';
-import { sealLoginState } from './login-state.js';
+import { openLoginState, sealLoginState } from './login-state.js';
 import type { LoginOutcome } from './identity-login.js';
 import { createSsoRoutes } from './routes-sso.js';
 import type { ReauthOutcome, SsoRouteDeps } from './routes-sso.js';
@@ -24,7 +24,6 @@ const ORG = orgContext('01J0ORGA00000000000000000A');
 const USER_ID = '01J0USERA0000000000000000A';
 const EMAIL = 'ada@example.test';
 const PROVIDER_ERROR_TEXT = 'upstream said: super-secret-detail';
-const CHALLENGE = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
 
 type Log = Readonly<Record<string, unknown>>;
 
@@ -114,6 +113,10 @@ async function build(options: Options = {}) {
           ? row.session
           : null,
       );
+    },
+    findActiveById: (ctx, id, cutoffs) => {
+      const entry = [...rows].find(([, row]) => row.session.id === id);
+      return repository.findActive(ctx, entry?.[0] ?? '', cutoffs);
     },
     touch: () => Promise.resolve(),
     revokeBySecretHash: (_ctx, hash) => {
@@ -396,6 +399,27 @@ describe('SSO login through start and callback', () => {
     expect(app.logs).toContainEqual(
       expect.objectContaining({ event: 'auth.login.succeeded', provider: 'dex' }),
     );
+  });
+
+  it('seals a login state without a challenge field', async () => {
+    const app = await build();
+    const start = await app.kernel.fetch(startRequest('dex'));
+    const login = `${LOGIN_COOKIE}=${cookieValue(start, LOGIN_COOKIE) ?? ''}`;
+    const state = await openLoginState(
+      app.cipher,
+      new Request(`${ORIGIN}/`, { headers: { cookie: login } }),
+      { provider: 'dex', sessionId: null },
+      NOW,
+    );
+    expect(state).not.toBeNull();
+    expect(Object.keys(state ?? {}).sort()).toEqual([
+      'data',
+      'issuedAt',
+      'provider',
+      'purpose',
+      'returnTo',
+      'sessionId',
+    ]);
   });
 
   it('passes the sealed provider state to finish and a callback URL from the public origin', async () => {
@@ -876,11 +900,32 @@ describe('callback refusals', () => {
     expect(app.login).not.toHaveBeenCalled();
   });
 
+  it('answers admin linking and not-invited refusals identically', async () => {
+    const responses: Response[] = [];
+    for (const reason of ['not_invited', 'link_requires_admin']) {
+      const app = await build({ loginRefusal: reason });
+      const login = await loginCookieOf(app);
+      responses.push(await app.kernel.fetch(callback('dex', login)));
+      expect(refusals(app)).toEqual([expect.objectContaining({ reason })]);
+    }
+    const [baseline, linking] = responses as [Response, Response];
+    expect(linking.status).toBe(baseline.status);
+    const baselineId = baseline.headers.get('x-request-id') as string;
+    const linkingId = linking.headers.get('x-request-id') as string;
+    linking.headers.delete('x-request-id');
+    baseline.headers.delete('x-request-id');
+    expect([...linking.headers]).toEqual([...baseline.headers]);
+    expect((await linking.text()).replace(linkingId, 'request-id')).toBe(
+      (await baseline.text()).replace(baselineId, 'request-id'),
+    );
+  });
+
   it.each([
     'email_missing',
     'email_unverified',
     'domain_not_verified',
     'not_invited',
+    'link_requires_admin',
     'user_suspended',
     'hook_denied',
     'too_many_groups',
@@ -1262,7 +1307,6 @@ describe('re-authentication', () => {
       returnTo: '/',
       issuedAt: NOW,
       sessionId: '01J0SESSIONOTHER0000000000',
-      challenge: CHALLENGE,
       data: {},
     });
     const login = pairOf(setCookie);
@@ -1472,5 +1516,254 @@ describe('no refusal text leaks', () => {
       expect(text).not.toContain('cross_site');
       expect(response.headers.get('cache-control')).toBe('no-store');
     }
+  });
+});
+
+describe('SSO start location response', () => {
+  const AUTHORIZE = 'https://dex.example.test/authorize?client_id=pb';
+
+  function attributesOf(response: Response): string[] {
+    const header = response.headers
+      .getSetCookie()
+      .find((entry) => entry.startsWith(`${LOGIN_COOKIE}=`));
+    return (header ?? '')
+      .split(';')
+      .slice(1)
+      .map((part) => part.trim());
+  }
+
+  it('answers 200 with only the location when Accept is application/json', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json' }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await bodyOf(response)).toEqual({ location: AUTHORIZE });
+  });
+
+  it('returns the same location as the 303 mode', async () => {
+    const app = await build();
+
+    const json = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json' }),
+    );
+    const redirected = await app.kernel.fetch(startRequest('dex'));
+
+    expect((await bodyOf(json))['location']).toBe(redirected.headers.get('location'));
+  });
+
+  it('serves the JSON mode for a media-range list that prefers application/json', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json, text/plain;q=0.5' }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('keeps the 303 for a request without Accept', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(startRequest('dex'));
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(AUTHORIZE);
+  });
+
+  it('keeps the 303 for Accept */*', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(startRequest('dex', undefined, { accept: '*/*' }));
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(AUTHORIZE);
+  });
+
+  it('keeps the 303 for Accept text/html', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'text/html' }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(AUTHORIZE);
+  });
+
+  it('keeps the 303 when text/html is listed before application/json', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'text/html, application/json' }),
+    );
+
+    expect(response.status).toBe(303);
+  });
+
+  it('keeps the 303 when application/json has quality zero', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json;q=0, text/html' }),
+    );
+
+    expect(response.status).toBe(303);
+  });
+
+  it('puts no key other than location in the JSON body', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json' }),
+    );
+    const cookie = cookieValue(response, LOGIN_COOKIE) ?? '';
+    const body = await bodyOf(response);
+
+    expect(Object.keys(body)).toEqual(['location']);
+    expect(cookie).not.toBe('');
+    expect(JSON.stringify(body)).not.toContain(cookie);
+  });
+
+  it('sets the same login cookie attributes and cache header in both modes', async () => {
+    const app = await build();
+
+    const json = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json' }),
+    );
+    const redirected = await app.kernel.fetch(startRequest('dex'));
+
+    expect(attributesOf(json)).toEqual(attributesOf(redirected));
+    expect(attributesOf(json).length).toBeGreaterThan(0);
+    expect(json.headers.get('cache-control')).toBe('no-store');
+    expect(json.headers.getSetCookie()).toHaveLength(redirected.headers.getSetCookie().length);
+  });
+
+  it('seals a login cookie in the JSON mode that the callback accepts', async () => {
+    const app = await build();
+
+    const start = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json' }),
+    );
+    const done = await app.kernel.fetch(
+      callback('dex', `${LOGIN_COOKIE}=${cookieValue(start, LOGIN_COOKIE) ?? ''}`),
+    );
+
+    expect(done.status).toBe(303);
+    expect(done.headers.get('location')).toBe('/projects/a');
+  });
+
+  it('matches Accept case-insensitively', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'Application/JSON' }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('accepts application/json with a charset parameter', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json; charset=utf-8' }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('treats an unparsable quality as unacceptable', async () => {
+    const app = await build();
+
+    const response = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json;q=abc' }),
+    );
+
+    expect(response.status).toBe(303);
+  });
+
+  it('answers a reauth start in the JSON mode with the location', async () => {
+    const app = await build();
+    const { cookie, csrf } = await app.seed();
+
+    const response = await app.kernel.fetch(
+      startRequest(
+        'dex',
+        { purpose: 'reauth', returnTo: '/tokens/new' },
+        { cookie, 'x-csrf-token': csrf, accept: 'application/json' },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await bodyOf(response)).toEqual({ location: AUTHORIZE });
+    expect(cookieValue(response, LOGIN_COOKIE)).not.toBeNull();
+  });
+
+  it('varies both start success responses on Accept', async () => {
+    const app = await build();
+
+    const json = await app.kernel.fetch(
+      startRequest('dex', undefined, { accept: 'application/json' }),
+    );
+    const redirected = await app.kernel.fetch(startRequest('dex'));
+
+    expect(json.headers.get('vary')).toBe('Accept');
+    expect(redirected.headers.get('vary')).toBe('Accept');
+  });
+
+  it('answers a direct provider in the JSON mode with the return location and the 303 cookies', async () => {
+    const access = makeProvider('access', {
+      supportsReauth: false,
+      start: () => Promise.resolve({ kind: 'direct' }),
+      finish: () => Promise.resolve({ ok: true, identity: { ...identity, provider: 'access' } }),
+    });
+    const app = await build({ providers: [access] });
+
+    const json = await app.kernel.fetch(
+      startRequest('access', undefined, { accept: 'application/json' }),
+    );
+    const redirected = await app.kernel.fetch(startRequest('access'));
+
+    expect(json.status).toBe(200);
+    expect(await bodyOf(json)).toEqual({ location: '/projects/a' });
+    expect(redirected.status).toBe(303);
+    const names = (response: Response) =>
+      response.headers
+        .getSetCookie()
+        .map((c) => c.replace(/=[^;]*/, ''))
+        .sort();
+    expect(names(json)).toEqual(names(redirected));
+    expect(names(json).length).toBeGreaterThan(0);
+  });
+
+  it('refuses a foreign Origin with the same envelope in the JSON mode', async () => {
+    const app = await build();
+    const headers = { origin: 'https://evil.test' };
+
+    const json = await app.kernel.fetch(
+      startRequest('dex', undefined, { ...headers, accept: 'application/json' }),
+    );
+    const plain = await app.kernel.fetch(startRequest('dex', undefined, headers));
+
+    expect(json.status).toBe(403);
+    expect(plain.status).toBe(403);
+    expect(genericRefusal(await bodyOf(json))).toEqual(genericRefusal(await bodyOf(plain)));
+    expect(json.headers.getSetCookie()).toEqual([]);
+  });
+
+  it('answers an unknown provider with the same error in both modes', async () => {
+    const app = await build();
+
+    const json = await app.kernel.fetch(
+      startRequest('nope', undefined, { accept: 'application/json' }),
+    );
+    const plain = await app.kernel.fetch(startRequest('nope'));
+
+    expect(json.status).toBe(404);
+    expect(plain.status).toBe(404);
+    expect(genericRefusal(await bodyOf(json))).toEqual(genericRefusal(await bodyOf(plain)));
   });
 });

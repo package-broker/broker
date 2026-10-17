@@ -8,7 +8,7 @@ import { fixedClock } from '../ids.js';
 import type { Clock } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
 import type { IdentityProvider } from '../identity/port.js';
-import { createAdministration } from './administration.js';
+import { createAdministration, type AdministrationDeps } from './administration.js';
 import { mutationFence, type AuthenticatedActor } from './fence.js';
 import type { ActorContext } from './administration.js';
 import { DEFAULT_ROLES, PERMISSIONS } from './permissions.js';
@@ -90,6 +90,7 @@ function setup(
     clock?: Clock;
     stored?: readonly Role[];
     storedGrants?: readonly OrganizationGrant[];
+    onCreatorOffboarded?: unknown;
   } = {},
 ) {
   const stored = overrides.stored ?? [customRole(), adminRole];
@@ -126,6 +127,13 @@ function setup(
     clock: overrides.clock ?? fixedClock(NOW),
     ids: { ulid: () => ULIDS[next++] as string },
     log,
+    ...(overrides.onCreatorOffboarded === undefined
+      ? {}
+      : {
+          onCreatorOffboarded: overrides.onCreatorOffboarded as NonNullable<
+            AdministrationDeps['onCreatorOffboarded']
+          >,
+        }),
   });
   return { admin, roles, grants, users, log };
 }
@@ -1734,5 +1742,104 @@ describe('repository contract: invalid input is answered, never thrown', () => {
     });
     expect(result.ok).toBe(acceptable);
     if (!result.ok) expect(result.error).toBe('invalid_subject');
+  });
+});
+
+describe('creator offboarding', () => {
+  it('reports a fresh suspension once with cause suspended', async () => {
+    const onCreatorOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ onCreatorOffboarded });
+    expect(await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(onCreatorOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'u1',
+      cause: 'suspended',
+    });
+  });
+
+  it('does not report an already suspended user or a refused suspension', async () => {
+    const onCreatorOffboarded = vi.fn(async () => undefined);
+    const already = setup({
+      grants: { suspendUser: vi.fn(async () => 'unchanged') },
+      onCreatorOffboarded,
+    });
+    expect(
+      (await already.admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).ok,
+    ).toBe(true);
+    for (const repo of ['authority', 'conflict', 'indeterminate', 'last_holder', 'not_found']) {
+      const refused = setup({
+        grants: { suspendUser: vi.fn(async () => repo) },
+        onCreatorOffboarded,
+      });
+      expect(
+        (await refused.admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).ok,
+      ).toBe(false);
+    }
+    const denied = setup({ onCreatorOffboarded });
+    await denied.admin.suspendUser(ctx, grantsWriter, fenceFor(grantsWriter), 'u1');
+    expect(onCreatorOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('keeps the suspension ok and logs the failure by name when the callback rejects', async () => {
+    const onCreatorOffboarded = vi.fn(async () => {
+      throw new RangeError('secret-bearing detail');
+    });
+    const { admin, log } = setup({ onCreatorOffboarded });
+    expect(await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).toEqual({
+      ok: true,
+      value: null,
+    });
+    const failures = log.mock.calls
+      .map(([entry]) => entry as Record<string, unknown>)
+      .filter((entry) => entry['event'] === 'user.offboarding_callback_failed');
+    expect(failures).toEqual([
+      {
+        level: 'warn',
+        event: 'user.offboarding_callback_failed',
+        orgId: 'org-a',
+        userId: 'u1',
+        cause: 'suspended',
+        error: 'RangeError',
+      },
+    ]);
+    expect(JSON.stringify(log.mock.calls)).not.toContain('secret-bearing detail');
+  });
+
+  it('keeps the suspension ok when the callback throws synchronously and the log sink fails', async () => {
+    const onCreatorOffboarded = vi.fn(() => {
+      throw new Error('boom');
+    });
+    const { admin } = setup({
+      onCreatorOffboarded,
+    });
+    expect((await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).ok).toBe(
+      true,
+    );
+    const failingLog = createAdministration({
+      roles: {
+        list: async () => [],
+        get: async () => null,
+      } as unknown as AdministrationDeps['roles'],
+      grants: {
+        listOrganization: async () => [],
+        suspendUser: async () => 'suspended',
+      } as unknown as AdministrationDeps['grants'],
+      users: { get: async () => userOf() },
+      providers: new Map(),
+      clock: fixedClock(NOW),
+      ids: { ulid: () => 'ID00' },
+      log: () => {
+        throw new Error('sink down');
+      },
+      onCreatorOffboarded,
+    });
+    expect(await failingLog.suspendUser(ctx, administrator, fenceFor(administrator), 'u1')).toEqual(
+      {
+        ok: true,
+        value: null,
+      },
+    );
   });
 });

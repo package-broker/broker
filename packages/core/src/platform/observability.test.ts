@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   APPROVED_ERROR_NAMES,
   DROPPED_SIGNALS,
   metricLabelValueAllowed,
   HTTP_REQUEST_EVENT,
+  LOG_FIELDS,
+  type SafeLogRecord,
+  projectLogFields,
   type ObsRecord,
   type ObsRecordSink,
   type ObservabilityScope,
@@ -552,6 +555,65 @@ describe('HTTP_REQUEST_EVENT', () => {
     expect(HTTP_REQUEST_EVENT).toBe('http.request');
     expect(HTTP_REQUEST_EVENT).toMatch(/^[a-z][a-z0-9_.]{0,63}$/);
     expect(safeRecord({ level: 'info', event: HTTP_REQUEST_EVENT })?.event).toBe('http.request');
+  });
+});
+
+describe('LOG_FIELDS', () => {
+  it('covers exactly the keys of SafeLogRecord', () => {
+    expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
+    const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
+    expect(missing).toHaveLength(20);
+    expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
+  });
+
+  it('rejects a list that omits a key or adds an extra entry', () => {
+    type Exhaustive<T extends readonly (keyof SafeLogRecord)[]> = [
+      Exclude<keyof SafeLogRecord, T[number]>,
+    ] extends [never]
+      ? T
+      : never;
+    expectTypeOf<Exhaustive<typeof LOG_FIELDS>>().toEqualTypeOf<typeof LOG_FIELDS>();
+    expectTypeOf<Exhaustive<readonly ['level']>>().toEqualTypeOf<never>();
+    // @ts-expect-error an entry that is not a SafeLogRecord key
+    const extra: readonly (keyof SafeLogRecord)[] = [...LOG_FIELDS, 'message'];
+    expect(extra).toContain('message');
+  });
+});
+
+describe('projectLogFields', () => {
+  it('drops unknown keys and undefined values', () => {
+    expect(
+      projectLogFields({
+        level: 'info',
+        event: 'a.b',
+        message: 'x',
+        email: 'e',
+        status: undefined,
+      }),
+    ).toEqual({ level: 'info', event: 'a.b' });
+  });
+
+  it('does not invoke getters', () => {
+    let called = false;
+    const record = {
+      level: 'info',
+      get event(): string {
+        called = true;
+        return 'a.b';
+      },
+    };
+    expect(projectLogFields(record)).toEqual({ level: 'info' });
+    expect(called).toBe(false);
+  });
+
+  it('ignores inherited properties', () => {
+    const record = Object.create({ event: 'a.b' }, { level: { value: 'info', enumerable: true } });
+    expect(projectLogFields(record as object)).toEqual({ level: 'info' });
+  });
+
+  it('orders keys by LOG_FIELDS', () => {
+    const out = projectLogFields({ reason_code: 'r', event: 'a.b', level: 'info' });
+    expect(Object.keys(out)).toEqual(['level', 'event', 'reason_code']);
   });
 });
 

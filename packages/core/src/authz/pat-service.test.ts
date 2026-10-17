@@ -143,6 +143,31 @@ function realSessions(reauthAt: string | null) {
 }
 
 describe('personal token issuance', () => {
+  it.each(['service', 'customer'])(
+    'refuses a forged %s session before repository calls',
+    async (kind) => {
+      const r = rig();
+      const tokens = vi.spyOn(r.deps.tokens, 'issuePersonal');
+      const organizations = vi.spyOn(r.deps.organizations, 'get');
+      const providers = vi.spyOn(r.deps.providers, 'anchors');
+      const authenticated = {
+        ...session(),
+        principal: { kind, id: 'other-principal' },
+      } as unknown as AuthenticatedSession;
+      const result = await createPersonalTokenService(r.deps).issue(
+        ctx,
+        authenticated,
+        fence(),
+        allInput(),
+      );
+      expect(result.ok).toBe(false);
+      expect(result).toMatchObject({ ok: false, error: 'forbidden' });
+      expect(tokens).not.toHaveBeenCalled();
+      expect(organizations).not.toHaveBeenCalled();
+      expect(providers).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ['null', null],
     ['stale', inDays(0, -REAUTH_WINDOW_MS - 1)],

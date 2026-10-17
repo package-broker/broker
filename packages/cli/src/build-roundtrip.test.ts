@@ -7,10 +7,16 @@ import {
 } from '@package-broker/db-sqlite/migrations/source';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { build } from './build.js';
+import { build, BuildDiagnosticsError } from './build.js';
+import { run } from './cli.js';
 import { toManifestMigrations } from './build-artifacts.js';
 import { BuiltManifestError, loadBuiltMigrations } from './commands/built-manifest.js';
-import { renderManifestJson, type Manifest } from './manifest.js';
+import { diagnoseRoutes, renderManifestJson, type Manifest } from './manifest.js';
+
+vi.mock('./manifest.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./manifest.js')>();
+  return { ...actual, diagnoseRoutes: vi.fn(actual.diagnoseRoutes) };
+});
 
 const CORE_SQL = 'CREATE TABLE core_items (id TEXT PRIMARY KEY);\n';
 const PLUGIN_SQL = 'CREATE TABLE github_repos (id TEXT PRIMARY KEY);\n';
@@ -174,5 +180,113 @@ describe('build platform ports warning', () => {
       'jobs: registered but platformPorts.node is not configured',
     );
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+async function routeFixture(permission: string | null) {
+  const options = await buildFixture({ node: NODE_PORTS });
+  await writeFile(
+    options.configPath,
+    `export default { platform: 'node', plugins: [{ id: 'widgets', package: '@test/widgets', apiVersion: 3, platforms: ['node'], register: (r) => r.route({ method: 'GET', path: '/widgets', permission: ${JSON.stringify(permission)}, boundary: 'organization', handler: () => new Response(null) }) }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
+  );
+  return options;
+}
+
+describe('build catalogue diagnostics', () => {
+  it('fails with the problem listed and writes no manifest when a route names an unknown permission', async () => {
+    const options = await routeFixture('org:typo');
+    const failure = await build(options).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BuildDiagnosticsError);
+    const problems = (failure as BuildDiagnosticsError).problems;
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((problem) => problem.includes('org:typo'))).toBe(true);
+    await expect(
+      readFile(path.join(options.cwd, '.pb', 'node', 'generated', 'manifest.json'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps a non-diagnostic failure as a plain error', async () => {
+    const options = await buildFixture(undefined, true);
+    const failure = await build(options).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(BuildDiagnosticsError);
+  });
+});
+
+describe('pb build exit codes', () => {
+  it('exits 2 and prints one error line per problem for a diagnostics failure', async () => {
+    const options = await routeFixture('org:typo');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(options.cwd);
+    try {
+      expect(await run(['build', '--config', options.configPath])).toBe(2);
+    } finally {
+      cwd.mockRestore();
+    }
+    const lines = error.mock.calls.map((call) => call.join(' '));
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every((line) => line.startsWith('error: '))).toBe(true);
+    expect(lines.some((line) => line.includes('org:typo'))).toBe(true);
+  });
+});
+
+describe('build failure disclosure', () => {
+  const SENTINEL = 'SENTINEL-apiversion-value';
+
+  async function sentinelFixture() {
+    const options = await buildFixture({ node: NODE_PORTS });
+    await writeFile(
+      options.configPath,
+      `export default { platform: 'node', plugins: [{ id: 'widgets', package: '@test/widgets', apiVersion: ${JSON.stringify(SENTINEL)}, platforms: ['node'] }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
+    );
+    return options;
+  }
+
+  it('prints only the error name and exits 1 when a config value is invalid', async () => {
+    const options = await sentinelFixture();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    vi.spyOn(process, 'cwd').mockReturnValue(options.cwd);
+    const argv = process.argv;
+    process.argv = ['node', 'pb', 'build', '--config', options.configPath];
+    try {
+      vi.resetModules();
+      await import('./bin.js');
+      await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+    } finally {
+      process.argv = argv;
+    }
+    expect(exit).toHaveBeenCalledWith(1);
+    const printed = error.mock.calls.map((call) => call.join(' ')).join('\n');
+    expect(printed).not.toContain(SENTINEL);
+    expect(printed).toBe('error: Error');
+  });
+});
+
+describe('build route diagnostics after registration', () => {
+  it('exits 2 and writes no manifest when diagnoseRoutes rejects a config the kernel accepted', async () => {
+    const options = await routeFixture('org:read');
+    vi.mocked(diagnoseRoutes).mockReturnValueOnce([
+      'Route GET /widgets (plugin "widgets"): synthetic',
+    ]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(options.cwd);
+    try {
+      expect(await run(['build', '--config', options.configPath])).toBe(2);
+    } finally {
+      cwd.mockRestore();
+    }
+    expect(error.mock.calls.map((call) => call.join(' '))).toEqual([
+      'error: Route GET /widgets (plugin "widgets"): synthetic',
+    ]);
+    await expect(
+      readFile(path.join(options.cwd, '.pb', 'node', 'generated', 'manifest.json'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

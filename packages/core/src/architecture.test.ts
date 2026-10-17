@@ -50,7 +50,7 @@ const RULES: Readonly<Record<string, Rule>> = {
     kitAndTests: ['vitest', 'node'],
   },
   'runtime-cloudflare': {
-    allow: [...ws('core', 'db-sqlite'), 'hono'],
+    allow: [...ws('core', 'db-sqlite'), 'hono', '@cloudflare/workers-types'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
     onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },

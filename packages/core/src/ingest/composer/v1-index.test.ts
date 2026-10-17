@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
 import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
@@ -684,3 +684,139 @@ describe('readV1Index listing containers', () => {
     expect(incomplete(await readV1Index(fetch, options))).toBe('invalid');
   });
 });
+
+describe('readV1Index streamed root', () => {
+  function bigRoot(count: number): string {
+    return JSON.stringify({
+      packages: Object.fromEntries(
+        Array.from({ length: count }, (_v, i) => [
+          `vendor/pkg-${i}`,
+          { '1.0.0': { name: `vendor/pkg-${i}`, description: 'x'.repeat(240) } },
+        ]),
+      ),
+    });
+  }
+
+  function chunkedRoutes(root: string): ReturnType<typeof createPolicyFetch> {
+    const bytes = new TextEncoder().encode(root);
+    return createPolicyFetch({
+      policy,
+      userAgent: 'pb-test/1',
+      fetchImpl: async () => {
+        let at = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (at >= bytes.length) controller.close();
+              else {
+                controller.enqueue(bytes.subarray(at, at + 65536));
+                at += 65536;
+              }
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+  }
+
+  it('indexes a 5 MiB single-file root with 20,000 packages', async () => {
+    const root = bigRoot(20_000);
+    expect(root.length).toBeGreaterThan(5 * 1024 * 1024);
+    const result = await readV1Index(chunkedRoutes(root), options);
+    expect(result.status === 'updated' && result.index.complete).toBe(true);
+    expect(result.status === 'updated' && result.index.entries.size).toBe(20_000);
+    expect(result.status === 'updated' && result.index.rootSha256).toBe(sha256(root));
+  });
+
+  it('fails a root over maxDocumentBytes as too_large', async () => {
+    const { fetch } = setup({ [`${BASE}/packages.json`]: bigRoot(50) });
+    await expect(readV1Index(fetch, { ...options, maxDocumentBytes: 4096 })).rejects.toMatchObject({
+      code: 'too_large',
+    });
+  });
+
+  it('counts the root against the pass byte budget', async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 100 }, (_, i) => [
+        `p/${i}$%hash%.json`,
+        providerFile({ [`vendor/pkg-${i}`]: H1 }),
+      ]),
+    );
+    const root = providersRoot(files);
+    const routes = Object.fromEntries(
+      Object.entries(files).map(([key, body]) => [
+        `${BASE}/${key.replace('$', '%24').replace('%hash%', sha256(body))}`,
+        body,
+      ]),
+    );
+    const { fetch } = setup({ [`${BASE}/packages.json`]: root, ...routes });
+    const maxPassBytes = Math.floor(root.length * 1.5);
+    expect(root.length).toBeLessThan(maxPassBytes);
+    expect(maxPassBytes).toBeLessThan(root.length * 2);
+    expect(incomplete(await readV1Index(fetch, { ...options, maxPassBytes }))).toBe('bytes');
+  });
+});
+
+describe('readV1Index root budget regressions', () => {
+  it('does not retry when the root alone exceeds maxPassBytes', async () => {
+    const root = providersRoot({});
+    const { fetch, requests } = setup({ [`${BASE}/packages.json`]: root });
+    expect(
+      incomplete(await readV1Index(fetch, { ...options, maxPassBytes: root.length - 1 })),
+    ).toBe('bytes');
+    expect(requests).toEqual([`${BASE}/packages.json`]);
+  });
+
+  it('shares the deadline between a slow root and slow includes', async () => {
+    const file = providerFile({ 'vendor/a': H1 });
+    const other = providerFile({ 'vendor/b': H2 });
+    const root = providersRoot({ 'p/a$%hash%.json': file, 'p/b$%hash%.json': other });
+    const { fetch } = setup({
+      [`${BASE}/packages.json`]: async () => {
+        await new Promise((r) => setTimeout(r, 70));
+        return new Response(root);
+      },
+      [`${BASE}/p/b%24${sha256(other)}.json`]: other,
+      [`${BASE}/p/a%24${sha256(file)}.json`]: async () => {
+        await new Promise((r) => setTimeout(r, 70));
+        return new Response(file);
+      },
+    });
+    const timeouts: number[] = [];
+    const result = await readV1Index(
+      (request) => {
+        timeouts.push(request.timeoutMs);
+        return fetch(request);
+      },
+      { ...options, passTimeoutMs: 110 },
+    );
+    expect(incomplete(result)).toBe('deadline');
+    expect(timeouts).toHaveLength(4);
+    expect(timeouts[1]).toBeLessThan(70);
+    expect(timeouts[3]).toBeLessThan(70);
+  });
+});
+
+it.each([1000, 25])(
+  'caps the root fetch at the remaining deadline and source timeout %i',
+  async (timeoutMs) => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1030);
+    now.mockReturnValueOnce(1000);
+    try {
+      const timeouts: number[] = [];
+      const root = providersRoot({});
+      const result = await readV1Index(
+        async (request) => {
+          timeouts.push(request.timeoutMs);
+          return { status: 200, headers: new Headers(), body: new Response(root).body };
+        },
+        { ...options, source: { ...source, timeoutMs }, passTimeoutMs: 100 },
+      );
+      expect(timeouts).toEqual([Math.min(timeoutMs, 70)]);
+      expect(result.status === 'updated' && result.index.complete).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  },
+);

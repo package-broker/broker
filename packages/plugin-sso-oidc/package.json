@@ -1,6 +1,6 @@
 {
   "name": "@package-broker/plugin-sso-oidc",
-  "version": "0.1.0-rc.0",
+  "version": "1.0.0-rc.0",
   "description": "Generic OIDC single sign-on plugin stub",
   "license": "AGPL-3.0-only",
   "type": "module",

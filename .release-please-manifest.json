@@ -1,10 +1,10 @@
 {
-  "packages/core": "2.0.0-rc.0",
-  "packages/cli": "2.0.0-rc.0",
-  "packages/runtime-cloudflare": "2.0.0-rc.0",
-  "packages/runtime-node": "2.0.0-rc.0",
-  "packages/ui": "2.0.0-rc.0",
-  "packages/plugin-sso-oidc": "0.1.0-rc.0",
-  "packages/plugin-github": "0.1.0-rc.0",
-  "packages/db-sqlite": "2.0.0-rc.0"
+  "packages/core": "2.0.0-rc.1",
+  "packages/cli": "2.0.0-rc.1",
+  "packages/runtime-cloudflare": "2.0.0-rc.1",
+  "packages/runtime-node": "2.0.0-rc.1",
+  "packages/ui": "2.0.0-rc.1",
+  "packages/plugin-sso-oidc": "1.0.0-rc.0",
+  "packages/plugin-github": "1.0.0-rc.0",
+  "packages/db-sqlite": "2.0.0-rc.1"
 }

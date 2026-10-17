@@ -4,7 +4,6 @@ import {
   randomToken,
   sha256Hex,
 } from '@package-broker/core/auth/primitives';
-import { domainPolicyProblems } from '@package-broker/core/identity/policy';
 import {
   isReservedProviderId,
   isValidProviderId,
@@ -18,7 +17,22 @@ import {
   type StartResult,
 } from '@package-broker/core/identity/port';
 import { providerSecretName } from '@package-broker/core/identity/providers';
-import { BoundedFetchError, fetchBounded, type BoundedFetchFailure } from './http.js';
+import {
+  checkPolicy,
+  copyList,
+  copyOwn,
+  hasHiddenKeys,
+  HIDDEN_KEYS_PROBLEM,
+  isPlainContainer,
+  MAX_LIST_LENGTH,
+} from './config.js';
+import {
+  BoundedFetchError,
+  fetchBounded,
+  tokenEndpointError,
+  type BoundedFetchFailure,
+  type TokenEndpointError,
+} from './http.js';
 import { createJwksCache } from './jwks.js';
 import { JwtError, verifyJwt, type KeySource, type VerifiedClaims } from './jwt.js';
 
@@ -34,7 +48,10 @@ export interface OidcConfig {
   readonly trustedEndpointOrigins?: readonly string[];
 }
 
+export { tokenEndpointError, type TokenEndpointError } from './http.js';
+
 export type OidcFailureDetail =
+  | TokenEndpointError
   | 'secret_missing'
   | 'callback_invalid'
   | 'purpose_invalid'
@@ -59,7 +76,6 @@ const DISCOVERY_TIMEOUT_MS = 5000;
 const TOKEN_MAX_BYTES = 64 * 1024;
 const TOKEN_TIMEOUT_MS = 5000;
 const DEFAULT_SCOPES: readonly string[] = ['openid', 'email', 'profile', 'groups'];
-const POLICY_KEYS: ReadonlySet<string> = new Set(['verifiedDomains', 'autoJoin']);
 const OWNED_AUTHORIZATION_PARAMETERS: readonly string[] = [
   'response_type',
   'client_id',
@@ -100,8 +116,10 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
 ]);
 const MAX_DISPLAY_NAME_LENGTH = 100;
 const MAX_CLIENT_ID_LENGTH = 255;
-const MAX_LIST_LENGTH = 32;
 const MAX_ENDPOINT_LENGTH = 2048;
+const MAX_LIST_ENTRY_LENGTH = 255;
+const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
+const DEFAULT_PORT = /^https?:\/\/[^/]*:(?:443|80)(?:\/|$)/;
 const UNSAFE_DISPLAY_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const CLIENT_ID = /^[\x21-\x7e]+$/;
 const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
@@ -124,31 +142,18 @@ function isSecureOrLoopback(url: URL): boolean {
   return url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHost(url.hostname));
 }
 
-function copyList(value: unknown): unknown {
-  return Array.isArray(value) ? Array.from(value as unknown[]) : value;
+interface Snapshot {
+  readonly config: Record<string, unknown>;
+  readonly problems: readonly string[];
 }
 
-function copyOwn(raw: object): Record<string, unknown> {
-  const source = raw as Record<string, unknown>;
-  const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of Object.keys(source)) {
-    Object.defineProperty(copy, key, {
-      value: source[key],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
-  }
-  return copy;
-}
-
-function isPlainContainer(value: unknown): value is object {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function snapshot(raw: unknown): Record<string, unknown> {
+function snapshot(raw: unknown): Snapshot {
   if (!isPlainContainer(raw)) {
     throw new TypeError('config must be an object');
+  }
+  const problems: string[] = [];
+  if (hasHiddenKeys(raw)) {
+    problems.push(`configuration ${HIDDEN_KEYS_PROBLEM}`);
   }
   const copy = copyOwn(raw);
   for (const key of ['scopes', 'trustedAudiences', 'trustedEndpointOrigins']) {
@@ -156,19 +161,17 @@ function snapshot(raw: unknown): Record<string, unknown> {
       copy[key] = copyList(copy[key]);
     }
   }
-  const policy = copy['policy'];
-  if (isPlainContainer(policy)) {
-    const policyCopy = copyOwn(policy);
-    if (Object.hasOwn(policyCopy, 'verifiedDomains')) {
-      policyCopy['verifiedDomains'] = copyList(policyCopy['verifiedDomains']);
-    }
-    copy['policy'] = policyCopy;
+  const policy = checkPolicy(copy['policy']);
+  copy['policy'] = policy.snapshot;
+  problems.push(...policy.problems.map((problem) => `policy: ${problem}`));
+  if (policy.groups) {
+    problems.push('policy: unsupported key "groups"');
   }
-  return copy;
+  return { config: copy, problems };
 }
 
 function isTrustedOrigin(value: unknown): boolean {
-  if (typeof value !== 'string') {
+  if (typeof value !== 'string' || value.length > MAX_ENDPOINT_LENGTH) {
     return false;
   }
   try {
@@ -200,6 +203,40 @@ function stringListProblems(
   return problems;
 }
 
+function isListEntry(entry: unknown): entry is string {
+  return typeof entry === 'string' && entry.length >= 1 && entry.length <= MAX_LIST_ENTRY_LENGTH;
+}
+
+function hasNonCanonicalEscape(path: string): boolean {
+  for (const [, hex] of path.matchAll(/%([0-9a-fA-F]{2})/g)) {
+    const escape = hex as string;
+    if (escape !== escape.toUpperCase()) {
+      return true;
+    }
+    if (UNRESERVED_CHARACTER.test(String.fromCharCode(Number.parseInt(escape, 16)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function issuerFormProblems(issuer: string): string[] {
+  const url = new URL(issuer);
+  if (DEFAULT_PORT.test(issuer) && url.port === '') {
+    return ['issuer must not name the default port'];
+  }
+  const authority = issuer.slice(url.protocol.length + 2).split('/', 1)[0] as string;
+  const path = issuer.slice(url.protocol.length + 2 + authority.length);
+  const serialised =
+    url.href.endsWith('/') && url.pathname === '/' ? url.href.slice(0, -1) : url.href;
+  const canonical =
+    serialised === `${url.protocol}//${authority.toLowerCase()}${path}` &&
+    !url.hostname.endsWith('.') &&
+    !path.includes('//') &&
+    !hasNonCanonicalEscape(path);
+  return canonical ? [] : ['issuer must be in canonical URL form'];
+}
+
 function snapshotProblems(config: Record<string, unknown>): string[] {
   const problems: string[] = [];
   for (const key of Object.keys(config)) {
@@ -207,7 +244,7 @@ function snapshotProblems(config: Record<string, unknown>): string[] {
       problems.push(`unsupported key ${JSON.stringify(key.slice(0, 40))}`);
     }
   }
-  const { id, kind, displayName, issuer, clientId, policy, scopes } = config;
+  const { id, kind, displayName, issuer, clientId, scopes } = config;
   if (typeof id !== 'string' || !isValidProviderId(id)) {
     problems.push('id must be a valid provider id');
   } else if (isReservedProviderId(id)) {
@@ -231,6 +268,8 @@ function snapshotProblems(config: Record<string, unknown>): string[] {
     problems.push(
       'issuer must be an https URL (or http on a loopback host) without query, fragment, credentials or trailing slash',
     );
+  } else {
+    problems.push(...issuerFormProblems(issuer));
   }
   if (
     typeof clientId !== 'string' ||
@@ -240,28 +279,18 @@ function snapshotProblems(config: Record<string, unknown>): string[] {
   ) {
     problems.push(`clientId must be 1 to ${MAX_CLIENT_ID_LENGTH} printable ASCII characters`);
   }
-  for (const problem of domainPolicyProblems(policy as DomainPolicy)) {
-    problems.push(`policy: ${problem}`);
-  }
-  if (isPlainContainer(policy)) {
-    for (const key of Object.keys(policy)) {
-      if (!POLICY_KEYS.has(key)) {
-        problems.push(`policy: unsupported key ${JSON.stringify(key.slice(0, 40))}`);
-      }
-    }
-  }
   problems.push(
     ...stringListProblems(
       scopes,
       'scopes',
-      (entry) => typeof entry === 'string' && SCOPE_TOKEN.test(entry) && entry !== 'offline_access',
-      'must be a scope token and must not be offline_access',
+      (entry) => isListEntry(entry) && SCOPE_TOKEN.test(entry) && entry !== 'offline_access',
+      `must be a scope token of at most ${MAX_LIST_ENTRY_LENGTH} characters and must not be offline_access`,
     ),
     ...stringListProblems(
       config['trustedAudiences'],
       'trustedAudiences',
-      (entry) => typeof entry === 'string' && entry.length >= 1 && CLIENT_ID.test(entry),
-      'must be a non-empty printable ASCII string',
+      (entry) => isListEntry(entry) && CLIENT_ID.test(entry),
+      `must be 1 to ${MAX_LIST_ENTRY_LENGTH} printable ASCII characters`,
     ),
     ...stringListProblems(
       config['trustedEndpointOrigins'],
@@ -275,7 +304,8 @@ function snapshotProblems(config: Record<string, unknown>): string[] {
 
 export function oidcProblems(config: unknown): string[] {
   try {
-    return snapshotProblems(snapshot(config));
+    const { config: copy, problems } = snapshot(config);
+    return [...problems, ...snapshotProblems(copy)];
   } catch {
     return ['config must be a readable object'];
   }
@@ -287,7 +317,12 @@ interface Endpoints {
   readonly jwks: string;
 }
 
-function endpointOf(value: unknown, issuer: URL, trusted: ReadonlySet<string>): URL | null {
+function endpointOf(
+  value: unknown,
+  issuer: URL,
+  trusted: ReadonlySet<string>,
+  allowQuery: boolean,
+): URL | null {
   if (typeof value !== 'string' || value.length < 1 || value.length > MAX_ENDPOINT_LENGTH) {
     return null;
   }
@@ -298,6 +333,9 @@ function endpointOf(value: unknown, issuer: URL, trusted: ReadonlySet<string>): 
     return null;
   }
   if (url.username !== '' || url.password !== '' || value.includes('#')) {
+    return null;
+  }
+  if (!allowQuery && value.includes('?')) {
     return null;
   }
   const schemeAllowed =
@@ -322,9 +360,9 @@ function parseDiscovery(
   if (document['issuer'] !== issuer) {
     throw new OidcProviderError('discovery_invalid');
   }
-  const authorization = endpointOf(document['authorization_endpoint'], issuerUrl, trusted);
-  const token = endpointOf(document['token_endpoint'], issuerUrl, trusted);
-  const jwks = endpointOf(document['jwks_uri'], issuerUrl, trusted);
+  const authorization = endpointOf(document['authorization_endpoint'], issuerUrl, trusted, true);
+  const token = endpointOf(document['token_endpoint'], issuerUrl, trusted, false);
+  const jwks = endpointOf(document['jwks_uri'], issuerUrl, trusted, false);
   if (authorization === null || token === null || jwks === null) {
     throw new OidcProviderError('discovery_invalid');
   }
@@ -422,8 +460,9 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
   let source: Record<string, unknown>;
   let problems: string[];
   try {
-    source = snapshot(config);
-    problems = snapshotProblems(source);
+    const taken = snapshot(config);
+    source = taken.config;
+    problems = [...taken.problems, ...snapshotProblems(source)];
   } catch {
     throw new RangeError('invalid oidc config: config must be a readable object');
   }
@@ -523,7 +562,7 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
       redirect_uri: callbackUrl,
       code_verifier: login.verifier,
     });
-    const { json } = await fetchBounded(
+    const { status, json } = await fetchBounded(
       ctx,
       new Request(endpoints.token, {
         method: 'POST',
@@ -534,8 +573,12 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
         },
         body: body.toString(),
       }),
-      { maxBytes: TOKEN_MAX_BYTES, timeoutMs: TOKEN_TIMEOUT_MS },
+      { maxBytes: TOKEN_MAX_BYTES, timeoutMs: TOKEN_TIMEOUT_MS, readErrorBody: true },
     );
+    if (status < 200 || status >= 300) {
+      const refusal = tokenEndpointError(json);
+      throw refusal === 'status' ? new BoundedFetchError('status') : new OidcProviderError(refusal);
+    }
     const idToken = isPlainContainer(json) ? (json as Record<string, unknown>)['id_token'] : null;
     if (typeof idToken !== 'string' || idToken === '') {
       throw new OidcProviderError('token_response_invalid');

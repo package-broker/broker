@@ -87,7 +87,7 @@ describe('source providers in collectRegistrations', () => {
     expect(
       problemsOf([plugin('gh', { apiVersion: 2, binds: ['source'], sourceProviders: () => [] })]),
     ).toEqual([
-      'plugin "gh" has apiVersion 2, core supports 3 to 3',
+      'plugin "gh" has apiVersion 2, core supports 3 to 4',
       'plugin "gh" declares sourceProviders and requires apiVersion 3',
     ]);
   });

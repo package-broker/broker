@@ -694,7 +694,7 @@ describe('round 3', () => {
     );
     const patterns = Array.from(
       { length: 64 },
-      (_, i) => `v${String(i).padStart(2, '0')}/${'q'.repeat(190)}*`,
+      (_, i) => `v${String(i).padStart(2, '0')}/${'q'.repeat(45)}*`,
     );
     const hosts = Array.from(
       { length: 64 },
@@ -715,6 +715,16 @@ describe('round 3', () => {
       },
     );
     expect(r.ok, JSON.stringify(!r.ok && r.problems)).toBe(true);
+  });
+
+  it('refuses a 51-byte selection pattern', () => {
+    expect(
+      problems(
+        parse('composer_repository', 'composer', 'https://repo.example.com', {
+          selection: { packages: [], patterns: [`v00/${'q'.repeat(46)}*`] },
+        }),
+      ),
+    ).toEqual(['selection.patterns']);
   });
 
   it('names the config limit in characters', () => {
@@ -830,5 +840,41 @@ describe('distHosts across source types', () => {
       distHosts: ['CDN.Acme.Example'],
     });
     expect(r.ok && r.config).toMatchObject({ distHosts: ['cdn.acme.example'] });
+  });
+});
+
+describe('broad selection pattern warnings', () => {
+  const repo = (selection: unknown, extra: object = {}) =>
+    parse('composer_repository', 'composer', 'https://repo.example.com', { selection, ...extra });
+  const warning = (index: number) => ({
+    field: `selection.patterns[${index}]`,
+    message: 'pattern has no literal vendor segment and may match almost every package',
+  });
+
+  it.each([
+    ['*.*', 0, ['*.*']],
+    ['*-*', 1, ['acme/a-*', '*-*']],
+    ['*/foo', 0, ['*/foo']],
+    ['acme-*/x', 2, ['acme/a', 'acme/b-*', 'acme-*/x']],
+  ])('warns once for %s', (_label, index, patterns) => {
+    const r = repo({ patterns });
+    expect(r.ok && r.warnings).toEqual([warning(index)]);
+  });
+
+  it('gives no warnings property for literal vendor segments', () => {
+    const r = repo({ patterns: ['acme/*', 'acme/foo-*'] });
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty('warnings');
+  });
+
+  it('returns problems only when a field is refused', () => {
+    const r = repo({ patterns: ['*-*'] }, { distHosts: 'nope' });
+    expect(r).toEqual({ ok: false, problems: [expect.objectContaining({ field: 'distHosts' })] });
+  });
+
+  it('never echoes the pattern in the message', () => {
+    const r = repo({ patterns: ['zzsentinel*'] });
+    expect(r.ok && r.warnings).toHaveLength(1);
+    expect(JSON.stringify(r.ok && r.warnings)).not.toContain('zzsentinel');
   });
 });

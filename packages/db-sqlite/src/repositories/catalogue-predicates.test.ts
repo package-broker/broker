@@ -323,6 +323,20 @@ describe('admissionCondition', () => {
     await source('S2', ctx.orgId, 'vcs');
   });
 
+  it('admits a matching 50-byte stored pattern', async () => {
+    const name = `acme/${'a'.repeat(45)}`;
+    await pkg('K-50', ctx.orgId, 'S1', name);
+    await pattern('P1', 'S1', name, 'include');
+    expect(await ids(admitted('P1'))).toEqual(['K-50']);
+  });
+
+  it.each(['include', 'exclude'])('fails closed for a seeded 51-byte %s rule', async (effect) => {
+    await pkg('K-51', ctx.orgId, 'S1', 'acme/a');
+    await pattern('P1', 'S1', 'acme/*', 'include');
+    await pattern('P1', 'S1', `other/${'a'.repeat(45)}`, effect);
+    expect(await ids(admitted('P1'))).toEqual([]);
+  });
+
   it('admits every flag-1 package without patterns and never a flag-0 package', async () => {
     await pkg('K-ON', ctx.orgId, 'S1', 'acme/on');
     await pkg('K-OFF', ctx.orgId, 'S1', 'acme/off', { flag: 0 });

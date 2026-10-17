@@ -1,6 +1,7 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ import type {
 } from '@package-broker/core/sources/provider';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createDnsGuard } from './dns-guard.js';
-import type { SpawnGit } from './ssh-git.js';
+import { openSshGitSession, type SpawnGit } from './ssh-git.js';
 import {
   createSshGitProvider,
   informationalUrl,
@@ -44,6 +45,9 @@ let altCommits: Record<string, string>;
 let catFileBytes = new Map<string, number>();
 let commits: Record<string, string>;
 let archiveCalls: number;
+let showCalls: number;
+let tzBare: string;
+let gcBare: string;
 
 function git(cwd: string, args: string[], date?: string): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], {
@@ -100,7 +104,27 @@ beforeAll(async () => {
   bare = join(root, 'remote.git');
   git(root, ['clone', '-q', '--bare', work, bare]);
   git(bare, ['config', 'uploadpack.allowFilter', 'true']);
+  git(bare, ['update-ref', 'refs/pull/2/refs/heads/evil', main]);
+  git(bare, ['update-ref', 'refs/pull/3/HEAD', main]);
   commits = { main, feature, foreign, huge, invalid };
+
+  const tz = join(root, 'tz');
+  git(root, ['init', '-q', '-b', 'main', tz]);
+  commitComposer(tz, { name: 'acme/lib' }, '2024-05-06T07:08:09+02:00');
+  tzBare = join(root, 'tz.git');
+  git(root, ['clone', '-q', '--bare', tz, tzBare]);
+
+  const gc = join(root, 'gc');
+  git(root, ['init', '-q', '-b', 'main', gc]);
+  writeFileSync(join(gc, 'first.txt'), 'first');
+  git(gc, ['add', '.']);
+  git(gc, ['commit', '-q', '-m', 'gc'], DATES.main);
+  git(gc, ['checkout', '-q', '-b', 'second']);
+  writeFileSync(join(gc, 'second.txt'), 'second');
+  git(gc, ['add', '.']);
+  git(gc, ['commit', '-q', '-m', 'second'], DATES.feature);
+  gcBare = join(root, 'gc.git');
+  git(root, ['clone', '-q', '--bare', gc, gcBare]);
 
   const alt = join(root, 'alt');
   git(root, ['init', '-q', '-b', 'main', alt]);
@@ -140,6 +164,7 @@ const stubSpawn =
   (fail = false, stub: StubOptions = {}): SpawnGit =>
   (command, args, options) => {
     if (args.includes('archive')) archiveCalls += 1;
+    if (args.includes('show')) showCalls += 1;
     if (args.includes('fetch') && stub.beforeFetch !== undefined) stub.beforeFetch();
     const target = stub.target ?? bare;
     const rewritten = args.map((arg) =>
@@ -507,5 +532,208 @@ describe('createSshGitProvider', () => {
       expect(key).not.toContain(commits['invalid']);
     }
     expect(archiveCalls).toBe(store.stored.size);
+  });
+});
+
+function openFixtureSession(target: string, wrap?: SpawnGit) {
+  const spawnGit = stubSpawn(false, { target });
+  return openSshGitSession(parseSshRepository(REPOSITORY), {
+    dnsGuard: createDnsGuard(
+      createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+      { resolver: async () => [{ address: '93.184.216.34', family: 4 }] },
+    ),
+    credential: KEY,
+    tmpRoot: root,
+    spawn: wrap ?? spawnGit,
+  });
+}
+
+describe('SSH ref metadata', () => {
+  it('lists only HEAD, branches and tags, ignoring tail-matching foreign refs', async () => {
+    const session = await openFixtureSession(bare);
+    try {
+      const names = (await session.lsRemote()).map((ref) => ref.name);
+      expect(names).toContain('HEAD');
+      expect(names).toContain('refs/heads/main');
+      expect(names.filter((name) => name.includes('refs/pull'))).toEqual([]);
+      for (const name of names) {
+        expect(name === 'HEAD' || /^refs\/(?:heads|tags)\//.test(name)).toBe(true);
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('keeps foreign refs out of the snapshot digest', async () => {
+    const clean = join(root, `clean-${Date.now()}.git`);
+    git(root, ['clone', '-q', '--bare', bare, clean]);
+    git(clean, ['update-ref', '-d', 'refs/pull/2/refs/heads/evil']);
+    git(clean, ['update-ref', '-d', 'refs/pull/3/HEAD']);
+    const snapshotOf = async (target: string) => {
+      const result = await provider(memoryStore(), false, undefined, { target }).describe(
+        ctx,
+        source(),
+        'acme/lib',
+        {},
+      );
+      if (result.kind !== 'found') throw new Error('expected found');
+      return result.description.snapshot;
+    };
+    expect(await snapshotOf(bare)).toEqual(await snapshotOf(clean));
+  });
+
+  it('normalizes commit times to UTC and forbids lazy fetches', async () => {
+    const envs: Record<string, string | undefined>[] = [];
+    const inner = stubSpawn(false, { target: tzBare });
+    const session = await openFixtureSession(tzBare, (command, args, options) => {
+      if (args.includes('show')) envs.push({ ...options.env });
+      return inner(command, args, options);
+    });
+    try {
+      await session.lsRemote();
+      await session.fetchRefs(['refs/heads/main'], { filter: 'blob:none', depth: 1 });
+      expect(await session.commitTime('refs/heads/main')).toBe('2024-05-06T05:08:09.000Z');
+      expect(envs).toHaveLength(1);
+      expect(envs[0]?.['GIT_NO_LAZY_FETCH']).toBe('1');
+      await expect(session.commitTime('f'.repeat(40))).rejects.toMatchObject({
+        reason: expect.stringMatching(/^(?:not_found|git_failed)$/),
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('reads the commit time once per commit', async () => {
+    const store = memoryStore();
+    archiveCalls = 0;
+    showCalls = 0;
+    await provider(store).describe(ctx, source(), 'acme/lib', {});
+    const commitsStored = new Set([...store.stored.keys()].map((key) => key.split('@')[1]));
+    expect(archiveCalls).toBeGreaterThan(commitsStored.size);
+    expect(showCalls).toBe(commitsStored.size);
+  });
+
+  it('discovers HEAD symref and reads fetched commit times without further transport calls', async () => {
+    const pids: number[] = [];
+    const invocations: string[][] = [];
+    const spawnGit = stubSpawn();
+    const session = await openSshGitSession(parseSshRepository(REPOSITORY), {
+      dnsGuard: createDnsGuard(
+        createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+        { resolver: async () => [{ address: '93.184.216.34', family: 4 }] },
+      ),
+      credential: KEY,
+      tmpRoot: root,
+      spawn(command, args, options) {
+        invocations.push([...args]);
+        const child = spawnGit(command, args, options);
+        if (child.pid !== undefined) pids.push(child.pid);
+        return child;
+      },
+    });
+    try {
+      const refs = await session.lsRemote();
+      expect(refs.find((ref) => ref.name === 'HEAD')).toMatchObject({
+        symref: 'refs/heads/main',
+        sha: commits['main'],
+      });
+      const selected = refs.filter((ref) =>
+        ['refs/heads/main', 'refs/heads/feature', 'refs/tags/v1.0.0'].includes(ref.name),
+      );
+      await session.fetchRefs(
+        selected.map((ref) => ref.name),
+        { filter: 'blob:none', depth: 1 },
+      );
+      const networkCalls = () =>
+        invocations.filter((args) => args.includes('fetch') || args.includes('ls-remote')).length;
+      for (const pid of pids) {
+        expect(() => process.kill(pid, 0)).toThrow();
+        expect(() => process.kill(-pid, 0)).toThrow();
+      }
+      const before = networkCalls();
+      for (const ref of selected) {
+        expect(await session.commitTime(ref.name)).toBe(
+          new Date(git(bare, ['log', '-1', '--format=%cI', ref.name])).toISOString(),
+        );
+      }
+      expect(networkCalls()).toBe(before);
+      for (const pid of pids) {
+        expect(() => process.kill(pid, 0)).toThrow();
+        expect(() => process.kill(-pid, 0)).toThrow();
+      }
+    } finally {
+      await session.close();
+    }
+  });
+});
+
+describe('SSH scratch repository maintenance', () => {
+  const autoGcEnv = {
+    GIT_CONFIG_COUNT: '3',
+    GIT_CONFIG_KEY_0: 'gc.auto',
+    GIT_CONFIG_VALUE_0: '1',
+    GIT_CONFIG_KEY_1: 'gc.autoDetach',
+    GIT_CONFIG_VALUE_1: 'true',
+    GIT_CONFIG_KEY_2: 'gc.autoPackLimit',
+    GIT_CONFIG_VALUE_2: '1',
+  };
+  const packCount = (repo: string): number =>
+    readdirSync(join(repo, 'objects', 'pack')).filter((file) => file.endsWith('.pack')).length;
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('control: without the quiet flags the second fetch triggers a detached gc', async () => {
+    const repo = join(root, `gc-control-${Date.now()}.git`);
+    git(root, ['init', '-q', '--bare', repo]);
+    for (const refspec of ['main:refs/heads/main', 'second:refs/heads/second']) {
+      const result = spawnSync(
+        'git',
+        [
+          `--git-dir=${repo}`,
+          '-c',
+          'transfer.fsckObjects=true',
+          'fetch',
+          '--no-tags',
+          '--depth=1',
+          `file://${gcBare}`,
+          refspec,
+        ],
+        {
+          env: {
+            PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+            HOME: root,
+            GIT_CONFIG_NOSYSTEM: '1',
+            GIT_ALLOW_PROTOCOL: 'file',
+            ...autoGcEnv,
+          },
+        },
+      );
+      expect(result.status).toBe(0);
+    }
+    let packs = packCount(repo);
+    for (let waited = 0; packs !== 1 && waited < 5000; waited += 100) {
+      await pause(100);
+      packs = packCount(repo);
+    }
+    expect(packs).toBe(1);
+  });
+
+  it('the flagged session never starts gc or maintenance', async () => {
+    const inner = stubSpawn(false, { target: gcBare });
+    const session = await openFixtureSession(gcBare, (command, args, options) =>
+      inner(command, args, { ...options, env: { ...autoGcEnv, ...options.env } }),
+    );
+    try {
+      await session.lsRemote();
+      await session.fetchRefs(['refs/heads/main'], { filter: 'none', depth: 1 });
+      await session.fetchRefs(['refs/heads/second'], { filter: 'none', depth: 1 });
+      const scratch = readdirSync(root).find((entry) => entry.startsWith('ssh-git-')) ?? '';
+      const repo = join(root, scratch, 'repo.git');
+      await pause(1500);
+      expect(existsSync(join(repo, 'gc.pid'))).toBe(false);
+      expect(existsSync(join(repo, 'gc.log'))).toBe(false);
+      expect(packCount(repo)).toBe(2);
+    } finally {
+      await session.close();
+    }
   });
 });

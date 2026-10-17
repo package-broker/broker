@@ -248,8 +248,9 @@ export async function invokeHook<I, R>(
 export type DenyCode = 'denied' | 'invalid_hook_result' | 'hook_error';
 
 /**
- * `reason` is the access.check reason for logs and audit. Identity hook callers must not
- * forward it: they expose only `plugin` and `code` (C37).
+ * `reason` is the sanitized access.check reason for the caller's own use. The kernel logs only
+ * `code`, never `reason`. Identity hook callers must not forward it: they expose only `plugin`
+ * and `code` (C37).
  */
 export interface DenyOutcome {
   readonly deny: true;
@@ -300,8 +301,8 @@ export async function runDenyHooks<I>(
 }
 
 /**
- * Runs access.check hooks in order; the first denial wins. The returned reason is for logs and
- * audit only: callers must never send it to clients. `input` must be plain acyclic data; an input
+ * Runs access.check hooks in order; the first denial wins. The returned reason is for the
+ * caller's own use: it must never be sent to clients, and the kernel does not log it. `input` must be plain acyclic data; an input
  * that cannot be copied (a cycle, a throwing getter) denies with hook_error.
  */
 export async function runAccessChecks(

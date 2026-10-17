@@ -9,6 +9,8 @@ export type TokenUseDiagnostic =
 
 /** The part of the repository's token envelope this gate reads. */
 export interface TokenAccessView {
+  /** Whether the principal can see the project independently of token scope or binding. */
+  readonly projectVisible: boolean;
   readonly token: {
     readonly id: string;
     readonly kind: 'pat' | 'svc';
@@ -72,13 +74,13 @@ async function runTouch(deps: TokenUseDeps, tokenId: string, kind: 'pat' | 'svc'
 }
 
 export function deferredDispatch(run: () => Promise<void>): void {
-  setImmediate(() => {
+  setTimeout(() => {
     try {
       run().catch(() => undefined);
     } catch {
       return;
     }
-  });
+  }, 0);
 }
 
 function dispatchTouch(deps: TokenUseDeps, tokenId: string, kind: 'pat' | 'svc'): void {

@@ -1,3 +1,4 @@
+import type { $ZodType as ZodType } from 'zod/v4/core';
 import type { OrganizationRepository } from './db/organization.js';
 import type { OrgContext } from './db/port.js';
 import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.js';
@@ -13,7 +14,7 @@ export { PlatformUnavailableError } from './platform/errors.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
-export const SUPPORTED_PLUGIN_API = [3, 3] as const;
+export const SUPPORTED_PLUGIN_API = [3, 4] as const;
 
 export type Platform = 'cloudflare' | 'node';
 
@@ -75,6 +76,18 @@ export interface PackageRouteBinding {
   readonly fetchOnAdmission?: boolean;
 }
 
+export interface ApiSlot {
+  readonly exempt?: never;
+  readonly operationId: string;
+  readonly summary: string;
+  readonly tags: readonly string[];
+  readonly params?: ZodType;
+  readonly query?: ZodType;
+  readonly body?: ZodType;
+  readonly responses: Record<number, ZodType | null>;
+  readonly mcp?: boolean;
+}
+
 export interface RouteDefinition {
   /** HEAD is served by GET routes, same authorization. */
   readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -91,6 +104,7 @@ export interface RouteDefinition {
   readonly package?: PackageRouteBinding;
   /** Default true; false requires permission null. */
   readonly needsOrg?: boolean;
+  readonly api?: ApiSlot | { exempt: string };
   readonly handler: (ctx: RequestContext) => Promise<Response> | Response;
 }
 

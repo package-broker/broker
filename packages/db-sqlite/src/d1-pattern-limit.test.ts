@@ -22,13 +22,13 @@ const DYNAMIC: Record<string, string> = {
   'db-sqlite/src/repositories/catalogue-list.ts:${pattern}':
     'escaped search pattern; UTF-8 byte length checked <= 50, otherwise instr() fallback',
   "db-sqlite/src/repositories/catalogue-predicates.ts:${at(a.r, 'pattern')}":
-    'catalogue rule pattern; D1 limit open, owner decision',
+    'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
   "db-sqlite/src/repositories/catalogue-predicates.ts:${at(a.im, 'pattern')}":
-    'catalogue rule pattern; D1 limit open, owner decision',
+    'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
   "db-sqlite/src/repositories/catalogue-predicates.ts:${at(a.x, 'pattern')}":
-    'catalogue rule pattern; D1 limit open, owner decision',
+    'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
   'db-sqlite/src/repositories/registered-name.ts:rn_cov.pattern':
-    'registered-name pattern; permits up to MAX_KEY_LENGTH (428) bytes, D1 limit open, owner decision',
+    'registered-name pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
 };
 
 interface Finding {

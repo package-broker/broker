@@ -196,7 +196,7 @@ describe('redirect chains', () => {
 
   it('refuses an https to http downgrade even toward an allowlisted http host', async () => {
     const allowing = createOutboundPolicy({
-      allowPrivateHosts: ['plain.example.com'],
+      allowPrivateHosts: ['plain.example.com:80'],
       runtime: 'node',
       selfOrigins: [],
     });

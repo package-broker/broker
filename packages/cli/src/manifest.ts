@@ -5,10 +5,18 @@ import {
   collectRegistrations,
   type Registration,
 } from '@package-broker/core/kernel/registry';
+import {
+  catalogueDiagnostics,
+  type DiagnosticRoute,
+} from '@package-broker/core/authz/catalogue-diagnostics';
+import { DEFAULT_ROLES } from '@package-broker/core/authz/permissions';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
-export function validatePlugins(plugins: readonly PluginDefinition[], target: Platform): string[] {
+export function validatePluginShape(
+  plugins: readonly PluginDefinition[],
+  target: Platform,
+): string[] {
   const errors: string[] = [];
   const ids = new Set<string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
@@ -36,6 +44,11 @@ export function validatePlugins(plugins: readonly PluginDefinition[], target: Pl
       }
     }
   }
+  return errors;
+}
+
+export function validatePlugins(plugins: readonly PluginDefinition[], target: Platform): string[] {
+  const errors = validatePluginShape(plugins, target);
   if (errors.length === 0) {
     try {
       collectRegistrations(plugins);
@@ -45,6 +58,12 @@ export function validatePlugins(plugins: readonly PluginDefinition[], target: Pl
     }
   }
   return errors;
+}
+
+const ROUTE_PROBLEM = /^(?:plugin "[^"]*"(?: route |: route path )|route [A-Z]+ )/;
+
+export function isRouteProblem(problem: string): boolean {
+  return ROUTE_PROBLEM.test(problem);
 }
 
 export function orderPlugins(plugins: readonly PluginDefinition[]): PluginDefinition[] {
@@ -111,6 +130,9 @@ export interface ManifestRoute {
   path: string;
   plugin: string;
   permission: string | null;
+  boundary?: string;
+  needsOrg?: boolean;
+  package?: true;
 }
 
 export interface ManifestMigration {
@@ -159,11 +181,21 @@ export function renderManifestJson(
       checksum,
       phase,
     })),
-    routes: (extra.registration?.routes ?? []).map(({ method, path, plugin, permission }) => ({
-      method,
-      path,
-      plugin,
-      permission,
+    routes: (extra.registration?.routes ?? []).map((route) => ({
+      method: route.method,
+      path: route.path,
+      plugin: route.plugin,
+      permission: route.permission,
+      ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
+      ...(route.needsOrg === undefined ? {} : { needsOrg: route.needsOrg }),
+      ...(route.package === undefined ? {} : { package: true as const }),
     })),
   };
+}
+
+const ADMIN_PERMISSIONS: readonly string[] =
+  DEFAULT_ROLES.find((role) => role.key === 'organization_admin')?.permissions ?? [];
+
+export function diagnoseRoutes(routes: readonly DiagnosticRoute[]): string[] {
+  return catalogueDiagnostics(routes, ADMIN_PERMISSIONS, { packageResolver: true });
 }

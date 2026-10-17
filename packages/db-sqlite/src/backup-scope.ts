@@ -3,7 +3,9 @@ export type BackupScope = 'include' | 'include-rows-only' | 'regenerate' | 'excl
 export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   access_grant: 'include',
   access_mutation_guard: 'exclude',
+  api_idempotency: 'exclude',
   audit_event: 'include',
+  audit_pending: 'include',
   blob: 'include-rows-only',
   bundle: 'include',
   bundle_item: 'include',

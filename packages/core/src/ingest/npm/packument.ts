@@ -13,6 +13,7 @@ import {
   type DescribeOptions,
   type DescribeResult,
   type DocumentValidators,
+  type SkippedMember,
   type SnapshotRef,
   type Validators,
   type VersionCandidate,
@@ -193,12 +194,14 @@ async function* candidates(
   members: AsyncIterable<ExtractedMember> | Iterable<ExtractedMember>,
   time: Readonly<Record<string, string>>,
   signal: AbortSignal | undefined,
+  skipped: readonly SkippedMember[] = [],
 ): AsyncGenerator<VersionCandidate> {
-  let ordinal = -1;
+  let seen = 0;
   for await (const member of members) {
     signal?.throwIfAborted();
     if (member.path[0] !== 'versions') continue;
-    ordinal += 1;
+    const ordinal = seen + skipped.length;
+    seen += 1;
     const key = member.path[1] as string;
     const manifest: unknown = JSON.parse(member.raw);
     if (!isRecord(manifest) || manifest.version !== key) continue;
@@ -235,6 +238,7 @@ function found(
   validators: DocumentValidators,
   distTags: Record<string, string>,
   members: AsyncIterable<VersionCandidate>,
+  skipped: readonly SkippedMember[] = [],
 ): NpmDescribeResult {
   return {
     kind: 'found',
@@ -244,7 +248,8 @@ function found(
       members,
       distTags,
       validators,
-      documentsComplete: true,
+      documentsComplete: () => skipped.length === 0,
+      skippedMembers: () => skipped,
     }),
   };
 }
@@ -315,6 +320,7 @@ async function describeStaged(
   }
   const time = stringRecord(timeRaw);
   const distTags = stringRecord(distTagsRaw);
+  const skipped: SkippedMember[] = [];
   async function* versions(): AsyncGenerator<VersionCandidate> {
     const second = await openStagedSnapshot(deps.ctx, deps.store, ref, { codecs: deps.codecs });
     if (second.kind === 'restart') throw new NpmPackumentError('snapshot_gone');
@@ -322,12 +328,16 @@ async function describeStaged(
       extractMembers(second.body, [['versions', '*']], {
         maxDocumentBytes: maxBytes,
         maxMemberBytes: VERSION_MEMBER_BYTES,
+        onOversizedMember: (path) => {
+          skipped.push({ version: path[1] as string, reason: 'member_too_large' });
+        },
       }),
       time,
       deps.signal,
+      skipped,
     );
   }
-  return found(name, ref, { 'npm-full': validators }, distTags, versions());
+  return found(name, ref, { 'npm-full': validators }, distTags, versions(), skipped);
 }
 
 /**

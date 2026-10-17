@@ -19,7 +19,12 @@ import {
 } from '../platform/jobs.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityResolver } from './routes.js';
-import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
+import {
+  routeApiProblems,
+  routeBoundaryProblems,
+  routePathProblem,
+  routesConflict,
+} from './routes.js';
 
 const SOURCE_PROVIDERS_API_VERSION = 3;
 
@@ -321,8 +326,17 @@ export function collectRegistrations(
         `plugin "${id}" route ${route.method} ${route.path}`,
         { ...options, apiVersion: plugin.apiVersion },
       );
-      problems.push(...boundaryProblems);
-      if (pathProblem === null && methodAllowed && boundaryProblems.length === 0) {
+      const apiProblems = routeApiProblems(
+        route,
+        `plugin "${id}" route ${route.method} ${route.path}`,
+      );
+      problems.push(...boundaryProblems, ...apiProblems);
+      if (
+        pathProblem === null &&
+        methodAllowed &&
+        boundaryProblems.length === 0 &&
+        apiProblems.length === 0
+      ) {
         routes.push({ ...route, plugin: id });
       }
     }

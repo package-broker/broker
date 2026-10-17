@@ -393,12 +393,42 @@ describe('auth wiring on Miniflare D1', () => {
     });
   });
 
-  it('reads the keys once per binding', async () => {
+  it('reads the keys once per binding and PB_* values, and again when a value changes', async () => {
     const db = await sharedDatabase();
-    const worker = createWorker([]);
+    let builds = 0;
+    const plugin = definePlugin({
+      id: 'idp-count',
+      package: 'test/idp-count',
+      platforms: ['cloudflare'],
+      apiVersion: 3,
+      binds: ['identity'],
+      identityProviders: () => {
+        builds += 1;
+        return [];
+      },
+    });
+    const logged: unknown[] = [];
+    const worker = createWorker([plugin], { log: (entry) => void logged.push(entry) });
     expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
-    const changed = env(db, { PB_MASTER_KEY: 'pbmk_v1_broken' });
-    expect((await worker.fetch(get('/_pb/auth/providers'), changed)).status).toBe(200);
+    expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
+    expect(builds).toBe(1);
+
+    const rotated = env(db, { PB_MASTER_KEY: KEY_V2, PB_MASTER_KEY_PREVIOUS: KEY_V1 });
+    expect((await worker.fetch(get('/_pb/auth/providers'), rotated)).status).toBe(200);
+    expect(builds).toBe(2);
+
+    const broken = await worker.fetch(
+      get('/_pb/auth/providers'),
+      env(db, { PB_MASTER_KEY: 'pbmk_v1_broken' }),
+    );
+    expect(broken.status).toBe(503);
+    const text = await broken.text();
+    expect(text).toContain('misconfigured');
+    for (const fragment of [...KEY_FRAGMENTS, 'broken']) {
+      expect(text).not.toContain(fragment);
+      expect(JSON.stringify(logged)).not.toContain(fragment);
+    }
+    expect(builds).toBe(2);
   });
 });
 

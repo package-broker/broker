@@ -368,6 +368,58 @@ describe('extractMembers', () => {
       expect(result.members).toBe(100_001);
       expect(result.peak).toBeLessThan(result.biggest + 2 * MiB + 48 * 100_001);
     }, 120_000);
+
+    it('skips one object with 300k distinct keys with heap growth under 4 MiB', async () => {
+      const skipped: string[][] = [];
+      function* parts(): Generator<Uint8Array> {
+        yield encoder.encode('{"versions":{"huge":{');
+        for (let start = 0; start < 300_000; start += 1000) {
+          yield encoder.encode(
+            Array.from({ length: 1000 }, (_, i) => `"k${start + i}":0,`).join(''),
+          );
+        }
+        yield encoder.encode('"last":0},"small":{}}}');
+      }
+      const result = await measure(
+        parts(),
+        [['versions', '*']],
+        {
+          maxMemberBytes: 1024,
+          onOversizedMember: (path) => skipped.push([...path]),
+        },
+        16,
+      );
+      expect(result.error).toBeNull();
+      expect(result.members).toBe(1);
+      expect(skipped).toEqual([['versions', 'huge']]);
+      expect(result.peak).toBeLessThan(4 * MiB);
+    }, 120_000);
+
+    it('skips a 30 MiB member with heap growth under 4 MiB', async () => {
+      const skipped: string[][] = [];
+      const piece = encoder.encode(`"${'d'.repeat(65_000)}",{"k":"${'e'.repeat(400)}"},`);
+      function* parts(): Generator<Uint8Array> {
+        yield encoder.encode('{"versions":{"huge":{"readmes":[');
+        for (let total = 0; total < 30 * MiB; total += piece.length) {
+          yield piece;
+        }
+        yield encoder.encode('1]},"small":{"a":1}}}');
+      }
+      const result = await measure(
+        parts(),
+        [['versions', '*']],
+        {
+          maxDocumentBytes: 64 * MiB,
+          onOversizedMember: (path) => skipped.push([...path]),
+        },
+        64,
+      );
+      expect(result.error).toBeNull();
+      expect(result.pulled).toBeGreaterThan(30 * MiB);
+      expect(result.members).toBe(1);
+      expect(skipped).toEqual([['versions', 'huge']]);
+      expect(result.peak).toBeLessThan(4 * MiB);
+    }, 120_000);
   });
 
   describe('shape and matching', () => {
@@ -872,6 +924,173 @@ describe('extractMembers array element boundaries and non-arrays', () => {
     const source = streamOf(encoder.encode('{}'), 2);
     expect(() =>
       extractMembers(source, PACKAGES, { nonArray: 'skip' as unknown as 'throw' }),
+    ).toThrow(TypeError);
+  });
+});
+
+describe('extractMembers: oversized member skip', () => {
+  const VERSIONS: MemberSelector[] = [['versions', '*']];
+  const big = `{"readme":"${'r'.repeat(3000)}","deps":{"a":"1","b":[1,2,{"c":null}]}}`;
+  const doc = `{"name":"x","versions":{"1.0.0":${big},"1.0.1":{"v":1},"1.0.2":{"v":2}},"time":{}}`;
+
+  function skipping(limit: number): { limits: ExtractLimits; skipped: string[][] } {
+    const skipped: string[][] = [];
+    return {
+      skipped,
+      limits: { maxMemberBytes: limit, onOversizedMember: (path) => skipped.push([...path]) },
+    };
+  }
+
+  it('leaves out an oversized member, reports it once and yields the rest', async () => {
+    for (const size of [1, 7, 64, 4096]) {
+      const { limits, skipped } = skipping(1024);
+      const members = await collect(streamOf(encoder.encode(doc), size), VERSIONS, limits);
+      expect(members.map((m) => m.path)).toEqual([
+        ['versions', '1.0.1'],
+        ['versions', '1.0.2'],
+      ]);
+      expect(members.map((m) => m.raw)).toEqual(['{"v":1}', '{"v":2}']);
+      expect(skipped).toEqual([['versions', '1.0.0']]);
+    }
+  });
+
+  it('delivers skips and members in document order regardless of chunk size', async () => {
+    const bytes = encoder.encode(`{"versions":{"a":{},"b":${big},"c":{}}}`);
+    for (const size of [bytes.length, 7]) {
+      const events: string[] = [];
+      const ordinals: number[] = [];
+      let ordinal = 0;
+      for await (const member of extractMembers(streamOf(bytes, size), VERSIONS, {
+        maxMemberBytes: 1024,
+        onOversizedMember: (path) => {
+          events.push(`skip:${path[1]}`);
+          ordinal += 1;
+        },
+      })) {
+        events.push(`member:${member.path[1]}`);
+        ordinals.push(ordinal++);
+      }
+      expect(events).toEqual(['member:a', 'skip:b', 'member:c']);
+      expect(ordinals).toEqual([0, 2]);
+    }
+  });
+
+  it('keeps object member counts across the skip transition and in nested objects', async () => {
+    for (const tail of ['"a":1,"b":2', '"nested":{"a":1,"b":2,"c":3}']) {
+      const bytes = encoder.encode(`{"versions":{"huge":{"readme":"${'x'.repeat(100)}",${tail}}}}`);
+      for (const size of [bytes.length, 7]) {
+        const { limits, skipped } = skipping(32);
+        const error = await failure(
+          collect(streamOf(bytes, size), VERSIONS, {
+            ...limits,
+            maxMembersPerLevel: 2,
+          }),
+        );
+        expect((error as JsonExtractError).code).toBe('too_many_members');
+        expect(skipped).toEqual([]);
+      }
+    }
+  });
+
+  it('still rejects keys over 64 KiB after skipping begins', async () => {
+    const bytes = encoder.encode(
+      `{"versions":{"huge":{"readme":"${'x'.repeat(100)}","${'k'.repeat(70_000)}":1}}}`,
+    );
+    for (const size of [bytes.length, 7]) {
+      const { limits, skipped } = skipping(32);
+      const error = await failure(collect(streamOf(bytes, size), VERSIONS, limits));
+      expect(['token_too_large', 'member_too_large']).toContain(
+        (error as JsonExtractError | JsonStreamError).code,
+      );
+      expect(skipped).toEqual([]);
+    }
+  });
+
+  it('yields a member exactly at the cap and skips it one byte below', async () => {
+    const exact = ':{"v":1}'.length;
+    const bytes = encoder.encode('{"versions":{"a":{"v":1}}}');
+    const at = skipping(exact);
+    const members = await collect(streamOf(bytes, 3), VERSIONS, at.limits);
+    expect(members.map((m) => m.raw)).toEqual(['{"v":1}']);
+    expect(at.skipped).toEqual([]);
+    const below = skipping(exact - 1);
+    expect(await collect(streamOf(bytes, 3), VERSIONS, below.limits)).toEqual([]);
+    expect(below.skipped).toEqual([['versions', 'a']]);
+  });
+
+  it('skips an oversized scalar member', async () => {
+    const { limits, skipped } = skipping(16);
+    const members = await collect(
+      streamOf(encoder.encode(`{"versions":{"a":"${'s'.repeat(100)}","b":1}}`), 5),
+      VERSIONS,
+      limits,
+    );
+    expect(members.map((m) => m.raw)).toEqual(['1']);
+    expect(skipped).toEqual([['versions', 'a']]);
+  });
+
+  it('still throws on invalid JSON inside a skipped member', async () => {
+    const { limits } = skipping(1024);
+    const broken = doc.replace('"c":null', '"c":nul');
+    const error = await failure(collect(streamOf(encoder.encode(broken), 512), VERSIONS, limits));
+    expect(error).toBeInstanceOf(JsonStreamError);
+  });
+
+  it('still throws on a truncated skipped member', async () => {
+    const { limits } = skipping(1024);
+    const cut = encoder.encode(doc).subarray(0, 2000);
+    const error = await failure(collect(streamOf(cut, 512), VERSIONS, limits));
+    expect(error).toBeInstanceOf(JsonStreamError);
+  });
+
+  it('still throws member_too_large without the option', async () => {
+    const error = await failure(
+      collect(streamOf(encoder.encode(doc), 512), VERSIONS, { maxMemberBytes: 1024 }),
+    );
+    expect(error).toBeInstanceOf(JsonExtractError);
+    expect((error as JsonExtractError).code).toBe('member_too_large');
+  });
+
+  it('still throws duplicate_key at the selected level in skip mode', async () => {
+    const { limits } = skipping(1024);
+    const duplicated = doc.replace('"1.0.2"', '"1.0.0"');
+    const error = await failure(
+      collect(streamOf(encoder.encode(duplicated), 512), VERSIONS, limits),
+    );
+    expect((error as JsonExtractError).code).toBe('duplicate_key');
+  });
+
+  it('still throws duplicate_key at a prefix level in skip mode', async () => {
+    const { limits } = skipping(1024);
+    const duplicated = doc.replace('"time":{}', '"versions":{}');
+    const error = await failure(
+      collect(streamOf(encoder.encode(duplicated), 512), VERSIONS, limits),
+    );
+    expect((error as JsonExtractError).code).toBe('duplicate_key');
+  });
+
+  it('still throws document_too_large in skip mode', async () => {
+    const { limits } = skipping(1024);
+    const error = await failure(
+      collect(streamOf(encoder.encode(doc), 512), VERSIONS, { ...limits, maxDocumentBytes: 2048 }),
+    );
+    expect((error as JsonExtractError).code).toBe('document_too_large');
+  });
+
+  it('still throws too_many_members in skip mode', async () => {
+    const { limits } = skipping(1024);
+    const error = await failure(
+      collect(streamOf(encoder.encode(doc), 512), VERSIONS, { ...limits, maxMembersPerLevel: 2 }),
+    );
+    expect((error as JsonExtractError).code).toBe('too_many_members');
+  });
+
+  it('rejects an onOversizedMember that is not a function', () => {
+    const source = streamOf(encoder.encode(doc), 512);
+    expect(() =>
+      extractMembers(source, VERSIONS, {
+        onOversizedMember: 'yes' as unknown as (path: readonly string[]) => void,
+      }),
     ).toThrow(TypeError);
   });
 });

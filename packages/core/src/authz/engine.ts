@@ -167,6 +167,7 @@ interface Authenticated {
   readonly principal: Principal;
   readonly project: { readonly id: string } | null;
   readonly effective: ReadonlySet<string>;
+  readonly projectVisible: boolean;
 }
 
 function projectOnly(names: readonly string[]): string[] {
@@ -196,7 +197,10 @@ function decideFrom(
       ? { allow: true, principal: found.principal, projectId: null }
       : FORBIDDEN;
   }
-  if (!slugValid || found.project === null || found.effective.size === 0) return NOT_FOUND;
+  if (!slugValid) return NOT_FOUND;
+  if (found.project === null || found.effective.size === 0) {
+    return found.projectVisible ? FORBIDDEN : NOT_FOUND;
+  }
   return found.effective.has(permission)
     ? { allow: true, principal: found.principal, projectId: found.project.id }
     : FORBIDDEN;
@@ -247,6 +251,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         principal: { kind: 'user', id: found.user.id },
         project: found.project,
         effective: sessionEffective(found, input.boundary),
+        projectVisible: false,
       },
       permission,
       input.boundary,
@@ -321,6 +326,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         principal,
         project: found.project,
         effective: tokenEffective(found, input.boundary),
+        projectVisible: found.projectVisible === true,
       },
       permission,
       input.boundary,

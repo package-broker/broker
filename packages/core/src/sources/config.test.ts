@@ -842,3 +842,39 @@ describe('distHosts across source types', () => {
     expect(r.ok && r.config).toMatchObject({ distHosts: ['cdn.acme.example'] });
   });
 });
+
+describe('broad selection pattern warnings', () => {
+  const repo = (selection: unknown, extra: object = {}) =>
+    parse('composer_repository', 'composer', 'https://repo.example.com', { selection, ...extra });
+  const warning = (index: number) => ({
+    field: `selection.patterns[${index}]`,
+    message: 'pattern has no literal vendor segment and may match almost every package',
+  });
+
+  it.each([
+    ['*.*', 0, ['*.*']],
+    ['*-*', 1, ['acme/a-*', '*-*']],
+    ['*/foo', 0, ['*/foo']],
+    ['acme-*/x', 2, ['acme/a', 'acme/b-*', 'acme-*/x']],
+  ])('warns once for %s', (_label, index, patterns) => {
+    const r = repo({ patterns });
+    expect(r.ok && r.warnings).toEqual([warning(index)]);
+  });
+
+  it('gives no warnings property for literal vendor segments', () => {
+    const r = repo({ patterns: ['acme/*', 'acme/foo-*'] });
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty('warnings');
+  });
+
+  it('returns problems only when a field is refused', () => {
+    const r = repo({ patterns: ['*-*'] }, { distHosts: 'nope' });
+    expect(r).toEqual({ ok: false, problems: [expect.objectContaining({ field: 'distHosts' })] });
+  });
+
+  it('never echoes the pattern in the message', () => {
+    const r = repo({ patterns: ['zzsentinel*'] });
+    expect(r.ok && r.warnings).toHaveLength(1);
+    expect(JSON.stringify(r.ok && r.warnings)).not.toContain('zzsentinel');
+  });
+});

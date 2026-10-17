@@ -1,0 +1,97 @@
+name: Bug report
+description: Report something that does not work as documented
+title: 'bug: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security vulnerabilities through the [private reporting form](https://github.com/package-broker/broker/security/advisories/new), not through an issue.
+  - type: dropdown
+    id: hosting
+    attributes:
+      label: Hosting
+      options:
+        - Cloudflare Workers
+        - Node (Docker or direct)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database
+      options:
+        - Cloudflare D1
+        - SQLite file
+    validations:
+      required: true
+  - type: dropdown
+    id: ecosystem
+    attributes:
+      label: Ecosystem
+      options:
+        - Composer
+        - npm
+        - Not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Client
+      options:
+        - composer
+        - npm
+        - pnpm
+        - yarn
+        - Not applicable
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package Broker version or commit
+      placeholder: 'For example 2.0.0 or a commit hash'
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime version
+      description: The Workers compatibility date or the Node version.
+    validations:
+      required: true
+  - type: input
+    id: client-version
+    attributes:
+      label: Client version
+      description: The version of the client selected above.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Remove tokens, cookies, credential-bearing URLs and e-mail addresses before pasting.
+      render: text
+    validations:
+      required: false

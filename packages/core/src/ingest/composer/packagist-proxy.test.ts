@@ -140,6 +140,74 @@ describe('packagist proxy describe', () => {
     expect(calls.some((call) => call.url.startsWith('https://evil.example.com'))).toBe(false);
   });
 
+  it('refuses a same-origin metadata redirect', async () => {
+    const target = `${REPO}/p2/evil/other.json`;
+    const routes: Record<string, Reply> = {
+      [`${REPO}/p2/${NAME}.json`]: {
+        status: 302,
+        headers: { location: '/p2/evil/other.json' },
+      },
+      [`${REPO}/p2/${NAME}~dev.json`]: { status: 200, body: p2('dev-main') },
+      [target]: { status: 200, body: p2('2.0.0') },
+    };
+    const { calls, fetch } = setup(routes);
+    const failures: unknown[] = [];
+    await expect(
+      packagistProxyProvider.describe(
+        ctx(async (request) => {
+          try {
+            return await fetch(request);
+          } catch (error) {
+            failures.push(error);
+            throw error;
+          }
+        }),
+        source(),
+        NAME,
+        {},
+      ),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(failures).toEqual([
+      expect.objectContaining({ code: 'refused', reason: 'redirect_refused' }),
+    ]);
+    expect(calls.some((call) => call.url === target)).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('refuses a dev metadata redirect and returns incomplete stable metadata', async () => {
+    const target = `${REPO}/p2/evil/other.json`;
+    const { calls, fetch } = setup({
+      [`${REPO}/p2/${NAME}.json`]: { status: 200, body: p2('1.0.0') },
+      [`${REPO}/p2/${NAME}~dev.json`]: {
+        status: 302,
+        headers: { location: '/p2/evil/other.json' },
+      },
+      [target]: { status: 200, body: p2('dev-main') },
+    });
+    const failures: unknown[] = [];
+    const result = await describePackagist(
+      async (request) => {
+        try {
+          return await fetch(request);
+        } catch (error) {
+          failures.push(error);
+          throw error;
+        }
+      },
+      NAME,
+      { path: 'request', clock: fixedClock(NOW) },
+    );
+    expect(failures).toEqual([
+      expect.objectContaining({ code: 'refused', reason: 'redirect_refused' }),
+    ]);
+    expect(result.kind).toBe('found');
+    if (result.kind !== 'found') return;
+    await drain(result.description);
+    expect(result.description.upstreamComplete).toBe(false);
+    expect(calls.some((call) => call.url === target)).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
   it('answers not_found for an invalid name without any request', async () => {
     const { calls, fetch } = setup({});
     const result = await packagistProxyProvider.describe(ctx(fetch), source(), '../etc', {});
@@ -227,6 +295,17 @@ describe('packagist proxy dist', () => {
     expect(await new Response(dist.body).text()).toBe('zip');
     expect(dist.size).toBe(3);
     expect(calls).toEqual([{ url: legacy, auth: `Bearer ${TOKEN}` }]);
+  });
+
+  it('follows a codeload zipball redirect', async () => {
+    const redirected = `${CODELOAD}/acme/widget/zip/${SHA}`;
+    const { calls, fetch } = setup({
+      [legacy]: { status: 302, headers: { location: redirected } },
+      [redirected]: { status: 200, body: 'zip' },
+    });
+    const dist = await packagistProxyProvider.openDist(ctx(fetch), source(), target(zipball));
+    expect(await new Response(dist.body).text()).toBe('zip');
+    expect(calls.map((call) => call.url)).toEqual([legacy, redirected]);
   });
 
   it('fetches other dist hosts without the token', async () => {

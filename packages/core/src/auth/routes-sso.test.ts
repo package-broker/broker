@@ -896,11 +896,32 @@ describe('callback refusals', () => {
     expect(app.login).not.toHaveBeenCalled();
   });
 
+  it('answers admin linking and not-invited refusals identically', async () => {
+    const responses: Response[] = [];
+    for (const reason of ['not_invited', 'link_requires_admin']) {
+      const app = await build({ loginRefusal: reason });
+      const login = await loginCookieOf(app);
+      responses.push(await app.kernel.fetch(callback('dex', login)));
+      expect(refusals(app)).toEqual([expect.objectContaining({ reason })]);
+    }
+    const [baseline, linking] = responses as [Response, Response];
+    expect(linking.status).toBe(baseline.status);
+    const baselineId = baseline.headers.get('x-request-id') as string;
+    const linkingId = linking.headers.get('x-request-id') as string;
+    linking.headers.delete('x-request-id');
+    baseline.headers.delete('x-request-id');
+    expect([...linking.headers]).toEqual([...baseline.headers]);
+    expect((await linking.text()).replace(linkingId, 'request-id')).toBe(
+      (await baseline.text()).replace(baselineId, 'request-id'),
+    );
+  });
+
   it.each([
     'email_missing',
     'email_unverified',
     'domain_not_verified',
     'not_invited',
+    'link_requires_admin',
     'user_suspended',
     'hook_denied',
     'too_many_groups',

@@ -44,7 +44,7 @@ export function createWorkersSink(options: {
     emit(record: ObsRecord): void {
       if (record.kind === 'log') {
         const level = record.record.level;
-        const safe = projectLogFields(record.record);
+        const safe = Object.freeze(projectLogFields(record.record));
         if (level === 'warn' || level === 'error') out.error(safe);
         else out.log(safe);
         return;

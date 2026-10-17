@@ -325,6 +325,19 @@ describe('buildIdentityProviders', () => {
     expect(map.get('dex')!.policy).toBe(seen);
   });
 
+  it('copies and freezes email-authoritative domains at build time', () => {
+    const emailAuthoritativeDomains = ['example.com'];
+    const map = build(() => [
+      provider({
+        policy: { verifiedDomains: ['example.com'], emailAuthoritativeDomains, autoJoin: false },
+      }),
+    ]);
+    emailAuthoritativeDomains.length = 0;
+    const seen = map.get('dex')!.policy.emailAuthoritativeDomains;
+    expect(seen).toEqual(['example.com']);
+    expect(Object.isFrozen(seen)).toBe(true);
+  });
+
   it('snapshots scalar fields at build time', () => {
     const original = provider() as { id: string; trustAnchor: string; displayName: string };
     const map = build(() => [original as unknown as IdentityProvider]);
@@ -607,6 +620,44 @@ describe('buildIdentityProviders', () => {
           provider({ policy: { verifiedDomains: domains(101), autoJoin: false } }),
         ]),
       ).toEqual([`${label(0)} policy: verifiedDomains must be an array of at most 100 entries`]);
+    });
+
+    it('caps emailAuthoritativeDomains at 100 entries', () => {
+      const verifiedDomains = Array.from({ length: 100 }, (_, i) => `d${i}.example.com`);
+      const policy = {
+        verifiedDomains,
+        emailAuthoritativeDomains: verifiedDomains,
+        autoJoin: false,
+      };
+      expect(build(() => [provider({ policy })]).size).toBe(1);
+      expect(
+        problemsOf(() => [
+          provider({
+            policy: {
+              ...policy,
+              emailAuthoritativeDomains: [...verifiedDomains, verifiedDomains[0]],
+            },
+          }),
+        ]),
+      ).toEqual([
+        `${label(0)} policy: emailAuthoritativeDomains must be an array of at most 100 entries`,
+      ]);
+    });
+
+    it('rejects an email-authoritative domain absent from verifiedDomains', () => {
+      expect(
+        problemsOf(() => [
+          provider({
+            policy: {
+              verifiedDomains: ['example.com'],
+              emailAuthoritativeDomains: ['other.example'],
+              autoJoin: false,
+            },
+          }),
+        ]),
+      ).toEqual([
+        `${label(0)} policy: emailAuthoritativeDomains[0] must appear in verifiedDomains`,
+      ]);
     });
 
     it('rejects an empty verifiedDomains list', () => {

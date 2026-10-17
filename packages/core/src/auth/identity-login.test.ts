@@ -8,7 +8,9 @@ import { orgContext } from '../db/port.js';
 import type { LoginLookup, LoginPlan, LoginWriter, UserRepository } from '../db/users.js';
 import { fixedClock } from '../ids.js';
 import type { IdentityProvider, VerifiedIdentity } from '../identity/port.js';
-import type { HookMap } from '../plugin.js';
+import { buildIdentityProviders } from '../identity/providers.js';
+import { collectRegistrations } from '../kernel/registry.js';
+import { SUPPORTED_PLUGIN_API, type HookMap, type PluginDefinition } from '../plugin.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 const ISSUED_AT = '2026-10-15T11:59:00.000Z';
@@ -42,6 +44,16 @@ function provider(overrides: Partial<IdentityProvider> = {}): IdentityProvider {
     finish: () => Promise.reject(new Error('unused')),
     ...overrides,
   };
+}
+
+function authoritativeProvider(): IdentityProvider {
+  return provider({
+    policy: {
+      verifiedDomains: ['example.test'],
+      emailAuthoritativeDomains: ['example.test'],
+      autoJoin: false,
+    },
+  });
 }
 
 function identity(overrides: Partial<VerifiedIdentity> = {}): VerifiedIdentity {
@@ -178,6 +190,36 @@ function manyGroups(count: number): string[] {
 }
 
 describe('completeIdentityLogin: deciding the user', () => {
+  it('links through an email-authoritative provider built by the registry', async () => {
+    const plugins: PluginDefinition[] = [
+      {
+        id: 'sso',
+        package: '@test/sso',
+        apiVersion: SUPPORTED_PLUGIN_API[0],
+        platforms: ['node'],
+        binds: ['identity'],
+        identityProviders: () => [authoritativeProvider()],
+      },
+    ];
+    const providers = buildIdentityProviders(collectRegistrations(plugins), plugins, {
+      fetch: () => Promise.reject(new Error('unused')),
+      clock: fixedClock(NOW),
+      env: () => undefined,
+    });
+    const h = harness({
+      lookups: [
+        lookup({ userByEmail: { id: LINKED_USER, status: 'active', linkedAtProvider: false } }),
+      ],
+    });
+    expect(await login(h, identity(), providers.get('dex')!)).toMatchObject({
+      ok: true,
+      userId: LINKED_USER,
+    });
+    expect(h.commit).toHaveBeenCalledTimes(1);
+    expect(h.plans()[0]).toMatchObject({ userId: LINKED_USER, createUser: false, provider: 'dex' });
+    expect(h.setCookies).toHaveBeenCalledTimes(1);
+  });
+
   it('logs a known identity in as its own user', async () => {
     const h = harness({ lookups: [knownLookup()] });
     const outcome = await login(h);
@@ -208,11 +250,37 @@ describe('completeIdentityLogin: deciding the user', () => {
         lookup({ userByEmail: { id: LINKED_USER, status: 'active', linkedAtProvider: false } }),
       ],
     });
-    const outcome = await login(h);
+    const outcome = await login(h, identity(), authoritativeProvider());
     expect(outcome).toMatchObject({ ok: true, userId: LINKED_USER });
     const plan = h.plans()[0];
     expect(plan).toMatchObject({ userId: LINKED_USER, createUser: false });
     expect(plan?.identityId).toMatch(/^01J0GEN/);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['empty', []],
+    ['another verified domain', ['other.test']],
+  ])('requires admin linking when authority is %s', async (_name, emailAuthoritativeDomains) => {
+    const h = harness({
+      lookups: [
+        lookup({
+          invited: true,
+          userByEmail: { id: LINKED_USER, status: 'active', linkedAtProvider: false },
+        }),
+      ],
+    });
+    const p = provider({
+      policy: {
+        verifiedDomains: ['example.test', 'other.test'],
+        ...(emailAuthoritativeDomains === undefined ? {} : { emailAuthoritativeDomains }),
+        autoJoin: true,
+      },
+    });
+    expect(await login(h, identity(), p)).toEqual({ ok: false, reason: 'link_requires_admin' });
+    expect(h.resolveHandler).not.toHaveBeenCalled();
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.setCookies).not.toHaveBeenCalled();
   });
 
   it('creates a user when the policy auto-joins', async () => {
@@ -320,7 +388,9 @@ describe('completeIdentityLogin: deciding the user', () => {
         lookup({ userByEmail: { id: LINKED_USER, status: 'active', linkedAtProvider: false } }),
       ],
     });
-    expect(await login(h, identity({ subject: 'second-provider-sub' }))).toMatchObject({
+    expect(
+      await login(h, identity({ subject: 'second-provider-sub' }), authoritativeProvider()),
+    ).toMatchObject({
       ok: true,
       userId: LINKED_USER,
     });
@@ -684,6 +754,28 @@ describe('completeIdentityLogin: runtime validation of the plugin identity', () 
     expect(h.lookupForLogin.mock.calls[0]?.[1].provider).toBe('dex');
   });
 
+  it('copies authoritative domains before hooks can mutate the provider', async () => {
+    const domains: string[] = [];
+    const p = provider({
+      policy: {
+        verifiedDomains: ['example.test'],
+        emailAuthoritativeDomains: domains,
+        autoJoin: false,
+      },
+    });
+    const h = harness({
+      lookups: [
+        lookup({ userByEmail: { id: LINKED_USER, status: 'active', linkedAtProvider: false } }),
+      ],
+      map: () => {
+        domains.push('example.test');
+      },
+    });
+    expect(await login(h, identity(), p)).toEqual({ ok: false, reason: 'link_requires_admin' });
+    expect(h.resolveHandler).not.toHaveBeenCalled();
+    expect(h.commit).not.toHaveBeenCalled();
+  });
+
   it('writes the trust anchor and provider id read at the start', async () => {
     const live = { ...provider() };
     const h = harness({
@@ -813,7 +905,7 @@ describe('completeIdentityLogin: resolveIdentity hook', () => {
         lookup({ userByEmail: { id: LINKED_USER, status: 'active', linkedAtProvider: false } }),
       ],
     });
-    await login(h);
+    await login(h, identity(), authoritativeProvider());
     expect((h.resolveHandler.mock.calls[0]?.[0] as { userId: unknown }).userId).toBe(LINKED_USER);
   });
 
@@ -1104,7 +1196,7 @@ describe('completeIdentityLogin: lost write race', () => {
       ],
       commits: ['refused', 'created'],
     });
-    const outcome = await login(h);
+    const outcome = await login(h, identity(), authoritativeProvider());
     expect(outcome).toMatchObject({ ok: true, userId: LINKED_USER });
     expect(h.events).toEqual([
       'mapGroups',

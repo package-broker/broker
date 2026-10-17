@@ -63,6 +63,10 @@
       "types": "./dist/sources/*.d.ts",
       "default": "./dist/sources/*.js"
     },
+    "./audit/*": {
+      "types": "./dist/audit/*.d.ts",
+      "default": "./dist/audit/*.js"
+    },
     "./registry/*": {
       "types": "./dist/registry/*.d.ts",
       "default": "./dist/registry/*.js"

@@ -14,13 +14,13 @@ import {
 async function openFile(): Promise<OpenedAuthDatabase> {
   const directory = await mkdtemp(join(tmpdir(), 'pb-auth-contract-'));
   const path = join(directory, 'contract.sqlite');
-  const connections: OpenedExecutor[] = [openNodeSqliteExecutor(path)];
+  const connections: OpenedExecutor[] = [openNodeSqliteExecutor(path, { d1PatternLimit: true })];
   const [first] = connections;
   if (first === undefined) throw new Error('no connection');
   return {
     executor: first.executor,
     async second() {
-      const extra = openNodeSqliteExecutor(path);
+      const extra = openNodeSqliteExecutor(path, { d1PatternLimit: true });
       connections.push(extra);
       return extra.executor;
     },

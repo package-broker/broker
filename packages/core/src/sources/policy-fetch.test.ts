@@ -110,6 +110,95 @@ async function failure(promise: Promise<unknown>): Promise<UpstreamError> {
   throw new Error('expected a refusal');
 }
 
+describe('createPolicyFetch redirect mode', () => {
+  it.each([301, 302, 307, 308])(
+    'refuses a same-origin %s without requesting its target',
+    async (status) => {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const { run, hops } = make({
+        'https://a.example.com/start?x=1': new Response(body, {
+          status,
+          headers: { location: '/other' },
+        }),
+        'https://a.example.com/other': new Response('ok'),
+      });
+      await expect(run(request({ redirects: 'error' }))).rejects.toMatchObject({
+        code: 'refused',
+        reason: 'redirect_refused',
+      });
+      expect(hops.map((hop) => hop.url)).toEqual(['https://a.example.com/start?x=1']);
+      expect(cancelled).toBe(true);
+    },
+  );
+
+  it.each([300, 303, 305, 399])('refuses any %s with a Location', async (status) => {
+    const { run, hops } = make({
+      'https://a.example.com/start?x=1': redirect('/other', status),
+    });
+    await expect(run(request({ redirects: 'error' }))).rejects.toMatchObject({
+      code: 'refused',
+      reason: 'redirect_refused',
+    });
+    expect(hops).toHaveLength(1);
+  });
+
+  it('returns a conditional 304 with a Location in error mode', async () => {
+    const { run, hops } = make({
+      'https://a.example.com/start?x=1': new Response(null, {
+        status: 304,
+        headers: { location: '/other', etag: '"cached"' },
+      }),
+    });
+    const response = await run(
+      request({ redirects: 'error', headers: { 'if-none-match': '"cached"' } }),
+    );
+    expect(response.status).toBe(304);
+    expect(response.headers.get('etag')).toBe('"cached"');
+    expect(response.body).toBeNull();
+    expect(hops.map((hop) => hop.url)).toEqual(['https://a.example.com/start?x=1']);
+    expect(hops[0]?.headers.get('if-none-match')).toBe('"cached"');
+  });
+
+  it('discards and refuses an opaque redirect in error mode', async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+    Object.defineProperties(response, {
+      status: { value: 0 },
+      type: { value: 'opaqueredirect' },
+    });
+    const { run, hops } = make({ 'https://a.example.com/start?x=1': response });
+    await expect(run(request({ redirects: 'error' }))).rejects.toMatchObject({
+      code: 'refused',
+      reason: 'redirect_refused',
+    });
+    expect(cancelled).toBe(true);
+    expect(hops).toHaveLength(1);
+  });
+
+  it.each(['manual', '', null, true])(
+    'refuses invalid redirects %j before fetching',
+    async (redirects) => {
+      const { run, hops } = make({ 'https://a.example.com/start?x=1': new Response('ok') });
+      await expect(run(request({ redirects: redirects as never }))).rejects.toMatchObject({
+        code: 'refused',
+        reason: 'request',
+      });
+      expect(hops).toHaveLength(0);
+    },
+  );
+});
+
 describe('createPolicyFetch redirects and credentials', () => {
   it('drops credentials, the credential header, the query parameter and caller headers on a cross-origin hop', async () => {
     const { run, hops } = make({
@@ -191,7 +280,7 @@ describe('createPolicyFetch redirects and credentials', () => {
 
   it('refuses https to http even when http is allowlisted', async () => {
     const lax = createOutboundPolicy({
-      allowPrivateHosts: ['plain.example.com'],
+      allowPrivateHosts: ['plain.example.com:80'],
       runtime: 'node',
       selfOrigins: [],
     });
@@ -200,6 +289,33 @@ describe('createPolicyFetch redirects and credentials', () => {
     const error = await failure(run(request()));
     expect(error.code).toBe('refused');
     expect(f.hops).toHaveLength(1);
+  });
+
+  it('refuses an HTTP redirect under a bare allowlist entry before requesting it', async () => {
+    const f = fake({
+      'https://repo.corp.internal/a': redirect('http://repo.corp.internal/b', 302),
+      'http://repo.corp.internal/b': new Response('ok'),
+    });
+    const run = createPolicyFetch({
+      fetchImpl: f.fetchImpl,
+      policy: createOutboundPolicy({
+        allowPrivateHosts: ['repo.corp.internal'],
+        runtime: 'node',
+        selfOrigins: [],
+      }),
+      userAgent: 'pb-test/1',
+    });
+    const error = await failure(
+      run(
+        request({
+          url: 'https://repo.corp.internal/a',
+          destinations: ['https://repo.corp.internal', 'http://repo.corp.internal'],
+        }),
+      ),
+    );
+    expect(error.code).toBe('refused');
+    expect(error.reason).toBe('scheme');
+    expect(f.hops.map((hop) => hop.url)).toEqual(['https://repo.corp.internal/a']);
   });
 
   it('refuses the start URL when it is classified as blocked', async () => {

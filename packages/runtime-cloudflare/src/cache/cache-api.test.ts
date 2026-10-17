@@ -269,4 +269,35 @@ describe('cache api adapter', () => {
     await Promise.all(pending);
     expect(counters).toEqual([['pb.cache.operations', { outcome: 'error', adapter: 'cache-api' }]]);
   });
+
+  it('counts a synchronously throwing waitUntil and does not reject set', async () => {
+    const counters: unknown[] = [];
+    const cache = createCacheApiAdapter(
+      {
+        open: async () => ({
+          match: async () => null,
+          put: async () => undefined,
+          delete: async () => false,
+        }),
+      },
+      undefined,
+      {
+        now: () => new Date(T0),
+        waitUntil: () => {
+          throw new Error('isolate shutting down');
+        },
+        metrics: { counter: (n, l) => void counters.push([n, l]) },
+      },
+    );
+    await expect(cache.set(ctx, key, envelope())).resolves.toBeUndefined();
+    expect(counters).toEqual([['pb.cache.operations', { outcome: 'error', adapter: 'cache-api' }]]);
+  });
+
+  it('resolves an oversized set without storing, like the Node LRU', async () => {
+    const h = setup();
+    await expect(
+      h.cache.set(ctx, key, envelope({ value: new Uint8Array(MAX_ENTRY_BYTES + 1) })),
+    ).resolves.toBeUndefined();
+    expect(h.store.size).toBe(0);
+  });
 });

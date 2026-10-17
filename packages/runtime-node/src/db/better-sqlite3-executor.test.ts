@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import { describeExecutorContract } from '@package-broker/db-sqlite/contract/executor-contract';
 import { openBetterSqliteExecutor } from './better-sqlite3-executor.js';
 
@@ -159,5 +160,31 @@ describe('openBetterSqliteExecutor statement cache', () => {
     expect(() => openBetterSqliteExecutor(':memory:', { statementCacheSize: 1.5 })).toThrow(
       RangeError,
     );
+  });
+});
+
+describe('openBetterSqliteExecutor guard constraint', () => {
+  it('a forced guard failure carries the guard constraint', async () => {
+    const opened = openBetterSqliteExecutor(':memory:');
+    try {
+      await opened.executor.batch([
+        {
+          sql: 'CREATE TABLE access_mutation_guard (key TEXT NOT NULL PRIMARY KEY CHECK(length(key) BETWEEN 1 AND 64)) STRICT',
+          params: [],
+        },
+      ]);
+      const guard = {
+        sql: 'INSERT INTO access_mutation_guard (key) SELECT ? WHERE (0) IS NOT 1',
+        params: ['K1'],
+      };
+
+      const error = await opened.executor.batch([guard, guard]).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(DbError);
+      expect((error as DbError).kind).toBe('unique');
+      expect((error as DbError).constraint).toBe(ACCESS_MUTATION_GUARD_CONSTRAINT);
+    } finally {
+      await opened.close();
+    }
   });
 });

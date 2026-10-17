@@ -6,7 +6,7 @@ import { migrate, MigrationChecksumError } from '@package-broker/db-sqlite/migra
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { createD1HttpExecutor } from '../cloudflare/d1-http-executor.js';
 import { redact } from '../cloudflare/d1-http-response.js';
-import { BuiltManifestError, loadBuiltMigrations } from './built-manifest.js';
+import { BuiltManifestError, loadBuiltMigrations, routesAreValid } from './built-manifest.js';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -98,6 +98,7 @@ export async function runCloudflareMigrate(o: {
   const secrets = [auth.apiToken, auth.accountId];
   try {
     const sources = await loadBuiltMigrations(o.outDir);
+    if (!(await routesAreValid(o.outDir))) return 2;
     const holder = ulid();
     if (!o.dryRun) console.error(`lock holder ${holder}`);
     const result = await migrate(executorFor(o, auth), sources, {

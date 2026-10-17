@@ -284,17 +284,32 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
     }
   }
 
-  /** An unknown id reveals nothing to an actor who manages nothing at organization scope. */
-  async function missing(
+  /**
+   * Loads the target and the actor's live set with the same round trips whether or not the id
+   * exists; a principal the actor cannot manage answers like a missing one. Only an actor who is
+   * not a full manager is logged as denied, so a manager's mistyped id stays silent.
+   */
+  async function reach(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
+    id: string,
     action: string,
-  ): Promise<ServicePrincipalResult<never>> {
-    const live = await authority.livePermissions(ctx, fence, null);
-    return live.has(ORG_MANAGE) || live.has(PROJECT_MANAGE)
-      ? fail('not_found')
-      : deny(ctx, actor, action);
+  ): Promise<
+    | { readonly target: ServicePrincipalRecord; readonly live: ReadonlySet<string> }
+    | ServicePrincipalResult<never>
+  > {
+    const target = typeof id === 'string' && id !== '' ? await principals.get(ctx, id) : null;
+    const live = await authority.livePermissions(ctx, fence, target?.projectId ?? null);
+    const { permission, organizationAdmin } = requirementFor(target?.projectId ?? null);
+    const admin = actor.isOrganizationAdmin === true;
+    if (target !== null && live.has(permission) && (!organizationAdmin || admin)) {
+      return { target, live };
+    }
+    if (!(admin && live.has(ORG_MANAGE))) {
+      emit({ event: 'admin.denied', action, orgId: ctx.orgId, actorUserId: actor.userId });
+    }
+    return fail('not_found');
   }
 
   async function transition(
@@ -307,10 +322,9 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
     const refused = untagged(ctx, actor, action);
     if (refused !== null) return refused;
     const held = requireFence(actor, fence);
-    const target = typeof id === 'string' && id !== '' ? await principals.get(ctx, id) : null;
-    if (target === null) return missing(ctx, actor, held, action);
-    const live = await manageable(ctx, actor, held, target.projectId);
-    if (live === null) return deny(ctx, actor, action);
+    const reached = await reach(ctx, actor, held, id, action);
+    if ('ok' in reached) return reached;
+    const { target, live } = reached;
     if (action === 'restored') {
       const expected = held.expected['service_principal'];
       if (!Number.isSafeInteger(expected)) return fail('invalid_revision');
@@ -373,10 +387,9 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
       const refused = untagged(ctx, actor, 'permissions_changed');
       if (refused !== null) return refused;
       const held = requireFence(actor, fence);
-      const target = typeof id === 'string' && id !== '' ? await principals.get(ctx, id) : null;
-      if (target === null) return missing(ctx, actor, held, 'permissions_changed');
-      const live = await manageable(ctx, actor, held, target.projectId);
-      if (live === null) return deny(ctx, actor, 'permissions_changed');
+      const reached = await reach(ctx, actor, held, id, 'permissions_changed');
+      if ('ok' in reached) return reached;
+      const { target, live } = reached;
       const expected = held.expected['service_principal'];
       if (!Number.isSafeInteger(expected)) return fail('invalid_revision');
       if (expected !== target.revision) return fail('conflict');

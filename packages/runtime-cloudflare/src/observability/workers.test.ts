@@ -130,7 +130,7 @@ describe('createWorkersSink', () => {
       runtime: 'cloudflare',
     });
     sink.emit(logRecord('info'));
-    sink.emit({ kind: 'counter', name: 'pb.http.requests', labels: { method: 'GET' }, value: 4 });
+    sink.emit({ kind: 'counter', name: 'pb.jobs.settled', labels: { method: 'GET' }, value: 4 });
     expect(points).toEqual([]);
     expect(errors).toEqual([]);
     expect(logs).toHaveLength(3);
@@ -139,12 +139,35 @@ describe('createWorkersSink', () => {
     delete metric.timestamp;
     expect(metric).toEqual({
       kind: 'counter',
-      name: 'pb.http.requests',
+      name: 'pb.jobs.settled',
       labels: { method: 'GET' },
       value: 4,
       deployment_id: 'dep-1',
       runtime: 'cloudflare',
     });
+  });
+
+  it.each([
+    { kind: 'counter', name: 'pb.http.requests' },
+    { kind: 'histogram', name: 'pb.http.duration_ms' },
+  ] as const)('drops $name without ANALYTICS', ({ kind, name }) => {
+    const { sink, logs, errors, points } = setup(false);
+    sink.emit({ kind, name, labels: {}, value: 1 });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ event: 'obs.analytics_unconfigured' });
+    expect(errors).toEqual([]);
+    expect(points).toEqual([]);
+  });
+
+  it('writes only the request log after startup without ANALYTICS', () => {
+    const { sink, logs, errors } = setup(false);
+    sink.emit(logRecord('info'));
+    sink.emit({ kind: 'counter', name: 'pb.http.requests', labels: {}, value: 1 });
+    sink.emit({ kind: 'histogram', name: 'pb.http.duration_ms', labels: {}, value: 9 });
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toMatchObject({ event: 'obs.analytics_unconfigured' });
+    expect(logs[1]).toMatchObject({ level: 'info', event: 'req.done' });
+    expect(errors).toEqual([]);
   });
 
   it('emits no startup event when ANALYTICS exists', () => {
@@ -179,5 +202,19 @@ describe('createWorkersSink', () => {
     expect(() =>
       createObservability({ emit: () => undefined }, { ...scope, route: '/a=b' }, registry),
     ).toThrow(RangeError);
+  });
+});
+
+describe('createWorkersSink field allowlist', () => {
+  it('drops fields outside the shared allowlist', () => {
+    const { sink, logs, errors, points } = setup();
+    sink.emit({
+      kind: 'log',
+      record: { level: 'info', event: 'req.done', message: 'secret text', email: 'a@b.c' },
+    } as ObsRecord);
+    const written = JSON.stringify([logs, errors, points]);
+    expect(written).not.toContain('message');
+    expect(written).not.toContain('email');
+    expect(written).toContain('req.done');
   });
 });

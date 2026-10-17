@@ -91,6 +91,7 @@ export interface VerifiedIdentity {
 
 export interface DomainPolicy {
   readonly verifiedDomains: readonly string[];
+  readonly emailAuthoritativeDomains?: readonly string[];
   readonly autoJoin: boolean;
 }
 

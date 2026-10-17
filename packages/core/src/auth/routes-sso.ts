@@ -70,20 +70,23 @@ const IDENTITY_FAILURES: ReadonlySet<string> = new Set<IdentityFailure>([
   'provider_error',
   'email_missing',
 ]);
-const LOGIN_REFUSALS: ReadonlySet<string> = new Set<LoginRefusal>([
-  'email_missing',
-  'email_unverified',
-  'domain_not_verified',
-  'not_invited',
-  'user_suspended',
-  'hook_denied',
-  'too_many_groups',
-  'already_linked',
-  'invalid_identity',
-  'provider_rebound',
-  'email_changed',
-  'conflict',
-]);
+const LOGIN_REFUSALS: ReadonlySet<string> = new Set(
+  Object.keys({
+    email_missing: true,
+    email_unverified: true,
+    domain_not_verified: true,
+    not_invited: true,
+    user_suspended: true,
+    hook_denied: true,
+    too_many_groups: true,
+    already_linked: true,
+    link_requires_admin: true,
+    invalid_identity: true,
+    provider_rebound: true,
+    email_changed: true,
+    conflict: true,
+  } satisfies Record<LoginRefusal, true>),
+);
 const REAUTH_REFUSALS: ReadonlySet<string> = new Set(
   Object.keys({
     not_sso_session: true,

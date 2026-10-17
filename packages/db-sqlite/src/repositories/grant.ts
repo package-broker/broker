@@ -1,14 +1,4 @@
-import {
-  AliasNode,
-  ExpressionWrapper,
-  IdentifierNode,
-  OperationNodeTransformer,
-  sql,
-  type Compilable,
-  type ExpressionBuilder,
-  type Kysely,
-  type SqlBool,
-} from 'kysely';
+import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
 import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type {
@@ -26,8 +16,7 @@ import {
   compile,
   db,
   existsGuard,
-  EVIDENCE_MAX_AGE_MS,
-  EVIDENCE_FUTURE_SKEW_MS,
+  databaseTimeMs,
   protectedHolder,
   runOrgFenced,
   type Database,
@@ -441,27 +430,6 @@ function statusRefusal(
   return 'conflict';
 }
 
-/** Replaces the predicate's bound freshness limits with statement-stable database time. */
-class HolderDatabaseTime extends OperationNodeTransformer {
-  protected override transformAlias(node: AliasNode): AliasNode {
-    if (IdentifierNode.is(node.alias)) {
-      const offset =
-        node.alias.name === 'lower_ms'
-          ? -EVIDENCE_MAX_AGE_MS
-          : node.alias.name === 'upper_ms'
-            ? EVIDENCE_FUTURE_SKEW_MS
-            : undefined;
-      if (offset !== undefined) {
-        return {
-          ...node,
-          node: sql`cast(round(unixepoch('now', 'subsec') * 1000) as integer) + ${offset}`.toOperationNode(),
-        };
-      }
-    }
-    return super.transformAlias(node);
-  }
-}
-
 export function createGrantRepository(
   executor: ScalarSqlExecutor,
   options: GrantRepositoryOptions,
@@ -834,7 +802,7 @@ export function createGrantRepository(
     },
 
     async isProtectedHolder(ctx, userId, input) {
-      const predicate = protectedHolder(
+      const holder = protectedHolder(
         ctx,
         sql.ref('holder.id'),
         input ?? {
@@ -842,13 +810,8 @@ export function createGrantRepository(
           now: '1970-01-01T00:00:00.000Z',
           providers,
         },
+        input === undefined ? { now: databaseTimeMs } : {},
       );
-      const holder =
-        input === undefined
-          ? new ExpressionWrapper<Database, 'user_account', SqlBool>(
-              new HolderDatabaseTime().transformNode(predicate.toOperationNode()),
-            )
-          : predicate;
       const rows = await executor.all<IdRow>(
         scalar(
           db

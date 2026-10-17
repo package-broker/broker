@@ -418,14 +418,33 @@ describe('dependency edges', () => {
 const MINTERS: Readonly<Record<string, readonly string[]>> = {
   'packages/core/src/db/catalogue': ['catalogueWriteGuard'],
   'packages/core/src/catalogue/version-rules': ['completeSourceListing', 'completeVersionListing'],
-  'packages/core/src/authz/fence': ['fenceGuard'],
+  'packages/core/src/authz/fence': [
+    'fenceGuard',
+    'systemMutationFence',
+    'tokenMutationFence',
+    'delegatedMutationFence',
+  ],
 };
 interface ImportRule {
   readonly modules: Readonly<Record<string, readonly string[]>>;
   readonly allowedRoots: readonly string[];
+  readonly allowedRootsByName?: Readonly<Record<string, readonly string[]>>;
 }
 
-const MINT_RULE: ImportRule = { modules: MINTERS, allowedRoots: ['packages/db-sqlite/src/'] };
+const FENCE_ISSUER_ROOTS = [
+  'packages/db-sqlite/src/',
+  'packages/core/src/kernel/',
+  'packages/core/src/platform/',
+];
+const MINT_RULE: ImportRule = {
+  modules: MINTERS,
+  allowedRoots: ['packages/db-sqlite/src/'],
+  allowedRootsByName: {
+    systemMutationFence: FENCE_ISSUER_ROOTS,
+    tokenMutationFence: FENCE_ISSUER_ROOTS,
+    delegatedMutationFence: FENCE_ISSUER_ROOTS,
+  },
+};
 const ACCESS_CONTEXT_RULE: ImportRule = {
   modules: {
     'packages/core/src/authz/access-context': [
@@ -490,7 +509,12 @@ function findMintViolations(
   rule: ImportRule = MINT_RULE,
 ): string[] {
   if (relativePath.endsWith('.test.ts')) return [];
-  const allowed = rule.allowedRoots.some((root) => relativePath.startsWith(root));
+  const allowedFor = (name: string): boolean =>
+    (rule.allowedRootsByName?.[name] ?? rule.allowedRoots).some((root) =>
+      relativePath.startsWith(root),
+    );
+  const allowedAll = (names: readonly string[]): boolean => names.every(allowedFor);
+  const unrestricted = allowedAll(Object.values(rule.modules).flat());
   const literalLoadsOnly =
     rule === MINT_RULE && LITERAL_LOADS_ONLY.includes(relativePath.split('/')[1] ?? '');
   const requireAliases = new Set<string>();
@@ -512,13 +536,13 @@ function findMintViolations(
     if (ts.isImportDeclaration(node)) {
       const names = mintNames(node.moduleSpecifier);
       const bindings = node.importClause?.namedBindings;
-      if (names && bindings && ts.isNamespaceImport(bindings) && !allowed) {
+      if (names && bindings && ts.isNamespaceImport(bindings) && !allowedAll(names)) {
         report(node, 'namespace import of a minting module');
       } else if (names && bindings && ts.isNamedImports(bindings)) {
         for (const element of bindings.elements) {
           const imported = (element.propertyName ?? element.name).text;
           if (!names.includes(imported)) continue;
-          if (allowed) mintedLocals.add(element.name.text);
+          if (allowedFor(imported)) mintedLocals.add(element.name.text);
           else report(element, imported);
         }
       }
@@ -536,12 +560,13 @@ function findMintViolations(
           }
         }
       }
-    } else if (ts.isImportEqualsDeclaration(node) && !allowed) {
+    } else if (ts.isImportEqualsDeclaration(node)) {
       const reference = node.moduleReference;
-      if (ts.isExternalModuleReference(reference) && mintNames(reference.expression)) {
-        report(node, 'import-equals of a minting module');
-      }
-    } else if (ts.isExportAssignment(node) && allowed) {
+      const names = ts.isExternalModuleReference(reference)
+        ? mintNames(reference.expression)
+        : undefined;
+      if (names && !allowedAll(names)) report(node, 'import-equals of a minting module');
+    } else if (ts.isExportAssignment(node)) {
       if (ts.isIdentifier(node.expression) && mintedLocals.has(node.expression.text)) {
         report(node, `re-export ${node.expression.text}`);
       }
@@ -552,11 +577,11 @@ function findMintViolations(
         if (init && isCreateRequire(init) && ts.isIdentifier(declaration.name)) {
           requireAliases.add(declaration.name.text);
         }
-        if (allowed && exported && init && ts.isIdentifier(init) && mintedLocals.has(init.text)) {
+        if (exported && init && ts.isIdentifier(init) && mintedLocals.has(init.text)) {
           report(declaration, `re-export ${init.text}`);
         }
       }
-    } else if (ts.isCallExpression(node) && !allowed) {
+    } else if (ts.isCallExpression(node) && !unrestricted) {
       const callee = node.expression;
       const isLoader =
         callee.kind === ts.SyntaxKind.ImportKeyword ||
@@ -566,8 +591,9 @@ function findMintViolations(
       const argument = node.arguments[0];
       if (isLoader && literalLoadsOnly && !(argument && ts.isStringLiteral(argument))) {
         report(node, 'dynamic load with a computed specifier');
-      } else if (isLoader && mintNames(argument)) {
-        report(node, 'dynamic load of a minting module');
+      } else if (isLoader) {
+        const names = mintNames(argument);
+        if (names && !allowedAll(names)) report(node, 'dynamic load of a minting module');
       }
     }
     ts.forEachChild(node, visit);
@@ -746,6 +772,53 @@ describe('minting modules', () => {
         ].join('\n'),
       ),
     ).toEqual([`${file}:2: re-export g`, `${file}:3: re-export g`]);
+  });
+
+  it('restricts the job, token and delegated fence issuers to kernel, platform and db-sqlite', () => {
+    const issuers = [
+      "import { systemMutationFence } from '@package-broker/core/authz/fence';",
+      "import { tokenMutationFence as t } from '@package-broker/core/authz/fence';",
+      "import { delegatedMutationFence } from '@package-broker/core/authz/fence';",
+    ].join('\n');
+    for (const file of [
+      'packages/plugin-github/src/a.ts',
+      'packages/core/src/sources/routes.ts',
+      'packages/core/src/authz/administration.ts',
+      'packages/runtime-node/src/a.ts',
+    ]) {
+      expect(findMintViolations(file, issuers)).toEqual([
+        `${file}:1: systemMutationFence`,
+        `${file}:2: tokenMutationFence`,
+        `${file}:3: delegatedMutationFence`,
+      ]);
+    }
+    for (const file of [
+      'packages/core/src/kernel/k.ts',
+      'packages/core/src/platform/runner.ts',
+      'packages/db-sqlite/src/repositories/w.ts',
+    ]) {
+      expect(findMintViolations(file, issuers)).toEqual([]);
+    }
+  });
+
+  it('keeps fenceGuard and namespace or dynamic loads of fence out of kernel and platform', () => {
+    const file = 'packages/core/src/kernel/k.ts';
+    expect(
+      findMintViolations(
+        file,
+        [
+          "import { fenceGuard, systemMutationFence } from '../authz/fence.js';",
+          "import * as fence from '../authz/fence.js';",
+          "const f = await import('../authz/fence.js');",
+          'export { systemMutationFence };',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${file}:1: fenceGuard`,
+      `${file}:2: namespace import of a minting module`,
+      `${file}:3: dynamic load of a minting module`,
+      `${file}:4: re-export systemMutationFence`,
+    ]);
   });
 
   it("exempts tests; defining modules may not re-export another module's mints", () => {

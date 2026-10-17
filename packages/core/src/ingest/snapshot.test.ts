@@ -4,6 +4,7 @@ import { orgContext } from '../db/port.js';
 import { fixedClock } from '../ids.js';
 import {
   BlobSizeMismatchError,
+  BlobValidationError,
   createBlobStore,
   createBlobUploadAdmission,
   parseSha256,
@@ -78,7 +79,8 @@ function memoryStore() {
   const byteStore: ByteStore = {
     async putVerified(key, body, input) {
       const bytes = await drain(body);
-      if (bytes.length !== input.size || sha256(bytes) !== input.sha256) throw new Error('verify');
+      if (bytes.length !== input.size || sha256(bytes) !== input.sha256)
+        throw new BlobValidationError();
       objects.set(key, { bytes, mediaType: input.mediaType });
       return { size: bytes.length, mediaType: input.mediaType };
     },
@@ -151,6 +153,12 @@ const packument = enc.encode(
 const options = { maxBytes: 1024 * 1024, codecs };
 const read = { codecs };
 
+function changedSameLength(bytes: Uint8Array): Uint8Array {
+  const copy = bytes.slice();
+  copy[0] = copy[0] === 0x7b ? 0x20 : 0x7b;
+  return copy;
+}
+
 describe('stageSnapshot', () => {
   it('stores the document as refetchable JSON keyed by its SHA-256', async () => {
     const m = memoryStore();
@@ -180,7 +188,7 @@ describe('stageSnapshot', () => {
     const m = memoryStore();
     let opens = 0;
     const open = async (): Promise<ReadableStream<Uint8Array>> =>
-      streamOf(opens++ % 2 === 0 ? packument : enc.encode('{}'));
+      streamOf(opens++ % 2 === 0 ? packument : changedSameLength(packument));
     await expect(stageSnapshot(ctx, open, m.store, options)).rejects.toThrow(UpstreamUnstableError);
     expect(m.objects.size).toBe(0);
   });

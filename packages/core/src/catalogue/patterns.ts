@@ -1,5 +1,6 @@
 import { MAX_KEY_LENGTH } from './names.js';
 
+export const MAX_PATTERN_BYTES = 50;
 export const MAX_PATTERN_WILDCARDS = 4;
 export const MAX_PATTERNS_PER_RULE = 64;
 
@@ -19,14 +20,18 @@ export interface VisibilityRule {
 export const PATTERN_ALPHABET = /^[a-z0-9._~@!/*-]+$/;
 
 export function isValidPattern(pattern: string): boolean {
-  if (pattern.length < 1 || pattern.length > MAX_KEY_LENGTH || !PATTERN_ALPHABET.test(pattern)) {
+  return isPatternSyntax(pattern, MAX_PATTERN_BYTES);
+}
+
+export function isPatternSyntax(pattern: string, maxLength: number): boolean {
+  if (pattern.length < 1 || pattern.length > maxLength || !PATTERN_ALPHABET.test(pattern)) {
     return false;
   }
   return pattern.split('*').length - 1 <= MAX_PATTERN_WILDCARDS;
 }
 
 export function matchesPattern(pattern: string, key: string): boolean {
-  if (!isValidPattern(pattern)) {
+  if (!isPatternSyntax(pattern, MAX_KEY_LENGTH)) {
     throw new PatternError('invalid_pattern');
   }
   const segments = pattern.split('*');

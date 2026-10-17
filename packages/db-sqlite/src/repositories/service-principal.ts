@@ -22,6 +22,11 @@ export interface ServicePrincipal {
 
 export interface ServicePrincipalRepository {
   get(ctx: OrgContext, id: string): Promise<ServicePrincipal | null>;
+  /** The principals of this organization whose creator is `userId`, ordered by id. */
+  createdBy(
+    ctx: OrgContext,
+    userId: string,
+  ): Promise<readonly { readonly id: string; readonly projectId: string | null }[]>;
   /**
    * One fenced batch inserts the principal and exactly its permission rows. The caller guard decides
    * whether the actor may create; a refusing guard stores nothing and answers `authority`.
@@ -254,6 +259,21 @@ export function createServicePrincipalRepository(
 
   return {
     get: load,
+
+    async createdBy(ctx, userId) {
+      requireNonEmpty(userId, 'userId');
+      const found = await executor.all<{ id: string; project_id: string | null }>(
+        scalar(
+          db
+            .selectFrom('service_principal')
+            .select(['id', 'project_id'])
+            .where('org_id', '=', ctx.orgId)
+            .where('created_by_user_id', '=', userId)
+            .orderBy('id'),
+        ),
+      );
+      return found.map((row) => ({ id: row.id, projectId: row.project_id }));
+    },
 
     async create(ctx, fence, guard, input) {
       requireNonEmpty(input.id, 'id');

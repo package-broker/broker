@@ -729,3 +729,51 @@ describe('cache_epoch', () => {
     expect(await rows('SELECT id FROM service_principal')).toEqual([]);
   });
 });
+
+describe('createdBy', () => {
+  function principalRow(
+    id: string,
+    orgId: string,
+    name: string,
+    projectId: string | null,
+    by: string,
+  ) {
+    return stmt(
+      'INSERT INTO service_principal (id, org_id, name, project_id, created_by_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      id,
+      orgId,
+      name,
+      projectId,
+      by,
+      NOW,
+      NOW,
+    );
+  }
+
+  it('lists the ids and project ids of the principals the user created, ordered by id', async () => {
+    await executor.batch([
+      principalRow(SP2, a.orgId, 'org-wide', null, U1),
+      principalRow(SP1, a.orgId, 'ci', PROJECT, U1),
+    ]);
+    expect(await principals.createdBy(a, U1)).toEqual([
+      { id: SP1, projectId: PROJECT },
+      { id: SP2, projectId: null },
+    ]);
+  });
+
+  it('never returns a principal of another organization, even one naming the same creator', async () => {
+    await executor.batch([
+      principalRow(SP1, a.orgId, 'ci', PROJECT, U1),
+      principalRow(SP2, b.orgId, 'foreign', PROJECT_B, U1),
+      principalRow(SP3, b.orgId, 'b-own', null, UB),
+    ]);
+    expect(await principals.createdBy(a, U1)).toEqual([{ id: SP1, projectId: PROJECT }]);
+    expect(await principals.createdBy(a, UB)).toEqual([]);
+    expect(await principals.createdBy(b, UB)).toEqual([{ id: SP3, projectId: null }]);
+  });
+
+  it('answers an empty list for a user who created nothing', async () => {
+    await executor.batch([principalRow(SP1, a.orgId, 'ci', PROJECT, U1)]);
+    expect(await principals.createdBy(a, '01J0USER000000000000000009')).toEqual([]);
+  });
+});

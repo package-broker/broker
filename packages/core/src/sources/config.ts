@@ -53,7 +53,11 @@ export interface SourceConfigProblem {
 }
 
 export type SourceConfigResult =
-  | { readonly ok: true; readonly config: SourceConfig }
+  | {
+      readonly ok: true;
+      readonly config: SourceConfig;
+      readonly warnings?: readonly SourceConfigProblem[];
+    }
   | { readonly ok: false; readonly problems: readonly SourceConfigProblem[] };
 
 export interface ParseSourceConfigOptions {
@@ -350,6 +354,20 @@ function parseComposerRepository(
   return { selection: { packages, patterns, expandPatterns }, distHosts, mirrorsFallback };
 }
 
+function broadPatternWarnings(patterns: readonly string[]): SourceConfigProblem[] {
+  const warnings: SourceConfigProblem[] = [];
+  patterns.forEach((pattern, i) => {
+    const slash = pattern.indexOf('/');
+    const vendor = slash < 0 ? '' : pattern.slice(0, slash);
+    if (vendor === '' || vendor.includes('*'))
+      warnings.push({
+        field: `selection.patterns[${i}]`,
+        message: 'pattern has no literal vendor segment and may match almost every package',
+      });
+  });
+  return warnings;
+}
+
 const ECOSYSTEM_OF: Record<Exclude<SourceType, 'hosted'>, SourceEcosystem> = {
   vcs: 'composer',
   composer_repository: 'composer',
@@ -412,7 +430,9 @@ export function parseSourceConfig(
         c.add('url', 'must be an allowed URL without userinfo, query or fragment');
       }
       const config = parseComposerRepository(c, parsed, policy);
-      return c.problems.length > 0 || config === null ? fail() : { ok: true, config };
+      if (c.problems.length > 0 || config === null) return fail();
+      const warnings = broadPatternWarnings(config.selection.patterns);
+      return warnings.length > 0 ? { ok: true, config, warnings } : { ok: true, config };
     }
     case 'npm_registry': {
       if (!hasUrl || sourceUrl(url, policy) === null) {

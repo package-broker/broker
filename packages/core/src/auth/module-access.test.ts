@@ -23,6 +23,7 @@ function fixture(wired = true) {
         project: null,
         organizationPermissions: ['org:read'],
         projectPermissions: [],
+        protectedHolder: false,
       }),
     ),
     lookupToken: vi.fn(() => Promise.resolve(null)),

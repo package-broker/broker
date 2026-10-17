@@ -290,7 +290,6 @@ describe('login success', () => {
     expect(input?.snapshot).toBe(harness.reservedSnapshot);
     expect(input?.snapshot).not.toBe(harness.found);
     expect(input?.step).toBe(STEP);
-    expect(input?.opId).toMatch(/^[0-9A-Z]{26}$/);
     expect(input?.rehash).toBeNull();
     expect(input?.reauthSessionId).toBeNull();
     expect(input?.previousSecretHash).toBe(META.previousSecretHash);

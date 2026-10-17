@@ -197,7 +197,6 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       const succeeded = await writer.succeed(ctx, {
         snapshot,
         step,
-        opId: ids.ulid(),
         rehash,
         session: {
           id: ids.ulid(),
@@ -240,7 +239,6 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       const succeeded = await writer.succeed(ctx, {
         snapshot: verified.snapshot,
         step: verified.step,
-        opId: ids.ulid(),
         rehash: verified.rehash,
         session: null,
         previousSecretHash: null,

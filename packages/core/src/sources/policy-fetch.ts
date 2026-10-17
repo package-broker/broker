@@ -44,6 +44,7 @@ export interface UpstreamRequest {
   readonly body?: Uint8Array;
   readonly credential?: UpstreamCredential;
   readonly destinations?: readonly string[];
+  readonly redirects?: 'follow' | 'error';
   readonly purpose: UpstreamPurpose;
   readonly maxBytes: number;
   /** Total budget including body streaming; fetch has no connect hook. */
@@ -229,6 +230,13 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
   async function run(request: UpstreamRequest, tracking: Tracking): Promise<UpstreamResponse> {
     const allowed = PURPOSE_HEADERS.get(request.purpose);
     if (allowed === undefined || !METHODS.has(request.method)) throw refuse('request');
+    if (
+      request.redirects !== undefined &&
+      request.redirects !== 'follow' &&
+      request.redirects !== 'error'
+    ) {
+      throw refuse('request');
+    }
     if (!Number.isFinite(request.maxBytes) || request.maxBytes <= 0) throw refuse('limit');
     if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) throw refuse('limit');
     const headersTimeoutMs = request.headersTimeoutMs ?? Math.min(request.timeoutMs, 30000);
@@ -316,7 +324,18 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
       }
 
       if (response.status === 0 || response.type === 'opaqueredirect') {
-        throw refuse('opaque_redirect');
+        discard(response);
+        throw refuse(request.redirects === 'error' ? 'redirect_refused' : 'opaque_redirect');
+      }
+      if (
+        request.redirects === 'error' &&
+        response.status >= 300 &&
+        response.status < 400 &&
+        response.status !== 304 &&
+        response.headers.has('location')
+      ) {
+        discard(response);
+        throw refuse('redirect_refused');
       }
       if (REDIRECT_STATUSES.has(response.status)) {
         discard(response);

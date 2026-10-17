@@ -2,7 +2,7 @@ import { buildIdentityProviders } from '@package-broker/core/identity/providers'
 import type { IdentityContext } from '@package-broker/core/identity/port';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import { fixedClock } from '@package-broker/core/ids';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import ssoOidc from './index.js';
 
 const AUDIENCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
@@ -44,7 +44,7 @@ describe('plugin-sso-oidc', () => {
   it('declares its plugin definition', () => {
     const plugin = ssoOidc();
     expect(plugin.id).toBe('sso-oidc');
-    expect(plugin.apiVersion).toBe(2);
+    expect(plugin.apiVersion).toBe(3);
   });
 
   it('binds nothing without providers', () => {
@@ -52,7 +52,7 @@ describe('plugin-sso-oidc', () => {
       expect(plugin).toEqual({
         id: 'sso-oidc',
         package: '@package-broker/plugin-sso-oidc',
-        apiVersion: 2,
+        apiVersion: 3,
         platforms: ['cloudflare', 'node'],
         capabilities: ['sso'],
       });
@@ -266,5 +266,66 @@ describe('plugin-sso-oidc', () => {
         expect(Object.isFrozen(first.binds)).toBe(true);
       }
     }
+  });
+});
+
+describe('plugin-sso-oidc config snapshot', () => {
+  const UNREADABLE = 'providers[0]: configuration must be a readable object';
+
+  function refused(config: unknown): string {
+    return messageOf(() => ssoOidc({ providers: [config as never] }));
+  }
+
+  it('refuses a scopes list over the cap without copying it', () => {
+    const scopes = Array.from({ length: 33 }, (_, index) => `scope${index}`);
+    const spy = vi.spyOn(Array, 'from');
+    try {
+      const message = refused({ ...oidc, scopes });
+      expect(message).toContain('providers[0]');
+      expect(spy.mock.calls.some(([arg]) => arg === scopes)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses a verifiedDomains list over the cap without copying it', () => {
+    const verifiedDomains = Array.from({ length: 33 }, (_, index) => `d${index}.example.com`);
+    const spy = vi.spyOn(Array, 'from');
+    try {
+      refused({ ...oidc, policy: { verifiedDomains, autoJoin: false } });
+      expect(spy.mock.calls.some(([arg]) => arg === verifiedDomains)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses a non-enumerable key', () => {
+    const config = { ...oidc };
+    Object.defineProperty(config, 'hidden', { value: 'x', enumerable: false });
+    expect(refused(config)).toBe(`invalid sso-oidc configuration: ${UNREADABLE}`);
+  });
+
+  it('refuses a symbol key', () => {
+    const config = { ...oidc, [Symbol('extra')]: 'x' };
+    expect(refused(config)).toBe(`invalid sso-oidc configuration: ${UNREADABLE}`);
+  });
+
+  it('refuses a getter without invoking it', () => {
+    const getter = vi.fn(() => 'x');
+    const config = { ...oidc };
+    Object.defineProperty(config, 'displayName', { get: getter, enumerable: true });
+    expect(refused(config)).toBe(`invalid sso-oidc configuration: ${UNREADABLE}`);
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('refuses a sparse list', () => {
+    const scopes = ['openid', 'email', 'profile'];
+    delete scopes[1];
+    expect(refused({ ...oidc, scopes })).toBe(`invalid sso-oidc configuration: ${UNREADABLE}`);
+  });
+
+  it('refuses a list with an extra own property', () => {
+    const scopes = Object.assign(['openid'], { extra: 'x' });
+    expect(refused({ ...oidc, scopes })).toBe(`invalid sso-oidc configuration: ${UNREADABLE}`);
   });
 });

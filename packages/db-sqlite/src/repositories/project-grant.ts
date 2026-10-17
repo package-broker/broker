@@ -16,6 +16,7 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
+import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_GROUP_LENGTH = 256;
@@ -90,7 +91,13 @@ export interface ProjectGrantRepository {
     ctx: OrgContext,
     fence: MutationFence,
     input: ProjectGrantTarget,
-  ): Promise<'deleted' | 'forbidden' | 'not_found' | 'conflict' | 'indeterminate'>;
+  ): Promise<
+    | { readonly status: 'deleted'; readonly offboardedUserId: string | null }
+    | 'forbidden'
+    | 'not_found'
+    | 'conflict'
+    | 'indeterminate'
+  >;
 }
 
 export function projectGrantKey(grantId: string): string {
@@ -105,13 +112,6 @@ function timestamp(value: string): string {
   const parsed = typeof value === 'string' ? new Date(value) : new Date(Number.NaN);
   if (!TIMESTAMP.test(value) || Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) {
     throw new TypeError('now must be a UTC timestamp with millisecond precision');
-  }
-  return value;
-}
-
-function requireIdleSeconds(value: number): number {
-  if (!Number.isInteger(value) || value < 60 || value > 86400) {
-    throw new RangeError('idleSeconds must be an integer from 60 to 86400');
   }
   return value;
 }
@@ -167,9 +167,7 @@ function actorIsLive(ctx: OrgContext, fence: MutationFence, idleSeconds: number)
     join session as actor_session on actor_session.user_id = actor.id and actor_session.org_id = actor.org_id
     where actor.id = ${fence.userId} and actor.org_id = ${ctx.orgId} and actor.status = 'active'
       and actor_session.id = ${fence.sessionId}
-      and actor_session.revoked_at is null
-      and unixepoch(actor_session.expires_at, 'subsec') > unixepoch('now', 'subsec')
-      and unixepoch(coalesce(actor_session.last_seen_at, actor_session.created_at), 'subsec') > unixepoch('now', 'subsec') - ${idleSeconds}
+      and ${liveSessionCondition('actor_session', idleSeconds)}
   )`;
 }
 
@@ -438,6 +436,33 @@ export function createProjectGrantRepository(
         select 1 from access_grant as tombstoned
         where tombstoned.id = ${input.id} and tombstoned.last_op_id = ${opId}
       )`;
+      const offboarded = compile(
+        db.selectNoFrom(
+          sql<string | null>`(
+          select subject.id from user_account as subject
+          join access_grant as removed on removed.org_id = subject.org_id
+            and removed.subject_type = 'email' and removed.subject_value = subject.email
+          where removed.id = ${input.id} and removed.org_id = ${ctx.orgId}
+            and removed.last_op_id = ${opId}
+            and not exists (
+              select 1 from access_grant as remaining
+              where remaining.org_id = subject.org_id and remaining.id <> removed.id
+                and (remaining.scope = 'organization'
+                  or (remaining.scope = 'project' and remaining.project_id = removed.project_id))
+                and (
+                  (remaining.subject_type = 'email' and remaining.subject_value = subject.email)
+                  or (remaining.subject_type = 'group' and exists (
+                    select 1 from user_group as membership
+                    where membership.org_id = subject.org_id and membership.user_id = subject.id
+                      and membership.provider = remaining.subject_provider
+                      and membership.group_name = remaining.subject_value
+                  ))
+                )
+            )
+        )
+      `.as('offboarded_user_id'),
+        ),
+      );
       const remove = compile(
         db
           .deleteFrom('access_grant')
@@ -451,12 +476,14 @@ export function createProjectGrantRepository(
         ctx,
         fence,
         assertGuard(allowed, ctx),
-        [...assertCheck(valid), tombstone, ...assertCheck(owned), remove],
+        [...assertCheck(valid), tombstone, ...assertCheck(owned), offboarded, remove],
         { authority: probe(allowed, true), conflict: probe(valid, true) },
       );
       if (outcome.ok) {
         if ((outcome.results.at(-1)?.rows.length ?? 0) !== 1) failed('delete removed no row');
-        return 'deleted';
+        const row = outcome.results.at(-2)?.rows[0] as
+          { offboarded_user_id: string | null } | undefined;
+        return { status: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };
       }
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') {

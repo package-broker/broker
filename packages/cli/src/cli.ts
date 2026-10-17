@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import type { Platform } from '@package-broker/core/plugin';
-import { build } from './build.js';
+import { build, BuildDiagnosticsError } from './build.js';
 import {
   runAdminBootstrap,
   runAdminRebindProvider,
@@ -25,8 +25,8 @@ const USAGE =
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb version\n' +
-  'Exit codes: 0 success; 1 error; 2 usage or invalid slug; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
-  'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 response lost, re-running is safe); 8 admin_role_missing (reset-local)\n' +
+  'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
+  'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
   'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)\n' +
   'Exit codes for pb admin show-provider-binding: 0 success; 1 error; 2 usage or invalid provider; 5 organization not bootstrapped; 6 no_binding; nothing is bound for that provider; 7 outcome unknown (D1 response lost, re-running is safe)';
 
@@ -197,11 +197,20 @@ export async function run(argv: readonly string[]): Promise<number> {
       console.error(`unknown target "${target}"`);
       return 2;
     }
-    const result = await build({
-      configPath: values.config ?? 'broker.config.ts',
-      ...(target === undefined ? {} : { target: target as Platform }),
-      ...(values.out === undefined ? {} : { outDir: values.out }),
-    });
+    let result: Awaited<ReturnType<typeof build>>;
+    try {
+      result = await build({
+        configPath: values.config ?? 'broker.config.ts',
+        ...(target === undefined ? {} : { target: target as Platform }),
+        ...(values.out === undefined ? {} : { outDir: values.out }),
+      });
+    } catch (error) {
+      if (!(error instanceof BuildDiagnosticsError)) throw error;
+      for (const problem of error.problems) {
+        console.error(`error: ${problem}`.replace(/[\r\n]+/g, ' '));
+      }
+      return 2;
+    }
     console.log(`manifest: ${result.manifestJson}`);
     console.log(`bundle: ${result.bundle}`);
     return 0;

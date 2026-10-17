@@ -77,6 +77,7 @@ export interface LoginPlan {
   readonly session: NewSession;
   readonly previousSecretHash: string | null;
   readonly now: string;
+  readonly autoJoin: boolean;
 }
 
 export interface LoginWriter {

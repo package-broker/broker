@@ -64,6 +64,7 @@ describe('renderManifestJson', () => {
     const plugins = [
       plugin('a', {
         binds: ['source'],
+        sourceProviders: () => [],
         register: (r) =>
           r.route({
             method: 'GET',
@@ -92,7 +93,13 @@ describe('renderManifestJson', () => {
     expect(manifest.plugins[0]?.binds).toEqual(['source']);
     expect(manifest.bindings).toEqual([{ port: 'source', plugin: 'a' }]);
     expect(manifest.routes).toEqual([
-      { method: 'GET', path: '/a', plugin: 'a', permission: 'org:read' },
+      {
+        method: 'GET',
+        path: '/a',
+        plugin: 'a',
+        permission: 'org:read',
+        boundary: 'organization',
+      },
     ]);
     expect(manifest.migrations).toEqual([
       { id: 'core/0001_init', name: '0001_init.sql', checksum: 'abc', phase: 'expand' },
@@ -135,7 +142,7 @@ describe('renderManifestFromConfig', () => {
           'const factory = (opts: { path: string }) => ({',
           "  id: 'opt',",
           "  package: '@test/opt',",
-          '  apiVersion: 2,',
+          '  apiVersion: 3,',
           "  platforms: ['node'],",
           "  register: (r: any) => r.route({ method: 'GET', path: opts.path, permission: null, handler: () => new Response('ok') }),",
           '});',

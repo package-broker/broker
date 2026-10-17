@@ -5,6 +5,7 @@ import {
   cloudflareAccessProblems,
   createCloudflareAccessProvider,
 } from './cloudflare-access.js';
+import { MAX_LIST_LENGTH } from './config.js';
 import { type OidcConfig, createOidcProvider, oidcProblems } from './oidc.js';
 
 export type { CloudflareAccessConfig } from './cloudflare-access.js';
@@ -29,7 +30,7 @@ function definition(
     definePlugin({
       id: 'sso-oidc',
       package: '@package-broker/plugin-sso-oidc',
-      apiVersion: 2,
+      apiVersion: 3,
       platforms: Object.freeze(['cloudflare', 'node'] as const),
       capabilities: Object.freeze(['sso'] as const),
       ...extra,
@@ -42,11 +43,19 @@ function isContainer(value: unknown): value is object {
 }
 
 function copyFields(raw: object): Fields {
-  const source = raw as Fields;
   const copy: Fields = Object.create(null) as Fields;
   for (const key of Reflect.ownKeys(raw)) {
+    const descriptor = Object.getOwnPropertyDescriptor(raw, key);
+    if (
+      typeof key !== 'string' ||
+      descriptor === undefined ||
+      !descriptor.enumerable ||
+      !('value' in descriptor)
+    ) {
+      throw new TypeError(UNREADABLE);
+    }
     Object.defineProperty(copy, key, {
-      value: source[key],
+      value: descriptor.value as unknown,
       writable: true,
       enumerable: true,
       configurable: true,
@@ -56,7 +65,24 @@ function copyFields(raw: object): Fields {
 }
 
 function frozenList(value: unknown): unknown {
-  return Array.isArray(value) ? Object.freeze(Array.from(value as unknown[])) : value;
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  const list = value as unknown[];
+  if (list.length > MAX_LIST_LENGTH) {
+    throw new TypeError(UNREADABLE);
+  }
+  const keys = Reflect.ownKeys(list);
+  if (keys.length !== list.length + 1) {
+    throw new TypeError(UNREADABLE);
+  }
+  for (let index = 0; index < list.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(list, index);
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new TypeError(UNREADABLE);
+    }
+  }
+  return Object.freeze(Array.from(list));
 }
 
 function snapshotConfig(raw: unknown): unknown {

@@ -4,13 +4,24 @@ import {
   type HookMap,
   type PluginDefinition,
   type PortName,
+  type SourceProviderFactory,
   type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
-import { JobError, defineJob, qualifyJobName, type JobDefinition } from '../platform/jobs.js';
+import type { SourceProvider } from '../sources/provider.js';
+import {
+  JobError,
+  assertPluginId,
+  defineJob,
+  isReservedPluginId,
+  qualifyJobName,
+  type JobDefinition,
+} from '../platform/jobs.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityResolver } from './routes.js';
 import { routeBoundaryProblems, routePathProblem, routesConflict } from './routes.js';
+
+const SOURCE_PROVIDERS_API_VERSION = 3;
 
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
 
@@ -19,6 +30,14 @@ export interface RegisteredJob {
   readonly qualifiedName: string;
   readonly definition: JobDefinition;
 }
+
+declare const coreJobBrand: unique symbol;
+
+export interface RegisteredCoreJob extends RegisteredJob {
+  readonly [coreJobBrand]: true;
+}
+
+const issuedCoreJobs = new WeakSet<RegisteredCoreJob>();
 
 export interface Registration {
   readonly routes: readonly RegisteredRoute[];
@@ -31,11 +50,12 @@ export interface Registration {
   readonly jobs: readonly RegisteredJob[];
   readonly bindings: ReadonlyMap<PortName, string>;
   readonly identityFactory: IdentityProviderFactory | null;
+  readonly sourceProviders: ReadonlyMap<string, SourceProvider>;
 }
 
 export interface RegistrationOptions {
   readonly packageResolver?: PackageVisibilityResolver;
-  readonly coreJobs?: readonly RegisteredJob[];
+  readonly coreJobs?: readonly RegisteredCoreJob[];
 }
 
 export class KernelConfigError extends Error {
@@ -57,6 +77,7 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'capabilities',
   'binds',
   'identityProviders',
+  'sourceProviders',
   'migrations',
   'register',
   'init',
@@ -99,10 +120,16 @@ function jobProblemCode(error: unknown): string {
 }
 
 /** Kernel-internal: `core` is rejected as a plugin id, so core job types are qualified here. */
-export function registerCoreJob(definition: JobDefinition): RegisteredJob {
+export function registerCoreJob(definition: JobDefinition): RegisteredCoreJob {
   const frozen = defineJob(definition);
   const qualifiedName = `core:${frozen.name}:v${frozen.version}`;
-  return Object.freeze({ plugin: 'core', qualifiedName, definition: frozen });
+  const job = Object.freeze({
+    plugin: 'core',
+    qualifiedName,
+    definition: frozen,
+  }) as RegisteredCoreJob;
+  issuedCoreJobs.add(job);
+  return job;
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -124,13 +151,20 @@ export function collectRegistrations(
     'auth.resolveIdentity': [],
     'auth.mapGroups': [],
   };
-  const jobs: RegisteredJob[] = [...(options.coreJobs ?? [])];
+  const jobs: RegisteredJob[] = [];
   const jobNames = new Set<string>();
   const bindings = new Map<PortName, string>();
   let identityFactory: IdentityProviderFactory | null = null;
+  const sourceProviders = new Map<string, SourceProvider>();
+  const sourceProviderOwners = new Map<string, string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 
-  for (const core of jobs) {
+  for (const [index, core] of (options.coreJobs ?? []).entries()) {
+    if (!issuedCoreJobs.has(core)) {
+      problems.push(`core job was not issued by registerCoreJob (coreJobs entry ${index})`);
+      continue;
+    }
+    jobs.push(core);
     if (jobNames.has(core.qualifiedName)) {
       problems.push(`job "${core.qualifiedName}" is registered more than once`);
     }
@@ -140,13 +174,17 @@ export function collectRegistrations(
   for (const plugin of plugins) {
     const id = plugin.id;
 
-    if (!(plugin.apiVersion >= minApi && plugin.apiVersion <= maxApi)) {
+    if (!Number.isInteger(plugin.apiVersion)) {
+      problems.push(`plugin "${id}" apiVersion must be an integer`);
+    } else if (!(plugin.apiVersion >= minApi && plugin.apiVersion <= maxApi)) {
       problems.push(
         `plugin "${id}" has apiVersion ${plugin.apiVersion}, core supports ${minApi} to ${maxApi}`,
       );
     }
-    if (id === 'core') {
-      problems.push('plugin id "core" is reserved');
+    let validId: boolean | undefined;
+    if (isReservedPluginId(id)) {
+      validId = false;
+      problems.push(`plugin id "${id}" is reserved`);
     }
     for (const key of Reflect.ownKeys(plugin)) {
       if (typeof key === 'symbol' || !DEFINITION_KEYS.has(key)) {
@@ -170,17 +208,36 @@ export function collectRegistrations(
 
     const bindsIdentity = binds.includes('identity');
     const factory: unknown = plugin.identityProviders;
-    if (factory !== undefined && typeof factory !== 'function') {
-      problems.push(`plugin "${id}" identityProviders must be a function`);
-    }
-    if (bindsIdentity && factory === undefined) {
-      problems.push(`plugin "${id}" binds identity but has no identityProviders`);
-    }
-    if (!bindsIdentity && factory !== undefined) {
-      problems.push(`plugin "${id}" has identityProviders but does not bind identity`);
-    }
+    problems.push(...providerFactoryProblems(id, 'identity', 'identityProviders', factory, binds));
     if (bindsIdentity && typeof factory === 'function' && bindings.get('identity') === id) {
       identityFactory = factory as IdentityProviderFactory;
+    }
+
+    const sourceFactory: unknown = plugin.sourceProviders;
+    problems.push(
+      ...providerFactoryProblems(id, 'source', 'sourceProviders', sourceFactory, binds),
+    );
+    if (sourceFactory !== undefined && plugin.apiVersion < SOURCE_PROVIDERS_API_VERSION) {
+      problems.push(
+        `plugin "${id}" declares sourceProviders and requires apiVersion ${SOURCE_PROVIDERS_API_VERSION}`,
+      );
+    }
+    if (binds.includes('source') && typeof sourceFactory === 'function') {
+      for (const provider of invokeSourceFactory(
+        id,
+        sourceFactory as SourceProviderFactory,
+        problems,
+      )) {
+        const holder = sourceProviderOwners.get(provider.id);
+        if (holder !== undefined) {
+          problems.push(
+            `source provider "${provider.id}" is supplied by plugins "${holder}" and "${id}"`,
+          );
+        } else {
+          sourceProviderOwners.set(provider.id, id);
+          sourceProviders.set(provider.id, provider);
+        }
+      }
     }
 
     if (plugin.register === undefined) {
@@ -214,6 +271,16 @@ export function collectRegistrations(
         },
         job: (definition) => {
           assertOpen();
+          if (validId === undefined) {
+            try {
+              assertPluginId(id);
+              validId = true;
+            } catch (error) {
+              validId = false;
+              problems.push(`plugin "${id}" id is invalid: ${jobProblemCode(error)}`);
+            }
+          }
+          if (!validId) return;
           try {
             const frozen = defineJob(definition);
             const qualifiedName = qualifyJobName(id, frozen.name, frozen.version);
@@ -286,5 +353,60 @@ export function collectRegistrations(
     jobs: Object.freeze(jobs),
     bindings,
     identityFactory,
+    sourceProviders,
   };
+}
+
+function providerFactoryProblems(
+  id: string,
+  port: PortName,
+  key: string,
+  factory: unknown,
+  binds: readonly string[],
+): string[] {
+  const bound = binds.includes(port);
+  const problems: string[] = [];
+  if (factory !== undefined && typeof factory !== 'function') {
+    problems.push(`plugin "${id}" ${key} must be a function`);
+  }
+  if (bound && factory === undefined) {
+    problems.push(`plugin "${id}" binds ${port} but has no ${key}`);
+  }
+  if (!bound && factory !== undefined) {
+    problems.push(`plugin "${id}" has ${key} but does not bind ${port}`);
+  }
+  return problems;
+}
+
+function invokeSourceFactory(
+  id: string,
+  factory: SourceProviderFactory,
+  problems: string[],
+): readonly SourceProvider[] {
+  let returned: unknown;
+  try {
+    returned = factory();
+  } catch (error) {
+    problems.push(`plugin "${id}" sourceProviders threw ${reportableErrorName(error)}`);
+    return [];
+  }
+  if (isThenable(returned)) {
+    problems.push(`plugin "${id}" sourceProviders must be synchronous`);
+    returned.then(undefined, () => undefined);
+    return [];
+  }
+  if (!Array.isArray(returned)) {
+    problems.push(`plugin "${id}" sourceProviders must return an array`);
+    return [];
+  }
+  const valid: SourceProvider[] = [];
+  for (const provider of returned as unknown[]) {
+    const providerId = (provider as { id?: unknown } | null)?.id;
+    if (typeof providerId !== 'string' || providerId === '') {
+      problems.push(`plugin "${id}" sourceProviders returned a provider without an id`);
+    } else {
+      valid.push(provider as SourceProvider);
+    }
+  }
+  return valid;
 }

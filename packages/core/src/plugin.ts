@@ -4,12 +4,16 @@ import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.
 import type { Clock } from './ids.js';
 import type { BlobStore } from './platform/blob.js';
 import type { Cache } from './platform/cache.js';
+import { PlatformUnavailableError } from './platform/errors.js';
 import type { JobDefinition, Jobs } from './platform/jobs.js';
 import type { Observability } from './platform/observability.js';
+import type { SourceProvider } from './sources/provider.js';
+
+export { PlatformUnavailableError } from './platform/errors.js';
 
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
-export const SUPPORTED_PLUGIN_API = [2, 3] as const;
+export const SUPPORTED_PLUGIN_API = [3, 3] as const;
 
 export type Platform = 'cloudflare' | 'node';
 
@@ -26,6 +30,9 @@ export type PortName =
 
 export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
 
+/** Receives no adapters and no credentials. */
+export type SourceProviderFactory = () => readonly SourceProvider[];
+
 export interface PluginApi {
   readonly apiVersion: number;
 }
@@ -37,10 +44,12 @@ export interface PluginDefinition extends PluginApi {
   readonly platforms: readonly Platform[];
   readonly dependsOn?: readonly string[];
   readonly capabilities?: readonly string[];
-  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders. */
+  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders, 'source' needs sourceProviders. */
   readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
+  /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
+  readonly sourceProviders?: SourceProviderFactory;
   readonly migrations?: { readonly dir: string };
   /** Synchronous and pure: declares routes, hooks and jobs. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;
@@ -56,6 +65,16 @@ export interface PluginRegistry {
 
 export type RouteBoundary = 'none' | 'organization' | 'project' | 'self' | 'package';
 
+export type PackageEcosystem = 'composer' | 'npm';
+
+export interface PackageRouteBinding {
+  readonly ecosystem: PackageEcosystem;
+  /** Returns the raw package name from the route parameters; null means the request names no package. */
+  readonly name: (params: Readonly<Record<string, string>>) => string | null;
+  /** Default false: an admissible but unseen package is not fetched for this route. */
+  readonly fetchOnAdmission?: boolean;
+}
+
 export interface RouteDefinition {
   /** HEAD is served by GET routes, same authorization. */
   readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -64,9 +83,12 @@ export interface RouteDefinition {
   readonly permission: string | null;
   /**
    * Required when permission is set; omitted means 'none' on a public route. 'self' is an
-   * authenticated-session route with no permission. 'package' is reserved.
+   * authenticated-session route with no permission. 'package' needs a registered package
+   * resolver, `package`, :project in the path and project:packages:read or write.
    */
   readonly boundary?: RouteBoundary;
+  /** Required when boundary is 'package', rejected otherwise. */
+  readonly package?: PackageRouteBinding;
   /** Default true; false requires permission null. */
   readonly needsOrg?: boolean;
   readonly handler: (ctx: RequestContext) => Promise<Response> | Response;
@@ -102,13 +124,6 @@ export interface PlatformPorts {
   readonly cache: Cache;
   readonly jobs: Jobs;
   readonly observability: Observability;
-}
-
-export class PlatformUnavailableError extends Error {
-  constructor() {
-    super('Platform services are not enabled');
-    this.name = 'PlatformUnavailableError';
-  }
 }
 
 export function requirePlatformPorts(ports: PluginPorts): PlatformPorts {

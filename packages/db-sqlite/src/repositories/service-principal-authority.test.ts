@@ -29,7 +29,12 @@ const ADMIN_ROLE = '01J0ROLEADMIN000000000000A1';
 const ORG_OPS_ROLE = '01J0ROLEORGOPS00000000000A1';
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 
 let directory: string;
@@ -663,6 +668,7 @@ describe('createServicePrincipalAuthority', () => {
       provider: `p${index}`,
       anchor: `p${index}:https://idp.example.test`,
       emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test'],
     }));
     await createServicePrincipalAuthority({
       executor: counting,

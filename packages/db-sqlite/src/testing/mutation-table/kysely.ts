@@ -1,3 +1,5 @@
+import { ANCHORS, NOT_NULL, ref as fixtureRef, seedBindings, seedSubject } from './fixtures.js';
+import type { Kysely } from 'kysely';
 import { epochEntry } from './cache-epoch-cases.js';
 import { expect } from 'vitest';
 import { sql } from 'kysely';
@@ -5,6 +7,7 @@ import type { OrgContext } from '@package-broker/core/db/port';
 import {
   adminEligibility,
   anchorMatches,
+  authoritativeVerifiedIdentity,
   boundVerifiedIdentity,
   compile,
   db,
@@ -31,7 +34,14 @@ import { seedUser } from './fixtures.js';
 
 type Branch = 'local' | 'email' | 'group';
 type Layer = 'user' | 'grant' | 'role' | 'member' | 'login' | 'credential' | 'identity' | 'binding';
-const providers = [{ provider: 'oidc', anchor: 'issuer', emailAuthoritative: true }];
+const providers = [
+  {
+    provider: 'oidc',
+    anchor: 'issuer',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+];
 const aliases: HolderAlias = {
   user: 'u',
   grant: 'g',
@@ -374,7 +384,14 @@ function foreignGroupEvidenceCase(part: 'member' | 'identity' | 'binding'): Cont
       const bindings = guardBindings(
         { values: alias.values, anchors: alias.anchors },
         { org_id: own.orgId },
-        [{ provider: 'oidc', anchor: 'current-anchor', emailAuthoritative: true }],
+        [
+          {
+            provider: 'oidc',
+            anchor: 'current-anchor',
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        ],
       );
       const rows = await context.executor.all(
         context.mutate(
@@ -409,8 +426,66 @@ const freshGroupMembershipEntry: MutationEntry = {
   })),
 };
 
+const authoritativeIdentityCase = (layer: 'identity' | 'binding'): ContractCase => ({
+  name: `an authoritative ${layer} row of another organization does not verify the user`,
+  async run(context) {
+    const { own } = orgOf(context);
+    await seedBindings(context);
+    const control = await seedSubject(context, 'ok');
+    const bad = await seedSubject(context, 'bad', { mismatched: layer });
+    const alias = {
+      user: 'reader_user',
+      identity: 'reader_identity',
+      binding: 'reader_binding',
+      grant: 'reader_grant',
+      role: 'reader_role',
+      member: 'reader_member',
+      login: 'reader_login',
+      credential: 'reader_credential',
+    };
+    const rowsOf = (userId: string, mutated: boolean) => {
+      const statement = compile(
+        (db as unknown as Kysely<Record<string, Record<string, unknown>>>)
+          .selectFrom('user_account as reader_user')
+          .select('reader_user.id')
+          .where('reader_user.org_id', '=', own.orgId)
+          .where('reader_user.id', '=', userId)
+          .where((eb) => eb.exists(authoritativeVerifiedIdentity(own, alias, ANCHORS))),
+      );
+      return context.executor.all(mutated ? context.mutate(statement) : statement);
+    };
+    expect(await rowsOf(control.userId, false)).toHaveLength(1);
+    expect(await rowsOf(bad.userId, true)).toEqual([]);
+  },
+});
+
 export const kyselyEntries: readonly MutationEntry[] = [
   freshGroupMembershipEntry,
+  {
+    builder: 'authoritativeVerifiedIdentity',
+    file: 'kysely.ts',
+    cases: [authoritativeIdentityCase('identity'), authoritativeIdentityCase('binding')],
+    waivers: [
+      {
+        locate: fixtureRef('reader_user', 'org_id', '\\?'),
+        reason: 'scopes the outer user query, not part of the identity builder',
+      },
+    ],
+    predicates: [
+      {
+        name: 'the authoritative identity is scoped to the organization',
+        locate: fixtureRef('reader_identity', 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: authoritativeIdentityCase('identity').name,
+      },
+      {
+        name: 'the authoritative provider binding is scoped to the organization',
+        locate: fixtureRef('reader_binding', 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: authoritativeIdentityCase('binding').name,
+      },
+    ],
+  },
   epochEntry('kysely.ts', 'cacheEpochBumpStatements'),
   epochEntry('kysely.ts', 'assertGuard'),
   simpleEntry('opGuard', op, 'guard_op'),

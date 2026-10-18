@@ -44,6 +44,16 @@ export const entries: readonly MutationEntry[] = [
     ],
     waivers: [
       {
+        locate: /derive_include\.org_id = \?/,
+        reason:
+          'delegated rederiveStatements origin predicates; retagged and inserted foreign-pattern cases are registered in visibility-derive.ts',
+      },
+      {
+        locate: /"guard_(?:bad|ci|cx|i|im|x)"\."org_id" = \?/,
+        reason:
+          'delegated admissionCondition predicates; all six pattern aliases have independent foreign-pattern mutants in catalogue-predicates.ts',
+      },
+      {
         locate:
           /"(?:project_package|stay_package|derive_attachment|derive_package|guard_ps|guard_s|guard_p)"\."org_id" = \?/,
         reason:

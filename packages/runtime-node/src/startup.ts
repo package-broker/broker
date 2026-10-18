@@ -5,6 +5,7 @@ import type { SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
+import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import {
   BlobValidationError,
@@ -285,6 +286,7 @@ export const AUTH_REASON_CODES: ReadonlySet<string> = new Set([
 ]);
 
 export const NODE_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
+  ...AUDIT_EVENTS,
   ...JOB_EVENTS,
   ...AUTH_EVENTS,
   'http.error',

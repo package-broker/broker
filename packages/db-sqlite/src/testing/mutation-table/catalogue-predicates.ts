@@ -4,6 +4,7 @@ import { expect } from 'vitest';
 import { sql } from 'kysely';
 import { compile, db } from '../../kysely.js';
 import {
+  admissionCondition,
   attachedSourceCondition,
   col,
   proxyEligibleCondition,
@@ -28,7 +29,7 @@ const proxyShadowedByForeignPackage: ContractCase = {
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
     await seedSource(seed, 'S-PROXY', own.orgId, 'packagist_proxy');
-    await seedSource(seed, 'S-FOREIGN', foreign.orgId, 'vcs');
+    await seedSource(seed, 'S-FOREIGN', own.orgId, 'vcs');
     await seedPackage(seed, 'K-PROXY', own.orgId, 'S-PROXY', 'acme/a');
     await seedPackage(seed, 'K-FOREIGN', foreign.orgId, 'S-FOREIGN', 'acme/a');
     expect(
@@ -41,6 +42,87 @@ const proxyShadowedByForeignPackage: ContractCase = {
     ).toEqual(['K-PROXY']);
   },
 };
+
+const proxyShadowedByForeignSource: ContractCase = {
+  name: 'a competing package with a foreign organization source does not shadow a proxy',
+  async run(context) {
+    const seed = seeder(context.executor);
+    const { own, foreign } = orgOf(context);
+    await seedSource(seed, 'S-PROXY', own.orgId, 'packagist_proxy');
+    await seedSource(seed, 'S-FOREIGN', foreign.orgId, 'vcs');
+    await seedPackage(seed, 'K-PROXY', own.orgId, 'S-PROXY', 'acme/a');
+    await seedPackage(seed, 'K-ODD', own.orgId, 'S-FOREIGN', 'acme/a');
+    expect(
+      await ids(
+        context,
+        packageRows()
+          .where('pkg.id', '=', 'K-PROXY')
+          .where(proxyEligibleCondition({ package: 'pkg', source: 'src' })),
+      ),
+    ).toEqual(['K-PROXY']);
+  },
+};
+
+const admissionAliases = ['bad', 'ci', 'cx', 'i', 'im', 'x'] as const;
+
+function admissionCase(alias: (typeof admissionAliases)[number]): ContractCase {
+  return {
+    name: `foreign pattern rows do not affect admission through ${alias}`,
+    async run(context) {
+      const seed = seeder(context.executor);
+      const { own, foreign } = orgOf(context);
+      await seedProject(seed, 'P1', own.orgId);
+      await seedSource(seed, 'S1', own.orgId, 'vcs');
+      await seedPackage(seed, 'K1', own.orgId, 'S1', 'acme/a');
+      const pattern = async (id: string, orgId: string, text: string, effect: string) => {
+        await seed(
+          'INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES (?, ?, ?, ?, ?, ?)',
+          id,
+          orgId,
+          'P1',
+          'S1',
+          text,
+          effect,
+        );
+      };
+      if (alias === 'im') await pattern('OWN', own.orgId, 'zzz/*', 'include');
+      const count = alias === 'ci' || alias === 'cx' ? 65 : 1;
+      for (let index = 0; index < count; index += 1) {
+        const text =
+          alias === 'bad'
+            ? 'acme/?'
+            : alias === 'i'
+              ? 'zzz/*'
+              : alias === 'im' || alias === 'x'
+                ? 'acme/*'
+                : `zzz/${String(index)}`;
+        await pattern(
+          `FOREIGN-${String(index)}`,
+          foreign.orgId,
+          text,
+          alias === 'cx' || alias === 'x' || alias === 'bad' ? 'exclude' : 'include',
+        );
+      }
+      expect(
+        await ids(
+          context,
+          db
+            .selectFrom('package as pkg')
+            .select('pkg.id')
+            .where(
+              admissionCondition(
+                own,
+                sql.lit('P1'),
+                col('pkg.source_id'),
+                col('pkg.name'),
+                col('pkg.visible_to_new_projects'),
+              ),
+            ),
+        ),
+      ).toEqual(alias === 'im' ? [] : ['K1']);
+    },
+  };
+}
 
 const proxyBlockedByForeignName: ContractCase = {
   name: 'a registered name of another organization does not block a proxy package',
@@ -129,7 +211,7 @@ export const entries: readonly MutationEntry[] = [
         reason: 'restricts the rows of the test query, not part of the builder',
       },
     ],
-    cases: [proxyShadowedByForeignPackage, proxyBlockedByForeignName],
+    cases: [proxyShadowedByForeignPackage, proxyShadowedByForeignSource, proxyBlockedByForeignName],
     predicates: [
       {
         name: 'proxy shadow check is scoped to the package organization',
@@ -138,12 +220,31 @@ export const entries: readonly MutationEntry[] = [
         caseName: proxyShadowedByForeignPackage.name,
       },
       {
+        name: 'competing source is scoped to the package organization',
+        locate: ref('guard_qs', 'org_id', '"pkg"\\."org_id"'),
+        neutral: ALWAYS,
+        copies: 1,
+        caseName: proxyShadowedByForeignSource.name,
+      },
+      {
         name: 'registered name check is scoped to the package organization',
         locate: ref('guard_r', 'org_id', '"pkg"\\."org_id"'),
         neutral: ALWAYS,
         caseName: proxyBlockedByForeignName.name,
       },
     ],
+  },
+  {
+    builder: 'admissionCondition',
+    file: 'repositories/catalogue-predicates.ts',
+    cases: admissionAliases.map(admissionCase),
+    predicates: admissionAliases.map((alias) => ({
+      name: `${alias} pattern rows are scoped to the organization`,
+      locate: ref(`guard_${alias}`, 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      copies: 1,
+      caseName: admissionCase(alias).name,
+    })),
   },
   {
     builder: 'attachedSourceCondition',

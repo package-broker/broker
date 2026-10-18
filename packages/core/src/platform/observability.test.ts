@@ -594,7 +594,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(20);
+    expect(missing).toHaveLength(25);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 
@@ -664,5 +664,72 @@ describe('dropped signal vocabulary', () => {
       expect(metricLabelValueAllowed('signal', signal, new Set())).toBe(true);
     }
     expect(metricLabelValueAllowed('signal', 'logs ', new Set())).toBe(false);
+  });
+});
+
+describe('audit verifier fields', () => {
+  it('preserves valid verifier fields', () => {
+    const fields = {
+      head_seq: 0,
+      seq: Number.MAX_SAFE_INTEGER,
+      rows: 1200,
+      head_hash: 'a'.repeat(64),
+      reason: 'hash',
+    };
+    expect(safeRecord({ level: 'info', event: 'audit.verified', ...fields })).toEqual({
+      level: 'info',
+      event: 'audit.verified',
+      ...fields,
+    });
+    for (const reason of ['seq_gap', 'prev_hash', 'hash', 'org_mismatch']) {
+      expect(safeRecord({ level: 'error', event: 'audit.chain_broken', reason })).toHaveProperty(
+        'reason',
+        reason,
+      );
+    }
+  });
+
+  it.each(['head_seq', 'seq', 'rows'])('drops invalid %s', (field) => {
+    for (const value of [
+      '1',
+      -1,
+      0.5,
+      Number.NaN,
+      Infinity,
+      Number.MAX_SAFE_INTEGER + 1,
+      null,
+      {},
+    ]) {
+      expect(safeRecord({ level: 'info', event: 'audit.verified', [field]: value })).toEqual({
+        level: 'info',
+        event: 'audit.verified',
+      });
+    }
+  });
+
+  it('drops invalid head_hash', () => {
+    for (const head_hash of [
+      1,
+      null,
+      {},
+      'a'.repeat(63),
+      'a'.repeat(65),
+      'A'.repeat(64),
+      'g'.repeat(64),
+    ]) {
+      expect(safeRecord({ level: 'info', event: 'audit.verified', head_hash })).toEqual({
+        level: 'info',
+        event: 'audit.verified',
+      });
+    }
+  });
+
+  it('drops invalid reason', () => {
+    for (const reason of [1, null, {}, 'unregistered', 'HASH']) {
+      expect(safeRecord({ level: 'error', event: 'audit.chain_broken', reason })).toEqual({
+        level: 'error',
+        event: 'audit.chain_broken',
+      });
+    }
   });
 });

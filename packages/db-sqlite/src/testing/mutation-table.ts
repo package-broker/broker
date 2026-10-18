@@ -23,9 +23,11 @@ import { entries as blobReferencesEntries } from './mutation-table/blob-referenc
 import { entries as catalogueWritePackageEntries } from './mutation-table/catalogue-write-package.js';
 import { entries as catalogueWriteVersionInsertEntries } from './mutation-table/catalogue-write-version-insert.js';
 import { entries as catalogueWriteVersionUpdateEntries } from './mutation-table/catalogue-write-version-update.js';
+import { entries as catalogueEpochEntries } from './mutation-table/catalogue-epoch.js';
 import { entries as cacheEpochEntries } from './mutation-table/cache-epoch.js';
 import { entries as sourceEntries } from './mutation-table/source.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
+import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -56,8 +58,10 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueWriteVersionInsertEntries,
   ...catalogueWriteVersionUpdateEntries,
   ...cacheEpochEntries,
+  ...catalogueEpochEntries,
   ...sourceEntries,
   ...auditSealEntries,
+  ...auditQueryEntries,
   ...blobLeaseEntries,
   ...fetchLeaseEntries,
   ...jobLeaseEntries,

@@ -41,7 +41,12 @@ const ADMIN_ROLE = '01J0ROLEADMIN0000000000000A';
 const OWNER_GRANTS = ['01J0GRANT000000000000000A1', '01J0GRANT000000000000000A2'];
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 
 let database: MigratedDatabase;
@@ -830,6 +835,7 @@ describe('D1 limits', () => {
       provider: `idp${index}`,
       anchor: `oidc:https://idp${index}.example.test`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     })),
   ];
 

@@ -40,6 +40,11 @@ export const entries: readonly MutationEntry[] = [
     ],
     waivers: [
       {
+        locate: /"guard_(?:bad|ci|cx|i|im|x)"\."org_id" = \?/,
+        reason:
+          'delegated admissionCondition predicates; all six pattern aliases have independent foreign-pattern mutants in catalogue-predicates.ts',
+      },
+      {
         locate: /"guard_(?:ps|src|prj)"\."org_id" = \?/,
         reason:
           'outer joins select the same unique attachment, source id and project id checked again by attachedSourceCondition; either copy alone is redundant',
@@ -50,9 +55,9 @@ export const entries: readonly MutationEntry[] = [
           'attachedSourceCondition uses the same unique attachment/project/source as the outer joins; helper predicate mutants are independently killed in catalogue-predicates.ts',
       },
       {
-        locate: /"guard_(?:q|r)"\."org_id" = "k"\."org_id"/,
+        locate: /"guard_(?:q|qs|r)"\."org_id" = "k"\."org_id"/,
         reason:
-          'delegated proxyEligibleCondition, whose foreign shadow and registered-name mutants are registered in catalogue-predicates.ts',
+          'delegated proxyEligibleCondition, whose foreign package, competing-source and registered-name mutants are registered in catalogue-predicates.ts',
       },
     ],
   },

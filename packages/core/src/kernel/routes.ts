@@ -89,7 +89,6 @@ interface BoundaryInput {
   readonly method?: unknown;
   readonly path: unknown;
   readonly permission: unknown;
-  readonly method?: unknown;
   readonly boundary?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;

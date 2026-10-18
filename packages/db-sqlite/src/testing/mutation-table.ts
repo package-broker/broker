@@ -27,6 +27,7 @@ import { entries as catalogueEpochEntries } from './mutation-table/catalogue-epo
 import { entries as cacheEpochEntries } from './mutation-table/cache-epoch.js';
 import { entries as sourceEntries } from './mutation-table/source.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
+import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import {
   checkCompleteness as checkInventory,
@@ -61,6 +62,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueEpochEntries,
   ...sourceEntries,
   ...auditSealEntries,
+  ...auditVerifyEntries,
   ...auditQueryEntries,
   ...blobLeaseEntries,
   ...fetchLeaseEntries,

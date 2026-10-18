@@ -11,6 +11,7 @@ import {
   ArchiveError,
   MAX_ARCHIVE_INPUT_BYTES,
   buildZipFromTree,
+  loadAttributes,
   type ArchiveBlobSource,
   type ArchiveIo,
   type ArchiveStaging,
@@ -746,5 +747,60 @@ describe('exportIgnoreMatcher', () => {
     expect(m.ignored(subject)).toBe(false);
     expect(m.ignored(`${'a'.repeat(1023)}b`)).toBe(true);
     expect(performance.now() - start).toBeLessThan(100);
+  });
+});
+
+describe('loadAttributes', () => {
+  const blobsOf = (f: Fixture): GitTreeEntry[] => f.tree.entries.filter((e) => e.type === 'blob');
+
+  it('reads attribute files shallowest first and returns the rules they set', async () => {
+    const f = treeOf({
+      'docs/.gitattributes': 'README.md -export-ignore\n',
+      '.gitattributes': '*.md export-ignore\n',
+      'docs/README.md': 'd',
+    });
+    const { matcher, loaded } = await loadAttributes(f.io.blobs, blobsOf(f), { used: 0 });
+    expect(f.reads.map((r) => r.oid)).toEqual([
+      oidOfPath(f, '.gitattributes'),
+      oidOfPath(f, 'docs/.gitattributes'),
+    ]);
+    expect([...loaded]).toEqual(['.gitattributes', 'docs/.gitattributes']);
+    expect(matcher.ignored('NOTES.md')).toBe(true);
+    expect(matcher.ignored('docs/README.md')).toBe(false);
+  });
+
+  it('never reads attributes beneath an export-ignored directory', async () => {
+    const f = treeOf({
+      '.gitattributes': '/build export-ignore\n',
+      'build/.gitattributes': '* -export-ignore\n',
+    });
+    const { loaded } = await loadAttributes(f.io.blobs, blobsOf(f), { used: 0 });
+    expect([...loaded]).toEqual(['.gitattributes']);
+    expect(f.reads.map((r) => r.oid)).not.toContain(oidOfPath(f, 'build/.gitattributes'));
+  });
+
+  it('counts the bytes it read against the budget', async () => {
+    const f = treeOf({ '.gitattributes': '*.md export-ignore\n' });
+    const budget = { used: 100 };
+    await loadAttributes(f.io.blobs, blobsOf(f), budget);
+    expect(budget.used).toBe(100 + '*.md export-ignore\n'.length);
+    expect(f.reads[0]!.maxBytes).toBe(Math.min(1024 * 1024, MAX_ARCHIVE_INPUT_BYTES - 100));
+  });
+
+  it('refuses an attribute file larger than the remaining budget', async () => {
+    const f = treeOf({ '.gitattributes': 'a export-ignore\n' });
+    await expect(
+      loadAttributes(f.io.blobs, blobsOf(f), { used: MAX_ARCHIVE_INPUT_BYTES - 3 }),
+    ).rejects.toMatchObject({ code: 'too_large' });
+  });
+
+  it('refuses a body that is not the declared size', async () => {
+    const f = treeOf({ '.gitattributes': 'a export-ignore\n' });
+    const blobs: ArchiveBlobSource = {
+      read: () => Promise.resolve({ size: 3, body: streamOf(enc.encode('longer than three')) }),
+    };
+    await expect(loadAttributes(blobs, blobsOf(f), { used: 0 })).rejects.toMatchObject({
+      code: 'bad_object',
+    });
   });
 });

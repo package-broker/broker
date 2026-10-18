@@ -50,12 +50,71 @@ function deriveCase(kind: 'remove' | 'retag' | 'stay' | 'insert'): ContractCase 
   };
 }
 
+function foreignOriginCase(existing: boolean): ContractCase {
+  return {
+    name: `a foreign include pattern does not affect the ${existing ? 'retagged' : 'inserted'} origin`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedProject(seed, 'P', own.orgId);
+      await seedSource(seed, 'S', own.orgId, 'vcs');
+      await seedPackage(seed, 'K', own.orgId, 'S', 'acme/a');
+      await seed(
+        "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
+        own.orgId,
+      );
+      await seed(
+        "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('I', ?, 'P', 'S', 'acme/*', 'include')",
+        foreign.orgId,
+      );
+      if (existing) {
+        await seed(
+          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'pattern')",
+          own.orgId,
+        );
+      }
+      await context.executor.batch(
+        context.mutateBatch(rederiveStatements(own, { kind: 'project', projectId: 'P' })),
+      );
+      expect(
+        await context.executor.all({
+          sql: "SELECT origin FROM project_package WHERE org_id = ? AND project_id = 'P' AND package_id = 'K'",
+          params: [own.orgId],
+        }),
+      ).toEqual([{ origin: 'subscription' }]);
+    },
+  };
+}
+
 export const entries: readonly MutationEntry[] = [
   {
     file: 'repositories/visibility-derive.ts',
     builder: 'rederiveStatements',
-    cases: (['remove', 'retag', 'stay', 'insert'] as const).map(deriveCase),
+    cases: [
+      ...(['remove', 'retag', 'stay', 'insert'] as const).map(deriveCase),
+      foreignOriginCase(true),
+      foreignOriginCase(false),
+    ],
     predicates: [
+      {
+        name: 'retagged origins ignore foreign include patterns',
+        locate: /derive_include\.org_id = \?/,
+        neutral: NOT_NULL,
+        copies: 3,
+        waivedCopies: { 2: 'the insert occurrence is killed by the inserted-origin case' },
+        caseName: foreignOriginCase(true).name,
+      },
+      {
+        name: 'inserted origins ignore foreign include patterns',
+        locate: /derive_include\.org_id = \?/,
+        neutral: NOT_NULL,
+        copies: 3,
+        waivedCopies: {
+          0: 'the retag assignment occurrence is killed by the retagged-origin case',
+          1: 'the retag comparison occurrence is killed by the retagged-origin case',
+        },
+        caseName: foreignOriginCase(false).name,
+      },
       ...(['remove', 'retag'] as const).map((kind, index) => ({
         name: `${kind} row belongs to the organization`,
         locate: ref('project_package', 'org_id', '\\?'),
@@ -76,6 +135,11 @@ export const entries: readonly MutationEntry[] = [
       })),
     ],
     waivers: [
+      {
+        locate: /"guard_(?:bad|ci|cx|i|im|x)"\."org_id" = \?/,
+        reason:
+          'delegated admissionCondition predicates; all six pattern aliases have independent foreign-pattern mutants in catalogue-predicates.ts',
+      },
       {
         locate: /"derive_attachment"\."org_id" = \?/,
         reason:

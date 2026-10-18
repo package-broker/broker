@@ -9,6 +9,11 @@ import { DbError } from '@package-broker/core/db/errors';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { scopeAllows } from '@package-broker/core/authz/scope';
 import type {
+  RevocableToken,
+  TokenOwnershipGuard,
+  TokenRevokeStore,
+} from '@package-broker/core/authz/token-revoke';
+import type {
   ServiceTokenIssueOutcome,
   ServiceTokenStore,
   ServiceTokenStoreInput,
@@ -140,6 +145,46 @@ export interface TokenRepository {
     tokenId: string,
     now: string,
   ): Promise<RevokeTokenResult>;
+  /** Revoked and expired tokens included; null when the id is not in the organization. */
+  get(ctx: OrgContext, tokenId: string): Promise<RevocableToken | null>;
+  /**
+   * The head guard of a revoke batch: holds only for a live (not revoked, not expired) personal
+   * token of `fence.userId` in the organization, on database time.
+   */
+  ownPersonalToken(ctx: OrgContext, fence: MutationFence, tokenId: string): FenceGuard;
+}
+
+interface RevocableRow {
+  readonly id: string;
+  readonly kind: string;
+  readonly user_id: string | null;
+  readonly project_id: string | null;
+  readonly project_mode: string;
+}
+
+function revocable(row: RevocableRow): RevocableToken {
+  if (row.kind === 'pat' && row.user_id !== null && row.project_id === null) {
+    if (row.project_mode === 'all' || row.project_mode === 'selected') {
+      return {
+        id: row.id,
+        kind: 'pat',
+        userId: row.user_id,
+        projectId: null,
+        projectMode: row.project_mode,
+      };
+    }
+  } else if (row.kind === 'svc' && row.user_id === null) {
+    return { id: row.id, kind: 'svc', userId: null, projectId: row.project_id, projectMode: null };
+  } else if (row.kind === 'cst') {
+    return {
+      id: row.id,
+      kind: 'cst',
+      userId: row.user_id,
+      projectId: row.project_id,
+      projectMode: null,
+    };
+  }
+  throw new TypeError('the token row does not have the shape of a revocable token');
 }
 
 function timestamp(field: string, value: unknown): string {
@@ -743,6 +788,37 @@ export function createTokenRepository(
       if (state.revoked_at !== null) return { status: 'already_revoked' };
       return { status: 'refused', reason: outcome.reason };
     },
-  } satisfies TokenRepository & ServiceTokenStore;
+
+    async get(ctx, tokenId) {
+      nonEmpty('tokenId', tokenId);
+      const rows = await executor.all<RevocableRow>(
+        compile(
+          db
+            .selectFrom('token')
+            .select(['id', 'kind', 'user_id', 'project_id', 'project_mode'])
+            .where('id', '=', tokenId)
+            .where('org_id', '=', ctx.orgId),
+        ),
+      );
+      const row = rows[0];
+      return row === undefined ? null : revocable(row);
+    },
+
+    ownPersonalToken(ctx, fence, tokenId) {
+      nonEmpty('tokenId', tokenId);
+      nonEmpty('fence.userId', fence.userId);
+      return assertGuard(
+        sql<boolean>`exists (
+          select 1 from token as owned_token
+          where owned_token.id = ${tokenId}
+            and owned_token.org_id = ${ctx.orgId}
+            and owned_token.kind = 'pat'
+            and owned_token.user_id = ${fence.userId}
+            and owned_token.revoked_at is null
+            and unixepoch(owned_token.expires_at, 'subsec') > unixepoch('now', 'subsec'))`,
+        ctx,
+      );
+    },
+  } satisfies TokenRepository & ServiceTokenStore & TokenRevokeStore & TokenOwnershipGuard;
   return repository;
 }

@@ -36,6 +36,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 const OIDC_PLAIN: ProtectedHolderProvider = { ...OIDC, emailAuthoritative: false };
 const OTHER: ProtectedHolderProvider = {
@@ -43,7 +44,11 @@ const OTHER: ProtectedHolderProvider = {
   anchor: 'https://other.example.test',
   emailAuthoritative: false,
 };
-const OTHER_AUTH: ProtectedHolderProvider = { ...OTHER, emailAuthoritative: true };
+const OTHER_AUTH: ProtectedHolderProvider = {
+  ...OTHER,
+  emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
+};
 
 const ADMIN_PERMISSIONS = ['org:read', 'org:users:read', 'project:read', 'project:packages:read'];
 const OWNER_PERMISSIONS = ['project:read', 'project:grants:write'];
@@ -564,6 +569,38 @@ describe('evidence rules', () => {
     expect(await organization({ providerAnchors: [OIDC] })).toEqual(['org:read']);
   });
 
+  it('satisfies an email grant only when the email domain is one the provider is authoritative for', async () => {
+    await seed(identity(a, U1, 'u1@example.test'));
+    expect(
+      await organization({
+        providerAnchors: [{ ...OIDC, emailAuthoritativeDomains: ['other.test'] }],
+      }),
+    ).toEqual([]);
+    expect(
+      await organization({
+        providerAnchors: [{ ...OIDC, emailAuthoritativeDomains: ['other.test', 'example.test'] }],
+      }),
+    ).toEqual(['org:read']);
+  });
+
+  it('never lets a parent domain vouch for an e-mail of a subdomain', async () => {
+    await seed(
+      stmt("UPDATE user_account SET email = 'u1@sub.example.test' WHERE id = ?", U1),
+      grant(a, 'email', 'u1@sub.example.test', ROLE_VIEWER),
+      identity(a, U1, 'u1@sub.example.test'),
+    );
+    expect(
+      await organization({
+        providerAnchors: [{ ...OIDC, emailAuthoritativeDomains: ['example.test'] }],
+      }),
+    ).toEqual([]);
+    expect(
+      await organization({
+        providerAnchors: [{ ...OIDC, emailAuthoritativeDomains: ['sub.example.test'] }],
+      }),
+    ).toEqual(['org:read']);
+  });
+
   it('lets a non-authoritative provider carry a group but not an email grant', async () => {
     await seed(identity(a, U1, 'u1@example.test'), member(a, U1, 'admins'));
     const permissions = await organization({ providerAnchors: [OIDC_PLAIN] });
@@ -591,7 +628,14 @@ describe('evidence rules', () => {
     );
     expect(
       await organization({
-        providerAnchors: [{ provider: 'unbound', anchor: 'x', emailAuthoritative: true }],
+        providerAnchors: [
+          {
+            provider: 'unbound',
+            anchor: 'x',
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        ],
       }),
     ).toEqual([]);
   });
@@ -701,6 +745,7 @@ describe('one indexed read', () => {
           provider: `idp${index}`,
           anchor: `https://idp${index}.example.test`,
           emailAuthoritative: index % 2 === 0,
+          emailAuthoritativeDomains: ['example.test'],
         })),
       ];
       for (const [boundary, providerAnchors] of [
@@ -864,7 +909,14 @@ describe('permissionRows and holdsPermission', () => {
 
   it('rejects a malformed provider descriptor', () => {
     expect(() =>
-      permissionRows(a, U1, P1, [{ provider: '', anchor: '', emailAuthoritative: true }]),
+      permissionRows(a, U1, P1, [
+        {
+          provider: '',
+          anchor: '',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ]),
     ).toThrow(TypeError);
   });
 });

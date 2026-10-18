@@ -1,4 +1,6 @@
+import { matchesPattern } from '../../catalogue/patterns.js';
 import type { Codecs } from '../../platform/codec.js';
+import type { ComposerRepositoryConfig } from '../../sources/config.js';
 import { UpstreamError, type PolicyFetch } from '../../sources/policy-fetch.js';
 import {
   JsonExtractError,
@@ -16,11 +18,45 @@ import {
   type ComposerRootSource,
 } from './root.js';
 
-export interface V1IndexEntry {
-  /** `provider`: the listed provider-file hash; `package`: SHA-256 of the inline versions. */
-  readonly kind: 'provider' | 'package';
-  readonly sha256: string;
+/** The document an inline package was read from, with the hashes it must match. */
+export interface V1IndexDocument {
+  readonly url: string;
+  readonly sha1?: string;
+  readonly sha256?: string;
 }
+
+/**
+ * A document of the pass whose hashes matched, with the raw values of the packages it kept by
+ * lowercased key. `partial` means some packages were not kept (outside the selection or over the
+ * cache budget), so a missing name is unknown rather than absent.
+ */
+export interface V1CachedDocument {
+  readonly members: ReadonlyMap<string, string>;
+  readonly partial: boolean;
+}
+
+/** Verified documents of one index pass, keyed by `documentKey`. */
+export type V1DocumentCache = ReadonlyMap<string, V1CachedDocument>;
+
+export function isSelected(key: string, selection: ComposerRepositoryConfig['selection']): boolean {
+  return selection.packages.includes(key) || selection.patterns.some((p) => matchesPattern(p, key));
+}
+
+export const documentKey = (document: V1IndexDocument): string =>
+  `${document.url}\n${document.sha1 ?? ''}\n${document.sha256 ?? ''}`;
+
+export type V1IndexEntry =
+  | {
+      /** The listed provider-file hash. */
+      readonly kind: 'provider';
+      readonly sha256: string;
+    }
+  | {
+      /** SHA-256 of the package's inline versions as written in `document`. */
+      readonly kind: 'package';
+      readonly sha256: string;
+      readonly document: V1IndexDocument;
+    };
 
 export type V1IndexFailure =
   | 'hash'
@@ -43,6 +79,8 @@ export interface V1Index {
   readonly reason?: V1IndexFailure;
   /** Lowercased package name to entry; empty when the index is incomplete. */
   readonly entries: ReadonlyMap<string, V1IndexEntry>;
+  /** Verified documents of this pass; empty when the index is incomplete. */
+  readonly documents: V1DocumentCache;
 }
 
 export interface V1IndexPrevious {
@@ -54,6 +92,10 @@ export interface V1IndexOptions {
   readonly source: ComposerRootSource;
   readonly codecs: Pick<Codecs, 'digestTap'>;
   readonly signal?: AbortSignal;
+  /** Only these names are kept in `V1Index.documents`; every name when absent. */
+  readonly selection?: ComposerRepositoryConfig['selection'];
+  /** Raw package text `V1Index.documents` may hold across the pass. Default 8 MiB. */
+  readonly maxCachedBytes?: number;
   /** Largest include or streamed root body. Default 32 MiB. */
   readonly maxDocumentBytes?: number;
   /** Largest single package or provider member. Default 1 MiB. */
@@ -79,6 +121,7 @@ const DEFAULT_MAX_MEMBER_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PASS_BYTES = 128 * 1024 * 1024;
 const DEFAULT_PASS_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_CACHED_BYTES = 8 * 1024 * 1024;
 const MAX_FILES = 1000;
 const MAX_DEPTH = 8;
 /**
@@ -112,6 +155,7 @@ interface Limits {
   readonly maxEntries: number;
   readonly maxFiles: number;
   readonly maxDepth: number;
+  readonly maxCachedBytes: number;
 }
 
 interface Pass {
@@ -122,6 +166,8 @@ interface Pass {
   readonly base: string;
   readonly deadline: number;
   readonly entries: Map<string, V1IndexEntry>;
+  readonly documents: Map<string, V1CachedDocument>;
+  cacheBytes: number;
   files: number;
   bytes: number;
 }
@@ -134,7 +180,7 @@ const hex = (bytes: ArrayBuffer | Uint8Array): string =>
     b.toString(16).padStart(2, '0'),
   ).join('');
 
-async function sha256Of(text: string): Promise<string> {
+export async function sha256Of(text: string): Promise<string> {
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
 }
 
@@ -161,6 +207,7 @@ function limitsOf(options: V1IndexOptions): Limits {
     maxEntries: limit('maxEntries', options.maxEntries, MAX_ENTRIES, MAX_ENTRIES),
     maxFiles: limit('maxFiles', options.maxFiles, MAX_FILES, MAX_FILES),
     maxDepth: limit('maxDepth', options.maxDepth, MAX_DEPTH, MAX_DEPTH),
+    maxCachedBytes: limit('maxCachedBytes', options.maxCachedBytes, DEFAULT_MAX_CACHED_BYTES, any),
   };
 }
 
@@ -218,12 +265,12 @@ function providerEntry(raw: string): V1IndexEntry {
   return { kind: 'provider', sha256: hash.toLowerCase() };
 }
 
-async function packageEntry(raw: string): Promise<V1IndexEntry | null> {
+async function packageEntry(raw: string, document: V1IndexDocument): Promise<V1IndexEntry | null> {
   const value = parse(raw);
   if (Array.isArray(value) && value.length === 0) return null;
   if (!isObject(value)) throw new IncludeFailure('invalid');
   if (Object.keys(value).length === 0) return null;
-  return { kind: 'package', sha256: await sha256Of(raw) };
+  return { kind: 'package', sha256: await sha256Of(raw), document };
 }
 
 function aborted(options: V1IndexOptions): void {
@@ -362,8 +409,16 @@ async function readDocument(
     selectors,
     { maxDocumentBytes: pass.limits.maxDocumentBytes, maxMemberBytes: pass.limits.maxMemberBytes },
   );
+  const document: V1IndexDocument = {
+    url,
+    ...(expected.sha1 === undefined ? {} : { sha1: expected.sha1 }),
+    ...(expected.sha256 === undefined ? {} : { sha256: expected.sha256 }),
+  };
   const staged = new Map<string, V1IndexEntry>();
   const nested: (ComposerRootInclude & Expected)[] = [];
+  const kept = new Map<string, string>();
+  let keptBytes = 0;
+  let partial = false;
   try {
     for (;;) {
       const step: IteratorResult<ExtractedMember> = await guarded(pass, () => members.next());
@@ -374,10 +429,22 @@ async function readDocument(
         continue;
       }
       const name = nameOf(key);
+      if (section === 'packages') {
+        const { selection } = pass.options;
+        if (
+          (selection !== undefined && !isSelected(name, selection)) ||
+          pass.cacheBytes - keptBytes < step.value.raw.length
+        ) {
+          partial = true;
+        } else {
+          kept.set(name, step.value.raw);
+          keptBytes += step.value.raw.length;
+        }
+      }
       const entry =
         section === 'providers'
           ? providerEntry(step.value.raw)
-          : await packageEntry(step.value.raw);
+          : await packageEntry(step.value.raw, document);
       if (entry === null) continue;
       if (staged.has(name) || pass.entries.has(name)) throw new IncludeFailure('duplicate');
       if (pass.entries.size + staged.size >= pass.limits.maxEntries) {
@@ -396,6 +463,8 @@ async function readDocument(
     const digest = digests[alg];
     if (digest === undefined || hex(digest) !== expected[alg]) throw new IncludeFailure('hash');
   }
+  pass.documents.set(documentKey(document), { members: kept, partial });
+  pass.cacheBytes -= keptBytes;
   for (const [name, entry] of staged) pass.entries.set(name, entry);
   for (const include of nested) {
     await readDocument(pass, include.url, include, [['packages', '*'], ['includes']], depth + 1);
@@ -410,7 +479,11 @@ function rootSelectors(root: ComposerRoot): MemberSelector[] {
 }
 
 type PassOutcome =
-  { readonly entries: Map<string, V1IndexEntry> } | { readonly failure: V1IndexFailure };
+  | {
+      readonly entries: Map<string, V1IndexEntry>;
+      readonly documents: Map<string, V1CachedDocument>;
+    }
+  | { readonly failure: V1IndexFailure };
 
 async function indexPass(
   fetch: PolicyFetch,
@@ -431,6 +504,8 @@ async function indexPass(
     base: baseOf(root.packagesJsonUrl),
     deadline,
     entries: new Map(),
+    documents: new Map(),
+    cacheBytes: limits.maxCachedBytes,
     files: 0,
     bytes: rootBytes,
   };
@@ -457,7 +532,7 @@ async function indexPass(
     if (error instanceof IncludeFailure) return { failure: error.code };
     throw error;
   }
-  return { entries: pass.entries };
+  return { entries: pass.entries, documents: pass.documents };
 }
 
 interface RootRead {
@@ -507,8 +582,8 @@ function updated(root: ComposerRoot, rootSha256: string, outcome: PassOutcome): 
       rootSha256,
       mode: root.mode as V1Index['mode'],
       ...('entries' in outcome
-        ? { complete: true, entries: outcome.entries }
-        : { complete: false, reason: outcome.failure, entries: new Map() }),
+        ? { complete: true, entries: outcome.entries, documents: outcome.documents }
+        : { complete: false, reason: outcome.failure, entries: new Map(), documents: new Map() }),
     },
   };
 }

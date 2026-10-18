@@ -82,6 +82,37 @@ describe('local server on 127.0.0.1', () => {
   });
 });
 
+describe('scheme and port scoping of the allowlist', () => {
+  it('guarded fetch refuses http on port 443 under host:443 before connecting', async () => {
+    const resolver = switching([LOOPBACK]);
+    const fetch = createGuardedFetch(policy([`${HOST}:443`]), { resolver });
+    await expect(fetch(`http://${HOST}:443/`)).rejects.toMatchObject({
+      cause: { reason: 'scheme' },
+    });
+    expect(hits).toBe(0);
+  });
+
+  it('policy fetch refuses http on port 443 under host:443 with reason scheme', async () => {
+    const resolver = switching([LOOPBACK]);
+    const error = await policyFetchFor(
+      [`${HOST}:443`],
+      resolver,
+    )(get(`http://${HOST}:443/`)).catch((e) => e);
+    expect(error).toBeInstanceOf(UpstreamError);
+    expect(error).toMatchObject({ code: 'refused', reason: 'scheme' });
+    expect(resolver).not.toHaveBeenCalled();
+    expect(hits).toBe(0);
+  });
+
+  it('guarded fetch refuses a private host on port 80 under a bare entry', async () => {
+    const fetch = createGuardedFetch(policy([HOST]), { resolver: switching([LOOPBACK]) });
+    await expect(fetch(`http://${HOST}/`)).rejects.toMatchObject({
+      cause: { reason: 'blocked_address' },
+    });
+    expect(hits).toBe(0);
+  });
+});
+
 describe('DNS answer switching between check and connect', () => {
   it('re-vets at connect and refuses the switched answer', async () => {
     const resolver = switching([PUBLIC], [LOOPBACK]);

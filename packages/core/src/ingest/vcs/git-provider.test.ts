@@ -1019,7 +1019,7 @@ describe('git provider blob plan', () => {
     for (const call of createGitBlobReader.mock.calls) expect(call[2]).not.toContain(ignored.oid);
   });
 
-  it('keeps an attributes file in the plan even when a rule ignores it', async () => {
+  it('reads an attributes file during planning even when a rule ignores it, and leaves it out of the archive reader plan', async () => {
     const text = '.gitattributes export-ignore\n';
     const attributes = { path: '.gitattributes', mode: '100644', type: 'blob', oid: sha1(text) };
     byOid.set(sha1(text), text);
@@ -1032,7 +1032,11 @@ describe('git provider blob plan', () => {
       oid(3),
     );
     const plan = createGitBlobReader.mock.calls.at(-1)![2] as string[];
-    expect(plan).toEqual([sha1(text), oidOf('a.php')]);
+    expect(plan).toEqual([oidOf('a.php')]);
+    const readAhead = createGitBlobReader.mock.calls
+      .slice(0, -1)
+      .flatMap((call) => call[2] as string[]);
+    expect(readAhead).toEqual([sha1(text)]);
   });
 
   it('keeps the full plan when the tree has no attributes file', async () => {
@@ -1092,22 +1096,37 @@ describe('git provider blob plan', () => {
         Duplex.toWeb(createDeflateRaw()) as unknown as TransformStream<Uint8Array, Uint8Array>,
     };
     const archiveReads: string[] = [];
-    const readers: string[][] = [];
     readTreeAtCommit.mockResolvedValue(tree);
-    createGitBlobReader.mockImplementation((c: unknown, u: string, plan: readonly string[]) => {
-      const log: string[] = [];
-      readers.push(log);
-      return servingReader(log)(c, u, plan);
-    });
-    buildZipFromTree.mockImplementation(real);
+    createGitBlobReader.mockImplementation(servingReader());
+    buildZipFromTree.mockImplementation(
+      (
+        archiveTree: unknown,
+        archiveCodecs: unknown,
+        io: { blobs: { read(id: string, max: number): Promise<unknown> } },
+        opts: unknown,
+      ) =>
+        (real as (...args: unknown[]) => Promise<unknown>)(
+          archiveTree,
+          archiveCodecs,
+          {
+            ...io,
+            blobs: {
+              read: (id: string, max: number) => {
+                archiveReads.push(id);
+                return io.blobs.read(id, max);
+              },
+            },
+          },
+          opts,
+        ),
+    );
     try {
       const built = await createGitProvider({ runtime: 'docker', staging }).buildArchive(
         { ...ctx, codecs } as unknown as ProviderContext,
         source(),
         oid(3),
       );
-      archiveReads.push(...readers.at(-1)!);
-      const plan = new Set(createGitBlobReader.mock.calls.at(-1)![2] as string[]);
+      const plan = new Set(createGitBlobReader.mock.calls.flatMap((call) => call[2] as string[]));
       expect(new Set(archiveReads)).toEqual(plan);
       const zip = (await readFile(built.path)).toString('latin1');
       expect(zip).toContain('src/b.php');
@@ -1116,5 +1135,391 @@ describe('git provider blob plan', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('never asks the archive reader for an attributes file that planning already read', async () => {
+    const nested = '*.log export-ignore\n';
+    const extra = {
+      '.gitattributes': ATTRIBUTES,
+      'a.php': contents['a.php']!,
+      'src/.gitattributes': nested,
+      'src/b.php': contents['src/b.php']!,
+    };
+    byOid.set(sha1(nested), nested);
+    const list = Object.entries(extra).map(([path, text]) => ({
+      path,
+      mode: '100644',
+      type: 'blob',
+      oid: sha1(text),
+    }));
+    const asked: string[][] = [];
+    readTreeAtCommit.mockResolvedValue({ ...tree, entries: list });
+    createGitBlobReader.mockImplementation((c: unknown, u: string, plan: readonly string[]) => {
+      const log: string[] = [];
+      asked.push(log);
+      const inner = servingReader(log)(c, u, plan);
+      return {
+        read: async (id: string) => {
+          if (!plan.includes(id)) throw new GitFetchError('missing_object');
+          log.push(...plan.filter((planned) => !log.includes(planned)));
+          return inner.read(id);
+        },
+      };
+    });
+    buildZipFromTree.mockImplementation(
+      async (
+        _t: unknown,
+        _c: unknown,
+        io: { blobs: { read(id: string, max: number): Promise<unknown> } },
+      ) => {
+        for (const entry of list) await io.blobs.read(entry.oid, 1024);
+        return {};
+      },
+    );
+    await createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } }).buildArchive(
+      ctx,
+      source(),
+      oid(3),
+    );
+    const mainPlan = createGitBlobReader.mock.calls.at(-1)![2] as string[];
+    for (const attributes of ['.gitattributes', 'src/.gitattributes'])
+      expect(mainPlan).not.toContain(sha1(extra[attributes as keyof typeof extra]));
+    expect(asked.at(-1)).not.toContain(sha1(ATTRIBUTES));
+    expect(asked.at(-1)).not.toContain(sha1(nested));
+  });
+
+  it('reads each attributes file from the repository once across planning and the archive build', async () => {
+    const { buildZipFromTree: real } = await vi.importActual<
+      typeof import('../../sources/git/archive.js')
+    >('../../sources/git/archive.js');
+    const dir = await mkdtemp(path.join(tmpdir(), 'pb-git-provider-'));
+    let n = 0;
+    const staging = {
+      create() {
+        const file = path.join(dir, `zip-${n++}.tmp`);
+        const stream = createWriteStream(file);
+        return Promise.resolve({
+          path: file,
+          writable: Writable.toWeb(stream) as WritableStream<Uint8Array>,
+          discard: () => rm(file, { force: true }),
+        });
+      },
+    };
+    const codecs = {
+      digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
+        const hashes = algs.map((alg) => [alg, createHash(alg)] as const);
+        let done!: (v: Record<A, Uint8Array>) => void;
+        const digests = new Promise<Record<A, Uint8Array>>((resolve) => {
+          done = resolve;
+        });
+        const transform = new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            for (const [, h] of hashes) h.update(chunk);
+            controller.enqueue(chunk);
+          },
+          flush() {
+            done(
+              Object.fromEntries(hashes.map(([a, h]) => [a, new Uint8Array(h.digest())])) as Record<
+                A,
+                Uint8Array
+              >,
+            );
+          },
+        });
+        return { transform, digests };
+      },
+      deflateRaw: () =>
+        Duplex.toWeb(createDeflateRaw()) as unknown as TransformStream<Uint8Array, Uint8Array>,
+    };
+    const reads: string[] = [];
+    readTreeAtCommit.mockResolvedValue(tree);
+    createGitBlobReader.mockImplementation(servingReader(reads));
+    buildZipFromTree.mockImplementation(real);
+    try {
+      const built = await createGitProvider({ runtime: 'docker', staging }).buildArchive(
+        { ...ctx, codecs } as unknown as ProviderContext,
+        source(),
+        oid(3),
+      );
+      expect(reads.filter((id) => id === oidOf('.gitattributes'))).toHaveLength(1);
+      expect(new Set(reads).size).toBe(reads.length);
+      const zip = (await readFile(built.path)).toString('latin1');
+      expect(zip).toContain('src/b.php');
+      expect(zip).not.toContain('README.md');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses attribute bytes that do not hash to their id even when planning already read them', async () => {
+    const { buildZipFromTree: real } = await vi.importActual<
+      typeof import('../../sources/git/archive.js')
+    >('../../sources/git/archive.js');
+    const codecs = {
+      digestTap: () => {
+        const transform = new TransformStream<Uint8Array, Uint8Array>();
+        return { transform, digests: Promise.resolve({ sha1: new Uint8Array(20) }) };
+      },
+      deflateRaw: () => new TransformStream<Uint8Array, Uint8Array>(),
+    };
+    readTreeAtCommit.mockResolvedValue(tree);
+    createGitBlobReader.mockImplementation(servingReader());
+    buildZipFromTree.mockImplementation(real);
+    await expect(
+      createGitProvider({
+        runtime: 'docker',
+        staging: { create: vi.fn() },
+      }).buildArchive({ ...ctx, codecs } as unknown as ProviderContext, source(), oid(3)),
+    ).rejects.toMatchObject({ code: 'bad_object' });
+  });
+});
+
+describe('git provider batch isolation cost', () => {
+  const count = 64;
+  const refs = Array.from({ length: count }, (_, n) => ({
+    name: `refs/tags/1.${n}.0`,
+    oid: oid(n + 20),
+  }));
+
+  function failing(error: (batch: GitRef[]) => Error | undefined): void {
+    lsRefs.mockResolvedValue({ refs, skipped: 0 });
+    const real = readFileAtRefs.getMockImplementation()!;
+    readFileAtRefs.mockImplementation(async (c, u, batch: GitRef[], path) => {
+      const failure = error(batch);
+      if (failure !== undefined) throw failure;
+      return real(c, u, batch, path);
+    });
+  }
+
+  const describeAll = () =>
+    createGitProvider({ runtime: 'docker' }).describe(ctx, source({ packageName: NAME }), NAME, {});
+
+  it('stops after both top halves and one probe each fail alike and rethrows the first error', async () => {
+    const failure = new GitFetchError('missing_object');
+    failing(() => failure);
+    await expect(describeAll()).rejects.toBe(failure);
+    expect(readFileAtRefs.mock.calls.length).toBeLessThanOrEqual(count + Math.log2(count));
+    expect(readFileAtRefs).toHaveBeenCalledTimes(1 + 2 + 2 + (count - 2));
+  });
+
+  it('keeps bisecting when the two top halves fail with different errors', async () => {
+    failing((batch) => {
+      if (batch.some((ref) => ref.name === refs[3]!.name))
+        return new GitFetchError('missing_object');
+      if (batch.some((ref) => ref.name === refs[40]!.name)) return new GitFetchError('bad_object');
+      return undefined;
+    });
+    const { members: found, description } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 2);
+    expect(description.upstreamComplete).toBe(false);
+    expect(counters.map((c) => c.labels?.reason).sort()).toEqual(['bad_object', 'missing_object']);
+  });
+
+  it('isolates one bad ref per top half when both fail with the same error', async () => {
+    failing((batch) =>
+      batch.some((ref) => ref.name === refs[21]!.name || ref.name === refs[50]!.name)
+        ? new GitFetchError('missing_object')
+        : undefined,
+    );
+    const { members: found } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 2);
+    expect(counters).toHaveLength(2);
+  });
+
+  it('keeps the readable refs when both top halves and both probes fail alike', async () => {
+    failing((batch) =>
+      batch.some((ref) => ref.name === refs[0]!.name || ref.name === refs[32]!.name)
+        ? new GitFetchError('missing_object')
+        : undefined,
+    );
+    const { members: found } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 2);
+    expect(counters).toHaveLength(2);
+  });
+
+  it('treats upstream failures with different statuses as different errors', async () => {
+    failing((batch) => {
+      if (batch.length === count) return new GitFetchError('missing_object');
+      if (batch.some((ref) => ref.name === refs[0]!.name))
+        return new UpstreamError('http_status', 502);
+      if (batch.some((ref) => ref.name === refs[32]!.name))
+        return new UpstreamError('http_status', 503);
+      return undefined;
+    });
+    const { members: found } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 2);
+  });
+
+  it('isolates only the failing refs when some refs of a batch fail alike', async () => {
+    failing((batch) =>
+      batch.some((ref) => ref.name === refs[21]!.name || ref.name === refs[22]!.name)
+        ? new GitFetchError('missing_object')
+        : undefined,
+    );
+    const { members: found } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 2);
+    expect(counters).toHaveLength(2);
+  });
+
+  it('bisects a sub-batch UpstreamError once per level down to single refs and keeps the rest', async () => {
+    failing((batch) => {
+      if (batch.length === count) return new GitFetchError('missing_object');
+      return batch.some((ref) => ref.name === refs[5]!.name)
+        ? new UpstreamError('http_status', 503)
+        : undefined;
+    });
+    const { members: found, description } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found).toHaveLength(count - 1);
+    expect(description.upstreamComplete).toBe(false);
+    expect(counters).toEqual([
+      { name: 'git_provider_ref_skipped', labels: { reason: 'http_status' } },
+    ]);
+  });
+
+  it.each([
+    ['timeout', new UpstreamError('timeout')],
+    ['network', new UpstreamError('network')],
+    ['429', new UpstreamError('http_status', 429)],
+  ])(
+    'fails a whole sub-batch on a transient upstream %s without bisecting it',
+    async (_name, upstream) => {
+      failing((batch) => {
+        if (batch.length === count) return new GitFetchError('missing_object');
+        return batch.some((ref) => ref.name === refs[5]!.name) ? upstream : undefined;
+      });
+      const { members: found } = await members(
+        createGitProvider({ runtime: 'docker' }),
+        source({ packageName: NAME }),
+      );
+      expect(found).toHaveLength(count / 2);
+      expect(counters).toHaveLength(count / 2);
+      expect(readFileAtRefs).toHaveBeenCalledTimes(3);
+    },
+  );
+});
+
+describe('git provider capability discovery', () => {
+  const ADVERT = 'application/x-git-upload-pack-advertisement';
+  const RESULT = 'application/x-git-upload-pack-result';
+  const pkt = (...parts: string[]): Uint8Array => {
+    const chunks = parts.map((part) => (part === '' ? FLUSH : encodePkt(part)));
+    const out = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
+  };
+  const server = () =>
+    vi.fn(async (request: { method?: string }) =>
+      request.method === 'POST'
+        ? new Response(
+            pkt(
+              `${oid(1)} HEAD symref-target:refs/heads/main\n`,
+              `${oid(1)} refs/heads/main\n`,
+              '',
+            ),
+            { headers: { 'content-type': RESULT } },
+          )
+        : new Response(
+            pkt(
+              '# service=git-upload-pack\n',
+              '',
+              'version 2\n',
+              'ls-refs=unborn\n',
+              'fetch=shallow filter\n',
+              '',
+            ),
+            { headers: { 'content-type': ADVERT } },
+          ),
+    );
+  const gets = (fetch: ReturnType<typeof server>): number =>
+    fetch.mock.calls.filter(([request]) => request.method !== 'POST').length;
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('../../sources/git/refs.js')>(
+      '../../sources/git/refs.js',
+    );
+    discoverCapabilities.mockImplementation(actual.discoverCapabilities);
+    lsRefs.mockImplementation(actual.lsRefs);
+    readTreeAtCommit.mockResolvedValue({ entries: [], skipped: 0 });
+    buildZipFromTree.mockResolvedValue({});
+  });
+
+  it('discovers once for consecutive archive builds of one source', async () => {
+    const fetch = server();
+    const context = { ...ctx, fetch } as unknown as ProviderContext;
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    await provider.buildArchive(context, source(), oid(1));
+    await provider.buildArchive(context, source(), oid(2));
+    expect(gets(fetch)).toBe(1);
+    expect(readTreeAtCommit.mock.calls[1]![0].capabilities).toEqual({ filter: true });
+  });
+
+  it('reuses the capabilities the ref listing already discovered', async () => {
+    const fetch = server();
+    const context = { ...ctx, fetch } as unknown as ProviderContext;
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    await provider.describe(context, source({ packageName: NAME }), NAME, {});
+    await provider.buildArchive(context, source(), oid(1));
+    expect(gets(fetch)).toBe(1);
+  });
+
+  it('discovers again for another source', async () => {
+    const fetch = server();
+    const context = { ...ctx, fetch } as unknown as ProviderContext;
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    await provider.buildArchive(context, source(), oid(1));
+    await provider.buildArchive(context, { ...source(), id: 's2' } as ProviderSource, oid(1));
+    expect(gets(fetch)).toBe(2);
+  });
+
+  it('discovers again once the cached capabilities are older than five minutes', async () => {
+    const fetch = server();
+    let now = Date.parse('2026-01-01T00:00:00Z');
+    const context = {
+      ...ctx,
+      fetch,
+      clock: { now: () => new Date(now) },
+    } as unknown as ProviderContext;
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    await provider.buildArchive(context, source(), oid(1));
+    now += 4 * 60_000;
+    await provider.buildArchive(context, source(), oid(1));
+    expect(gets(fetch)).toBe(1);
+    now += 2 * 60_000;
+    await provider.buildArchive(context, source(), oid(1));
+    expect(gets(fetch)).toBe(2);
+  });
+
+  it('does not keep a failed discovery', async () => {
+    const fetch = server();
+    fetch.mockRejectedValueOnce(new UpstreamError('timeout'));
+    const context = { ...ctx, fetch } as unknown as ProviderContext;
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    await expect(provider.buildArchive(context, source(), oid(1))).rejects.toBeInstanceOf(
+      UpstreamError,
+    );
+    await provider.buildArchive(context, source(), oid(1));
+    expect(gets(fetch)).toBe(2);
   });
 });

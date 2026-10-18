@@ -58,7 +58,6 @@ export interface SshBuiltArchive extends SshArchiveRecord {
  * and commit time are durable and atomically visible together. Readers must see either
  * no record or the complete archive, including during concurrent writes. Repeating a
  * put for an existing key preserves the first published archive; it is never rebuilt.
- * Persist catalogue archives with `refetchable = 0`.
  *
  * `find` is the metadata get and existence check: null means absent; a record means
  * the complete ZIP is available. Storage failures reject, rather than report absence.
@@ -66,7 +65,7 @@ export interface SshBuiltArchive extends SshArchiveRecord {
  *
  * Implementations enforce their configured ZIP byte cap before publishing. An oversized
  * archive or failed write rejects without publishing a record, preserves any prior
- * archive and removes temporary files. Errors must not contain request or credential data.
+ * archive and removes temporary files. Errors must not contain a URL, key path or credential text.
  */
 export interface SshArchiveStore {
   find(

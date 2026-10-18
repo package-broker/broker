@@ -58,6 +58,23 @@ function route(path: string, extra: Partial<RouteDefinition> = {}): RouteDefinit
 }
 
 describe('createKernel coreRoutes', () => {
+  it.each(['/', '/x'])('rejects a configurable core route at %s', async (path) => {
+    expect((await problemsOf([route(path)])).join('\n')).toContain('must start with');
+  });
+
+  it.each(['GET', 'POST'] as const)('rejects a plugin %s / at kernel build', async (method) => {
+    const plugin: PluginDefinition = {
+      id: 'root',
+      package: '@test/root',
+      apiVersion: SUPPORTED_PLUGIN_API[0],
+      platforms: ['node'],
+      register: (registry) => {
+        registry.route(route('/', { method }));
+      },
+    };
+    await expect(createKernel(options([], [plugin]))).rejects.toBeInstanceOf(KernelConfigError);
+  });
+
   it('serves a public core route with a request id', async () => {
     const kernel = await createKernel(options([ping]));
 

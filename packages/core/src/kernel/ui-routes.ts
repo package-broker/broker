@@ -52,7 +52,7 @@ export function uiRootRedirect(request: Request): Response | null {
   if (!prefersHtml(request)) return null;
   return new Response(null, {
     status: 303,
-    headers: { location: UI_PATH, 'cache-control': 'no-store' },
+    headers: { location: UI_PATH, 'cache-control': 'no-store', vary: 'Accept' },
   });
 }
 

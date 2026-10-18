@@ -264,3 +264,46 @@ describe('legacy route tables', () => {
     );
   });
 });
+
+describe('nullable route boundaries', () => {
+  const route = { method: 'GET', path: '/public', plugin: 'a', permission: null };
+  async function withBoundary(boundary: unknown) {
+    return build((core) => ({
+      schemaVersion: 1,
+      migrations: [core],
+      routes: [{ ...route, boundary }],
+    }));
+  }
+  it('normalizes null to the same absent boundary as an omitted key', async () => {
+    const routes = await loadBuiltRoutes(await withBoundary(null));
+    expect(routes).toHaveLength(1);
+    expect(routes?.[0]?.boundary).toBeUndefined();
+    expect(Object.hasOwn(routes![0]!, 'boundary')).toBe(false);
+  });
+  it('rejects a numeric boundary', async () => {
+    await expect(loadBuiltRoutes(await withBoundary(42))).rejects.toThrow(
+      'route 0: boundary must be a string',
+    );
+  });
+  it('rejects an object boundary', async () => {
+    await expect(loadBuiltRoutes(await withBoundary({}))).rejects.toThrow(
+      'route 0: boundary must be a string',
+    );
+  });
+  it.each([undefined, null])(
+    'preserves the protected legacy rejection for boundary %s',
+    async (boundary) => {
+      const outDir = await build((core) => ({
+        schemaVersion: 1,
+        migrations: [core],
+        routes: [
+          { ...route, permission: 'org:read', ...(boundary === undefined ? {} : { boundary }) },
+        ],
+      }));
+      await expect(loadBuiltRoutes(outDir)).rejects.toMatchObject({
+        name: 'LegacyRouteTableError',
+        message: 'manifest route table predates route boundaries; run pb build again',
+      });
+    },
+  );
+});

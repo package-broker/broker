@@ -130,7 +130,7 @@ export interface ManifestRoute {
   path: string;
   plugin: string;
   permission: string | null;
-  boundary?: string;
+  boundary: string | null;
   needsOrg?: boolean;
   package?: true;
 }
@@ -186,7 +186,7 @@ export function renderManifestJson(
       path: route.path,
       plugin: route.plugin,
       permission: route.permission,
-      ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
+      boundary: route.boundary ?? null,
       ...(route.needsOrg === undefined ? {} : { needsOrg: route.needsOrg }),
       ...(route.package === undefined ? {} : { package: true as const }),
     })),

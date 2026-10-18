@@ -19,7 +19,7 @@ import type { D1DatabaseLike, D1PreparedStatementLike } from './db/d1-executor.j
 import type { QueueLike } from './jobs/consumer.js';
 import type { AnalyticsEngineLike } from './observability/workers.js';
 import { createWorker, unboundExecutor } from './index.js';
-import type { Env } from './index.js';
+import type { Env, WorkerOptions } from './index.js';
 
 describe('runtime-cloudflare', () => {
   it('answers unknown routes with the error envelope', async () => {
@@ -457,6 +457,80 @@ async function migratedDatabase(): Promise<{ db: D1DatabaseLike; orgId: string }
   });
   return { db, orgId };
 }
+
+describe('runtime-cloudflare inbound traceparent', () => {
+  const TRACE_ID = 'ab'.repeat(16);
+  const TRACEPARENT = `00-${TRACE_ID}-${'cd'.repeat(8)}-01`;
+
+  async function traceIds(observability: WorkerOptions['observability']): Promise<unknown[]> {
+    const lines: unknown[] = [];
+    const worker = createWorker([], {
+      log: () => undefined,
+      console: { log: (value) => void lines.push(value), error: (value) => void lines.push(value) },
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+      ...(observability === undefined ? {} : { observability }),
+    });
+    await worker.fetch(
+      new Request('https://broker.test/nope', { headers: { traceparent: TRACEPARENT } }),
+      boundEnv(),
+    );
+    const ids = lines
+      .filter((line) => (line as { event?: string }).event === 'http.request')
+      .map((line) => (line as { trace_id?: string }).trace_id);
+    expect(ids.length).toBeGreaterThan(0);
+    return ids;
+  }
+
+  it('ignores the header by default', async () => {
+    for (const id of await traceIds(undefined)) expect(id).not.toBe(TRACE_ID);
+  });
+
+  it('ignores the header when the flag is false', async () => {
+    for (const id of await traceIds({ trustInboundTraceparent: false })) {
+      expect(id).not.toBe(TRACE_ID);
+    }
+  });
+
+  it('adopts the header trace id when the flag is true', async () => {
+    for (const id of await traceIds({ trustInboundTraceparent: true })) {
+      expect(id).toBe(TRACE_ID);
+    }
+  });
+
+  it('answers 503 misconfigured on a non-boolean flag without echoing it', async () => {
+    const worker = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+      observability: {
+        trustInboundTraceparent: 'yes-secret',
+      } as unknown as WorkerOptions['observability'],
+    });
+    const response = await worker.fetch(new Request('https://broker.test/nope'), boundEnv());
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect(JSON.parse(text).error.code).toBe('misconfigured');
+    expect(text).not.toContain('yes-secret');
+  });
+
+  it('answers 503 misconfigured on an unknown observability key', async () => {
+    const worker = createWorker([], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+      observability: { sampleRate: true } as unknown as WorkerOptions['observability'],
+    });
+    const response = await worker.fetch(new Request('https://broker.test/nope'), boundEnv());
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      'misconfigured',
+    );
+  });
+});
 
 describe('runtime-cloudflare job path', () => {
   it('commits to D1, notifies the queue and gives runner events job_id and attempt', async () => {

@@ -551,6 +551,67 @@ describe('startNode', () => {
       }
     });
 
+    describe('inbound traceparent', () => {
+      const TRACE_ID = 'ab'.repeat(16);
+      const TRACEPARENT = `00-${TRACE_ID}-${'cd'.repeat(8)}-01`;
+
+      async function traceIds(observability: StartOptions['observability']): Promise<unknown[]> {
+        const out = capture();
+        const err = capture();
+        const broker = await start({}, ports, {
+          stdout: out.stream,
+          stderr: err.stream,
+          ...(observability === undefined ? {} : { observability }),
+        });
+        const base = await listen(broker);
+        await fetch(`${base}/nope`, { headers: { traceparent: TRACEPARENT } });
+        const ids = [...out.lines(), ...err.lines()]
+          .filter((line) => line['event'] === 'http.request')
+          .map((line) => line['trace_id']);
+        expect(ids.length).toBeGreaterThan(0);
+        return ids;
+      }
+
+      it('ignores the header by default', async () => {
+        for (const id of await traceIds(undefined)) expect(id).not.toBe(TRACE_ID);
+      });
+
+      it('ignores the header when the flag is false', async () => {
+        for (const id of await traceIds({ trustInboundTraceparent: false })) {
+          expect(id).not.toBe(TRACE_ID);
+        }
+      });
+
+      it('adopts the header trace id when the flag is true', async () => {
+        for (const id of await traceIds({ trustInboundTraceparent: true })) {
+          expect(id).toBe(TRACE_ID);
+        }
+      });
+
+      it('fails startup on a non-boolean flag', async () => {
+        const failure = await rejection(
+          start({}, ports, {
+            observability: {
+              trustInboundTraceparent: 'yes',
+            } as unknown as StartOptions['observability'],
+          }),
+        );
+        expect(failure).toBeInstanceOf(StartupConfigError);
+        expect((failure as StartupConfigError).message).toContain('observability');
+        expect((failure as StartupConfigError).message).not.toContain('yes');
+      });
+
+      it('fails startup on an unknown observability key', async () => {
+        const failure = await rejection(
+          start({}, ports, {
+            observability: { sampleRate: true } as unknown as StartOptions['observability'],
+          }),
+        );
+        expect(failure).toBeInstanceOf(StartupConfigError);
+        expect((failure as StartupConfigError).message).toContain('observability');
+      });
+    });
+
     it('10: an unusable blob root fails startup', async () => {
       const file = join(directory, 'not-a-directory');
       await writeFile(file, 'x');

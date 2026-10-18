@@ -9,6 +9,7 @@ import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
 import { KERNEL_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
@@ -85,6 +86,7 @@ export interface WorkerOptions {
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
+  readonly observability?: BrokerConfig['observability'];
   readonly console?: { log: (value: unknown) => void; error: (value: unknown) => void };
 }
 
@@ -708,6 +710,12 @@ export function createWorker(
   }
 
   async function build(env: Env | undefined): Promise<Application> {
+    const observabilityProblems = brokerObservabilityProblems({
+      platform: 'cloudflare',
+      plugins,
+      ...(options.observability === undefined ? {} : { observability: options.observability }),
+    });
+    if (observabilityProblems.length > 0) throw new KernelConfigError(observabilityProblems);
     const config = stanza;
     const bound = config === null ? null : resolveBindings(config, env ?? {}, cacheStorage);
     const db = bound?.db ?? env?.DB;
@@ -748,7 +756,7 @@ export function createWorker(
               observability: {
                 sink: services.sink,
                 deploymentId: services.deploymentId,
-                trustInboundTraceparent: false,
+                trustInboundTraceparent: options.observability?.trustInboundTraceparent === true,
               },
             }),
       });

@@ -893,6 +893,53 @@ describe('describeNpmPackument: absence fails closed', () => {
   });
 });
 
+describe('describeNpmPackument: mixed-value time maps', () => {
+  it.each([
+    ['inline', false],
+    ['staged', true],
+  ])('preserves valid timestamps in a mixed-value time map (%s)', async (_, staged) => {
+    const firstTime = '2021-01-02T03:04:05.000Z';
+    const secondTime = '2022-02-03T04:05:06.000Z';
+    const body = JSON.stringify({
+      name: 'example',
+      versions: {
+        '1.0.0': manifest('1.0.0', 0, 1),
+        '2.0.0': manifest('2.0.0', 1, 1),
+        '3.0.0': manifest('3.0.0', 2, 1),
+      },
+      time: {
+        '1.0.0': firstTime,
+        created: null,
+        modified: false,
+        unpublished: {},
+        other: [],
+        '3.0.0': 123,
+        '2.0.0': secondTime,
+      },
+      'dist-tags': { latest: '2.0.0' },
+      ...(staged ? { padding: 'x'.repeat(NPM_INLINE_PARSE_BYTES) } : {}),
+    });
+    const { describeWith } = setup(() => ({ body }));
+    const description = described(await describeWith());
+    expect(description.snapshot.stagedBlob !== undefined).toBe(staged);
+    const expected = [
+      { version: '1.0.0', upstreamTime: firstTime },
+      { version: '2.0.0', upstreamTime: secondTime },
+      { version: '3.0.0', upstreamTime: undefined },
+    ];
+    const timestamps = (members: readonly VersionCandidate[]) =>
+      members.map(({ version, upstreamTime }) => ({ version, upstreamTime }));
+    expect(timestamps(await drain(description))).toEqual(expected);
+    expect(description.upstreamComplete).toBe(true);
+    expect(description.distTags).toEqual({ latest: '2.0.0' });
+    if (staged) {
+      const continued = described(await describeWith({ snapshot: description.snapshot }));
+      expect(timestamps(await drain(continued))).toEqual(expected);
+      expect(continued.upstreamComplete).toBe(true);
+    }
+  });
+});
+
 describe('describeNpmPackument: dist-tag authority', () => {
   describe.each([
     ['inline', false],
@@ -918,6 +965,12 @@ describe('describeNpmPackument: dist-tag authority', () => {
       ['string', 'latest'],
       ['number', 1],
       ['boolean', false],
+      ['mixed map with null', { latest: null, next: '2.0.0' }],
+      ['mixed map with array', { latest: [], next: '2.0.0' }],
+      ['mixed map with object', { latest: {}, next: '2.0.0' }],
+      ['mixed map with number', { latest: 1, next: '2.0.0' }],
+      ['mixed map with boolean', { latest: false, next: '2.0.0' }],
+      ['mixed map with invalid value last', { next: '2.0.0', latest: null }],
     ])('preserves seeded tags when dist-tags is %s', async (_, upstreamTags) => {
       let storedTags: Readonly<Record<string, string>> = {
         latest: '1.0.0',

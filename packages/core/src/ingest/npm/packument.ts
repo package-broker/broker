@@ -184,13 +184,17 @@ function replay(
   );
 }
 
-function stringRecord(raw: string | undefined): Record<string, string> | undefined {
+function stringRecord(
+  raw: string | undefined,
+  requireAllStrings = false,
+): Record<string, string> | undefined {
   if (raw === undefined) return undefined;
   const parsed: unknown = JSON.parse(raw);
   if (!isRecord(parsed)) return undefined;
   const out = Object.create(null) as Record<string, string>;
   for (const [key, value] of Object.entries(parsed)) {
     if (typeof value === 'string') out[key] = value;
+    else if (requireAllStrings) return undefined;
   }
   return out;
 }
@@ -341,7 +345,7 @@ async function describeInline(
     return { kind: 'not_found', definitive: definitiveAbsence };
   }
   const time = stringRecord(timeRaw) ?? {};
-  const distTags = stringRecord(members.find((m) => m.path[0] === 'dist-tags')?.raw);
+  const distTags = stringRecord(members.find((m) => m.path[0] === 'dist-tags')?.raw, true);
   const accepted: VersionCandidate[] = [];
   for await (const candidate of candidates(name, members, time, undefined))
     accepted.push(candidate);
@@ -408,7 +412,7 @@ async function describeStaged(
     };
   }
   const time = stringRecord(timeRaw) ?? {};
-  const distTags = stringRecord(distTagsRaw);
+  const distTags = stringRecord(distTagsRaw, true);
   const skipped: SkippedMember[] = [];
   async function* versions(): AsyncGenerator<VersionCandidate> {
     const second = await openStagedSnapshot(deps.ctx, deps.store, ref, { codecs: deps.codecs });

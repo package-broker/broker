@@ -7,6 +7,7 @@ import type { Clock } from '../ids.js';
 import { isoTimestamp } from '../ids.js';
 import type { IdentityProvider } from '../identity/port.js';
 import { normalizeEmail } from '../identity/policy.js';
+import { isPermissionView, type PermissionView } from './actor.js';
 import type { MutationFence } from './fence.js';
 import { DEFAULT_ROLES, isPermission, rolePermissionProblems } from './permissions.js';
 import type { CreatorOffboardingCause } from './service-principal-service.js';
@@ -180,7 +181,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 interface Actor {
   readonly userId: string;
-  readonly permissions: ReadonlySet<Permission>;
+  readonly permissions: PermissionView;
   readonly isAdmin: boolean;
 }
 
@@ -188,10 +189,10 @@ function normalizeActor(raw: unknown): Actor | null {
   if (!isObject(raw)) return null;
   if (raw['kind'] !== 'organization') return null;
   const { userId, permissions, isOrganizationAdmin } = raw;
-  if (!isId(userId) || !(permissions instanceof Set)) return null;
+  if (!isId(userId) || !isPermissionView(permissions)) return null;
   return {
     userId,
-    permissions: permissions as ReadonlySet<Permission>,
+    permissions,
     isAdmin: isOrganizationAdmin === true,
   };
 }

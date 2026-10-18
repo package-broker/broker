@@ -121,8 +121,18 @@ export type Layer = 'user' | 'grant' | 'role' | 'permission' | 'identity' | 'bin
 export const CHAIN: readonly Layer[] = ['user', 'grant', 'role', 'permission'];
 
 export const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
-  { provider: 'oidc2', anchor: 'oidc:https://idp2.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+  {
+    provider: 'oidc2',
+    anchor: 'oidc:https://idp2.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 
 export const ORG_PERMISSION = 'org:settings:write';

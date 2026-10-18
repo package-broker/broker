@@ -752,6 +752,22 @@ describe('plugin hooks and identity fetch', () => {
     expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
   });
 
+  it('gives the assembled services the anchors of the providers the auth module uses', async () => {
+    const { db } = await bootstrappedDatabase();
+    const worker = createWorker([identityPlugin()], { log: () => undefined });
+    const services = await worker.services(env(db));
+    expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([
+      {
+        provider: 'access',
+        anchor: accessProvider().trustAnchor,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
+      },
+    ]);
+    expect((await worker.fetch(startLogin(), env(db))).status).toBe(303);
+    expect(await worker.services(env(db))).toBe(services);
+  });
+
   it('hands the registered hooks to the auth module: a deny hook refuses the login', async () => {
     const { db } = await bootstrappedDatabase();
     const response = await createWorker([identityPlugin(), denyPlugin()], {

@@ -10,6 +10,7 @@ const DYNAMIC_IMPORT = /(?:^|[^\w$.])import\s*\(/g;
 const REQUIRE_CALL = /(?:^|[^\w$.])(?:__)?require\s*\(/g;
 const FROM_SPECIFIER = /\bfrom\s*/g;
 const STATIC_IMPORT = /(?:^|[^\w$.])import\s+/g;
+const CLOUDFLARE_ALLOWED_NODE = new Set(['node:async_hooks']);
 const FIXTURE = process.env.PB_CHECK_TREESHAKE_FIXTURE;
 
 function skipSpace(text, start) {
@@ -49,12 +50,14 @@ function scanBundle(file, text) {
 
   for (const match of text.matchAll(FROM_SPECIFIER)) {
     const literal = readStringLiteral(text, skipSpace(text, match.index + match[0].length));
-    if (literal?.value.startsWith('node:')) report(literal.start, 'node: specifier after from');
+    if (literal?.value.startsWith('node:') && !CLOUDFLARE_ALLOWED_NODE.has(literal.value))
+      report(literal.start, 'node: specifier after from');
   }
 
   for (const match of text.matchAll(STATIC_IMPORT)) {
     const literal = readStringLiteral(text, skipSpace(text, match.index + match[0].length));
-    if (literal?.value.startsWith('node:')) report(literal.start, 'node: specifier in import');
+    if (literal?.value.startsWith('node:') && !CLOUDFLARE_ALLOWED_NODE.has(literal.value))
+      report(literal.start, 'node: specifier in import');
   }
 
   for (const match of text.matchAll(REQUIRE_CALL)) {
@@ -157,11 +160,13 @@ for (const target of ['cloudflare', 'node']) {
       ['minimal', minimal],
       ['default', full],
     ]) {
-      const foreign = externalImports.filter((path) => !path.startsWith('cloudflare:'));
+      const foreign = externalImports.filter(
+        (path) => !path.startsWith('cloudflare:') && !CLOUDFLARE_ALLOWED_NODE.has(path),
+      );
       if (foreign.length > 0) {
         failed = true;
         console.error(
-          `${label}/cloudflare: external imports other than cloudflare:* (metafile: every external import of every output):\n${foreign.join('\n')}`,
+          `${label}/cloudflare: external imports other than cloudflare:* and node:async_hooks (metafile: every external import of every output):\n${foreign.join('\n')}`,
         );
       }
     }

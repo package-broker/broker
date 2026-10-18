@@ -150,7 +150,7 @@ export async function readJsonBody(request: Request, limits: BodyLimits = {}): P
   return { ok: true, value };
 }
 
-export const VALIDATION_CODES = [
+const SCHEMA_VALIDATION_CODES = [
   'invalid_type',
   'too_small',
   'too_big',
@@ -161,9 +161,14 @@ export const VALIDATION_CODES = [
   'invalid',
 ] as const;
 
-export const VALIDATION_DETAIL_CODES = [...VALIDATION_CODES, ...BODY_VALIDATION_CODES] as const;
+export const VALIDATION_DETAIL_CODES = [
+  ...SCHEMA_VALIDATION_CODES,
+  ...BODY_VALIDATION_CODES,
+] as const;
 
-export type ValidationCode = (typeof VALIDATION_CODES)[number];
+export const VALIDATION_CODES: ReadonlySet<string> = new Set(VALIDATION_DETAIL_CODES);
+
+export type ValidationCode = (typeof VALIDATION_DETAIL_CODES)[number];
 
 export interface ValidationDetail {
   readonly path: string;
@@ -173,8 +178,6 @@ export interface ValidationDetail {
 export type ValidationResult<T> =
   | { readonly ok: true; readonly data: T }
   | { readonly ok: false; readonly details: readonly ValidationDetail[] };
-
-const KNOWN_CODES: ReadonlySet<string> = new Set(VALIDATION_CODES);
 
 interface SchemaDef {
   readonly type?: string;
@@ -275,7 +278,7 @@ function pointerOf(schema: $ZodType, path: readonly PropertyKey[], input: unknow
 }
 
 function codeOf(issue: $ZodIssue): ValidationCode {
-  return KNOWN_CODES.has(issue.code) ? (issue.code as ValidationCode) : 'invalid';
+  return VALIDATION_CODES.has(issue.code) ? (issue.code as ValidationCode) : 'invalid';
 }
 
 const thrown = (): ValidationResult<never> => ({

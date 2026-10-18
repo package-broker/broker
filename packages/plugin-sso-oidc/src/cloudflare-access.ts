@@ -1,13 +1,14 @@
-import type {
-  DomainPolicy,
-  IdentityContext,
-  IdentityFailure,
-  IdentityProvider,
-  IdentityResult,
-  VerifiedIdentity,
-} from '@package-broker/core/identity/port';
-import { isReservedProviderId, isValidProviderId } from '@package-broker/core/identity/port';
-import { normalizeEmail } from '@package-broker/core/identity/policy';
+import {
+  isReservedProviderId,
+  isValidProviderId,
+  normalizeEmail,
+  type DomainPolicy,
+  type IdentityContext,
+  type IdentityFailure,
+  type IdentityProvider,
+  type IdentityResult,
+  type VerifiedIdentity,
+} from '@package-broker/core/plugin';
 import { checkPolicy } from './config.js';
 import { createJwksCache } from './jwks.js';
 import { JwtError, type JwtFailure, type VerifiedClaims, verifyJwt } from './jwt.js';

@@ -40,8 +40,10 @@ export interface GuardedTarget {
   readonly lookup: LookupFunction;
 }
 
+export type GuardedScheme = 'http' | 'https';
+
 export interface DnsGuard {
-  forTarget(host: string, port: number): GuardedTarget;
+  forTarget(host: string, port: number, scheme?: GuardedScheme): GuardedTarget;
 }
 
 export class DnsGuardError extends Error {
@@ -53,7 +55,7 @@ export class DnsGuardError extends Error {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_IN_FLIGHT = 16;
-const DEFAULT_PORTS = new Set([80, 443]);
+const HTTPS_PORT = 443;
 
 const systemResolver: Resolver = async (host) =>
   (await systemLookup(host, { all: true, verbatim: true })).map((entry) => ({
@@ -79,12 +81,18 @@ function comparableHost(host: string): string {
   return canonicalIpv6(bare) ?? bare.replace(/\.$/, '');
 }
 
-function isAllowlisted(host: string, port: number, allowlist: readonly string[]): boolean {
+function isAllowlisted(
+  host: string,
+  port: number,
+  scheme: GuardedScheme | undefined,
+  allowlist: readonly string[],
+): boolean {
   const wanted = comparableHost(host);
   return allowlist.some((entry) => {
     const match = /^(\[[^\]]+\]|[^:]+)(?::(\d{1,5}))?$/.exec(entry);
     if (!match?.[1] || comparableHost(match[1]) !== wanted) return false;
-    return match[2] === undefined ? DEFAULT_PORTS.has(port) : Number(match[2]) === port;
+    if (match[2] !== undefined) return Number(match[2]) === port;
+    return scheme !== 'http' && port === HTTPS_PORT;
   });
 }
 
@@ -194,12 +202,17 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
     return work;
   }
 
-  async function resolveTarget(host: string, port: number): Promise<GuardedResolution> {
+  async function resolveTarget(
+    host: string,
+    port: number,
+    scheme: GuardedScheme | undefined,
+  ): Promise<GuardedResolution> {
+    if (scheme === 'http' && port === HTTPS_PORT) throw new DnsGuardError('scheme');
     const literal = canonicalIpv6(stripBrackets(host.toLowerCase()));
     const target = literal ?? host;
     const resolved = await withDeadline(startResolution(target), timeoutMs, options.signal);
     if (resolved.length === 0) throw new DnsGuardError('no_address');
-    const allowed = isAllowlisted(host, port, allowlist);
+    const allowed = isAllowlisted(host, port, scheme, allowlist);
     const addresses = resolved.map((entry) => {
       const normalized = normalizeAddress(entry.address);
       if (isNeverAllowed(normalized)) throw new DnsGuardError('blocked_address');
@@ -213,7 +226,7 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
   }
 
   return {
-    forTarget(host, port) {
+    forTarget(host, port, scheme) {
       const bound = comparableHost(host);
       const lookup: LookupFunction = (requested, lookupOptions, callback) => {
         const wanted = wantedFamily(lookupOptions.family);
@@ -225,7 +238,7 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
           fail(new DnsGuardError('blocked_host'));
           return;
         }
-        resolveTarget(host, port).then(
+        resolveTarget(host, port, scheme).then(
           ({ addresses }) => {
             const matching = addresses.filter(
               (entry) => wanted === undefined || entry.family === wanted,
@@ -248,7 +261,7 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
             fail(error instanceof DnsGuardError ? error : new DnsGuardError('resolution_failed')),
         );
       };
-      return { resolve: () => resolveTarget(host, port), lookup };
+      return { resolve: () => resolveTarget(host, port, scheme), lookup };
     },
   };
 }

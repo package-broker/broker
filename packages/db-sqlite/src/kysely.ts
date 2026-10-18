@@ -241,6 +241,11 @@ export type ProtectedHolderInput =
 export const EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const EVIDENCE_FUTURE_SKEW_MS = 60 * 1000;
 
+export type DatabaseTime = Expression<number>;
+
+/** The database clock in epoch milliseconds, stable within one statement. */
+export const databaseTimeMs: DatabaseTime = sql<number>`cast(round(unixepoch('now', 'subsec') * 1000) as integer)`;
+
 export type HolderAlias = Record<
   'user' | 'grant' | 'role' | 'member' | 'identity' | 'binding' | 'login' | 'credential',
   string
@@ -443,7 +448,7 @@ export function protectedHolder(
   ctx: OrgContext,
   userIdColumn: Expression<string>,
   input: ProtectedHolderInput,
-  options: { readonly includeSuspended?: boolean } = {},
+  options: { readonly includeSuspended?: boolean; readonly now?: DatabaseTime } = {},
 ): Guard {
   requireProtectedHolderInput(input);
   const outer = referencedTable(userIdColumn);
@@ -466,7 +471,7 @@ export function protectedHolder(
   const fresh = input.kind === 'fresh';
   const nowMs = fresh ? Date.parse(input.now) : 0;
   const values: Record<string, string | number> = { org_id: ctx.orgId };
-  if (fresh) {
+  if (fresh && options.now === undefined) {
     values.lower_ms = nowMs - EVIDENCE_MAX_AGE_MS;
     values.upper_ms = nowMs + EVIDENCE_FUTURE_SKEW_MS;
   }
@@ -531,7 +536,15 @@ export function protectedHolder(
 
   const evidence = (column: string) => {
     const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
-    return sql<SqlBool>`(${ms} >= ${bindings.value('lower_ms')} and ${ms} <= ${bindings.value('upper_ms')})`;
+    const lower =
+      options.now === undefined
+        ? bindings.value('lower_ms')
+        : sql`${options.now} - ${sql.lit(EVIDENCE_MAX_AGE_MS)}`;
+    const upper =
+      options.now === undefined
+        ? bindings.value('upper_ms')
+        : sql`${options.now} + ${sql.lit(EVIDENCE_FUTURE_SKEW_MS)}`;
+    return sql<SqlBool>`(${ms} >= ${lower} and ${ms} <= ${upper})`;
   };
 
   const branches: (typeof localAdmin)[] = [];

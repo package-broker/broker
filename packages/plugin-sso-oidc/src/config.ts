@@ -1,5 +1,4 @@
-import { domainPolicyProblems } from '@package-broker/core/identity/policy';
-import type { DomainPolicy } from '@package-broker/core/identity/port';
+import { domainPolicyProblems, type DomainPolicy } from '@package-broker/core/plugin';
 
 export const MAX_LIST_LENGTH = 32;
 export const OVER_CAP: unique symbol = Symbol('over cap');

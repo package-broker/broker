@@ -1,6 +1,6 @@
-import type { CatalogueSourceType } from '../db/catalogue.js';
+import type { CatalogueSourceType, WinnerCandidate } from '../db/catalogue.js';
 import type { NameEcosystem } from './names.js';
-import { matchesPattern, patternAdmits } from './patterns.js';
+import { isValidPattern, matchesPattern, patternAdmits } from './patterns.js';
 
 export type VisibilityOrigin = 'explicit' | 'pattern' | 'subscription';
 export type VisibilityPackageStatus = 'active' | 'removed_upstream';
@@ -75,11 +75,7 @@ const servesProject = (source: VisibilitySource, project: VisibilityProject): bo
 const compare = (a: string | number, b: string | number): number => (a < b ? -1 : a > b ? 1 : 0);
 
 function patternHits(pattern: string, key: string): boolean {
-  try {
-    return matchesPattern(pattern, key);
-  } catch {
-    return true;
-  }
+  return !isValidPattern(pattern) || matchesPattern(pattern, key);
 }
 
 export function deriveVisibility(config: VisibilityConfig): VisibilityRow[] {
@@ -142,15 +138,15 @@ function proxyBlocked(
   );
 }
 
-export function resolveWinner(
+export function rankCandidates(
   config: VisibilityConfig,
   projectId: string,
   ecosystem: NameEcosystem,
   key: string,
-): Winner | null {
+): WinnerCandidate[] {
   const project = config.projects.find((p) => p.id === projectId);
   if (!project?.active) {
-    return null;
+    return [];
   }
   const sources = new Map(config.sources.map((s) => [s.id, s]));
   const packages = new Map(config.packages.map((p) => [p.id, p]));
@@ -161,29 +157,49 @@ export function resolveWinner(
     }
   }
   const blocked = proxyBlocked(config, project.orgId, ecosystem, key);
-  const candidates: { pkg: VisibilityPackage; source: VisibilitySource; precedence: number }[] = [];
+  const candidates: { candidate: WinnerCandidate; source: VisibilitySource }[] = [];
   for (const row of deriveVisibility(config)) {
     const pkg = packages.get(row.packageId);
     const source = pkg && sources.get(pkg.sourceId);
     if (row.projectId !== projectId || !pkg || !source) {
       continue;
     }
+    if (pkg.key !== key || pkg.ecosystem !== ecosystem) {
+      continue;
+    }
     const live =
       pkg.status === 'active' ||
       (pkg.status === 'removed_upstream' && source.removalPolicy === 'flag');
-    if (pkg.key === key && pkg.ecosystem === ecosystem && live && !(isProxy(source) && blocked)) {
-      candidates.push({ pkg, source, precedence: precedence.get(source.id) ?? 0 });
-    }
+    candidates.push({
+      source,
+      candidate: {
+        sourceId: source.id,
+        sourceType: source.type,
+        projectLevel: source.ownerProjectId !== null,
+        precedence: precedence.get(source.id) ?? 0,
+        packageId: pkg.id,
+        eligible: live && !(isProxy(source) && blocked),
+      },
+    });
   }
   candidates.sort(
     (a, b) =>
       compare(Number(isProxy(a.source)), Number(isProxy(b.source))) ||
-      compare(Number(a.source.ownerProjectId === null), Number(b.source.ownerProjectId === null)) ||
-      compare(a.precedence, b.precedence) ||
+      compare(Number(!a.candidate.projectLevel), Number(!b.candidate.projectLevel)) ||
+      compare(a.candidate.precedence, b.candidate.precedence) ||
       compare(a.source.id, b.source.id),
   );
-  const first = candidates[0];
-  return first ? { packageId: first.pkg.id, sourceId: first.source.id } : null;
+  return candidates.map((c) => c.candidate);
+}
+
+export function resolveWinner(
+  config: VisibilityConfig,
+  projectId: string,
+  ecosystem: NameEcosystem,
+  key: string,
+): Winner | null {
+  const first = rankCandidates(config, projectId, ecosystem, key).find((c) => c.eligible);
+  return first ? { packageId: first.packageId, sourceId: first.sourceId } : null;
 }
 
 export function admitProxy(

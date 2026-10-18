@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { cp, mkdtemp, rename, rm } from 'node:fs/promises';
+import { cp, mkdtemp, realpath, rename, rm } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -113,7 +113,7 @@ async function stopChild() {
 
 async function run() {
   step = 'copying the bundle';
-  copy = await mkdtemp(join(tmpdir(), 'pb-node-smoke-'));
+  copy = await realpath(await mkdtemp(join(tmpdir(), 'pb-node-smoke-')));
   await cp(join(SOURCE, '.'), copy, { recursive: true });
   console.log(`smoke:node copied ${SOURCE} to ${copy}`);
 
@@ -150,6 +150,8 @@ async function run() {
     PB_ORG_NAME: 'Smoke',
     PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
     PB_PUBLIC_URL: 'http://127.0.0.1',
+    PB_BLOB_ROOT: join(copy, 'data', 'blobs'),
+    DEPLOYMENT_ID: 'smoke',
   };
   delete env['NODE_PATH'];
   delete env['PB_MASTER_KEY_FILE'];

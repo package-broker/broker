@@ -258,6 +258,7 @@ const creatorRemoved: Case = (open, wrap) =>
       ]);
       const grants = createGrantRepository(executor, {
         holderInput: () => ({ kind: 'fresh', now: iso(0), providers: anchors }),
+        providerAnchors: anchors,
       });
       const [grant] = await grants.listOrganization(ctx);
       expect(grant).toBeDefined();

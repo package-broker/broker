@@ -17,7 +17,9 @@ import {
 import type { BlobMetadataPort, ByteStore, Sha256 } from '@package-broker/core/platform/blob';
 import {
   describeBlobContract,
-  type BlobContractFixture,
+  describeBlobReserveContract,
+  executorExpiringLeaseAfterFirstStatement,
+  type BlobReserveFixture,
 } from '@package-broker/db-sqlite/contract/blob-contract';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -234,7 +236,7 @@ function proxyStore(bucketName: string, faults: Faults): ByteStore {
   };
 }
 
-async function r2Fixture(): Promise<BlobContractFixture> {
+async function r2Fixture(): Promise<BlobReserveFixture> {
   const index = nextCase;
   nextCase += 1;
   const bucketName = bucketNames[index];
@@ -315,6 +317,27 @@ async function r2Fixture(): Promise<BlobContractFixture> {
         key,
       );
     },
+    reserve: (ctx, key) => repository.reserve(ctx, key),
+    claimPurge: (ctx, key) => repository.claimPurge(ctx, key),
+    async expireLease(ctx, key) {
+      await exec(
+        `UPDATE blob SET purge_lease_until = strftime('${FORMAT}', 'now', '-1 minute') WHERE org_id = ? AND sha256 = ?`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async generationOf(ctx, key) {
+      const rows = await executor.all<{ purge_generation: string | null }>({
+        sql: 'SELECT purge_generation FROM blob WHERE org_id = ? AND sha256 = ?',
+        params: [ctx.orgId, key],
+      });
+      return rows[0]?.purge_generation ?? null;
+    },
+    reserveWithLeaseExpiringBetweenStatements: (ctx, key) =>
+      createBlobRepository(executorExpiringLeaseAfterFirstStatement(executor, ctx, key)).reserve(
+        ctx,
+        key,
+      ),
     async refetchableOf(ctx: OrgContext, key: Sha256) {
       const rows = await executor.all<{ refetchable: number }>({
         sql: 'SELECT refetchable FROM blob WHERE org_id = ? AND sha256 = ?',
@@ -348,3 +371,4 @@ async function r2Fixture(): Promise<BlobContractFixture> {
 }
 
 describeBlobContract('r2-miniflare', r2Fixture);
+describeBlobReserveContract('r2-miniflare', r2Fixture);

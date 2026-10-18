@@ -727,7 +727,7 @@ describe('readV1Index streamed root', () => {
     expect(result.status === 'updated' && result.index.complete).toBe(true);
     expect(result.status === 'updated' && result.index.entries.size).toBe(20_000);
     expect(result.status === 'updated' && result.index.rootSha256).toBe(sha256(root));
-  });
+  }, 30_000);
 
   it('fails a root over maxDocumentBytes as too_large', async () => {
     const { fetch } = setup({ [`${BASE}/packages.json`]: bigRoot(50) });

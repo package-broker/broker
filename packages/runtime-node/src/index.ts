@@ -1,7 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { createAuthModule } from '@package-broker/core/auth/module';
+import { deferredDispatch } from '@package-broker/core/authz/token-use';
 import type { SqlExecutor } from '@package-broker/core/db/port';
+import {
+  createProviderAnchorReader,
+  type ProviderAnchorReader,
+} from '@package-broker/core/identity/provider-anchors';
 import { scopedEnv, buildIdentityProviders } from '@package-broker/core/identity/providers';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
@@ -37,12 +42,23 @@ export interface NodeServerOptions {
   readonly authorization?: AuthorizationEngine;
 }
 
+export interface NodeServices {
+  readonly providerAnchors: ProviderAnchorReader;
+  readonly dispatch: (run: () => Promise<void>) => void;
+}
+
 export interface NodeBroker {
   readonly plugins: readonly PluginDefinition[];
   readonly server: Server;
   ready(): Promise<Kernel>;
+  /** The services of the application the server was built with. */
+  services(): Promise<NodeServices>;
   close(): Promise<void>;
 }
+
+const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
+  anchors: () => Promise.resolve(Object.freeze([])),
+});
 
 function rejectingExecutor(): SqlExecutor {
   const unavailable = (): Promise<never> =>
@@ -56,13 +72,13 @@ function authRoutes(
   auth: NodeAuthOptions,
   executor: SqlExecutor,
   log: KernelLog,
-): readonly RouteDefinition[] {
+): { readonly routes: readonly RouteDefinition[]; readonly providerAnchors: ProviderAnchorReader } {
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) => fetch(request),
     clock: systemClock,
     env: scopedEnv(auth.env),
   });
-  return createAuthModule({
+  const routes = createAuthModule({
     repositories: createAuthRepositories(executor),
     keyring: auth.keyring,
     clock: systemClock,
@@ -72,6 +88,7 @@ function authRoutes(
     hooks: registration.hooks,
     log,
   }).coreRoutes;
+  return { routes, providerAnchors: createProviderAnchorReader(providers) };
 }
 
 export function createNodeServer(
@@ -91,9 +108,11 @@ export function createNodeServer(
   });
 
   const { auth } = options;
-  const kernel = (async () => {
+  const application = (async () => {
     const registration = collectRegistrations(plugins);
-    return createKernel({
+    const built =
+      auth === undefined ? undefined : authRoutes(registration, plugins, auth, executor, log);
+    const kernel = await createKernel({
       platform: 'node',
       plugins,
       registration,
@@ -105,13 +124,19 @@ export function createNodeServer(
       ...(options.platformServices === undefined
         ? {}
         : { platformServices: options.platformServices }),
-      ...(auth === undefined
-        ? {}
-        : { coreRoutes: authRoutes(registration, plugins, auth, executor, log) }),
+      ...(built === undefined ? {} : { coreRoutes: built.routes }),
       ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
     });
+    const services: NodeServices = Object.freeze({
+      providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
+      dispatch: deferredDispatch,
+    });
+    return { kernel, services };
   })();
+  const kernel = application.then((built) => built.kernel);
+  const services = application.then((built) => built.services);
   kernel.catch(() => undefined);
+  services.catch(() => undefined);
 
   const server = createServer(
     getRequestListener((request) =>
@@ -131,6 +156,7 @@ export function createNodeServer(
     plugins,
     server,
     ready: () => kernel,
+    services: () => services,
     close: async () => {
       if (closed) return;
       closed = true;

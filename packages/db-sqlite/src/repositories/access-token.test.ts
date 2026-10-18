@@ -1,6 +1,10 @@
 import { describeTokenContract } from '../contract/token-contract.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
@@ -37,6 +41,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 
 const ORG_PERMISSIONS = ['org:read', 'org:users:write', 'project:read', 'project:packages:read'];
@@ -421,7 +426,23 @@ describe('lookupToken personal access tokens', () => {
     expect(unbound?.project).toBeNull();
     expect(unbound?.projectPermissions).toEqual([]);
     expect(unbound?.organizationPermissions).toEqual([]);
-    expect(unbound).toEqual(unknown);
+    expect(unbound).toHaveProperty('projectVisible', true);
+    expect(Object.keys(unbound ?? {})).toContain('projectVisible');
+    const { projectVisible: unboundVisible, ...unboundEnvelope } = unbound!;
+    expect(unboundVisible).toBe(true);
+    await seed(
+      project(a, '01J0PROJECT0000000000000P3', 'gone', { status: 'archived' }),
+      project(b, '01J0PROJECT0000000000000PG', 'gamma'),
+    );
+    for (const hidden of [
+      unknown,
+      await lookup('pat-sel', { projectSlug: 'gone' }),
+      await lookup('pat-sel', { projectSlug: 'gamma' }),
+    ]) {
+      const { projectVisible, ...envelope } = hidden!;
+      expect(projectVisible).toBe(false);
+      expect(envelope).toEqual(unboundEnvelope);
+    }
   });
 
   it('denies every project for a selected PAT with no live binding', async () => {
@@ -984,8 +1005,22 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
 
     for (const anchors of [
       [],
-      [{ provider: 'oidc', anchor: 'https://changed.example.test', emailAuthoritative: true }],
-      [{ provider: 'other', anchor: ANCHOR, emailAuthoritative: true }],
+      [
+        {
+          provider: 'oidc',
+          anchor: 'https://changed.example.test',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ],
+      [
+        {
+          provider: 'other',
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ],
     ]) {
       const result = await lookup('pat-anchor', { providerAnchors: anchors });
       expect(result?.validation?.fresh).toBe(false);
@@ -1097,6 +1132,7 @@ describe('bound parameters', () => {
       provider: `idp${index}`,
       anchor: `https://idp${index}.example.test/"quoted"/'single'/\\`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
 
   for (const boundary of ['project', 'organization'] as const) {
@@ -1117,3 +1153,208 @@ describe('bound parameters', () => {
 });
 
 describeTokenContract('node:sqlite', () => openMigratedDatabase());
+
+describe('lookupToken projectVisible', () => {
+  const U4 = '01J0USER000000000000000004';
+  const IDENTITY_U4 = '01J0IDENT000000000000000U4';
+
+  async function seedProjectOnlyUser(): Promise<void> {
+    await seed(
+      user(a, U4, 'u4@example.test'),
+      identity(a, IDENTITY_U4, U4, 'u4@example.test', at(-HOUR)),
+      grant(a, 'u4@example.test', ROLE_DEV, P1),
+    );
+  }
+
+  it('is true for a project the principal sees but the token binding excludes', async () => {
+    await seed(pat('pat-sel', { mode: 'selected' }), bind('pat-sel', P1));
+
+    const result = await lookup('pat-sel', { projectSlug: 'beta' });
+
+    expect(result?.project).toBeNull();
+    expect(result?.projectPermissions).toEqual([]);
+    expect(result?.projectVisible).toBe(true);
+  });
+
+  it('is true when the token scope and read-only flag leave the principal grants unused', async () => {
+    await seedProjectOnlyUser();
+    await seed(
+      pat('pat-ro', {
+        userId: U4,
+        scopes: '["read"]',
+        readOnly: 1,
+        validationIdentityId: IDENTITY_U4,
+      }),
+      pat('pat-junk', {
+        userId: U4,
+        scopes: '["write","read"]',
+        validationIdentityId: IDENTITY_U4,
+      }),
+    );
+
+    const junk = await lookup('pat-junk');
+    expect(junk?.projectPermissions).toEqual([]);
+    expect(junk?.projectVisible).toBe(true);
+    expect((await lookup('pat-ro'))?.projectVisible).toBe(true);
+  });
+
+  it('is false for a project of another organization', async () => {
+    await seed(project(b, '01J0PROJECT0000000000000PG', 'gamma'), pat('pat-a'));
+
+    const result = await lookup('pat-a', { projectSlug: 'gamma' });
+
+    expect(result?.project).toBeNull();
+    expect(result?.projectVisible).toBe(false);
+  });
+
+  it('is false for an archived project even with organization-wide project read', async () => {
+    await seed(
+      project(a, '01J0PROJECT0000000000000P3', 'gone', { status: 'archived' }),
+      pat('pat-a'),
+    );
+
+    const result = await lookup('pat-a', { projectSlug: 'gone' });
+
+    expect(result?.project).toBeNull();
+    expect(result?.projectVisible).toBe(false);
+  });
+
+  it('is false for a project the principal reaches only through the token binding', async () => {
+    await seedProjectOnlyUser();
+    await seed(
+      pat('pat-bind', { userId: U4, mode: 'selected', validationIdentityId: IDENTITY_U4 }),
+      bind('pat-bind', P2),
+    );
+
+    const result = await lookup('pat-bind', { projectSlug: 'beta' });
+
+    expect(result?.project?.id).toBe(P2);
+    expect(result?.projectPermissions).toEqual([]);
+    expect(result?.projectVisible).toBe(false);
+    expect((await lookup('pat-bind', { projectSlug: 'alpha' }))?.projectVisible).toBe(true);
+  });
+
+  it('is false for an unknown slug, an organization boundary and a missing slug', async () => {
+    await seed(pat('pat-a'));
+
+    expect((await lookup('pat-a', { projectSlug: 'nope' }))?.projectVisible).toBe(false);
+    expect(
+      (await lookup('pat-a', { boundary: 'organization', projectSlug: null }))?.projectVisible,
+    ).toBe(false);
+    expect((await lookup('pat-a', { projectSlug: null }))?.projectVisible).toBe(false);
+  });
+
+  it('is false for a suspended user, a revoked token and an expired token', async () => {
+    await seed(
+      pat('pat-rev', { revokedAt: at(-1000) }),
+      pat('pat-exp', { expiresAt: at(-1000) }),
+      pat('pat-sus', { userId: U3, validationKind: 'local' }),
+      grant(a, 'u3@example.test', ROLE_ORG),
+    );
+
+    expect((await lookup('pat-rev'))?.projectVisible).toBe(false);
+    expect((await lookup('pat-exp'))?.projectVisible).toBe(false);
+    expect((await lookup('pat-sus'))?.projectVisible).toBe(false);
+  });
+
+  it('follows the service principal binding and its stored project permissions', async () => {
+    await seed(
+      principal(SP1, 'ci', P1, U3),
+      principalPermission(SP1, 'project:read'),
+      principal(SPW, 'wide', null, U3),
+      principalPermission(SPW, 'project:read'),
+      principal('01J0SERVICE00000000000000PO', 'org-only', null, U3),
+      principalPermission('01J0SERVICE00000000000000PO', 'org:read'),
+      svc('svc-ci', SP1, { projectId: P1 }),
+      svc('svc-wide', SPW, { scopes: '["read"]', readOnly: 1 }),
+      svc('svc-org', '01J0SERVICE00000000000000PO'),
+    );
+
+    expect((await lookup('svc-ci'))?.projectVisible).toBe(true);
+    expect((await lookup('svc-ci', { projectSlug: 'beta' }))?.projectVisible).toBe(false);
+    expect((await lookup('svc-wide', { projectSlug: 'beta' }))?.projectVisible).toBe(true);
+    expect((await lookup('svc-org'))?.projectVisible).toBe(false);
+
+    await seed(stmt('UPDATE service_principal SET status = ? WHERE id = ?', 'suspended', SPW));
+    expect((await lookup('svc-wide', { projectSlug: 'beta' }))?.projectVisible).toBe(false);
+  });
+
+  it.each(['pat', 'svc'] as const)(
+    'answers 403 for an invalid %s binding on a visible project and 404 on an invisible one',
+    async (kind) => {
+      const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
+      const label = `${kind}-invalid`;
+      const presented = formatToken(kind, selector(label), new Uint8Array(32).fill(9));
+      if (kind === 'pat') await seedProjectOnlyUser();
+      await seed(
+        principal(SP1, 'ci', P1, U3),
+        principalPermission(SP1, 'project:read'),
+        kind === 'pat'
+          ? pat(label, { projectId: P2, userId: U4, validationIdentityId: IDENTITY_U4 })
+          : svc(label, SP1, { projectId: P2 }),
+        stmt(
+          'UPDATE token SET hash = ? WHERE id = ?',
+          await hashToken(keyring, 1, presented),
+          `tok-${label}`,
+        ),
+      );
+      const result = await lookup(label);
+      expect(result?.principalStatus).toBe('active');
+      expect(result?.project).toBeNull();
+      expect(result?.projectPermissions).toEqual([]);
+      expect(result?.projectVisible).toBe(true);
+      const repository = createAccessRepository(executor);
+      let dispatched = 0;
+      const engine = createAuthorizationEngine({
+        access: repository,
+        tokenUse: {
+          keyring,
+          nowMs: Date.now,
+          dispatch: () => {
+            dispatched += 1;
+          },
+          log: () => undefined,
+        },
+        patValidation: patValidationGate,
+        publicOrigin: 'https://broker.test',
+        providerAnchors: () => Promise.resolve([OIDC]),
+      });
+      for (const [slug, status] of [
+        ['alpha', 403],
+        ['beta', 404],
+        ['nope', 404],
+      ] as const) {
+        expect(
+          await engine.authorize({
+            request: new Request(`https://broker.test/_pb/projects/${slug}`, {
+              headers: { authorization: `Bearer ${presented}` },
+            }),
+            org: a,
+            route: {
+              plugin: 'core',
+              method: 'GET',
+              path: '/_pb/projects/:project',
+              permission: 'project:read',
+              boundary: 'project',
+            },
+            params: { project: slug },
+          }),
+        ).toEqual({ allow: false, status });
+      }
+      expect(dispatched).toBe(0);
+    },
+  );
+
+  it('keeps the statement within 100 bound parameters with 8 anchors', () => {
+    const anchors = Array.from({ length: 8 }, (_, index) => ({
+      provider: `idp${index}`,
+      anchor: `https://idp${index}.example.test`,
+      emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
+    }));
+
+    const statement = lookupTokenStatement(a, input('pat-params', { providerAnchors: anchors }));
+
+    expect(statement.params.length).toBeLessThanOrEqual(100);
+  });
+});

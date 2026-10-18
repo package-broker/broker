@@ -80,6 +80,7 @@ const ANCHORS: readonly ProtectedHolderProvider[] = Array.from({ length: 8 }, (_
   provider: `idp${index}`,
   anchor: `https://idp${index}.example.test/"quoted"/'single'/\\`,
   emailAuthoritative: index % 2 === 0,
+  emailAuthoritativeDomains: ['example.test'],
 }));
 
 function st(sql: string, ...params: ScalarStatement['params']): ScalarStatement {

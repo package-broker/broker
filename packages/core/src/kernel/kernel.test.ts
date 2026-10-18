@@ -10,7 +10,7 @@ import {
   type RouteDefinition,
 } from '../plugin.js';
 import type { AuthorizationDecision, AuthorizationEngine } from './authorize.js';
-import { createKernel } from './kernel.js';
+import { AUTHORIZATION_RETRY_AFTER_SECONDS, createKernel } from './kernel.js';
 import type { KernelOptions } from './kernel.js';
 import { NotBootstrappedError } from './org.js';
 import { collectRegistrations, KernelConfigError } from './registry.js';
@@ -463,6 +463,7 @@ describe('createKernel', () => {
       const response = await kernel.fetch(new Request(`${BASE}/secure/1`));
 
       expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe(String(AUTHORIZATION_RETRY_AFTER_SECONDS));
       expect(h.logs).toEqual([
         expect.objectContaining({
           level: 'error',
@@ -472,6 +473,36 @@ describe('createKernel', () => {
         }),
         expect.objectContaining({ event: 'http.request', status: 503 }),
       ]);
+    });
+
+    it.each([
+      { name: '403 json', status: 403, accept: 'application/json' },
+      { name: '403 html', status: 403, accept: 'text/html' },
+      { name: '404', status: 404, accept: 'application/json' },
+    ] as const)('sends no Retry-After on a policy denial ($name)', async ({ status, accept }) => {
+      const h = harness([plugin('alpha', [protectedItem])], {
+        authorization: engineReturning({ allow: false, status }),
+      });
+      const kernel = await createKernel(h.options);
+
+      const response = await kernel.fetch(new Request(`${BASE}/secure/1`, { headers: { accept } }));
+
+      expect(response.status).toBe(status);
+      expect(response.headers.has('retry-after')).toBe(false);
+    });
+
+    it('keeps a policy denial a 403 denial page', async () => {
+      const h = harness([plugin('alpha', [protectedItem])], {
+        authorization: engineReturning({ allow: false, status: 403 }),
+      });
+      const kernel = await createKernel(h.options);
+
+      const response = await kernel.fetch(
+        new Request(`${BASE}/secure/1`, { headers: { accept: 'text/html' } }),
+      );
+
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain('administrator');
     });
 
     it('log a throwing hook by plugin and error name only', async () => {

@@ -21,7 +21,13 @@ export const KERNEL_EVENTS = frozenSet([
   'authz.error',
 ]);
 
-export const AUDIT_EVENTS = frozenSet(['audit.sealed', 'audit.seal.contended']);
+export const AUDIT_EVENTS = frozenSet([
+  'audit.sealed',
+  'audit.seal.contended',
+  'audit.verified',
+  'audit.chain_broken',
+  'audit.verify_partial',
+]);
 
 const REASON_CODES = [
   'authz.unauthenticated',

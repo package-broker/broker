@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
+import { orgContext } from '@package-broker/core/db/port';
 import type { ProviderSource } from '@package-broker/core/sources/provider';
 import type {
   SshArchiveRecord,
@@ -31,6 +32,8 @@ export interface SuiteHarness {
   readonly it: (name: string, body: () => Promise<void>) => unknown;
 }
 
+const ctx = orgContext('org-1');
+
 const LEAK_PATTERNS: readonly RegExp[] = [
   /[a-z][a-z0-9+.-]*:\/\//i,
   /PRIVATE KEY/,
@@ -58,13 +61,14 @@ export async function assertSshArchiveAtomicPublish(
   archive: SshBuiltArchive,
 ): Promise<void> {
   let finished = false;
-  const pending = fixture.store.store(source, name, archive).finally(() => {
+  const pending = fixture.store.store(ctx, source, name, archive).finally(() => {
     finished = true;
   });
   void pending.catch(() => undefined);
   try {
     do {
       const record = await fixture.store.find(
+        ctx,
         source,
         name,
         archive.versionNormalized,
@@ -80,7 +84,7 @@ export async function assertSshArchiveAtomicPublish(
     await pending;
     assert.ok(
       sameRecord(
-        await fixture.store.find(source, name, archive.versionNormalized, archive.commit),
+        await fixture.store.find(ctx, source, name, archive.versionNormalized, archive.commit),
         archive,
       ),
       'record missing after publication',
@@ -155,7 +159,7 @@ export function describeSshArchiveStoreContract(
     it('returns null for an absent key', () =>
       run(async ({ store, source }) => {
         assertAbsent(
-          await store.find(source, 'acme/lib', archive.versionNormalized, archive.commit),
+          await store.find(ctx, source, 'acme/lib', archive.versionNormalized, archive.commit),
           'absent key reported a record',
         );
       }));
@@ -168,11 +172,11 @@ export function describeSshArchiveStoreContract(
     it('preserves the first publication and isolates source, name, version and commit', () =>
       run(async (fixture) => {
         const { store, source } = fixture;
-        await store.store(source, 'acme/lib', archive);
-        await store.store(source, 'acme/lib', { ...archive, time: null });
+        await store.store(ctx, source, 'acme/lib', archive);
+        await store.store(ctx, source, 'acme/lib', { ...archive, time: null });
         assert.ok(
           sameRecord(
-            await store.find(source, 'acme/lib', archive.versionNormalized, archive.commit),
+            await store.find(ctx, source, 'acme/lib', archive.versionNormalized, archive.commit),
             archive,
           ),
           'the first publication was replaced',
@@ -183,7 +187,7 @@ export function describeSshArchiveStoreContract(
           [source, 'acme/lib', '2.0.0.0', archive.commit],
           [source, 'acme/lib', archive.versionNormalized, 'b'.repeat(40)],
         ] as const) {
-          assertAbsent(await store.find(src, name, version, commit), 'keys are not isolated');
+          assertAbsent(await store.find(ctx, src, name, version, commit), 'keys are not isolated');
         }
       }));
 
@@ -191,13 +195,13 @@ export function describeSshArchiveStoreContract(
       run(async (fixture) => {
         const { store, source } = fixture;
         await rejection(
-          store.store(source, 'acme/lib', {
+          store.store(ctx, source, 'acme/lib', {
             ...archive,
             zip: new Uint8Array(fixture.maxArchiveBytes + 1),
           }),
         );
         assertAbsent(
-          await store.find(source, 'acme/lib', archive.versionNormalized, archive.commit),
+          await store.find(ctx, source, 'acme/lib', archive.versionNormalized, archive.commit),
           'an oversized archive was published',
         );
         assert.deepEqual(await fixture.temporaryFiles(), []);
@@ -206,9 +210,10 @@ export function describeSshArchiveStoreContract(
     it('cleans up a failed write without publishing metadata', () =>
       run(async (fixture) => {
         fixture.failNextWrite();
-        await rejection(fixture.store.store(fixture.source, 'acme/lib', archive));
+        await rejection(fixture.store.store(ctx, fixture.source, 'acme/lib', archive));
         assertAbsent(
           await fixture.store.find(
+            ctx,
             fixture.source,
             'acme/lib',
             archive.versionNormalized,
@@ -223,7 +228,7 @@ export function describeSshArchiveStoreContract(
       run(async (fixture) => {
         fixture.failNextWrite();
         const text = errorText(
-          await rejection(fixture.store.store(fixture.source, 'acme/lib', archive)),
+          await rejection(fixture.store.store(ctx, fixture.source, 'acme/lib', archive)),
         );
         const repository =
           fixture.source.type === 'vcs' ? fixture.source.config.repository : undefined;

@@ -73,3 +73,18 @@ describe('creator removal mutation', () => {
     );
   });
 });
+
+describe('token lookup negative contract coverage', () => {
+  it.each([
+    'revoked',
+    'expired',
+    'crossOrg',
+    'wrongSelector',
+    'projectBinding',
+    'projectGrantDeleted',
+  ])('runs the shared %s case', async (name) => {
+    expect(tokenContractCases).toHaveProperty(name);
+    const run = Reflect.get(tokenContractCases, name) as typeof tokenContractCases.nullSlug;
+    await run(() => openMigratedDatabase());
+  });
+});

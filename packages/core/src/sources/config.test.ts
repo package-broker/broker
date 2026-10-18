@@ -623,7 +623,7 @@ describe('round 3', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('allows http only for allowlisted hosts', () => {
+  it('refuses http even for allowlisted hosts', () => {
     expect(
       problems(parse('composer_repository', 'composer', 'http://repo.example.com', {})),
     ).toEqual(['url']);
@@ -636,7 +636,7 @@ describe('round 3', () => {
     expect(
       parseSourceConfig('composer_repository', 'composer', 'http://repo.corp.internal/', '{}', opts)
         .ok,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       parseSourceConfig(
         'npm_registry',
@@ -645,7 +645,7 @@ describe('round 3', () => {
         '{"scopes":["@a"]}',
         opts,
       ).ok,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       parseSourceConfig('composer_repository', 'composer', 'http://other.example.com/', '{}', opts)
         .ok,

@@ -406,6 +406,49 @@ describe('remove', () => {
   });
 });
 
+describe('D1 registered-name coverage', () => {
+  beforeEach(async () => {
+    await database.close();
+    database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
+    if (database.orgs === null) throw new Error('orgs missing');
+    a = database.orgs.a;
+    executor = database.executor;
+    seedOrg = a;
+    await executor.batch([seedSource(SRC_ORG, 'org-src')]);
+  });
+
+  async function covered(pattern: string, key: string): Promise<number | undefined> {
+    await executor.batch([
+      stmt(
+        `INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', ?)`,
+        NAME_1,
+        a.orgId,
+        SRC_ORG,
+        pattern,
+      ),
+    ]);
+    return (
+      await executor.all<{ held: number }>(
+        compile(
+          db.selectNoFrom(sql<number>`(${coveredByRegisteredNames(a, SRC_ORG, key)})`.as('held')),
+        ),
+      )
+    )[0]?.held;
+  }
+
+  it('does not cover a non-matching key with a stored 51-byte pattern without exceeding the D1 limit', async () => {
+    await expect(covered(`acme/${'a'.repeat(45)}*`, 'other/lib')).resolves.toBe(0);
+  });
+
+  it('covers a matching key with a valid 50-byte pattern', async () => {
+    await expect(covered(`acme/${'a'.repeat(44)}*`, `acme/${'a'.repeat(44)}lib`)).resolves.toBe(1);
+  });
+
+  it('does not cover a non-matching key with a valid 50-byte pattern', async () => {
+    await expect(covered(`acme/${'a'.repeat(44)}*`, 'other/lib')).resolves.toBe(0);
+  });
+});
+
 describe('SQL conditions', () => {
   async function holds(condition: ReturnType<typeof sourceActivatable>): Promise<number> {
     const [row] = await executor.all<{ held: number }>(

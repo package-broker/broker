@@ -20,10 +20,13 @@ import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated
 import {
   describeBlobContract,
   describeBlobLifecycleContract,
+  describeBlobReserveContract,
+  executorExpiringLeaseAfterFirstStatement,
   requireBlobFixtureHooks,
   requireBlobLifecycleFixtureHooks,
   type BlobContractFixture,
   type BlobLifecycleFixture,
+  type BlobReserveFixture,
 } from './blob-contract.js';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
@@ -54,7 +57,7 @@ function hex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function sqliteFixture(): Promise<BlobLifecycleFixture> {
+async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixture> {
   const database = await openMigratedDatabase({ d1PatternLimit: true });
   open.push(database);
   const executor: SqlExecutor = database.executor;
@@ -191,6 +194,13 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture> {
       );
     },
     narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),
+    reserve: (ctx, key) => repository.reserve(ctx, key),
+    claimPurge: (ctx, key) => repository.claimPurge(ctx, key),
+    reserveWithLeaseExpiringBetweenStatements: (ctx, key) =>
+      createBlobRepository(executorExpiringLeaseAfterFirstStatement(executor, ctx, key)).reserve(
+        ctx,
+        key,
+      ),
     async generationOf(ctx, key) {
       const rows = await executor.all<{ purge_generation: string | null }>({
         sql: 'SELECT purge_generation FROM blob WHERE org_id = ? AND sha256 = ?',
@@ -230,6 +240,7 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture> {
 
 describeBlobContract('sqlite repository with in-memory bytes', sqliteFixture);
 describeBlobLifecycleContract('sqlite repository with in-memory bytes', sqliteFixture);
+describeBlobReserveContract('sqlite repository with in-memory bytes', sqliteFixture);
 
 const MAIN_HOOKS = [
   'store',

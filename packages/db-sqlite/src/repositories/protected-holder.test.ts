@@ -292,6 +292,7 @@ beforeEach(async () => {
   executor = database.executor;
   actorSeeded = false;
   grants = createGrantRepository(executor, {
+    providerAnchors: [AUTHORITATIVE],
     holderInput: () =>
       fresh([AUTHORITATIVE], actorSeeded ? { identityId: ACTOR_IDENTITY } : undefined),
   });
@@ -804,11 +805,8 @@ describe('writers use the freshness-aware predicate', () => {
 });
 
 describe('input is required', () => {
-  it('rejects a call without a descriptor at compile time', async () => {
-    // @ts-expect-error the freshness or LocalRecovery input has no default
-    const call = grants.isProtectedHolder(a, U1);
-
-    await expect(call).rejects.toThrow(TypeError);
+  it('accepts a call using repository anchors and database freshness', async () => {
+    expect(await grants.isProtectedHolder(a, U1)).toBe(false);
   });
 
   it('rejects a malformed now before running SQL', async () => {

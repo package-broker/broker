@@ -259,6 +259,7 @@ const creatorRemoved: Case = (open, wrap) =>
       ]);
       const grants = createGrantRepository(executor, {
         holderInput: () => ({ kind: 'fresh', now: iso(0), providers: anchors }),
+        providerAnchors: anchors,
       });
       const [grant] = await grants.listOrganization(ctx);
       expect(grant).toBeDefined();
@@ -289,7 +290,8 @@ const emptySelected: Case = (open, wrap) =>
     open,
     async (executor, ctx) => {
       const plaintext = await insertToken(executor, ctx, 'pat', 'selected');
-      for (const slug of ['alpha', 'beta', 'missing']) {
+      const expected = { alpha: 403, beta: 403, missing: 404 } as const;
+      for (const slug of ['alpha', 'beta', 'missing'] as const) {
         const found = await lookup(executor, ctx, slug);
         expect(found).not.toBeNull();
         expect(found?.validation?.fresh).toBe(true);
@@ -297,7 +299,7 @@ const emptySelected: Case = (open, wrap) =>
         expect(found?.projectPermissions).toEqual([]);
         expect(await decision(executor, ctx, plaintext, slug)).toEqual({
           allow: false,
-          status: 404,
+          status: expected[slug],
         });
       }
     },

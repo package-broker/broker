@@ -5,11 +5,9 @@ import { sha256Hex } from '@package-broker/core/auth/primitives';
 import type { FetchLeaseHandle, FetchLeases } from '@package-broker/core/ingest/coalesce';
 import { assertCheck, compile, db } from '../kysely.js';
 import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import { FORMAT, NOW, seconds, until } from '../internal/lease-time.js';
 
-const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
-const NOW = sql.raw(`strftime('${FORMAT}','now')`);
 const MAX_TEXT = 512;
-const MAX_LEASE_SECONDS = 3600;
 export const FETCH_LEASE_GC_LIMIT = 20;
 const LEASE_KEY = /^[0-9a-f]{64}$/;
 
@@ -38,22 +36,6 @@ function fence(value: unknown): number {
     throw new RangeError('fence must be a positive integer');
   }
   return value;
-}
-
-function seconds(value: unknown): number {
-  if (
-    typeof value !== 'number' ||
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > MAX_LEASE_SECONDS
-  ) {
-    throw new RangeError(`leaseSeconds must be an integer from 1 to ${String(MAX_LEASE_SECONDS)}`);
-  }
-  return value;
-}
-
-function until(leaseSeconds: number) {
-  return sql<string>`strftime('${sql.raw(FORMAT)}','now', ${`+${String(leaseSeconds)} seconds`})`;
 }
 
 export function fetchLeaseGuard(ctx: OrgContext, handle: FetchLeaseHandle): readonly Statement[] {

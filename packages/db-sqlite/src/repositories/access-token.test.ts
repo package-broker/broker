@@ -1350,6 +1350,7 @@ describe('lookupToken projectVisible', () => {
       provider: `idp${index}`,
       anchor: `https://idp${index}.example.test`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
 
     const statement = lookupTokenStatement(a, input('pat-params', { providerAnchors: anchors }));

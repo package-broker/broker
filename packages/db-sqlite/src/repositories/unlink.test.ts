@@ -607,8 +607,18 @@ describe('unlinkIdentity against concurrent holder changes', () => {
   async function holderCount(): Promise<number> {
     const repository = createGrantRepository(executor, {
       providerAnchors: [
-        { provider: OIDC, anchor: ANCHOR, emailAuthoritative: true },
-        { provider: CF, anchor: CF_ANCHOR, emailAuthoritative: true },
+        {
+          provider: OIDC,
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+        {
+          provider: CF,
+          anchor: CF_ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
       ],
       holderInput: async () => holders(),
     });
@@ -623,8 +633,18 @@ describe('unlinkIdentity against concurrent holder changes', () => {
       const unlinkGate = held(executor);
       const suspending = createGrantRepository(suspendGate.executor, {
         providerAnchors: [
-          { provider: OIDC, anchor: ANCHOR, emailAuthoritative: true },
-          { provider: CF, anchor: CF_ANCHOR, emailAuthoritative: true },
+          {
+            provider: OIDC,
+            anchor: ANCHOR,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+          {
+            provider: CF,
+            anchor: CF_ANCHOR,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
         ],
         holderInput: async () => holders(),
       }).suspendUser(org, fenceOf(SECOND_ADMIN, SECOND_SESSION), ACTOR, '2026-10-15T13:00:00.000Z');

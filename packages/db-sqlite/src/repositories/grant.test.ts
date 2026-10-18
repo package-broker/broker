@@ -388,6 +388,7 @@ beforeEach(async () => {
       provider,
       anchor: ANCHOR,
       emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test', 'actor.test'],
     })),
     holderInput,
   });
@@ -619,6 +620,7 @@ describe('listOrganization', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     }).listOrganization(a);
@@ -748,6 +750,7 @@ describe('createOrganization', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -865,6 +868,7 @@ describe('createOrganization', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     }).createOrganization(a, email(G1, 'x@example.test'));
@@ -936,6 +940,7 @@ describe('deleteOrganization', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     }).deleteOrganization(a, G1);
@@ -1038,6 +1043,7 @@ describe('changeRole', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     }).changeRole(a, G1, ADMIN, LATER);
@@ -1066,6 +1072,7 @@ describe('suspendUser and reactivateUser', () => {
           provider,
           anchor: ANCHOR,
           emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput,
       }).suspendUser(a, U2, LATER),
@@ -1159,6 +1166,7 @@ describe('suspendUser and reactivateUser', () => {
           provider,
           anchor: ANCHOR,
           emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput,
       }).reactivateUser(a, U1, LATER),
@@ -1250,6 +1258,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1274,6 +1283,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1294,6 +1304,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1307,6 +1318,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1320,6 +1332,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1340,6 +1353,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1357,6 +1371,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1406,6 +1421,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1431,6 +1447,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1448,6 +1465,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1479,6 +1497,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1497,6 +1516,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput: async () =>
         ({ ...(await holderInput()), includeSuspended: true }) as unknown as ProtectedHolderInput,
@@ -1508,6 +1528,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput: () =>
         ({
@@ -1533,6 +1554,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1543,6 +1565,7 @@ describe('user status fence', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1613,6 +1636,7 @@ describe('concurrent guarded operations on one file database', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1622,6 +1646,7 @@ describe('concurrent guarded operations on one file database', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
     });
@@ -1836,6 +1861,7 @@ describe('concurrent guarded operations on one file database', () => {
             provider,
             anchor: provider === 'oidc' ? UNLINK_ANCHOR : ANCHOR,
             emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
           })),
           holderInput: boundHolderInput,
         }).suspendUser(org, U2, LATER);
@@ -1854,6 +1880,7 @@ describe('concurrent guarded operations on one file database', () => {
             provider,
             anchor: provider === 'oidc' ? UNLINK_ANCHOR : ANCHOR,
             emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
           })),
           holderInput: boundHolderInput,
         });
@@ -1875,6 +1902,7 @@ describe('concurrent guarded operations on one file database', () => {
               provider,
               anchor: ANCHOR,
               emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test', 'actor.test'],
             })),
             holderInput: async (ctx) => ({
               ...holderInput(),
@@ -2280,6 +2308,7 @@ describe('fenced grant mutators', () => {
         provider,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput: () => ({ ...holderInput(), exclude: { identityId: uncounted } }),
     });
@@ -2353,6 +2382,7 @@ describe('fenced grant mutators', () => {
               provider,
               anchor: ANCHOR,
               emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test', 'actor.test'],
             })),
             holderInput: () =>
               recovery ? { kind: 'local_recovery' } : { ...holderInput(), providers: [] },
@@ -2683,6 +2713,7 @@ describe('fenced grant mutators', () => {
           provider,
           anchor: ANCHOR,
           emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput: () => ({ ...holderInput(), exclude: { identityId: '01J0NONE' } }),
       };
@@ -2724,6 +2755,7 @@ describe('fenced grant mutators', () => {
           provider,
           anchor: ANCHOR,
           emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput,
       });
@@ -2897,6 +2929,7 @@ describe('fenced grant mutators', () => {
             provider,
             anchor: ANCHOR,
             emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
           })),
           holderInput,
         }),
@@ -3019,6 +3052,7 @@ it('checks holders with database time, matching anchors and at most 100 paramete
     provider,
     anchor: ANCHOR,
     emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test', 'actor.test'],
   }));
   const recording = {
     ...executor,
@@ -3035,6 +3069,7 @@ it('checks holders with database time, matching anchors and at most 100 paramete
         provider: `extra${i}`,
         anchor: ANCHOR,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
     ],
   });

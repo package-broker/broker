@@ -3,7 +3,7 @@ import { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors
 import { sql } from 'kysely';
 import type { SyncResult } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
-import { compile, db } from '../kysely.js';
+import { authoritativeVerifiedIdentity, compile, db } from '../kysely.js';
 import type { Expression, Kysely, SqlBool } from 'kysely';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
@@ -957,8 +957,18 @@ type Layer = 'user' | 'grant' | 'role' | 'permission' | 'identity' | 'binding';
 const LAYERS: readonly Layer[] = ['user', 'grant', 'role', 'permission', 'identity', 'binding'];
 const CHAIN: readonly Layer[] = ['user', 'grant', 'role', 'permission'];
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
-  { provider: 'oidc2', anchor: 'oidc:https://idp2.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+  {
+    provider: 'oidc2',
+    anchor: 'oidc:https://idp2.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 const ORG_PERMISSION = 'org:settings:write';
 const PROJECT_PERMISSION = 'project:packages:write';
@@ -1097,6 +1107,39 @@ const rowsCase = (layer: Layer): ContractCase => ({
       return context.executor.all(mutated ? context.mutate(statement) : statement);
     };
     expect((await rowsOf(control.userId, false)).length).toBeGreaterThan(0);
+    expect(await rowsOf(bad.userId, true)).toEqual([]);
+  },
+});
+
+const authoritativeIdentityCase = (layer: 'identity' | 'binding'): ContractCase => ({
+  name: `an authoritative ${layer} row of another organization does not verify the user`,
+  async run(context) {
+    const { own } = orgOf(context);
+    await seedBindings(context);
+    const control = await seedSubject(context, 'ok');
+    const bad = await seedSubject(context, 'bad', { mismatched: layer });
+    const alias = {
+      user: 'reader_user',
+      identity: 'reader_identity',
+      binding: 'reader_binding',
+      grant: 'reader_grant',
+      role: 'reader_role',
+      member: 'reader_member',
+      login: 'reader_login',
+      credential: 'reader_credential',
+    };
+    const rowsOf = (userId: string, mutated: boolean) => {
+      const statement = compile(
+        loose
+          .selectFrom('user_account as reader_user')
+          .select('reader_user.id')
+          .where('reader_user.org_id', '=', own.orgId)
+          .where('reader_user.id', '=', userId)
+          .where((eb) => eb.exists(authoritativeVerifiedIdentity(own, alias, ANCHORS))),
+      );
+      return context.executor.all(mutated ? context.mutate(statement) : statement);
+    };
+    expect(await rowsOf(control.userId, false)).toHaveLength(1);
     expect(await rowsOf(bad.userId, true)).toEqual([]);
   },
 });
@@ -1744,6 +1787,31 @@ const servicePrincipalGuardEntry: MutationEntry = {
 };
 
 export const mutationTable: readonly MutationEntry[] = [
+  {
+    builder: 'authoritativeVerifiedIdentity',
+    file: 'kysely.ts',
+    cases: [authoritativeIdentityCase('identity'), authoritativeIdentityCase('binding')],
+    waivers: [
+      {
+        locate: ref('reader_user', 'org_id', '\\?'),
+        reason: 'scopes the outer user query, not part of the identity builder',
+      },
+    ],
+    predicates: [
+      {
+        name: 'the authoritative identity is scoped to the organization',
+        locate: ref('reader_identity', 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: authoritativeIdentityCase('identity').name,
+      },
+      {
+        name: 'the authoritative provider binding is scoped to the organization',
+        locate: ref('reader_binding', 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: authoritativeIdentityCase('binding').name,
+      },
+    ],
+  },
   {
     builder: 'proxyEligibleCondition',
     file: 'repositories/catalogue-predicates.ts',

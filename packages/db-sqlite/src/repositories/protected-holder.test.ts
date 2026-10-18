@@ -884,7 +884,7 @@ describe('e-mail authority by domain', () => {
           return executor.all(statement);
         },
       },
-      { holderInput: () => fresh([AUTHORITATIVE]) },
+      { providerAnchors: [AUTHORITATIVE], holderInput: () => fresh([AUTHORITATIVE]) },
     );
     for (const anchor of [
       { provider: 'oidc', anchor: ANCHOR, emailAuthoritative: true },

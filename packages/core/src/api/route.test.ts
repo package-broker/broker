@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as z from 'zod';
-import type { ValidationDetail } from './validate.js';
+import { VALIDATION_CODES, type ValidationDetail } from './validate.js';
 import type { RequestContext } from '../plugin.js';
 import { apiRoute, defineApi, type ApiOutcome, type ApiRouteSpec } from './route.js';
 
@@ -442,5 +442,88 @@ describe('defineApi', () => {
   it('returns the spec unchanged', () => {
     const value = spec();
     expect(defineApi(value)).toBe(value);
+  });
+});
+
+describe('apiRoute follow-ups', () => {
+  it('validates 40,000 repeated query keys in under 500ms', async () => {
+    const ctx = context({ query: `?${Array(40000).fill('limit=a').join('&')}`, headers: rev });
+    const route = apiRoute(spec(), () => Promise.resolve(ok));
+    const started = performance.now();
+    const response = (await route.handler(ctx)) as Response;
+    expect(performance.now() - started).toBeLessThan(500);
+    expect((await envelope(response)).error.details).toEqual([
+      { path: '/query/limit', code: 'invalid_type' },
+    ]);
+  });
+
+  it('reads the request URL once without a query schema', async () => {
+    const ctx = context({ body: null, query: '?extra=1' });
+    const url = ctx.request.url;
+    const read = vi.fn(() => url);
+    Object.defineProperty(ctx.request, 'url', { get: read });
+    const parse = vi.spyOn(globalThis, 'URL');
+    const response = (await apiRoute(spec({ api: omit(omit(slot, 'body'), 'query') }), () =>
+      Promise.resolve(ok),
+    ).handler(ctx)) as Response;
+    expect(response.status).toBe(400);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not copy a non-string handler detail path', async () => {
+    const details = [
+      { path: { value: 'private' }, code: 'invalid' },
+    ] as unknown as ValidationDetail[];
+    const response = await run({ headers: rev }, () =>
+      Promise.resolve({ error: 'invalid_request', details }),
+    );
+    expect((await envelope(response)).error.details).toEqual([{ path: '', code: 'invalid' }]);
+  });
+
+  it.each(['invalid_json', 'invalid_encoding', 'too_deep'] as const)(
+    'preserves shared handler validation code %s',
+    async (code) => {
+      const details: ValidationDetail[] = [{ path: '/body', code }];
+      const response = await run({ headers: rev }, () =>
+        Promise.resolve({ error: 'invalid_request', details }),
+      );
+      expect((await envelope(response)).error.details).toEqual(details);
+    },
+  );
+
+  it('uses the shared validation set for handler details', async () => {
+    const has = vi.spyOn(VALIDATION_CODES, 'has');
+    await run({ headers: rev }, () =>
+      Promise.resolve({ error: 'invalid_request', details: [{ path: '', code: 'invalid' }] }),
+    );
+    expect(has).toHaveBeenCalledWith('invalid');
+  });
+
+  it('rejects an unknown handler validation code', async () => {
+    const details = [{ path: '', code: 'unknown_code' }] as unknown as ValidationDetail[];
+    const response = await run({ headers: rev }, () =>
+      Promise.resolve({ error: 'invalid_request', details }),
+    );
+    expect((await envelope(response)).error.details).toEqual([{ path: '', code: 'invalid' }]);
+  });
+
+  it('rejects an empty object on a body-less route before invoking the handler', async () => {
+    const handler = vi.fn(() => Promise.resolve(ok));
+    const response = await run({ body: '{}', headers: rev }, handler, { api: omit(slot, 'body') });
+    expect(response.status).toBe(400);
+    expect((await envelope(response)).error.details).toEqual([{ path: '/body', code: 'invalid' }]);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rejects raw upload bytes on a body-less route', async () => {
+    const handler = vi.fn(() => Promise.resolve(ok));
+    const response = await run(
+      { body: 'raw upload', contentType: 'application/octet-stream', headers: rev },
+      handler,
+      { api: omit(slot, 'body') },
+    );
+    expect(response.status).toBe(400);
+    expect(handler).not.toHaveBeenCalled();
   });
 });

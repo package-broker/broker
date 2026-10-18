@@ -1,4 +1,4 @@
-import type { IdentityContext } from '@package-broker/core/identity/port';
+import type { IdentityContext } from '@package-broker/core/plugin';
 import { fetchBounded } from './http.js';
 import { type CryptoKey, JwtError, type KeySource } from './jwt.js';
 

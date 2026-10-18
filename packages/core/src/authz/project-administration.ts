@@ -315,7 +315,11 @@ export function createProjectAdministration(
       const fence = requireFence(actor, rawFence);
       if (!isUlid(grantId)) return fail('not_found');
       if (!expects(fence, `access_grant:${grantId}`)) return fail('invalid_revision');
-      const answer = await grants.delete(ctx, fence, { id: grantId, projectId, providerAnchors });
+      const answer = await grants.delete(ctx, fence, {
+        id: grantId,
+        projectId,
+        providerAnchors,
+      });
       if (typeof answer === 'string') return refused(ctx, actor, action, answer);
       changed(ctx, actor, 'revoke', grantId);
       if (answer.offboardedUserId !== null && deps.onCreatorOffboarded !== undefined) {

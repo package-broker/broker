@@ -392,6 +392,39 @@ export function boundVerifiedIdentity(
   return identityWithAnchor(bindings.org, alias, bindings.anchors(authoritativeOnly), undefined);
 }
 
+function evidenceWithin(column: string, bindings?: GuardBindings) {
+  const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
+  if (bindings !== undefined) {
+    return sql<SqlBool>`(${ms} >= ${bindings.value('lower_ms')} and ${ms} <= ${bindings.value('upper_ms')})`;
+  }
+  const now = sql`cast(round(unixepoch('now', 'subsec') * 1000) as integer)`;
+  return sql<SqlBool>`${ms} between ${now} - ${sql.lit(EVIDENCE_MAX_AGE_MS)} and ${now} + ${sql.lit(EVIDENCE_FUTURE_SKEW_MS)}`;
+}
+
+/**
+ * Whether the group membership row aliased `alias.member` still carries its user: the row was
+ * of the bindings' organization and refreshed within the evidence window (database clock), and the user has a verified identity of the same provider
+ * whose provider anchor is in the bindings and whose validation is inside the same window. The
+ * window is the database clock; `boundWindow` instead reads `lower_ms` and `upper_ms` from the
+ * bindings, for a caller that takes its time as input. The bindings carry `excluded_identity` for `excludeIdentity`.
+ * Every consumer of group membership as proof of access, the protected-holder rule and the
+ * creator-offboarding checks of grant revocation, goes through this one predicate.
+ */
+export function freshGroupMembership(
+  bindings: GuardBindings,
+  alias: HolderAlias,
+  options: { readonly excludeIdentity?: boolean; readonly boundWindow?: boolean } = {},
+): Expression<SqlBool> {
+  const window = options.boundWindow === true ? bindings : undefined;
+  let identity = boundVerifiedIdentity(bindings, alias, false)
+    .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
+    .where(evidenceWithin(`${alias.identity}.validated_at`, window));
+  if (options.excludeIdentity === true) {
+    identity = identity.where(`${alias.identity}.id`, '<>', bindings.value('excluded_identity'));
+  }
+  return sql<SqlBool>`(${sql.ref(`${alias.member}.org_id`)} = ${bindings.org} and ${evidenceWithin(`${alias.member}.refreshed_at`, window)} and exists ${identity})`;
+}
+
 const HOLDER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export function requireProviders(providers: readonly ProtectedHolderProvider[]): void {
@@ -529,11 +562,6 @@ export function protectedHolder(
   );
   if (input.kind === 'local_recovery') return existsOf(localAdmin);
 
-  const evidence = (column: string) => {
-    const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
-    return sql<SqlBool>`(${ms} >= ${bindings.value('lower_ms')} and ${ms} <= ${bindings.value('upper_ms')})`;
-  };
-
   const branches: (typeof localAdmin)[] = [];
 
   if (input.providers.some((entry) => entry.emailAuthoritative)) {
@@ -565,13 +593,11 @@ export function protectedHolder(
       .$if(options.includeSuspended !== true, (qb) =>
         qb.where(`${alias.user}.status`, '=', sql.lit('active')),
       )
-      .where(evidence(`${alias.member}.refreshed_at`))
-      .where((eb) =>
-        eb.exists(
-          verified(false)
-            .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
-            .where(evidence(`${alias.identity}.validated_at`)),
-        ),
+      .where(
+        freshGroupMembership(bindings, alias, {
+          excludeIdentity: exclude?.identityId !== undefined,
+          boundWindow: true,
+        }),
       );
     if (exclude?.grantId !== undefined) {
       byGroup = byGroup.where(`${alias.grant}.id`, '<>', bindings.value('excluded_grant'));

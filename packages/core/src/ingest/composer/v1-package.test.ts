@@ -3,9 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
 import type { ComposerVersionOrigin } from '../../registry/composer/version-object.js';
 import type { DescribeResult, VersionCandidate } from '../../sources/provider.js';
-import { createPolicyFetch } from '../../sources/policy-fetch.js';
+import { createPolicyFetch, type PolicyFetch } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
 import type { ComposerRoot, ComposerRootSource } from './root.js';
+import { documentKey } from './v1-index.js';
 import { ComposerV1PackageError, describeComposerV1, type V1PackageOptions } from './v1-package.js';
 
 const policy = createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] });
@@ -602,5 +603,584 @@ describe('describeComposerV1 round 2', () => {
     });
     const found = await members((await describeBody('acme/owner', body)).result);
     expect(found.map((m) => m.ordinal)).toEqual([0, 2]);
+  });
+});
+
+describe('describeComposerV1 include kind', () => {
+  const sha1 = (text: string): string => createHash('sha1').update(text).digest('hex');
+  const ROOT_URL = `${BASE}/packages.json`;
+  const INCLUDE_URL = (hash: string): string => `${BASE}/include/all%24${hash}.json`;
+  const owner = (...versions: string[]): Record<string, unknown> =>
+    Object.fromEntries(versions.map((v) => [v, version('acme/owner', v)]));
+  const codeOf = (error: unknown): string | undefined =>
+    error instanceof ComposerV1PackageError ? error.code : undefined;
+
+  interface Doc {
+    readonly body: string;
+    readonly member: string;
+    readonly entry: Extract<NonNullable<V1PackageOptions['entry']>, { kind: 'package' }>;
+    readonly url: string;
+  }
+
+  function include(
+    packages: Record<string, unknown>,
+    over: { key?: string; algs?: ('sha1' | 'sha256')[] } = {},
+  ): Doc {
+    const body = JSON.stringify({ packages });
+    const algs = over.algs ?? ['sha1'];
+    const key = over.key ?? 'acme/owner';
+    const member = JSON.stringify(packages[key]);
+    const url = INCLUDE_URL(sha1(body));
+    return {
+      body,
+      member,
+      url,
+      entry: {
+        kind: 'package',
+        sha256: sha256(member),
+        document: {
+          url,
+          ...(algs.includes('sha1') ? { sha1: sha1(body) } : {}),
+          ...(algs.includes('sha256') ? { sha256: sha256(body) } : {}),
+        },
+      },
+    };
+  }
+
+  const run = (
+    doc: Doc,
+    extra: Partial<V1PackageOptions> = {},
+    routes: Record<string, (n: number) => string | Response> = { [doc.url]: () => doc.body },
+  ) => {
+    const harness = setup(routes);
+    return {
+      ...harness,
+      result: () =>
+        describeComposerV1(harness.fetch, 'acme/owner', {
+          source,
+          root: root({ mode: 'v1-includes' }),
+          origin,
+          codecs,
+          selection,
+          entry: doc.entry,
+          ...extra,
+        }),
+    };
+  };
+
+  it('describes a package from an include document verified by sha1', async () => {
+    const doc = include({
+      'acme/owner': {
+        ...owner('1.0.0'),
+        'dev-main': version('acme/owner', 'dev-main', { version_normalized: 'dev-main' }),
+      },
+    });
+    const { result, requests } = run(doc);
+    const found = await members(await result());
+    expect(found.map((m) => [m.version, m.form])).toEqual([
+      ['1.0.0', 'composer-p2'],
+      ['dev-main', 'composer-p2-dev'],
+    ]);
+    expect(requests).toEqual([doc.url]);
+  });
+
+  it('describes a package from the inline packages of the root, verified by its sha256', async () => {
+    const body = JSON.stringify({ packages: { 'acme/owner': owner('1.0.0') } });
+    const member = JSON.stringify({ '1.0.0': version('acme/owner', '1.0.0') });
+    const doc: Doc = {
+      body,
+      member,
+      url: ROOT_URL,
+      entry: {
+        kind: 'package',
+        sha256: sha256(member),
+        document: { url: ROOT_URL, sha256: sha256(body) },
+      },
+    };
+    const { result } = run(doc);
+    expect((await members(await result())).map((m) => m.version)).toEqual(['1.0.0']);
+  });
+
+  it('verifies sha1 and sha256 together when an include lists both', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') }, { algs: ['sha1', 'sha256'] });
+    const { result } = run(doc);
+    expect(await members(await result())).toHaveLength(1);
+  });
+
+  it('uses the member hash as the snapshot', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result } = run(doc);
+    const found = await result();
+    if (found.kind !== 'found') throw new Error('expected found');
+    expect(found.description.snapshot.id).toBe(`sha256:${sha256(doc.member)}`);
+    await members(found);
+  });
+
+  it('drops other packages of the document and objects named for another package', async () => {
+    const doc = include({
+      'acme/other': { '9.0.0': version('acme/other', '9.0.0') },
+      'acme/owner': { ...owner('1.0.0'), '2.0.0': version('acme/intruder', '2.0.0') },
+    });
+    const { result } = run(doc);
+    const found = await result();
+    expect((await members(found)).map((m) => m.version)).toEqual(['1.0.0']);
+    expect(found.kind === 'found' && found.skipped).toEqual({ foreign_name: 1 });
+  });
+
+  it('finds a package whose key differs from its name in case', async () => {
+    const doc = include({ 'Acme/Owner': owner('1.0.0') }, { key: 'Acme/Owner' });
+    const { result } = run(doc);
+    expect((await members(await result())).map((m) => m.version)).toEqual(['1.0.0']);
+  });
+
+  it('counts duplicate normalized versions of the owner', async () => {
+    const doc = include({
+      'acme/owner': {
+        '1.0.0': version('acme/owner', '1.0.0'),
+        'v1.0.0': version('acme/owner', 'v1.0.0', { version_normalized: '1.0.0.0' }),
+      },
+    });
+    const { result } = run(doc);
+    const found = await result();
+    expect(await members(found)).toHaveLength(1);
+    expect(found.kind === 'found' && found.skipped).toEqual({ duplicate: 1 });
+  });
+
+  it('answers not_modified for an unchanged package hash without a request', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result, requests } = run(doc, { previousSha256: sha256(doc.member).toUpperCase() });
+    expect(await result()).toEqual({ kind: 'not_modified' });
+    expect(requests).toEqual([]);
+  });
+
+  it('refetches when the previous hash differs', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result, requests } = run(doc, { previousSha256: 'a'.repeat(64) });
+    expect(await members(await result())).toHaveLength(1);
+    expect(requests).toHaveLength(1);
+  });
+
+  it('fails closed on a sha1 mismatch after three attempts', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const tampered = doc.body.replace('1.0.0', '6.6.6');
+    const { result, requests } = run(doc, {}, { [doc.url]: () => tampered });
+    const error = await result().catch((e: unknown) => e);
+    expect(codeOf(error)).toBe('hash');
+    expect(requests).toHaveLength(3);
+  });
+
+  it('fails closed on a sha256 mismatch when sha1 matches', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') }, { algs: ['sha1', 'sha256'] });
+    const bad: Doc = {
+      ...doc,
+      entry: {
+        ...doc.entry,
+        document: { ...doc.entry.document!, sha256: 'f'.repeat(64) },
+      },
+    };
+    const error = await run(bad)
+      .result()
+      .catch((e: unknown) => e);
+    expect(codeOf(error)).toBe('hash');
+  });
+
+  it('fails closed when the verified document holds a different package body than the index recorded', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const stale: Doc = { ...doc, entry: { ...doc.entry, sha256: 'e'.repeat(64) } };
+    const harness = run(stale);
+    const error = await harness.result().catch((e: unknown) => e);
+    expect(codeOf(error)).toBe('hash');
+    expect(harness.requests).toHaveLength(1);
+  });
+
+  it('accepts a matching document on a later attempt', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result, requests } = run(
+      doc,
+      {},
+      { [doc.url]: (n) => (n < 3 ? '{"packages":{}}' : doc.body) },
+    );
+    expect(await members(await result())).toHaveLength(1);
+    expect(requests).toHaveLength(3);
+  });
+
+  it('refuses a document that lists no hash before any request', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const bare: Doc = {
+      ...doc,
+      entry: { ...doc.entry, document: { url: doc.url } },
+    };
+    const { result, requests } = run(bare);
+    expect(codeOf(await result().catch((e: unknown) => e))).toBe('invalid');
+    expect(requests).toEqual([]);
+  });
+
+  it('refuses a malformed listed sha1 before any request', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const bad: Doc = {
+      ...doc,
+      entry: { ...doc.entry, document: { url: doc.url, sha1: 'nope' } },
+    };
+    const { result, requests } = run(bad);
+    expect(codeOf(await result().catch((e: unknown) => e))).toBe('invalid');
+    expect(requests).toEqual([]);
+  });
+
+  it('refuses a malformed member hash before any request', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const bad: Doc = { ...doc, entry: { ...doc.entry, sha256: 'nope' } };
+    const { result, requests } = run(bad);
+    expect(codeOf(await result().catch((e: unknown) => e))).toBe('invalid');
+    expect(requests).toEqual([]);
+  });
+
+  it('treats a 404 for a listed include as a non-definitive not_found', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result } = run(doc, {}, {});
+    expect(await result()).toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it('reports a status error for a failing include', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result } = run(doc, {}, { [doc.url]: () => new Response('', { status: 503 }) });
+    const error = await result().catch((e: unknown) => e);
+    expect(codeOf(error)).toBe('status');
+    expect((error as ComposerV1PackageError).status).toBe(503);
+  });
+
+  it('answers non-definitive not_found when a verified document no longer lists the package', async () => {
+    const other = include(
+      { 'acme/other': { '1.0.0': version('acme/other', '1.0.0') } },
+      { key: 'acme/other' },
+    );
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result } = run(
+      { ...doc, entry: { ...doc.entry, document: other.entry.document! } },
+      {},
+      { [other.url]: () => other.body },
+    );
+    expect(await result()).toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it.each([
+    '{}',
+    '{"foo":1}',
+    '{"packages":"x"}',
+    '{"packages":{"acme/owner":"x"}}',
+    '{"packages":{"acme/owner":[{"name":"acme/owner"}]}}',
+  ])('rejects the include shape %s', async (body) => {
+    const url = INCLUDE_URL(sha1(body));
+    const doc: Doc = {
+      body,
+      member: '{}',
+      url,
+      entry: { kind: 'package', sha256: sha256('{}'), document: { url, sha1: sha1(body) } },
+    };
+    expect(
+      codeOf(
+        await run(doc)
+          .result()
+          .catch((e: unknown) => e),
+      ),
+    ).toBe('invalid');
+  });
+
+  it('skips version values that are not objects', async () => {
+    const doc = include({ 'acme/owner': { '1.0.0': version('acme/owner', '1.0.0'), '2.0.0': 5 } });
+    const found = await run(doc).result();
+    expect(await members(found)).toHaveLength(1);
+    expect(found.kind === 'found' && found.skipped).toEqual({ malformed: 1 });
+  });
+
+  it('caps the document by the shared byte budget across attempts', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result, requests } = run(doc, { maxBytes: 40 });
+    expect(codeOf(await result().catch((e: unknown) => e))).toBe('too_large');
+    expect(requests.length).toBeGreaterThan(0);
+  });
+
+  it('refuses a package above 1 MiB', async () => {
+    const doc = include({
+      'acme/owner': { '1.0.0': version('acme/owner', '1.0.0', { readme: 'x'.repeat(1100000) }) },
+    });
+    expect(
+      codeOf(
+        await run(doc)
+          .result()
+          .catch((e: unknown) => e),
+      ),
+    ).toBe('too_large');
+  });
+
+  it('caps the number of version objects', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0', '1.0.1', '1.0.2') });
+    expect(
+      codeOf(
+        await run(doc, { maxVersions: 2 })
+          .result()
+          .catch((e: unknown) => e),
+      ),
+    ).toBe('too_large');
+  });
+
+  it('stops at the shared deadline', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const { result, requests } = run(
+      doc,
+      { deadlineMs: 50 },
+      { [doc.url]: () => '{"packages":{}}' },
+    );
+    expect(codeOf(await result().catch((e: unknown) => e))).toBe('deadline');
+    expect(requests.length).toBeLessThan(3);
+  });
+
+  const twoPackages = (): { body: string; entries: Doc['entry'][]; url: string } => {
+    const packages = {
+      'acme/owner': owner('1.0.0'),
+      'acme/second': { '1.0.0': version('acme/second', '1.0.0') },
+      'acme/third': { '1.0.0': version('acme/third', '1.0.0') },
+    };
+    const body = JSON.stringify({ packages });
+    const url = INCLUDE_URL(sha1(body));
+    return {
+      body,
+      url,
+      entries: Object.values(packages).map((pkg) => ({
+        kind: 'package' as const,
+        sha256: sha256(JSON.stringify(pkg)),
+        document: { url, sha1: sha1(body) },
+      })),
+    };
+  };
+  const describeAs = (
+    harness: ReturnType<typeof setup>,
+    name: string,
+    entry: Doc['entry'],
+    extra: Partial<V1PackageOptions>,
+  ) =>
+    describeComposerV1(harness.fetch, name, {
+      source,
+      root: root({ mode: 'v1-includes' }),
+      origin,
+      codecs,
+      selection: { packages: [name], patterns: [], expandPatterns: false },
+      entry,
+      ...extra,
+    });
+
+  const indexOf = (
+    entries: Doc['entry'][],
+    cached?: {
+      document: Doc['entry']['document'];
+      members: Record<string, string>;
+      partial: boolean;
+    },
+  ): NonNullable<V1PackageOptions['index']> => ({
+    complete: true,
+    entries: new Map(entries.map((entry, i) => [`acme/p${i}`, entry])),
+    documents: new Map(
+      cached === undefined
+        ? []
+        : [
+            [
+              documentKey(cached.document),
+              { members: new Map(Object.entries(cached.members)), partial: cached.partial },
+            ],
+          ],
+    ),
+  });
+  const rawOf = (pkg: unknown): string => JSON.stringify(pkg);
+
+  it('describes every package of a cached include without a request', async () => {
+    const { body, entries, url } = twoPackages();
+    const harness = setup({ [url]: () => body });
+    const packages = JSON.parse(body).packages as Record<string, unknown>;
+    const index = indexOf(entries, {
+      document: entries[0]!.document,
+      members: Object.fromEntries(Object.entries(packages).map(([k, v]) => [k, rawOf(v)])),
+      partial: false,
+    });
+    for (const [i, name] of ['acme/owner', 'acme/second', 'acme/third'].entries()) {
+      const found = await members(await describeAs(harness, name, entries[i]!, { index }));
+      expect(found).toHaveLength(1);
+    }
+    expect(harness.requests).toEqual([]);
+  });
+
+  it('fetches the include for each package when nothing is cached', async () => {
+    const { body, entries, url } = twoPackages();
+    const harness = setup({ [url]: () => body });
+    for (const [i, name] of ['acme/owner', 'acme/second'].entries()) {
+      await members(await describeAs(harness, name, entries[i]!, {}));
+    }
+    expect(harness.requests).toEqual([url, url]);
+  });
+
+  it('includes the expected hash in the cache key', async () => {
+    const { body, entries, url } = twoPackages();
+    const harness = setup({ [url]: () => body });
+    const other = { url, sha1: sha1('some other body') };
+    const index = indexOf(entries, {
+      document: other,
+      members: { 'acme/owner': rawOf(owner('1.0.0')) },
+      partial: false,
+    });
+    await members(await describeAs(harness, 'acme/owner', entries[0]!, { index }));
+    expect(harness.requests).toEqual([url]);
+  });
+
+  it('answers non-definitive not_found for a name a complete cached document lacks', async () => {
+    const { body, entries, url } = twoPackages();
+    const harness = setup({ [url]: () => body });
+    const index = indexOf(entries, { document: entries[0]!.document, members: {}, partial: false });
+    expect(await describeAs(harness, 'acme/owner', entries[0]!, { index })).toEqual({
+      kind: 'not_found',
+      definitive: false,
+    });
+    expect(harness.requests).toEqual([]);
+  });
+
+  it('fetches the document for a name a partial cached document lacks', async () => {
+    const { body, entries, url } = twoPackages();
+    const harness = setup({ [url]: () => body });
+    const index = indexOf(entries, {
+      document: entries[0]!.document,
+      members: { 'acme/owner': rawOf(owner('1.0.0')) },
+      partial: true,
+    });
+    await members(await describeAs(harness, 'acme/owner', entries[0]!, { index }));
+    expect(harness.requests).toEqual([]);
+    await members(await describeAs(harness, 'acme/second', entries[1]!, { index }));
+    expect(harness.requests).toEqual([url]);
+  });
+
+  it('does not retry a cached member that is not JSON', async () => {
+    const { entries } = twoPackages();
+    let reads = 0;
+    class Counting extends Map<string, string> {
+      override get(key: string): string | undefined {
+        reads += 1;
+        return super.get(key);
+      }
+    }
+    const raw = 'not json';
+    const entry = { ...entries[0]!, sha256: sha256(raw) };
+    const index = {
+      complete: true,
+      entries: new Map(),
+      documents: new Map([
+        [
+          documentKey(entry.document),
+          { members: new Counting([['acme/owner', raw]]), partial: false },
+        ],
+      ]),
+    };
+    const error = await describeAs(setup({}), 'acme/owner', entry, { index }).catch(
+      (e: unknown) => e,
+    );
+    expect(codeOf(error)).toBe('invalid');
+    expect(reads).toBe(1);
+  });
+
+  it('sizes the byte budget by the document cap the index used', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const seen: number[] = [];
+    const stub: PolicyFetch = async (request) => {
+      seen.push(request.maxBytes ?? -1);
+      return new Response(doc.body, { status: 200 });
+    };
+    await describeComposerV1(stub, 'acme/owner', {
+      source,
+      root: root({ mode: 'v1-includes' }),
+      origin,
+      codecs,
+      selection,
+      entry: doc.entry,
+      maxDocumentBytes: 64 * 1024 * 1024,
+    });
+    expect(seen).toEqual([64 * 1024 * 1024]);
+  });
+
+  it('rejects a member above the default cap and accepts it under the cap the index used', async () => {
+    const big = {
+      'acme/owner': Object.fromEntries(
+        Array.from({ length: 30 }, (_, i) => [
+          `1.0.${i}`,
+          version('acme/owner', `1.0.${i}`, { readme: 'x'.repeat(40000) }),
+        ]),
+      ),
+    };
+    const doc = include(big);
+    const capped = await run(doc)
+      .result()
+      .catch((e: unknown) => e);
+    expect(codeOf(capped)).toBe('too_large');
+    const raised = run(doc, { maxMemberBytes: 2 * 1024 * 1024 });
+    expect(await members(await raised.result())).toHaveLength(30);
+  });
+
+  it('applies the document cap the index used', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    const error = await run(doc, { maxDocumentBytes: 50 })
+      .result()
+      .catch((e: unknown) => e);
+    expect(codeOf(error)).toBe('too_large');
+  });
+
+  it('rejects a non-positive carried limit', async () => {
+    const doc = include({ 'acme/owner': owner('1.0.0') });
+    await expect(run(doc, { maxMemberBytes: 0 }).result()).rejects.toThrow(RangeError);
+    await expect(run(doc, { maxDocumentBytes: 0 }).result()).rejects.toThrow(RangeError);
+  });
+});
+
+describe('describeComposerV1 absence', () => {
+  const listed = { kind: 'provider' as const, sha256: 'a'.repeat(64) };
+  const absent = (index: V1PackageOptions['index']) =>
+    describeComposerV1(setup({}).fetch, 'acme/unlisted', {
+      source,
+      root: root({ mode: 'v1-includes' }),
+      origin,
+      codecs,
+      selection: { packages: ['acme/unlisted'], patterns: [], expandPatterns: false },
+      ...(index === undefined ? {} : { index }),
+    });
+
+  it('is definitive only when a complete, non-empty index does not list the name', async () => {
+    const entries = new Map([['acme/other', listed]]);
+    expect(await absent({ complete: true, entries })).toEqual({
+      kind: 'not_found',
+      definitive: true,
+    });
+  });
+
+  it.each([
+    ['an incomplete index', { complete: false, entries: new Map() }],
+    ['an empty index', { complete: true, entries: new Map() }],
+    [
+      'an incomplete index that lists names',
+      { complete: false, entries: new Map([['acme/other', listed]]) },
+    ],
+    ['no index', undefined],
+  ])('is not definitive with %s', async (_label, index) => {
+    expect(await absent(index)).toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it('reads the entry from the index', async () => {
+    const body = JSON.stringify({ packages: { 'acme/owner': {} } });
+    const hash = sha256(body);
+    const { fetch } = setup({ [`${BASE}/p/acme/owner%24${hash}.json`]: () => body });
+    const result = await describeComposerV1(fetch, 'acme/owner', {
+      source,
+      root: root(),
+      origin,
+      codecs,
+      selection,
+      index: {
+        complete: true,
+        entries: new Map([['acme/owner', { kind: 'provider', sha256: hash }]]),
+      },
+    });
+    expect(result.kind).toBe('found');
   });
 });

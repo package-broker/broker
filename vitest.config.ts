@@ -24,9 +24,11 @@ const packages = [
 ];
 
 const loadTolerantProjects = new Set([
+  'core',
   'db-sqlite',
   'runtime-cloudflare',
   'runtime-node',
+  'cli',
   'plugin-sso-oidc',
   'plugin-github',
 ]);

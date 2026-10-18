@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as z from 'zod';
 import * as zm from 'zod/mini';
-import { MAX_BODY_BYTES, MAX_BODY_DEPTH, readJsonBody, validateInput } from './validate.js';
+import {
+  MAX_BODY_BYTES,
+  MAX_BODY_DEPTH,
+  readJsonBody,
+  validateInput,
+  VALIDATION_CODES,
+} from './validate.js';
 
 const SENTINEL = 'S3CR3T-SENTINEL';
 
@@ -422,5 +428,14 @@ describe('readJsonBody', () => {
       status: 413,
       code: 'payload_too_large',
     });
+  });
+});
+
+describe('shared validation codes', () => {
+  it.each(['invalid_json', 'invalid_encoding', 'too_deep'])('includes body code %s', (code) => {
+    expect(VALIDATION_CODES.has(code)).toBe(true);
+  });
+  it('rejects an unknown code from the shared set', () => {
+    expect(VALIDATION_CODES.has('unknown_code')).toBe(false);
   });
 });

@@ -38,6 +38,8 @@ pnpm pb build --config broker.config.ts --target cloudflare   # or --target node
 
 `pb build` validates the plugin set, writes `.pb/<target>/generated/manifest.ts` and `manifest.json`, and bundles the runtime entry for the target to `.pb/<target>/worker.js` (Cloudflare) or `.pb/<target>/server.js` (Node) with `metafile.json`.
 
+Plugin code may import only the `@package-broker/core` root and `@package-broker/core/plugin`. Every other `@package-broker/core/*` subpath is internal and may change in any release; an architecture test enforces this for the first-party plugins.
+
 `pnpm check:treeshake` builds the `minimal` fixture (`fixtures/minimal.config.ts`) and fails if any `plugin-*` package appears in its bundle.
 
 ## Versioning

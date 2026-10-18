@@ -3,7 +3,7 @@ import {
   UpstreamError,
   type PolicyFetch,
   type UpstreamCredential,
-} from '@package-broker/core/sources/policy-fetch';
+} from '@package-broker/core/plugin';
 import type { InstallationTokens } from './installation-token.js';
 
 export const PAGE_SIZE = 49;

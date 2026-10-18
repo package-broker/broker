@@ -1,4 +1,5 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
+import { MAX_PATTERN_BYTES } from '@package-broker/core/catalogue/patterns';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { guardAliases } from '../kysely.js';
 
@@ -20,7 +21,6 @@ export interface WinnerRefs {
 
 const PROXY_TYPES = sql`('packagist_proxy', 'npmjs_proxy')`;
 
-const MAX_PATTERN_LENGTH = 50;
 const MAX_PATTERN_WILDCARDS = 4;
 const MAX_PATTERNS_PER_RULE = 64;
 
@@ -28,7 +28,7 @@ const MAX_PATTERNS_PER_RULE = 64;
 function invalidPattern(pattern: Expression<unknown>): Expression<SqlBool> {
   return sql<SqlBool>`(
     length(cast(${pattern} as blob)) <> length(${pattern})
-    or length(${pattern}) not between 1 and ${sql.lit(MAX_PATTERN_LENGTH)}
+    or length(${pattern}) not between 1 and ${sql.lit(MAX_PATTERN_BYTES)}
     or ${pattern} glob '*[^a-z0-9._~@!/*-]*'
     or length(${pattern}) - length(replace(${pattern}, '*', '')) > ${sql.lit(MAX_PATTERN_WILDCARDS)}
   )`;
@@ -115,6 +115,7 @@ export function proxyEligibleCondition(pkg: PackageRefs): Expression<SqlBool> {
       not exists (
         select 1 from package as ${sql.id(a.q)} indexed by package_by_name
         join source as ${sql.id(a.qs)} on ${at(a.qs, 'id')} = ${at(a.q, 'source_id')}
+          and ${at(a.qs, 'org_id')} = ${p('org_id')}
         where ${at(a.q, 'org_id')} = ${p('org_id')}
           and ${at(a.q, 'ecosystem')} = ${p('ecosystem')}
           and ${at(a.q, 'name')} = ${p('name')}
@@ -150,6 +151,7 @@ export function readTimeCondition(
 }
 
 export function admissionCondition(
+  ctx: OrgContext,
   projectRef: Ref,
   sourceRef: Ref,
   keyRef: Ref,
@@ -161,7 +163,7 @@ export function admissionCondition(
     [],
   );
   const scoped = (alias: string) =>
-    sql`${at(alias, 'project_id')} = ${projectRef} and ${at(alias, 'source_id')} = ${sourceRef}`;
+    sql`${at(alias, 'org_id')} = ${ctx.orgId} and ${at(alias, 'project_id')} = ${projectRef} and ${at(alias, 'source_id')} = ${sourceRef}`;
   const effect = (alias: string, value: 'include' | 'exclude') =>
     sql`${at(alias, 'effect')} = ${sql.lit(value)}`;
   const table = (alias: string) => sql`project_package_pattern as ${sql.id(alias)}`;

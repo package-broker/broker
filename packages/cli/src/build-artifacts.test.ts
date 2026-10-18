@@ -369,6 +369,40 @@ describe('build with platformPorts', () => {
     60_000,
   );
 
+  it('leaves only cloudflare:* and node:async_hooks external for the cloudflare target', async () => {
+    const config = await writeConfig('cloudflare', { cloudflare: CLOUDFLARE_PORTS });
+    const entry = path.join(project, 'scoped-entry.ts');
+    await writeFile(
+      entry,
+      "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { env } from 'cloudflare:workers';\nexport default { AsyncLocalStorage, env };\n",
+    );
+    const result = await build({
+      configPath: config,
+      target: 'cloudflare',
+      cwd: project,
+      runtimeEntry: entry,
+    });
+    const external = Object.values(result.metafile.outputs)
+      .flatMap((output) => output.imports)
+      .filter((imported) => imported.external)
+      .map((imported) => imported.path)
+      .sort();
+    expect(external).toEqual(['cloudflare:workers', 'node:async_hooks']);
+  }, 60_000);
+
+  it.each(['node:fs', 'node:crypto'])(
+    'fails the cloudflare build when the entry imports %s',
+    async (specifier) => {
+      const config = await writeConfig('cloudflare', { cloudflare: CLOUDFLARE_PORTS });
+      const entry = path.join(project, 'forbidden-entry.ts');
+      await writeFile(entry, `import * as mod from '${specifier}';\nexport default mod;\n`);
+      await expect(
+        build({ configPath: config, target: 'cloudflare', cwd: project, runtimeEntry: entry }),
+      ).rejects.toThrow();
+    },
+    60_000,
+  );
+
   it('does not write a credential-looking value into the bundle or manifest', async () => {
     const config = await writeConfig('node', {
       node: { ...NODE_PORTS, blob: { ...NODE_PORTS.blob, rootEnv: 'AKIAABCDEFGHIJKLMNOP' } },

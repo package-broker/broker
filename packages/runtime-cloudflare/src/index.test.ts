@@ -60,6 +60,137 @@ describe('runtime-cloudflare', () => {
       vi.resetModules();
     }
   });
+
+  it('resolves the same services from the assembled application on every call', async () => {
+    const worker = createWorker([]);
+    const first = await worker.services();
+    expect(await worker.services()).toBe(first);
+    expect(await first.providerAnchors.anchors({ orgId: 'org' } as never)).toEqual([]);
+  });
+
+  it('runs work dispatched outside a request and logs that nothing keeps it alive', async () => {
+    const log = vi.fn();
+    const services = await createWorker([], { log }).services();
+    let ran = false;
+    services.dispatch(() => {
+      ran = true;
+      return Promise.resolve();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ran).toBe(true);
+    expect(log).toHaveBeenCalledWith({ level: 'warn', event: 'deferred.untracked' });
+  });
+
+  it('binds dispatched work to the request that dispatched it, not the latest one', async () => {
+    const gates = new Map<string, () => void>();
+    const opened = new Map<string, Promise<void>>();
+    for (const path of ['/a', '/b']) {
+      opened.set(
+        path,
+        new Promise<void>((resolve) => {
+          gates.set(path, resolve);
+        }),
+      );
+    }
+    let finishA = (): void => undefined;
+    const workA = new Promise<void>((resolve) => {
+      finishA = resolve;
+    });
+    const shared: { dispatch?: (run: () => Promise<void>) => void } = {};
+    vi.resetModules();
+    vi.doMock('@package-broker/core/kernel/kernel', () => ({
+      createKernel: () =>
+        Promise.resolve({
+          fetch: async (request: Request) => {
+            const path = new URL(request.url).pathname;
+            await opened.get(path);
+            if (path === '/a') shared.dispatch?.(() => workA);
+            return new Response(path);
+          },
+        }),
+    }));
+    try {
+      const { createWorker: createGatedWorker } = await import('./index.js');
+      const worker = createGatedWorker([], { log: () => undefined });
+      shared.dispatch = (await worker.services()).dispatch;
+      const waitA = vi.fn<(promise: Promise<unknown>) => void>();
+      const waitB = vi.fn<(promise: Promise<unknown>) => void>();
+      const a = worker.fetch(new Request('https://broker.invalid/a'), undefined, {
+        waitUntil: waitA,
+      });
+      const b = worker.fetch(new Request('https://broker.invalid/b'), undefined, {
+        waitUntil: waitB,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      gates.get('/a')?.();
+      expect(await (await a).text()).toBe('/a');
+      const keptA = waitA.mock.calls[0]?.[0] as Promise<unknown>;
+      let settledA = false;
+      void keptA.then(() => {
+        settledA = true;
+      });
+
+      gates.get('/b')?.();
+      expect(await (await b).text()).toBe('/b');
+      const keptB = waitB.mock.calls[0]?.[0] as Promise<unknown>;
+      await expect(keptB).resolves.toBeUndefined();
+      expect(settledA).toBe(false);
+
+      finishA();
+      await keptA;
+      expect(settledA).toBe(true);
+    } finally {
+      vi.doUnmock('@package-broker/core/kernel/kernel');
+      vi.resetModules();
+    }
+  });
+
+  it('reports work a request dispatches after its context settled as untracked', async () => {
+    const shared: { dispatch?: (run: () => Promise<void>) => void } = {};
+    let dispatchedLate = (): void => undefined;
+    const late = new Promise<void>((resolve) => {
+      dispatchedLate = resolve;
+    });
+    vi.resetModules();
+    vi.doMock('@package-broker/core/kernel/kernel', () => ({
+      createKernel: () =>
+        Promise.resolve({
+          fetch: () => {
+            setTimeout(() => {
+              shared.dispatch?.(() => Promise.resolve());
+              dispatchedLate();
+            }, 20);
+            return Promise.resolve(new Response('ok'));
+          },
+        }),
+    }));
+    try {
+      const { createWorker: createLateWorker } = await import('./index.js');
+      const log = vi.fn();
+      const worker = createLateWorker([], { log });
+      shared.dispatch = (await worker.services()).dispatch;
+      const waitUntil = vi.fn<(promise: Promise<unknown>) => void>();
+      await worker.fetch(new Request('https://broker.invalid/'), undefined, { waitUntil });
+      await waitUntil.mock.calls[0]?.[0];
+      expect(log).not.toHaveBeenCalled();
+      await late;
+      expect(log).toHaveBeenCalledWith({ level: 'warn', event: 'deferred.untracked' });
+    } finally {
+      vi.doUnmock('@package-broker/core/kernel/kernel');
+      vi.resetModules();
+    }
+  });
+
+  it('does not hold a request open for work dispatched after it ended', async () => {
+    const worker = createWorker([]);
+    const waitUntil = vi.fn<(promise: Promise<unknown>) => void>();
+    await worker.fetch(new Request('https://broker.invalid/nope'), undefined, { waitUntil });
+    const services = await worker.services();
+    services.dispatch(() => new Promise<void>(() => undefined));
+    const kept = waitUntil.mock.calls[0]?.[0] as Promise<unknown>;
+    await expect(kept).resolves.toBeUndefined();
+  });
 });
 
 const KEY_V1 = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
@@ -1040,5 +1171,253 @@ describe('runtime-cloudflare handler failure reporting', () => {
     expect(logged.some((entry) => (entry as { event?: string }).event === 'job.batch_failed')).toBe(
       false,
     );
+  });
+});
+
+function deferred<T = void>() {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function consoleLines() {
+  const lines: string[] = [];
+  const record = (value: unknown) =>
+    void lines.push(typeof value === 'string' ? value : JSON.stringify(value));
+  return { lines, console: { log: record, error: record } };
+}
+
+describe('runtime-cloudflare request scope', () => {
+  it('keeps a cache put with the request that started it while another request is live', async () => {
+    const puts = heldPuts();
+    const gate = deferred();
+    const holdGate = deferred();
+    let ports: PluginPorts | undefined;
+    const plugin = definePlugin({
+      id: 'slow',
+      package: 'test/slow',
+      platforms: ['cloudflare'],
+      apiVersion: 3,
+      register(registry) {
+        registry.route({
+          method: 'GET',
+          path: '/slow',
+          permission: null,
+          needsOrg: false,
+          handler: async () => {
+            await gate.promise;
+            await requirePlatformPorts(ports as PluginPorts).cache.set(
+              orgContext('o'),
+              CACHE_KEY,
+              cacheEntry(),
+            );
+            return Response.json({ ok: true });
+          },
+        });
+        registry.route({
+          method: 'GET',
+          path: '/hold',
+          permission: null,
+          needsOrg: false,
+          handler: async () => {
+            await holdGate.promise;
+            return Response.json({ ok: true });
+          },
+        });
+        registry.route({
+          method: 'GET',
+          path: '/none',
+          permission: null,
+          needsOrg: false,
+          handler: () => Response.json({ ok: true }),
+        });
+      },
+      init(initPorts) {
+        ports = initPorts;
+      },
+    });
+    const worker = createWorker([plugin], {
+      ...quiet,
+      platformPorts: STANZA,
+      cacheStorage: puts.caches,
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/none'), env);
+
+    puts.hold(true);
+    const a = context();
+    const b = context();
+    const slow = worker.fetch(new Request('https://broker.test/slow'), { ...env }, a);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const held = worker.fetch(new Request('https://broker.test/hold'), { ...env }, b);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    gate.resolve();
+    expect((await slow).status).toBe(200);
+    holdGate.resolve();
+    expect((await held).status).toBe(200);
+
+    expect(await within(Promise.all(b.promises))).toBe('settled');
+    expect(await within(Promise.all(a.promises), 50)).toBe('hung');
+    for (const release of puts.releases) release();
+    expect(await within(Promise.all(a.promises))).toBe('settled');
+  });
+
+  it('keeps waiting for dispatched work when the telemetry flush rejects', async () => {
+    vi.resetModules();
+    vi.doMock('@package-broker/core/platform/otlp', async (original) => {
+      const actual = await original<typeof import('@package-broker/core/platform/otlp')>();
+      return {
+        ...actual,
+        createOtlpExporter: (...args: Parameters<typeof actual.createOtlpExporter>) => ({
+          ...actual.createOtlpExporter(...args),
+          flush: () => Promise.reject(new Error('flush rejected')),
+        }),
+      };
+    });
+    try {
+      const { createWorker: createFlushingWorker } = await import('./index.js');
+      const work = deferred();
+      const shared: { dispatch?: (run: () => Promise<void>) => void } = {};
+      const plugin = definePlugin({
+        id: 'dispatcher',
+        package: 'test/dispatcher',
+        platforms: ['cloudflare'],
+        apiVersion: 3,
+        register(registry) {
+          registry.route({
+            method: 'GET',
+            path: '/go',
+            permission: null,
+            needsOrg: false,
+            handler: () => {
+              shared.dispatch?.(() => work.promise);
+              return Response.json({ ok: true });
+            },
+          });
+        },
+      });
+      const worker = createFlushingWorker([plugin], {
+        ...quiet,
+        platformPorts: STANZA,
+        cacheStorage: fakeCaches(),
+        otlpFetch: otlpFetch().impl,
+      });
+      const env = boundEnv();
+      shared.dispatch = (await worker.services(env)).dispatch;
+      const ctx = context();
+      await worker.fetch(new Request('https://broker.test/go'), env, ctx);
+      const kept = Promise.all(ctx.promises);
+      expect(await within(kept, 50)).toBe('hung');
+      work.resolve();
+      await expect(kept).resolves.toBeDefined();
+    } finally {
+      vi.doUnmock('@package-broker/core/platform/otlp');
+      vi.resetModules();
+    }
+  });
+
+  it('closes the dispatch scope of a request that has no execution context', async () => {
+    const shared: { dispatch?: (run: () => Promise<void>) => void } = {};
+    const late = deferred();
+    const log = vi.fn();
+    const plugin = definePlugin({
+      id: 'late',
+      package: 'test/late',
+      platforms: ['cloudflare'],
+      apiVersion: 3,
+      register(registry) {
+        registry.route({
+          method: 'GET',
+          path: '/go',
+          permission: null,
+          needsOrg: false,
+          handler: () => {
+            setTimeout(() => {
+              shared.dispatch?.(() => Promise.resolve());
+              late.resolve();
+            }, 30);
+            return Response.json({ ok: true });
+          },
+        });
+      },
+    });
+    const worker = createWorker([plugin], { log, console: quiet.console });
+    shared.dispatch = (await worker.services()).dispatch;
+    await worker.fetch(new Request('https://broker.test/go'));
+    await late.promise;
+    expect(log).toHaveBeenCalledWith({ level: 'warn', event: 'deferred.untracked' });
+  });
+
+  it('logs untracked dispatches once, through the platform observability path', async () => {
+    const out = consoleLines();
+    const worker = createWorker([], {
+      log: () => undefined,
+      console: out.console,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const env = boundEnv();
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    const services = await worker.services(env);
+    services.dispatch(() => Promise.resolve());
+    services.dispatch(() => Promise.resolve());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(out.lines.filter((line) => line.includes('deferred.untracked'))).toHaveLength(1);
+  });
+
+  it('runs a queue event in its own scope so work it dispatches is kept alive', async () => {
+    const shared: { dispatch?: (run: () => Promise<void>) => void } = {};
+    const work = deferred();
+    const out = consoleLines();
+    let ports: PluginPorts | undefined;
+    const plugin = definePlugin({
+      id: 'probe',
+      package: 'test/probe',
+      platforms: ['cloudflare'],
+      apiVersion: 3,
+      register(registry) {
+        registry.job({
+          name: 'work',
+          version: 1,
+          validate: (input) => input,
+          handler: () => {
+            shared.dispatch?.(() => work.promise);
+            return Promise.resolve();
+          },
+        });
+      },
+      init(initPorts) {
+        ports = initPorts;
+      },
+    });
+    const worker = createWorker([plugin], {
+      log: () => undefined,
+      console: out.console,
+      platformPorts: STANZA,
+      cacheStorage: fakeCaches(),
+      otlpFetch: otlpFetch().impl,
+    });
+    const { db } = await migratedDatabase();
+    const bootstrapped = await createOrganizationBootstrap(createD1Executor(db)).findSingleton();
+    const env = boundEnv({ DB: db });
+    await worker.fetch(new Request('https://broker.test/nope'), env);
+    shared.dispatch = (await worker.services(env)).dispatch;
+    await requirePlatformPorts(ports as PluginPorts).jobs.enqueue(
+      orgContext((bootstrapped as { id: string }).id),
+      'probe:work:v1',
+      {},
+      { idempotencyKey: 'scoped' },
+    );
+    const sent = (env.JOBS as unknown as { sent: unknown[] }).sent;
+    const ctx = context();
+    await worker.queue({ messages: [messageProbe(sent[0]).message] }, { ...env }, ctx);
+    expect(await within(Promise.all(ctx.promises), 50)).toBe('hung');
+    work.resolve();
+    expect(await within(Promise.all(ctx.promises))).toBe('settled');
+    expect(out.lines.some((line) => line.includes('deferred.untracked'))).toBe(false);
   });
 });

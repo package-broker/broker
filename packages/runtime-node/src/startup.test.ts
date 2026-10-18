@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { Server } from 'node:net';
@@ -16,15 +16,21 @@ import {
   loadMigrationSource,
   type MigrationSource,
 } from '@package-broker/db-sqlite/migrations/source';
+import { createObservability, type ObsRecord } from '@package-broker/core/platform/observability';
 import {
+  AUTH_EVENTS,
+  AUTH_REASON_CODES,
   AlreadyBootstrappedError,
+  NODE_RUNTIME_EVENTS,
   StartupConfigError,
+  sinkLog,
   startNode,
   type StartOptions,
 } from './startup.js';
 import type { StdioStream } from './observability/stdio.js';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import type { NodeBroker } from './index.js';
+import { JOB_DRAIN_MS } from './jobs/loop.js';
 
 const recorded = vi.hoisted(() => ({
   closes: [] as string[],
@@ -97,6 +103,147 @@ function healthyPlugin(): PluginDefinition {
     platforms: ['node'],
   };
 }
+
+const REQUEST_ID = '0b0e5d2e-6d0e-4f7e-9a53-0c6f4b0f5a11';
+
+function authSink(): {
+  readonly records: ObsRecord[];
+  readonly log: ReturnType<typeof sinkLog>;
+} {
+  const records: ObsRecord[] = [];
+  const sink = { emit: (record: ObsRecord) => void records.push(record) };
+  const log = sinkLog((scope) =>
+    createObservability(
+      sink,
+      {
+        deploymentId: 'test-deployment',
+        runtime: 'node',
+        requestId: scope?.requestId ?? null,
+        ...(scope?.plugin === undefined ? {} : { plugin: scope.plugin }),
+      },
+      { events: NODE_RUNTIME_EVENTS, reasonCodes: AUTH_REASON_CODES, routeTemplates: new Set() },
+    ),
+  );
+  return { records, log };
+}
+
+function logs(records: readonly ObsRecord[]): Array<Record<string, unknown>> {
+  return records.flatMap((record) => (record.kind === 'log' ? [{ ...record.record }] : []));
+}
+
+function counters(records: readonly ObsRecord[]): ObsRecord[] {
+  return records.filter((record) => record.kind === 'counter');
+}
+
+describe('auth sink log', () => {
+  it('23: an SSO start failure keeps its detail as reason_code', () => {
+    const { records, log } = authSink();
+    log({
+      level: 'warn',
+      event: 'auth.login.refused',
+      requestId: REQUEST_ID,
+      provider: 'oidc',
+      reason: 'provider_error',
+      detail: 'discovery_failed',
+    });
+    expect(logs(records)[0]).toMatchObject({
+      event: 'auth.login.refused',
+      request_id: REQUEST_ID,
+      reason_code: 'discovery_failed',
+    });
+  });
+
+  it('24: reason is used when detail is null, and an unregistered value only drops the field', () => {
+    const { records, log } = authSink();
+    log({
+      level: 'warn',
+      event: 'auth.login.refused',
+      requestId: REQUEST_ID,
+      reason: 'not_invited',
+      detail: null,
+    });
+    log({
+      level: 'warn',
+      event: 'auth.login.refused',
+      requestId: REQUEST_ID,
+      reason: 'free_text',
+    });
+    const [first, second] = logs(records);
+    expect(first).toMatchObject({ reason_code: 'not_invited' });
+    expect(second).toMatchObject({ event: 'auth.login.refused', request_id: REQUEST_ID });
+    expect(second).not.toHaveProperty('reason_code');
+    expect(JSON.stringify(records)).not.toContain('free_text');
+  });
+
+  it('25: pluginId becomes the plugin scope and an unregistered hook code is dropped', () => {
+    const { records, log } = authSink();
+    log({ level: 'warn', event: 'auth.hook.denied', pluginId: 'sso-gate', code: 'free_text' });
+    expect(logs(records)[0]).toMatchObject({ event: 'auth.hook.denied', plugin: 'sso-gate' });
+    expect(logs(records)[0]).not.toHaveProperty('reason_code');
+  });
+
+  it('26: login records count by provider and outcome; userId and sessionId stay out', () => {
+    const { records, log } = authSink();
+    log({
+      level: 'info',
+      event: 'auth.login.succeeded',
+      requestId: REQUEST_ID,
+      provider: 'oidc',
+      userId: 'user-1',
+      sessionId: 'session-1',
+    });
+    log({ level: 'warn', event: 'auth.login.refused', requestId: REQUEST_ID, provider: 'oidc' });
+    expect(counters(records)).toEqual([
+      {
+        kind: 'counter',
+        name: 'pb.auth.login',
+        labels: { provider: 'oidc', outcome: 'succeeded' },
+        value: 1,
+      },
+      {
+        kind: 'counter',
+        name: 'pb.auth.login',
+        labels: { provider: 'oidc', outcome: 'refused' },
+        value: 1,
+      },
+    ]);
+    const serialized = JSON.stringify(records);
+    expect(serialized).not.toContain('user-1');
+    expect(serialized).not.toContain('session-1');
+  });
+
+  it('27: request_id is read in snake case too, and an invalid request id falls back to none', () => {
+    const { records, log } = authSink();
+    log({ level: 'info', event: 'auth.reauth.succeeded', request_id: REQUEST_ID });
+    log({ level: 'info', event: 'auth.reauth.succeeded', requestId: 'not a uuid' });
+    const [first, second] = logs(records);
+    expect(first).toMatchObject({ request_id: REQUEST_ID });
+    expect(second).toMatchObject({ request_id: null });
+  });
+
+  it('28: AUTH_EVENTS covers every auth event core emits', async () => {
+    const coreSource = join(
+      dirname(require.resolve('@package-broker/db-sqlite/package.json')),
+      '..',
+      'core',
+      'src',
+    );
+    const emitted = new Set<string>();
+    for (const directory of ['auth', 'authz']) {
+      for (const name of await readdir(join(coreSource, directory))) {
+        if (!name.endsWith('.ts') || name.endsWith('.test.ts')) continue;
+        const text = await readFile(join(coreSource, directory, name), 'utf8');
+        for (const match of text.matchAll(/event: '(auth\.[a-z0-9_.]+)'/g))
+          emitted.add(match[1] ?? '');
+        for (const match of text.matchAll(/log\('(token_touch_failed)'\)/g))
+          emitted.add(match[1] ?? '');
+      }
+    }
+    expect(emitted.size).toBeGreaterThan(8);
+    expect([...emitted].filter((event) => !AUTH_EVENTS.includes(event as never))).toEqual([]);
+    expect(AUTH_EVENTS).toContain('token_touch_failed');
+  });
+});
 
 describe('startNode', () => {
   let directory: string;
@@ -431,6 +578,8 @@ describe('startNode', () => {
         migrations: [await initSource(), ...(await epochSources())],
         env: env(databasePath(), extraEnv),
         ...(platformPorts === undefined ? {} : { platformPorts }),
+        stdout: capture().stream,
+        stderr: capture().stream,
         ...extra,
       });
     }
@@ -543,6 +692,8 @@ describe('startNode', () => {
             migrations: [await initSource(), ...(await epochSources())],
             env: env(path, extra),
             platformPorts: stanza,
+            stdout: capture().stream,
+            stderr: capture().stream,
           }),
         );
         expect(failure, name).toBeInstanceOf(StartupConfigError);
@@ -687,6 +838,206 @@ describe('startNode', () => {
       await new Promise((resolve) => setTimeout(resolve, 2300));
       expect(calls.length).toBe(settled);
       expect(recorded.usesAfterClose).toBe(0);
+    });
+
+    async function allSources(): Promise<MigrationSource[]> {
+      const names = (await readdir(migrationsDirectory)).filter((name) => name.endsWith('.sql'));
+      return Promise.all(
+        names
+          .sort()
+          .map(async (name) =>
+            loadMigrationSource(
+              'core',
+              name,
+              await readFile(join(migrationsDirectory, name), 'utf8'),
+            ),
+          ),
+      );
+    }
+
+    async function refusedLogin(base: string): Promise<void> {
+      const response = await fetch(`${base}/_pb/auth/local/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1' },
+        body: JSON.stringify({
+          email: 'someone@example.com',
+          password: 'hunter2-hunter2',
+          code: '123456',
+        }),
+      });
+      expect(response.status).toBe(401);
+    }
+
+    it('17: auth records go to the sink with no secret fields and never to the legacy log', async () => {
+      const out = capture();
+      const err = capture();
+      const legacy: Array<Readonly<Record<string, unknown>>> = [];
+      const broker = await start({}, ports, {
+        migrations: await allSources(),
+        stdout: out.stream,
+        stderr: err.stream,
+        log: (entry) => {
+          legacy.push(entry);
+        },
+      });
+      const base = await listen(broker);
+      await refusedLogin(base);
+
+      const all = [...out.lines(), ...err.lines()];
+      const record = all.find((line) => line['event'] === 'auth.login.refused');
+      expect(record).toMatchObject({
+        level: 'info',
+        deployment_id: 'test-deployment',
+        runtime: 'node',
+      });
+      expect(record?.['request_id']).toEqual(expect.any(String));
+      const serialized = JSON.stringify(all);
+      for (const secret of ['someone@example.com', 'hunter2', '123456']) {
+        expect(serialized).not.toContain(secret);
+      }
+      expect(legacy.some((entry) => String(entry['event'] ?? '').startsWith('auth.'))).toBe(false);
+    });
+
+    it('18: migrate output stays on the legacy log and is absent from the sink', async () => {
+      const out = capture();
+      const err = capture();
+      const legacy: Array<Readonly<Record<string, unknown>>> = [];
+      await start({}, ports, {
+        stdout: out.stream,
+        stderr: err.stream,
+        log: (entry) => {
+          legacy.push(entry);
+        },
+      });
+      expect(legacy.some((entry) => entry['id'] === 'core:0001_init')).toBe(true);
+      const sunk = JSON.stringify([...out.lines(), ...err.lines()]);
+      expect(sunk).not.toContain('core:0001_init');
+      expect(sunk).not.toContain('"holder"');
+    });
+
+    it('19: an auth record without telemetry still reaches the legacy log', async () => {
+      const legacy: Array<Readonly<Record<string, unknown>>> = [];
+      const broker = await start({}, null, {
+        plugins: [healthyPlugin()],
+        migrations: await allSources(),
+        log: (entry) => {
+          legacy.push(entry);
+        },
+      });
+      const base = await listen(broker);
+      await refusedLogin(base);
+      expect(legacy.some((entry) => entry['event'] === 'auth.login.refused')).toBe(true);
+    });
+
+    it('20: close() reports a handler that never settles through the sink before the database closes', async () => {
+      const out = capture();
+      const err = capture();
+      let started = false;
+      const closesAtReport: number[] = [];
+      const stuck: PluginDefinition = {
+        id: 'stuck',
+        package: '@test/stuck',
+        apiVersion: SUPPORTED_PLUGIN_API[0],
+        platforms: ['node'],
+        register(registry) {
+          registry.job({
+            name: 'x',
+            version: 1,
+            validate: (input: unknown) => input,
+            handler: () => {
+              started = true;
+              return new Promise<void>(() => undefined);
+            },
+          });
+          registry.route({
+            method: 'GET',
+            path: '/stuck/run',
+            permission: null,
+            handler: async (ctx) => {
+              if (ctx.org !== null && ctx.ports.platform !== undefined) {
+                await ctx.ports.platform.jobs.enqueue(
+                  ctx.org,
+                  'stuck:x:v1',
+                  {},
+                  { idempotencyKey: 'stuck-1' },
+                );
+              }
+              return Response.json({});
+            },
+          });
+        },
+      };
+      const stderr: StdioStream = {
+        write(chunk: string) {
+          if (chunk.includes('shutdown.jobs_abandoned'))
+            closesAtReport.push(recorded.closes.length);
+          return err.stream.write(chunk);
+        },
+        on: () => undefined,
+      };
+      const broker = await startNode({
+        plugins: [stuck],
+        migrations: [await initSource(), ...(await epochSources())],
+        env: env(databasePath()),
+        platformPorts: ports,
+        stdout: out.stream,
+        stderr,
+      });
+      const base = await listen(broker);
+      await fetch(`${base}/stuck/run`);
+      await vi.waitFor(() => expect(started).toBe(true), { timeout: 5000, interval: 25 });
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const closing = broker.close();
+        await vi.advanceTimersByTimeAsync(JOB_DRAIN_MS);
+        await closing;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(closesAtReport).toEqual([0]);
+      expect(recorded.closes).toHaveLength(1);
+      const record = err.lines().find((line) => line['event'] === 'shutdown.jobs_abandoned');
+      expect(record).toMatchObject({ level: 'warn', deployment_id: 'test-deployment' });
+      const counter = out
+        .lines()
+        .find((line) => line['name'] === 'pb.jobs.abandoned' && line['kind'] === 'counter');
+      expect(counter).toMatchObject({ value: 1 });
+    });
+
+    it('21: a clean close reports nothing abandoned', async () => {
+      const out = capture();
+      const err = capture();
+      const broker = await start({}, ports, { stdout: out.stream, stderr: err.stream });
+      await broker.close();
+      const all = [...out.lines(), ...err.lines()];
+      expect(all.some((line) => line['event'] === 'shutdown.jobs_abandoned')).toBe(false);
+      expect(all.some((line) => line['name'] === 'pb.jobs.abandoned')).toBe(false);
+    });
+
+    it('22: an init failure after telemetry is up is reported through the sink by error name only', async () => {
+      const out = capture();
+      const err = capture();
+      const failure = await rejection(
+        startNode({
+          plugins: [healthyPlugin()],
+          migrations: [await initSource()],
+          env: { ...env(databasePath()), PB_ORG_NAME: undefined },
+          platformPorts: ports,
+          stdout: out.stream,
+          stderr: err.stream,
+        }),
+      );
+      expect(failure).toBeInstanceOf(Error);
+      const all = [...out.lines(), ...err.lines()];
+      const record = all.find((line) => line['event'] === 'startup.failed');
+      expect(record).toMatchObject({
+        level: 'error',
+        error_name: 'Error',
+        deployment_id: 'test-deployment',
+      });
+      expect(JSON.stringify(all)).not.toContain('PB_ORG_SLUG');
     });
 
     it('14: a keyring error leaves no blob staging directory behind', async () => {

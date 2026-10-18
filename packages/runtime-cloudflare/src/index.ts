@@ -8,10 +8,18 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import { KERNEL_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
 import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
+import {
+  AUDIT_EVENTS,
+  KERNEL_EVENTS,
+  KERNEL_REASON_CODES,
+} from '@package-broker/core/kernel/obs-codes';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
+import {
+  createProviderAnchorReader,
+  type ProviderAnchorReader,
+} from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
@@ -60,6 +68,8 @@ import {
 import type { JobEvent, QueueBatchLike, QueueLike, QueueMessageLike } from './jobs/consumer.js';
 import { createScheduledHandler } from './jobs/cron.js';
 import { createWorkersSink } from './observability/workers.js';
+import { createRequestScopes } from './request-scope.js';
+import type { RequestScope } from './request-scope.js';
 import type { AnalyticsEngineLike } from './observability/workers.js';
 
 export type Env = {
@@ -76,6 +86,12 @@ export type Env = {
 
 export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;
+}
+
+export interface WorkerServices {
+  readonly providerAnchors: ProviderAnchorReader;
+  /** Starts `run` off the request path; a request in flight keeps it alive through `waitUntil`. */
+  readonly dispatch: (run: () => Promise<void>) => void;
 }
 
 export interface WorkerOptions {
@@ -95,6 +111,8 @@ export interface Worker {
   fetch(request: Request, env?: Env, ctx?: ExecutionContextLike): Promise<Response>;
   queue(batch: unknown, env: Env, ctx?: ExecutionContextLike): Promise<void>;
   scheduled(event: unknown, env: Env, ctx?: ExecutionContextLike): Promise<void>;
+  /** The services of the application that `fetch` uses for the same bindings. */
+  services(env?: Env): Promise<WorkerServices>;
 }
 
 export function unboundExecutor(): ScalarSqlExecutor {
@@ -137,7 +155,11 @@ async function buildAuth(
   plugins: readonly PluginDefinition[],
   env: Env,
   log: KernelLog,
-): Promise<{ auth: AuthModule; registration: Registration }> {
+): Promise<{
+  auth: AuthModule;
+  registration: Registration;
+  providerAnchors: ProviderAnchorReader;
+}> {
   const keyring = createKeyring(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
   );
@@ -162,8 +184,12 @@ async function buildAuth(
     hooks: registration.hooks,
     log,
   });
-  return { auth, registration };
+  return { auth, registration, providerAnchors: createProviderAnchorReader(providers) };
 }
+
+const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
+  anchors: () => Promise.resolve(Object.freeze([])),
+});
 
 function withoutBodyForHead(request: Request, response: Response): Response {
   return request.method === 'HEAD' ? new Response(null, response) : response;
@@ -173,6 +199,7 @@ const STARTUP_EVENTS = [
   'startup.failed',
   'obs.analytics_unconfigured',
   'cache.put_untracked',
+  'deferred.untracked',
 ] as const;
 const MAX_CACHED_APPLICATIONS = 8;
 const FINGERPRINT_BINDINGS = ['DB', 'STORAGE', 'JOBS', 'ANALYTICS'] as const;
@@ -182,9 +209,10 @@ type Handler = (input: unknown) => Promise<void>;
 
 interface Application {
   readonly kernel: Kernel;
+  readonly services: WorkerServices;
   readonly queue?: Handler;
   readonly scheduled?: Handler;
-  begin(): RequestScope;
+  flush(): Promise<void>;
   fail(event: JobEvent, error: unknown): void;
 }
 
@@ -325,57 +353,7 @@ function bridgeToOtlp(
   });
 }
 
-interface RequestScope {
-  end(): void;
-  settle(): Promise<void>;
-}
-
 const NO_ENV: Env = Object.freeze({});
-const NO_SCOPE: RequestScope = Object.freeze({
-  end: () => undefined,
-  settle: () => Promise.resolve(),
-});
-
-function createScopes(
-  flush: () => Promise<void>,
-  onUntracked: () => void,
-): {
-  begin(): RequestScope;
-  track(promise: Promise<unknown>): void;
-} {
-  const live: Set<Promise<void>>[] = [];
-  return {
-    begin() {
-      const pending = new Set<Promise<void>>();
-      live.push(pending);
-      return {
-        end() {
-          const index = live.indexOf(pending);
-          if (index !== -1) live.splice(index, 1);
-        },
-        async settle() {
-          while (pending.size > 0) await Promise.all([...pending]);
-          await flush();
-        },
-      };
-    },
-    track(promise) {
-      const pending = live.at(-1);
-      if (pending === undefined) {
-        promise.catch(() => undefined);
-        onUntracked();
-        return;
-      }
-      const settled = promise.then(
-        () => undefined,
-        () => undefined,
-      );
-      pending.add(settled);
-      void settled.then(() => pending.delete(settled));
-    },
-  };
-}
-
 function scheduleDefinitions(jobs: Registration['jobs']) {
   return jobs.flatMap((job) =>
     job.definition.schedule === undefined
@@ -475,6 +453,7 @@ export function createWorker(
       ? (globalThis as { caches?: CacheStorageLike }).caches
       : options.cacheStorage;
   const applications = new Map<string, Promise<Application>>();
+  const scopes = createRequestScopes();
   const identities = new WeakMap<object, number>();
   let nextIdentity = 0;
 
@@ -571,24 +550,27 @@ export function createWorker(
             },
           });
     let exporter = newExporter();
-    let untrackedReported = false;
-    const scopes = createScopes(
-      async () => {
-        const full = exporter;
-        if (full === undefined) return;
-        exporter = newExporter();
-        await full.flush();
-      },
-      () => {
-        if (untrackedReported) return;
-        untrackedReported = true;
-        try {
-          observability.log({ level: 'warn', event: 'cache.put_untracked' });
-        } catch {
-          return;
-        }
-      },
-    );
+    const untrackedReported = new Set<string>();
+    const flush = async (): Promise<void> => {
+      const full = exporter;
+      if (full === undefined) return;
+      exporter = newExporter();
+      await full.flush();
+    };
+    const track = (
+      event: 'cache.put_untracked' | 'deferred.untracked',
+      promise: Promise<unknown>,
+    ) => {
+      if (scopes.track(promise)) return;
+      promise.catch(() => undefined);
+      if (untrackedReported.has(event)) return;
+      untrackedReported.add(event);
+      try {
+        observability.log({ level: 'warn', event });
+      } catch {
+        return;
+      }
+    };
     const sink: ObsRecordSink = {
       emit(record) {
         const httpMetric = record.kind !== 'log' && record.name.startsWith('pb.http.');
@@ -597,7 +579,12 @@ export function createWorker(
       },
     };
     const registry = (templates: ReadonlySet<string>): ObsRegistry => ({
-      events: new Set<string>([...KERNEL_EVENTS, ...JOB_EVENTS, ...STARTUP_EVENTS]),
+      events: new Set<string>([
+        ...KERNEL_EVENTS,
+        ...AUDIT_EVENTS,
+        ...JOB_EVENTS,
+        ...STARTUP_EVENTS,
+      ]),
       reasonCodes: new Set<string>([...KERNEL_REASON_CODES, ...JOB_REASON_CODES]),
       routeTemplates: templates,
     });
@@ -618,7 +605,7 @@ export function createWorker(
       cache: createCacheApiAdapter(
         bound.cacheStorage,
         config.cache.namespace ?? DEFAULT_CACHE_NAMESPACE,
-        { metrics: observability, waitUntil: (promise) => scopes.track(promise) },
+        { metrics: observability, waitUntil: (promise) => track('cache.put_untracked', promise) },
       ),
       jobStore: Object.freeze({
         enqueue: enqueueAndNotify({
@@ -639,7 +626,7 @@ export function createWorker(
       }
     };
 
-    function attach(kernel: Kernel): Omit<Application, 'kernel'> {
+    function attach(kernel: Kernel): Omit<Application, 'kernel' | 'services'> {
       for (const template of kernel.routeTemplates) routeTemplates.add(template);
       current = createObservability(sink, scope, registry(routeTemplates));
       const consume = createQueueHandler({
@@ -689,7 +676,7 @@ export function createWorker(
           if (accepted.length > 0) await consume({ messages: accepted }, undefined);
         },
         scheduled: (event) => tick(event, undefined),
-        begin: scopes.begin,
+        flush,
         fail: (event, error) => reportJobEvent(observability, 'error', event, error),
       };
     }
@@ -706,7 +693,7 @@ export function createWorker(
       }
     }
 
-    return { platformServices, sink, deploymentId: bound.deploymentId, attach, failed };
+    return { platformServices, sink, deploymentId: bound.deploymentId, attach, failed, track };
   }
 
   async function build(env: Env | undefined): Promise<Application> {
@@ -739,6 +726,25 @@ export function createWorker(
       ids: { ulid },
     };
 
+    let untrackedLogged = false;
+    const applicationServices: WorkerServices = Object.freeze({
+      providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
+      dispatch: (run: () => Promise<void>) => {
+        const work = Promise.resolve().then(run);
+        if (services !== undefined) services.track('deferred.untracked', work);
+        else if (!scopes.track(work)) {
+          work.catch(() => undefined);
+          if (untrackedLogged) return;
+          untrackedLogged = true;
+          try {
+            log({ level: 'warn', event: 'deferred.untracked' });
+          } catch {
+            return;
+          }
+        }
+      },
+    });
+
     try {
       const kernel = await createKernel({
         platform: 'cloudflare',
@@ -763,10 +769,11 @@ export function createWorker(
       if (services === undefined)
         return {
           kernel,
-          begin: () => NO_SCOPE,
+          services: applicationServices,
+          flush: () => Promise.resolve(),
           fail: (event, error) => logJobFailure(log, event, error),
         };
-      return { kernel, ...services.attach(kernel) };
+      return { kernel, services: applicationServices, ...services.attach(kernel) };
     } catch (error) {
       services?.failed(error);
       throw error;
@@ -795,14 +802,42 @@ export function createWorker(
     return pending;
   }
 
-  function defer(scope: RequestScope, ctx: ExecutionContextLike | undefined): void {
-    scope.end();
-    if (ctx === undefined) return;
+  function defer(
+    scope: RequestScope,
+    application: Application,
+    ctx: ExecutionContextLike | undefined,
+  ): void {
+    if (ctx === undefined) {
+      void scope.settle();
+      return;
+    }
+    const finish = async (): Promise<void> => {
+      await scope.settle();
+      try {
+        await application.flush();
+      } catch {
+        return;
+      }
+    };
     try {
-      ctx.waitUntil(scope.settle().catch(() => undefined));
+      ctx.waitUntil(finish());
     } catch {
       return;
     }
+  }
+
+  function inScope<T>(
+    application: Application,
+    ctx: ExecutionContextLike | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return scopes.run(async (scope) => {
+      try {
+        return await work();
+      } finally {
+        defer(scope, application, ctx);
+      }
+    });
   }
 
   async function event(
@@ -821,17 +856,16 @@ export function createWorker(
       onFailure();
       return;
     }
-    const scope = application.begin();
-    try {
-      const handler = pick(application);
-      if (handler === undefined) onFailure();
-      else await handler(input);
-    } catch (error) {
-      application.fail(failure, error);
-      onFailure();
-    } finally {
-      defer(scope, ctx);
-    }
+    await inScope(application, ctx, async () => {
+      try {
+        const handler = pick(application);
+        if (handler === undefined) onFailure();
+        else await handler(input);
+      } catch (error) {
+        application.fail(failure, error);
+        onFailure();
+      }
+    });
   }
 
   function retryBatch(batch: unknown): void {
@@ -850,14 +884,16 @@ export function createWorker(
       } catch (error) {
         return withoutBodyForHead(request, errorResponse(error, requestId, log));
       }
-      const scope = application.begin();
-      try {
-        return await application.kernel.fetch(request);
-      } catch (error) {
-        return withoutBodyForHead(request, errorResponse(error, requestId, log));
-      } finally {
-        defer(scope, ctx);
-      }
+      return inScope(application, ctx, async () => {
+        try {
+          return await application.kernel.fetch(request);
+        } catch (error) {
+          return withoutBodyForHead(request, errorResponse(error, requestId, log));
+        }
+      });
+    },
+    async services(env?: Env): Promise<WorkerServices> {
+      return (await applicationFor(env)).services;
     },
     queue: (batch, env, ctx) =>
       event(

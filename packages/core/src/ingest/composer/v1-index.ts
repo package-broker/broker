@@ -415,6 +415,7 @@ async function readDocument(
     ...(expected.sha256 === undefined ? {} : { sha256: expected.sha256 }),
   };
   const staged = new Map<string, V1IndexEntry>();
+  const names = new Set<string>();
   const nested: (ComposerRootInclude & Expected)[] = [];
   const kept = new Map<string, string>();
   let keptBytes = 0;
@@ -446,7 +447,15 @@ async function readDocument(
           ? providerEntry(step.value.raw)
           : await packageEntry(step.value.raw, document);
       if (entry === null) continue;
-      if (staged.has(name) || pass.entries.has(name)) throw new IncludeFailure('duplicate');
+      if (names.has(name)) throw new IncludeFailure('duplicate');
+      names.add(name);
+      const previous = pass.entries.get(name);
+      if (previous !== undefined) {
+        if (previous.kind !== entry.kind || previous.sha256 !== entry.sha256) {
+          throw new IncludeFailure('duplicate');
+        }
+        continue;
+      }
       if (pass.entries.size + staged.size >= pass.limits.maxEntries) {
         throw new IncludeFailure('limit');
       }

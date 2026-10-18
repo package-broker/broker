@@ -517,6 +517,88 @@ describe('readV1Index round 2 hardening', () => {
     });
   });
 
+  it.each(['provider', 'package'] as const)(
+    'keeps one identical %s listing across include documents',
+    async (kind) => {
+      const raw = { '1.0.0': {} };
+      const a = kind === 'provider' ? providerFile({ 'Vendor/A': H1 }) : pkgs({ 'Vendor/A': raw });
+      const b = kind === 'provider' ? providerFile({ 'vendor/a': H1 }) : pkgs({ 'vendor/a': raw });
+      const files = { 'include/a.json': a, 'include/b.json': b, 'include/c.json': b };
+      const root = kind === 'provider' ? providersRoot(files) : includesRoot(files);
+      const { fetch } = setup({
+        [`${BASE}/packages.json`]: root,
+        ...Object.fromEntries(
+          Object.entries(files).map(([path, body]) => [`${BASE}/${path}`, body]),
+        ),
+      });
+      const result = await readV1Index(fetch, { ...options, maxEntries: 1 });
+      expect(entriesOf(result)).toEqual({
+        'vendor/a': kind === 'provider' ? H1 : sha256(JSON.stringify(raw)),
+      });
+      expect(result.status === 'updated' && result.index.complete).toBe(true);
+      if (result.status === 'updated' && kind === 'package') {
+        expect(result.index.entries.get('vendor/a')).toMatchObject({
+          document: { url: `${BASE}/include/a.json` },
+        });
+      }
+    },
+  );
+
+  it.each(['provider', 'package'] as const)(
+    'rejects a conflicting %s listing after an identical duplicate',
+    async (kind) => {
+      const a =
+        kind === 'provider'
+          ? providerFile({ 'vendor/a': H1 })
+          : pkgs({ 'vendor/a': { '1.0.0': {} } });
+      const c =
+        kind === 'provider'
+          ? providerFile({ 'vendor/a': H2 })
+          : pkgs({ 'vendor/a': { '2.0.0': {} } });
+      const files = { 'include/a.json': a, 'include/b.json': a, 'include/c.json': c };
+      const { fetch } = setup({
+        [`${BASE}/packages.json`]: kind === 'provider' ? providersRoot(files) : includesRoot(files),
+        ...Object.fromEntries(
+          Object.entries(files).map(([path, body]) => [`${BASE}/${path}`, body]),
+        ),
+      });
+      const result = await readV1Index(fetch, options);
+      expect(incomplete(result)).toBe('duplicate');
+      expect(result.status === 'updated' && result.index.documents.size).toBe(0);
+    },
+  );
+
+  it.each([
+    ['provider', false],
+    ['provider', true],
+    ['package', false],
+    ['package', true],
+  ] as const)(
+    'rejects a document-local duplicate %s listing with duplicate include first: %s',
+    async (kind, duplicateFirst) => {
+      const raw = { '1.0.0': {} };
+      const single =
+        kind === 'provider' ? providerFile({ 'vendor/a': H1 }) : pkgs({ 'vendor/a': raw });
+      const duplicate =
+        kind === 'provider'
+          ? providerFile({ 'Vendor/A': H1, 'vendor/a': H1 })
+          : pkgs({ 'Vendor/A': raw, 'vendor/a': raw });
+      const files = duplicateFirst
+        ? { 'include/duplicate.json': duplicate, 'include/single.json': single }
+        : { 'include/single.json': single, 'include/duplicate.json': duplicate };
+      const { fetch } = setup({
+        [`${BASE}/packages.json`]: kind === 'provider' ? providersRoot(files) : includesRoot(files),
+        ...Object.fromEntries(
+          Object.entries(files).map(([path, body]) => [`${BASE}/${path}`, body]),
+        ),
+      });
+      const result = await readV1Index(fetch, options);
+      expect(incomplete(result)).toBe('duplicate');
+      expect(entriesOf(result)).toEqual({});
+      expect(result.status === 'updated' && result.index.documents.size).toBe(0);
+    },
+  );
+
   it('fails on a case-insensitive duplicate name across documents', async () => {
     const a = providerFile({ 'Vendor/A': H1 });
     const b = providerFile({ 'vendor/a': H2 });

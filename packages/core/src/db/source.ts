@@ -104,6 +104,8 @@ export interface SourceTarget {
 
 export interface SourceUpdate extends SourceTarget {
   readonly changes: SourceChanges;
+  /** Inserted atomically with the update; its id must match changes.credentialId. */
+  readonly preparedCredential?: { readonly id: string; readonly statement: Statement };
 }
 
 interface PollValidators {

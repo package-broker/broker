@@ -47,18 +47,18 @@ describe('manifest', () => {
 
   it('reports duplicate ids, unsupported targets, api range and missing dependencies', () => {
     const errors = validatePlugins(
-      [plugin('a'), plugin('a'), plugin('c', { apiVersion: 4, dependsOn: ['zz'] })],
+      [plugin('a'), plugin('a'), plugin('c', { apiVersion: 5, dependsOn: ['zz'] })],
       'cloudflare',
     );
     expect(errors.join('\n')).toMatch(/duplicate plugin id "a"/);
     expect(errors.join('\n')).toMatch(/does not support target "cloudflare"/);
-    expect(errors.join('\n')).toMatch(/apiVersion 4/);
+    expect(errors.join('\n')).toMatch(/apiVersion 5/);
     expect(errors.join('\n')).toMatch(/missing plugin "zz"/);
   });
 
   it('reports an API 2 plugin with the range message and accepts API 3', () => {
     expect(validatePlugins([plugin('legacy', { apiVersion: 2 })], 'node')).toEqual([
-      'plugin "legacy" has apiVersion 2, core supports 3 to 3',
+      'plugin "legacy" has apiVersion 2, core supports 3 to 4',
     ]);
     expect(validatePlugins([plugin('current', { apiVersion: 3 })], 'node')).toEqual([]);
   });

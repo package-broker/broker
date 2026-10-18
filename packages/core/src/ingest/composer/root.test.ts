@@ -1,10 +1,42 @@
-import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
+import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
 import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
-import { baseOf, ComposerRootError, readComposerRoot, type ComposerRootSource } from './root.js';
+import {
+  baseOf,
+  ComposerRootError,
+  readComposerRoot as readRoot,
+  type ComposerRootSource,
+} from './root.js';
 
 const policy = createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] });
 const SHA = 'a'.repeat(64);
+
+const fixtureFetches = new WeakMap<
+  Parameters<typeof readRoot>[0],
+  () => Parameters<typeof readRoot>[0]
+>();
+async function readComposerRoot(...args: Parameters<typeof readRoot>): ReturnType<typeof readRoot> {
+  const [fetch, source, streaming] = args;
+  const replay = fixtureFetches.get(fetch);
+  if (replay === undefined || streaming !== undefined) return readRoot(...args);
+  const results = await Promise.allSettled(
+    [undefined, STREAMING].map((options) =>
+      readRoot(options === undefined ? fetch : replay(), source, options),
+    ),
+  );
+  const comparable = results.map((result) => {
+    if (result.status === 'fulfilled') return result.value;
+    expect(result.reason).toBeInstanceOf(ComposerRootError);
+    const { code, field, status } = result.reason as ComposerRootError;
+    return { code, field, status };
+  });
+  expect(comparable[1]).toEqual(comparable[0]);
+  const buffered = results[0]!;
+  if (buffered.status === 'rejected') throw buffered.reason;
+  return buffered.value;
+}
 
 function setup(
   body: unknown,
@@ -21,6 +53,7 @@ function setup(
       return new Response(raw ?? JSON.stringify(body), { status, headers });
     },
   });
+  fixtureFetches.set(fetch, () => setup(body, headers, status, raw).fetch);
   return { requests, fetch };
 }
 
@@ -561,4 +594,367 @@ describe('baseOf', () => {
   ])('derives the base of %s', (input, expected) => {
     expect(baseOf(input)).toBe(expected);
   });
+});
+
+const codecs: Pick<Codecs, 'digestTap'> = {
+  digestTap<A extends DigestAlgorithm>(algs: readonly A[]) {
+    const hashes = algs.map((alg) => [alg, createHash(alg)] as const);
+    let settle!: { resolve(v: never): void; reject(e: unknown): void };
+    const digests = new Promise<Record<A, Uint8Array>>((resolve, reject) => {
+      settle = { resolve: resolve as (v: never) => void, reject };
+    });
+    digests.catch(() => undefined);
+    const transform = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        for (const [, h] of hashes) h.update(chunk);
+        controller.enqueue(chunk);
+      },
+      flush() {
+        settle.resolve(
+          Object.fromEntries(hashes.map(([alg, h]) => [alg, new Uint8Array(h.digest())])) as never,
+        );
+      },
+      cancel(reason) {
+        settle.reject(reason);
+      },
+    });
+    return { transform, digests };
+  },
+};
+
+const STREAMING = { codecs, maxDocumentBytes: 32 * 1024 * 1024 };
+
+function chunked(text: string, size = 64 * 1024): Response {
+  const bytes = new TextEncoder().encode(text);
+  let at = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (at >= bytes.length) controller.close();
+        else {
+          controller.enqueue(bytes.subarray(at, at + size));
+          at += size;
+        }
+      },
+    }),
+    { status: 200, headers: { etag: '"e"' } },
+  );
+}
+
+function serve(text: string): ReturnType<typeof createPolicyFetch> {
+  return createPolicyFetch({
+    policy,
+    userAgent: 'pb-test/1',
+    fetchImpl: async () => chunked(text),
+  });
+}
+
+const STREAM_FIXTURES: Record<string, { body: unknown; extra?: Partial<ComposerRootSource> }> = {
+  packagist: {
+    body: {
+      'metadata-url': '/p2/%package%.json',
+      'metadata-changes-url': 'https://packagist.org/metadata/changes.json',
+      list: 'https://packagist.org/packages/list.json',
+    },
+    extra: { allowedOrigins: ['https://packagist.org'] },
+  },
+  satis: {
+    body: {
+      includes: { 'include/all$0123abcd.json': { sha1: 'b'.repeat(40) } },
+      'metadata-url': '/p2/%package%.json',
+      'available-packages': ['Fixture/Lib', 'fixture/other'],
+      'available-package-patterns': ['fixture/*'],
+      packages: { 'a/b': { '1.0.0': {} } },
+    },
+  },
+  wpackagist: {
+    body: {
+      'providers-url': '/p/%package%$%hash%.json',
+      'provider-includes': { 'p/provider-a$%hash%.json': { sha256: 'c'.repeat(64) } },
+      'providers-lazy-url': '/lazy/%package%.json',
+      packages: { 'a/b': {} },
+      warning: 'w',
+      'warning-versions': '<1',
+      info: 'i',
+      'info-versions': '>2',
+      warnings: [{ message: 'many', versions: '*' }],
+      infos: [{ message: 'more' }],
+    },
+  },
+  lazy: { body: { 'providers-lazy-url': '/lazy/%package%.json', packages: {} } },
+  inlineProviders: {
+    body: {
+      'providers-url': '/p/%package%.json',
+      providers: { 'a/b': { sha256: 'd'.repeat(64) } },
+    },
+  },
+  includes: {
+    body: {
+      packages: { 'a/b': { '1.0.0': { name: 'a/b' } } },
+      includes: { 'include/all$0123abcd.json': { sha1: 'b'.repeat(40) } },
+      mirrors: [
+        { 'dist-url': 'https://mirror.example.com/%package%/%version%.zip', preferred: true },
+        { 'dist-url': 'https://evil.example.net/x.zip' },
+      ],
+    },
+    extra: { allowedOrigins: ['https://mirror.example.com'] },
+  },
+  emptyPackages: { body: { packages: {}, includes: {} } },
+  packagesArray: { body: { packages: [] } },
+  empty: { body: {} },
+};
+
+describe('readComposerRoot streaming path', () => {
+  it.each(Object.entries(STREAM_FIXTURES))('matches the buffered path for %s', async (_n, f) => {
+    const text = JSON.stringify(f.body);
+    const src = source('https://r.example.com', f.extra);
+    const buffered = await readComposerRoot(
+      setup(undefined, { etag: '"e"' }, 200, text).fetch,
+      src,
+    );
+    const streamed = await readComposerRoot(serve(text), src, STREAMING);
+    expect(streamed).toEqual(buffered);
+    expect(streamed.validator.sha256).toBe(createHash('sha256').update(text).digest('hex'));
+  });
+
+  it('classifies 20,000 inline packages in 5 MiB as v1-includes without holding them', async () => {
+    const packages = Object.fromEntries(
+      Array.from({ length: 20_000 }, (_v, i) => [
+        `vendor/pkg-${i}`,
+        { '1.0.0': { name: `vendor/pkg-${i}`, description: 'x'.repeat(240) } },
+      ]),
+    );
+    const text = JSON.stringify({ packages });
+    expect(text.length).toBeGreaterThan(5 * 1024 * 1024);
+    const root = await readComposerRoot(serve(text), source('https://r.example.com'), STREAMING);
+    expect(root.mode).toBe('v1-includes');
+    expect(root.inlinePackages).toBe(true);
+  });
+
+  it('caps the retained non-inline fields at source.maxBytes', async () => {
+    const includes = Object.fromEntries(
+      Array.from({ length: 200 }, (_v, i) => [`include/${i}$0.json`, { sha1: 'b'.repeat(40) }]),
+    );
+    const text = JSON.stringify({ includes });
+    await expect(
+      readComposerRoot(serve(text), source('https://r.example.com', { maxBytes: 1024 }), STREAMING),
+    ).rejects.toMatchObject({ code: 'too_large' });
+    const ok = await readComposerRoot(serve(text), source('https://r.example.com'), STREAMING);
+    expect(ok.includes).toHaveLength(200);
+  });
+
+  it('fails a document over maxDocumentBytes as too_large', async () => {
+    const text = JSON.stringify({ packages: { x: { y: 'z'.repeat(5000) } } });
+    await expect(
+      readComposerRoot(serve(text), source('https://r.example.com'), {
+        codecs,
+        maxDocumentBytes: 1000,
+      }),
+    ).rejects.toMatchObject({ code: 'too_large' });
+  });
+
+  it.each([
+    ['a duplicate top-level key', '{"metadata-url":"/a","metadata-url":"/b"}'],
+    ['a non-object document', '[1,2]'],
+    ['a scalar document', '"text"'],
+    ['a truncated body', '{"packages":{"a/b":{"1.0.0":{'],
+    ['an empty body', ''],
+  ])('rejects %s as invalid', async (_n, text) => {
+    await expect(
+      readComposerRoot(serve(text), source('https://r.example.com'), STREAMING),
+    ).rejects.toMatchObject({ name: 'ComposerRootError', code: 'invalid', field: 'body' });
+  });
+
+  it('keeps the buffered behaviour without options', async () => {
+    const { fetch } = setup({ packages: { x: 'y'.repeat(1024 * 1024 + 1) } });
+    await expect(readComposerRoot(fetch, source('https://r.example.com'))).rejects.toMatchObject({
+      code: 'too_large',
+    });
+  });
+});
+
+describe('readComposerRoot streaming regressions', () => {
+  it.each([1, 2, 3, 65536])(
+    'strips a leading BOM across %i-byte chunks after hashing',
+    async (size) => {
+      const text = '\uFEFF' + JSON.stringify({ includes: {} });
+      const src = source('https://r.example.com');
+      const buffered = await readComposerRoot(
+        setup(undefined, { etag: '"e"' }, 200, text).fetch,
+        src,
+      );
+      const fetch = createPolicyFetch({
+        policy,
+        userAgent: 'pb-test/1',
+        fetchImpl: async () => chunked(text, size),
+      });
+      expect(await readComposerRoot(fetch, src, STREAMING)).toEqual(buffered);
+      expect(buffered.validator.sha256).toBe(createHash('sha256').update(text).digest('hex'));
+    },
+  );
+
+  it('counts retained UTF-8 bytes near the cap', async () => {
+    const text = JSON.stringify({ info: '界'.repeat(10), warning: '界'.repeat(10) });
+    const read = (maxBytes: number) =>
+      readComposerRoot(serve(text), source('https://r.example.com', { maxBytes }), STREAMING);
+    expect((await read(64)).messages).toHaveLength(2);
+    await expect(read(63)).rejects.toMatchObject({ code: 'too_large' });
+  });
+
+  it('allows a retained includes field above the inline member cap', async () => {
+    const text = JSON.stringify({
+      includes: Object.fromEntries(
+        Array.from({ length: 900 }, (_, i) => [`${i}-${'x'.repeat(1200)}.json`, {}]),
+      ),
+    });
+    const src = source('https://r.example.com', { maxBytes: 2 * 1024 * 1024 });
+    expect(text.length).toBeGreaterThan(1024 * 1024);
+    const buffered = await readComposerRoot(serve(text), src);
+    expect(await readComposerRoot(serve(text), src, STREAMING)).toEqual(buffered);
+  });
+
+  it.each([0, -1, 1.5, Infinity, NaN])('rejects invalid streaming limits: %s', async (value) => {
+    for (const [extra, limits] of [
+      [{}, { ...STREAMING, maxDocumentBytes: value }],
+      [{}, { ...STREAMING, maxMemberBytes: value }],
+      [{ maxBytes: value }, STREAMING],
+    ] as const) {
+      const fetch = vi.fn();
+      await expect(
+        readComposerRoot(fetch, source('https://r.example.com', extra), limits),
+      ).rejects.toMatchObject({ name: 'ComposerRootError', code: 'invalid', field: 'limits' });
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  });
+
+  it('preserves an unrelated stream TypeError', async () => {
+    const error = new TypeError('stream failed');
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        throw error;
+      },
+    });
+    await expect(
+      readComposerRoot(
+        async () => ({ status: 200, headers: new Headers(), body }),
+        source('https://r.example.com'),
+        STREAMING,
+      ),
+    ).rejects.toBe(error);
+  });
+
+  it.each([
+    [
+      'invalid UTF-8',
+      new Uint8Array([
+        ...new TextEncoder().encode('{"info":"'),
+        0xc3,
+        0x28,
+        ...new TextEncoder().encode('"}'),
+      ]),
+    ],
+    [
+      'deep nesting',
+      new TextEncoder().encode('{"info":' + '['.repeat(70) + '0' + ']'.repeat(70) + '}'),
+    ],
+    ['upstream bytes', new TextEncoder().encode('{"info":{"BODY_SENTINEL_477":!}}')],
+  ])('sanitizes %s errors', async (_name, bytes) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(bytes);
+        c.close();
+      },
+    });
+    const error = await readComposerRoot(
+      async () => ({ status: 200, headers: new Headers(), body }),
+      source('https://r.example.com'),
+      STREAMING,
+    ).catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      name: 'ComposerRootError',
+      code: 'invalid',
+      field: 'body',
+      message: 'composer root invalid: body',
+    });
+    expect(JSON.stringify(error)).not.toContain('BODY_SENTINEL_477');
+    expect(String(error)).not.toContain('BODY_SENTINEL_477');
+  });
+
+  it('cancels the reader and releases stream locks on a retained-size failure', async () => {
+    const cancel = vi.fn();
+    let at = 0;
+    const chunks = ['{"info":"' + 'x'.repeat(40) + '",', '"packages":{', '"a/b":{}}}'];
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(c) {
+          if (at < chunks.length) c.enqueue(new TextEncoder().encode(chunks[at++]));
+        },
+        cancel,
+      },
+      { highWaterMark: 0 },
+    );
+    const tapped: ReadableStream<Uint8Array>[] = [];
+    const observingCodecs: typeof codecs = {
+      digestTap(algs) {
+        const tap = codecs.digestTap(algs);
+        tapped.push(tap.transform.readable);
+        return tap;
+      },
+    };
+    await expect(
+      readComposerRoot(
+        async () => ({ status: 200, headers: new Headers(), body }),
+        source('https://r.example.com', { maxBytes: 16 }),
+        { ...STREAMING, codecs: observingCodecs },
+      ),
+    ).rejects.toMatchObject({ code: 'too_large' });
+    await vi.waitFor(() => {
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(body.locked).toBe(false);
+      expect(tapped[0]?.locked).toBe(false);
+    });
+    expect(at).toBeLessThan(chunks.length);
+  });
+});
+
+it('keeps the inline member cap when retained fields have a larger allowance', async () => {
+  const text = JSON.stringify({ packages: { 'vendor/a': { description: 'x'.repeat(100) } } });
+  await expect(
+    readComposerRoot(serve(text), source('https://r.example.com', { maxBytes: 1024 }), {
+      ...STREAMING,
+      maxMemberBytes: 64,
+    }),
+  ).rejects.toMatchObject({ code: 'too_large' });
+});
+
+it('maps a stalled streamed body timeout without exposing body bytes', async () => {
+  const fetch = createPolicyFetch({
+    policy,
+    userAgent: 'pb-test/1',
+    fetchImpl: async (_input, init) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"info":"BODY_SENTINEL_477'));
+            init?.signal?.addEventListener(
+              'abort',
+              () => controller.error(new Error('BODY_SENTINEL_477')),
+              { once: true },
+            );
+          },
+        }),
+      ),
+  });
+  const error = await readComposerRoot(
+    fetch,
+    source('https://r.example.com', { timeoutMs: 20 }),
+    STREAMING,
+  ).catch((e: unknown) => e);
+  expect(error).toMatchObject({
+    name: 'ComposerRootError',
+    code: 'timeout',
+    message: 'composer root timeout',
+  });
+  expect(JSON.stringify(error)).not.toContain('BODY_SENTINEL_477');
+  expect(String(error)).not.toContain('BODY_SENTINEL_477');
 });

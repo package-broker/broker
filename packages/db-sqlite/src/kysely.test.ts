@@ -95,7 +95,14 @@ describe('protectedHolder database time', () => {
   const input = {
     kind: 'fresh',
     now: '1970-01-01T00:00:00.000Z',
-    providers: [{ provider: 'idp', anchor: 'anchor', emailAuthoritative: true }],
+    providers: [
+      {
+        provider: 'idp',
+        anchor: 'anchor',
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
+      },
+    ],
   } as const;
   const render = (options?: Parameters<typeof protectedHolder>[3]) =>
     compile(

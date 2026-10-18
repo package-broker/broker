@@ -5,6 +5,7 @@ import type { SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
+import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import {
   BlobValidationError,
@@ -15,6 +16,9 @@ import {
 import { completionSpan } from '@package-broker/core/platform/completion-span';
 import {
   createObservability,
+  safeErrorName,
+  type LogLevel,
+  type Observability,
   type ObsRecord,
   type ObsRecordSink,
   type ObsRegistry,
@@ -217,8 +221,76 @@ async function bootstrapOrganization(
   if (!result.created && result.slug !== slug) throw new AlreadyBootstrappedError(result.slug);
 }
 
+export const AUTH_EVENTS = Object.freeze([
+  'auth.hook.denied',
+  'auth.hook.error',
+  'auth.local.locked',
+  'auth.local.setup.completed',
+  'auth.local.setup.refused',
+  'auth.login.refused',
+  'auth.login.succeeded',
+  'auth.logout.refused',
+  'auth.reauth.refused',
+  'auth.reauth.succeeded',
+  'token_touch_failed',
+] as const);
+
+export const AUTH_REASON_CODES: ReadonlySet<string> = new Set([
+  'secret_missing',
+  'callback_invalid',
+  'purpose_invalid',
+  'discovery_invalid',
+  'discovery_failed',
+  'discovery_redirect',
+  'discovery_status',
+  'discovery_content_type',
+  'discovery_too_large',
+  'discovery_timeout',
+  'discovery_network',
+  'discovery_bad_json',
+  'missing_credentials',
+  'invalid_token',
+  'state_mismatch',
+  'provider_error',
+  'email_missing',
+  'email_unverified',
+  'domain_not_verified',
+  'not_invited',
+  'user_suspended',
+  'hook_denied',
+  'too_many_groups',
+  'already_linked',
+  'link_requires_admin',
+  'invalid_identity',
+  'provider_rebound',
+  'email_changed',
+  'conflict',
+  'login_refused',
+  'not_sso_session',
+  'not_supported',
+  'identity_mismatch',
+  'no_auth_time',
+  'stale_auth_time',
+  'policy',
+  'not_updated',
+  'reauth_refused',
+  'no_session',
+  'direct_reauth',
+  'state_invalid',
+  'cross_site',
+  'origin_mismatch',
+  'origin_missing',
+  'token_missing',
+  'token_mismatch',
+  'attempts',
+]);
+
 export const NODE_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
+  ...AUDIT_EVENTS,
   ...JOB_EVENTS,
+  ...AUTH_EVENTS,
+  'http.error',
+  'shutdown.jobs_abandoned',
   'startup.failed',
   'process.uncaught_exception',
   'process.unhandled_rejection',
@@ -230,7 +302,59 @@ interface Telemetry {
   readonly sink: ObsRecordSink;
   readonly deploymentId: string;
   readonly routes: Set<string>;
+  observe(scope?: ObserveScope): Observability;
   flush(): Promise<void>;
+}
+
+const JOBS_ABANDONED_COUNTER = 'pb.jobs.abandoned';
+
+interface ObserveScope {
+  readonly requestId?: string;
+  readonly plugin?: string;
+}
+
+const LOGIN_OUTCOMES: Readonly<Record<string, string>> = {
+  'auth.login.succeeded': 'succeeded',
+  'auth.login.refused': 'refused',
+};
+
+function registered(value: unknown): string | undefined {
+  return typeof value === 'string' && AUTH_REASON_CODES.has(value) ? value : undefined;
+}
+
+export function sinkLog(observe: (scope?: ObserveScope) => Observability): KernelLog {
+  const unscoped = observe();
+  return (entry) => {
+    const requestId = entry['request_id'] ?? entry['requestId'];
+    const plugin = entry['pluginId'];
+    const scope: ObserveScope = {
+      ...(typeof requestId === 'string' ? { requestId } : {}),
+      ...(typeof plugin === 'string' ? { plugin } : {}),
+    };
+    let observability = unscoped;
+    if (scope.requestId !== undefined || scope.plugin !== undefined) {
+      try {
+        observability = observe(scope);
+      } catch {
+        observability = unscoped;
+      }
+    }
+    const error = entry['error_name'] ?? entry['error'];
+    const reason =
+      registered(entry['detail']) ?? registered(entry['reason']) ?? registered(entry['code']);
+    const event = entry['event'] as string;
+    observability.log({
+      level: entry['level'] as LogLevel,
+      event,
+      ...(error === undefined ? {} : { error_name: error }),
+      ...(reason === undefined ? {} : { reason_code: reason }),
+    });
+    const outcome = LOGIN_OUTCOMES[event];
+    const provider = entry['provider'];
+    if (outcome !== undefined && typeof provider === 'string') {
+      observability.counter('pb.auth.login', { provider, outcome });
+    }
+  };
 }
 
 function requiredEnv(env: Env, variable: string): string {
@@ -304,19 +428,35 @@ function createTelemetry(ports: PlatformPortConfig, options: StartOptions): Tele
     if (span !== null) exporter.export('traces', span);
   };
 
+  const sink: ObsRecordSink = {
+    emit(record) {
+      stdio.emit(record);
+      try {
+        bridge(record);
+      } catch {
+        return;
+      }
+    },
+  };
   return {
     deploymentId,
     routes,
-    sink: {
-      emit(record) {
-        stdio.emit(record);
-        try {
-          bridge(record);
-        } catch {
-          return;
-        }
-      },
-    },
+    sink,
+    observe: (scope) =>
+      createObservability(
+        sink,
+        {
+          deploymentId,
+          runtime: 'node',
+          requestId: scope?.requestId ?? null,
+          ...(scope?.plugin === undefined ? {} : { plugin: scope.plugin }),
+        },
+        {
+          events: NODE_RUNTIME_EVENTS,
+          reasonCodes: AUTH_REASON_CODES,
+          routeTemplates: routes,
+        },
+      ),
     flush: () => otlp?.flush() ?? Promise.resolve(),
   };
 }
@@ -435,7 +575,12 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     if (flushTimer !== undefined) clearInterval(flushTimer);
     flushTimer = undefined;
     try {
-      await loop?.stop();
+      const stopped = await loop?.stop();
+      if (telemetry !== undefined && stopped !== undefined && stopped.abandoned > 0) {
+        const observability = telemetry.observe();
+        observability.log({ level: 'warn', event: 'shutdown.jobs_abandoned' });
+        observability.counter(JOBS_ABANDONED_COUNTER, {}, stopped.abandoned);
+      }
     } finally {
       try {
         await telemetry?.flush();
@@ -485,7 +630,11 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       executor: opened.executor,
       closeDatabase,
       auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
-      ...(log === undefined ? {} : { log }),
+      ...(telemetry !== undefined
+        ? { log: sinkLog(telemetry.observe) }
+        : log === undefined
+          ? {}
+          : { log }),
       ...(telemetry === undefined
         ? {}
         : {
@@ -513,6 +662,11 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
 
     return broker;
   } catch (error) {
+    telemetry?.observe().log({
+      level: 'error',
+      event: 'startup.failed',
+      error_name: safeErrorName(error),
+    });
     const closing = broker === undefined ? closeDatabase() : broker.close();
     await closing.catch(() => undefined);
     throw error;

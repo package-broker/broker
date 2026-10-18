@@ -1,5 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { safeErrorName, safeRecord } from '@package-broker/core/platform/observability';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import type { NodeBroker } from './index.js';
@@ -10,12 +12,17 @@ const DEFAULT_PORT = 8787;
 export interface EntryManifest {
   readonly plugins: readonly PluginDefinition[];
   readonly migrations: readonly MigrationSource[];
+  readonly platformPorts?: PlatformPortConfig | null;
 }
 
 export interface EntryRuntime {
   readonly start: (options: StartOptions) => Promise<NodeBroker>;
   readonly exit: (code: number) => void;
   readonly error: (message: string) => void;
+  readonly onProcessError?: (
+    event: 'uncaughtException' | 'unhandledRejection',
+    listener: (error: unknown) => void,
+  ) => void;
   readonly onSignal: (signal: 'SIGTERM' | 'SIGINT', listener: () => void) => void;
 }
 
@@ -35,13 +42,14 @@ export function parsePort(raw: string | undefined): number {
 export function createShutdown(
   close: () => Promise<void>,
   exit: (code: number) => void,
+  code = 0,
 ): () => void {
   let closing = false;
   return () => {
     if (closing) return;
     closing = true;
     close().then(
-      () => exit(0),
+      () => exit(code),
       () => exit(1),
     );
   };
@@ -53,32 +61,58 @@ export async function runEntry(
   runtime: EntryRuntime,
 ): Promise<void> {
   let broker: NodeBroker;
-  try {
-    const { plugins, migrations } = await manifest;
-    broker = await runtime.start({ plugins, migrations, env });
-  } catch (error) {
-    runtime.error(describeError(error));
-    runtime.exit(1);
-    return;
-  }
-
   let port: number;
   try {
-    port = parsePort(env['PORT']);
+    const { plugins, migrations, platformPorts } = await manifest;
+    try {
+      port = parsePort(env['PORT']);
+    } catch (error) {
+      runtime.error(describeError(error));
+      runtime.exit(1);
+      return;
+    }
+    broker = await runtime.start({
+      plugins,
+      migrations,
+      env,
+      ...(platformPorts == null ? {} : { platformPorts }),
+    });
   } catch (error) {
-    runtime.error(describeError(error));
-    await broker.close().catch(() => undefined);
+    runtime.error(failureRecord('startup.failed', error));
     runtime.exit(1);
     return;
   }
 
   broker.server.listen(port);
+  let processFailed = false;
   const stop = createShutdown(
     () => broker.close(),
-    (code) => runtime.exit(code),
+    (code) => runtime.exit(processFailed ? 1 : code),
   );
   runtime.onSignal('SIGTERM', stop);
   runtime.onSignal('SIGINT', stop);
+  for (const [event, recordEvent] of [
+    ['uncaughtException', 'process.uncaught_exception'],
+    ['unhandledRejection', 'process.unhandled_rejection'],
+  ] as const) {
+    runtime.onProcessError?.(event, (error) => {
+      runtime.error(failureRecord(recordEvent, error));
+      processFailed = true;
+      stop();
+    });
+  }
+}
+
+function failureRecord(event: string, error: unknown): string {
+  return JSON.stringify(
+    safeRecord({
+      level: 'error',
+      event,
+      service: 'package-broker',
+      runtime: 'node',
+      error_name: safeErrorName(error),
+    }),
+  );
 }
 
 export function isMainEntry(argv1: string | undefined, moduleUrl: string): boolean {
@@ -100,8 +134,9 @@ if (isMainModule()) {
     exit: (code) => process.exit(code),
     error: (message) => console.error(message),
     onSignal: (signal, listener) => process.on(signal, listener),
+    onProcessError: (event, listener) => process.on(event, listener),
   }).catch((error: unknown) => {
-    console.error(describeError(error));
+    console.error(failureRecord('startup.failed', error));
     process.exit(1);
   });
 }

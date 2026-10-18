@@ -1,6 +1,35 @@
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
 import { createAuthModule } from '@package-broker/core/auth/module';
 import type { AuthModule } from '@package-broker/core/auth/module';
+import type { SessionService } from '@package-broker/core/auth/session';
+import {
+  createPersonalTokenService,
+  type PersonalTokenService,
+} from '@package-broker/core/authz/pat-service';
+import {
+  createProjectAdministration,
+  type ProjectAdministration,
+} from '@package-broker/core/authz/project-administration';
+import { createProjectLister, type ProjectLister } from '@package-broker/core/authz/project-list';
+import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
+import {
+  createProjectService,
+  type ProjectService,
+} from '@package-broker/core/authz/project-service';
+import {
+  createServicePrincipalService,
+  type ServicePrincipalService,
+} from '@package-broker/core/authz/service-principal-service';
+import {
+  createServiceTokenService,
+  type ServiceTokenService,
+} from '@package-broker/core/authz/service-token-service';
+import type { TokenReader } from '@package-broker/core/authz/token-read';
+import {
+  createTokenRevokeService,
+  type TokenRevokeService,
+} from '@package-broker/core/authz/token-revoke';
+import type { CatalogueReader } from '@package-broker/core/db/catalogue';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
@@ -8,9 +37,18 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import { KERNEL_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import {
+  AUDIT_EVENTS,
+  KERNEL_EVENTS,
+  KERNEL_REASON_CODES,
+} from '@package-broker/core/kernel/obs-codes';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
+import {
+  providerAnchorsOf,
+  type ConfiguredProviderAnchor,
+  type ProviderAnchorReader,
+} from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
@@ -35,11 +73,21 @@ import { createJobRepository } from '@package-broker/db-sqlite/repositories/job'
 import { createJobScheduleRepository } from '@package-broker/db-sqlite/repositories/job-schedule';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
+import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
 } from '@package-broker/db-sqlite/repositories/organization';
+import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
+import { createProjectGrantRepository } from '@package-broker/db-sqlite/repositories/project-grant';
+import { createReadableProjectRepository } from '@package-broker/db-sqlite/repositories/project-readable';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { createServicePrincipalAuthority } from '@package-broker/db-sqlite/repositories/service-principal-authority';
+import { createTokenRepository } from '@package-broker/db-sqlite/repositories/token';
+import { createTokenReader } from '@package-broker/db-sqlite/repositories/token-read';
+import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
 import { createR2ByteStore } from './blob/r2.js';
 import type { R2BucketLike } from './blob/r2.js';
 import { createCacheApiAdapter, DEFAULT_CACHE_NAMESPACE } from './cache/cache-api.js';
@@ -59,6 +107,8 @@ import {
 import type { JobEvent, QueueBatchLike, QueueLike, QueueMessageLike } from './jobs/consumer.js';
 import { createScheduledHandler } from './jobs/cron.js';
 import { createWorkersSink } from './observability/workers.js';
+import { createRequestScopes } from './request-scope.js';
+import type { RequestScope } from './request-scope.js';
 import type { AnalyticsEngineLike } from './observability/workers.js';
 
 export type Env = {
@@ -77,6 +127,29 @@ export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;
 }
 
+/** The step 5 domain services; PB-32 resolves each one from here. */
+export interface WorkerAccessServices {
+  readonly engine: AuthorizationEngine;
+  readonly sessions: SessionService;
+  readonly projects: ProjectService;
+  readonly projectGrants: ProjectAdministration;
+  readonly projectList: ProjectLister;
+  readonly personalTokens: PersonalTokenService;
+  readonly servicePrincipals: ServicePrincipalService;
+  readonly serviceTokens: ServiceTokenService;
+  readonly tokenRevoke: TokenRevokeService;
+  readonly tokenList: TokenReader;
+}
+
+export interface WorkerServices {
+  readonly providerAnchors: ProviderAnchorReader;
+  /** Starts `run` off the request path; a request in flight keeps it alive through `waitUntil`. */
+  readonly dispatch: (run: () => Promise<void>) => void;
+  readonly catalogue: Pick<CatalogueReader, 'resolveVersions'>;
+  /** Null without a DB binding. */
+  readonly access: WorkerAccessServices | null;
+}
+
 export interface WorkerOptions {
   readonly log?: KernelLog;
   readonly authorization?: AuthorizationEngine;
@@ -93,6 +166,8 @@ export interface Worker {
   fetch(request: Request, env?: Env, ctx?: ExecutionContextLike): Promise<Response>;
   queue(batch: unknown, env: Env, ctx?: ExecutionContextLike): Promise<void>;
   scheduled(event: unknown, env: Env, ctx?: ExecutionContextLike): Promise<void>;
+  /** The services of the application that `fetch` uses for the same bindings. */
+  services(env?: Env): Promise<WorkerServices>;
 }
 
 export function unboundExecutor(): ScalarSqlExecutor {
@@ -130,17 +205,35 @@ export function publicOriginOf(raw: string | undefined): string {
   return url.origin;
 }
 
+function wired<T>(name: string, value: T | undefined): T {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError(`${name} is not wired`);
+  }
+  return value;
+}
+
+function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchorReader {
+  return Object.freeze({ anchors: () => Promise.resolve(list) });
+}
+
 async function buildAuth(
-  executor: ScalarSqlExecutor,
+  executor: SqlExecutor,
   plugins: readonly PluginDefinition[],
   env: Env,
   log: KernelLog,
-): Promise<{ auth: AuthModule; registration: Registration }> {
+  dispatch: (run: () => Promise<void>) => void,
+): Promise<{
+  auth: AuthModule;
+  registration: Registration;
+  providerAnchors: ProviderAnchorReader;
+  access: WorkerAccessServices;
+}> {
   const keyring = createKeyring(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
   );
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
   await selfTestPasswordHashing(keyring);
+  await keyring.hmacKey('token-pepper', keyring.currentVersion);
   const registration = collectRegistrations(plugins);
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) =>
@@ -150,18 +243,113 @@ async function buildAuth(
     clock: systemClock,
     env: scopedEnv(env),
   });
+  const anchorList = providerAnchorsOf(providers);
+  const providerAnchors = anchorReader(anchorList);
+  const ids = { ulid };
   const auth = createAuthModule({
     repositories: createAuthRepositories(executor),
     keyring,
     clock: systemClock,
-    ids: { ulid },
+    ids,
     publicOrigin,
     providers,
     hooks: registration.hooks,
     log,
+    access: {
+      access: wired('access repository', createAccessRepository(executor)),
+      providerAnchors: providerAnchors.anchors,
+      dispatch,
+    },
+    unlink: {
+      unlinks: wired(
+        'unlink repository',
+        createUnlinkRepository(executor, {
+          holderInput: () => ({
+            kind: 'fresh',
+            now: systemClock.now().toISOString(),
+            providers: anchorList,
+          }),
+        }),
+      ),
+      providers: providerAnchors,
+    },
   });
-  return { auth, registration };
+
+  const projectRepository = wired(
+    'project repository',
+    createProjectRepository(executor, {
+      reservedSlugs: reservedFirstSegments([...registration.routes, ...auth.coreRoutes]),
+      providerAnchors: anchorList,
+    }),
+  );
+  const tokenRepository = wired('token repository', createTokenRepository(executor));
+  const principalRepository = wired(
+    'service principal repository',
+    createServicePrincipalRepository(executor),
+  );
+  const authority = wired(
+    'service principal authority',
+    createServicePrincipalAuthority({ executor, providerAnchors: anchorList }),
+  );
+  const organizations = wired('organization repository', createOrganizationRepository(executor));
+  const common = { clock: systemClock, ids, log };
+
+  const access: WorkerAccessServices = Object.freeze({
+    engine: auth.authorization,
+    sessions: auth.sessions,
+    projects: createProjectService({ projects: projectRepository, ...common }),
+    projectGrants: createProjectAdministration({
+      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      providers,
+      providerAnchors: anchorList,
+      ...common,
+    }),
+    projectList: createProjectLister({
+      source: projectRepository,
+      readable: wired(
+        'readable project repository',
+        createReadableProjectRepository(executor, { providerAnchors: anchorList }),
+      ),
+    }),
+    personalTokens: createPersonalTokenService({
+      tokens: tokenRepository,
+      sessions: auth.sessions,
+      organizations,
+      providers: providerAnchors,
+      keyring,
+      ...common,
+    }),
+    servicePrincipals: createServicePrincipalService({
+      principals: principalRepository,
+      authority,
+      directory: principalRepository,
+      ...common,
+    }),
+    serviceTokens: createServiceTokenService({
+      tokens: tokenRepository,
+      principals: principalRepository,
+      authority,
+      sessions: auth.sessions,
+      organizations,
+      providers: providerAnchors,
+      keyring,
+      ...common,
+    }),
+    tokenRevoke: createTokenRevokeService({
+      tokens: tokenRepository,
+      authority,
+      ownership: tokenRepository,
+      clock: systemClock,
+      log,
+    }),
+    tokenList: wired('token reader', createTokenReader(executor)),
+  });
+  return { auth, registration, providerAnchors, access };
 }
+
+const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
+  anchors: () => Promise.resolve(Object.freeze([])),
+});
 
 function withoutBodyForHead(request: Request, response: Response): Response {
   return request.method === 'HEAD' ? new Response(null, response) : response;
@@ -171,6 +359,7 @@ const STARTUP_EVENTS = [
   'startup.failed',
   'obs.analytics_unconfigured',
   'cache.put_untracked',
+  'deferred.untracked',
 ] as const;
 const MAX_CACHED_APPLICATIONS = 8;
 const FINGERPRINT_BINDINGS = ['DB', 'STORAGE', 'JOBS', 'ANALYTICS'] as const;
@@ -180,9 +369,10 @@ type Handler = (input: unknown) => Promise<void>;
 
 interface Application {
   readonly kernel: Kernel;
+  readonly services: WorkerServices;
   readonly queue?: Handler;
   readonly scheduled?: Handler;
-  begin(): RequestScope;
+  flush(): Promise<void>;
   fail(event: JobEvent, error: unknown): void;
 }
 
@@ -323,57 +513,7 @@ function bridgeToOtlp(
   });
 }
 
-interface RequestScope {
-  end(): void;
-  settle(): Promise<void>;
-}
-
 const NO_ENV: Env = Object.freeze({});
-const NO_SCOPE: RequestScope = Object.freeze({
-  end: () => undefined,
-  settle: () => Promise.resolve(),
-});
-
-function createScopes(
-  flush: () => Promise<void>,
-  onUntracked: () => void,
-): {
-  begin(): RequestScope;
-  track(promise: Promise<unknown>): void;
-} {
-  const live: Set<Promise<void>>[] = [];
-  return {
-    begin() {
-      const pending = new Set<Promise<void>>();
-      live.push(pending);
-      return {
-        end() {
-          const index = live.indexOf(pending);
-          if (index !== -1) live.splice(index, 1);
-        },
-        async settle() {
-          while (pending.size > 0) await Promise.all([...pending]);
-          await flush();
-        },
-      };
-    },
-    track(promise) {
-      const pending = live.at(-1);
-      if (pending === undefined) {
-        promise.catch(() => undefined);
-        onUntracked();
-        return;
-      }
-      const settled = promise.then(
-        () => undefined,
-        () => undefined,
-      );
-      pending.add(settled);
-      void settled.then(() => pending.delete(settled));
-    },
-  };
-}
-
 function scheduleDefinitions(jobs: Registration['jobs']) {
   return jobs.flatMap((job) =>
     job.definition.schedule === undefined
@@ -473,6 +613,7 @@ export function createWorker(
       ? (globalThis as { caches?: CacheStorageLike }).caches
       : options.cacheStorage;
   const applications = new Map<string, Promise<Application>>();
+  const scopes = createRequestScopes();
   const identities = new WeakMap<object, number>();
   let nextIdentity = 0;
 
@@ -569,24 +710,27 @@ export function createWorker(
             },
           });
     let exporter = newExporter();
-    let untrackedReported = false;
-    const scopes = createScopes(
-      async () => {
-        const full = exporter;
-        if (full === undefined) return;
-        exporter = newExporter();
-        await full.flush();
-      },
-      () => {
-        if (untrackedReported) return;
-        untrackedReported = true;
-        try {
-          observability.log({ level: 'warn', event: 'cache.put_untracked' });
-        } catch {
-          return;
-        }
-      },
-    );
+    const untrackedReported = new Set<string>();
+    const flush = async (): Promise<void> => {
+      const full = exporter;
+      if (full === undefined) return;
+      exporter = newExporter();
+      await full.flush();
+    };
+    const track = (
+      event: 'cache.put_untracked' | 'deferred.untracked',
+      promise: Promise<unknown>,
+    ) => {
+      if (scopes.track(promise)) return;
+      promise.catch(() => undefined);
+      if (untrackedReported.has(event)) return;
+      untrackedReported.add(event);
+      try {
+        observability.log({ level: 'warn', event });
+      } catch {
+        return;
+      }
+    };
     const sink: ObsRecordSink = {
       emit(record) {
         const httpMetric = record.kind !== 'log' && record.name.startsWith('pb.http.');
@@ -595,7 +739,12 @@ export function createWorker(
       },
     };
     const registry = (templates: ReadonlySet<string>): ObsRegistry => ({
-      events: new Set<string>([...KERNEL_EVENTS, ...JOB_EVENTS, ...STARTUP_EVENTS]),
+      events: new Set<string>([
+        ...KERNEL_EVENTS,
+        ...AUDIT_EVENTS,
+        ...JOB_EVENTS,
+        ...STARTUP_EVENTS,
+      ]),
       reasonCodes: new Set<string>([...KERNEL_REASON_CODES, ...JOB_REASON_CODES]),
       routeTemplates: templates,
     });
@@ -616,7 +765,7 @@ export function createWorker(
       cache: createCacheApiAdapter(
         bound.cacheStorage,
         config.cache.namespace ?? DEFAULT_CACHE_NAMESPACE,
-        { metrics: observability, waitUntil: (promise) => scopes.track(promise) },
+        { metrics: observability, waitUntil: (promise) => track('cache.put_untracked', promise) },
       ),
       jobStore: Object.freeze({
         enqueue: enqueueAndNotify({
@@ -637,7 +786,7 @@ export function createWorker(
       }
     };
 
-    function attach(kernel: Kernel): Omit<Application, 'kernel'> {
+    function attach(kernel: Kernel): Omit<Application, 'kernel' | 'services'> {
       for (const template of kernel.routeTemplates) routeTemplates.add(template);
       current = createObservability(sink, scope, registry(routeTemplates));
       const consume = createQueueHandler({
@@ -687,7 +836,7 @@ export function createWorker(
           if (accepted.length > 0) await consume({ messages: accepted }, undefined);
         },
         scheduled: (event) => tick(event, undefined),
-        begin: scopes.begin,
+        flush,
         fail: (event, error) => reportJobEvent(observability, 'error', event, error),
       };
     }
@@ -704,7 +853,7 @@ export function createWorker(
       }
     }
 
-    return { platformServices, sink, deploymentId: bound.deploymentId, attach, failed };
+    return { platformServices, sink, deploymentId: bound.deploymentId, attach, failed, track };
   }
 
   async function build(env: Env | undefined): Promise<Application> {
@@ -717,7 +866,26 @@ export function createWorker(
     const organizations = createOrganizationRepository(executor);
     const resolveOrg = createOrgResolver(bootstrap);
 
-    const built = db === undefined ? undefined : await buildAuth(executor, plugins, env ?? {}, log);
+    let untrackedLogged = false;
+    const dispatch = (run: () => Promise<void>): void => {
+      const work = Promise.resolve().then(run);
+      if (services !== undefined) services.track('deferred.untracked', work);
+      else if (!scopes.track(work)) {
+        work.catch(() => undefined);
+        if (untrackedLogged) return;
+        untrackedLogged = true;
+        try {
+          log({ level: 'warn', event: 'deferred.untracked' });
+        } catch {
+          return;
+        }
+      }
+    };
+
+    const built =
+      db === undefined
+        ? undefined
+        : await buildAuth(executor as SqlExecutor, plugins, env ?? {}, log, dispatch);
     const registration = built?.registration ?? collectRegistrations(plugins);
     const auth = built?.auth;
     const services =
@@ -731,6 +899,14 @@ export function createWorker(
       ids: { ulid },
     };
 
+    const applicationServices: WorkerServices = Object.freeze({
+      providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
+      dispatch,
+      catalogue: createCatalogueReader(executor as SqlExecutor),
+      access: built?.access ?? null,
+    });
+    const authorization = options.authorization ?? auth?.authorization;
+
     try {
       const kernel = await createKernel({
         platform: 'cloudflare',
@@ -741,7 +917,7 @@ export function createWorker(
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
         ...(auth === undefined ? {} : { coreRoutes: auth.coreRoutes }),
-        ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
+        ...(authorization === undefined ? {} : { authorization }),
         ...(services === undefined
           ? { log }
           : {
@@ -755,10 +931,11 @@ export function createWorker(
       if (services === undefined)
         return {
           kernel,
-          begin: () => NO_SCOPE,
+          services: applicationServices,
+          flush: () => Promise.resolve(),
           fail: (event, error) => logJobFailure(log, event, error),
         };
-      return { kernel, ...services.attach(kernel) };
+      return { kernel, services: applicationServices, ...services.attach(kernel) };
     } catch (error) {
       services?.failed(error);
       throw error;
@@ -787,14 +964,42 @@ export function createWorker(
     return pending;
   }
 
-  function defer(scope: RequestScope, ctx: ExecutionContextLike | undefined): void {
-    scope.end();
-    if (ctx === undefined) return;
+  function defer(
+    scope: RequestScope,
+    application: Application,
+    ctx: ExecutionContextLike | undefined,
+  ): void {
+    if (ctx === undefined) {
+      void scope.settle();
+      return;
+    }
+    const finish = async (): Promise<void> => {
+      await scope.settle();
+      try {
+        await application.flush();
+      } catch {
+        return;
+      }
+    };
     try {
-      ctx.waitUntil(scope.settle().catch(() => undefined));
+      ctx.waitUntil(finish());
     } catch {
       return;
     }
+  }
+
+  function inScope<T>(
+    application: Application,
+    ctx: ExecutionContextLike | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return scopes.run(async (scope) => {
+      try {
+        return await work();
+      } finally {
+        defer(scope, application, ctx);
+      }
+    });
   }
 
   async function event(
@@ -813,17 +1018,16 @@ export function createWorker(
       onFailure();
       return;
     }
-    const scope = application.begin();
-    try {
-      const handler = pick(application);
-      if (handler === undefined) onFailure();
-      else await handler(input);
-    } catch (error) {
-      application.fail(failure, error);
-      onFailure();
-    } finally {
-      defer(scope, ctx);
-    }
+    await inScope(application, ctx, async () => {
+      try {
+        const handler = pick(application);
+        if (handler === undefined) onFailure();
+        else await handler(input);
+      } catch (error) {
+        application.fail(failure, error);
+        onFailure();
+      }
+    });
   }
 
   function retryBatch(batch: unknown): void {
@@ -842,14 +1046,16 @@ export function createWorker(
       } catch (error) {
         return withoutBodyForHead(request, errorResponse(error, requestId, log));
       }
-      const scope = application.begin();
-      try {
-        return await application.kernel.fetch(request);
-      } catch (error) {
-        return withoutBodyForHead(request, errorResponse(error, requestId, log));
-      } finally {
-        defer(scope, ctx);
-      }
+      return inScope(application, ctx, async () => {
+        try {
+          return await application.kernel.fetch(request);
+        } catch (error) {
+          return withoutBodyForHead(request, errorResponse(error, requestId, log));
+        }
+      });
+    },
+    async services(env?: Env): Promise<WorkerServices> {
+      return (await applicationFor(env)).services;
     },
     queue: (batch, env, ctx) =>
       event(

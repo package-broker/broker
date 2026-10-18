@@ -242,7 +242,14 @@ function currentHolderInput(): ProtectedHolderInput {
   return {
     kind: 'fresh',
     now: new Date().toISOString(),
-    providers: [{ provider: HOLDER_PROVIDER, anchor: ANCHOR, emailAuthoritative: true }],
+    providers: [
+      {
+        provider: HOLDER_PROVIDER,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      },
+    ],
     exclude: { identityId: ACTOR_IDENTITY },
   };
 }
@@ -1101,7 +1108,14 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       const [firstExecutor, secondExecutor] = gatedPair(pair.executor, other);
       const options = {
         holderInput: currentHolderInput,
-        providerAnchors: [{ provider: HOLDER_PROVIDER, anchor: ANCHOR, emailAuthoritative: true }],
+        providerAnchors: [
+          {
+            provider: HOLDER_PROVIDER,
+            anchor: ANCHOR,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
+          },
+        ],
       };
       const first = createGrantRepository(wrap(firstExecutor), options);
       const second = createGrantRepository(wrap(secondExecutor), options);

@@ -339,6 +339,33 @@ describe('distAttachStatements', () => {
     expect(await state()).toEqual(linked);
   });
 
+  it('scopes both live-blob reads in the attach UPDATE', async () => {
+    await database.executor.batch([
+      stmt('UPDATE blob SET org_id = ? WHERE id = ?', other.orgId, BLOB_A),
+    ]);
+    const plan = distAttachStatements(org, guard, {
+      versionId: VERSION,
+      revision: 4,
+      sha256: SHA_A,
+    });
+    const update = plan.statements[guard.length];
+    if (update === undefined) throw new Error('attach statement missing');
+    const before = await state();
+    const [result] = await database.executor.batch([update]);
+    expect(result?.changes).toBe(0);
+    expect(await state()).toEqual(before);
+  });
+
+  it('does not advance a foreign package referenced by an own version', async () => {
+    await database.executor.batch([
+      stmt('UPDATE package SET org_id = ? WHERE id = ?', other.orgId, PACKAGE),
+    ]);
+    const before = await state();
+    expect((await attach()).changed).toBe(true);
+    expect((await state()).rev).toBe(before.rev);
+    expect((await state()).modifiedAt).toBe(before.modifiedAt);
+  });
+
   it('refuses a guard built for another organization', () => {
     expect(() =>
       distAttachStatements(other, guard, { versionId: VERSION, revision: 4, sha256: SHA_A }),

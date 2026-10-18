@@ -7,7 +7,7 @@ A package registry broker for Composer and npm that runs on Cloudflare Workers o
 ## Prerequisites
 
 - Node 24 (see `.nvmrc`) and pnpm (`corepack enable`; the version is pinned in `package.json`).
-- For the Cloudflare runtime: a Cloudflare account on the Workers Paid plan.
+- For the Cloudflare runtime: a Cloudflare account on the Workers Paid plan, and the `nodejs_compat` compatibility flag on the Worker. The bundle imports `node:async_hooks` to scope deferred work to the request that started it; `packages/runtime-cloudflare/wrangler.toml` already sets the flag.
 
 ## Packages
 
@@ -37,6 +37,8 @@ pnpm pb build --config broker.config.ts --target cloudflare   # or --target node
 ```
 
 `pb build` validates the plugin set, writes `.pb/<target>/generated/manifest.ts` and `manifest.json`, and bundles the runtime entry for the target to `.pb/<target>/worker.js` (Cloudflare) or `.pb/<target>/server.js` (Node) with `metafile.json`.
+
+Plugin code may import only the `@package-broker/core` root and `@package-broker/core/plugin`. Every other `@package-broker/core/*` subpath is internal and may change in any release; an architecture test enforces this for the first-party plugins.
 
 `pnpm check:treeshake` builds the `minimal` fixture (`fixtures/minimal.config.ts`) and fails if any `plugin-*` package appears in its bundle.
 

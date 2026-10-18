@@ -46,6 +46,7 @@ export function createScopedAdmission(executor: ScalarSqlExecutor) {
         )
         .where(
           admissionCondition(
+            ctx,
             col('ps.project_id'),
             col('src.id'),
             sql.val(query.key),

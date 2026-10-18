@@ -10,7 +10,12 @@ import { SOURCE_ERROR_CODES, createSourceRepository, dueStatement } from './sour
 import type { NewSource, SourceRepository } from './source.js';
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 
 const NOW = '2026-10-15T12:00:00.000Z';

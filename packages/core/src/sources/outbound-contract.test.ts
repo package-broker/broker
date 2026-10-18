@@ -194,19 +194,20 @@ describe('redirect chains', () => {
     expect(six.hops).toHaveLength(6);
   });
 
-  it('refuses an https to http downgrade even toward an allowlisted http host', async () => {
+  it('refuses an https to http downgrade even toward a host with an explicit port entry', async () => {
     const allowing = createOutboundPolicy({
       allowPrivateHosts: ['plain.example.com:80'],
       runtime: 'node',
       selfOrigins: [],
     });
     const direct = upstream({ 'http://plain.example.com/x': ok }, allowing);
-    expect((await direct.fetch(get('http://plain.example.com/x'))).status).toBe(200);
+    expect(await refusal(direct.fetch(get('http://plain.example.com/x')))).toBe('scheme');
+    expect(direct.hops).toHaveLength(0);
     const { hops, fetch } = upstream(
       { [`${BOUND}/p`]: to('http://plain.example.com/x'), 'http://plain.example.com/x': ok },
       allowing,
     );
-    expect(await refusal(fetch(get(`${BOUND}/p`)))).toBe('downgrade');
+    expect(await refusal(fetch(get(`${BOUND}/p`)))).toBe('scheme');
     expect(hops).toHaveLength(1);
   });
 

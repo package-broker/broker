@@ -17,7 +17,6 @@ export const MAX_UPDATE_VERSIONS_PER_CALL = CATALOGUE_SYNC_VERSIONS_PER_CALL;
 const MAX_BATCH_PARAMETER_BYTES = 4 * 1024 * 1024;
 const CONTROL = /\p{Cc}/u;
 const ENCODER = new TextEncoder();
-const NOW = sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
 
 export interface VersionUpdateRequest {
   readonly packageId: string;
@@ -260,7 +259,6 @@ export function versionUpdateStatements(
               dist_type: input.distType,
               revision: sql<number>`version.revision + 1`,
               last_op_id: opId,
-              updated_at: NOW,
             })
             .where(slot)
             .where(
@@ -293,7 +291,6 @@ export function versionUpdateStatements(
         deprecated_message: metadata.deprecatedMessage,
         upstream_released_at: input.upstreamReleasedAt,
         last_op_id: opId,
-        updated_at: NOW,
       })
       .where(slot)
       .where(deprecationDiffers);

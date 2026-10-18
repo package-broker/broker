@@ -17,7 +17,7 @@
     "!dist/**/*.test.*"
   ],
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@tailwindcss/cli": "catalog:",

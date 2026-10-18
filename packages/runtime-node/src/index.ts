@@ -1,10 +1,40 @@
 import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
-import { createAuthModule } from '@package-broker/core/auth/module';
+import { createAuthModule, type AuthModule } from '@package-broker/core/auth/module';
+import type { SessionService } from '@package-broker/core/auth/session';
+import {
+  createPersonalTokenService,
+  type PersonalTokenService,
+} from '@package-broker/core/authz/pat-service';
+import {
+  createProjectAdministration,
+  type ProjectAdministration,
+} from '@package-broker/core/authz/project-administration';
+import { createProjectLister, type ProjectLister } from '@package-broker/core/authz/project-list';
+import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
+import {
+  createProjectService,
+  type ProjectService,
+} from '@package-broker/core/authz/project-service';
+import {
+  createServicePrincipalService,
+  type ServicePrincipalService,
+} from '@package-broker/core/authz/service-principal-service';
+import {
+  createServiceTokenService,
+  type ServiceTokenService,
+} from '@package-broker/core/authz/service-token-service';
+import type { TokenReader } from '@package-broker/core/authz/token-read';
+import {
+  createTokenRevokeService,
+  type TokenRevokeService,
+} from '@package-broker/core/authz/token-revoke';
 import { deferredDispatch } from '@package-broker/core/authz/token-use';
+import type { CatalogueReader } from '@package-broker/core/db/catalogue';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import {
-  createProviderAnchorReader,
+  providerAnchorsOf,
+  type ConfiguredProviderAnchor,
   type ProviderAnchorReader,
 } from '@package-broker/core/identity/provider-anchors';
 import { scopedEnv, buildIdentityProviders } from '@package-broker/core/identity/providers';
@@ -18,13 +48,23 @@ import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import type { Registration } from '@package-broker/core/kernel/registry';
-import type { PluginDefinition, PluginPorts, RouteDefinition } from '@package-broker/core/plugin';
+import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
+import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
 } from '@package-broker/db-sqlite/repositories/organization';
+import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
+import { createProjectGrantRepository } from '@package-broker/db-sqlite/repositories/project-grant';
+import { createReadableProjectRepository } from '@package-broker/db-sqlite/repositories/project-readable';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { createServicePrincipalAuthority } from '@package-broker/db-sqlite/repositories/service-principal-authority';
+import { createTokenRepository } from '@package-broker/db-sqlite/repositories/token';
+import { createTokenReader } from '@package-broker/db-sqlite/repositories/token-read';
+import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
 
 export interface NodeAuthOptions {
   readonly keyring: Keyring;
@@ -42,9 +82,26 @@ export interface NodeServerOptions {
   readonly authorization?: AuthorizationEngine;
 }
 
+/** The step 5 domain services; PB-32 resolves each one from here. */
+export interface NodeAccessServices {
+  readonly engine: AuthorizationEngine;
+  readonly sessions: SessionService;
+  readonly projects: ProjectService;
+  readonly projectGrants: ProjectAdministration;
+  readonly projectList: ProjectLister;
+  readonly personalTokens: PersonalTokenService;
+  readonly servicePrincipals: ServicePrincipalService;
+  readonly serviceTokens: ServiceTokenService;
+  readonly tokenRevoke: TokenRevokeService;
+  readonly tokenList: TokenReader;
+}
+
 export interface NodeServices {
   readonly providerAnchors: ProviderAnchorReader;
   readonly dispatch: (run: () => Promise<void>) => void;
+  readonly catalogue: Pick<CatalogueReader, 'resolveVersions'>;
+  /** Null when the runtime has no auth options. */
+  readonly access: NodeAccessServices | null;
 }
 
 export interface NodeBroker {
@@ -66,29 +123,139 @@ function rejectingExecutor(): SqlExecutor {
   return { driver: 'node-sqlite', all: unavailable, batch: unavailable };
 }
 
-function authRoutes(
+function wired<T>(name: string, value: T | undefined): T {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError(`${name} is not wired`);
+  }
+  return value;
+}
+
+function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchorReader {
+  return Object.freeze({ anchors: () => Promise.resolve(list) });
+}
+
+interface AccessAssembly {
+  readonly module: AuthModule;
+  readonly providerAnchors: ProviderAnchorReader;
+  readonly services: NodeAccessServices;
+}
+
+async function assembleAccess(
   registration: Registration,
   plugins: readonly PluginDefinition[],
   auth: NodeAuthOptions,
   executor: SqlExecutor,
   log: KernelLog,
-): { readonly routes: readonly RouteDefinition[]; readonly providerAnchors: ProviderAnchorReader } {
+): Promise<AccessAssembly> {
+  await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) => fetch(request),
     clock: systemClock,
     env: scopedEnv(auth.env),
   });
-  const routes = createAuthModule({
+  const anchorList = providerAnchorsOf(providers);
+  const providerAnchors = anchorReader(anchorList);
+  const ids = { ulid };
+
+  const module = createAuthModule({
     repositories: createAuthRepositories(executor),
     keyring: auth.keyring,
     clock: systemClock,
-    ids: { ulid },
+    ids,
     publicOrigin: auth.publicOrigin,
     providers,
     hooks: registration.hooks,
     log,
-  }).coreRoutes;
-  return { routes, providerAnchors: createProviderAnchorReader(providers) };
+    access: {
+      access: wired('access repository', createAccessRepository(executor)),
+      providerAnchors: providerAnchors.anchors,
+      dispatch: deferredDispatch,
+    },
+    unlink: {
+      unlinks: wired(
+        'unlink repository',
+        createUnlinkRepository(executor, {
+          holderInput: () => ({
+            kind: 'fresh',
+            now: systemClock.now().toISOString(),
+            providers: anchorList,
+          }),
+        }),
+      ),
+      providers: providerAnchors,
+    },
+  });
+
+  const projectRepository = wired(
+    'project repository',
+    createProjectRepository(executor, {
+      reservedSlugs: reservedFirstSegments([...registration.routes, ...module.coreRoutes]),
+      providerAnchors: anchorList,
+    }),
+  );
+  const tokenRepository = wired('token repository', createTokenRepository(executor));
+  const principalRepository = wired(
+    'service principal repository',
+    createServicePrincipalRepository(executor),
+  );
+  const authority = wired(
+    'service principal authority',
+    createServicePrincipalAuthority({ executor, providerAnchors: anchorList }),
+  );
+  const organizations = wired('organization repository', createOrganizationRepository(executor));
+  const common = { clock: systemClock, ids, log };
+
+  const services: NodeAccessServices = Object.freeze({
+    engine: module.authorization,
+    sessions: module.sessions,
+    projects: createProjectService({ projects: projectRepository, ...common }),
+    projectGrants: createProjectAdministration({
+      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      providers,
+      providerAnchors: anchorList,
+      ...common,
+    }),
+    projectList: createProjectLister({
+      source: projectRepository,
+      readable: wired(
+        'readable project repository',
+        createReadableProjectRepository(executor, { providerAnchors: anchorList }),
+      ),
+    }),
+    personalTokens: createPersonalTokenService({
+      tokens: tokenRepository,
+      sessions: module.sessions,
+      organizations,
+      providers: providerAnchors,
+      keyring: auth.keyring,
+      ...common,
+    }),
+    servicePrincipals: createServicePrincipalService({
+      principals: principalRepository,
+      authority,
+      directory: principalRepository,
+      ...common,
+    }),
+    serviceTokens: createServiceTokenService({
+      tokens: tokenRepository,
+      principals: principalRepository,
+      authority,
+      sessions: module.sessions,
+      organizations,
+      providers: providerAnchors,
+      keyring: auth.keyring,
+      ...common,
+    }),
+    tokenRevoke: createTokenRevokeService({
+      tokens: tokenRepository,
+      authority,
+      ownership: tokenRepository,
+      clock: systemClock,
+      log,
+    }),
+    tokenList: wired('token reader', createTokenReader(executor)),
+  });
+  return { module, providerAnchors, services };
 }
 
 export function createNodeServer(
@@ -110,8 +277,11 @@ export function createNodeServer(
   const { auth } = options;
   const application = (async () => {
     const registration = collectRegistrations(plugins);
-    const built =
-      auth === undefined ? undefined : authRoutes(registration, plugins, auth, executor, log);
+    const access =
+      auth === undefined
+        ? undefined
+        : await assembleAccess(registration, plugins, auth, executor, log);
+    const authorization = options.authorization ?? access?.module.authorization;
     const kernel = await createKernel({
       platform: 'node',
       plugins,
@@ -124,12 +294,14 @@ export function createNodeServer(
       ...(options.platformServices === undefined
         ? {}
         : { platformServices: options.platformServices }),
-      ...(built === undefined ? {} : { coreRoutes: built.routes }),
-      ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
+      ...(access === undefined ? {} : { coreRoutes: access.module.coreRoutes }),
+      ...(authorization === undefined ? {} : { authorization }),
     });
     const services: NodeServices = Object.freeze({
-      providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
+      providerAnchors: access?.providerAnchors ?? NO_ANCHORS,
       dispatch: deferredDispatch,
+      catalogue: createCatalogueReader(executor),
+      access: access?.services ?? null,
     });
     return { kernel, services };
   })();

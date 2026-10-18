@@ -42,6 +42,10 @@
       "types": "./dist/repositories/*.d.ts",
       "default": "./dist/repositories/*.js"
     },
+    "./contract/access-contract": {
+      "types": "./dist/contract/access-contract.d.ts",
+      "default": "./dist/contract/access-contract.js"
+    },
     "./contract/auth-contract": {
       "types": "./dist/contract/auth-contract.d.ts",
       "default": "./dist/contract/auth-contract.js"
@@ -53,6 +57,10 @@
     "./contract/cache-contract": {
       "types": "./dist/contract/cache-contract.d.ts",
       "default": "./dist/contract/cache-contract.js"
+    },
+    "./contract/catalogue-contract": {
+      "types": "./dist/contract/catalogue-contract.d.ts",
+      "default": "./dist/contract/catalogue-contract.js"
     },
     "./contract/catalogue-read-contract": {
       "types": "./dist/contract/catalogue-read-contract.d.ts",

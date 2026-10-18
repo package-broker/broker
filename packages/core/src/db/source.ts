@@ -189,6 +189,11 @@ export interface SourceRepository {
     | 'conflict'
     | 'indeterminate'
   >;
+  hasAttachedProxy(
+    ctx: OrgContext,
+    projectId: string,
+    ecosystem: SourceEcosystem,
+  ): Promise<boolean>;
   get(ctx: OrgContext, id: string): Promise<SourceRecord | null>;
   /** Non-paused sources with `next_poll_at` reached on database time, oldest first. `limit` is an integer from 1 to 50. */
   listDue(ctx: OrgContext, limit: number): Promise<SourceRecord[]>;

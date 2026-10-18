@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SESSION_COOKIE } from '../auth/cookies.js';
 import * as catalogueModule from '../authz/catalogue.js';
-import * as engineModule from '../authz/engine.js';
+import * as packageActorModule from '../internal/package-actor.js';
 import { accessContextOf } from '../authz/access-context.js';
 import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
 import type { EngineSessionAccess, EngineTokenAccess } from '../authz/engine.js';
@@ -15,7 +15,8 @@ import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
 import type { AuthorizationEngine } from './authorize.js';
 import { createKernel } from './kernel.js';
-import { resolvedPackageOf, setResolvedPackage } from './package-context.js';
+import { resolvedPackageOf } from './package-context.js';
+import { setResolvedPackage } from '../internal/package-context.js';
 
 const org = orgContext('org-1');
 const read = 'project:packages:read';
@@ -468,7 +469,7 @@ describe('package boundary resolution', () => {
     const actorSpy =
       kind === 'missing grant'
         ? null
-        : vi.spyOn(engineModule, 'packageActorOf').mockReturnValue(
+        : vi.spyOn(packageActorModule, 'packageActorOf').mockReturnValue(
             kind === 'missing actor'
               ? null
               : {

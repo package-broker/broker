@@ -1,3 +1,4 @@
+import { packageActorOf } from '../internal/package-actor.js';
 import { describe, expect, it, vi } from 'vitest';
 import * as catalogueModule from './catalogue.js';
 import { SESSION_COOKIE } from '../auth/cookies.js';
@@ -6,7 +7,7 @@ import type { AuthorizationRequest } from '../kernel/authorize.js';
 import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
-import { createAuthorizationEngine, packageActorOf, patValidationGate } from './engine.js';
+import { createAuthorizationEngine, patValidationGate } from './engine.js';
 import type { EngineTokenAccess } from './engine.js';
 
 const read = 'project:packages:read';

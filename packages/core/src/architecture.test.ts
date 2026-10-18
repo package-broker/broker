@@ -96,7 +96,9 @@ function fileKind(relativePath: string): FileKind {
   const inPackage = rest.join('/');
   if (inPackage.endsWith('.test.ts')) return 'test';
   if (pkg === 'db-sqlite' && /^src\/(contract|testing)\//.test(inPackage)) return 'kit';
-  if (inPackage.startsWith('scripts/')) return 'script';
+  if (inPackage.startsWith('scripts/') || (pkg === 'ui' && /^build\.[cm]?js$/.test(inPackage))) {
+    return 'script';
+  }
   return 'source';
 }
 
@@ -267,6 +269,13 @@ function sourceFiles(pkg: string): string[] {
   const files: string[] = [];
   walk(path.join(root, 'src'), ['.ts', '.tsx'], files);
   walk(path.join(root, 'scripts'), ['.mjs'], files);
+  if (pkg === 'ui') {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (entry.isFile() && /\.(?:[cm]?js|tsx?)$/.test(entry.name)) {
+        files.push(path.join(root, entry.name));
+      }
+    }
+  }
   return files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/')).sort();
 }
 
@@ -401,6 +410,32 @@ describe('classifier', () => {
     expect(findViolations('packages/ui/scripts/build.mjs', "import 'lodash';")).toHaveLength(1);
   });
 
+  it('discovers ui root config files and the configured build entry', () => {
+    const files = sourceFiles('ui');
+    expect(files).toContain('packages/ui/tailwind.config.js');
+    const manifest = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, 'packages/ui/package.json'), 'utf8'),
+    ) as { scripts: { build: string } };
+    const entry = manifest.scripts.build.split(' ')[1];
+    expect(entry).toBeTruthy();
+    expect(files).toContain(`packages/ui/${entry}`);
+  });
+
+  it('reports forbidden imports in the ui tailwind config', () => {
+    expect(
+      format(findViolations('packages/ui/tailwind.config.js', "import 'better-sqlite3';")),
+    ).toEqual([
+      'packages/ui/tailwind.config.js:1: better-sqlite3 (ui must not import better-sqlite3 from a source file)',
+    ]);
+  });
+
+  it('checks a root ui build entry as a script', () => {
+    expect(findViolations('packages/ui/build.mjs', "import 'node:fs'; import 'esbuild';")).toEqual(
+      [],
+    );
+    expect(findViolations('packages/ui/build.mjs', "import 'better-sqlite3';")).toHaveLength(1);
+  });
+
   it('applies the cli workspace wildcard to workspace packages only', () => {
     const file = 'packages/cli/src/a.ts';
     expect(findViolations(file, "import '@package-broker/runtime-node/entry';")).toEqual([]);
@@ -519,8 +554,13 @@ const ACCESS_CONTEXT_RULE: ImportRule = {
       'organizationActorOf',
       'authenticatedActorOf',
     ],
-    'packages/core/src/authz/engine': ['engineGrantOf', 'packageActorOf'],
-    'packages/core/src/kernel/package-context': ['setResolvedPackage'],
+    'packages/core/src/authz/engine': ['engineGrantOf'],
+    'packages/core/src/internal/package-actor': [
+      'packageActorOf',
+      'setPackageActor',
+      'clearPackageActor',
+    ],
+    'packages/core/src/internal/package-context': ['setResolvedPackage'],
   },
   allowedRoots: [
     'packages/core/src/',

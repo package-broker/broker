@@ -62,6 +62,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
       .mockResolvedValue({ id: 'credential', statement: { sql: 'sealed', params: [] } }),
     put: vi.fn().mockResolvedValue('credential'),
   };
+  const credentialRepository = { get: vi.fn().mockResolvedValue(null) };
   const catalogue = {
     previewWinners: vi.fn().mockResolvedValue([
       { sourceId: 'own', eligible: false, projectLevel: true },
@@ -77,16 +78,195 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     organizations,
     registeredNames,
     credentials,
+    credentialRepository,
     catalogue,
     policy: { runtime, allowPrivateHosts, selfOrigins: ['https://broker.example.com'] },
     ids: { ulid: () => 'source' },
     providerAnchors: [],
     log,
   } satisfies SourceServiceDeps);
-  return { service, sources, organizations, registeredNames, credentials, catalogue, log };
+  return {
+    service,
+    sources,
+    organizations,
+    registeredNames,
+    credentials,
+    credentialRepository,
+    catalogue,
+    log,
+  };
 }
 
 describe('source administration', () => {
+  it('links an existing credential id without preparing a credential', async () => {
+    const { service, sources, credentials, credentialRepository } = setup();
+    credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'bearer' });
+    expect((await service.create(ctx, org, fence, { ...input, credentialId: 'existing' })).ok).toBe(
+      true,
+    );
+    expect(credentials.prepare).not.toHaveBeenCalled();
+    expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
+    const created = sources.create.mock.calls[0]?.[2] as { credential: unknown };
+    expect(created.credential).toStrictEqual({ id: 'existing' });
+    expect(created).not.toHaveProperty('credentialId');
+  });
+
+  it('refuses plaintext together with a credential id', async () => {
+    const { service, sources, credentials } = setup();
+    expect(
+      await service.create(ctx, org, fence, {
+        ...input,
+        credential: { kind: 'bearer', plaintext: JSON.stringify({ token: 'long-enough-token' }) },
+        credentialId: 'existing',
+      }),
+    ).toMatchObject({ ok: false, error: 'invalid_config', problems: [{ field: 'credential' }] });
+    expect(sources.create).not.toHaveBeenCalled();
+    expect(credentials.prepare).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['github_app', true],
+    ['bearer', false],
+  ] as const)('checks the kind of a linked GitHub App credential (%s)', async (kind, allowed) => {
+    const { service, sources, credentialRepository } = setup();
+    credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind });
+    const result = await service.create(ctx, org, fence, {
+      ...input,
+      type: 'vcs',
+      url: null,
+      configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+      credentialId: 'existing',
+    });
+    expect(result.ok).toBe(allowed);
+    expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
+    expect(sources.create).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    if (!allowed) expect(result).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+  });
+
+  it('refuses a GitHub App credential for a project source', async () => {
+    const { service, sources, credentialRepository } = setup();
+    credentialRepository.get.mockResolvedValue({
+      id: 'existing',
+      projectId: null,
+      kind: 'github_app',
+    });
+    expect(
+      await service.create(ctx, project, fence, {
+        ...input,
+        projectId: 'project-a',
+        type: 'vcs',
+        url: null,
+        configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+        credentialId: 'existing',
+      }),
+    ).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+    expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
+    expect(sources.create).not.toHaveBeenCalled();
+  });
+
+  it('answers a missing GitHub App credential like a wrong kind', async () => {
+    const { service, credentialRepository } = setup();
+    const github = {
+      ...input,
+      type: 'vcs' as const,
+      url: null,
+      configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+      credentialId: 'existing',
+    };
+    credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'bearer' });
+    const wrongKind = await service.create(ctx, org, fence, github);
+    credentialRepository.get.mockResolvedValue(null);
+    expect(await service.create(ctx, org, fence, github)).toEqual(wrongKind);
+  });
+
+  it.each([
+    ['query', 'composer_repository', 'node', true],
+    ['query', 'composer_repository', 'cloudflare', true],
+    ['query', 'npm_registry', 'node', false],
+    ['query', 'vcs', 'node', false],
+    ['query', 'packagist_proxy', 'node', false],
+    ['query', 'npmjs_proxy', 'node', false],
+    ['ssh_key', 'composer_repository', 'node', true],
+    ['ssh_key', 'composer_repository', 'cloudflare', false],
+    ['github_app', 'composer_repository', 'node', false],
+    ['github_app', 'npm_registry', 'node', false],
+    ['github_app', 'vcs', 'node', false],
+    ['github_app', 'packagist_proxy', 'node', false],
+    ['github_app', 'npmjs_proxy', 'node', false],
+  ] as const)('validates linked %s for %s on %s', async (kind, type, runtime, allowed) => {
+    const { service, sources, credentials, credentialRepository } = setup(runtime);
+    credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind });
+    const result = await service.create(ctx, org, fence, {
+      ...input,
+      type,
+      ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
+      url: type === 'vcs' ? null : kind === 'query' ? `${input.url}?key=discarded` : input.url,
+      configJson:
+        type === 'vcs'
+          ? JSON.stringify({ provider: 'git', repository: 'https://git.example.com/repo' })
+          : '{}',
+      credentialId: 'existing',
+    });
+    expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
+    expect(credentials.prepare).not.toHaveBeenCalled();
+    expect(sources.create).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    if (allowed) {
+      expect(result).toMatchObject({ ok: true });
+      expect(sources.create.mock.calls[0]?.[2]).toMatchObject({
+        url: input.url,
+        credential: { id: 'existing' },
+      });
+    } else {
+      expect(result).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+    }
+  });
+
+  it('refuses missing credentials for a non-GitHub source before persistence', async () => {
+    const { service, sources, credentialRepository } = setup();
+    expect(await service.create(ctx, org, fence, { ...input, credentialId: 'missing' })).toEqual({
+      ok: false,
+      error: 'credential_scope_mismatch',
+    });
+    expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'missing');
+    expect(sources.create).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'treats a null credentialId as absent (plaintext: %s)',
+    async (plaintext) => {
+      const { service, sources, credentials, credentialRepository } = setup();
+      expect(
+        await service.create(ctx, org, fence, {
+          ...input,
+          credentialId: null,
+          ...(plaintext
+            ? { credential: { kind: 'bearer' as const, plaintext: '{"token":"shared-token"}' } }
+            : {}),
+        }),
+      ).toMatchObject({ ok: true });
+      expect(credentialRepository.get).not.toHaveBeenCalled();
+      expect(credentials.prepare).toHaveBeenCalledTimes(plaintext ? 1 : 0);
+      expect(sources.create.mock.calls[0]?.[2]).toMatchObject({
+        credential: plaintext ? { id: 'credential' } : null,
+      });
+    },
+  );
+
+  it('treats a null credentialId as absent when the source forbids credentials', async () => {
+    const { service, sources, credentialRepository } = setup();
+    expect(
+      await service.create(ctx, org, fence, {
+        ...input,
+        type: 'npmjs_proxy',
+        ecosystem: 'npm',
+        url: 'https://registry.npmjs.org',
+        credentialId: null,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(credentialRepository.get).not.toHaveBeenCalled();
+    expect(sources.create.mock.calls[0]?.[2]).toMatchObject({ credential: null });
+  });
+
   it.each([
     ['cloudflare', [], false],
     ['cloudflare', ['10.0.0.1'], false],

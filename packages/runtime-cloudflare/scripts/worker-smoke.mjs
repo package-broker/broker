@@ -208,6 +208,7 @@ async function run() {
         modules: true,
         scriptPath: basename(workerScript),
         compatibilityDate: '2026-10-01',
+        compatibilityFlags: ['nodejs_compat'],
         d1Databases: ['DB'],
         r2Buckets: ['STORAGE'],
         queueProducers: { JOBS: 'pb-smoke-jobs' },

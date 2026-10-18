@@ -72,71 +72,111 @@ export function builderNames(
   return names;
 }
 
-const NO_ORG_COLUMN = 'builds no organization-scoped read or write';
-const UNREGISTERED = 'organization scoping not yet registered in the mutation table';
+const productionAccessFactories: ReadonlySet<string> = new Set([
+  'repositories/project.ts#createProjectRepository',
+  'repositories/project-grant.ts#createProjectGrantRepository',
+  'repositories/service-principal-authority.ts#createServicePrincipalAuthority',
+  'repositories/unlink.ts#createUnlinkRepository',
+  'repositories/access.ts#createAccessRepository',
+  'repositories/token-read.ts#createTokenReader',
+  'repositories/organization.ts#createOrganizationRepository',
+  'repositories/project-readable.ts#createReadableProjectRepository',
+  'repositories/token.ts#createTokenRepository',
+  'repositories/auth.ts#createAuthRepositories',
+  'repositories/service-principal.ts#createServicePrincipalRepository',
+]);
 
-/** Exported builders that are not in `mutationTable`, each with the reason. */
+/** Factories still awaiting semantic cases, and builders with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
-  // Factory methods are scanned too; these remain explicit work for subsequent rounds.
-  'repositories/blob-access.ts#createBlobAccessRepository': UNREGISTERED,
-  'repositories/project.ts#createProjectRepository': UNREGISTERED,
-  'repositories/fetch-lease.ts#createFetchLeases': UNREGISTERED,
-  'repositories/visibility-subset.ts#createVisibilitySubsetRepository': UNREGISTERED,
-  'repositories/blob.ts#createBlobRepository': UNREGISTERED,
-  'repositories/credential.ts#createCredentialRepository': UNREGISTERED,
-  'repositories/source.ts#createSourceRepository': UNREGISTERED,
-  'repositories/ingest-session.ts#createIngestSessionWriteGuard': UNREGISTERED,
-  'repositories/ingest-session.ts#createIngestSessions': UNREGISTERED,
-  'repositories/ingest-session.ts#createIngestSessionMaintenance': UNREGISTERED,
-  'repositories/project-grant.ts#createProjectGrantRepository': UNREGISTERED,
-  'repositories/catalogue-lookup.ts#createCatalogueLookup': UNREGISTERED,
-  'repositories/registered-name.ts#createRegisteredNameRepository': UNREGISTERED,
-  'repositories/upstream-state.ts#createUpstreamStateRepository': UNREGISTERED,
-  'repositories/blob-references.ts#createBlobReferenceReader': UNREGISTERED,
-  'repositories/login.ts#createLoginWriter': UNREGISTERED,
-  'repositories/service-principal-authority.ts#createServicePrincipalAuthority': UNREGISTERED,
-  'repositories/unlink.ts#createUnlinkRepository': UNREGISTERED,
-  'repositories/closure-edges.ts#createClosureEdges': UNREGISTERED,
-  'repositories/representation-clock.ts#createRepresentationClock': UNREGISTERED,
-  'repositories/proxy-admission.ts#createProxyAdmission': UNREGISTERED,
-  'repositories/scoped-admission.ts#createScopedAdmission': UNREGISTERED,
-  'repositories/job-schedule.ts#createJobScheduleRepository': UNREGISTERED,
-  'repositories/catalogue-list.ts#createCatalogueList': UNREGISTERED,
-  'repositories/grant.ts#createGrantRepository': UNREGISTERED,
-  'repositories/role.ts#createRoleRepository': UNREGISTERED,
-  'repositories/session.ts#createSessionRepository': UNREGISTERED,
-  'repositories/access.ts#createAccessRepository': UNREGISTERED,
-  'repositories/catalogue-dist.ts#createDistResolver': UNREGISTERED,
-  'repositories/identity-block.ts#createIdentityBlockRepository': UNREGISTERED,
-  'repositories/token-read.ts#createTokenReader': UNREGISTERED,
-  'repositories/job.ts#createJobRepository': UNREGISTERED,
-  'repositories/local-login-success.ts#createLocalLoginSuccessWriter': UNREGISTERED,
-  'repositories/catalogue-read.ts#createCatalogueReader': UNREGISTERED,
-  'repositories/organization.ts#createOrganizationRepository': UNREGISTERED,
-  'repositories/organization.ts#createOrganizationBootstrap': UNREGISTERED,
-  'repositories/existing-versions.ts#createExistingVersionsReader': UNREGISTERED,
-  'repositories/project-readable.ts#createReadableProjectRepository': UNREGISTERED,
-  'repositories/local-login.ts#createLocalLoginReader': UNREGISTERED,
-  'repositories/local-login-setup.ts#createLocalLoginSetupWriter': UNREGISTERED,
-  'repositories/token.ts#createTokenRepository': UNREGISTERED,
-  'repositories/user.ts#createUserRepository': UNREGISTERED,
-  'repositories/auth.ts#createAuthRepositories': UNREGISTERED,
-  'repositories/cache-epoch.ts#createCacheEpochRepository': UNREGISTERED,
-  'repositories/service-principal.ts#createServicePrincipalRepository': UNREGISTERED,
-  'repositories/visibility-attach.ts#createVisibilityAttachRepository': UNREGISTERED,
+  'repositories/blob-access.ts#createBlobAccessRepository':
+    'DEFERRED: blob authorization read paths need independent child fixtures; owner T782n follow-up',
+  'repositories/fetch-lease.ts#createFetchLeases':
+    'DEFERRED: factory acquire, renew and release paths exceed the registered guard cases; owner T782n follow-up',
+  'repositories/visibility-subset.ts#createVisibilitySubsetRepository':
+    'DEFERRED: visibility subset readers need foreign package and source fixtures; owner T782n follow-up',
+  'repositories/blob.ts#createBlobRepository':
+    'DEFERRED: blob writes and lease lifecycle need independent child fixtures; owner T782n follow-up',
+  'repositories/credential.ts#createCredentialRepository':
+    'DEFERRED: credential lifecycle needs foreign user and credential fixtures; owner T782n follow-up',
+  'repositories/source.ts#createSourceRepository':
+    'DEFERRED: source factory reads and writes exceed the registered source guard case; owner T782n follow-up',
+  'repositories/ingest-session.ts#createIngestSessionWriteGuard':
+    'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
+  'repositories/ingest-session.ts#createIngestSessions':
+    'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
+  'repositories/ingest-session.ts#createIngestSessionMaintenance':
+    'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
+  'repositories/catalogue-lookup.ts#createCatalogueLookup':
+    'DEFERRED: lookup adapter needs executable foreign winner fixtures; owner T782n follow-up',
+  'repositories/registered-name.ts#createRegisteredNameRepository':
+    'DEFERRED: factory lookup paths exceed the registered name statements; owner T782n follow-up',
+  'repositories/upstream-state.ts#createUpstreamStateRepository':
+    'DEFERRED: upstream state transitions need foreign package fixtures; owner T782n follow-up',
+  'repositories/blob-references.ts#createBlobReferenceReader':
+    'DEFERRED: reference reader adapter exceeds the registered statement case; owner T782n follow-up',
+  'repositories/login.ts#createLoginWriter':
+    'DEFERRED: login writer needs foreign identity and user fixtures; owner T782n follow-up',
+  'repositories/closure-edges.ts#createClosureEdges':
+    'DEFERRED: closure edge lifecycle needs foreign project and package fixtures; owner T782n follow-up',
+  'repositories/representation-clock.ts#createRepresentationClock':
+    'DEFERRED: representation clock reads need foreign package fixtures; owner T782n follow-up',
+  'repositories/proxy-admission.ts#createProxyAdmission':
+    'DEFERRED: factory admission lifecycle exceeds admittedProxySources registration; owner T782n follow-up',
+  'repositories/scoped-admission.ts#createScopedAdmission':
+    'DEFERRED: scoped admission needs foreign lease and session fixtures; owner T782n follow-up',
+  'repositories/job-schedule.ts#createJobScheduleRepository':
+    'DEFERRED: job schedule writes need foreign source fixtures; owner T782n follow-up',
+  'repositories/catalogue-list.ts#createCatalogueList':
+    'DEFERRED: catalogue list readers need independent foreign winner fixtures; owner T782n follow-up',
+  'repositories/grant.ts#createGrantRepository':
+    'DEFERRED: organization grant lifecycle needs foreign role and subject fixtures; owner T782n follow-up',
+  'repositories/role.ts#createRoleRepository':
+    'DEFERRED: role factory writes exceed seedDefaultsStatements registration; owner T782n follow-up',
+  'repositories/session.ts#createSessionRepository':
+    'DEFERRED: session factory lifecycle exceeds the registered session statements; owner T782n follow-up',
+  'repositories/catalogue-dist.ts#createDistResolver':
+    'DEFERRED: dist resolver needs foreign version and blob fixtures; owner T782n follow-up',
+  'repositories/identity-block.ts#createIdentityBlockRepository':
+    'DEFERRED: identity blocking needs foreign subject and issuer fixtures; owner T782n follow-up',
+  'repositories/job.ts#createJobRepository':
+    'DEFERRED: job lifecycle needs foreign source and lease fixtures; owner T782n follow-up',
+  'repositories/local-login-success.ts#createLocalLoginSuccessWriter':
+    'DEFERRED: local login success writes need foreign user and credential fixtures; owner T782n follow-up',
+  'repositories/catalogue-read.ts#createCatalogueReader':
+    'DEFERRED: catalogue reader factory exceeds visibleWinner registration; owner T782n follow-up',
+  'repositories/organization.ts#createOrganizationBootstrap':
+    'REDUNDANT_BY_SCHEMA: 0001_init.sql organization_singleton UNIQUE (singleton), CHECK (singleton = 1); bootstrap selects the installation singleton rather than an organization context',
+  'repositories/existing-versions.ts#createExistingVersionsReader':
+    'DEFERRED: existing version reader needs foreign package fixtures; owner T782n follow-up',
+  'repositories/local-login.ts#createLocalLoginReader':
+    'DEFERRED: local login reader needs foreign user and credential fixtures; owner T782n follow-up',
+  'repositories/local-login-setup.ts#createLocalLoginSetupWriter':
+    'DEFERRED: local login setup writes need foreign user and credential fixtures; owner T782n follow-up',
+  'repositories/user.ts#createUserRepository':
+    'DEFERRED: user factory methods beyond the auth getIdentity case need separate fixtures; owner T782n follow-up',
+  'repositories/cache-epoch.ts#createCacheEpochRepository':
+    'DEFERRED: epoch repository adapter exceeds epochReadStatement registration; owner T782n follow-up',
+  'repositories/visibility-attach.ts#createVisibilityAttachRepository':
+    'DEFERRED: factory attachment lifecycle exceeds attachSourceStatements registration; owner T782n follow-up',
 
   'internal/lease-time.ts#until':
-    'builds only a lease timestamp expression; no organization-scoped read or write',
-  'repositories/catalogue-predicates.ts#winnerOrder': NO_ORG_COLUMN,
+    'DEFERRED: builds only a lease timestamp expression; no organization-scoped read or write; owner T782n exemption review',
+  'repositories/catalogue-predicates.ts#winnerOrder':
+    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
   'repositories/catalogue-status.ts#quarantineStatements':
-    'adds no SQL or organization column of its own: concatenates the supplied guard, versionStatusStatements and conditionalEpochBumpStatement unchanged; their predicates are registered separately',
-  'repositories/session-liveness.ts#liveSessionCondition': NO_ORG_COLUMN,
-  'kysely.ts#compile': NO_ORG_COLUMN,
+    'DEFERRED: adds no SQL or organization column of its own: concatenates the supplied guard, versionStatusStatements and conditionalEpochBumpStatement unchanged; their predicates are registered separately; owner T782n exemption review',
+  'repositories/session-liveness.ts#liveSessionCondition':
+    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+  'kysely.ts#compile':
+    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
   'kysely.ts#existsGuard':
-    'wraps only the supplied query in EXISTS; it adds no table, column or organization predicate of its own',
-  'kysely.ts#assertCheck': NO_ORG_COLUMN,
-  'internal/catalogue-write-guard.ts#registerCatalogueWriteGuard': NO_ORG_COLUMN,
-  'internal/catalogue-write-guard.ts#assertCatalogueWriteGuard': NO_ORG_COLUMN,
+    'DEFERRED: wraps only the supplied query in EXISTS; it adds no table, column or organization predicate of its own; owner T782n exemption review',
+  'kysely.ts#assertCheck':
+    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+  'internal/catalogue-write-guard.ts#registerCatalogueWriteGuard':
+    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+  'internal/catalogue-write-guard.ts#assertCatalogueWriteGuard':
+    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
 };
 
 /** Problems between the exported builders of the given repository sources, the table and the allowlist. */
@@ -160,6 +200,17 @@ export function checkCompleteness(
   for (const key of Object.keys(allowlist)) {
     if (!exported.has(key)) problems.push(`${key} is allowlisted but no longer exported`);
     if (registered.has(key)) problems.push(`${key} is allowlisted and registered`);
+    if (!exported.has(key)) continue;
+    if (productionAccessFactories.has(key)) {
+      problems.push(`${key} is wired in production and cannot be waived`);
+    }
+    const reason = allowlist[key] ?? '';
+    if (
+      !/^REDUNDANT_BY_SCHEMA: .*(?:FOREIGN KEY|PRIMARY KEY|UNIQUE|CHECK)/.test(reason) &&
+      !/^DEFERRED: .+; owner T\d+\w*(?: .+)?$/.test(reason)
+    ) {
+      problems.push(`${key} needs a schema constraint or a deferred reason and owner packet`);
+    }
   }
   return problems;
 }

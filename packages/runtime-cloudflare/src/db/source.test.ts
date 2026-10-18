@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
-import { countCalls } from '../../../db-sqlite/src/contract/count-calls.js';
+import { countCalls } from '@package-broker/db-sqlite/contract/count-calls';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';

@@ -21,7 +21,7 @@ import { readV1Index, type V1Index, type V1IndexResult } from './v1-index.js';
 import { describeComposerV1 } from './v1-package.js';
 
 const FIXTURE_DIR = new URL('../../../test-fixtures/composer-v1/', import.meta.url);
-const ORIGIN = 'http://127.0.0.1:8851';
+const ORIGIN = 'https://127.0.0.1:8851';
 const policy = createOutboundPolicy({
   allowPrivateHosts: ['127.0.0.1:8851'],
   runtime: 'node',
@@ -83,10 +83,15 @@ function loadFixture(id: string): Tree {
     for (const entry of readdirSync(url, { withFileTypes: true })) {
       if (entry.isDirectory()) walk(`${dir}/${entry.name}`, `${prefix}${entry.name}/`);
       else if (entry.name.endsWith('.body')) {
-        tree.set(
-          `${prefix}${entry.name.slice(0, -'.body'.length)}`,
-          new Uint8Array(readFileSync(new URL(`${dir}/${entry.name}`, FIXTURE_DIR))),
-        );
+        const body = readFileSync(new URL(`${dir}/${entry.name}`, FIXTURE_DIR));
+        // Upgrade root URLs without changing the bytes of hash-verified includes.
+        const bytes =
+          entry.name === 'packages.json.body'
+            ? new TextEncoder().encode(
+                body.toString('utf8').replaceAll('http://127.0.0.1:8851', ORIGIN),
+              )
+            : new Uint8Array(body);
+        tree.set(`${prefix}${entry.name.slice(0, -'.body'.length)}`, bytes);
       }
     }
   };
@@ -236,13 +241,12 @@ async function describeAll(
 ): Promise<Map<string, Outcome>> {
   const outcomes = new Map<string, Outcome>();
   for (const name of names) {
-    const entry = index?.entries.get(name);
     try {
       const prev = previous.get(name);
       const result = await describeComposerV1(server.fetch, name, {
         source,
         root,
-        ...(entry === undefined ? {} : { entry }),
+        ...(index === undefined ? {} : { index }),
         selection: { packages: names, patterns: [], expandPatterns: false },
         origin,
         codecs,
@@ -291,34 +295,11 @@ function trackedNames(fixture: string): string[] {
 
 const FIXTURE_IDS = [...new Set(rows.map((r) => r.fixture))].filter((id) => /^f\d\d-/.test(id));
 
-const V1_INCLUDES_IDS = new Set([
-  'f01-inline-full',
-  'f02-inline-minimal',
-  'f03-satis-includes',
-  'f04-includes-sha256-nested',
-  'f05-includes-hash-mismatch',
-  'f11-lazy-partial',
-  'f15-dist-shapes',
-  'f17-duplicate-versions',
-  'f32-json-url',
-  'f33-legacy-format',
-  'f34-includes-validators',
-]);
-
-const statusError = (outcome: Outcome | undefined): boolean =>
-  outcome?.error?.endsWith(':unsupported') === true;
-
-function deferredUnsupported(fixture: string, outcome: Outcome | undefined): boolean {
-  if (!statusError(outcome)) return false;
-  expect(V1_INCLUDES_IDS.has(fixture)).toBe(true);
-  return true;
-}
-
 const sorted = (values: readonly string[]): string[] => [...values].sort();
 
 interface Verdict {
   readonly kind: 'value' | 'excluded';
-  readonly category?: 'cli' | 'fixture-server' | 'dist' | 'render' | 'transport' | 'deferred';
+  readonly category?: 'cli' | 'fixture-server' | 'dist' | 'render' | 'transport';
   readonly reason?: string;
   readonly actual?: unknown;
   readonly expected?: unknown;
@@ -539,11 +520,9 @@ async function judge(row: Row): Promise<Verdict> {
   const isV2 = f.startsWith('f27') || f.startsWith('f31');
   if (isV2) return v2Verdict(row);
   const r = await once(`sync:${f}`, () => sync(f));
-  const unsupported = [...r.outcomes.values()].some((outcome) => deferredUnsupported(f, outcome));
   let m: RegExpExecArray | null;
   if ((m = /^adapter ingested versions of (.+)$/.exec(a))) {
     const outcome = r.outcomes.get(m[1] ?? '');
-    if (deferredUnsupported(f, outcome)) return excluded('deferred');
     return value(sorted(outcome?.versions ?? []), {
       expected: sorted(parseExpected(row.expected) as string[]),
     });
@@ -556,7 +535,6 @@ async function judge(row: Row): Promise<Verdict> {
     case 'adapter poll exit':
       return value(r.rootError === undefined && r.pollError === undefined ? 0 : 'non-zero');
     case 'adapter per-package errors':
-      if (unsupported) return excluded('deferred');
       return value(
         [...r.outcomes.values()].filter((o) => o.error !== undefined || o.notFound === 'listed')
           .length,
@@ -652,7 +630,10 @@ async function judge(row: Row): Promise<Verdict> {
     return value(r.root?.metadataChangesUrl === undefined ? 0 : 1);
   }
   if (a.startsWith('repository url ending in packages.json')) {
-    if (unsupported) return excluded('deferred');
+    return excluded(
+      'fixture-server',
+      'The fixture has no include, so resolving includes against the base directory is not exercised.',
+    );
   }
   throw new Error(`unclassified row: ${f} ${a}`);
 }
@@ -963,7 +944,6 @@ async function cdVerdict(row: Row): Promise<Verdict> {
     throw new Error(`unclassified row: ${row.assertion}`);
   }
   const wanted = expected as Record<string, number>;
-  if (result.mode === 'v1-includes' && 'changed' in wanted) return excluded('deferred');
   const dropped = ['dist'].filter((k) => k in wanted);
   const keys = Object.keys(wanted).filter((k) => !dropped.includes(k));
   return value(pick(result.counts, keys), {
@@ -981,13 +961,17 @@ const NO_CONDITIONAL =
 const INCLUDE_HASH =
   'an include whose body does not match its listed hash fails the pass (G1 safer rule)';
 const DUPLICATE_NAME =
-  'a name listed by more than one include document fails the pass (reason duplicate); Composer lets the later listing win or merges';
+  'conflicting member hashes across include documents fail the pass (reason duplicate); identical listings are accepted';
 const LEGACY =
   'known bug, tracked in T709: a legacy root (top-level name => {versions}) is not read: the index lists no names';
 const NO_RETRY =
   'known gap, tracked in T709 (Retry-After on v1 429): describeComposerV1 does not retry or sleep on 429; the status error propagates to the caller';
 const V2_PARTIAL =
   'known bug, tracked in T709: inline partial packages of a metadata-url root are not read by the v2 path';
+const NO_PROOF =
+  'an incomplete or empty index yields no definitive absence, so an unlisted name is a per-package error';
+const DIST_FAULT =
+  'the wrong upstream shasum is a dist-level fault found when the dist is stored, not when versions are described';
 const NO_RELIST =
   'describeComposerV1 does not re-read the listing; a listed-but-missing file is reported to the caller';
 
@@ -996,6 +980,7 @@ const PINNED: Readonly<Record<string, { actual: unknown; why: string }>> = {
     actual: { root: 2, include: 1, 'provider-file': 0, p2: 0 },
     why: ROOT_REREAD,
   },
+  'f15-dist-shapes|adapter per-package errors': { actual: 0, why: DIST_FAULT },
   'f05-includes-hash-mismatch|adapter ingested versions of fx/lib': {
     actual: [],
     why: INCLUDE_HASH,
@@ -1006,6 +991,10 @@ const PINNED: Readonly<Record<string, { actual: unknown; why: string }>> = {
   },
   'f05-includes-hash-mismatch|adapter logs a hash-mismatch event per failed algorithm and still ingests (Composer verifies neither sha1 nor sha256 of includes)':
     { actual: false, why: INCLUDE_HASH },
+  'f05-includes-hash-mismatch|adapter per-package errors': { actual: 2, why: NO_PROOF },
+  'f08-providers-includes-multi|adapter per-package errors': { actual: 3, why: NO_PROOF },
+  'f17-duplicate-versions|adapter per-package errors': { actual: 1, why: NO_PROOF },
+  'f33-legacy-format|adapter per-package errors': { actual: 2, why: LEGACY },
   'f08-providers-includes-multi|adapter ingested versions of fx/lib': {
     actual: [],
     why: DUPLICATE_NAME,
@@ -1053,10 +1042,27 @@ const PINNED: Readonly<Record<string, { actual: unknown; why: string }>> = {
     actual: { root: 1, 'provider-include': 1, 'provider-file': 0, changed: 0 },
     why: CHANGED_ROOT,
   },
+  'cd-includes|includes: cold sync': {
+    actual: { root: 2, include: 1, changed: 1 },
+    why: ROOT_REREAD,
+  },
+  'cd-includes|includes: packages.json changed only': {
+    actual: { root: 2, include: 1, changed: 0 },
+    why: `${ROOT_REREAD}; ${CHANGED_ROOT}`,
+  },
+  'cd-includes|includes: include content changed (new sha1 and file name)': {
+    actual: { root: 2, include: 1, changed: 1 },
+    why: ROOT_REREAD,
+  },
   'cd-includes-validators|includes with validators: cold sync': {
     actual: { root: 2, include: 1, notModified: 0 },
     why: ROOT_REREAD,
   },
+  'cd-includes-validators|includes with validators: poll, nothing changed: packages.json answers 304':
+    {
+      actual: { root: 1, include: 0, notModified: 0, changed: 0 },
+      why: NO_CONDITIONAL,
+    },
   'cd-lazy-validators|lazy with validators: poll: every lazy file answers 304 (If-Modified-Since)':
     {
       actual: { root: 1, 'provider-file': 2, notModified: 0, changed: 0 },
@@ -1098,13 +1104,12 @@ describe('v1 conformance corpus', () => {
 
   it('accounts for every row', () => {
     expect(tally).toEqual({
-      pass: 251,
-      pinned: 23,
-      partial: 3,
+      pass: 277,
+      pinned: 32,
+      partial: 6,
       'excluded:cli': 186,
-      'excluded:fixture-server': 4,
+      'excluded:fixture-server': 5,
       'excluded:dist': 11,
-      'excluded:deferred': 36,
       'excluded:render': 1,
       'excluded:transport': 1,
     });
@@ -1112,6 +1117,58 @@ describe('v1 conformance corpus', () => {
 });
 
 describe('v1 conformance negative cases', () => {
+  it.each(['f08-providers-includes-multi', 'f17-duplicate-versions'])(
+    '%s accepts identical listings and rejects the original conflicting fixture',
+    async (id) => {
+      const original = await sync(id);
+      expect(original.index?.complete).toBe(false);
+      expect(original.index?.reason).toBe('duplicate');
+      expect(original.index?.entries.size).toBe(0);
+      const tree = loadFixture(id);
+      const decode = (body: string | Uint8Array | undefined): string =>
+        typeof body === 'string' ? body : new TextDecoder().decode(body);
+      const root = JSON.parse(decode(tree.get('packages.json')));
+      const providers = id.startsWith('f08');
+      const section = providers ? 'providers' : 'packages';
+      const listings = root[providers ? 'provider-includes' : 'includes'];
+      let first: unknown;
+      for (const [path, hashes] of Object.entries(listings)) {
+        const algorithm = providers ? 'sha256' : 'sha1';
+        const hash = (hashes as Record<string, string>)[algorithm] as string;
+        const resolved = path.replace('%hash%', hash);
+        const doc = JSON.parse(decode(tree.get(resolved)));
+        const name = providers ? 'fx/lib' : 'fx/dup';
+        if (doc[section][name] !== undefined) {
+          first ??= doc[section][name];
+          doc[section][name] = first;
+        }
+        const body = JSON.stringify(doc);
+        const updatedHash = sha(algorithm, body);
+        delete listings[path];
+        listings[path.replace(hash, updatedHash)] = { [algorithm]: updatedHash };
+        tree.set(resolved.replace(hash, updatedHash), body);
+      }
+      tree.set('packages.json', JSON.stringify(root));
+      const server = serve(id, tree);
+      const source = sourceOf(id);
+      const result = await readV1Index(server.fetch, { source, codecs });
+      expect(result.status).toBe('updated');
+      if (result.status !== 'updated') throw new Error('expected updated');
+      expect(result.index.complete).toBe(true);
+      expect(result.index.entries.size).toBe(providers ? 3 : 1);
+      const outcomes = await describeAll(
+        server,
+        source,
+        result.root,
+        result.index,
+        trackedNames(id),
+      );
+      expect(outcomes.get(providers ? 'fx/lib' : 'fx/dup')?.versions).toEqual(
+        providers ? ['1.0.0', '1.1.0', 'dev-main'] : ['1.0.0', '1.1.0'],
+      );
+    },
+  );
+
   it('keeps upstream bodies and credentials out of root and package errors', async () => {
     const wrong = await sync('f21-auth', true);
     expect(wrong.rootError?.code).toBe('http_status');

@@ -200,6 +200,22 @@ describe('createPolicyFetch redirect mode', () => {
 });
 
 describe('createPolicyFetch redirects and credentials', () => {
+  it.each([0, 1, 2])('reports whether it followed %i redirects', async (count) => {
+    const replies: Record<string, Reply> = {};
+    for (let i = 0; i < count; i++) {
+      replies[`https://a.example.com/${i}`] = redirect(`/${i + 1}`);
+    }
+    replies[`https://a.example.com/${count}`] = new Response('{"error":"Not found"}', {
+      status: 404,
+    });
+    const { run, hops } = make(replies);
+    const response = await run(request({ url: 'https://a.example.com/0' }));
+    expect(response.status).toBe(404);
+    expect(response.redirected).toBe(count > 0);
+    expect(hops).toHaveLength(count + 1);
+    await response.body?.cancel();
+  });
+
   it('drops credentials, the credential header, the query parameter and caller headers on a cross-origin hop', async () => {
     const { run, hops } = make({
       [`https://a.example.com/start?x=1&token=${SECRET}`]: redirect(
@@ -278,7 +294,7 @@ describe('createPolicyFetch redirects and credentials', () => {
     expect(hops).toHaveLength(1);
   });
 
-  it('refuses https to http even when http is allowlisted', async () => {
+  it('refuses https to http even with an explicit port allowlist entry', async () => {
     const lax = createOutboundPolicy({
       allowPrivateHosts: ['plain.example.com:80'],
       runtime: 'node',
@@ -288,7 +304,7 @@ describe('createPolicyFetch redirects and credentials', () => {
     const run = createPolicyFetch({ fetchImpl: f.fetchImpl, policy: lax, userAgent: 'pb-test/1' });
     const error = await failure(run(request()));
     expect(error.code).toBe('refused');
-    expect(error.reason).toBe('downgrade');
+    expect(error.reason).toBe('scheme');
     expect(f.hops).toHaveLength(1);
   });
 

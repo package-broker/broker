@@ -7,6 +7,7 @@ import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { createAccessRepository } from '../repositories/access.js';
 import { createGrantRepository } from '../repositories/grant.js';
+import { createProjectGrantRepository, projectGrantKey } from '../repositories/project-grant.js';
 import { createTokenRepository } from '../repositories/token.js';
 import { seedTwoOrganizations } from './two-organizations.js';
 
@@ -370,6 +371,146 @@ function ssoAnchors(count: number): Case {
     );
 }
 
+function inactiveToken(field: 'revoked_at' | 'expires_at'): Case {
+  return (open, wrap) =>
+    fixture(
+      open,
+      async (executor, ctx) => {
+        const plaintext = await insertToken(executor, ctx, 'svc');
+        expect((await lookup(executor, ctx, 'alpha'))?.projectPermissions).toEqual(PERMISSIONS);
+        await executor.batch([
+          st(`UPDATE token SET ${field} = ? WHERE org_id = ?`, iso(-60_000), ctx.orgId),
+        ]);
+        const found = await lookup(executor, ctx, 'alpha');
+        expect(found !== null).toBe(true);
+        expect(found?.token[field === 'revoked_at' ? 'revoked' : 'expired']).toBe(true);
+        expect(found?.projectPermissions).toEqual([]);
+        expect(found?.organizationPermissions).toEqual([]);
+        expect(await decision(executor, ctx, plaintext, 'alpha')).toEqual({
+          allow: false,
+          status: 401,
+        });
+      },
+      wrap,
+    );
+}
+
+const crossOrg: Case = (open, wrap) =>
+  fixture(
+    open,
+    async (executor, ctx, other) => {
+      const plaintext = await insertToken(executor, ctx, 'svc');
+      expect((await lookup(executor, ctx, 'alpha'))?.projectPermissions).toEqual(PERMISSIONS);
+      expect((await lookup(executor, other, 'alpha')) === null).toBe(true);
+      expect(await decision(executor, other, plaintext, 'alpha')).toEqual({
+        allow: false,
+        status: 401,
+      });
+    },
+    wrap,
+  );
+
+const wrongSelector: Case = (open, wrap) =>
+  fixture(
+    open,
+    async (executor, ctx) => {
+      await insertToken(executor, ctx, 'svc');
+      expect((await lookup(executor, ctx, 'alpha'))?.projectPermissions).toEqual(PERMISSIONS);
+      const found = await createAccessRepository(executor).lookupToken(ctx, {
+        selector: 'mnopqrstuvwx',
+        boundary: 'project',
+        projectSlug: 'alpha',
+        providerAnchors: anchors,
+      });
+      expect(found === null).toBe(true);
+    },
+    wrap,
+  );
+
+const projectBinding: Case = (open, wrap) =>
+  fixture(
+    open,
+    async (executor, ctx) => {
+      const plaintext = await insertToken(executor, ctx, 'pat', 'selected');
+      await executor.batch([
+        st(
+          'INSERT INTO token_project (org_id, token_id, project_id) VALUES (?, ?, ?)',
+          ctx.orgId,
+          'contract-token',
+          'alpha',
+        ),
+      ]);
+      expect((await lookup(executor, ctx, 'alpha'))?.projectPermissions).toEqual(PERMISSIONS);
+      const found = await lookup(executor, ctx, 'beta');
+      expect(found !== null).toBe(true);
+      expect(found?.project === null).toBe(true);
+      expect(found?.projectPermissions).toEqual([]);
+      expect(found?.projectVisible).toBe(true);
+      expect(await decision(executor, ctx, plaintext, 'beta')).toEqual({
+        allow: false,
+        status: 403,
+      });
+    },
+    wrap,
+  );
+
+const projectGrantDeleted: Case = (open, wrap) =>
+  fixture(
+    open,
+    async (executor, ctx) => {
+      const plaintext = await insertToken(executor, ctx, 'pat');
+      await executor.batch([
+        st(
+          "DELETE FROM role_permission WHERE org_id = ? AND role_id = 'contract-role' AND permission = 'project:packages:write'",
+          ctx.orgId,
+        ),
+        st(
+          "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'contract-role', 'project:grants:write')",
+          ctx.orgId,
+        ),
+        st(
+          "INSERT INTO role (id, org_id, key, name, scope) VALUES ('project-role', ?, 'project', 'Project', 'project')",
+          ctx.orgId,
+        ),
+        st(
+          "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'project-role', 'project:packages:write')",
+          ctx.orgId,
+        ),
+        st(
+          "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, project_id, role_id) VALUES ('project-grant', ?, 'email', ?, 'project', 'alpha', 'project-role')",
+          ctx.orgId,
+          'contract@example.test',
+        ),
+      ]);
+      expect((await lookup(executor, ctx, 'alpha'))?.projectPermissions).toEqual([...PERMISSIONS]);
+      expect((await lookup(executor, ctx, 'beta'))?.projectPermissions).toEqual([
+        'project:packages:read',
+        'project:read',
+      ]);
+      expect(
+        await decision(executor, ctx, plaintext, 'alpha', 'project:packages:write'),
+      ).toMatchObject({ allow: true });
+      expect(
+        await createProjectGrantRepository(executor).delete(
+          ctx,
+          mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
+            [projectGrantKey('project-grant')]: 1,
+          }),
+          { id: 'project-grant', projectId: 'alpha', providerAnchors: anchors },
+        ),
+      ).toEqual({ status: 'deleted', offboardedUserId: null });
+      const found = await lookup(executor, ctx, 'alpha');
+      expect(found !== null).toBe(true);
+      expect(found?.principalStatus).toBe('active');
+      expect(found?.projectPermissions).toEqual(['project:packages:read', 'project:read']);
+      expect(await decision(executor, ctx, plaintext, 'alpha', 'project:packages:write')).toEqual({
+        allow: false,
+        status: 403,
+      });
+    },
+    wrap,
+  );
+
 const OTHER_USER = 'contract-other-user';
 const SECRET_COLUMNS = /hash|selector|pepper/i;
 
@@ -558,6 +699,12 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
   );
 
 export const tokenContractCases = {
+  revoked: inactiveToken('revoked_at'),
+  expired: inactiveToken('expires_at'),
+  crossOrg,
+  wrongSelector,
+  projectBinding,
+  projectGrantDeleted,
   nullSlug,
   projectCap,
   creatorRemoved,
@@ -567,8 +714,58 @@ export const tokenContractCases = {
   revocableGet,
   ownPersonalTokenGuard,
 };
+const predicateMutants = [
+  ['org', 'crossOrg', '"t"."org_id" = ?', '? is not null'],
+  ['selector', 'wrongSelector', '"t"."selector" = ?', '? is not null'],
+  ['revoked', 'revoked', '"t"."revoked_at" as "revoked_at"', 'null as "revoked_at"'],
+  ['expiry', 'expired', "unixepoch(t.expires_at, 'subsec') > unixepoch('now', 'subsec')", '1 = 1'],
+  ['project binding', 'projectBinding', 'tp.project_id = p.id', '1 = 1'],
+] as const;
+
 export function describeTokenContract(label: string, open: Open) {
   describe(`token lookup contract (${label})`, () => {
+    for (const [predicate, name, before, after] of predicateMutants) {
+      it(`catches the ${predicate} SQL mutant with ${name}`, async () => {
+        let mutations = 0;
+        await expect(
+          tokenContractCases[name](open, (executor) => ({
+            driver: executor.driver,
+            batch: executor.batch.bind(executor),
+            all: (statement) => {
+              if (!statement.sql.includes('"t"."id" as "token_id"')) return executor.all(statement);
+              const sql = statement.sql.replace(before, after);
+              if (sql !== statement.sql) mutations += 1;
+              return executor.all({ ...statement, sql });
+            },
+          })),
+        ).rejects.toThrow(/expected/);
+        expect(mutations).toBeGreaterThan(0);
+      }, 120_000);
+    }
+    it('catches a project grant delete that leaves the grant intact', async () => {
+      let mutations = 0;
+      await expect(
+        projectGrantDeleted(open, (executor) => ({
+          driver: executor.driver,
+          all: executor.all.bind(executor),
+          batch: (statements) =>
+            executor.batch(
+              statements.map((statement) => {
+                if (!statement.sql.startsWith('delete from "access_grant"')) return statement;
+                mutations += 1;
+                return {
+                  ...statement,
+                  sql: statement.sql.replace(
+                    'delete from "access_grant"',
+                    'update "access_grant" set "last_op_id" = "last_op_id"',
+                  ),
+                };
+              }),
+            ),
+        })),
+      ).rejects.toThrow(/expected/);
+      expect(mutations).toBeGreaterThan(0);
+    }, 120_000);
     for (const [name, run] of Object.entries(tokenContractCases)) {
       it(name, () => run(open), 120_000);
     }

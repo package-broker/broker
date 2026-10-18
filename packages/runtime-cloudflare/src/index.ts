@@ -1,3 +1,9 @@
+import type { JobDefinition } from '@package-broker/core/platform/jobs';
+import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
+import { auditSealJob } from '@package-broker/core/audit/sealer';
+import { auditVerifyJob } from '@package-broker/core/audit/verify';
+import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
+import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
 import { createAuthModule } from '@package-broker/core/auth/module';
 import type { AuthModule } from '@package-broker/core/auth/module';
@@ -52,7 +58,7 @@ import {
 } from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
-import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { collectRegistrations, registerCoreJob } from '@package-broker/core/kernel/registry';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
@@ -224,6 +230,7 @@ async function buildAuth(
   env: Env,
   log: KernelLog,
   dispatch: (run: () => Promise<void>) => void,
+  collectRegistration: () => Registration,
 ): Promise<{
   auth: AuthModule;
   registration: Registration;
@@ -236,7 +243,7 @@ async function buildAuth(
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
   await selfTestPasswordHashing(keyring);
   await keyring.hmacKey('token-pepper', keyring.currentVersion);
-  const registration = collectRegistrations(plugins);
+  const registration = collectRegistration();
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) =>
       fetch(request, {
@@ -890,11 +897,53 @@ export function createWorker(
       }
     };
 
+    function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+      return registerCoreJob({
+        ...definition,
+        handler: (payload, context) =>
+          definition.handler(definition.validate(payload), {
+            ...context,
+            observability: createObservability(
+              services!.sink,
+              {
+                deploymentId: services!.deploymentId,
+                runtime: 'cloudflare',
+                requestId: null,
+                plugin: 'core',
+                jobId: context.jobId,
+                attempt: context.attempt,
+              },
+              {
+                events: AUDIT_EVENTS,
+                reasonCodes: new Set(),
+                routeTemplates: new Set(),
+              },
+            ),
+          }),
+      });
+    }
+    const collectRegistration = (): Registration =>
+      collectRegistrations(plugins, {
+        coreJobs:
+          config === null
+            ? []
+            : [
+                registerAuditJob(auditSealJob(createAuditSealRepository(executor as SqlExecutor))),
+                registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor))),
+              ],
+      });
     const built =
       db === undefined
         ? undefined
-        : await buildAuth(executor as SqlExecutor, plugins, env ?? {}, log, dispatch);
-    const registration = built?.registration ?? collectRegistrations(plugins);
+        : await buildAuth(
+            executor as SqlExecutor,
+            plugins,
+            env ?? {},
+            log,
+            dispatch,
+            collectRegistration,
+          );
+    const registration = built?.registration ?? collectRegistration();
     const auth = built?.auth;
     const services =
       config === null || bound === null

@@ -6,6 +6,7 @@ const PLUGIN_PATH = /(^|\/)packages\/plugin-|node_modules\/@package-broker\/plug
 const WORKERS_INPUT_DENY =
   /node_modules\/(\.pnpm\/)?(better-sqlite3|miniflare|@hono\/node-server)|db-sqlite\/(src|dist)\/(contract|testing)\//;
 const NODE_INPUT_DENY = /miniflare|db-sqlite\/(src|dist)\/(contract|testing)\//;
+const OPENAPI_INPUT = /core\/(src|dist)\/api\/openapi\.(?:js|ts)$/;
 const DYNAMIC_IMPORT = /(?:^|[^\w$.])import\s*\(/g;
 const REQUIRE_CALL = /(?:^|[^\w$.])(?:__)?require\s*\(/g;
 const FROM_SPECIFIER = /\bfrom\s*/g;
@@ -143,6 +144,13 @@ for (const target of ['cloudflare', 'node']) {
     ['minimal', minimal],
     ['default', full],
   ]) {
+    const openapi = inputs.filter((input) => OPENAPI_INPUT.test(input));
+    if (openapi.length > 0) {
+      failed = true;
+      console.error(
+        `${label}/${target}: OpenAPI generator in bundle without the OpenAPI route:\n${openapi.join('\n')}`,
+      );
+    }
     const forbidden = inputs.filter((input) => inputDeny.test(input));
     if (forbidden.length > 0) {
       failed = true;

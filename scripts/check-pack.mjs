@@ -18,6 +18,12 @@ const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc']);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const STATIC_REQUIRED_FILES = {
+  core: [
+    'dist/api/openapi.js',
+    'dist/api/openapi.d.ts',
+    'dist/api/openapi-route.js',
+    'dist/api/openapi-route.d.ts',
+  ],
   'db-sqlite': ['migrations/0010_job_claim_index.sql'],
 };
 const MIGRATION_PACKAGES = ['db-sqlite'];
@@ -156,6 +162,13 @@ function checkExports(pkg, pkgJson, files) {
   }
 
   const forbidden = FORBIDDEN_EXPORTS[pkg] ?? [];
+  if (pkg === 'core') {
+    const api = exportsField['./api/*'];
+    if (api?.types !== './dist/api/*.d.ts' || api?.default !== './dist/api/*.js')
+      problems.push(
+        'export "./api/*" must map types and default to dist/api/*.d.ts and dist/api/*.js',
+      );
+  }
   for (const key of forbidden) {
     if (Object.hasOwn(exportsField, key))
       problems.push(`export "${key}" is advertised but must be gone`);
@@ -415,5 +428,7 @@ for (const { pkg, result } of outcomes) {
     console.log(
       `${pkg}: ok (${result.files} packed files, ${result.targets} entry targets resolved)`,
     );
+    if (pkg === 'core')
+      console.log('  ./api/*: ./api/openapi, ./api/openapi-route (types and default resolved)');
   }
 }

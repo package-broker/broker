@@ -30,6 +30,9 @@ import {
 import { versionInsertStatements } from '../repositories/catalogue-write-version-insert.js';
 import { versionUpdateStatements } from '../repositories/catalogue-write-version-update.js';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
+import type { Sha256 } from '@package-broker/core/platform/blob';
+import { distAttachStatements } from '../repositories/catalogue-write-dist.js';
+import { ingestSessionGuard, sweepStatements } from '../repositories/ingest-session.js';
 import { distTagStatements, type DistTagRequest } from '../repositories/catalogue-write-tags.js';
 import { coveredByRegisteredNames, sourceActivatable } from '../repositories/registered-name.js';
 import { epochReadStatement } from '../repositories/cache-epoch.js';
@@ -1743,7 +1746,275 @@ const servicePrincipalGuardEntry: MutationEntry = {
   ],
 };
 
+type DistProbe =
+  | 'blob assignment'
+  | 'blob eligibility'
+  | 'blob postcondition'
+  | 'version update'
+  | 'version postcondition'
+  | 'package advance';
+
+function distProbe(probe: DistProbe): ContractCase {
+  return {
+    name: `dist attach scopes the ${probe} to its organization`,
+    async run(context) {
+      const seed = seeder(context.executor);
+      const { own, foreign } = orgOf(context);
+      await seedSource(seed, 'S-DIST', own.orgId, 'npm_registry', 'npm');
+      await seedPackage(
+        seed,
+        'K-DIST',
+        probe === 'package advance' ? foreign.orgId : own.orgId,
+        'S-DIST',
+        'widget',
+        'npm',
+      );
+      await seedVersion(
+        seed,
+        'V-DIST',
+        probe.startsWith('version') ? foreign.orgId : own.orgId,
+        'K-DIST',
+        '1.0.0',
+      );
+      await seed(
+        'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key) VALUES (?, ?, ?, 1, ?)',
+        'B-FOREIGN',
+        foreign.orgId,
+        HASH,
+        'foreign',
+      );
+      if (probe !== 'blob eligibility' && probe !== 'blob postcondition') {
+        await seed(
+          'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key) VALUES (?, ?, ?, 1, ?)',
+          'B-OWN',
+          own.orgId,
+          HASH,
+          'own',
+        );
+      }
+      const guard = createCatalogueWriteGuard(own, WRITE_GUARD);
+      const plan = distAttachStatements(own, guard, {
+        versionId: 'V-DIST',
+        revision: 1,
+        sha256: HASH as Sha256,
+      });
+      const statements = plan.statements.slice(guard.length);
+      if (probe.endsWith('postcondition')) {
+        await seed(
+          'UPDATE version SET blob_id = ? WHERE id = ?',
+          probe === 'blob postcondition' ? 'B-FOREIGN' : 'B-OWN',
+          'V-DIST',
+        );
+        expect(await guardPasses(context, statements.slice(1, 2), true)).toBe(false);
+      } else if (probe === 'package advance') {
+        await seed('UPDATE version SET last_op_id = ? WHERE id = ?', plan.opId, 'V-DIST');
+        const before = await context.executor.all({ sql: 'SELECT * FROM package', params: [] });
+        await context.executor.batch(statements.slice(2).map(context.mutate));
+        expect(await context.executor.all({ sql: 'SELECT * FROM package', params: [] })).toEqual(
+          before,
+        );
+      } else {
+        const [result] = await context.executor.batch(statements.slice(0, 1).map(context.mutate));
+        if (probe === 'blob assignment') {
+          expect(result?.changes).toBe(1);
+          expect(
+            await context.executor.all({
+              sql: 'SELECT blob_id FROM version WHERE id = ?',
+              params: ['V-DIST'],
+            }),
+          ).toEqual([{ blob_id: 'B-OWN' }]);
+        } else {
+          expect(result?.changes).toBe(0);
+        }
+      }
+    },
+  };
+}
+
+async function seedIngest(
+  context: CaseContext,
+  id: string,
+  orgId: string,
+  generation: number,
+): Promise<void> {
+  await seeder(context.executor)(
+    `INSERT INTO ingest_session (id, org_id, scope, scope_key, source_id, generation, owner, fence, lease_until, state, started_at, updated_at)
+      VALUES (?, ?, 'source', ?, 'S-INGEST', ?, ?, 3, ?, 'complete', ?, ?)`,
+    id,
+    orgId,
+    HASH,
+    generation,
+    OWNER,
+    FUTURE,
+    FUTURE,
+    FUTURE,
+  );
+}
+
+const ingestHandle = {
+  id: 'I-FOREIGN',
+  owner: OWNER,
+  fence: 3,
+  scopeKey: HASH,
+  leaseSeconds: 60,
+  generation: 1,
+  stamp: null,
+  snapshotId: null,
+  snapshotBlobSha256: null,
+  cursor: null,
+  seenCount: 0,
+  pagesSoFar: 0,
+  pendingValidators: null,
+};
+
+const ingestForeignGuard: ContractCase = {
+  name: 'a live ingest holder of another organization cannot pass the guard',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    await seedSource(seeder(context.executor), 'S-INGEST', foreign.orgId, 'npm_registry', 'npm');
+    await seedIngest(context, ingestHandle.id, foreign.orgId, 1);
+    await seeder(context.executor)(
+      "UPDATE ingest_session SET state = 'running' WHERE id = ?",
+      ingestHandle.id,
+    );
+    expect(await guardPasses(context, ingestSessionGuard(foreign, ingestHandle), false)).toBe(true);
+    expect(await guardPasses(context, ingestSessionGuard(own, ingestHandle), true)).toBe(false);
+  },
+};
+
+const sweepForeignGeneration: ContractCase = {
+  name: 'a newer foreign ingest generation does not delete the latest own generation',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    await seedSource(seeder(context.executor), 'S-INGEST', own.orgId, 'npm_registry', 'npm');
+    await seedIngest(context, 'I-OWN', own.orgId, 1);
+    await seedIngest(context, 'I-FOREIGN', foreign.orgId, 2);
+    await context.executor.batch(
+      sweepStatements(10, '2000-01-01T00:00:00.000Z', FUTURE).map(context.mutate),
+    );
+    expect(
+      await context.executor.all({ sql: 'SELECT id FROM ingest_session ORDER BY id', params: [] }),
+    ).toEqual([{ id: 'I-FOREIGN' }, { id: 'I-OWN' }]);
+  },
+};
+
+const distAttachEntry: MutationEntry = {
+  builder: 'distAttachStatements',
+  file: 'repositories/catalogue-write-dist.ts',
+  cases: (
+    [
+      'blob assignment',
+      'blob eligibility',
+      'blob postcondition',
+      'version update',
+      'version postcondition',
+      'package advance',
+    ] as const
+  ).map(distProbe),
+  predicates: [
+    ...(['blob assignment', 'blob eligibility', 'blob postcondition'] as const).map((probe) => ({
+      name: probe,
+      locate:
+        probe === 'blob assignment'
+          ? /(?<=set "blob_id" = \(SELECT blob.id FROM blob\s+WHERE )blob.org_id = \?/
+          : probe === 'blob eligibility'
+            ? /(?<=and \(SELECT blob.id FROM blob\s+WHERE )blob.org_id = \?/
+            : ref('blob', 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      caseName: distProbe(probe).name,
+      copies: 1,
+    })),
+    ...(['version update', 'version postcondition'] as const).map((probe) => ({
+      name: probe,
+      locate: ref('version', 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      caseName: distProbe(probe).name,
+      copies: 1,
+    })),
+    {
+      name: 'package advance',
+      locate: ref('package', 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      caseName: distProbe('package advance').name,
+      copies: 1,
+    },
+  ],
+  decisions: [
+    {
+      name: 'dist attach makes five clock reads including the job guard',
+      pattern: /(?:strftime\('[^']*',\s*'now'(?:, '[^']*')?\)|unixepoch\('now'(?:, '[^']*')?\))/,
+      expected: 5,
+      build: () =>
+        distAttachStatements(WRITE_ORG, writeGuard(), {
+          versionId: 'V-DIST',
+          revision: 1,
+          sha256: HASH as Sha256,
+        }).statements,
+    },
+    {
+      name: 'dist attach reads the revision clock once',
+      pattern: REVISION_CLOCK,
+      expected: 1,
+      build: () =>
+        distAttachStatements(WRITE_ORG, writeGuard(), {
+          versionId: 'V-DIST',
+          revision: 1,
+          sha256: HASH as Sha256,
+        }).statements,
+    },
+  ],
+};
+
+const ingestGuardEntry: MutationEntry = {
+  builder: 'ingestSessionGuard',
+  file: 'repositories/ingest-session.ts',
+  cases: [ingestForeignGuard],
+  predicates: [
+    {
+      name: 'holder organization',
+      locate: ref('ingest_session', 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      caseName: ingestForeignGuard.name,
+      copies: 1,
+    },
+  ],
+  decisions: [
+    {
+      name: 'the holder guard reads the lease clock once',
+      pattern: /strftime\('[^']*',\s*'now'\)/,
+      expected: 1,
+      build: () => ingestSessionGuard(WRITE_ORG, ingestHandle),
+    },
+  ],
+};
+
+const sweepEntry: MutationEntry = {
+  builder: 'sweepStatements',
+  file: 'repositories/ingest-session.ts',
+  cases: [sweepForeignGeneration],
+  predicates: [
+    {
+      name: 'newer generation belongs to the old organization',
+      locate: /newer\.org_id = old\.org_id/,
+      neutral: ALWAYS,
+      caseName: sweepForeignGeneration.name,
+      copies: 1,
+    },
+  ],
+  decisions: [
+    {
+      name: 'both sweep decisions are bounded',
+      pattern: /limit \?/,
+      expected: 2,
+      build: () => sweepStatements(10, '2000-01-01T00:00:00.000Z', FUTURE),
+    },
+  ],
+};
+
 export const mutationTable: readonly MutationEntry[] = [
+  distAttachEntry,
+  ingestGuardEntry,
+  sweepEntry,
   {
     builder: 'proxyEligibleCondition',
     file: 'repositories/catalogue-predicates.ts',
@@ -1959,12 +2230,6 @@ const UNREGISTERED = 'organization scoping not yet registered in the mutation ta
 export const builderAllowlist: Readonly<Record<string, string>> = {
   'internal/lease-time.ts#until':
     'builds only a lease timestamp expression; no organization-scoped read or write',
-  'repositories/catalogue-write-dist.ts#distAttachStatements':
-    'blob, version and package org predicates have catalogue-write-dist contract coverage; mutation cases not yet registered',
-  'repositories/ingest-session.ts#ingestSessionGuard':
-    'session holder org predicate has ingest-session contract coverage; mutation case not yet registered',
-  'repositories/ingest-session.ts#sweepStatements':
-    'global maintenance intentionally spans orgs; same-org generation comparison has ingest-session-latest contract coverage but no mutation case yet',
   'repositories/blob-lease-guard.ts#blobLeaseNotLive': UNREGISTERED,
   'repositories/catalogue-predicates.ts#admissionCondition':
     'admission pattern rules carry no organization column; their scoping is project and source ids, which T716 registers',

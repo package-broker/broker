@@ -81,6 +81,7 @@ async function tokenEnvelope(state: State): Promise<EngineTokenAccess> {
       userId: t.kind === 'pat' ? 'user-1' : null,
       servicePrincipalId: t.kind === 'svc' ? 'svc-1' : null,
     },
+    projectVisible: false,
     principalStatus: t.principalStatus,
     validation:
       t.kind === 'svc'
@@ -950,5 +951,133 @@ describe('engine grants', () => {
     const request = req({ headers: cookie });
     await expect(engine.authorize(request)).rejects.toThrow('unavailable');
     expect(engineGrantOf(request)).toBeNull();
+  });
+});
+
+describe('token scope shortfall on a visible project', () => {
+  function withVisibility(state: State, projectVisible: boolean): AuthorizationEngineDeps {
+    const base = deps(state);
+    return {
+      ...base,
+      access: {
+        ...base.access,
+        lookupToken: async (ctx, input) => {
+          const found = await base.access.lookupToken(ctx, input);
+          return found === null
+            ? null
+            : (Object.defineProperty({ ...found, projectVisible }, 'verifier', {
+                value: (found as never as { verifier: unknown }).verifier,
+                enumerable: false,
+              }) as EngineTokenAccess);
+        },
+      },
+    };
+  }
+
+  it('answers 403 when the principal sees the project but the token scope yields nothing', async () => {
+    const state = freshState();
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, true));
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 403,
+    });
+    expect(state.dispatched).toBe(0);
+  });
+
+  it('answers 403 when the principal sees the project but the token binding excludes it', async () => {
+    const state = freshState();
+    state.token.project = null;
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, true));
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 403,
+    });
+  });
+
+  it('answers 403 for a service token whose scope excludes a project its principal sees', async () => {
+    const state = freshState();
+    state.token.kind = 'svc';
+    state.token.hashOf = SVC;
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, true));
+    expect(await engine.authorize(req({ headers: bearer(SVC) }))).toEqual({
+      allow: false,
+      status: 403,
+    });
+  });
+
+  it('answers 404 when the principal cannot see the project', async () => {
+    const state = freshState();
+    state.token.project = null;
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, false));
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 404,
+    });
+  });
+
+  it('answers 404 for a project of another organization', async () => {
+    const state = freshState();
+    state.token.project = null;
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, false));
+    expect(
+      await engine.authorize(req({ headers: bearer(PAT), params: { project: 'other-org-demo' } })),
+    ).toEqual({ allow: false, status: 404 });
+  });
+
+  it('answers 404 for a project the token binding reaches but the principal cannot see', async () => {
+    const state = freshState();
+    state.token.project = { id: 'proj-1' };
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, false));
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 404,
+    });
+  });
+
+  it('answers 404 for a malformed slug even when the port reports the project visible', async () => {
+    const state = freshState();
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, true));
+    expect(
+      await engine.authorize(req({ headers: bearer(PAT), params: { project: 'Bad Slug' } })),
+    ).toEqual({ allow: false, status: 404 });
+  });
+
+  it('treats anything other than true as not visible', async () => {
+    const state = freshState();
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, 'yes' as unknown as boolean));
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 404,
+    });
+  });
+
+  it('still answers 401 for an expired token on a visible project', async () => {
+    const state = freshState();
+    state.token.expired = true;
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(withVisibility(state, true));
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 401,
+    });
+  });
+
+  it('keeps the session decision at 404 for an empty set', async () => {
+    const state = freshState();
+    state.sessionProjectPermissions = [];
+    state.sessionOrg = ['org:read'];
+    const engine = createAuthorizationEngine(withVisibility(state, true));
+    expect(await engine.authorize(req({ headers: cookie }))).toEqual({
+      allow: false,
+      status: 404,
+    });
   });
 });

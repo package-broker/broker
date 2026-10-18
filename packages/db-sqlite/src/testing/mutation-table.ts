@@ -1,4 +1,5 @@
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
+import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
 import { entries as projectReadableEntries } from './mutation-table/project-readable.js';
 import { entries as catalogueStatusEntries } from './mutation-table/catalogue-status-statements.js';
 import { entries as visibilityDeriveEntries } from './mutation-table/visibility-derive.js';
@@ -42,6 +43,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...catalogueWriterEntries,
   ...catalogueReconcileEntries,
   ...projectReadableEntries,
   ...catalogueStatusEntries,

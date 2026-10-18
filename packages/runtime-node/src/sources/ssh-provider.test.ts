@@ -2,10 +2,11 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { existsSync, readdirSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { orgContext } from '@package-broker/core/db/port';
 import { fixedClock } from '@package-broker/core/ids';
 import {
   parseCredentialMaterial,
@@ -17,6 +18,7 @@ import type {
   VersionCandidate,
 } from '@package-broker/core/sources/provider';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
+import { createFilesystemArchiveStore } from './ssh-archive-store.js';
 import { createDnsGuard } from './dns-guard.js';
 import { openSshGitSession, type SpawnGit } from './ssh-git.js';
 import {
@@ -201,10 +203,10 @@ function memoryStore(): SshArchiveStore & { stored: Map<string, Uint8Array> } {
   const records = new Map<string, { sha1: string; time: string | null }>();
   return {
     stored,
-    async find(_source, _name, versionNormalized, commit) {
+    async find(_ctx, _source, _name, versionNormalized, commit) {
       return records.get(`${versionNormalized}@${commit}`) ?? null;
     },
-    async store(_source, _name, archive) {
+    async store(_ctx, _source, _name, archive) {
       const key = `${archive.versionNormalized}@${archive.commit}`;
       stored.set(key, archive.zip);
       records.set(key, { sha1: archive.sha1, time: archive.time });
@@ -228,6 +230,7 @@ const source = (
 });
 
 const ctx = {
+  org: orgContext('org-1'),
   signal: new AbortController().signal,
   clock: fixedClock('2026-10-16T12:00:00.000Z'),
 } as ProviderContext;
@@ -339,6 +342,26 @@ describe('createSshGitProvider', () => {
           .update(zip as Uint8Array)
           .digest('hex'),
       );
+    }
+  });
+
+  it('scopes archives by the organization of the provider context', async () => {
+    const holder = await realpath(await mkdtemp(join(tmpdir(), 'ssh-org-')));
+    try {
+      const fsStore = await createFilesystemArchiveStore(join(holder, 'store'), {
+        maxZipBytes: 4 * 1024 * 1024,
+      });
+      archiveCalls = 0;
+      const describeAs = (org: string) =>
+        provider(fsStore).describe({ ...ctx, org: orgContext(org) }, source(), 'acme/lib', {});
+      await describeAs('org-a');
+      expect(archiveCalls).toBe(4);
+      await describeAs('org-a');
+      expect(archiveCalls).toBe(4);
+      await describeAs('org-b');
+      expect(archiveCalls).toBe(8);
+    } finally {
+      await rm(holder, { recursive: true, force: true });
     }
   });
 

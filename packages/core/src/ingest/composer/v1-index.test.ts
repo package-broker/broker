@@ -864,10 +864,14 @@ describe('readV1Index listing containers', () => {
     }
   });
 
-  it('marks the index incomplete for a malformed packages container in a streamed root', async () => {
+  it('rejects a malformed root packages container before streaming the index', async () => {
     const root = JSON.stringify({ packages: 'x' });
     const { fetch } = setup({ [`${BASE}/packages.json`]: root });
-    expect(incomplete(await readV1Index(fetch, options))).toBe('invalid');
+    await expect(readV1Index(fetch, options)).rejects.toMatchObject({
+      name: 'ComposerRootError',
+      code: 'unsupported',
+      field: 'packages',
+    });
   });
 
   it('splits the container check across chunk boundaries', async () => {

@@ -78,7 +78,10 @@ function fresh(exclude?: ProtectedHolderExclusion): ProtectedHolderInput {
 const withoutOperator = (): ProtectedHolderInput => fresh({ identityId: OPERATOR_IDENTITY });
 
 function repository(connection: SqlExecutor = executor): ProtectedGrantRepository {
-  return createGrantRepository(connection, { holderInput: withoutOperator });
+  return createGrantRepository(connection, {
+    providerAnchors: [OIDC],
+    holderInput: withoutOperator,
+  });
 }
 
 function user(org: OrgContext, id: string, email: string): Statement {
@@ -330,11 +333,10 @@ describe('exact protected-user predicate', () => {
 });
 
 describe('freshness or LocalRecovery input is required', () => {
-  it('rejects a call without the input at compile time and at run time', async () => {
+  it('accepts holder checks without input and rejects a count without it', async () => {
     const grants = repository();
 
-    // @ts-expect-error the freshness or LocalRecovery input has no default
-    await expect(grants.isProtectedHolder(a, U1)).rejects.toThrow(TypeError);
+    expect(await grants.isProtectedHolder(a, U1)).toBe(false);
     // @ts-expect-error the freshness or LocalRecovery input has no default
     await expect(grants.countProtectedHoldersFor(a)).rejects.toThrow(TypeError);
   });

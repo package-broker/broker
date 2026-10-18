@@ -3,12 +3,18 @@ export const MAX_METADATA_DEPTH = 32;
 
 export type MetadataEcosystem = 'composer' | 'npm';
 
+declare const NORMALIZED_METADATA: unique symbol;
+declare const BRAND: unique symbol;
+
+export type NormalizedJson = string & { readonly [BRAND]: true };
+
 export interface NormalizedMetadata {
-  json: string;
-  license: string | null;
-  deprecatedMessage: string | null;
-  composerShasum: string | null;
-  npmIntegrity: string | null;
+  readonly [NORMALIZED_METADATA]: true;
+  readonly json: NormalizedJson;
+  readonly license: string | null;
+  readonly deprecatedMessage: string | null;
+  readonly composerShasum: string | null;
+  readonly npmIntegrity: string | null;
 }
 
 export class MetadataError extends Error {
@@ -249,10 +255,10 @@ function normalize(ecosystem: MetadataEcosystem, input: unknown): NormalizedMeta
   const json = canonicalJson(result);
   if (ENCODER.encode(json).length > MAX_METADATA_BYTES) throw new MetadataTooLargeError();
   return {
-    json,
+    json: json as NormalizedJson,
     license: licenseOf(result, ecosystem),
     deprecatedMessage,
     composerShasum,
     npmIntegrity,
-  };
+  } satisfies Omit<NormalizedMetadata, typeof NORMALIZED_METADATA> as NormalizedMetadata;
 }

@@ -26,6 +26,9 @@ const matrix = [
   ['org:tokens:read', 'organization', '111000'],
   ['org:tokens:revoke', 'organization', '110000'],
   ['org:service-principals:write', 'organization', '110000'],
+  ['org:packages:manage', 'organization', '110000'],
+  ['org:import:write', 'organization', '010000'],
+  ['org:import:approve', 'organization', '110000'],
   ['org:audit:read', 'organization', '011000'],
   ['project:read', 'project', '011111'],
   ['project:settings:write', 'project', '110100'],
@@ -54,8 +57,8 @@ const roles = [
 describe('permission catalogue', () => {
   it('matches every catalogue and default-role matrix cell', () => {
     expect(PERMISSIONS.map(({ name }) => name)).toEqual(matrix.map(([name]) => name));
-    expect(PERMISSIONS).toHaveLength(30);
-    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(16);
+    expect(PERMISSIONS).toHaveLength(33);
+    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(19);
     expect(PERMISSIONS.filter(({ scope }) => scope === 'project')).toHaveLength(14);
     expect(DEFAULT_ROLES).toHaveLength(5);
     for (const [index, [key, name, scope]] of roles.entries()) {
@@ -77,8 +80,8 @@ describe('permission catalogue', () => {
       expect(name).toMatch(PERMISSION_PATTERN);
       expect(isPermission(name)).toBe(true);
     }
-    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(30);
-    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(30);
+    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(33);
+    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(33);
   });
 
   it('validates unknown names, project scope violations and duplicates', () => {
@@ -217,8 +220,8 @@ describe('permission catalogue', () => {
     expect(problems).toHaveLength(2);
     const missing = missingCatalogue([]);
     expect(() => missing.push('extra')).not.toThrow();
-    expect(missing).toHaveLength(31);
-    expect(missingCatalogue([])).toHaveLength(30);
+    expect(missing).toHaveLength(34);
+    expect(missingCatalogue([])).toHaveLength(33);
     expect(rolePermissionProblems('project', ['bogus'])).toHaveLength(1);
   });
 
@@ -246,4 +249,10 @@ describe('permission catalogue', () => {
     expect(new Set(effective)).toEqual(new Set(['project:read', 'project:packages:read']));
     expect([...effective]).toEqual(['project:read', 'project:packages:read']);
   });
+});
+
+it('refuses package management in a project role', () => {
+  expect(rolePermissionProblems('project', ['org:packages:manage'])).toEqual([
+    'Organization permission in project role: "org:packages:manage"',
+  ]);
 });

@@ -17,7 +17,14 @@ const SSO_SESSION = '01J0SESSION0000000000000002';
 const ADMIN_ROLE = '01J0ROLE000000000000000001';
 const WRITER_ROLE = '01J0ROLE000000000000000002';
 const READER_ROLE = '01J0ROLE000000000000000003';
-const ANCHORS = [{ provider: 'idp', anchor: 'anchor-1', emailAuthoritative: true }];
+const ANCHORS = [
+  {
+    provider: 'idp',
+    anchor: 'anchor-1',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+];
 const OTHER_SSO_SESSION = '01J0SESSION0000000000000003';
 const IDENTITY = '01J0IDENTITY00000000000001';
 const OTHER_IDENTITY = '01J0IDENTITY00000000000002';
@@ -1427,7 +1434,16 @@ describe('round 6 hardening', () => {
       repository.issuePersonal(
         a,
         fence(),
-        baseInput({ providerAnchors: [{ provider: '', anchor: '', emailAuthoritative: true }] }),
+        baseInput({
+          providerAnchors: [
+            {
+              provider: '',
+              anchor: '',
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test'],
+            },
+          ],
+        }),
         minter('abcdefghijkl').mint,
       ),
     ).rejects.toThrow(TypeError);
@@ -1497,6 +1513,7 @@ describe('bound parameter budget', () => {
     provider: `idp${index}`,
     anchor: `anchor-${index}`,
     emailAuthoritative: index % 2 === 0,
+    emailAuthoritativeDomains: ['example.test'],
   }));
 
   function recorder() {

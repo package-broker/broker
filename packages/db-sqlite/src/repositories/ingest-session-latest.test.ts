@@ -232,6 +232,13 @@ describe('ingest session maintenance sweep', () => {
     expect(await ids()).toEqual([lowOther, top].sort());
   });
 
+  it('a bounded sweep keeps a finished row when only a foreign generation is newer', async () => {
+    const own = await insertRow(org.orgId, key(1), 1, 'complete', PAST);
+    const foreign = await insertRow(other.orgId, key(1), 2, 'complete', PAST);
+    await database.executor.batch([...sweepStatements(1, PAST, PAST)]);
+    expect(await ids()).toEqual([own, foreign].sort());
+  });
+
   it('3: keeps a latest finished session and a recently expired running one', async () => {
     const abandoned = await insertRow(org.orgId, key(1), 1, 'abandoned', PAST);
     const fresh = await insertRow(org.orgId, key(2), 1, 'running', ago(1));

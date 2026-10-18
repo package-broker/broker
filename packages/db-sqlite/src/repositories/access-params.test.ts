@@ -22,6 +22,7 @@ const ANCHORS: readonly ProtectedHolderProvider[] = Array.from({ length: 8 }, (_
   provider: `idp${index}`,
   anchor: `https://idp${index}.example.test/"quoted"/'single'/\\`,
   emailAuthoritative: index % 2 === 0,
+  emailAuthoritativeDomains: ['example.test'],
 }));
 
 const SELECTED_PROJECTS = JSON.stringify(
@@ -187,7 +188,12 @@ describe('holdsPermission negation', () => {
   const OWNER = '01J0ROLEOWNER00000000000AA';
   const anchors: ProtectedHolderProvider[] = ANCHORS.map((entry, index) =>
     index === 0
-      ? { provider: 'oidc', anchor: 'https://idp.example.test', emailAuthoritative: true }
+      ? {
+          provider: 'oidc',
+          anchor: 'https://idp.example.test',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        }
       : entry,
   );
   let database: MigratedDatabase;

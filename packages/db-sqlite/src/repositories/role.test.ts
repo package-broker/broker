@@ -64,6 +64,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test', 'actor.test'],
 };
 const OTHER: ProtectedHolderProvider = {
   provider: 'other',

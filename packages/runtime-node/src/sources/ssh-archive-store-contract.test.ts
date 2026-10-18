@@ -1,8 +1,21 @@
 import { createHash } from 'node:crypto';
+import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { orgContext } from '@package-broker/core/db/port';
 import type { ProviderSource } from '@package-broker/core/sources/provider';
+import { createFilesystemArchiveStore } from './ssh-archive-store.js';
 import type { SshArchiveRecord, SshArchiveStore, SshBuiltArchive } from './ssh-provider.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, link: vi.fn(actual.link) };
+});
+const { link: mockedLink } = await import('node:fs/promises');
+
+const ctx = orgContext('org-1');
 
 export interface SshArchiveStoreFixture {
   readonly store: SshArchiveStore;
@@ -22,7 +35,7 @@ export async function assertSshArchiveAtomicPublish(
   archive: SshBuiltArchive,
 ): Promise<void> {
   let finished = false;
-  const pending = fixture.store.store(source, name, archive).finally(() => {
+  const pending = fixture.store.store(ctx, source, name, archive).finally(() => {
     finished = true;
   });
   // Attach a handler immediately; observation can yield before the write rejects.
@@ -30,6 +43,7 @@ export async function assertSshArchiveAtomicPublish(
   try {
     do {
       const record = await fixture.store.find(
+        ctx,
         source,
         name,
         archive.versionNormalized,
@@ -45,7 +59,7 @@ export async function assertSshArchiveAtomicPublish(
     } while (!finished);
     await pending;
     expect(
-      await fixture.store.find(source, name, archive.versionNormalized, archive.commit),
+      await fixture.store.find(ctx, source, name, archive.versionNormalized, archive.commit),
     ).toEqual({ sha1: archive.sha1, time: archive.time });
     expect(await fixture.readZip(source, name, archive.versionNormalized, archive.commit)).toEqual(
       archive.zip,
@@ -90,7 +104,7 @@ export function describeSshArchiveStoreContract(
     it('returns null for an absent key', () =>
       run(async ({ store, source }) => {
         expect(
-          await store.find(source, 'acme/lib', archive.versionNormalized, archive.commit),
+          await store.find(ctx, source, 'acme/lib', archive.versionNormalized, archive.commit),
         ).toBeNull();
       }));
 
@@ -102,10 +116,10 @@ export function describeSshArchiveStoreContract(
     it('preserves the first publication and isolates source, name, version and commit', () =>
       run(async (fixture) => {
         const { store, source } = fixture;
-        await store.store(source, 'acme/lib', archive);
-        await store.store(source, 'acme/lib', { ...archive, time: null });
+        await store.store(ctx, source, 'acme/lib', archive);
+        await store.store(ctx, source, 'acme/lib', { ...archive, time: null });
         expect(
-          await store.find(source, 'acme/lib', archive.versionNormalized, archive.commit),
+          await store.find(ctx, source, 'acme/lib', archive.versionNormalized, archive.commit),
         ).toEqual({ sha1: archive.sha1, time: archive.time });
         for (const [src, name, version, commit] of [
           [{ ...source, id: 'different' }, 'acme/lib', archive.versionNormalized, archive.commit],
@@ -113,7 +127,7 @@ export function describeSshArchiveStoreContract(
           [source, 'acme/lib', '2.0.0.0', archive.commit],
           [source, 'acme/lib', archive.versionNormalized, 'b'.repeat(40)],
         ] as const) {
-          expect(await store.find(src, name, version, commit)).toBeNull();
+          expect(await store.find(ctx, src, name, version, commit)).toBeNull();
         }
       }));
 
@@ -121,13 +135,13 @@ export function describeSshArchiveStoreContract(
       run(async (fixture) => {
         const { store, source } = fixture;
         await expect(
-          store.store(source, 'acme/lib', {
+          store.store(ctx, source, 'acme/lib', {
             ...archive,
             zip: new Uint8Array(fixture.maxArchiveBytes + 1),
           }),
         ).rejects.toThrow();
         expect(
-          await store.find(source, 'acme/lib', archive.versionNormalized, archive.commit),
+          await store.find(ctx, source, 'acme/lib', archive.versionNormalized, archive.commit),
         ).toBeNull();
         expect(await fixture.temporaryFiles()).toEqual([]);
       }));
@@ -135,9 +149,12 @@ export function describeSshArchiveStoreContract(
     it('cleans up a failed write without publishing metadata', () =>
       run(async (fixture) => {
         fixture.failNextWrite();
-        await expect(fixture.store.store(fixture.source, 'acme/lib', archive)).rejects.toThrow();
+        await expect(
+          fixture.store.store(ctx, fixture.source, 'acme/lib', archive),
+        ).rejects.toThrow();
         expect(
           await fixture.store.find(
+            ctx,
             fixture.source,
             'acme/lib',
             archive.versionNormalized,
@@ -179,11 +196,11 @@ function createMemoryArchiveFixture(): SshArchiveStoreContractFixture {
   const keyOf = (src: ProviderSource, name: string, version: string, commit: string): string =>
     JSON.stringify([src.id, name, version, commit]);
   const store: SshArchiveStore = {
-    async find(src, name, version, commit) {
+    async find(_ctx, src, name, version, commit) {
       const entry = published.get(keyOf(src, name, version, commit));
       return entry === undefined ? null : { ...entry.record };
     },
-    async store(src, name, built) {
+    async store(_ctx, src, name, built) {
       const key = keyOf(src, name, built.versionNormalized, built.commit);
       if (built.zip.byteLength > MEMORY_MAX_ARCHIVE_BYTES) throw new Error('archive too large');
       staged.add(key);
@@ -220,6 +237,46 @@ function createMemoryArchiveFixture(): SshArchiveStoreContractFixture {
 
 describeSshArchiveStoreContract('memory', async () => createMemoryArchiveFixture());
 
+const FILESYSTEM_MAX_ARCHIVE_BYTES = 64 * 1024;
+
+async function createFilesystemFixture(): Promise<SshArchiveStoreContractFixture> {
+  const root = join(await realpath(await mkdtemp(join(tmpdir(), 'ssh-archive-'))), 'store');
+  const store = await createFilesystemArchiveStore(root, {
+    maxZipBytes: FILESYSTEM_MAX_ARCHIVE_BYTES,
+  });
+  return {
+    store,
+    source,
+    maxArchiveBytes: FILESYSTEM_MAX_ARCHIVE_BYTES,
+    readZip: (src, name, version, commit) => store.readZip(ctx, src, name, version, commit),
+    temporaryFiles: async () => readdir(join(root, '.staging')),
+    failNextWrite: () => {
+      vi.mocked(mockedLink).mockRejectedValueOnce(
+        Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }),
+      );
+    },
+    close: async () => rm(join(root, '..'), { recursive: true, force: true }),
+  };
+}
+
+describeSshArchiveStoreContract('filesystem', createFilesystemFixture);
+
+describe('filesystem store publication', () => {
+  it('never exposes a partial archive while a large ZIP is being written', async () => {
+    const fixture = await createFilesystemFixture();
+    try {
+      const zip = new Uint8Array(FILESYSTEM_MAX_ARCHIVE_BYTES).fill(7);
+      await assertSshArchiveAtomicPublish(fixture, fixture.source, 'acme/lib', {
+        ...archive,
+        zip,
+        sha1: createHash('sha1').update(zip).digest('hex'),
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+});
+
 describe('SSH archive contract checker', () => {
   it('rejects a store exposing metadata before its complete bytes', async () => {
     let record: SshArchiveRecord | null = null;
@@ -231,7 +288,7 @@ describe('SSH archive contract checker', () => {
             async find() {
               return record;
             },
-            async store(_source, _name, built) {
+            async store(_ctx, _source, _name, built) {
               record = { sha1: built.sha1, time: built.time };
               await setImmediate();
               zip = built.zip;

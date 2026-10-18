@@ -400,7 +400,17 @@ export interface CatalogueWriter {
 
 export type VisibilityWriteResult =
   | { readonly ok: true; readonly opId: string }
-  | { readonly ok: false; readonly reason: FailureReason | 'indeterminate' | 'not_found' };
+  | {
+      readonly ok: false;
+      readonly reason:
+        | FailureReason
+        | 'indeterminate'
+        | 'not_found'
+        | 'invalid_pattern'
+        | 'too_many_patterns'
+        | 'not_attached'
+        | 'not_eligible';
+    };
 
 /** Every method checks the fence actor's authority inside its own batch. */
 export interface VisibilityStore {

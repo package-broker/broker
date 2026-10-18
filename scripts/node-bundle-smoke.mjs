@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { createHmac } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { createHmac, randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
 import { cp, mkdtemp, readFile, realpath, rename, rm } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -166,7 +169,110 @@ let step = 'startup';
 let copy;
 let child;
 let childStderr = '';
+let childStdout = '';
 let deadlineTimer;
+
+async function copyInstalledDependencies(target, manifestPath) {
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const require = createRequire(manifestPath);
+  for (const name of Object.keys(manifest.dependencies ?? {})) {
+    const sourceManifest = require.resolve(`${name}/package.json`);
+    const destination = join(target, 'node_modules', name);
+    await cp(dirname(sourceManifest), destination, { recursive: true });
+    await copyInstalledDependencies(destination, sourceManifest);
+  }
+}
+
+async function waitForAudit(check, label) {
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await delay(POLL_INTERVAL_MS);
+  }
+  throw new Error(`audit jobs: timed out waiting for ${label}`);
+}
+
+function auditLogs() {
+  return `${childStdout}\n${childStderr}`.split('\n').flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+async function checkAuditJobs(database) {
+  const db = new DatabaseSync(database);
+  try {
+    db.exec('PRAGMA busy_timeout = 5000');
+    const orgId = db.prepare('SELECT id FROM organization LIMIT 1').get().id;
+    const schedules = () =>
+      db
+        .prepare(
+          'SELECT name, every_seconds FROM job_schedule WHERE org_id = ? AND enabled = 1 ORDER BY name',
+        )
+        .all(orgId);
+    await waitForAudit(() => schedules().length >= 2, 'registered schedules');
+    assert.deepEqual(
+      schedules().map((row) => [row.name, row.every_seconds]),
+      [
+        ['core:audit-seal:v1', 60],
+        ['core:audit-verify:v1', 86400],
+      ],
+    );
+    db.prepare(
+      `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+      VALUES (?, ?, ?, 'system', 'org.update', 'organization')`,
+    ).run('smoke-audit', orgId, new Date().toISOString());
+    const run = async (type) => {
+      const id = randomUUID();
+      db.prepare(
+        'INSERT INTO job (id, org_id, type, payload_json, idempotency_key) VALUES (?, ?, ?, ?, ?)',
+      ).run(id, orgId, type, '{}', id);
+      await waitForAudit(
+        () =>
+          db.prepare('SELECT state FROM job WHERE org_id = ? AND id = ?').get(orgId, id)?.state ===
+          'succeeded',
+        type,
+      );
+      return id;
+    };
+    await run('core:audit-seal:v1');
+    const sealed = db
+      .prepare('SELECT seq FROM audit_event WHERE org_id = ? AND id = ?')
+      .get(orgId, 'smoke-audit');
+    assert.ok(sealed, 'seal job must append the audit row');
+    const verified = await run('core:audit-verify:v1');
+    await waitForAudit(
+      () =>
+        auditLogs().some(
+          (row) => row.event === 'audit.verified' && row.job_id === verified && row.rows >= 1,
+        ),
+      'verification success',
+    );
+    db.prepare("UPDATE audit_event SET action = 'org.delete' WHERE org_id = ? AND id = ?").run(
+      orgId,
+      'smoke-audit',
+    );
+    const broken = await run('core:audit-verify:v1');
+    await waitForAudit(
+      () =>
+        auditLogs().some(
+          (row) =>
+            row.event === 'audit.chain_broken' &&
+            row.job_id === broken &&
+            row.seq === sealed.seq &&
+            row.reason === 'hash',
+        ),
+      'tamper outcome',
+    );
+    assert.ok(!auditLogs().some((row) => row.event === 'audit.verified' && row.job_id === broken));
+    console.log('smoke:node registered audit schedules, sealed, verified and detected tampering');
+  } finally {
+    db.close();
+  }
+}
 
 function spawnFailure(server) {
   let fail;
@@ -212,18 +318,28 @@ async function run() {
   await cp(join(SOURCE, '.'), copy, { recursive: true });
   console.log(`smoke:node copied ${SOURCE} to ${copy}`);
 
-  step = 'installing production dependencies';
-  const install = spawnSync(
-    'npm',
-    ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'],
-    { cwd: copy, encoding: 'utf8' },
-  );
-  if (install.status !== 0) {
-    throw new Error(
-      `npm install exited with ${install.status}: ${install.error?.message ?? (install.stderr || install.stdout)}`,
+  if (process.env['SMOKE_OFFLINE'] === '1') {
+    step = 'copying installed production dependencies';
+    const require = createRequire(join(REPO_ROOT, 'packages/runtime-node/package.json'));
+    const driverManifest = require.resolve('better-sqlite3/package.json');
+    const driverTarget = join(copy, 'node_modules/better-sqlite3');
+    await cp(dirname(driverManifest), driverTarget, { recursive: true });
+    await copyInstalledDependencies(driverTarget, driverManifest);
+    console.log('smoke:node copied installed production dependencies (offline)');
+  } else {
+    step = 'installing production dependencies';
+    const install = spawnSync(
+      'npm',
+      ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'],
+      { cwd: copy, encoding: 'utf8' },
     );
+    if (install.status !== 0) {
+      throw new Error(
+        `npm install exited with ${install.status}: ${install.error?.message ?? (install.stderr || install.stdout)}`,
+      );
+    }
+    console.log('smoke:node installed production dependencies');
   }
-  console.log('smoke:node installed production dependencies');
 
   if (BREAK) {
     step = 'breaking the driver resolution';
@@ -259,7 +375,9 @@ async function run() {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const failure = spawnFailure(child);
-  child.stdout.on('data', () => {});
+  child.stdout.on('data', (chunk) => {
+    childStdout += chunk;
+  });
   child.stderr.on('data', (chunk) => {
     childStderr += chunk;
   });
@@ -290,6 +408,9 @@ async function run() {
   });
   await expectStatus(signedIn, 200, 'GET /_pb/session with the minted session');
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
+
+  step = 'checking audit jobs';
+  await checkAuditJobs(env['PB_SQLITE_PATH']);
 
   step = 'shutting down';
   child.kill('SIGTERM');

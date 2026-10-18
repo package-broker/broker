@@ -1,3 +1,11 @@
+import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
+import { createObservability } from '@package-broker/core/platform/observability';
+import type { JobDefinition } from '@package-broker/core/platform/jobs';
+import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
+import { auditSealJob } from '@package-broker/core/audit/sealer';
+import { auditVerifyJob } from '@package-broker/core/audit/verify';
+import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
+import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { createServer, type Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { createAuthModule, type AuthModule } from '@package-broker/core/auth/module';
@@ -46,7 +54,7 @@ import { createKernel } from '@package-broker/core/kernel/kernel';
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
-import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { collectRegistrations, registerCoreJob } from '@package-broker/core/kernel/registry';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
@@ -276,7 +284,44 @@ export function createNodeServer(
 
   const { auth } = options;
   const application = (async () => {
-    const registration = collectRegistrations(plugins);
+    function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+      return registerCoreJob({
+        ...definition,
+        handler: (payload, context) =>
+          definition.handler(definition.validate(payload), {
+            ...context,
+            observability: createObservability(
+              options.observability?.sink ?? {
+                emit: (record) => {
+                  if (record.kind === 'log') log({ ...record.record });
+                },
+              },
+              {
+                deploymentId: options.observability?.deploymentId ?? 'unconfigured',
+                runtime: 'node',
+                requestId: null,
+                plugin: 'core',
+                jobId: context.jobId,
+                attempt: context.attempt,
+              },
+              {
+                events: AUDIT_EVENTS,
+                reasonCodes: new Set(),
+                routeTemplates: new Set(),
+              },
+            ),
+          }),
+      });
+    }
+    const registration = collectRegistrations(plugins, {
+      coreJobs:
+        options.platformServices === undefined
+          ? []
+          : [
+              registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
+              registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+            ],
+    });
     const access =
       auth === undefined
         ? undefined

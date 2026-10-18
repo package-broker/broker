@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -11,6 +12,7 @@ import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { planMigrations } from '@package-broker/db-sqlite/migrations/plan';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
@@ -54,6 +56,15 @@ function workerdPids() {
   }
 }
 
+const workerLogs = [];
+async function waitForAuditLog(predicate, label, limitMs) {
+  const deadline = Date.now() + limitMs;
+  while (Date.now() < deadline) {
+    if (workerLogs.some(predicate)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`audit jobs: missing ${label}`);
+}
 let step = 'startup';
 let mf;
 let disposed = false;
@@ -213,6 +224,7 @@ async function run() {
     mf = new Miniflare(
       convertV4MiniflareOptions({
         rootPath: dirname(workerScript),
+        handleStructuredLogs: (record) => workerLogs.push(record.message),
         modules: true,
         scriptPath: basename(workerScript),
         compatibilityDate: '2026-10-01',
@@ -380,6 +392,90 @@ async function run() {
     if (role === undefined) throw new Error('no organization role');
     await insertGrant(role.id);
     console.log('smoke:cloudflare workerd: D1 enforces foreign keys');
+
+    step = 'checking registered audit schedules';
+    const entry = await mf.getWorker();
+    await entry.scheduled();
+    const schedules = await executor.all({
+      sql: 'SELECT name, every_seconds FROM job_schedule WHERE org_id = ? AND enabled = 1 ORDER BY name',
+      params: [orgId],
+    });
+    assert.deepEqual(
+      schedules.map((row) => [row.name, row.every_seconds]),
+      [
+        ['core:audit-seal:v1', 60],
+        ['core:audit-verify:v1', 86400],
+      ],
+    );
+    await executor.batch([
+      {
+        sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+            VALUES ('smoke-audit', ?, ?, 'system', 'org.update', 'organization')`,
+        params: [orgId, new Date().toISOString()],
+      },
+    ]);
+    const jobs = createJobRepository(executor);
+    const runAudit = async (type) => {
+      const id = ulid();
+      await jobs.enqueue(orgContext(orgId), {
+        id,
+        type,
+        payloadJson: '{}',
+        idempotencyKey: id,
+        resourceKey: null,
+        runAt: null,
+        maxAttempts: 2,
+        projectId: null,
+        initiatorTokenId: null,
+      });
+      const result = await entry.queue('pb-smoke-jobs', [
+        {
+          id,
+          timestamp: new Date(),
+          attempts: 1,
+          body: { v: 1, org: orgId, job: id },
+        },
+      ]);
+      assert.equal(result.outcome, 'ok', `queue execution of ${type}`);
+      assert.equal((await jobs.status(orgContext(orgId), id))?.state, 'succeeded', type);
+      return id;
+    };
+    step = 'sealing and verifying audit rows through the built Worker';
+    await runAudit('core:audit-seal:v1');
+    const [sealed] = await executor.all({
+      sql: "SELECT seq FROM audit_event WHERE org_id = ? AND id = 'smoke-audit'",
+      params: [orgId],
+    });
+    assert.ok(sealed, 'seal job must append the audit row');
+    const verified = await runAudit('core:audit-verify:v1');
+    await waitForAuditLog(
+      (message) => message.includes('audit.verified') && message.includes(verified),
+      'verification success',
+      limitMs,
+    );
+    step = 'detecting audit tampering through the built Worker';
+    await executor.batch([
+      {
+        sql: "UPDATE audit_event SET action = 'org.delete' WHERE org_id = ? AND id = 'smoke-audit'",
+        params: [orgId],
+      },
+    ]);
+    const broken = await runAudit('core:audit-verify:v1');
+    await waitForAuditLog(
+      (message) =>
+        message.includes('audit.chain_broken') &&
+        message.includes(broken) &&
+        message.includes('hash') &&
+        new RegExp(`seq["']?\\s*:\\s*${sealed.seq}\\b`).test(message),
+      'tamper outcome identifying the broken sequence and hash',
+      limitMs,
+    );
+    assert.ok(
+      !workerLogs.some((message) => message.includes('audit.verified') && message.includes(broken)),
+    );
+    console.log(
+      'smoke:cloudflare registered audit schedules, sealed, verified and detected tampering',
+    );
 
     step = 'done';
     console.log('smoke:cloudflare ok');

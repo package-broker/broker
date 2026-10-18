@@ -269,6 +269,14 @@ async function run() {
       throw new Error(`/nope: expected error.code "not_found", got ${JSON.stringify(envelope)}`);
     }
 
+    step = 'GET /_pb/session without credentials';
+    await expectStatus(
+      '/_pb/session without credentials',
+      await dispatch('/_pb/session', limitMs),
+      401,
+    );
+    console.log('smoke:cloudflare workerd: session without credentials refused (401)');
+
     step = 'POST /_pb/auth/local/setup/start';
     const started = await send('/_pb/auth/local/setup/start', limitMs, {
       method: 'POST',

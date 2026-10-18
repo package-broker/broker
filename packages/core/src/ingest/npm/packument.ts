@@ -1,3 +1,4 @@
+import { packageKey } from '../../catalogue/names.js';
 import type { OrgContext } from '../../db/port.js';
 import type { BlobStore } from '../../platform/blob.js';
 import type { Codecs } from '../../platform/codec.js';
@@ -19,6 +20,7 @@ import {
   type VersionCandidate,
 } from '../../sources/provider.js';
 import { extractMembers, type ExtractedMember } from '../json-stream.js';
+import { JsonTokenizer, type JsonToken } from '../json-tokenizer.js';
 import { openStagedSnapshot, stageSnapshot, type StageSnapshotOptions } from '../snapshot.js';
 
 export const NPM_INLINE_PARSE_BYTES = 1024 * 1024;
@@ -38,6 +40,7 @@ export class NpmPackumentError extends Error {
   constructor(
     readonly code: NpmPackumentErrorCode,
     readonly status?: number,
+    readonly packageKey?: string,
   ) {
     super(`npm packument ${code}${status === undefined ? '' : ` (${status})`}`);
   }
@@ -68,6 +71,8 @@ export interface NpmPackumentTarget {
  */
 export interface NpmSnapshotRef extends SnapshotRef {
   readonly validators?: Validators;
+  /** Preserved with the staged bytes; missing evidence fails closed on continuation. */
+  readonly definitiveAbsence?: boolean;
 }
 
 /** `restart`: the staged snapshot is gone; the ingest session must start over (retryable). */
@@ -179,10 +184,10 @@ function replay(
   );
 }
 
-function stringRecord(raw: string | undefined): Record<string, string> {
-  if (raw === undefined) return {};
+function stringRecord(raw: string | undefined): Record<string, string> | undefined {
+  if (raw === undefined) return undefined;
   const parsed: unknown = JSON.parse(raw);
-  if (!isRecord(parsed)) return {};
+  if (!isRecord(parsed)) return undefined;
   const out = Object.create(null) as Record<string, string>;
   for (const [key, value] of Object.entries(parsed)) {
     if (typeof value === 'string') out[key] = value;
@@ -190,7 +195,53 @@ function stringRecord(raw: string | undefined): Record<string, string> {
   return out;
 }
 
+function invalidPackument(name: string): NpmPackumentError {
+  return new NpmPackumentError(
+    'invalid',
+    undefined,
+    packageKey(name, { ecosystem: 'npm', legacyCase: true }),
+  );
+}
+
+function assertNamed(expected: string, raw: string | undefined): void {
+  if (raw === undefined || (JSON.parse(raw) as unknown) !== expected) {
+    throw invalidPackument(expected);
+  }
+}
+
+function isNotFoundBody(parsed: unknown): boolean {
+  if (!isRecord(parsed)) return false;
+  const keys = Object.keys(parsed);
+  const error = parsed.error;
+  return keys.length === 1 && error === 'Not found';
+}
+
+/** Track presence without retaining the versions object or confusing it with an empty one. */
+async function* inspectVersions(
+  source: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>,
+  state: { present: boolean },
+): AsyncGenerator<Uint8Array> {
+  const tokenizer = new JsonTokenizer();
+  const sink = (token: JsonToken): void => {
+    if (token.type !== 'key') return;
+    if (token.value === 'versions') state.present = true;
+    tokenizer.skipNext();
+  };
+  for await (const bytes of source) {
+    tokenizer.write(bytes, sink);
+    yield bytes;
+  }
+  tokenizer.end(sink);
+}
+
+function isUnpublished(timeRaw: string | undefined, versionsPresent: boolean): boolean {
+  if (versionsPresent || timeRaw === undefined) return false;
+  const time: unknown = JSON.parse(timeRaw);
+  return isRecord(time) && isRecord(time.unpublished);
+}
+
 async function* candidates(
+  name: string,
   members: AsyncIterable<ExtractedMember> | Iterable<ExtractedMember>,
   time: Readonly<Record<string, string>>,
   signal: AbortSignal | undefined,
@@ -204,7 +255,7 @@ async function* candidates(
     seen += 1;
     const key = member.path[1] as string;
     const manifest: unknown = JSON.parse(member.raw);
-    if (!isRecord(manifest) || manifest.version !== key) continue;
+    if (!isRecord(manifest) || manifest.version !== key) throw invalidPackument(name);
     const upstreamTime = Object.hasOwn(time, key) ? time[key] : undefined;
     yield {
       ordinal,
@@ -214,6 +265,7 @@ async function* candidates(
       raw: member.raw,
     };
   }
+  if (seen === 0 && skipped.length === 0) throw invalidPackument(name);
 }
 
 /** Groups members into writer calls of at most NPM_VERSION_CHUNK versions. */
@@ -236,7 +288,7 @@ function found(
   name: string,
   snapshot: SnapshotRef,
   validators: DocumentValidators,
-  distTags: Record<string, string>,
+  distTags: Record<string, string> | undefined,
   members: AsyncIterable<VersionCandidate>,
   skipped: readonly SkippedMember[] = [],
 ): NpmDescribeResult {
@@ -246,7 +298,7 @@ function found(
       name,
       snapshot,
       members,
-      distTags,
+      ...(distTags === undefined ? {} : { distTags }),
       validators,
       documentsComplete: () => skipped.length === 0,
       skippedMembers: () => skipped,
@@ -254,32 +306,51 @@ function found(
   };
 }
 
+async function* replayCandidates(
+  items: readonly VersionCandidate[],
+): AsyncGenerator<VersionCandidate> {
+  yield* items;
+}
+
 async function describeInline(
   name: string,
   bytes: Uint8Array,
   validators: Validators,
   maxBytes: number,
+  definitiveAbsence: boolean,
 ): Promise<NpmDescribeResult> {
   const id =
     strongEtag(validators) ?? `sha256:${hex(await crypto.subtle.digest('SHA-256', bytes))}`;
   const members: ExtractedMember[] = [];
+  const versions = { present: false };
   for await (const member of extractMembers(
-    (async function* () {
-      yield bytes;
-    })(),
-    [['versions', '*'], ['time'], ['dist-tags']],
+    inspectVersions(
+      (async function* () {
+        yield bytes;
+      })(),
+      versions,
+    ),
+    [['name'], ['versions', '*'], ['time'], ['dist-tags']],
     { maxDocumentBytes: maxBytes },
   )) {
     members.push(member);
   }
-  const time = stringRecord(members.find((m) => m.path[0] === 'time')?.raw);
+  assertNamed(name, members.find((m) => m.path[0] === 'name')?.raw);
+  const timeRaw = members.find((m) => m.path[0] === 'time')?.raw;
+  if (isUnpublished(timeRaw, versions.present)) {
+    return { kind: 'not_found', definitive: definitiveAbsence };
+  }
+  const time = stringRecord(timeRaw) ?? {};
   const distTags = stringRecord(members.find((m) => m.path[0] === 'dist-tags')?.raw);
+  const accepted: VersionCandidate[] = [];
+  for await (const candidate of candidates(name, members, time, undefined))
+    accepted.push(candidate);
   return found(
     name,
     snapshotRef(id),
     { 'npm-full': validators },
     distTags,
-    candidates(members, time, undefined),
+    replayCandidates(accepted),
   );
 }
 
@@ -301,30 +372,49 @@ function resumedValidators(ref: NpmSnapshotRef): Validators {
 
 async function describeStaged(
   deps: NpmPackumentDeps,
-  name: string,
+  target: NpmPackumentTarget,
   ref: NpmSnapshotRef,
   maxBytes: number,
 ): Promise<NpmDescribeResult> {
+  const { name } = target;
   const validators = resumedValidators(ref);
   const first = await openStagedSnapshot(deps.ctx, deps.store, ref, { codecs: deps.codecs });
   if (first.kind === 'restart') return { kind: 'restart' };
+  let nameRaw: string | undefined;
   let timeRaw: string | undefined;
   let distTagsRaw: string | undefined;
-  for await (const member of extractMembers(first.body, [['time'], ['dist-tags']], {
-    maxDocumentBytes: maxBytes,
-    maxMemberBytes: Math.min(TIME_MEMBER_BYTES, maxBytes),
-  })) {
+  const versionsPresent = { present: false };
+  for await (const member of extractMembers(
+    inspectVersions(first.body, versionsPresent),
+    [['name'], ['time'], ['dist-tags']],
+    {
+      maxDocumentBytes: maxBytes,
+      maxMemberBytes: Math.min(TIME_MEMBER_BYTES, maxBytes),
+    },
+  )) {
     deps.signal?.throwIfAborted();
-    if (member.path[0] === 'time') timeRaw = member.raw;
+    if (member.path[0] === 'name') nameRaw = member.raw;
+    else if (member.path[0] === 'time') timeRaw = member.raw;
     else distTagsRaw = member.raw;
   }
-  const time = stringRecord(timeRaw);
+  assertNamed(name, nameRaw);
+  if (isUnpublished(timeRaw, versionsPresent.present)) {
+    return {
+      kind: 'not_found',
+      definitive:
+        new URL(target.url).origin === 'https://registry.npmjs.org' &&
+        target.credential === undefined &&
+        ref.definitiveAbsence === true,
+    };
+  }
+  const time = stringRecord(timeRaw) ?? {};
   const distTags = stringRecord(distTagsRaw);
   const skipped: SkippedMember[] = [];
   async function* versions(): AsyncGenerator<VersionCandidate> {
     const second = await openStagedSnapshot(deps.ctx, deps.store, ref, { codecs: deps.codecs });
     if (second.kind === 'restart') throw new NpmPackumentError('snapshot_gone');
     yield* candidates(
+      name,
       extractMembers(second.body, [['versions', '*']], {
         maxDocumentBytes: maxBytes,
         maxMemberBytes: VERSION_MEMBER_BYTES,
@@ -353,7 +443,7 @@ export async function describeNpmPackument(
 ): Promise<NpmDescribeResult> {
   const maxBytes = target.maxBytes ?? DEFAULT_MAX_BYTES;
   if (options.snapshot?.stagedBlob !== undefined) {
-    return describeStaged(deps, target.name, options.snapshot, maxBytes);
+    return describeStaged(deps, target, options.snapshot, maxBytes);
   }
   const known = options.validators?.['npm-full'];
   const request = (conditional: boolean): Promise<UpstreamResponse> =>
@@ -377,6 +467,10 @@ export async function describeNpmPackument(
 
   const conditional = known !== undefined;
   const response = await request(conditional);
+  const definitiveAbsence =
+    new URL(target.url).origin === 'https://registry.npmjs.org' &&
+    target.credential === undefined &&
+    response.redirected === false;
   if (response.status === 304) {
     if (!conditional) throw new NpmPackumentError('unexpected_status', 304);
     return { kind: 'not_modified' };
@@ -392,10 +486,10 @@ export async function describeNpmPackument(
       }
     }
     let definitive = false;
-    if (body !== null) {
+    if (body !== null && definitiveAbsence) {
       try {
         const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
-        definitive = isRecord(parsed);
+        definitive = isNotFoundBody(parsed);
       } catch {
         definitive = false;
       }
@@ -406,19 +500,27 @@ export async function describeNpmPackument(
     await response.body?.cancel().catch(() => undefined);
     throw new UpstreamError('http_status', response.status);
   }
-  if (response.body === null) throw new NpmPackumentError('invalid');
+  if (response.body === null) throw invalidPackument(target.name);
   const validators = validatorsOf(response);
   const head = await readHead(response.body, NPM_INLINE_PARSE_BYTES, deps.onUpstreamBytes);
   if (head.rest === null) {
-    return describeInline(target.name, concat(head.parts, head.size), validators, maxBytes);
+    return describeInline(
+      target.name,
+      concat(head.parts, head.size),
+      validators,
+      maxBytes,
+      definitiveAbsence,
+    );
   }
 
   const firstTag = etagValue(validators.etag);
   const staged: Validators[] = [validators];
+  let stagedDefinitiveAbsence = definitiveAbsence;
   const ref = await stageSnapshot(
     deps.ctx,
     async () => {
       const again = await request(false);
+      stagedDefinitiveAbsence &&= again.redirected === false;
       if (again.status !== 200 || again.body === null) {
         await again.body?.cancel().catch(() => undefined);
         throw new UpstreamError('http_status', again.status);
@@ -450,6 +552,7 @@ export async function describeNpmPackument(
   const resumable: NpmSnapshotRef = {
     ...(sameStrong ? snapshotRef(etag, ref.stagedBlob) : ref),
     validators: staged[staged.length - 1]!,
+    definitiveAbsence: stagedDefinitiveAbsence,
   };
-  return describeStaged(deps, target.name, resumable, maxBytes);
+  return describeStaged(deps, target, resumable, maxBytes);
 }

@@ -24,10 +24,33 @@ const coveredByForeignName: ContractCase = {
       context.mutate(
         compile(
           db.selectNoFrom(
-            sql<number>`(${coveredByRegisteredNames(own, 'S1' as never, 'acme/a')})`.as('held'),
+            sql<number>`(${coveredByRegisteredNames(own, 'S1', 'composer', 'acme/a')})`.as('held'),
           ),
         ),
       ) as never,
+    );
+    expect(rows[0]?.held).toBe(0);
+  },
+};
+
+const coveredByOtherEcosystem: ContractCase = {
+  name: 'only a registered name of the requested ecosystem covers a key',
+  async run(context) {
+    const seed = seeder(context.executor);
+    const { own } = orgOf(context);
+    await seedSource(seed, 'S1', own.orgId, 'vcs');
+    await seed(
+      "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('R1', ?, 'S1', 'npm', 'acme/*')",
+      own.orgId,
+    );
+    const rows = await context.executor.all<{ held: number }>(
+      context.mutate(
+        compile(
+          db.selectNoFrom(
+            sql<number>`(${coveredByRegisteredNames(own, 'S1', 'composer', 'acme/a')})`.as('held'),
+          ),
+        ),
+      ),
     );
     expect(rows[0]?.held).toBe(0);
   },
@@ -64,13 +87,20 @@ export const entries: readonly MutationEntry[] = [
   {
     builder: 'coveredByRegisteredNames',
     file: 'repositories/registered-name.ts',
-    cases: [coveredByForeignName],
+    cases: [coveredByForeignName, coveredByOtherEcosystem],
     predicates: [
       {
         name: 'registered name row is scoped to the organization',
         locate: ref('rn_cov', 'org_id', '\\?'),
         neutral: NOT_NULL,
         caseName: coveredByForeignName.name,
+      },
+      {
+        name: 'registered name matches the requested ecosystem',
+        locate: /rn_cov\.ecosystem = \?/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: coveredByOtherEcosystem.name,
       },
     ],
   },

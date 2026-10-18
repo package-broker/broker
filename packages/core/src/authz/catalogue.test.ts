@@ -66,6 +66,7 @@ describe('step 5 catalogue additions', () => {
       'org:roles:read',
       'org:grants:read',
       'org:sources:read',
+      'org:import:write',
       'org:audit:read',
       'project:read',
       'project:grants:read',
@@ -229,5 +230,16 @@ describe('catalogueProblems', () => {
     );
     expect(problem).toContain(JSON.stringify('x'.repeat(80)));
     expect(problem).not.toContain('x'.repeat(81));
+  });
+});
+
+describe('import and package permissions', () => {
+  it.each([
+    ['org:packages:manage', true, false],
+    ['org:import:write', false, true],
+    ['org:import:approve', true, false],
+  ] as const)('%s session and token eligibility', (name, sessionOnly, eligible) => {
+    expect(byName(name)).toMatchObject({ scope: 'organization', sessionOnly });
+    expect(catalogueTokenEligible(name)).toBe(eligible);
   });
 });

@@ -55,6 +55,7 @@ export function admittedProxySources(
     .where(proxyEligibleCondition({ package: keyRow, source: src }))
     .where(
       admissionCondition(
+        ctx,
         col(`${ps}.project_id`),
         col(`${ps}.source_id`),
         key('name'),

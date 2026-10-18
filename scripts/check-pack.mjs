@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_PACKAGES = ['core', 'cli', 'db-sqlite', 'runtime-cloudflare', 'runtime-node', 'ui'];
@@ -249,6 +250,67 @@ function checkEntryFields(pkgJson, files) {
   return { problems, count: entries.filter(([, value]) => value !== undefined).length };
 }
 
+function checkCorePackageContext(dir, pkgJson, files) {
+  const entries = [];
+  for (const [key, value] of Object.entries(normalizeExports(pkgJson.exports) ?? {})) {
+    for (const target of collectTargets(value)) {
+      const values = target.includes('*') ? wildcardValues(target, files) : [''];
+      for (const match of values) {
+        const file = target.split('*').join(match);
+        if (/\.(?:[cm]?js|[cm]?ts)$/.test(file))
+          entries.push({ subpath: key.split('*').join(match), file: join(dir, file) });
+      }
+    }
+  }
+
+  const program = ts.createProgram([...new Set(entries.map(({ file }) => file))], {
+    allowJs: true,
+    noEmit: true,
+    noLib: true,
+    types: [],
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  });
+  const checker = program.getTypeChecker();
+  const forbidden = new Set([
+    'setResolvedPackage',
+    'packageActorOf',
+    'setPackageActor',
+    'clearPackageActor',
+  ]);
+  const problems = new Set();
+  const inspectSymbol = (symbol, subpath, visited = new Set()) => {
+    const original =
+      symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+    if (visited.has(original)) return;
+    visited.add(original);
+    if (forbidden.has(symbol.name) || forbidden.has(original.name))
+      problems.add(`core export "${subpath}" exposes kernel-only "${original.name}"`);
+    if (original.flags & ts.SymbolFlags.Module)
+      for (const member of checker.getExportsOfModule(original))
+        inspectSymbol(member, subpath, visited);
+  };
+  let readers = 0;
+  for (const { subpath, file } of entries) {
+    const source = program.getSourceFile(file);
+    const module = source && checker.getSymbolAtLocation(source);
+    if (!module) {
+      problems.add(`core export "${subpath}" could not be inspected for private package context`);
+      continue;
+    }
+    const symbols = checker.getExportsOfModule(module);
+    for (const symbol of symbols) inspectSymbol(symbol, subpath);
+    if (subpath === './kernel/package-context') {
+      readers += 1;
+      if (!symbols.some((symbol) => symbol.name === 'resolvedPackageOf'))
+        problems.add(`core export "${subpath}" must expose resolvedPackageOf`);
+    }
+  }
+  if (readers === 0)
+    problems.add('core must export ./kernel/package-context with resolvedPackageOf');
+  return [...problems];
+}
+
 function parseVersion(text) {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(text);
   if (!match) return null;
@@ -385,7 +447,9 @@ function inspect(pkg) {
     const dir = join(extract, 'package');
     const files = listFiles(dir);
     const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    return { ...checkPackedPackage(pkg, pkgJson, files), pkgJson };
+    const result = checkPackedPackage(pkg, pkgJson, files);
+    if (pkg === 'core') result.problems.push(...checkCorePackageContext(dir, pkgJson, files));
+    return { ...result, pkgJson };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -13,6 +13,7 @@ import {
   type Sha256,
 } from '@package-broker/core/platform/blob';
 import { compile, db } from '../kysely.js';
+import { leaseLive } from './blob-lease-guard.js';
 
 export interface BlobLifecycleMetadata {
   softDelete(ctx: OrgContext, key: Sha256, input: { removedAt: string }): Promise<boolean>;
@@ -39,8 +40,6 @@ const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
 
 const NOW = sql<string>`strftime(${sql.lit(FORMAT)}, 'now')`;
 const FRESH = sql<string>`lower(hex(randomblob(16)))`;
-const leaseLive = (column: string) =>
-  sql<SqlBool>`(${sql.ref(column)} is not null and ${sql.ref(column)} > ${NOW})`;
 
 interface InfoRow {
   readonly sha256: string;

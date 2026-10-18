@@ -231,6 +231,28 @@ export function dueStatement(ctx: OrgContext, limit: number): Statement {
   );
 }
 
+export function attachedProxyStatement(
+  ctx: OrgContext,
+  projectId: string,
+  ecosystem: SourceEcosystem,
+): Statement {
+  return compile(
+    db
+      .selectFrom('project_source')
+      .innerJoin('source', (join) =>
+        join
+          .onRef('source.id', '=', 'project_source.source_id')
+          .onRef('source.org_id', '=', 'project_source.org_id'),
+      )
+      .select('source.id')
+      .where('project_source.org_id', '=', ctx.orgId)
+      .where('project_source.project_id', '=', projectId)
+      .where('source.ecosystem', '=', ecosystem)
+      .where('source.type', '=', ecosystem === 'npm' ? 'npmjs_proxy' : 'packagist_proxy')
+      .limit(1),
+  );
+}
+
 export function createSourceRepository(executor: SqlExecutor): SourceRepository {
   async function read(ctx: OrgContext, id: string): Promise<SourceRecord | null> {
     const [row] = await executor.all<SourceRow>(
@@ -281,6 +303,9 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async hasAttachedProxy(ctx, projectId, ecosystem) {
+      return (await executor.all(attachedProxyStatement(ctx, projectId, ecosystem))).length > 0;
+    },
     async create(ctx, fence, input) {
       const jsonConfig = jsonText(input.configJson);
       const interval =

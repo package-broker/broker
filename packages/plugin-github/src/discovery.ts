@@ -4,7 +4,7 @@ import {
   type PolicyFetch,
   type UpstreamCredential,
 } from '@package-broker/core/plugin';
-import type { InstallationTokens } from './installation-token.js';
+import { InstallationTokenError, type InstallationTokens } from './installation-token.js';
 
 export const PAGE_SIZE = 49;
 
@@ -64,6 +64,16 @@ export interface DiscoveryOptions {
   readonly exists: (candidate: ExistingCandidate) => boolean | Promise<boolean>;
   readonly pattern?: string;
   readonly cursor?: string;
+  readonly apiOrigin?: string;
+  readonly timeoutMs?: number;
+}
+
+export interface PlanRepositoryOptions {
+  readonly tokens: InstallationTokens;
+  readonly fetch: PolicyFetch;
+  readonly installationId: string;
+  readonly repository: string;
+  readonly exists: DiscoveryOptions['exists'];
   readonly apiOrigin?: string;
   readonly timeoutMs?: number;
 }
@@ -233,21 +243,17 @@ function normaliseOrigin(text: string): string {
   }
 }
 
-export async function discoverRepositories(options: DiscoveryOptions): Promise<DiscoveryPage> {
+function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
   const { tokens, fetch, installationId, exists } = options;
   const apiOrigin = normaliseOrigin(options.apiOrigin ?? 'https://api.github.com');
   const timeoutMs = options.timeoutMs ?? 30_000;
-  if (typeof installationId !== 'string' || !INSTALLATION_ID.test(installationId)) {
+  if (
+    typeof installationId !== 'string' ||
+    installationId.trim() !== installationId ||
+    !INSTALLATION_ID.test(installationId)
+  ) {
     throw new DiscoveryError('invalid_request');
   }
-  if (options.pattern !== undefined && !PATTERN.test(options.pattern)) {
-    throw new DiscoveryError('invalid_request');
-  }
-  if (options.cursor !== undefined && !CURSOR.test(options.cursor)) {
-    throw new DiscoveryError('invalid_request');
-  }
-  const page = options.cursor === undefined ? 1 : Number(options.cursor);
-  const matches = patternMatcher(options.pattern);
 
   function credential(value: string): UpstreamCredential {
     return {
@@ -296,6 +302,167 @@ export async function discoverRepositories(options: DiscoveryOptions): Promise<D
     );
   }
 
+  async function manifest(repo: Listed, file: string, bearer: string): Promise<Manifest> {
+    let response: Awaited<ReturnType<PolicyFetch>>;
+    try {
+      response = await request(
+        `${apiOrigin}/repos/${repo.owner}/${repo.name}/contents/${file}?ref=${encodeURIComponent(repo.branch)}`,
+        'application/vnd.github.raw+json',
+        bearer,
+        MAX_MANIFEST_BYTES,
+      );
+    } catch (error) {
+      if (error instanceof UpstreamError && error.code === 'too_large') return { kind: 'invalid' };
+      throw error;
+    }
+    if (response.status === 451) {
+      void response.body?.cancel().catch(() => undefined);
+      return { kind: 'error', reason: 'error_451' };
+    }
+    if (response.status === 404) {
+      const text = await readCapped(response.body, MAX_ERROR_BYTES);
+      let message: unknown;
+      try {
+        message = (JSON.parse(text ?? '') as { message?: unknown }).message;
+      } catch {
+        message = undefined;
+      }
+      return typeof message === 'string' && MISSING_REF.test(message)
+        ? { kind: 'error', reason: 'error_404' }
+        : { kind: 'absent' };
+    }
+    if (response.status !== 200) throw failure(response);
+    const text = await readCapped(response.body, MAX_MANIFEST_BYTES);
+    if (text === undefined) return { kind: 'invalid' };
+    try {
+      const parsed: unknown = JSON.parse(text);
+      return isRecord(parsed) ? { kind: 'ok', name: parsed.name } : { kind: 'invalid' };
+    } catch {
+      return { kind: 'invalid' };
+    }
+  }
+
+  async function classify(
+    repository: string,
+    ecosystem: DiscoveryEcosystem,
+    result: Manifest,
+  ): Promise<PlanEntry> {
+    const name = result.kind === 'ok' ? result.name : undefined;
+    const valid =
+      typeof name === 'string' &&
+      name.length <= MAX_NAME_LENGTH &&
+      (ecosystem === 'composer' ? COMPOSER_NAME : NPM_NAME).test(name);
+    if (!valid) return skipped(repository, 'invalid_name', ecosystem);
+    if (ecosystem === 'npm') {
+      return skipped(repository, 'npm_from_vcs_unsupported', ecosystem, name);
+    }
+    const present = await exists({ repository, ecosystem, packageName: name });
+    return {
+      repository,
+      ecosystem,
+      packageName: name,
+      action: present ? 'existing' : 'new',
+      reason: null,
+    };
+  }
+
+  async function plan(repo: Listed, bearer: string): Promise<readonly PlanEntry[]> {
+    if (repo.archived) return [skipped(repo.fullName, 'archived')];
+    const found: PlanEntry[] = [];
+    for (const [file, ecosystem] of MANIFESTS) {
+      const result = await manifest(repo, file, bearer);
+      if (result.kind === 'absent') continue;
+      if (result.kind === 'error') {
+        found.push(skipped(repo.fullName, result.reason));
+        break;
+      }
+      found.push(await classify(repo.fullName, ecosystem, result));
+    }
+    return found.length > 0 ? found : [skipped(repo.fullName, 'no_manifest')];
+  }
+
+  return { apiOrigin, request, failure, plan };
+}
+
+export async function planRepository(options: PlanRepositoryOptions): Promise<PlanEntry> {
+  const client = discoveryClient(options);
+  if (typeof options.repository !== 'string') throw new DiscoveryError('invalid_request');
+  const parts = options.repository.split('/');
+  const [owner, name] = parts;
+  if (
+    parts.length !== 2 ||
+    owner === undefined ||
+    !OWNER.test(owner) ||
+    owner.trim() !== owner ||
+    name === undefined ||
+    !REPOSITORY_NAME.test(name) ||
+    name.trim() !== name ||
+    /^\.+$/.test(name)
+  ) {
+    throw new DiscoveryError('invalid_request');
+  }
+  let contentsToken;
+  try {
+    contentsToken = await options.tokens.forRepositories(options.installationId, [name]);
+  } catch (error) {
+    if (
+      error instanceof InstallationTokenError &&
+      (error.code === 'not_found' || error.code === 'unprocessable')
+    ) {
+      return skipped(options.repository, 'error_404');
+    }
+    throw error;
+  }
+  const response = await client.request(
+    `${client.apiOrigin}/repos/${owner}/${name}`,
+    'application/vnd.github+json',
+    contentsToken.value,
+    MAX_LISTING_BYTES,
+  );
+  if (response.status === 404 || response.status === 451) {
+    void response.body?.cancel().catch(() => undefined);
+    return skipped(options.repository, response.status === 404 ? 'error_404' : 'error_451');
+  }
+  if (response.status !== 200) throw client.failure(response);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse((await readCapped(response.body, MAX_LISTING_BYTES)) ?? '');
+  } catch {
+    throw new DiscoveryError('invalid_response');
+  }
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.archived !== 'boolean' ||
+    typeof parsed.default_branch !== 'string' ||
+    !validBranch(parsed.default_branch)
+  ) {
+    throw new DiscoveryError('invalid_response');
+  }
+  const entries = await client.plan(
+    {
+      owner,
+      name,
+      fullName: options.repository,
+      archived: parsed.archived,
+      branch: parsed.default_branch,
+    },
+    contentsToken.value,
+  );
+  return entries[0]!;
+}
+
+export async function discoverRepositories(options: DiscoveryOptions): Promise<DiscoveryPage> {
+  const { tokens, installationId } = options;
+  const { apiOrigin, request, failure, plan } = discoveryClient(options);
+  if (options.pattern !== undefined && !PATTERN.test(options.pattern)) {
+    throw new DiscoveryError('invalid_request');
+  }
+  if (options.cursor !== undefined && !CURSOR.test(options.cursor)) {
+    throw new DiscoveryError('invalid_request');
+  }
+  const page = options.cursor === undefined ? 1 : Number(options.cursor);
+  const matches = patternMatcher(options.pattern);
+
   const listingToken = await tokens.forListing(installationId);
   const listingResponse = await request(
     `${apiOrigin}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
@@ -325,86 +492,8 @@ export async function discoverRepositories(options: DiscoveryOptions): Promise<D
       candidates.map((repo) => repo.name),
     );
 
-    async function manifest(repo: Listed, file: string): Promise<Manifest> {
-      let response: Awaited<ReturnType<PolicyFetch>>;
-      try {
-        response = await request(
-          `${apiOrigin}/repos/${repo.owner}/${repo.name}/contents/${file}?ref=${encodeURIComponent(repo.branch)}`,
-          'application/vnd.github.raw+json',
-          contentsToken.value,
-          MAX_MANIFEST_BYTES,
-        );
-      } catch (error) {
-        if (error instanceof UpstreamError && error.code === 'too_large')
-          return { kind: 'invalid' };
-        throw error;
-      }
-      if (response.status === 451) {
-        void response.body?.cancel().catch(() => undefined);
-        return { kind: 'error', reason: 'error_451' };
-      }
-      if (response.status === 404) {
-        const text = await readCapped(response.body, MAX_ERROR_BYTES);
-        let message: unknown;
-        try {
-          message = (JSON.parse(text ?? '') as { message?: unknown }).message;
-        } catch {
-          message = undefined;
-        }
-        return typeof message === 'string' && MISSING_REF.test(message)
-          ? { kind: 'error', reason: 'error_404' }
-          : { kind: 'absent' };
-      }
-      if (response.status !== 200) throw failure(response);
-      const text = await readCapped(response.body, MAX_MANIFEST_BYTES);
-      if (text === undefined) return { kind: 'invalid' };
-      try {
-        const parsed: unknown = JSON.parse(text);
-        return isRecord(parsed) ? { kind: 'ok', name: parsed.name } : { kind: 'invalid' };
-      } catch {
-        return { kind: 'invalid' };
-      }
-    }
-
-    async function classify(
-      repository: string,
-      ecosystem: DiscoveryEcosystem,
-      result: Manifest,
-    ): Promise<PlanEntry> {
-      const name = result.kind === 'ok' ? result.name : undefined;
-      const valid =
-        typeof name === 'string' &&
-        name.length <= MAX_NAME_LENGTH &&
-        (ecosystem === 'composer' ? COMPOSER_NAME : NPM_NAME).test(name);
-      if (!valid) return skipped(repository, 'invalid_name', ecosystem);
-      if (ecosystem === 'npm') {
-        return skipped(repository, 'npm_from_vcs_unsupported', ecosystem, name);
-      }
-      const present = await exists({ repository, ecosystem, packageName: name });
-      return {
-        repository,
-        ecosystem,
-        packageName: name,
-        action: present ? 'existing' : 'new',
-        reason: null,
-      };
-    }
-
     for (const repo of candidates) {
-      const found: PlanEntry[] = [];
-      for (const [file, ecosystem] of MANIFESTS) {
-        const result = await manifest(repo, file);
-        if (result.kind === 'absent') continue;
-        if (result.kind === 'error') {
-          found.push(skipped(repo.fullName, result.reason));
-          break;
-        }
-        found.push(await classify(repo.fullName, ecosystem, result));
-      }
-      entries.set(
-        repo.fullName,
-        found.length > 0 ? found : [skipped(repo.fullName, 'no_manifest')],
-      );
+      entries.set(repo.fullName, await plan(repo, contentsToken.value));
     }
   }
 

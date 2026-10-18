@@ -8,6 +8,7 @@ import type { OrgContext, Statement, StatementResult } from '@package-broker/cor
 import type { Sha256 } from '@package-broker/core/platform/blob';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import { leaseLive } from './blob-lease-guard.js';
 
 export type DistAttachRequest = DistIdentity & { readonly sha256: Sha256 };
 
@@ -19,7 +20,6 @@ export interface DistAttachPlan {
 }
 
 const SHA256 = /^[0-9a-f]{64}$/;
-const NOW = sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
 
 /** Rewriting last_op_id on an equal-blob replay would also bump the package rev. */
 export function distAttachStatements(
@@ -42,7 +42,7 @@ export function distAttachStatements(
 
   const liveBlob = sql<string>`(SELECT blob.id FROM blob
     WHERE blob.org_id = ${ctx.orgId} AND blob.sha256 = ${sha256} AND blob.deleted_at IS NULL
-      AND (blob.purge_lease_until IS NULL OR blob.purge_lease_until <= ${NOW}))`;
+      AND NOT ${leaseLive('blob.purge_lease_until')})`;
 
   const attach = db
     .updateTable('version')

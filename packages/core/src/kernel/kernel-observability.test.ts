@@ -125,6 +125,18 @@ afterEach(() => {
 });
 
 describe('kernel completion record', () => {
+  it('attributes GET / completion to the root route', async () => {
+    const logs: Entry[] = [];
+    const kernel = await createKernel(options([], logs));
+
+    const response = await kernel.fetch(
+      new Request(`${BASE}/`, { headers: { accept: 'text/html' } }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(completions(logs)).toEqual([expect.objectContaining({ route: '/', status: 303 })]);
+  });
+
   it('emits one http.request per request with the minted id, trace fields and reason', async () => {
     const logs: Entry[] = [];
     let healthy = true;
@@ -579,7 +591,7 @@ describe('kernel observability option', () => {
     );
 
     expect([...kernel.routeTemplates].sort()).toEqual(
-      ['/_pb/ping', '/health/live', '/health/ready', '/items/:id'].sort(),
+      ['/', '/_pb/ping', '/health/live', '/health/ready', '/items/:id'].sort(),
     );
   });
 

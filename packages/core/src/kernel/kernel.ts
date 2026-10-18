@@ -61,6 +61,7 @@ import {
   routePathProblem,
   routesConflict,
 } from './routes.js';
+import { uiRootRedirect } from './ui-routes.js';
 
 export interface KernelObservability {
   readonly sink: ObsRecordSink;
@@ -266,7 +267,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const coreRoutes = Object.freeze(
     (options.coreRoutes ?? []).map((route) => Object.freeze({ ...route })),
   );
-  const coreProblems = validateCoreRoutes(coreRoutes, options.packageResolver);
+  const coreProblems = [...validateCoreRoutes(coreRoutes, options.packageResolver)];
   let registration: Registration;
   try {
     registration =
@@ -280,6 +281,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       throw new KernelConfigError([...error.problems, ...coreProblems]);
     }
     throw error;
+  }
+  for (const route of registration.routes) {
+    if (route.path === '/') {
+      coreProblems.push('plugin root route is reserved for core');
+    }
   }
   if (coreProblems.length > 0) throw new KernelConfigError(coreProblems);
   const { ports, resolveOrg, health } = options;
@@ -311,6 +317,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   const routeTemplates = frozenSet(
     [
+      '/',
       ...registration.routes.map((route) => route.path),
       ...coreRoutes.map((route) => route.path),
       ...HEALTH_ROUTES,
@@ -550,6 +557,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
 
   const app = new Hono<KernelEnv>();
+  app.get('/', (c) => {
+    c.env.scope.set({ route: '/' });
+    const redirect = uiRootRedirect(c.req.raw);
+    if (redirect !== null) return redirect;
+    c.env.guard.reason('route.not_found');
+    const response = routeNotFound(c.env.requestId);
+    response.headers.set('vary', 'Accept');
+    return response;
+  });
   app.get('/health/live', (c) => {
     c.env.scope.set({ route: '/health/live' });
     return liveResponse(c.env.requestId);

@@ -21,7 +21,7 @@ import { readV1Index, type V1Index, type V1IndexResult } from './v1-index.js';
 import { describeComposerV1 } from './v1-package.js';
 
 const FIXTURE_DIR = new URL('../../../test-fixtures/composer-v1/', import.meta.url);
-const ORIGIN = 'http://127.0.0.1:8851';
+const ORIGIN = 'https://127.0.0.1:8851';
 const policy = createOutboundPolicy({
   allowPrivateHosts: ['127.0.0.1:8851'],
   runtime: 'node',
@@ -83,10 +83,15 @@ function loadFixture(id: string): Tree {
     for (const entry of readdirSync(url, { withFileTypes: true })) {
       if (entry.isDirectory()) walk(`${dir}/${entry.name}`, `${prefix}${entry.name}/`);
       else if (entry.name.endsWith('.body')) {
-        tree.set(
-          `${prefix}${entry.name.slice(0, -'.body'.length)}`,
-          new Uint8Array(readFileSync(new URL(`${dir}/${entry.name}`, FIXTURE_DIR))),
-        );
+        const body = readFileSync(new URL(`${dir}/${entry.name}`, FIXTURE_DIR));
+        // Upgrade root URLs without changing the bytes of hash-verified includes.
+        const bytes =
+          entry.name === 'packages.json.body'
+            ? new TextEncoder().encode(
+                body.toString('utf8').replaceAll('http://127.0.0.1:8851', ORIGIN),
+              )
+            : new Uint8Array(body);
+        tree.set(`${prefix}${entry.name.slice(0, -'.body'.length)}`, bytes);
       }
     }
   };
@@ -956,7 +961,7 @@ const NO_CONDITIONAL =
 const INCLUDE_HASH =
   'an include whose body does not match its listed hash fails the pass (G1 safer rule)';
 const DUPLICATE_NAME =
-  'a name listed by more than one include document fails the pass (reason duplicate); Composer lets the later listing win or merges';
+  'conflicting member hashes across include documents fail the pass (reason duplicate); identical listings are accepted';
 const LEGACY =
   'known bug, tracked in T709: a legacy root (top-level name => {versions}) is not read: the index lists no names';
 const NO_RETRY =
@@ -1112,6 +1117,58 @@ describe('v1 conformance corpus', () => {
 });
 
 describe('v1 conformance negative cases', () => {
+  it.each(['f08-providers-includes-multi', 'f17-duplicate-versions'])(
+    '%s accepts identical listings and rejects the original conflicting fixture',
+    async (id) => {
+      const original = await sync(id);
+      expect(original.index?.complete).toBe(false);
+      expect(original.index?.reason).toBe('duplicate');
+      expect(original.index?.entries.size).toBe(0);
+      const tree = loadFixture(id);
+      const decode = (body: string | Uint8Array | undefined): string =>
+        typeof body === 'string' ? body : new TextDecoder().decode(body);
+      const root = JSON.parse(decode(tree.get('packages.json')));
+      const providers = id.startsWith('f08');
+      const section = providers ? 'providers' : 'packages';
+      const listings = root[providers ? 'provider-includes' : 'includes'];
+      let first: unknown;
+      for (const [path, hashes] of Object.entries(listings)) {
+        const algorithm = providers ? 'sha256' : 'sha1';
+        const hash = (hashes as Record<string, string>)[algorithm] as string;
+        const resolved = path.replace('%hash%', hash);
+        const doc = JSON.parse(decode(tree.get(resolved)));
+        const name = providers ? 'fx/lib' : 'fx/dup';
+        if (doc[section][name] !== undefined) {
+          first ??= doc[section][name];
+          doc[section][name] = first;
+        }
+        const body = JSON.stringify(doc);
+        const updatedHash = sha(algorithm, body);
+        delete listings[path];
+        listings[path.replace(hash, updatedHash)] = { [algorithm]: updatedHash };
+        tree.set(resolved.replace(hash, updatedHash), body);
+      }
+      tree.set('packages.json', JSON.stringify(root));
+      const server = serve(id, tree);
+      const source = sourceOf(id);
+      const result = await readV1Index(server.fetch, { source, codecs });
+      expect(result.status).toBe('updated');
+      if (result.status !== 'updated') throw new Error('expected updated');
+      expect(result.index.complete).toBe(true);
+      expect(result.index.entries.size).toBe(providers ? 3 : 1);
+      const outcomes = await describeAll(
+        server,
+        source,
+        result.root,
+        result.index,
+        trackedNames(id),
+      );
+      expect(outcomes.get(providers ? 'fx/lib' : 'fx/dup')?.versions).toEqual(
+        providers ? ['1.0.0', '1.1.0', 'dev-main'] : ['1.0.0', '1.1.0'],
+      );
+    },
+  );
+
   it('keeps upstream bodies and credentials out of root and package errors', async () => {
     const wrong = await sync('f21-auth', true);
     expect(wrong.rootError?.code).toBe('http_status');

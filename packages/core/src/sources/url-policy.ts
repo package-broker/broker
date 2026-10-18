@@ -1,7 +1,7 @@
 export type OutboundRuntime = 'node' | 'cloudflare';
 
 export interface OutboundPolicy {
-  /** Bare entries allow HTTPS on port 443 only; HTTP needs host:80 or host:<port>. */
+  /** Entries allow HTTPS only: bare hosts on port 443, host:port on that port. */
   readonly allowPrivateHosts: readonly string[];
   readonly runtime: OutboundRuntime;
   readonly selfOrigins: readonly string[];
@@ -227,17 +227,16 @@ export function classifyUrl(input: string, policy: OutboundPolicy): OutboundVerd
     return refuse('self_origin');
   }
 
-  if (url.protocol === 'http:' && url.port === '443') return refuse('scheme');
+  if (url.username !== '' || url.password !== '' || rawAuthority(text).includes('@')) {
+    return refuse('userinfo');
+  }
+
+  if (url.protocol === 'http:') return refuse('scheme');
 
   const allowlist = parseAllowlist(policy.allowPrivateHosts, policy.runtime);
   const allowlisted =
     allowlist.includes(`${hostname}:${effectivePort(url)}`) ||
     (url.protocol === 'https:' && url.port === '' && allowlist.includes(hostname));
-
-  if (url.protocol === 'http:' && !allowlisted) return refuse('scheme');
-  if (url.username !== '' || url.password !== '' || rawAuthority(text).includes('@')) {
-    return refuse('userinfo');
-  }
 
   const origin = `${url.protocol}//${hostname}${url.port === '' ? '' : `:${url.port}`}`;
   if (!allowlisted) {

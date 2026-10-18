@@ -11,6 +11,8 @@ import {
   boundVerifiedIdentity,
   compile,
   db,
+  freshGroupMembership,
+  guardAliases,
   guardBindings,
   opGuard,
   ownsIdentity,
@@ -27,6 +29,8 @@ import {
   type ContractCase,
   type MutationEntry,
 } from './harness.js';
+
+import { seedUser } from './fixtures.js';
 
 type Branch = 'local' | 'email' | 'group';
 type Layer = 'user' | 'grant' | 'role' | 'member' | 'login' | 'credential' | 'identity' | 'binding';
@@ -328,6 +332,100 @@ for (const branch of ['local', 'email', 'group', 'recovery'] as const) {
   }
 }
 
+function foreignGroupEvidenceCase(part: 'member' | 'identity' | 'binding'): ContractCase {
+  return {
+    name: `group evidence with a foreign ${part} does not retain the user`,
+    async run(context) {
+      const seed = seeder(context.executor);
+      const { own, foreign } = orgOf(context);
+      const evidenceOrg = (candidate: typeof part) =>
+        candidate === part ? foreign.orgId : own.orgId;
+      const now = new Date().toISOString();
+      await seedUser(seed, 'U-GROUP', own.orgId);
+      await seed(
+        'INSERT INTO user_group (org_id, user_id, provider, group_name, refreshed_at) VALUES (?, ?, ?, ?, ?)',
+        evidenceOrg('member'),
+        'U-GROUP',
+        'oidc',
+        'staff',
+        now,
+      );
+      await seed(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        'I-GROUP',
+        evidenceOrg('identity'),
+        'U-GROUP',
+        'oidc',
+        'subject',
+        'u-group@example.test',
+        now,
+      );
+      await seed(
+        'INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+        evidenceOrg('binding'),
+        'oidc',
+        'current-anchor',
+      );
+      const alias = guardAliases(
+        [
+          'user',
+          'grant',
+          'role',
+          'member',
+          'identity',
+          'binding',
+          'login',
+          'credential',
+          'values',
+          'anchors',
+        ],
+        null,
+      );
+      const bindings = guardBindings(
+        { values: alias.values, anchors: alias.anchors },
+        { org_id: own.orgId },
+        [
+          {
+            provider: 'oidc',
+            anchor: 'current-anchor',
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        ],
+      );
+      const rows = await context.executor.all(
+        context.mutate(
+          compile(
+            bindings.creator
+              .selectFrom(`user_group as ${alias.member}`)
+              .innerJoin(
+                `user_account as ${alias.user}`,
+                `${alias.user}.id`,
+                `${alias.member}.user_id`,
+              )
+              .select(`${alias.user}.id`)
+              .where(freshGroupMembership(bindings, alias)),
+          ),
+        ),
+      );
+      expect(rows).toEqual([]);
+    },
+  };
+}
+
+const freshGroupMembershipEntry: MutationEntry = {
+  builder: 'freshGroupMembership',
+  file: 'kysely.ts',
+  cases: (['member', 'identity', 'binding'] as const).map((part) => foreignGroupEvidenceCase(part)),
+  predicates: (['member', 'identity', 'binding'] as const).map((part) => ({
+    name: `the ${part} evidence is scoped to the organization`,
+    locate: ref(`guard_${part}`, '\\(select "guard_values"\\."org_id" from "guard_values"\\)'),
+    neutral: always,
+    copies: 1,
+    caseName: foreignGroupEvidenceCase(part).name,
+  })),
+};
+
 const authoritativeIdentityCase = (layer: 'identity' | 'binding'): ContractCase => ({
   name: `an authoritative ${layer} row of another organization does not verify the user`,
   async run(context) {
@@ -362,6 +460,7 @@ const authoritativeIdentityCase = (layer: 'identity' | 'binding'): ContractCase 
 });
 
 export const kyselyEntries: readonly MutationEntry[] = [
+  freshGroupMembershipEntry,
   {
     builder: 'authoritativeVerifiedIdentity',
     file: 'kysely.ts',

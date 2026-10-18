@@ -40,10 +40,10 @@ export interface GuardedTarget {
   readonly lookup: LookupFunction;
 }
 
-export type GuardedScheme = 'http' | 'https';
+export type GuardedScheme = 'http' | 'https' | 'ssh';
 
 export interface DnsGuard {
-  forTarget(host: string, port: number, scheme?: GuardedScheme): GuardedTarget;
+  forTarget(host: string, port: number, scheme: GuardedScheme): GuardedTarget;
 }
 
 export class DnsGuardError extends Error {
@@ -84,15 +84,16 @@ function comparableHost(host: string): string {
 function isAllowlisted(
   host: string,
   port: number,
-  scheme: GuardedScheme | undefined,
+  scheme: GuardedScheme,
   allowlist: readonly string[],
 ): boolean {
+  if (scheme !== 'https' && scheme !== 'ssh') return false;
   const wanted = comparableHost(host);
   return allowlist.some((entry) => {
     const match = /^(\[[^\]]+\]|[^:]+)(?::(\d{1,5}))?$/.exec(entry);
     if (!match?.[1] || comparableHost(match[1]) !== wanted) return false;
     if (match[2] !== undefined) return Number(match[2]) === port;
-    return scheme !== 'http' && port === HTTPS_PORT;
+    return scheme === 'https' && port === HTTPS_PORT;
   });
 }
 
@@ -205,9 +206,17 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
   async function resolveTarget(
     host: string,
     port: number,
-    scheme: GuardedScheme | undefined,
+    scheme: GuardedScheme,
   ): Promise<GuardedResolution> {
-    if (scheme === 'http' && port === HTTPS_PORT) throw new DnsGuardError('scheme');
+    if (scheme !== 'https' && scheme !== 'http' && scheme !== 'ssh') {
+      throw new DnsGuardError('scheme');
+    }
+    if (
+      scheme === 'http' &&
+      (port === HTTPS_PORT || isAllowlisted(host, port, 'https', allowlist))
+    ) {
+      throw new DnsGuardError('scheme');
+    }
     const literal = canonicalIpv6(stripBrackets(host.toLowerCase()));
     const target = literal ?? host;
     const resolved = await withDeadline(startResolution(target), timeoutMs, options.signal);

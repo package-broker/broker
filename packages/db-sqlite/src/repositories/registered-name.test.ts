@@ -425,7 +425,9 @@ describe('D1 registered-name coverage', () => {
     return (
       await executor.all<{ held: number }>(
         compile(
-          db.selectNoFrom(sql<number>`(${coveredByRegisteredNames(a, SRC_ORG, key)})`.as('held')),
+          db.selectNoFrom(
+            sql<number>`(${coveredByRegisteredNames(a, SRC_ORG, 'composer', key)})`.as('held'),
+          ),
         ),
       )
     )[0]?.held;
@@ -463,10 +465,16 @@ describe('SQL conditions', () => {
   it('coveredByRegisteredNames matches keys of the source own patterns only', async () => {
     await add(orgFence(), NAME_1, SRC_ORG, 'acme/*');
     await add(orgFence(), NAME_2, SRC_P1, 'one/*');
-    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'acme/lib'))).toBe(1);
-    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'acme/sub/lib'))).toBe(1);
-    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'one/lib'))).toBe(0);
-    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'acmex/lib'))).toBe(0);
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acme/lib'))).toBe(1);
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acme/sub/lib'))).toBe(1);
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'one/lib'))).toBe(0);
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acmex/lib'))).toBe(0);
+  });
+
+  it('coveredByRegisteredNames ignores a pattern registered for another ecosystem', async () => {
+    await add(orgFence(), NAME_1, SRC_ORG, 'acme/*');
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acme/lib'))).toBe(1);
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'npm', 'acme/lib'))).toBe(0);
   });
 
   it('coveredByRegisteredNames ignores a row whose pattern is outside the grammar', async () => {
@@ -478,7 +486,7 @@ describe('SQL conditions', () => {
         SRC_ORG,
       ),
     ]);
-    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'acme/a'))).toBe(0);
+    expect(await holds(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acme/a'))).toBe(0);
   });
 });
 
@@ -572,7 +580,7 @@ describe('round 2', () => {
             compile(db.selectNoFrom(sql<number>`(${condition})`.as('held'))),
           )
         )[0]?.held;
-      expect(await held(coveredByRegisteredNames(a, SRC_ORG, 'acme/lib'))).toBe(0);
+      expect(await held(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acme/lib'))).toBe(0);
       expect(await held(sourceActivatable(a, SRC_ORG))).toBe(0);
       expect(await held(sourceActivatable(b, SRC_ORG))).toBe(0);
       expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
@@ -713,7 +721,9 @@ describe('round 2', () => {
       (
         await executor.all<{ held: number }>(
           compile(
-            db.selectNoFrom(sql<number>`(${coveredByRegisteredNames(a, SRC_ORG, key)})`.as('held')),
+            db.selectNoFrom(
+              sql<number>`(${coveredByRegisteredNames(a, SRC_ORG, 'composer', key)})`.as('held'),
+            ),
           ),
         )
       )[0]?.held;

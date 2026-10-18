@@ -127,8 +127,6 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
 
   'internal/lease-time.ts#until':
     'builds only a lease timestamp expression; no organization-scoped read or write',
-  'repositories/catalogue-predicates.ts#admissionCondition':
-    'admission pattern rules carry no organization column; their scoping is project and source ids, which T716 registers',
   'repositories/catalogue-predicates.ts#winnerOrder': NO_ORG_COLUMN,
   'repositories/catalogue-status.ts#quarantineStatements':
     'adds no SQL or organization column of its own: concatenates the supplied guard, versionStatusStatements and conditionalEpochBumpStatement unchanged; their predicates are registered separately',

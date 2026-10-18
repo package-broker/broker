@@ -217,6 +217,29 @@ const SOURCE_COLUMNS = [
   'poll_last_modified',
 ] as const;
 
+export function findByRepositoryStatement(
+  ctx: OrgContext,
+  input: { provider: string; repository: string },
+): Statement {
+  const config = sql`case when json_valid(config_json) then
+    case when json_type(config_json) = 'object' then config_json end end`;
+  return compile(
+    db
+      .selectFrom('source')
+      .select([...SOURCE_COLUMNS])
+      .where('org_id', '=', ctx.orgId)
+      .where('type', '=', sql.lit('vcs'))
+      .where(sql`json_extract(${config}, '$.provider')`, '=', input.provider)
+      .where(
+        sql`lower(json_extract(${config}, '$.repository'))`,
+        '=',
+        input.repository.toLowerCase(),
+      )
+      .orderBy('id')
+      .limit(1),
+  );
+}
+
 export function dueStatement(ctx: OrgContext, limit: number): Statement {
   return compile(
     db
@@ -557,6 +580,11 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     },
 
     get: read,
+
+    async findByRepository(ctx, input) {
+      const [row] = await executor.all<SourceRow>(findByRepositoryStatement(ctx, input));
+      return row === undefined ? null : toRecord(row);
+    },
 
     async listDue(ctx, limit) {
       if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DUE) {

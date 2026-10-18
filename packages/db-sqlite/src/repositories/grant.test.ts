@@ -54,6 +54,7 @@ function holderInput(): ProtectedHolderInput {
       provider,
       anchor: ANCHOR,
       emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test', 'actor.test'],
     })),
   };
 }

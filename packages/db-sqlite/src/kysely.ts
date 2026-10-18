@@ -23,6 +23,7 @@ import {
   type MutationFence,
 } from '@package-broker/core/authz/fence';
 import { ulid } from '@package-broker/core/ids';
+import { isValidDomain } from '@package-broker/core/identity/policy';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import type { Database } from './schema.js';
 
@@ -213,6 +214,11 @@ export interface ProtectedHolderProvider {
   readonly provider: string;
   readonly anchor: string;
   readonly emailAuthoritative: boolean;
+  /**
+   * Required and non-empty when `emailAuthoritative`: an identity's e-mail counts for e-mail
+   * grants only when its domain equals one of these lowercase domains.
+   */
+  readonly emailAuthoritativeDomains?: readonly string[];
 }
 
 export interface ProtectedHolderExclusion {
@@ -258,6 +264,8 @@ export interface GuardBindings {
   value(column: string): Expression<string | number>;
   /** A select of `(provider, anchor)`, all anchors or the e-mail authoritative ones only. */
   anchors(authoritativeOnly: boolean): Expression<unknown>;
+  /** A select of `(provider, domain)` for every e-mail authoritative domain. */
+  authoritativeDomains(): Expression<unknown>;
 }
 
 const BOUND_COLUMN = /^[a-z][a-z_]*$/;
@@ -281,13 +289,14 @@ export function guardBindings(
   ) as unknown as QueryCreator<LooseDatabase>;
   if (providers.length > 0) {
     creator = creator.with(
-      `${names.anchors}(provider, anchor, email_authoritative)`,
+      `${names.anchors}(provider, anchor, email_authoritative, domains)`,
       () =>
-        sql`(select json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') from json_each(${JSON.stringify(
+        sql`(select json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]') from json_each(${JSON.stringify(
           providers.map((entry) => [
             entry.provider,
             entry.anchor,
             entry.emailAuthoritative ? 1 : 0,
+            authoritativeDomainsOf(entry),
           ]),
         )}))`,
     ) as unknown as QueryCreator<LooseDatabase>;
@@ -308,7 +317,29 @@ export function guardBindings(
         : sql`select provider, anchor from ${sql.table(names.anchors)}${
             authoritativeOnly ? sql` where email_authoritative = 1` : sql``
           }`,
+    authoritativeDomains: () =>
+      providers.length === 0
+        ? sql`select null, null where 0`
+        : sql`select ${sql.ref(`${names.anchors}.provider`)}, json_each.value from ${sql.table(
+            names.anchors,
+          )}, json_each(${sql.ref(`${names.anchors}.domains`)}) where ${sql.ref(
+            `${names.anchors}.email_authoritative`,
+          )} = 1`,
   };
+}
+
+function authoritativeDomainsOf(entry: ProtectedHolderProvider): readonly string[] {
+  return entry.emailAuthoritative ? (entry.emailAuthoritativeDomains ?? []) : [];
+}
+
+function jsonAuthoritativeDomains(
+  providers: readonly ProtectedHolderProvider[],
+): Expression<unknown> {
+  return sql`select json_extract(value, '$[0]'), json_extract(value, '$[1]') from json_each(${JSON.stringify(
+    providers.flatMap((entry) =>
+      authoritativeDomainsOf(entry).map((domain) => [entry.provider, domain]),
+    ),
+  )})`;
 }
 
 function jsonAnchors(providers: readonly ProtectedHolderProvider[]): Expression<unknown> {
@@ -347,6 +378,7 @@ function identityWithAnchor(
   alias: HolderAlias,
   anchors: Expression<unknown>,
   exclude: ProtectedHolderExclusion | undefined,
+  authoritativeDomains?: Expression<unknown>,
 ) {
   let query = loose
     .selectFrom(`identity as ${alias.identity}`)
@@ -367,6 +399,12 @@ function identityWithAnchor(
           ),
       ),
     );
+  if (authoritativeDomains !== undefined) {
+    const email = sql.ref(`${alias.identity}.email`);
+    query = query.where(
+      sql<SqlBool>`(${sql.ref(`${alias.identity}.provider`)}, substr(${email}, instr(${email}, '@') + 1)) in (${authoritativeDomains})`,
+    );
+  }
   if (exclude?.identityId !== undefined) {
     query = query.where(`${alias.identity}.id`, '<>', exclude.identityId);
   }
@@ -383,13 +421,35 @@ export function verifiedIdentity(
   return identityWithAnchor(ctx.orgId, alias, jsonAnchors(providers), exclude);
 }
 
+/** `verifiedIdentity` at an e-mail authoritative provider whose domains include the e-mail's. */
+export function authoritativeVerifiedIdentity(
+  ctx: OrgContext,
+  alias: HolderAlias,
+  providers: readonly ProtectedHolderProvider[],
+) {
+  const authoritative = providers.filter((entry) => entry.emailAuthoritative);
+  return identityWithAnchor(
+    ctx.orgId,
+    alias,
+    jsonAnchors(authoritative),
+    undefined,
+    jsonAuthoritativeDomains(authoritative),
+  );
+}
+
 /** `verifiedIdentity` against anchors and organization already bound by `guardBindings`. */
 export function boundVerifiedIdentity(
   bindings: GuardBindings,
   alias: HolderAlias,
   authoritativeOnly: boolean,
 ) {
-  return identityWithAnchor(bindings.org, alias, bindings.anchors(authoritativeOnly), undefined);
+  return identityWithAnchor(
+    bindings.org,
+    alias,
+    bindings.anchors(authoritativeOnly),
+    undefined,
+    authoritativeOnly ? bindings.authoritativeDomains() : undefined,
+  );
 }
 
 const HOLDER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -404,6 +464,17 @@ export function requireProviders(providers: readonly ProtectedHolderProvider[]):
       typeof entry.emailAuthoritative !== 'boolean'
     ) {
       throw new TypeError('protected holder provider must have a provider id and an anchor');
+    }
+    const domains: unknown = entry.emailAuthoritativeDomains;
+    if (
+      (domains !== undefined &&
+        (!Array.isArray(domains) ||
+          !domains.every((domain) => typeof domain === 'string' && isValidDomain(domain)))) ||
+      (entry.emailAuthoritative && (!Array.isArray(domains) || domains.length === 0))
+    ) {
+      throw new TypeError(
+        'an e-mail authoritative provider needs a non-empty list of lowercase domains',
+      );
     }
   }
 }

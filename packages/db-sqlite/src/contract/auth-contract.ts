@@ -242,7 +242,14 @@ function currentHolderInput(): ProtectedHolderInput {
   return {
     kind: 'fresh',
     now: new Date().toISOString(),
-    providers: [{ provider: HOLDER_PROVIDER, anchor: ANCHOR, emailAuthoritative: true }],
+    providers: [
+      {
+        provider: HOLDER_PROVIDER,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      },
+    ],
     exclude: { identityId: ACTOR_IDENTITY },
   };
 }

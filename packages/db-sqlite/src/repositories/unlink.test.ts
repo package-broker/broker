@@ -71,8 +71,18 @@ function holders(): ProtectedHolderInput {
     kind: 'fresh',
     now: new Date().toISOString(),
     providers: [
-      { provider: OIDC, anchor: ANCHOR, emailAuthoritative: true },
-      { provider: CF, anchor: CF_ANCHOR, emailAuthoritative: true },
+      {
+        provider: OIDC,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
+      },
+      {
+        provider: CF,
+        anchor: CF_ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
+      },
     ],
   };
 }

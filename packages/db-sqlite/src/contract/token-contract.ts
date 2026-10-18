@@ -28,6 +28,7 @@ const anchors = Array.from({ length: 3 }, (_, i) => ({
   provider: `idp${i}`,
   anchor: `https://idp${i}.example.test`,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 }));
 function st(sql: string, ...params: Statement['params']): Statement {
   return { sql, params };
@@ -38,13 +39,13 @@ function iso(offset: number): string {
 
 async function fixture(
   open: Open,
-  run: (executor: SqlExecutor, ctx: OrgContext) => Promise<void>,
+  run: (executor: SqlExecutor, ctx: OrgContext, other: OrgContext) => Promise<void>,
   wrap: Wrap = (e) => e,
 ) {
   const db = await open();
   try {
     const executor = wrap(db.executor);
-    const { a } = await seedTwoOrganizations(executor);
+    const { a, b } = await seedTwoOrganizations(executor);
     await executor.batch([
       st(
         'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
@@ -122,7 +123,7 @@ async function fixture(
         ),
       ),
     ]);
-    await run(executor, a);
+    await run(executor, a, b);
   } finally {
     await db.close();
   }
@@ -367,6 +368,193 @@ function ssoAnchors(count: number): Case {
     );
 }
 
+const OTHER_USER = 'contract-other-user';
+const SECRET_COLUMNS = /hash|selector|pepper/i;
+
+async function insertRevocable(
+  executor: SqlExecutor,
+  org: OrgContext,
+  row: {
+    readonly id: string;
+    readonly selector: string;
+    readonly kind: 'pat' | 'svc';
+    readonly userId?: string;
+    readonly projectId?: string | null;
+    readonly mode?: 'all' | 'selected';
+    readonly expiresAt?: string;
+    readonly revokedAt?: string | null;
+  },
+) {
+  await executor.batch([
+    st(
+      'INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, user_id, service_principal_id, project_id, project_mode, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id,
+      org.orgId,
+      row.kind,
+      row.selector,
+      'c'.repeat(64),
+      'Revocable',
+      '["read"]',
+      row.kind === 'pat' ? (row.userId ?? USER) : null,
+      row.kind === 'svc' ? SERVICE : null,
+      row.projectId ?? null,
+      row.mode ?? 'all',
+      row.expiresAt ?? iso(3_600_000),
+      row.revokedAt ?? null,
+    ),
+  ]);
+}
+
+function recording(executor: SqlExecutor, statements: Statement[]): SqlExecutor {
+  return {
+    driver: executor.driver,
+    all: (statement) => {
+      statements.push(statement);
+      return executor.all(statement);
+    },
+    batch: (batch) => {
+      statements.push(...batch);
+      return executor.batch(batch);
+    },
+  };
+}
+
+const revocableGet: Case = (open, wrap) =>
+  fixture(
+    open,
+    async (executor, ctx, other) => {
+      await insertRevocable(executor, ctx, {
+        id: 'own-pat',
+        selector: 'aaaaaaaaaaaa',
+        kind: 'pat',
+        mode: 'selected',
+      });
+      await insertRevocable(executor, ctx, {
+        id: 'svc-token',
+        selector: 'bbbbbbbbbbbb',
+        kind: 'svc',
+        projectId: 'alpha',
+      });
+      await insertRevocable(executor, ctx, {
+        id: 'revoked-pat',
+        selector: 'cccccccccccc',
+        kind: 'pat',
+        revokedAt: iso(-60_000),
+      });
+      await insertRevocable(executor, other, {
+        id: 'other-org-pat',
+        selector: 'dddddddddddd',
+        kind: 'pat',
+      });
+      const statements: Statement[] = [];
+      const tokens = createTokenRepository(recording(executor, statements));
+
+      expect(await tokens.get(ctx, 'own-pat')).toEqual({
+        id: 'own-pat',
+        kind: 'pat',
+        userId: USER,
+        projectId: null,
+        projectMode: 'selected',
+      });
+      expect(await tokens.get(ctx, 'svc-token')).toEqual({
+        id: 'svc-token',
+        kind: 'svc',
+        userId: null,
+        projectId: 'alpha',
+        projectMode: null,
+      });
+      expect((await tokens.get(ctx, 'revoked-pat'))?.id).toBe('revoked-pat');
+      expect(await tokens.get(ctx, 'other-org-pat')).toBeNull();
+      expect(await tokens.get(ctx, 'missing')).toBeNull();
+      await insertRevocable(executor, ctx, {
+        id: 'bound-pat',
+        selector: 'eeeeeeeeeeee',
+        kind: 'pat',
+        projectId: 'alpha',
+      });
+      await expect(tokens.get(ctx, 'bound-pat')).rejects.toThrow(TypeError);
+      expect(statements.length).toBe(6);
+      for (const statement of statements) {
+        expect(statement.sql).not.toMatch(SECRET_COLUMNS);
+      }
+    },
+    wrap,
+  );
+
+const ownPersonalTokenGuard: Case = (open, wrap) =>
+  fixture(
+    open,
+    async (executor, ctx, other) => {
+      await executor.batch([
+        st(
+          'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+          OTHER_USER,
+          ctx.orgId,
+          'other@example.test',
+        ),
+      ]);
+      const rows = [
+        { id: 'own-pat', selector: 'aaaaaaaaaaaa', kind: 'pat' },
+        { id: 'other-user-pat', selector: 'bbbbbbbbbbbb', kind: 'pat', userId: OTHER_USER },
+        { id: 'svc-token', selector: 'cccccccccccc', kind: 'svc' },
+        { id: 'revoked-pat', selector: 'dddddddddddd', kind: 'pat', revokedAt: iso(-60_000) },
+        { id: 'expired-pat', selector: 'eeeeeeeeeeee', kind: 'pat', expiresAt: iso(-60_000) },
+      ] as const;
+      for (const row of rows) await insertRevocable(executor, ctx, row);
+      await insertRevocable(executor, other, {
+        id: 'other-org-pat',
+        selector: 'ffffffffffff',
+        kind: 'pat',
+      });
+      const statements: Statement[] = [];
+      const tokens = createTokenRepository(recording(executor, statements));
+      const fence = () =>
+        mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {});
+      const holds = async (tokenId: string) => {
+        try {
+          await executor.batch([...tokens.ownPersonalToken(ctx, fence(), tokenId)]);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      expect(await holds('own-pat')).toBe(true);
+      for (const tokenId of [
+        'other-org-pat',
+        'other-user-pat',
+        'svc-token',
+        'revoked-pat',
+        'expired-pat',
+        'missing',
+      ]) {
+        expect([tokenId, await holds(tokenId)]).toEqual([tokenId, false]);
+      }
+
+      const revoke = (tokenId: string) =>
+        tokens.revoke(
+          ctx,
+          fence(),
+          tokens.ownPersonalToken(ctx, fence(), tokenId),
+          tokenId,
+          iso(0),
+        );
+      expect(await revoke('other-user-pat')).toEqual({ status: 'refused', reason: 'unclassified' });
+      expect(await revoke('svc-token')).toEqual({ status: 'refused', reason: 'unclassified' });
+      expect(await revoke('expired-pat')).toEqual({ status: 'refused', reason: 'unclassified' });
+      expect(await revoke('revoked-pat')).toEqual({ status: 'already_revoked' });
+      expect(await revoke('other-org-pat')).toEqual({ status: 'not_found' });
+      expect(
+        await executor.all(st('SELECT id FROM token WHERE revoked_at IS NOT NULL ORDER BY id')),
+      ).toEqual([{ id: 'revoked-pat' }]);
+      expect((await revoke('own-pat')).status).toBe('revoked');
+      for (const statement of statements) {
+        expect(statement.sql).not.toMatch(SECRET_COLUMNS);
+      }
+    },
+    wrap,
+  );
+
 export const tokenContractCases = {
   nullSlug,
   projectCap,
@@ -374,6 +562,8 @@ export const tokenContractCases = {
   emptySelected,
   twoAnchors: ssoAnchors(2),
   threeAnchors: ssoAnchors(3),
+  revocableGet,
+  ownPersonalTokenGuard,
 };
 export function describeTokenContract(label: string, open: Open) {
   describe(`token lookup contract (${label})`, () => {

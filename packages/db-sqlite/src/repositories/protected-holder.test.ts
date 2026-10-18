@@ -41,6 +41,7 @@ const AUTHORITATIVE: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test', 'actor.test'],
 };
 
 let database: MigratedDatabase;
@@ -640,7 +641,12 @@ describe('provider mutants', () => {
     const providers = [
       AUTHORITATIVE,
       ACCESS,
-      { ...ACCESS, provider: 'unbound', emailAuthoritative: true },
+      {
+        ...ACCESS,
+        provider: 'unbound',
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      },
     ];
 
     expect(await grants.isProtectedHolder(a, U1, fresh(providers))).toBe(false);
@@ -659,7 +665,14 @@ describe('provider mutants', () => {
       await grants.isProtectedHolder(
         a,
         U1,
-        fresh([AUTHORITATIVE, { ...ACCESS, emailAuthoritative: true }]),
+        fresh([
+          AUTHORITATIVE,
+          {
+            ...ACCESS,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
+          },
+        ]),
       ),
     ).toBe(false);
   });
@@ -802,5 +815,88 @@ describe('input is required', () => {
     await expect(
       grants.isProtectedHolder(a, U1, { kind: 'fresh', now: '2026-10-15', providers: [SSO] }),
     ).rejects.toThrow(TypeError);
+  });
+});
+
+describe('e-mail authority by domain', () => {
+  const U4 = '01J0USER000000000000000004';
+
+  function authoritativeFor(...domains: string[]): ProtectedHolderProvider {
+    return { ...AUTHORITATIVE, emailAuthoritativeDomains: domains };
+  }
+
+  it('does not count an e-mail whose domain the provider is not authoritative for', async () => {
+    await seed(
+      grant(a, G_EMAIL, 'email', 'u1@example.test', ADMIN),
+      identity(a, U1, 'u1@example.test'),
+    );
+
+    expect(await grants.isProtectedHolder(a, U1, fresh([authoritativeFor('other.test')]))).toBe(
+      false,
+    );
+    expect(
+      await grants.isProtectedHolder(
+        a,
+        U1,
+        fresh([authoritativeFor('other.test', 'example.test')]),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the domain exactly, never a parent domain', async () => {
+    await seed(
+      user(a, U4, 'u4@sub.example.test'),
+      grant(a, G_EMAIL, 'email', 'u4@sub.example.test', ADMIN),
+      identity(a, U4, 'u4@sub.example.test'),
+    );
+
+    expect(await grants.isProtectedHolder(a, U4, fresh([authoritativeFor('example.test')]))).toBe(
+      false,
+    );
+    expect(
+      await grants.isProtectedHolder(a, U4, fresh([authoritativeFor('sub.example.test')])),
+    ).toBe(true);
+  });
+
+  it('does not let one provider vouch for a domain another provider is authoritative for', async () => {
+    await seed(
+      grant(a, G_EMAIL, 'email', 'u1@example.test', ADMIN),
+      identity(a, U1, 'u1@example.test'),
+    );
+    const providers: ProtectedHolderProvider[] = [
+      authoritativeFor('other.test'),
+      {
+        provider: 'second',
+        anchor: 'https://second.example.test',
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
+      },
+    ];
+
+    expect(await grants.isProtectedHolder(a, U1, fresh(providers))).toBe(false);
+  });
+
+  it('refuses an authoritative anchor without valid lowercase domains before SQL', async () => {
+    const statements: Statement[] = [];
+    const recording = createGrantRepository(
+      {
+        ...executor,
+        all: (statement) => {
+          statements.push(statement);
+          return executor.all(statement);
+        },
+      },
+      { holderInput: () => fresh([AUTHORITATIVE]) },
+    );
+    for (const anchor of [
+      { provider: 'oidc', anchor: ANCHOR, emailAuthoritative: true },
+      authoritativeFor(),
+      authoritativeFor('Example.test'),
+      authoritativeFor('example.test', ''),
+      { ...AUTHORITATIVE, emailAuthoritativeDomains: 'example.test' as unknown as string[] },
+    ]) {
+      await expect(recording.isProtectedHolder(a, U1, fresh([anchor]))).rejects.toThrow(TypeError);
+    }
+    expect(statements).toEqual([]);
   });
 });

@@ -7,7 +7,7 @@ A package registry broker for Composer and npm that runs on Cloudflare Workers o
 ## Prerequisites
 
 - Node 24 (see `.nvmrc`) and pnpm (`corepack enable`; the version is pinned in `package.json`).
-- For the Cloudflare runtime: a Cloudflare account on the Workers Paid plan.
+- For the Cloudflare runtime: a Cloudflare account on the Workers Paid plan, and the `nodejs_compat` compatibility flag on the Worker. The bundle imports `node:async_hooks` to scope deferred work to the request that started it; `packages/runtime-cloudflare/wrangler.toml` already sets the flag.
 
 ## Packages
 

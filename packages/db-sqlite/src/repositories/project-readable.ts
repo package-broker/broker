@@ -13,6 +13,7 @@ import {
   EVIDENCE_FUTURE_SKEW_MS,
   EVIDENCE_MAX_AGE_MS,
   requireProviders,
+  authoritativeVerifiedIdentity,
   verifiedIdentity,
   type HolderAlias,
   type ProtectedHolderProvider,
@@ -137,12 +138,7 @@ function grantPath(
   const alias = holderAlias(u, `${kind}_evidence`);
   const evidence =
     kind === 'email'
-      ? verifiedIdentity(
-          ctx,
-          alias,
-          providerAnchors.filter((entry) => entry.emailAuthoritative),
-          undefined,
-        )
+      ? authoritativeVerifiedIdentity(ctx, alias, providerAnchors)
       : verifiedIdentity(ctx, alias, providerAnchors, undefined)
           .whereRef(`${alias.identity}.provider`, '=', `${m}.provider`)
           .where(freshEvidence(`${alias.identity}.validated_at`));

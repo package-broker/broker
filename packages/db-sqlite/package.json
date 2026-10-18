@@ -58,6 +58,10 @@
       "types": "./dist/contract/catalogue-read-contract.d.ts",
       "default": "./dist/contract/catalogue-read-contract.js"
     },
+    "./contract/catalogue-write-contract": {
+      "types": "./dist/contract/catalogue-write-contract.d.ts",
+      "default": "./dist/contract/catalogue-write-contract.js"
+    },
     "./contract/count-calls": {
       "types": "./dist/contract/count-calls.d.ts",
       "default": "./dist/contract/count-calls.js"

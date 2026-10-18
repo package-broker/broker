@@ -4,6 +4,7 @@ import { entries as visibilityDeriveEntries } from './mutation-table/visibility-
 import { entries as visibilityAttachEntries } from './mutation-table/visibility-attach.js';
 import { entries as roleEntries } from './mutation-table/role.js';
 import { entries as proxyAdmissionEntries } from './mutation-table/proxy-admission.js';
+import { entries as catalogueReaderEntries } from './mutation-table/catalogue-reader.js';
 import { entries as catalogueReadEntries } from './mutation-table/catalogue-read.js';
 import { kyselyEntries } from './mutation-table/kysely.js';
 import { entries as epochEntries } from './mutation-table/cache-epoch-bump.js';
@@ -45,6 +46,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...roleEntries,
   ...proxyAdmissionEntries,
   ...catalogueReadEntries,
+  ...catalogueReaderEntries,
   ...catalogueWriteDistEntries,
   ...ingestSessionEntries,
   ...cataloguePredicatesEntries,

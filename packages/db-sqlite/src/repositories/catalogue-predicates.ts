@@ -115,6 +115,7 @@ export function proxyEligibleCondition(pkg: PackageRefs): Expression<SqlBool> {
       not exists (
         select 1 from package as ${sql.id(a.q)} indexed by package_by_name
         join source as ${sql.id(a.qs)} on ${at(a.qs, 'id')} = ${at(a.q, 'source_id')}
+          and ${at(a.qs, 'org_id')} = ${p('org_id')}
         where ${at(a.q, 'org_id')} = ${p('org_id')}
           and ${at(a.q, 'ecosystem')} = ${p('ecosystem')}
           and ${at(a.q, 'name')} = ${p('name')}
@@ -150,6 +151,7 @@ export function readTimeCondition(
 }
 
 export function admissionCondition(
+  ctx: OrgContext,
   projectRef: Ref,
   sourceRef: Ref,
   keyRef: Ref,
@@ -161,7 +163,7 @@ export function admissionCondition(
     [],
   );
   const scoped = (alias: string) =>
-    sql`${at(alias, 'project_id')} = ${projectRef} and ${at(alias, 'source_id')} = ${sourceRef}`;
+    sql`${at(alias, 'org_id')} = ${ctx.orgId} and ${at(alias, 'project_id')} = ${projectRef} and ${at(alias, 'source_id')} = ${sourceRef}`;
   const effect = (alias: string, value: 'include' | 'exclude') =>
     sql`${at(alias, 'effect')} = ${sql.lit(value)}`;
   const table = (alias: string) => sql`project_package_pattern as ${sql.id(alias)}`;

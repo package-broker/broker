@@ -6,6 +6,7 @@ import type { GitTree, GitTreeEntry } from './fetch.js';
 export const MAX_ARCHIVE_INPUT_BYTES = 64 * 1024 * 1024;
 export const MAX_ARCHIVE_PATH_BYTES = 1024;
 export const MAX_ATTRIBUTES_FILE_BYTES = 1024 * 1024;
+export const ATTRIBUTES_FILE = '.gitattributes';
 
 const MAX_PREFIX_BYTES = 255;
 const MAX_ZIP_ENTRIES = 0xfffe;
@@ -196,12 +197,12 @@ function checkTree(tree: GitTree): PlannedFile[] {
  */
 async function pumpBlob(
   codecs: Codec,
-  io: ArchiveIo,
-  entry: GitTreeEntry,
+  blobs: ArchiveBlobSource,
+  oid: string,
   maxBytes: number,
   sink: (chunk: Uint8Array) => Promise<void>,
 ): Promise<number> {
-  const { size, body } = await io.blobs.read(entry.oid, maxBytes);
+  const { size, body } = await blobs.read(oid, maxBytes);
   const reader = body.getReader();
   const tap = codecs.digestTap(['sha1'] as const);
   tap.digests.catch(noop);
@@ -222,7 +223,7 @@ async function pumpBlob(
     if (seen !== size) throw new ArchiveError('bad_object');
     await hasher.close();
     await draining;
-    if (hex((await tap.digests).sha1) !== entry.oid) throw new ArchiveError('bad_object');
+    if (hex((await tap.digests).sha1) !== oid) throw new ArchiveError('bad_object');
     return size;
   } catch (error) {
     await reader.cancel(error).catch(noop);
@@ -231,36 +232,76 @@ async function pumpBlob(
   }
 }
 
-async function loadAttributes(
-  codecs: Codec,
-  io: ArchiveIo,
-  files: readonly PlannedFile[],
+export interface LoadedAttributes {
+  readonly matcher: ExportIgnore;
+  /** Paths of the attribute files that were read. */
+  readonly loaded: ReadonlySet<string>;
+}
+
+/**
+ * Reads the `.gitattributes` files among `entries`, shallowest first, skipping those beneath an
+ * export-ignored directory. Bytes count against `budget`. The reader is trusted as given.
+ */
+export async function loadAttributes(
+  blobs: ArchiveBlobSource,
+  entries: readonly GitTreeEntry[],
   budget: { used: number },
-): Promise<ExportIgnore> {
+): Promise<LoadedAttributes> {
   const matcher = new ExportIgnore();
-  const sources = files
-    .filter((f) => f.entry.path === '.gitattributes' || f.entry.path.endsWith('/.gitattributes'))
-    .map((f) => ({ entry: f.entry, dir: f.entry.path.slice(0, -'/.gitattributes'.length) }))
+  const loaded = new Set<string>();
+  const sources = entries
+    .filter((e) => e.path === ATTRIBUTES_FILE || e.path.endsWith(`/${ATTRIBUTES_FILE}`))
+    .map((entry) => ({ entry, dir: entry.path.slice(0, -(ATTRIBUTES_FILE.length + 1)) }))
     .map((s) => ({ ...s, depth: s.dir === '' ? 0 : s.dir.split('/').length }))
     .sort((a, b) => a.depth - b.depth);
   for (const { entry, dir } of sources) {
     if (dir !== '' && matcher.dirIgnored(dir)) continue;
     const max = Math.min(MAX_ATTRIBUTES_FILE_BYTES, MAX_ARCHIVE_INPUT_BYTES - budget.used);
-    const chunks: Uint8Array[] = [];
-    const size = await pumpBlob(codecs, io, entry, max, (chunk) => {
-      chunks.push(chunk);
-      return Promise.resolve();
-    });
+    const { size, body } = await blobs.read(entry.oid, max);
+    const text = await collect(body, size, max);
     budget.used += size;
-    const text = new Uint8Array(size);
-    let o = 0;
-    for (const c of chunks) {
-      text.set(c, o);
-      o += c.length;
-    }
     matcher.add(dir, attrsDecoder.decode(text));
+    loaded.add(entry.path);
   }
-  return matcher;
+  return { matcher, loaded };
+}
+
+async function collect(
+  body: ReadableStream<Uint8Array>,
+  size: number,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const reader = body.getReader();
+  try {
+    if (!Number.isSafeInteger(size) || size < 0) throw new ArchiveError('bad_object');
+    if (size > maxBytes) throw new ArchiveError('too_large');
+    const text = new Uint8Array(size);
+    let seen = 0;
+    for (let r = await reader.read(); !r.done; r = await reader.read()) {
+      seen += r.value.length;
+      if (seen > size) throw new ArchiveError('bad_object');
+      text.set(r.value, seen - r.value.length);
+    }
+    if (seen !== size) throw new ArchiveError('bad_object');
+    return text;
+  } catch (error) {
+    await reader.cancel(error).catch(noop);
+    throw error;
+  }
+}
+
+/** Buffers each blob while checking its bytes against its id, then replays it. */
+function verifying(codecs: Codec, blobs: ArchiveBlobSource): ArchiveBlobSource {
+  return {
+    async read(oid, maxBytes) {
+      const chunks: Uint8Array[] = [];
+      const size = await pumpBlob(codecs, blobs, oid, maxBytes, (chunk) => {
+        chunks.push(chunk);
+        return Promise.resolve();
+      });
+      return { size, body: new Blob(chunks).stream() };
+    },
+  };
 }
 
 function localHeader(name: Uint8Array): Uint8Array {
@@ -391,7 +432,13 @@ async function build(
   const budget = { used: END_RECORD };
   let matcher: ExportIgnore;
   try {
-    matcher = await loadAttributes(codecs, io, files, budget);
+    matcher = (
+      await loadAttributes(
+        verifying(codecs, io.blobs),
+        files.map((f) => f.entry),
+        budget,
+      )
+    ).matcher;
   } catch (error) {
     if (error instanceof AttributesLimitError) throw new ArchiveError('bad_attributes');
     throw error;
@@ -424,7 +471,7 @@ async function build(
       const remaining = MAX_ARCHIVE_INPUT_BYTES - budget.used;
       if (remaining < 0) throw new ArchiveError('too_large');
       await zip.entry(name, FILE_MODES.get(entry.mode) as number, async (sink) => {
-        const size = await pumpBlob(codecs, io, entry, remaining, sink);
+        const size = await pumpBlob(codecs, io.blobs, entry.oid, remaining, sink);
         budget.used += size;
         return size;
       });

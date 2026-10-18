@@ -6,7 +6,14 @@ import { ALWAYS, NOT_NULL, ref, seedProject } from './fixtures.js';
 type Layer =
   'user' | 'grant' | 'role' | 'permission' | 'project' | 'identity' | 'binding' | 'member';
 type Branch = 'email' | 'group';
-const providers = [{ provider: 'oidc', anchor: 'issuer', emailAuthoritative: true }];
+const providers = [
+  {
+    provider: 'oidc',
+    anchor: 'issuer',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+];
 const layers = (branch: Branch): readonly Layer[] => [
   'user',
   'grant',

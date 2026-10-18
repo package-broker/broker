@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
+import { deferredDispatch } from '@package-broker/core/authz/token-use';
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
@@ -729,6 +730,53 @@ describe('node auth wiring', () => {
 
       const response = await kernel.fetch(new Request('http://127.0.0.1/_pb/auth/providers'));
       expect(response.status).toBe(200);
+    });
+
+    it('8a: the services carry the anchors of the providers the auth module uses', async () => {
+      const keyring = createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]);
+      const trustAnchor = `access:team.example.com/${'ab'.repeat(32)}`;
+      const broker = createNodeServer(
+        [
+          plugin({
+            binds: ['identity'],
+            identityProviders: () => [
+              {
+                id: 'access',
+                kind: 'cloudflare-access',
+                displayName: 'Access',
+                trustAnchor,
+                policy: {
+                  verifiedDomains: ['example.test', 'other.test'],
+                  emailAuthoritativeDomains: ['example.test'],
+                  autoJoin: false,
+                },
+                supportsReauth: false,
+                start: () => Promise.resolve({ kind: 'direct' }),
+                finish: () => Promise.resolve({ ok: false, reason: 'provider_error' }),
+              },
+            ],
+          }),
+        ],
+        { log: () => undefined, auth: { keyring, publicOrigin: 'http://127.0.0.1', env: {} } },
+      );
+      running.push(broker);
+      const services = await broker.services();
+
+      expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([
+        {
+          provider: 'access',
+          anchor: trustAnchor,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ]);
+      expect(services.dispatch).toBe(deferredDispatch);
+      expect(await broker.services()).toBe(services);
+    });
+
+    it('8b: without auth the services carry no provider anchors', async () => {
+      const services = await bare().services();
+      expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([]);
     });
 
     it('9: a non-canonical publicOrigin fails the kernel build', async () => {

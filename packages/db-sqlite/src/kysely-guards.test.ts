@@ -164,6 +164,7 @@ function holderInput(exclude?: ProtectedHolderExclusion): ProtectedHolderInput {
     provider,
     anchor: HOLDER_ANCHOR,
     emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
   }));
   const now = new Date().toISOString();
   return exclude === undefined

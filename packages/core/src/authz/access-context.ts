@@ -36,6 +36,7 @@ const ROUTE_CLASSES = [
   'organization',
   'project',
   'self',
+  'authenticated',
 ] as const satisfies readonly AccessRouteClass[];
 const PRINCIPAL_KINDS = [
   'user',

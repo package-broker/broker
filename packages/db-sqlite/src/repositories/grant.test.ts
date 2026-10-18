@@ -1024,6 +1024,7 @@ describe('deleteOrganization reports the user it offboards', () => {
           provider,
           anchor: ANCHOR,
           emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput,
       }).deleteOrganization(a, await fenceFor(a, G1), G1, nextOp()),

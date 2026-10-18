@@ -1,8 +1,12 @@
 import * as z from 'zod/mini';
-import type { ApiSlot, RouteDefinition } from '../plugin.js';
+import { SUPPORTED_PLUGIN_API } from '../plugin.js';
+import type { ApiSlot, PluginDefinition, RouteDefinition } from '../plugin.js';
+import { KernelConfigError, collectRegistrations } from './registry.js';
 import { describe, expect, it } from 'vitest';
+import { routeDescriptors } from '../authz/catalogue.js';
 import {
   routeApiProblems,
+  routeBoundaryProblems,
   RESERVED_PATH_PREFIXES,
   routePathProblem,
   routesConflict,
@@ -166,5 +170,92 @@ describe('routeApiProblems', () => {
       },
     };
     expect(definition.api).toBeDefined();
+  });
+});
+
+describe('authenticated boundary registration', () => {
+  const authenticated = {
+    path: '/_pb/projects',
+    method: 'GET',
+    permission: null,
+    boundary: 'authenticated',
+  };
+  const core = { allowAuthenticated: true };
+  const problems = (patch: Record<string, unknown>, options: object = core): string[] =>
+    routeBoundaryProblems({ ...authenticated, ...patch }, 'route', options);
+
+  it('accepts a core GET route without permission and without :project', () => {
+    expect(problems({})).toEqual([]);
+  });
+
+  it('refuses a permission', () => {
+    const found = problems({ permission: 'org:read' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must not require a permission/);
+  });
+
+  it('refuses :project in the path', () => {
+    const found = problems({ path: '/_pb/projects/:project' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must not have :project/);
+  });
+
+  it('refuses POST', () => {
+    const found = problems({ method: 'POST' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must be a GET route/);
+  });
+
+  it('refuses needsOrg false', () => {
+    const found = problems({ needsOrg: false });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/needs organization context/);
+  });
+
+  it('refuses a plugin route', () => {
+    const found = problems({}, { apiVersion: 3 });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/not available to plugin routes/);
+  });
+
+  it('refuses a route registered without the core option', () => {
+    const found = problems({}, {});
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/not available to plugin routes/);
+  });
+
+  it('refuses a real plugin that declares the boundary', () => {
+    const plugin: PluginDefinition = {
+      id: 'demo',
+      package: '@test/demo',
+      apiVersion: SUPPORTED_PLUGIN_API[1],
+      platforms: ['node'],
+      register(registry) {
+        registry.route({
+          method: 'GET',
+          path: '/projects',
+          permission: null,
+          boundary: 'authenticated',
+          handler: () => new Response('ok'),
+        });
+      },
+    };
+    let caught: unknown;
+    try {
+      collectRegistrations([plugin]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(KernelConfigError);
+    expect((caught as KernelConfigError).problems.join('\n')).toMatch(
+      /not available to plugin routes/,
+    );
+  });
+
+  it('marks the route as not session-only in the descriptors', () => {
+    const [descriptor] = routeDescriptors([
+      { plugin: 'core', ...authenticated, handler: () => new Response() },
+    ] as never);
+    expect(descriptor?.sessionOnly).toBe(false);
   });
 });

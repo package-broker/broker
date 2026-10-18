@@ -37,6 +37,7 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
+import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
 import {
   AUDIT_EVENTS,
   KERNEL_EVENTS,
@@ -158,6 +159,7 @@ export interface WorkerOptions {
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
+  readonly observability?: BrokerConfig['observability'];
   readonly console?: { log: (value: unknown) => void; error: (value: unknown) => void };
 }
 
@@ -857,6 +859,12 @@ export function createWorker(
   }
 
   async function build(env: Env | undefined): Promise<Application> {
+    const observabilityProblems = brokerObservabilityProblems({
+      platform: 'cloudflare',
+      plugins,
+      ...(options.observability === undefined ? {} : { observability: options.observability }),
+    });
+    if (observabilityProblems.length > 0) throw new KernelConfigError(observabilityProblems);
     const config = stanza;
     const bound = config === null ? null : resolveBindings(config, env ?? {}, cacheStorage);
     const db = bound?.db ?? env?.DB;
@@ -924,7 +932,7 @@ export function createWorker(
               observability: {
                 sink: services.sink,
                 deploymentId: services.deploymentId,
-                trustInboundTraceparent: false,
+                trustInboundTraceparent: options.observability?.trustInboundTraceparent === true,
               },
             }),
       });

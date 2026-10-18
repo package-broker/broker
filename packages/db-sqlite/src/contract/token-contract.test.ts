@@ -56,7 +56,7 @@ describe('creator removal mutation', () => {
         ...repository,
         async deleteOrganization(...args) {
           const result = await repository.deleteOrganization(...args);
-          if (result === 'deleted') {
+          if (typeof result === 'object' && result.outcome === 'deleted') {
             await executor.batch([
               {
                 sql: 'UPDATE token SET revoked_at = ? WHERE org_id = ?',
@@ -71,5 +71,20 @@ describe('creator removal mutation', () => {
     await expect(tokenContractCases.creatorRemoved(() => openMigratedDatabase())).rejects.toThrow(
       /to deeply equal/,
     );
+  });
+});
+
+describe('token lookup negative contract coverage', () => {
+  it.each([
+    'revoked',
+    'expired',
+    'crossOrg',
+    'wrongSelector',
+    'projectBinding',
+    'projectGrantDeleted',
+  ])('runs the shared %s case', async (name) => {
+    expect(tokenContractCases).toHaveProperty(name);
+    const run = Reflect.get(tokenContractCases, name) as typeof tokenContractCases.nullSlug;
+    await run(() => openMigratedDatabase());
   });
 });

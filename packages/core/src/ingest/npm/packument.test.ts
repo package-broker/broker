@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../../db/port.js';
 import {
   BlobSizeMismatchError,
@@ -23,7 +23,7 @@ import type {
   SnapshotRef,
   VersionCandidate,
 } from '../../sources/provider.js';
-import { SnapshotCorruptError } from '../snapshot.js';
+import { SnapshotCorruptError, stageSnapshot } from '../snapshot.js';
 import { UpstreamUnstableError } from '../two-pass-put.js';
 import {
   NPM_INLINE_PARSE_BYTES,
@@ -32,11 +32,13 @@ import {
   versionChunks,
   type NpmDescribeResult,
   type NpmPackumentDeps,
+  type NpmPackumentTarget,
+  type NpmSnapshotRef,
 } from './packument.js';
 
 const ctx = orgContext('01J0ACME000000000000000000');
 const enc = new TextEncoder();
-const URL_ = 'https://registry.example.test/example';
+const URL_ = 'https://registry.npmjs.org/example';
 const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 const origin = {
   probe: { secrets: [], queryParams: [] },
@@ -131,6 +133,7 @@ function memoryStore(chunkSize = 65_536) {
 
 interface Reply {
   status?: number;
+  redirected?: boolean;
   body?: Uint8Array | string | null;
   headers?: Record<string, string>;
 }
@@ -144,7 +147,12 @@ function fakeFetch(reply: (request: UpstreamRequest, call: number) => Reply) {
       r.body === null
         ? null
         : streamOf(typeof r.body === 'string' ? enc.encode(r.body) : (r.body ?? new Uint8Array()));
-    return { status: r.status ?? 200, headers: new Headers(r.headers ?? {}), body };
+    return {
+      status: r.status ?? 200,
+      redirected: r.redirected ?? false,
+      headers: new Headers(r.headers ?? {}),
+      body,
+    };
   };
   return { fetch, requests };
 }
@@ -152,12 +160,13 @@ function fakeFetch(reply: (request: UpstreamRequest, call: number) => Reply) {
 function setup(
   reply: (request: UpstreamRequest, call: number) => Reply,
   extra: Pick<NpmPackumentDeps, 'onUpstreamBytes' | 'signal'> = {},
+  target: Partial<NpmPackumentTarget> = {},
 ) {
   const { store, objects } = memoryStore();
   const { fetch, requests } = fakeFetch(reply);
   const deps: NpmPackumentDeps = { ctx, fetch, store, codecs, ...extra };
   const describeWith = (options: DescribeOptions = {}): Promise<NpmDescribeResult> =>
-    describeNpmPackument(deps, { name: 'example', url: URL_ }, options);
+    describeNpmPackument(deps, { name: 'example', url: URL_, ...target }, options);
   return { describeWith, requests, objects };
 }
 
@@ -180,14 +189,13 @@ function packument(
   count: number,
   pad: number,
   key: (index: number) => string,
-  options: { timeFirst?: boolean; mismatchEvery?: number; unicode?: boolean } = {},
+  options: { timeFirst?: boolean; unicode?: boolean } = {},
 ): Json {
   const versions: Json = {};
   const time: Json = { created: '2020-01-01T00:00:00.000Z', modified: '2024-01-01T00:00:00.000Z' };
   for (let index = 0; index < count; index += 1) {
     const k = key(index);
-    const mismatch = options.mismatchEvery !== undefined && index % options.mismatchEvery === 3;
-    versions[k] = manifest(mismatch ? `9.9.${index}` : k, index, pad, {
+    versions[k] = manifest(k, index, pad, {
       ...(options.unicode === true ? { readme: `zażółć ${index} \u{1F600}` } : {}),
     });
     if (index % 5 !== 0) time[k] = `2021-0${(index % 9) + 1}-02T03:04:05.${index % 1000}Z`;
@@ -214,9 +222,9 @@ const fixtures: { name: string; text: string; headers: Record<string, string> }[
     headers: {},
   },
   {
-    name: 'time before versions, weak ETag, mismatched keys',
+    name: 'time before versions, weak ETag',
     text: JSON.stringify(
-      packument(1000, 1300, (i) => `0.${i}.0-beta.${i % 3}`, { timeFirst: true, mismatchEvery: 7 }),
+      packument(1000, 1300, (i) => `0.${i}.0-beta.${i % 3}`, { timeFirst: true }),
     ),
     headers: { etag: 'W/"weak"', 'last-modified': 'Mon, 01 Jan 2024 00:00:00 GMT' },
   },
@@ -296,12 +304,12 @@ describe('describeNpmPackument: large packuments', () => {
     }, 60_000);
   });
 
-  it('keeps document ordinals and skips manifests whose version differs from the key', async () => {
+  it('keeps document ordinals', async () => {
     const text = fixtures[2]?.text as string;
     const { describeWith } = setup(() => ({ body: text }));
     const members = await drain(described(await describeWith()));
     const keys = Object.keys((JSON.parse(text) as { versions: Json }).versions);
-    expect(members.length).toBeLessThan(keys.length);
+    expect(members).toHaveLength(keys.length);
     for (const member of members) expect(keys[member.ordinal]).toBe(member.version);
     expect(members.some((m) => m.upstreamTime === undefined)).toBe(true);
   });
@@ -348,7 +356,7 @@ describe('describeNpmPackument: large packuments', () => {
 });
 
 describe('describeNpmPackument: inline packuments', () => {
-  const small = JSON.stringify(packument(20, 10, (i) => `1.0.${i}`, { mismatchEvery: 7 }));
+  const small = JSON.stringify(packument(20, 10, (i) => `1.0.${i}`));
 
   it('parses a body up to 1 MiB once with a sha256 id that continuations repeat', async () => {
     const { describeWith, requests, objects } = setup(() => ({ body: small }));
@@ -487,7 +495,7 @@ describe('describeNpmPackument: round 2', () => {
   );
 
   it('keeps a __proto__ dist-tag', async () => {
-    const body = '{"dist-tags":{"__proto__":"1.0.0","latest":"1.0.0"},"versions":{}}';
+    const body = `{"name":"example","dist-tags":{"__proto__":"1.0.0","latest":"1.0.0"},"versions":{"1.0.0":${JSON.stringify(manifest('1.0.0', 0, 1))}}}`;
     const { describeWith } = setup(() => ({ body }));
     const tags = described(await describeWith()).distTags ?? {};
     expect(Object.hasOwn(tags, '__proto__')).toBe(true);
@@ -744,6 +752,16 @@ describe('describeNpmPackument: oversized version manifests', () => {
     expect(continued.upstreamComplete).toBe(false);
   }, 60_000);
 
+  it('reports an incomplete set when every version manifest is oversized', async () => {
+    const doc = packument(1, 10, () => '1.0.0') as { versions: Record<string, Json> };
+    doc.versions['1.0.0'] = manifest('1.0.0', 0, 10, { readme: 'x'.repeat(2 * MiB) });
+    const { describeWith } = setup(() => ({ body: JSON.stringify(doc) }));
+    const description = described(await describeWith());
+    expect(await drain(description)).toEqual([]);
+    expect(description.skippedMembers).toEqual([{ version: '1.0.0', reason: 'member_too_large' }]);
+    expect(description.upstreamComplete).toBe(false);
+  }, 60_000);
+
   it('keeps document ordinals when an oversized manifest is in the middle', async () => {
     const doc = packument(3, 10, (i) => `1.0.${i}`) as { versions: Record<string, Json> };
     doc.versions['1.0.1'] = manifest('1.0.1', 1, 10, { readme: 'x'.repeat(2 * MiB) });
@@ -800,4 +818,427 @@ describe('describeNpmPackument: oversized version manifests', () => {
     );
     expect((error as { code?: unknown }).code).toBe('member_too_large');
   }, 60_000);
+});
+
+describe('describeNpmPackument: absence fails closed', () => {
+  const notFound = '{"error":"Not found"}';
+  const definitiveOf = async (
+    reply: Reply,
+    target: Partial<NpmPackumentTarget> = {},
+  ): Promise<boolean> => {
+    const result = await setup(() => ({ status: 404, ...reply }), {}, target).describeWith();
+    if (result.kind !== 'not_found') throw new Error(`expected not_found, got ${result.kind}`);
+    return result.definitive;
+  };
+
+  it('is definitive for the documented body on the expected url', async () => {
+    expect(await definitiveOf({ body: notFound })).toBe(true);
+  });
+
+  it.each([
+    ['an empty object', '{}'],
+    ['a message member', '{"message":"gone"}'],
+    ['another error text', '{"error":"Bad gateway"}'],
+    ['a non-string error', '{"error":404}'],
+    ['extra members', '{"error":"Not found","hint":"proxy"}'],
+    ['a different case', '{"error":"not found"}'],
+    ['an array', '[{"error":"Not found"}]'],
+  ])('is not definitive for a 404 body with %s', async (_, body) => {
+    expect(await definitiveOf({ body })).toBe(false);
+  });
+
+  it('is not definitive after a redirect to the documented not-found body', async () => {
+    expect(await definitiveOf({ body: notFound, redirected: true })).toBe(false);
+  });
+
+  it('is not definitive for a credentialed npmjs 404 with the documented body', async () => {
+    expect(
+      await definitiveOf(
+        { body: notFound, redirected: false },
+        {
+          credential: {
+            origins: ['https://registry.npmjs.org'],
+            queryParams: [],
+            apply: (headers, url) => ({ headers, url }),
+          },
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('is not definitive without redirect information', async () => {
+    const result = await describeNpmPackument(
+      {
+        ctx,
+        fetch: async () => ({
+          status: 404,
+          headers: new Headers(),
+          body: streamOf(enc.encode(notFound)),
+        }),
+        store: memoryStore().store,
+        codecs,
+      },
+      { name: 'example', url: URL_ },
+      {},
+    );
+    expect(result).toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it.each([
+    'https://npm.pkg.github.com',
+    'https://verdaccio.example.test',
+    'https://artifactory.example.test',
+  ])('is not definitive for another registry %s', async (registry) => {
+    expect(await definitiveOf({ body: notFound }, { url: `${registry}/example` })).toBe(false);
+  });
+});
+
+describe('describeNpmPackument: mixed-value time maps', () => {
+  it.each([
+    ['inline', false],
+    ['staged', true],
+  ])('preserves valid timestamps in a mixed-value time map (%s)', async (_, staged) => {
+    const firstTime = '2021-01-02T03:04:05.000Z';
+    const secondTime = '2022-02-03T04:05:06.000Z';
+    const body = JSON.stringify({
+      name: 'example',
+      versions: {
+        '1.0.0': manifest('1.0.0', 0, 1),
+        '2.0.0': manifest('2.0.0', 1, 1),
+        '3.0.0': manifest('3.0.0', 2, 1),
+      },
+      time: {
+        '1.0.0': firstTime,
+        created: null,
+        modified: false,
+        unpublished: {},
+        other: [],
+        '3.0.0': 123,
+        '2.0.0': secondTime,
+      },
+      'dist-tags': { latest: '2.0.0' },
+      ...(staged ? { padding: 'x'.repeat(NPM_INLINE_PARSE_BYTES) } : {}),
+    });
+    const { describeWith } = setup(() => ({ body }));
+    const description = described(await describeWith());
+    expect(description.snapshot.stagedBlob !== undefined).toBe(staged);
+    const expected = [
+      { version: '1.0.0', upstreamTime: firstTime },
+      { version: '2.0.0', upstreamTime: secondTime },
+      { version: '3.0.0', upstreamTime: undefined },
+    ];
+    const timestamps = (members: readonly VersionCandidate[]) =>
+      members.map(({ version, upstreamTime }) => ({ version, upstreamTime }));
+    expect(timestamps(await drain(description))).toEqual(expected);
+    expect(description.upstreamComplete).toBe(true);
+    expect(description.distTags).toEqual({ latest: '2.0.0' });
+    if (staged) {
+      const continued = described(await describeWith({ snapshot: description.snapshot }));
+      expect(timestamps(await drain(continued))).toEqual(expected);
+      expect(continued.upstreamComplete).toBe(true);
+    }
+  });
+});
+
+describe('describeNpmPackument: dist-tag authority', () => {
+  describe.each([
+    ['inline', false],
+    ['staged', true],
+  ])('%s', (_, staged) => {
+    const read = async (tags: unknown): Promise<PackageDescription> => {
+      const body = JSON.stringify({
+        name: 'example',
+        versions: { '1.0.0': manifest('1.0.0', 0, 1) },
+        ...(tags === undefined ? {} : { 'dist-tags': tags }),
+        ...(staged ? { padding: 'x'.repeat(NPM_INLINE_PARSE_BYTES) } : {}),
+      });
+      const description = described(await setup(() => ({ body })).describeWith());
+      await drain(description);
+      expect(description.upstreamComplete).toBe(true);
+      return description;
+    };
+
+    it.each([
+      ['missing', undefined],
+      ['null', null],
+      ['array', []],
+      ['string', 'latest'],
+      ['number', 1],
+      ['boolean', false],
+      ['mixed map with null', { latest: null, next: '2.0.0' }],
+      ['mixed map with array', { latest: [], next: '2.0.0' }],
+      ['mixed map with object', { latest: {}, next: '2.0.0' }],
+      ['mixed map with number', { latest: 1, next: '2.0.0' }],
+      ['mixed map with boolean', { latest: false, next: '2.0.0' }],
+      ['mixed map with invalid value last', { next: '2.0.0', latest: null }],
+    ])('preserves seeded tags when dist-tags is %s', async (_, upstreamTags) => {
+      let storedTags: Readonly<Record<string, string>> = {
+        latest: '1.0.0',
+        next: '2.0.0-beta.1',
+      };
+      const replaceTags = vi.fn((tags: Readonly<Record<string, string>>) => {
+        storedTags = tags;
+      });
+      const description = await read(upstreamTags);
+      // The replacement plan accepts only an authoritative map; undefined skips tag writes.
+      if (description.distTags !== undefined) replaceTags(description.distTags);
+      expect(storedTags).toEqual({ latest: '1.0.0', next: '2.0.0-beta.1' });
+      expect(replaceTags).not.toHaveBeenCalled();
+      expect(description.distTags).toBeUndefined();
+    });
+
+    it.each([{}, { latest: '1.0.0' }])('retains an authoritative map %j', async (tags) => {
+      const description = await read(tags);
+      expect(description.distTags).toEqual(tags);
+      expect(Object.hasOwn(description, 'distTags')).toBe(true);
+    });
+  });
+});
+
+describe('describeNpmPackument: completeness fails closed', () => {
+  const doc = (versions: unknown, extra: Json = {}): string =>
+    JSON.stringify({
+      name: 'example',
+      'dist-tags': {},
+      ...(versions === undefined ? {} : { versions }),
+      ...extra,
+    });
+  const one = { '1.0.0': manifest('1.0.0', 0, 1) };
+  const invalid = async (text: string, staged = false): Promise<void> => {
+    const body = staged
+      ? text.replace('"dist-tags"', `"padding":"${'x'.repeat(NPM_INLINE_PARSE_BYTES)}","dist-tags"`)
+      : text;
+    const { describeWith } = setup(() => ({ body }));
+    const run = async (): Promise<unknown> => {
+      const result = await describeWith();
+      if (result.kind === 'found') await drain(result.description);
+      return result;
+    };
+    await expect(run()).rejects.toMatchObject({
+      name: 'NpmPackumentError',
+      code: 'invalid',
+      packageKey: 'example',
+    });
+  };
+
+  it('accepts a valid packument inline and staged', async () => {
+    for (const staged of [false, true]) {
+      const text = doc(one);
+      const body = staged
+        ? text.replace(
+            '"dist-tags"',
+            `"padding":"${'x'.repeat(NPM_INLINE_PARSE_BYTES)}","dist-tags"`,
+          )
+        : text;
+      const description = described(await setup(() => ({ body })).describeWith());
+      expect((await drain(description)).map((m) => m.version)).toEqual(['1.0.0']);
+      expect(description.upstreamComplete).toBe(true);
+    }
+  });
+
+  describe.each([
+    ['inline', false],
+    ['staged', true],
+  ])('%s', (_, staged) => {
+    it.each([true, false])(
+      'recognizes an unpublished package with time first: %s',
+      async (timeFirst) => {
+        const name = { name: 'example' };
+        const time = {
+          time: { unpublished: { time: '2026-10-17T00:00:00.000Z', versions: ['1.0.0'] } },
+        };
+        const text = JSON.stringify({
+          ...(timeFirst ? { ...time, ...name } : { ...name, ...time }),
+          ...(staged ? { padding: 'x'.repeat(NPM_INLINE_PARSE_BYTES) } : {}),
+        });
+        const { describeWith, objects } = setup(() => ({ body: text }));
+        await expect(describeWith()).resolves.toEqual({ kind: 'not_found', definitive: true });
+        expect(objects.size).toBe(staged ? 1 : 0);
+      },
+    );
+
+    it('never makes a redirected unpublished response definitive', async () => {
+      const text = doc(undefined, { time: { unpublished: {} } });
+      const body = staged
+        ? text.replace(
+            '"dist-tags"',
+            `"padding":"${'x'.repeat(NPM_INLINE_PARSE_BYTES)}","dist-tags"`,
+          )
+        : text;
+      await expect(setup(() => ({ body, redirected: true })).describeWith()).resolves.toEqual({
+        kind: 'not_found',
+        definitive: false,
+      });
+    });
+
+    it('never makes another registry unpublished response definitive', async () => {
+      const text = doc(undefined, { time: { unpublished: {} } });
+      const body = staged
+        ? text.replace(
+            '"dist-tags"',
+            `"padding":"${'x'.repeat(NPM_INLINE_PARSE_BYTES)}","dist-tags"`,
+          )
+        : text;
+      await expect(
+        setup(() => ({ body }), {}, { url: 'https://npm.pkg.github.com/example' }).describeWith(),
+      ).resolves.toEqual({ kind: 'not_found', definitive: false });
+    });
+
+    it.each([null, [], 'gone', true])(
+      'rejects a non-object unpublished marker %j',
+      async (unpublished) => {
+        await invalid(doc(undefined, { time: { unpublished } }), staged);
+      },
+    );
+
+    it.each([{}, null, []])(
+      'rejects a versions field %j despite an unpublished marker',
+      async (versions) => {
+        await invalid(doc(versions, { time: { unpublished: {} } }), staged);
+      },
+    );
+
+    it('rejects an unpublished document with a mismatched name', async () => {
+      await invalid(doc(undefined, { name: 'other', time: { unpublished: {} } }), staged);
+    });
+
+    it('rejects a document without versions', async () => {
+      await invalid(doc(undefined), staged);
+    });
+    it.each([
+      ['an array', []],
+      ['a string', 'x'],
+      ['null', null],
+      ['a number', 3],
+    ])('rejects versions that is %s', async (_n, versions) => {
+      await invalid(doc(versions), staged);
+    });
+    it('rejects an empty versions object', async () => {
+      await invalid(doc({}), staged);
+    });
+    it('rejects a version key that differs from its version', async () => {
+      await invalid(doc({ ...one, '2.0.0': manifest('2.0.1', 1, 1) }), staged);
+    });
+    it('rejects a version member that is not an object', async () => {
+      await invalid(doc({ ...one, '2.0.0': null }), staged);
+      await invalid(doc({ ...one, '2.0.0': [] }), staged);
+    });
+    it('rejects a missing name', async () => {
+      const parsed = JSON.parse(doc(one)) as Json;
+      delete parsed.name;
+      await invalid(JSON.stringify(parsed), staged);
+    });
+    it('rejects a name that is not the requested package', async () => {
+      await invalid(doc(one, { name: 'other' }), staged);
+      await invalid(doc(one, { name: 5 }), staged);
+    });
+  });
+
+  it('never reports a partial set as complete when a later version is malformed', async () => {
+    const text = doc({ ...one, '2.0.0': manifest('9.9.9', 1, 1) });
+    const result = await setup(() => ({ body: text }))
+      .describeWith()
+      .catch((e: unknown) => e);
+    if (result instanceof Error) return;
+    const description = described(result as NpmDescribeResult);
+    await drain(description).catch(() => undefined);
+    expect(description.upstreamComplete).toBe(false);
+  });
+});
+
+describe('staged unpublished evidence', () => {
+  const body = JSON.stringify({
+    name: 'example',
+    time: { unpublished: {} },
+    padding: 'x'.repeat(NPM_INLINE_PARSE_BYTES),
+  });
+
+  it.each([1, 2])('fails closed when fetch %i was redirected', async (redirectedCall) => {
+    const { describeWith } = setup((_, call) => ({ body, redirected: call === redirectedCall }));
+    await expect(describeWith()).resolves.toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it.each([3, 4])('fails closed when retry fetch %i was redirected', async (redirectedCall) => {
+    const { describeWith, requests } = setup((_, call) => ({
+      body: call === 1 ? body.replace('"unpublished":{}', '"unpublished":[]') : body,
+      redirected: call === redirectedCall,
+    }));
+    await expect(describeWith()).resolves.toEqual({ kind: 'not_found', definitive: false });
+    expect(requests).toHaveLength(4);
+  });
+
+  it('never makes a credentialed continuation definitive despite persisted evidence', async () => {
+    const { store } = memoryStore();
+    const ref = await stageSnapshot(ctx, async () => streamOf(enc.encode(body)), store, {
+      codecs,
+      maxBytes: 32 * 1024 * 1024,
+    });
+    await expect(
+      describeNpmPackument(
+        {
+          ctx,
+          store,
+          codecs,
+          fetch: async () => {
+            throw new Error('continuation must not fetch');
+          },
+        },
+        {
+          name: 'example',
+          url: URL_,
+          credential: {
+            origins: ['https://registry.npmjs.org'],
+            queryParams: [],
+            apply: (headers, url) => ({ headers, url }),
+          },
+        },
+        { snapshot: { ...ref, definitiveAbsence: true } as NpmSnapshotRef },
+      ),
+    ).resolves.toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it.each([true, false, undefined])(
+    'preserves staged absence evidence %s on continuation',
+    async (definitiveAbsence) => {
+      const { store } = memoryStore();
+      const ref = await stageSnapshot(ctx, async () => streamOf(enc.encode(body)), store, {
+        codecs,
+        maxBytes: 32 * 1024 * 1024,
+      });
+      const fetch: PolicyFetch = async () => {
+        throw new Error('continuation must not fetch');
+      };
+      const persisted = JSON.parse(JSON.stringify({ ...ref, definitiveAbsence })) as SnapshotRef;
+      await expect(
+        describeNpmPackument(
+          { ctx, fetch, store, codecs },
+          { name: 'example', url: URL_ },
+          { snapshot: persisted },
+        ),
+      ).resolves.toEqual({ kind: 'not_found', definitive: definitiveAbsence === true });
+    },
+  );
+});
+
+describe('NpmPackumentError package context', () => {
+  it('carries the canonical package key without adding it to the error message', async () => {
+    const run = setup(
+      () => ({ body: '{"name":"LegacyName"}' }),
+      {},
+      { name: 'LegacyName' },
+    ).describeWith();
+    await expect(run).rejects.toMatchObject({
+      code: 'invalid',
+      packageKey: '!legacy!name',
+      message: 'npm packument invalid',
+    });
+  });
+
+  it('carries the package key for an empty 200 body', async () => {
+    await expect(setup(() => ({ body: null })).describeWith()).rejects.toMatchObject({
+      code: 'invalid',
+      packageKey: 'example',
+      message: 'npm packument invalid',
+    });
+  });
 });

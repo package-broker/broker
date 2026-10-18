@@ -4,12 +4,13 @@ import type { AddressInfo } from 'node:net';
 import { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   SUPPORTED_PLUGIN_API,
   type PluginDefinition,
   type PluginPorts,
 } from '@package-broker/core/plugin';
+import { AUTH_REASON_CODES, type AuthReasonCode } from '@package-broker/core/auth/reason-codes';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { MigrationChecksumError } from '@package-broker/db-sqlite/migrations/runner';
 import {
@@ -19,11 +20,11 @@ import {
 import { createObservability, type ObsRecord } from '@package-broker/core/platform/observability';
 import {
   AUTH_EVENTS,
-  AUTH_REASON_CODES,
   AlreadyBootstrappedError,
   NODE_RUNTIME_EVENTS,
   StartupConfigError,
   sinkLog,
+  registeredAuthReason,
   startNode,
   type StartOptions,
 } from './startup.js';
@@ -136,6 +137,11 @@ function counters(records: readonly ObsRecord[]): ObsRecord[] {
 }
 
 describe('auth sink log', () => {
+  it('only forwards reasons from the core auth reason set', () => {
+    expectTypeOf(registeredAuthReason).returns.toEqualTypeOf<AuthReasonCode | undefined>();
+    expectTypeOf<string>().not.toExtend<AuthReasonCode>();
+  });
+
   it('23: an SSO start failure keeps its detail as reason_code', () => {
     const { records, log } = authSink();
     log({
@@ -700,6 +706,67 @@ describe('startNode', () => {
         expect((failure as StartupConfigError).message, name).toContain(variable);
         expect(recorded.closes, name).toEqual([path]);
       }
+    });
+
+    describe('inbound traceparent', () => {
+      const TRACE_ID = 'ab'.repeat(16);
+      const TRACEPARENT = `00-${TRACE_ID}-${'cd'.repeat(8)}-01`;
+
+      async function traceIds(observability: StartOptions['observability']): Promise<unknown[]> {
+        const out = capture();
+        const err = capture();
+        const broker = await start({}, ports, {
+          stdout: out.stream,
+          stderr: err.stream,
+          ...(observability === undefined ? {} : { observability }),
+        });
+        const base = await listen(broker);
+        await fetch(`${base}/nope`, { headers: { traceparent: TRACEPARENT } });
+        const ids = [...out.lines(), ...err.lines()]
+          .filter((line) => line['event'] === 'http.request')
+          .map((line) => line['trace_id']);
+        expect(ids.length).toBeGreaterThan(0);
+        return ids;
+      }
+
+      it('ignores the header by default', async () => {
+        for (const id of await traceIds(undefined)) expect(id).not.toBe(TRACE_ID);
+      });
+
+      it('ignores the header when the flag is false', async () => {
+        for (const id of await traceIds({ trustInboundTraceparent: false })) {
+          expect(id).not.toBe(TRACE_ID);
+        }
+      });
+
+      it('adopts the header trace id when the flag is true', async () => {
+        for (const id of await traceIds({ trustInboundTraceparent: true })) {
+          expect(id).toBe(TRACE_ID);
+        }
+      });
+
+      it('fails startup on a non-boolean flag', async () => {
+        const failure = await rejection(
+          start({}, ports, {
+            observability: {
+              trustInboundTraceparent: 'yes',
+            } as unknown as StartOptions['observability'],
+          }),
+        );
+        expect(failure).toBeInstanceOf(StartupConfigError);
+        expect((failure as StartupConfigError).message).toContain('observability');
+        expect((failure as StartupConfigError).message).not.toContain('yes');
+      });
+
+      it('fails startup on an unknown observability key', async () => {
+        const failure = await rejection(
+          start({}, ports, {
+            observability: { sampleRate: true } as unknown as StartOptions['observability'],
+          }),
+        );
+        expect(failure).toBeInstanceOf(StartupConfigError);
+        expect((failure as StartupConfigError).message).toContain('observability');
+      });
     });
 
     it('10: an unusable blob root fails startup', async () => {

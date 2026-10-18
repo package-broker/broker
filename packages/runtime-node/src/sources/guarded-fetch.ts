@@ -144,7 +144,7 @@ export function createGuardedFetch(
   return async (input, init) => {
     const { url, method, headers, body } = await normalizeRequest(input, init);
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw fetchFailed();
+    if (url.protocol !== 'https:') throw fetchFailed(new DnsGuardError('scheme'));
     if (signal?.aborted) throw signal.reason;
 
     const secure = url.protocol === 'https:';

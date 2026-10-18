@@ -106,9 +106,9 @@ export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
       attachDist: 4,
       openListing: 3,
       markListing: 5,
-      finalizeListing: 12,
+      finalizeListing: 13,
       quarantine: 5,
-      markPackageAbsent: 7,
+      markPackageAbsent: 8,
     },
     async syncPackage(ctx, guard, input) {
       if (input.versions.length > CATALOGUE_SYNC_VERSIONS_PER_CALL)

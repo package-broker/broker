@@ -543,6 +543,25 @@ describe('describeComposerV2 retries and failures', () => {
     expect(slept).toEqual([30_000]);
   });
 
+  it.each([
+    ['86401', 86400],
+    ['-5', null],
+    ['1.5', null],
+    ['12 apples', null],
+    ['', null],
+  ])('carries bounded Retry-After without waiting for %j', async (header, seconds) => {
+    const { slept, sleep } = recorder();
+    const { fetch, calls } = setup({
+      [P2]: [{ status: 429, headers: { 'retry-after': header } }],
+    });
+    expect(await describeComposerV2(fetch, source(), NAME, opts({ sleep }))).toEqual({
+      kind: 'busy',
+      retryAfterSeconds: seconds,
+    });
+    expect(slept).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
   it('keeps the 429 retry and the 404 recheck on separate counters', async () => {
     const { slept, sleep } = recorder();
     const listed = source({ root: root({ availablePackages: [NAME] }), credential });

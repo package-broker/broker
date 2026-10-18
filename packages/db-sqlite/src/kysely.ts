@@ -594,7 +594,6 @@ export function protectedHolder(
           .on(`${alias.role}.protects_last_holder`, '=', sql.lit(1)),
       )
       .select(sql.lit(1).as('one'))
-      .where(`${alias.member}.org_id`, '=', org)
       .where(`${alias.user}.org_id`, '=', org)
       .where(`${alias.user}.id`, '=', userIdColumn)
       .$if(options.includeSuspended !== true, (qb) =>

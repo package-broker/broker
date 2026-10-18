@@ -5,25 +5,15 @@ import { assertRepresentable } from './json-schema.js';
 import { apiError, jsonResponse, type ApiErrorCode } from './response.js';
 import {
   readJsonBody,
+  VALIDATION_CODES,
   validateInput,
-  type ValidationCode,
   type ValidationDetail,
 } from './validate.js';
 
 const MAX_DETAILS = 20;
-const VALIDATION_CODES: ReadonlySet<ValidationCode> = new Set([
-  'invalid_type',
-  'too_small',
-  'too_big',
-  'invalid_format',
-  'invalid_value',
-  'unrecognized_keys',
-  'invalid_union',
-  'invalid',
-]);
 const BODY_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH']);
 const CONCURRENCY_METHODS: ReadonlySet<string> = new Set(['PUT', 'PATCH', 'DELETE']);
-const IF_MATCH = /^"r([1-9][0-9]*)"$/;
+export const IF_MATCH = /^"r([1-9][0-9]*)"$/;
 
 export interface ApiRouteSpec {
   readonly method: RouteDefinition['method'];
@@ -110,7 +100,7 @@ function handlerDetails(details: readonly ValidationDetail[]): ValidationDetail[
   return details.slice(0, MAX_DETAILS).map((detail) => {
     const { location } = detail as ValidationDetail & { readonly location?: unknown };
     return {
-      path: detail.path,
+      path: typeof detail.path === 'string' ? detail.path : '',
       code: VALIDATION_CODES.has(detail.code) ? detail.code : 'invalid',
       ...(location === 'params' || location === 'query' || location === 'body' ? { location } : {}),
     };
@@ -149,7 +139,7 @@ export function apiRoute<const S extends ApiRouteSpec>(
         if (!read.ok) {
           if (read.status !== 400) return fail(read.code);
           if (read.detail === 'invalid_request') return fail('invalid_request');
-          const detail = { path: '/body', code: read.detail } as unknown as ValidationDetail;
+          const detail: ValidationDetail = { path: '/body', code: read.detail };
           return fail('invalid_request', [detail]);
         }
         body = read.value;
@@ -164,8 +154,9 @@ export function apiRoute<const S extends ApiRouteSpec>(
         return undefined;
       };
       const params = check(api.params, '/params', ctx.params);
-      const query = check(api.query, '/query', queryOf(new URL(ctx.request.url)));
-      if (api.query === undefined && new URL(ctx.request.url).searchParams.size > 0) {
+      const url = new URL(ctx.request.url);
+      const query = check(api.query, '/query', queryOf(url));
+      if (api.query === undefined && url.searchParams.size > 0) {
         details.push({ path: '/query', code: 'unrecognized_keys' });
       }
       const parsedBody = check(api.body, '/body', body);

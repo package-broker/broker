@@ -19,6 +19,10 @@ The module set must be decided when the artifact is built, on Cloudflare and on 
 - Hooks may only deny. The core permission model is the sole authority for granting access.
 - Plugins may contribute UI pages through a build-time manifest of routes, menu entries and required permissions (Nice to have).
 - Users with their own plugin list build from a template repository and its lockfile.
+- Ports fall into two groups. `blob`, `cache`, `job` and `observability` are adapters chosen in `broker.config.ts` (the config key for `job` is `jobs`); the database is fixed by the runtime (D1 or SQLite) and has no choice. A plugin cannot bind any of these. `identity` and `source` are contributed by plugins: a plugin lists them in `binds` and supplies the provider factory. One plugin binds each of them at most.
+- Two plugin keys are special-cased because they return provider instances rather than hook or route declarations: `identityProviders` is required when `binds` contains `identity` and rejected otherwise, and `sourceProviders` is required when `binds` contains `source` and rejected otherwise (it needs `apiVersion` 3 or later). An identity factory receives `fetch`, a clock and an env reader limited to its own `PB_IDP_*` secrets. A source factory receives nothing. The kernel validates the keys at `pb build` and at boot and rejects a missing, extra or non-function key as a configuration error.
+- `session` and `secrets` are not ports. Nothing binds them, so they are not in the `PortName` type.
+- The supported import surface for plugins is the `@package-broker/core` root and `@package-broker/core/plugin`. Every other subpath of core is internal and may change in any release. An architecture test fails when a `packages/plugin-*` source file imports one.
 
 ### Consequences
 

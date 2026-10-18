@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Duplex, Writable } from 'node:stream';
 import { createDeflateRaw } from 'node:zlib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { orgContext } from '../../db/port.js';
 import type { DigestAlgorithm } from '../../platform/codec.js';
 import { FLUSH, GitRemoteError, encodePkt } from '../../sources/git/pkt-line.js';
 import { GitFetchError, type FileAtRef, type GitFetchContext } from '../../sources/git/fetch.js';
@@ -72,6 +73,7 @@ const source = (config: Partial<ProviderSource['config']> = {}): ProviderSource 
 
 const counters: { name: string; labels: Record<string, string> | undefined }[] = [];
 const ctx = {
+  org: orgContext('org-test'),
   fetch: vi.fn(),
   credential: null,
   codecs: {},
@@ -961,7 +963,7 @@ describe('git provider blob plan', () => {
       .update(`blob ${Buffer.byteLength(text)}\0`)
       .update(text)
       .digest('hex');
-  const ATTRIBUTES = 'docs export-ignore\n*.md export-ignore\n';
+  const ATTRIBUTES = '.gitattributes export-ignore\ndocs export-ignore\n*.md export-ignore\n';
   const contents: Record<string, string> = {
     '.gitattributes': ATTRIBUTES,
     'a.php': '<?php // a\n',
@@ -1246,6 +1248,7 @@ describe('git provider blob plan', () => {
       const zip = (await readFile(built.path)).toString('latin1');
       expect(zip).toContain('src/b.php');
       expect(zip).not.toContain('README.md');
+      expect(zip).not.toContain('.gitattributes');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -1294,7 +1297,7 @@ describe('git provider batch isolation cost', () => {
   const describeAll = () =>
     createGitProvider({ runtime: 'docker' }).describe(ctx, source({ packageName: NAME }), NAME, {});
 
-  it('stops after both top halves and one probe each fail alike and rethrows the first error', async () => {
+  it('falls back to every ref after both top halves and probes fail alike, then rethrows the first error', async () => {
     const failure = new GitFetchError('missing_object');
     failing(() => failure);
     await expect(describeAll()).rejects.toBe(failure);
@@ -1399,7 +1402,7 @@ describe('git provider batch isolation cost', () => {
     ['network', new UpstreamError('network')],
     ['429', new UpstreamError('http_status', 429)],
   ])(
-    'fails a whole sub-batch on a transient upstream %s without bisecting it',
+    'retries a transient upstream %s once before failing the whole sub-batch without bisecting it',
     async (_name, upstream) => {
       failing((batch) => {
         if (batch.length === count) return new GitFetchError('missing_object');
@@ -1411,9 +1414,119 @@ describe('git provider batch isolation cost', () => {
       );
       expect(found).toHaveLength(count / 2);
       expect(counters).toHaveLength(count / 2);
-      expect(readFileAtRefs).toHaveBeenCalledTimes(3);
+      expect(readFileAtRefs).toHaveBeenCalledTimes(4);
     },
   );
+
+  it.each([
+    ['timeout', new UpstreamError('timeout')],
+    ['network', new UpstreamError('network')],
+    ['429', new UpstreamError('http_status', 429)],
+  ])('keeps every ref when a transient upstream %s recovers on retry', async (_name, upstream) => {
+    let attempts = 0;
+    failing((batch) => {
+      if (batch.length === count) return new GitFetchError('missing_object');
+      if (batch.some((ref) => ref.name === refs[5]!.name) && ++attempts === 1) return upstream;
+      return undefined;
+    });
+    const { members: found, description } = await members(
+      createGitProvider({ runtime: 'docker' }),
+      source({ packageName: NAME }),
+    );
+    expect(found.map((member) => member.version).sort()).toEqual(
+      refs.map((ref) => ref.name.slice('refs/tags/'.length)).sort(),
+    );
+    expect(description.upstreamComplete).toBe(true);
+    expect(counters).toEqual([]);
+    expect(attempts).toBe(2);
+    expect(readFileAtRefs).toHaveBeenCalledTimes(4);
+    expect(readFileAtRefs.mock.calls[2]![2]).toEqual(readFileAtRefs.mock.calls[1]![2]);
+  });
+
+  it('fails both persistently transient halves after exactly one retry each without probing refs', async () => {
+    const initial = new GitFetchError('missing_object');
+    failing((batch) => (batch.length === count ? initial : new UpstreamError('timeout')));
+    await expect(describeAll()).rejects.toBe(initial);
+    expect(readFileAtRefs.mock.calls.map((call) => call[2])).toEqual([
+      refs,
+      refs.slice(0, count / 2),
+      refs.slice(0, count / 2),
+      refs.slice(count / 2),
+      refs.slice(count / 2),
+    ]);
+  });
+
+  it('aborts during retry backoff without another read', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const reason = new Error('cancelled');
+      let ready!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+      failing((batch) => {
+        if (batch.length === count) return new GitFetchError('missing_object');
+        ready();
+        return new UpstreamError('network');
+      });
+      const pending = createGitProvider({ runtime: 'docker' }).describe(
+        { ...ctx, signal: controller.signal },
+        source({ packageName: NAME }),
+        NAME,
+        {},
+      );
+      const rejected = expect(pending).rejects.toBe(reason);
+      await waiting;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(readFileAtRefs).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(1);
+      controller.abort(reason);
+      await rejected;
+      await vi.runAllTimersAsync();
+      expect(readFileAtRefs).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays within 4n+2 reads while bisecting all 64 refs and retrying transient leaves', async () => {
+    vi.useFakeTimers();
+    try {
+      let ready!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+      const attempts = new Map<string, number>();
+      failing((batch) => {
+        if (batch.length > 1) {
+          const index = refs.findIndex((ref) => ref.name === batch[0]!.name);
+          return new GitFetchError(index === 0 ? 'missing_object' : 'bad_object');
+        }
+        const name = batch[0]!.name;
+        const reads = (attempts.get(name) ?? 0) + 1;
+        attempts.set(name, reads);
+        ready();
+        return reads === 1 ? new UpstreamError('timeout') : undefined;
+      });
+      const pending = members(
+        createGitProvider({ runtime: 'docker' }),
+        source({ packageName: NAME }),
+      );
+      await waiting;
+      await vi.runAllTimersAsync();
+      const { members: found, description } = await pending;
+      expect(found).toHaveLength(count);
+      expect(description.upstreamComplete).toBe(true);
+      expect(attempts.size).toBe(count);
+      expect([...attempts.values()]).toEqual(Array.from({ length: count }, () => 2));
+      expect(readFileAtRefs).toHaveBeenCalledTimes(3 * count - 1);
+      expect(readFileAtRefs.mock.calls.length).toBeLessThanOrEqual(4 * count + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('git provider capability discovery', () => {
@@ -1491,6 +1604,43 @@ describe('git provider capability discovery', () => {
     await provider.buildArchive(context, source(), oid(1));
     await provider.buildArchive(context, { ...source(), id: 's2' } as ProviderSource, oid(1));
     expect(gets(fetch)).toBe(2);
+  });
+
+  it('keeps discovery capabilities separate for two orgs with the same source id and URL', async () => {
+    const fetchA = server();
+    const fetchB = server();
+    const contextA = { ...ctx, org: orgContext('org-a'), fetch: fetchA };
+    const contextB = { ...ctx, org: orgContext('org-b'), fetch: fetchB };
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    discoverCapabilities
+      .mockResolvedValueOnce({ filter: true })
+      .mockResolvedValueOnce({ filter: false });
+
+    await provider.buildArchive(contextA, source(), oid(1));
+    await provider.buildArchive(contextB, source(), oid(1));
+    await provider.buildArchive(contextA, source(), oid(2));
+    await provider.buildArchive(contextB, source(), oid(2));
+
+    expect(discoverCapabilities).toHaveBeenCalledTimes(2);
+    expect(readTreeAtCommit.mock.calls.map(([git]) => git.capabilities)).toEqual([
+      { filter: true },
+      { filter: false },
+      { filter: true },
+      { filter: false },
+    ]);
+  });
+
+  it('keeps capabilities remembered by a ref listing within that org', async () => {
+    const fetchA = server();
+    const fetchB = server();
+    const contextA = { ...ctx, org: orgContext('org-a'), fetch: fetchA };
+    const contextB = { ...ctx, org: orgContext('org-b'), fetch: fetchB };
+    const provider = createGitProvider({ runtime: 'docker', staging: { create: vi.fn() } });
+    await provider.describe(contextA, source({ packageName: NAME }), NAME, {});
+    await provider.buildArchive(contextB, source(), oid(1));
+    await provider.buildArchive(contextA, source(), oid(2));
+    expect(gets(fetchA)).toBe(1);
+    expect(gets(fetchB)).toBe(1);
   });
 
   it('discovers again once the cached capabilities are older than five minutes', async () => {

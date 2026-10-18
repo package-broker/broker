@@ -8,3 +8,8 @@ export interface ProjectActor {
   readonly projectId: string;
   readonly permissions: ReadonlySet<string>;
 }
+
+export const PACKAGE_BOUNDARY_PERMISSIONS: ReadonlySet<string> = new Set([
+  'project:packages:read',
+  'project:packages:write',
+]);

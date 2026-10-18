@@ -19,6 +19,7 @@ import {
 } from '../../sources/provider.js';
 import { JsonExtractError, extractMembers } from '../json-stream.js';
 import { JsonStreamError, JsonTokenizer, type JsonToken } from '../json-tokenizer.js';
+import { retryAfterOf } from './retry-after.js';
 import type { ComposerRoot, ComposerRootSource } from './root.js';
 import {
   documentKey,
@@ -37,6 +38,7 @@ export class ComposerV1PackageError extends Error {
   constructor(
     readonly code: ComposerV1PackageErrorCode,
     readonly status?: number,
+    readonly retryAfterSeconds?: number,
   ) {
     super(`composer v1 package ${code}${status === undefined ? '' : ` (${status})`}`);
   }
@@ -270,7 +272,13 @@ async function open(
   if (response.status !== 200 || response.body === null) {
     await response.body?.cancel().catch(() => undefined);
     if (response.status === 404) return null;
-    throw new ComposerV1PackageError('status', response.status);
+    throw new ComposerV1PackageError(
+      'status',
+      response.status,
+      response.status === 429
+        ? retryAfterOf(response.headers.get('retry-after'), Date.now())
+        : undefined,
+    );
   }
   return response.body;
 }
@@ -542,6 +550,7 @@ export async function describeComposerV1(
   const documentCap = options.maxDocumentBytes ?? UPSTREAM_DEFAULTS.metadataMaxBytes;
   const { root, index, signal } = options;
   const entry = options.entry ?? index?.entries.get(key);
+  if (root.mode === 'v2') throw new ComposerV1PackageError('unsupported');
   const previous = options.previousSha256?.toLowerCase();
   const budget: Budget = {
     bytes: Math.min(options.maxBytes ?? documentCap, documentCap),

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +56,17 @@ for a in "$@"; do
 done
 exit 0
 `;
+
+function configValue(file: string, key: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      '/usr/bin/git',
+      ['config', '--file', file, '--get', key],
+      { env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1' } },
+      (error, stdout) => (error ? reject(error) : resolve(stdout.trim())),
+    );
+  });
+}
 
 const remote: SshRemote = { host: 'git.example.com', user: 'git', path: 'acme/lib.git' };
 const credential = {
@@ -563,11 +574,10 @@ describe('quiet scratch repositories', () => {
       await session.catFile(SHA, 'composer.json');
       await session.archiveZip(SHA);
       const scratch = join(tmpRoot, (await readdir(tmpRoot))[0] ?? '');
-      const config = await readFile(join(scratch, 'repo.git', 'config'), 'utf8');
-      expect(config).toContain('[maintenance]');
-      expect(config).toContain('auto = false');
-      expect(config).toContain('auto = 0');
-      expect(config).toContain('autoDetach = false');
+      const configFile = join(scratch, 'repo.git', 'config');
+      expect(await configValue(configFile, 'maintenance.auto')).toBe('false');
+      expect(await configValue(configFile, 'gc.auto')).toBe('0');
+      expect(await configValue(configFile, 'gc.autoDetach')).toBe('false');
     });
     for (const [, args] of spawnSpy.mock.calls) {
       for (const setting of ['maintenance.auto=false', 'gc.auto=0', 'gc.autoDetach=false']) {

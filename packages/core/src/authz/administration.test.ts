@@ -111,6 +111,17 @@ function setup(
     suspendUser: vi.fn(async () => 'suspended'),
     reactivateUser: vi.fn(async () => 'reactivated'),
     countProtectedHolders: vi.fn(async () => 1),
+    isProtectedHolder: vi.fn(async (_ctx: OrgContext, userId: string) => {
+      const target = userOf();
+      return (
+        userId === target.id &&
+        (overrides.storedGrants ?? []).some(
+          (grant) =>
+            stored.some((role) => role.id === grant.roleId && role.protectsLastHolder) &&
+            (grant.subject.type === 'group' || grant.subject.value === target.email),
+        )
+      );
+    }),
     ...overrides.grants,
   };
   const users = { get: vi.fn(async (): Promise<User | null> => userOf()), ...overrides.users };
@@ -1841,5 +1852,42 @@ describe('creator offboarding', () => {
         value: null,
       },
     );
+  });
+});
+
+describe('repository holder checks and retired permissions', () => {
+  it('allows a project manager to suspend a non-holder while a protected group grant exists', async () => {
+    const { admin, grants } = setup({
+      storedGrants: [
+        {
+          ...grantOf('group', 'role-admin'),
+          subject: { type: 'group', provider: 'corp', value: 'admins' },
+        },
+      ],
+      grants: { isProtectedHolder: vi.fn(async () => false) },
+    });
+    expect(await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(grants.isProtectedHolder).toHaveBeenCalledExactlyOnceWith(ctx, 'u1');
+  });
+
+  it('refuses a project manager touching the last protected holder reported by the repository', async () => {
+    const { admin, grants } = setup({ grants: { isProtectedHolder: vi.fn(async () => true) } });
+    expect(await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1')).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(grants.suspendUser).not.toHaveBeenCalled();
+  });
+
+  it('allows renaming a role with retired permissions covered in the current catalogue', async () => {
+    const { admin } = setup({
+      stored: [customRole({ permissions: ['org:read', 'retired:permission'] })],
+    });
+    expect(
+      await admin.renameRole(ctx, rolesWriter, fenceFor(rolesWriter), 'role-1', 'Renamed'),
+    ).toEqual({ ok: true, value: null });
   });
 });

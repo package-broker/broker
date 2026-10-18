@@ -1,5 +1,4 @@
 import { PackageNameError, packageKey } from '../../catalogue/names.js';
-import { matchesPattern } from '../../catalogue/patterns.js';
 import type { Codecs } from '../../platform/codec.js';
 import {
   composerVersionInput,
@@ -22,7 +21,14 @@ import { JsonExtractError, extractMembers } from '../json-stream.js';
 import { JsonStreamError, JsonTokenizer, type JsonToken } from '../json-tokenizer.js';
 import { retryAfterOf } from './retry-after.js';
 import type { ComposerRoot, ComposerRootSource } from './root.js';
-import type { V1Index, V1IndexEntry } from './v1-index.js';
+import {
+  documentKey,
+  isSelected,
+  sha256Of,
+  type V1Index,
+  type V1IndexDocument,
+  type V1IndexEntry,
+} from './v1-index.js';
 
 export type ComposerV1PackageErrorCode =
   'name' | 'invalid' | 'hash' | 'status' | 'unsupported' | 'too_large' | 'deadline';
@@ -44,9 +50,13 @@ export interface V1PackageOptions {
   readonly source: ComposerRootSource;
   readonly root: ComposerRoot;
   /** The listing and its completeness; required to prove a selected name absent. */
-  readonly index?: Pick<V1Index, 'complete' | 'entries'>;
+  readonly index?: Pick<V1Index, 'complete' | 'entries'> & Partial<Pick<V1Index, 'documents'>>;
   /** The name's entry, when supplied separately from the index. */
   readonly entry?: V1IndexEntry;
+  /** Largest document the index accepted. Default 32 MiB. */
+  readonly maxDocumentBytes?: number;
+  /** Largest package or provider member the index accepted. Default 1 MiB. */
+  readonly maxMemberBytes?: number;
   readonly selection: ComposerRepositoryConfig['selection'];
   readonly origin: ComposerVersionOrigin;
   readonly codecs: Pick<Codecs, 'digestTap'>;
@@ -73,6 +83,7 @@ const DEFAULT_MAX_VERSIONS = 10_000;
 const MAX_MEMBER_BYTES = 1024 * 1024;
 const KEY_BYTES = 64 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/;
+const SHA1 = /^[0-9a-f]{40}$/;
 
 interface Budget {
   bytes: number;
@@ -99,10 +110,6 @@ function keyOf(name: string): string {
     if (error instanceof PackageNameError) throw new ComposerV1PackageError('name');
     throw error;
   }
-}
-
-function selected(key: string, selection: ComposerRepositoryConfig['selection']): boolean {
-  return selection.packages.includes(key) || selection.patterns.some((p) => matchesPattern(p, key));
 }
 
 function fill(template: string, key: string, hash = ''): string {
@@ -234,17 +241,17 @@ async function upstream<T>(budget: Budget, step: () => Promise<T>): Promise<T> {
   }
 }
 
-function retryAfterHeader(headers: Headers): number | undefined {
-  return retryAfterOf(headers.get('retry-after'), Date.now());
+interface Expected {
+  readonly sha1?: string;
+  readonly sha256?: string;
 }
 
-async function readOnce(
+async function open(
   fetch: PolicyFetch,
   url: string,
-  key: string,
   options: V1PackageOptions,
   budget: Budget,
-): Promise<Parsed | null> {
+): Promise<ReadableStream<Uint8Array> | null> {
   const { source, signal } = options;
   const remaining = budget.deadline - Date.now();
   if (remaining <= 0) throw new ComposerV1PackageError('deadline');
@@ -268,16 +275,25 @@ async function readOnce(
     throw new ComposerV1PackageError(
       'status',
       response.status,
-      response.status === 429 ? retryAfterHeader(response.headers) : undefined,
+      response.status === 429
+        ? retryAfterOf(response.headers.get('retry-after'), Date.now())
+        : undefined,
     );
   }
-  const tap = options.codecs.digestTap(['sha256']);
-  tap.digests.catch(() => undefined);
-  const members = extractMembers(
-    response.body.pipeThrough(counted(budget)).pipeThrough(shapeCheck()).pipeThrough(tap.transform),
-    [['packages', '*', '*']],
-    { maxDocumentBytes: UPSTREAM_DEFAULTS.metadataMaxBytes, maxMemberBytes: MAX_MEMBER_BYTES },
-  );
+  return response.body;
+}
+
+function limitsOf(options: V1PackageOptions): {
+  readonly maxDocumentBytes: number;
+  readonly maxMemberBytes: number;
+} {
+  return {
+    maxDocumentBytes: options.maxDocumentBytes ?? UPSTREAM_DEFAULTS.metadataMaxBytes,
+    maxMemberBytes: options.maxMemberBytes ?? MAX_MEMBER_BYTES,
+  };
+}
+
+function versionSink(key: string, options: V1PackageOptions) {
   const maxVersions = options.maxVersions ?? DEFAULT_MAX_VERSIONS;
   const candidates: VersionCandidate[] = [];
   const skipped: Partial<Record<V1PackageSkip, number>> = {};
@@ -286,47 +302,142 @@ async function readOnce(
   };
   const seen = new Set<string>();
   let objects = 0;
+  const take = (object: unknown): void => {
+    objects += 1;
+    if (objects > maxVersions) throw new ComposerV1PackageError('too_large');
+    if (!isRecord(object)) {
+      skip('malformed');
+      return;
+    }
+    if (typeof object.name !== 'string' || object.name.toLowerCase() !== key) {
+      skip('foreign_name');
+      return;
+    }
+    const result = composerVersionInput(key, object, options.origin);
+    if (!result.ok) {
+      skip(result.reason);
+      return;
+    }
+    const { input } = result;
+    if (seen.has(input.versionNormalized)) {
+      skip('duplicate');
+      return;
+    }
+    seen.add(input.versionNormalized);
+    const dev =
+      input.versionNormalized.startsWith('dev-') || input.versionNormalized.endsWith('-dev');
+    candidates.push({
+      ordinal: objects - 1,
+      version: input.version,
+      form: dev ? 'composer-p2-dev' : 'composer-p2',
+      ...(input.upstreamReleasedAt === null ? {} : { upstreamTime: input.upstreamReleasedAt }),
+      raw: input.metadata.json,
+    });
+  };
+  return { take, candidates, skipped };
+}
+
+async function readOnce(
+  fetch: PolicyFetch,
+  url: string,
+  key: string,
+  options: V1PackageOptions,
+  budget: Budget,
+  expected: Expected,
+): Promise<Parsed | null | undefined> {
+  const body = await open(fetch, url, options, budget);
+  if (body === null) return null;
+  const tap = options.codecs.digestTap(['sha256']);
+  tap.digests.catch(() => undefined);
+  const members = extractMembers(
+    body.pipeThrough(counted(budget)).pipeThrough(shapeCheck()).pipeThrough(tap.transform),
+    [['packages', '*', '*']],
+    limitsOf(options),
+  );
+  const { take, candidates, skipped } = versionSink(key, options);
   try {
     for (;;) {
       const step = await upstream(budget, () => members.next());
       if (step.done === true) break;
-      objects += 1;
-      if (objects > maxVersions) throw new ComposerV1PackageError('too_large');
-      const object = JSON.parse(step.value.raw) as unknown;
-      if (!isRecord(object)) {
-        skip('malformed');
-        continue;
-      }
-      if (typeof object.name !== 'string' || object.name.toLowerCase() !== key) {
-        skip('foreign_name');
-        continue;
-      }
-      const result = composerVersionInput(key, object, options.origin);
-      if (!result.ok) {
-        skip(result.reason);
-        continue;
-      }
-      const { input } = result;
-      if (seen.has(input.versionNormalized)) {
-        skip('duplicate');
-        continue;
-      }
-      seen.add(input.versionNormalized);
-      const dev =
-        input.versionNormalized.startsWith('dev-') || input.versionNormalized.endsWith('-dev');
-      candidates.push({
-        ordinal: objects - 1,
-        version: input.version,
-        form: dev ? 'composer-p2-dev' : 'composer-p2',
-        ...(input.upstreamReleasedAt === null ? {} : { upstreamTime: input.upstreamReleasedAt }),
-        raw: input.metadata.json,
-      });
+      take(JSON.parse(step.value.raw));
     }
   } finally {
     await members.return(undefined).catch(() => undefined);
   }
+  const hash = hex((await tap.digests).sha256);
+  if (expected.sha256 !== undefined && hash !== expected.sha256) return undefined;
+  return { hash, candidates, skipped };
+}
+
+async function readDocument(
+  fetch: PolicyFetch,
+  document: V1IndexDocument & Expected,
+  key: string,
+  options: V1PackageOptions,
+  budget: Budget,
+): Promise<{ readonly verified: boolean; readonly raw: string | undefined } | null> {
+  const body = await open(fetch, document.url, options, budget);
+  if (body === null) return null;
+  const algs: ('sha1' | 'sha256')[] = document.sha1 === undefined ? ['sha256'] : ['sha256', 'sha1'];
+  const tap = options.codecs.digestTap(algs);
+  tap.digests.catch(() => undefined);
+  const stream = extractMembers(
+    body.pipeThrough(counted(budget)).pipeThrough(shapeCheck()).pipeThrough(tap.transform),
+    [['packages', '*']],
+    limitsOf(options),
+  );
+  let raw: string | undefined;
+  try {
+    for (;;) {
+      const step = await upstream(budget, () => stream.next());
+      if (step.done === true) break;
+      if ((step.value.path[1] ?? '').toLowerCase() === key) raw = step.value.raw;
+    }
+  } finally {
+    await stream.return(undefined).catch(() => undefined);
+  }
   const digests = await tap.digests;
-  return { hash: hex(digests.sha256), candidates, skipped };
+  const matches = (alg: 'sha1' | 'sha256'): boolean => {
+    const want = document[alg];
+    const got = digests[alg];
+    return want === undefined || (got !== undefined && hex(got) === want);
+  };
+  return { verified: matches('sha256') && matches('sha1'), raw };
+}
+
+/** Thrown for a fault a further attempt cannot cure. */
+class SettledError extends ComposerV1PackageError {}
+
+async function describeMember(
+  fetch: PolicyFetch,
+  key: string,
+  member: string,
+  document: V1IndexDocument & Expected,
+  options: V1PackageOptions,
+  budget: Budget,
+): Promise<V1PackageResult | undefined> {
+  const cached = options.index?.documents?.get(documentKey(document));
+  let raw: string | undefined;
+  if (cached !== undefined && (cached.members.has(key) || !cached.partial)) {
+    raw = cached.members.get(key);
+  } else {
+    const loaded = await readDocument(fetch, document, key, options, budget);
+    if (loaded === null) return { kind: 'not_found', definitive: false };
+    if (!loaded.verified) return undefined;
+    raw = loaded.raw;
+  }
+  if (raw === undefined) return { kind: 'not_found', definitive: false };
+  const hash = await sha256Of(raw);
+  if (hash !== member) throw new ComposerV1PackageError('hash');
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new SettledError('invalid');
+  }
+  const { take, candidates, skipped } = versionSink(key, options);
+  if (isRecord(value)) for (const object of Object.values(value)) take(object);
+  return found(key, { hash, candidates, skipped });
 }
 
 function found(key: string, parsed: Parsed): V1PackageResult {
@@ -372,14 +483,58 @@ function positive(name: string, value: number | undefined): void {
   }
 }
 
+function documentOf(document: V1IndexDocument): V1IndexDocument & Expected {
+  const sha1 = document.sha1?.toLowerCase();
+  const sha256 = document.sha256?.toLowerCase();
+  if (
+    (sha1 === undefined && sha256 === undefined) ||
+    (sha1 !== undefined && !SHA1.test(sha1)) ||
+    (sha256 !== undefined && !SHA256.test(sha256))
+  ) {
+    throw new ComposerV1PackageError('invalid');
+  }
+  return {
+    url: document.url,
+    ...(sha1 === undefined ? {} : { sha1 }),
+    ...(sha256 === undefined ? {} : { sha256 }),
+  };
+}
+
+async function attempts(
+  read: () => Promise<V1PackageResult | null | undefined>,
+  signal: AbortSignal | undefined,
+): Promise<V1PackageResult> {
+  let failure: ComposerV1PackageErrorCode = 'hash';
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+    if (attempt > 1) await pause(signal);
+    try {
+      const result = await read();
+      if (result === null) return { kind: 'not_found', definitive: false };
+      if (result !== undefined) return result;
+      failure = 'hash';
+    } catch (error) {
+      if (
+        !(error instanceof ComposerV1PackageError) ||
+        error.code !== 'invalid' ||
+        error instanceof SettledError
+      ) {
+        throw error;
+      }
+      failure = 'invalid';
+    }
+  }
+  throw new ComposerV1PackageError(failure);
+}
+
 /**
- * Describes one package of a Composer v1 repository from its provider file. A listed provider file
- * must match its listed SHA-256 within three attempts that share one byte budget and one deadline;
- * a lazy provider is read only for names in the source selection. Versions are kept by the
- * object's own `name`, as Composer does, and nothing is yielded before the digest is known.
- * Without a lazy lookup, an unlisted name is definitive only in a complete, non-empty index.
- * Unlisted names outside the source selection return definitive not_found as a caller selection
- * decision, not an upstream proof.
+ * Describes one package of a Composer v1 repository: from its provider file, from the include or
+ * root document that holds it inline, or from a lazy provider. A listed provider file or document
+ * must match its listed hashes within three attempts that share one byte budget and one deadline;
+ * a document that matches but holds a package with another hash fails at once. Documents are
+ * shared across packages through `documents`. A lazy provider is read only for names in the
+ * source selection. Versions are kept by the object's own `name`, as Composer does, and nothing is
+ * yielded before the digest is known. Without a lazy lookup, an unlisted name is definitive only
+ * in a complete, non-empty index; names outside the source selection are a caller decision.
  */
 export async function describeComposerV1(
   fetch: PolicyFetch,
@@ -389,50 +544,43 @@ export async function describeComposerV1(
   positive('maxBytes', options.maxBytes);
   positive('maxVersions', options.maxVersions);
   positive('deadlineMs', options.deadlineMs);
+  positive('maxDocumentBytes', options.maxDocumentBytes);
+  positive('maxMemberBytes', options.maxMemberBytes);
   const key = keyOf(name);
+  const documentCap = options.maxDocumentBytes ?? UPSTREAM_DEFAULTS.metadataMaxBytes;
   const { root, index, signal } = options;
   const entry = options.entry ?? index?.entries.get(key);
   if (root.mode === 'v2') throw new ComposerV1PackageError('unsupported');
   const previous = options.previousSha256?.toLowerCase();
   const budget: Budget = {
-    bytes: Math.min(
-      options.maxBytes ?? UPSTREAM_DEFAULTS.metadataMaxBytes,
-      UPSTREAM_DEFAULTS.metadataMaxBytes,
-    ),
+    bytes: Math.min(options.maxBytes ?? documentCap, documentCap),
     deadline: Date.now() + (options.deadlineMs ?? DEFAULT_DEADLINE_MS),
     signal,
   };
+  if (entry?.kind === 'package') {
+    const member = entry.sha256.toLowerCase();
+    const document = documentOf(entry.document);
+    if (!SHA256.test(member)) throw new ComposerV1PackageError('invalid');
+    if (previous === member) return { kind: 'not_modified' };
+    return attempts(() => describeMember(fetch, key, member, document, options, budget), signal);
+  }
   if (entry !== undefined) {
-    if (entry.kind !== 'provider' || root.providersUrl === undefined) {
-      throw new ComposerV1PackageError('unsupported');
-    }
+    if (root.providersUrl === undefined) throw new ComposerV1PackageError('unsupported');
     const hash = entry.sha256.toLowerCase();
     if (!SHA256.test(hash)) throw new ComposerV1PackageError('invalid');
     if (previous === hash) return { kind: 'not_modified' };
     const url = fill(root.providersUrl, key, hash);
-    let failure: ComposerV1PackageErrorCode = 'hash';
-    for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-      if (attempt > 1) await pause(signal);
-      try {
-        const parsed = await readOnce(fetch, url, key, options, budget);
-        if (parsed === null) return { kind: 'not_found', definitive: false };
-        if (parsed.hash === hash) return found(key, parsed);
-        failure = 'hash';
-      } catch (error) {
-        if (!(error instanceof ComposerV1PackageError) || error.code !== 'invalid') throw error;
-        failure = 'invalid';
-      }
-    }
-    throw new ComposerV1PackageError(failure);
+    return attempts(async () => {
+      const parsed = await readOnce(fetch, url, key, options, budget, { sha256: hash });
+      return parsed === undefined || parsed === null ? parsed : found(key, parsed);
+    }, signal);
   }
-  if (!selected(key, options.selection)) {
-    return { kind: 'not_found', definitive: true };
-  }
+  if (!isSelected(key, options.selection)) return { kind: 'not_found', definitive: true };
   if (root.providersLazyUrl === undefined) {
     return { kind: 'not_found', definitive: index?.complete === true && index.entries.size > 0 };
   }
-  const parsed = await readOnce(fetch, fill(root.providersLazyUrl, key), key, options, budget);
-  if (parsed === null) return { kind: 'not_found', definitive: true };
+  const parsed = await readOnce(fetch, fill(root.providersLazyUrl, key), key, options, budget, {});
+  if (parsed === null || parsed === undefined) return { kind: 'not_found', definitive: true };
   if (previous === parsed.hash) return { kind: 'not_modified' };
   return found(key, parsed);
 }

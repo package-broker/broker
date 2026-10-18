@@ -114,6 +114,7 @@ export interface TokenAccess {
     readonly boundProjectId: string | null;
     readonly projectMode: TokenProjectMode | null;
     readonly scope: { readonly level: ScopeLevel; readonly readOnly: boolean } | null;
+    readonly bindingOk: boolean;
     readonly expiresAt: string | null;
     readonly revokedAt: string | null;
     readonly lastUsedAt: string | null;
@@ -981,6 +982,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
       boundProjectId: row.token_project_id,
       projectMode,
       scope,
+      bindingOk: row.binding_ok === 1,
       expiresAt: row.expires_at,
       revokedAt: row.revoked_at,
       lastUsedAt: row.last_used_at,

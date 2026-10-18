@@ -3,6 +3,7 @@ import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp, isUlid } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
+import { isPermissionView } from './actor.js';
 import type { AdminLog, AdminResult, AdministrationDeps } from './administration.js';
 import type { MutationFence } from './fence.js';
 import type { ProjectActor } from './project-actor.js';
@@ -172,7 +173,7 @@ export function createProjectAdministration(
       raw['kind'] !== 'project' ||
       raw['orgId'] !== ctx.orgId ||
       raw['projectId'] !== projectId ||
-      !(raw['permissions'] instanceof Set) ||
+      !isPermissionView(raw['permissions']) ||
       !raw['permissions'].has(WRITE_PERMISSION)
     ) {
       deny(ctx, userId, action, projectId);

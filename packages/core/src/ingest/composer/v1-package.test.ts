@@ -5,7 +5,8 @@ import type { ComposerVersionOrigin } from '../../registry/composer/version-obje
 import type { DescribeResult, VersionCandidate } from '../../sources/provider.js';
 import { createPolicyFetch } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
-import type { ComposerRoot, ComposerRootSource } from './root.js';
+import { readComposerRoot, type ComposerRoot, type ComposerRootSource } from './root.js';
+import { readV1Index, type V1IndexEntry } from './v1-index.js';
 import { ComposerV1PackageError, describeComposerV1, type V1PackageOptions } from './v1-package.js';
 
 const policy = createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] });
@@ -336,6 +337,100 @@ describe('describeComposerV1 lazy providers', () => {
   });
 });
 
+describe('describeComposerV1 index completeness', () => {
+  const listed = new Map<string, V1IndexEntry>([
+    ['acme/other', { kind: 'provider', sha256: 'a'.repeat(64) }],
+  ]);
+
+  it.each([
+    ['unknown index', undefined, false],
+    ['incomplete empty index', { complete: false, entries: new Map() }, false],
+    ['incomplete non-empty index', { complete: false, entries: listed }, false],
+    ['complete empty index', { complete: true, entries: new Map() }, false],
+    ['complete non-empty index', { complete: true, entries: listed }, true],
+  ] as const)('answers absence from %s', async (_label, index, definitive) => {
+    const { fetch, requests } = setup({});
+    const result = await describeComposerV1(fetch, 'acme/listed', {
+      source,
+      root: root(),
+      origin,
+      codecs,
+      selection,
+      ...(index === undefined ? {} : { index }),
+    });
+    expect(result).toEqual({ kind: 'not_found', definitive });
+    expect(requests).toEqual([]);
+  });
+
+  it.each([
+    { 'providers-url': '/p/%package%$%hash%.json', 'provider-includes': {} },
+    { includes: {} },
+    { packages: [] },
+    { packages: {} },
+  ])('never proves absence from an empty upstream listing: %j', async (body) => {
+    const { fetch, requests } = setup({
+      [`${BASE}/packages.json`]: () => JSON.stringify(body),
+    });
+    const result = await readV1Index(fetch, { source, codecs });
+    expect(result.status).toBe('updated');
+    if (result.status !== 'updated') throw new Error('expected index');
+    expect(result.index.entries.size).toBe(0);
+    const before = requests.length;
+    expect(
+      await describeComposerV1(fetch, 'acme/listed', {
+        source,
+        root: result.root,
+        index: result.index,
+        origin,
+        codecs,
+        selection,
+      }),
+    ).toEqual({ kind: 'not_found', definitive: false });
+    expect(requests).toHaveLength(before);
+  });
+
+  it('reads a provider entry from the index', async () => {
+    const body = JSON.stringify({
+      packages: { 'acme/listed': { '1.0.0': version('acme/listed', '1.0.0') } },
+    });
+    const hash = sha256(body);
+    const { fetch } = setup({ [providerUrl('acme/listed', hash)]: () => body });
+    const result = await describeComposerV1(fetch, 'acme/listed', {
+      source,
+      root: root(),
+      origin,
+      codecs,
+      selection,
+      index: {
+        complete: true,
+        entries: new Map([['acme/listed', { kind: 'provider', sha256: hash }]]),
+      },
+    });
+    expect((await members(result)).map((m) => m.version)).toEqual(['1.0.0']);
+  });
+
+  it('uses lazy loading with both provider URLs and no provider listing', async () => {
+    const { fetch, requests } = setup({
+      [`${BASE}/packages.json`]: () =>
+        JSON.stringify({
+          'providers-url': '/p/%package%$%hash%.json',
+          'providers-lazy-url': '/lazy/%package%.json',
+        }),
+    });
+    const lazy = await readComposerRoot(fetch, source);
+    expect(
+      await describeComposerV1(fetch, 'acme/listed', {
+        source,
+        root: lazy,
+        origin,
+        codecs,
+        selection,
+      }),
+    ).toEqual({ kind: 'not_found', definitive: true });
+    expect(requests).toEqual([`${BASE}/packages.json`, `${BASE}/lazy/acme/listed.json`]);
+  });
+});
+
 describe('describeComposerV1 round 2', () => {
   async function describeBody(name: string, body: string, extra: Partial<V1PackageOptions> = {}) {
     const hash = sha256(body);
@@ -602,5 +697,53 @@ describe('describeComposerV1 round 2', () => {
     });
     const found = await members((await describeBody('acme/owner', body)).result);
     expect(found.map((m) => m.ordinal)).toEqual([0, 2]);
+  });
+
+  describe('rate limiting and unsupported roots', () => {
+    const hash = sha256('x');
+    const limited = (headers: Record<string, string>) =>
+      setup({
+        [providerUrl('acme/listed', hash)]: () =>
+          new Response('slow down', { status: 429, headers }),
+      });
+    const status = async (headers: Record<string, string>): Promise<ComposerV1PackageError> => {
+      const { fetch } = limited(headers);
+      const error = await describeComposerV1(
+        fetch,
+        'acme/listed',
+        options('acme/listed', hash),
+      ).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ComposerV1PackageError);
+      expect(error).toMatchObject({ code: 'status', status: 429 });
+      return error as ComposerV1PackageError;
+    };
+
+    it('carries the parsed Retry-After on a 429', async () => {
+      expect((await status({ 'retry-after': '7' })).retryAfterSeconds).toBe(7);
+    });
+
+    it('carries Retry-After beyond 60 seconds, bounded at 86400 seconds', async () => {
+      expect((await status({ 'retry-after': '61' })).retryAfterSeconds).toBe(61);
+      expect((await status({ 'retry-after': '86400' })).retryAfterSeconds).toBe(86400);
+      expect((await status({ 'retry-after': '86401' })).retryAfterSeconds).toBe(86400);
+    });
+
+    it('carries no Retry-After when the header is absent or unparsable', async () => {
+      expect((await status({})).retryAfterSeconds).toBeUndefined();
+      expect((await status({ 'retry-after': 'soon' })).retryAfterSeconds).toBeUndefined();
+    });
+
+    it('refuses a v2 root instead of answering not_found', async () => {
+      const { fetch, requests } = setup({});
+      const error = await describeComposerV1(fetch, 'acme/listed', {
+        source,
+        origin,
+        codecs,
+        selection,
+        root: root({ mode: 'v2', metadataUrl: `${BASE}/p2/%package%.json` }),
+      }).catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: 'unsupported' });
+      expect(requests).toEqual([]);
+    });
   });
 });

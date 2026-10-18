@@ -18,7 +18,7 @@ import {
 } from './root.js';
 import { describeComposerV2 } from './v2-package.js';
 import { readV1Index, type V1Index, type V1IndexResult } from './v1-index.js';
-import { describeComposerV1 } from './v1-package.js';
+import { ComposerV1PackageError, describeComposerV1 } from './v1-package.js';
 
 const FIXTURE_DIR = new URL('../../../test-fixtures/composer-v1/', import.meta.url);
 const ORIGIN = 'http://127.0.0.1:8851';
@@ -197,6 +197,7 @@ interface Outcome {
   readonly skipped: Record<string, number>;
   readonly error?: string;
   readonly message?: string;
+  readonly retryAfterSeconds?: number;
   readonly notFound?: 'definitive' | 'listed';
   readonly notModified?: boolean;
   readonly sha?: string;
@@ -242,6 +243,7 @@ async function describeAll(
       const result = await describeComposerV1(server.fetch, name, {
         source,
         root,
+        ...(index === undefined ? {} : { index }),
         ...(entry === undefined ? {} : { entry }),
         selection: { packages: names, patterns: [], expandPatterns: false },
         origin,
@@ -274,6 +276,9 @@ async function describeAll(
         skipped: {},
         error: error instanceof Error ? error.name + ':' + (error as { code?: string }).code : 'x',
         message: error instanceof Error ? error.message : '',
+        ...(error instanceof ComposerV1PackageError && error.retryAfterSeconds !== undefined
+          ? { retryAfterSeconds: error.retryAfterSeconds }
+          : {}),
       });
     }
   }
@@ -447,13 +452,17 @@ async function v2(id: string) {
   const server = serve(id, loadFixture(id));
   const source = sourceOf(id);
   let root: ComposerRoot | undefined;
+  let rootError: ComposerRootError | undefined;
   let syncExit: 0 | 'non-zero' = 0;
   try {
     root = await readComposerRoot(server.fetch, source);
-  } catch {
+  } catch (error) {
+    if (!(error instanceof ComposerRootError)) throw error;
+    rootError = error;
     syncExit = 'non-zero';
   }
   const versions = new Map<string, string[]>();
+  const notFound = new Map<string, boolean>();
   let packageErrors = 0;
   if (root !== undefined)
     for (const name of trackedNames(id)) {
@@ -465,7 +474,10 @@ async function v2(id: string) {
           probe: origin.probe,
           clock: { now: () => new Date('2026-10-16T08:00:00.000Z') },
         });
-        if (result.kind === 'not_found') packageErrors += 1;
+        if (result.kind === 'not_found') {
+          packageErrors += 1;
+          notFound.set(name, result.definitive);
+        }
         if (result.kind === 'found')
           for await (const m of result.description.members) list.push(m.version);
       } catch {
@@ -474,12 +486,25 @@ async function v2(id: string) {
       versions.set(name, list);
     }
   let pollExit: 0 | 'non-zero' = 0;
+  let pollError: ComposerRootError | undefined;
   try {
     await readComposerRoot(server.fetch, source);
-  } catch {
+  } catch (error) {
+    if (!(error instanceof ComposerRootError)) throw error;
+    pollError = error;
     pollExit = 'non-zero';
   }
-  return { server, root, versions, syncExit, pollExit, packageErrors };
+  return {
+    server,
+    root,
+    rootError,
+    versions,
+    notFound,
+    syncExit,
+    pollExit,
+    pollError,
+    packageErrors,
+  };
 }
 
 const parseExpected = (text: string): unknown => {
@@ -528,11 +553,16 @@ async function judge(row: Row): Promise<Verdict> {
       await once(`mode:${f}`, async () => {
         const server = serve(f, loadFixture(f));
         const url = f.startsWith('f32') ? `${ORIGIN}/${f}/packages.json` : undefined;
-        const root = await readComposerRoot(
-          server.fetch,
-          sourceOf(f, f.startsWith('f21') ? AUTH : undefined, url),
-        );
-        return root.mode;
+        try {
+          const root = await readComposerRoot(
+            server.fetch,
+            sourceOf(f, f.startsWith('f21') ? AUTH : undefined, url),
+          );
+          return root.mode;
+        } catch (error) {
+          if (!(error instanceof ComposerRootError) || error.code !== 'unsupported') throw error;
+          return error.code;
+        }
       }),
     );
   }
@@ -640,6 +670,7 @@ async function judge(row: Row): Promise<Verdict> {
       return value({
         retry429: r.server.count(/\/p\/fx\/lib/) - 1,
         versions: r.outcomes.get('fx/lib')?.versions.length,
+        retryAfterSeconds: r.outcomes.get('fx/lib')?.retryAfterSeconds,
       });
     case 'adapter logs a hash-mismatch event per failed algorithm and still ingests (Composer verifies neither sha1 nor sha256 of includes)':
       return value(r.index?.complete === true);
@@ -982,12 +1013,14 @@ const INCLUDE_HASH =
   'an include whose body does not match its listed hash fails the pass (G1 safer rule)';
 const DUPLICATE_NAME =
   'a name listed by more than one include document fails the pass (reason duplicate); Composer lets the later listing win or merges';
+const INCOMPLETE_INDEX =
+  'T709 rule 2: an incomplete index cannot prove a selected name absent; report per-package uncertainty';
 const LEGACY =
-  'known bug, tracked in T709: a legacy root (top-level name => {versions}) is not read: the index lists no names';
+  'T709 rule 1: a legacy root is unsupported, so sync and poll refuse it before describing packages';
 const NO_RETRY =
-  'known gap, tracked in T709 (Retry-After on v1 429): describeComposerV1 does not retry or sleep on 429; the status error propagates to the caller';
+  'T709 rule 3: the v1 429 status error carries parsed Retry-After to the caller; retry scheduling belongs to the caller';
 const V2_PARTIAL =
-  'known bug, tracked in T709: inline partial packages of a metadata-url root are not read by the v2 path';
+  'T709 rule 1: inline packages beside metadata-url are unsupported, so sync and poll refuse the root before describing packages';
 const NO_RELIST =
   'describeComposerV1 does not re-read the listing; a listed-but-missing file is reported to the caller';
 
@@ -1004,6 +1037,7 @@ const PINNED: Readonly<Record<string, { actual: unknown; why: string }>> = {
     actual: [],
     why: INCLUDE_HASH,
   },
+  'f05-includes-hash-mismatch|adapter per-package errors': { actual: 2, why: INCOMPLETE_INDEX },
   'f05-includes-hash-mismatch|adapter logs a hash-mismatch event per failed algorithm and still ingests (Composer verifies neither sha1 nor sha256 of includes)':
     { actual: false, why: INCLUDE_HASH },
   'f08-providers-includes-multi|adapter ingested versions of fx/lib': {
@@ -1018,12 +1052,14 @@ const PINNED: Readonly<Record<string, { actual: unknown; why: string }>> = {
     actual: [],
     why: DUPLICATE_NAME,
   },
+  'f08-providers-includes-multi|adapter per-package errors': { actual: 3, why: INCOMPLETE_INDEX },
   'f08-providers-includes-multi|adapter cold sync requests: 3 provider-includes, 3 provider files':
     {
       actual: { 'provider-include': 6, 'provider-file': 0 },
       why: DUPLICATE_NAME,
     },
   'f17-duplicate-versions|adapter ingested versions of fx/dup': { actual: [], why: DUPLICATE_NAME },
+  'f17-duplicate-versions|adapter per-package errors': { actual: 1, why: INCOMPLETE_INDEX },
   'f17-duplicate-versions|duplicate version across include files is stored once': {
     actual: 0,
     why: DUPLICATE_NAME,
@@ -1033,15 +1069,18 @@ const PINNED: Readonly<Record<string, { actual: unknown; why: string }>> = {
   'f26-429-once|adapter ingested versions of fx/lib': { actual: [], why: NO_RETRY },
   'f26-429-once|adapter per-package errors': { actual: 1, why: NO_RETRY },
   'f26-429-once|adapter honours Retry-After once and ingests': {
-    actual: { retry429: 0, versions: 0 },
+    actual: { retry429: 0, versions: 0, retryAfterSeconds: 1 },
     why: NO_RETRY,
   },
-  'f31-v2-partial|adapter per-package errors': { actual: 1, why: V2_PARTIAL },
+  'f31-v2-partial|adapter sync exit': { actual: 'non-zero', why: V2_PARTIAL },
+  'f31-v2-partial|adapter poll exit': { actual: 'non-zero', why: V2_PARTIAL },
+  'f31-v2-partial|adapter mode detected': { actual: 'unsupported', why: V2_PARTIAL },
+  'f31-v2-partial|adapter ingested versions of fx/lib': { actual: [], why: V2_PARTIAL },
+  'f31-v2-partial|adapter ingested versions of fx/app': { actual: [], why: V2_PARTIAL },
   'f31-v2-partial|adapter ingested versions of fx/inline': { actual: [], why: V2_PARTIAL },
-  'f31-v2-partial|no p2 request for the name found in inline packages': {
-    actual: 2,
-    why: V2_PARTIAL,
-  },
+  'f33-legacy-format|adapter sync exit': { actual: 'non-zero', why: LEGACY },
+  'f33-legacy-format|adapter poll exit': { actual: 'non-zero', why: LEGACY },
+  'f33-legacy-format|adapter mode detected': { actual: 'unsupported', why: LEGACY },
   'f33-legacy-format|adapter ingested versions of fx/lib': { actual: [], why: LEGACY },
   'f33-legacy-format|adapter ingested versions of fx/app': { actual: [], why: LEGACY },
   'f34-includes-validators|poll with validators: packages.json answers 304, include served from cache':
@@ -1098,8 +1137,8 @@ describe('v1 conformance corpus', () => {
 
   it('accounts for every row', () => {
     expect(tally).toEqual({
-      pass: 251,
-      pinned: 23,
+      pass: 242,
+      pinned: 32,
       partial: 3,
       'excluded:cli': 186,
       'excluded:fixture-server': 4,
@@ -1112,6 +1151,38 @@ describe('v1 conformance corpus', () => {
 });
 
 describe('v1 conformance negative cases', () => {
+  it('f26: carries Retry-After on the 429 error for the caller', async () => {
+    const r = await sync('f26-429-once');
+    expect(r.outcomes.get('fx/lib')).toMatchObject({
+      versions: [],
+      error: 'ComposerV1PackageError:status',
+      retryAfterSeconds: 1,
+    });
+    expect(r.server.count(/\/p\/fx\/lib/)).toBe(1);
+  });
+
+  it('f31: refuses the partial v2 root before any definitive absence or p2 request', async () => {
+    const r = await v2('f31-v2-partial');
+    for (const error of [r.rootError, r.pollError]) {
+      expect(error).toBeInstanceOf(ComposerRootError);
+      expect(error).toMatchObject({ code: 'unsupported', field: 'packages' });
+    }
+    expect(r.root).toBeUndefined();
+    expect(r.versions.size).toBe(0);
+    expect(r.notFound.size).toBe(0);
+    expect(r.server.kinds()).toEqual({ root: 2 });
+  });
+
+  it('f33: refuses the legacy root before describing or marking any name absent', async () => {
+    const r = await sync('f33-legacy-format');
+    expect(r.rootError).toBeInstanceOf(ComposerRootError);
+    expect(r.rootError).toMatchObject({ code: 'unsupported', field: 'packages' });
+    expect(r.root).toBeUndefined();
+    expect(r.index).toBeUndefined();
+    expect(r.outcomes.size).toBe(0);
+    expect(r.server.kinds()).toEqual({ root: 1 });
+  });
+
   it('keeps upstream bodies and credentials out of root and package errors', async () => {
     const wrong = await sync('f21-auth', true);
     expect(wrong.rootError?.code).toBe('http_status');

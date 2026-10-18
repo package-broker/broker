@@ -20,8 +20,9 @@ import {
 } from '../../sources/provider.js';
 import { JsonExtractError, extractMembers } from '../json-stream.js';
 import { JsonStreamError, JsonTokenizer, type JsonToken } from '../json-tokenizer.js';
+import { retryAfterOf } from './retry-after.js';
 import type { ComposerRoot, ComposerRootSource } from './root.js';
-import type { V1IndexEntry } from './v1-index.js';
+import type { V1Index, V1IndexEntry } from './v1-index.js';
 
 export type ComposerV1PackageErrorCode =
   'name' | 'invalid' | 'hash' | 'status' | 'unsupported' | 'too_large' | 'deadline';
@@ -31,6 +32,7 @@ export class ComposerV1PackageError extends Error {
   constructor(
     readonly code: ComposerV1PackageErrorCode,
     readonly status?: number,
+    readonly retryAfterSeconds?: number,
   ) {
     super(`composer v1 package ${code}${status === undefined ? '' : ` (${status})`}`);
   }
@@ -41,7 +43,9 @@ export type V1PackageSkip = ComposerVersionSkip | 'duplicate';
 export interface V1PackageOptions {
   readonly source: ComposerRootSource;
   readonly root: ComposerRoot;
-  /** The name's entry in a complete v1 index; absent when the index does not list it. */
+  /** The listing and its completeness; required to prove a selected name absent. */
+  readonly index?: Pick<V1Index, 'complete' | 'entries'>;
+  /** The name's entry, when supplied separately from the index. */
   readonly entry?: V1IndexEntry;
   readonly selection: ComposerRepositoryConfig['selection'];
   readonly origin: ComposerVersionOrigin;
@@ -230,6 +234,10 @@ async function upstream<T>(budget: Budget, step: () => Promise<T>): Promise<T> {
   }
 }
 
+function retryAfterHeader(headers: Headers): number | undefined {
+  return retryAfterOf(headers.get('retry-after'), Date.now());
+}
+
 async function readOnce(
   fetch: PolicyFetch,
   url: string,
@@ -257,7 +265,11 @@ async function readOnce(
   if (response.status !== 200 || response.body === null) {
     await response.body?.cancel().catch(() => undefined);
     if (response.status === 404) return null;
-    throw new ComposerV1PackageError('status', response.status);
+    throw new ComposerV1PackageError(
+      'status',
+      response.status,
+      response.status === 429 ? retryAfterHeader(response.headers) : undefined,
+    );
   }
   const tap = options.codecs.digestTap(['sha256']);
   tap.digests.catch(() => undefined);
@@ -365,6 +377,9 @@ function positive(name: string, value: number | undefined): void {
  * must match its listed SHA-256 within three attempts that share one byte budget and one deadline;
  * a lazy provider is read only for names in the source selection. Versions are kept by the
  * object's own `name`, as Composer does, and nothing is yielded before the digest is known.
+ * Without a lazy lookup, an unlisted name is definitive only in a complete, non-empty index.
+ * Unlisted names outside the source selection return definitive not_found as a caller selection
+ * decision, not an upstream proof.
  */
 export async function describeComposerV1(
   fetch: PolicyFetch,
@@ -375,7 +390,9 @@ export async function describeComposerV1(
   positive('maxVersions', options.maxVersions);
   positive('deadlineMs', options.deadlineMs);
   const key = keyOf(name);
-  const { root, entry, signal } = options;
+  const { root, index, signal } = options;
+  const entry = options.entry ?? index?.entries.get(key);
+  if (root.mode === 'v2') throw new ComposerV1PackageError('unsupported');
   const previous = options.previousSha256?.toLowerCase();
   const budget: Budget = {
     bytes: Math.min(
@@ -408,8 +425,11 @@ export async function describeComposerV1(
     }
     throw new ComposerV1PackageError(failure);
   }
-  if (root.providersLazyUrl === undefined || !selected(key, options.selection)) {
+  if (!selected(key, options.selection)) {
     return { kind: 'not_found', definitive: true };
+  }
+  if (root.providersLazyUrl === undefined) {
+    return { kind: 'not_found', definitive: index?.complete === true && index.entries.size > 0 };
   }
   const parsed = await readOnce(fetch, fill(root.providersLazyUrl, key), key, options, budget);
   if (parsed === null) return { kind: 'not_found', definitive: true };

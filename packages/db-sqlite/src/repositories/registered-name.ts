@@ -115,10 +115,12 @@ export function sourceActivatable(ctx: OrgContext, sourceId: SourceRef): Guard {
 export function coveredByRegisteredNames(
   ctx: OrgContext,
   sourceId: SourceRef,
+  ecosystem: Ecosystem,
   key: string | Expression<string>,
 ): Guard {
   return sql<SqlBool>`exists (select 1 from registered_name as rn_cov
     where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}
+      and rn_cov.ecosystem = ${ecosystem}
       and (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'
       and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)
       and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}

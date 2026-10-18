@@ -8,7 +8,11 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import { KERNEL_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import {
+  AUDIT_EVENTS,
+  KERNEL_EVENTS,
+  KERNEL_REASON_CODES,
+} from '@package-broker/core/kernel/obs-codes';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
 import {
@@ -573,7 +577,12 @@ export function createWorker(
       },
     };
     const registry = (templates: ReadonlySet<string>): ObsRegistry => ({
-      events: new Set<string>([...KERNEL_EVENTS, ...JOB_EVENTS, ...STARTUP_EVENTS]),
+      events: new Set<string>([
+        ...KERNEL_EVENTS,
+        ...AUDIT_EVENTS,
+        ...JOB_EVENTS,
+        ...STARTUP_EVENTS,
+      ]),
       reasonCodes: new Set<string>([...KERNEL_REASON_CODES, ...JOB_REASON_CODES]),
       routeTemplates: templates,
     });

@@ -54,9 +54,9 @@ export const entries: readonly MutationEntry[] = [
           'delegated attachedSourceCondition and readTimeCondition predicates; their named foreign attachment/source/project cases are registered in catalogue-predicates.ts (source/attachment scopes also duplicate the outer joins)',
       },
       {
-        locate: /"guard_(?:q|r)"\."org_id" = "pkg"\."org_id"/,
+        locate: /"guard_(?:q|qs|r)"\."org_id" = "pkg"\."org_id"/,
         reason:
-          'delegated proxyEligibleCondition predicates, killed by its foreign shadow package and registered name cases in catalogue-predicates.ts',
+          'delegated proxyEligibleCondition predicates, killed by its foreign package, competing-source and registered name cases in catalogue-predicates.ts',
       },
     ],
   },

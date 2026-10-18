@@ -1,22 +1,20 @@
-import { packageKey } from '@package-broker/core/catalogue/names';
-import {
-  GITHUB_API_VERSION,
-  UpstreamError,
-  type PolicyFetch,
-  type UpstreamCredential,
-  type UpstreamResponse,
-} from '@package-broker/core/sources/policy-fetch';
 import {
   createPackageDescription,
+  GITHUB_API_VERSION,
+  lsRefs,
+  packageKey,
+  readFileAtRefs,
   snapshotRef,
+  UpstreamError,
+  versionsFromRefs,
+  type PolicyFetch,
   type ProviderContext,
   type ProviderSource,
   type SourceProvider,
+  type UpstreamCredential,
+  type UpstreamResponse,
   type VersionCandidate,
-} from '@package-broker/core/sources/provider';
-import { lsRefs } from '@package-broker/core/sources/git/refs';
-import { readFileAtRefs } from '@package-broker/core/sources/git/fetch';
-import { versionsFromRefs } from '@package-broker/core/registry/composer/version-rules';
+} from '@package-broker/core/plugin';
 import {
   InstallationTokenError,
   parseRateLimit,

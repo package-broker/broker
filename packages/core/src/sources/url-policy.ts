@@ -227,6 +227,8 @@ export function classifyUrl(input: string, policy: OutboundPolicy): OutboundVerd
     return refuse('self_origin');
   }
 
+  if (url.protocol === 'http:' && url.port === '443') return refuse('scheme');
+
   const allowlist = parseAllowlist(policy.allowPrivateHosts, policy.runtime);
   const allowlisted =
     allowlist.includes(`${hostname}:${effectivePort(url)}`) ||

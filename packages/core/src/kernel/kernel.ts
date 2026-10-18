@@ -194,14 +194,18 @@ async function failed(
   }
 }
 
+export const AUTHORIZATION_RETRY_AFTER_SECONDS = 5;
+
 function authorizationUnavailable(requestId: string): Response {
-  return envelopeResponse(
+  const response = envelopeResponse(
     503,
     'unavailable',
     'Authorization is temporarily unavailable',
     requestId,
     'authz.engine_error',
   );
+  response.headers.set('retry-after', String(AUTHORIZATION_RETRY_AFTER_SECONDS));
+  return response;
 }
 
 function withRequestId(response: Response, requestId: string): Response {
@@ -407,12 +411,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       } catch (error) {
         c.env.guard.reason(hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN));
         c.env.scope.obs({ plugin: hookPlugin(ENGINE_PLUGIN) }).log({
-          level: 'warn',
+          level: 'error',
           event: 'authz.error',
           error_name: reportableErrorName(error),
           reason_code: hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN),
         });
-        return denialResponse(c.req.raw, c.env.requestId);
+        return authorizationUnavailable(c.env.requestId);
       }
     }
     const response: unknown = await route.handler(context);
@@ -528,14 +532,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
     const grant = engineGrantOf(authorizationRequest);
     if (grant === null) return invoke(route, c, org, decision.principal, decision.projectId, null);
+    if (route.boundary === 'package') {
+      onHookError({
+        plugin: ENGINE_PLUGIN,
+        error: new TypeError('package route holds an engine grant'),
+      });
+      return denialResponse(c.req.raw, requestId);
+    }
     if (
-      route.boundary === 'package' ||
       grant.principal.kind !== decision.principal.kind ||
       grant.principal.id !== decision.principal.id ||
       grant.projectId !== decision.projectId
     ) {
       onHookError({ plugin: ENGINE_PLUGIN, error: new TypeError('inconsistent engine grant') });
-      return denialResponse(c.req.raw, requestId);
+      return authorizationUnavailable(requestId);
     }
     const snapshot: AccessContextSnapshot = {
       principal: grant.principal,

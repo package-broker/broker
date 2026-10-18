@@ -12,6 +12,47 @@ import type { SourceProvider } from './sources/provider.js';
 
 export { PlatformUnavailableError } from './platform/errors.js';
 
+export {
+  base64urlDecode,
+  base64urlEncode,
+  constantTimeEqual,
+  randomToken,
+  sha256Hex,
+} from './auth/primitives.js';
+export { packageKey } from './catalogue/names.js';
+export { normalizeEmail, domainPolicyProblems } from './identity/policy.js';
+export {
+  isReservedProviderId,
+  isValidProviderId,
+  isValidSubject,
+  isValidTrustAnchor,
+} from './identity/port.js';
+export type {
+  DomainPolicy,
+  IdentityContext,
+  IdentityFailure,
+  IdentityProvider,
+  IdentityProviderFactory,
+  IdentityResult,
+  LoginStateData,
+  StartResult,
+  VerifiedIdentity,
+} from './identity/port.js';
+export { providerSecretName } from './identity/secret-name.js';
+export type { Clock } from './ids.js';
+export { versionsFromRefs } from './registry/composer/version-rules.js';
+export { readFileAtRefs } from './sources/git/fetch.js';
+export { lsRefs } from './sources/git/refs.js';
+export { GITHUB_API_VERSION, UpstreamError } from './sources/policy-fetch.js';
+export type { PolicyFetch, UpstreamCredential, UpstreamResponse } from './sources/policy-fetch.js';
+export { createPackageDescription, snapshotRef } from './sources/provider.js';
+export type {
+  ProviderContext,
+  ProviderSource,
+  SourceProvider,
+  VersionCandidate,
+} from './sources/provider.js';
+
 export type OrganizationReader = Pick<OrganizationRepository, 'get'>;
 
 export const SUPPORTED_PLUGIN_API = [3, 4] as const;
@@ -19,15 +60,7 @@ export const SUPPORTED_PLUGIN_API = [3, 4] as const;
 export type Platform = 'cloudflare' | 'node';
 
 export type PortName =
-  | 'database'
-  | 'blob'
-  | 'cache'
-  | 'job'
-  | 'session'
-  | 'identity'
-  | 'secrets'
-  | 'observability'
-  | 'source';
+  'database' | 'blob' | 'cache' | 'job' | 'identity' | 'observability' | 'source';
 
 export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
 

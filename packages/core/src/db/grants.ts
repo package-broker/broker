@@ -95,5 +95,6 @@ export interface GrantRepository {
     userId: string,
     now: string,
   ): Promise<'reactivated' | 'unchanged' | 'not_found' | FencedRefusal>;
+  isProtectedHolder(ctx: OrgContext, userId: string): Promise<boolean>;
   countProtectedHolders(ctx: OrgContext): Promise<number>;
 }

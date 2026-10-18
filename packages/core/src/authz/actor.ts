@@ -3,6 +3,15 @@ import type { ActorContext } from './administration.js';
 export type { ActorContext } from './administration.js';
 export type { ProjectActor } from './project-actor.js';
 
+/** Services read permissions through this view; mutable Sets also satisfy the contract. */
+export type PermissionView = Pick<ReadonlySet<string>, 'has' | typeof Symbol.iterator>;
+
+export function isPermissionView(value: unknown): value is PermissionView {
+  if (typeof value !== 'object' || value === null) return false;
+  const view = value as Record<PropertyKey, unknown>;
+  return typeof view['has'] === 'function' && typeof view[Symbol.iterator] === 'function';
+}
+
 export type ActorLookupBoundary = 'organization' | 'project';
 
 /** The slice of a session lookup that an actor is built from. */

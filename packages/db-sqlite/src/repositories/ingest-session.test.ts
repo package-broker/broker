@@ -378,6 +378,20 @@ describe('ingest session write guard', () => {
     await expect(database.executor.batch(bad.statements)).rejects.toThrow();
   });
 
+  it('a foreign bare guard rolls back an earlier write', async () => {
+    const sessions = createIngestSessions(database.executor);
+    const h = await sessions.acquire(org, pkg('widget'), A, 60);
+    if (h === 'held') throw new Error('unreachable');
+    const before = await rows();
+    await expect(
+      database.executor.batch([
+        stmt('UPDATE ingest_session SET seen_count = 42 WHERE id = ?', h.id),
+        ...ingestSessionGuard(other, h),
+      ]),
+    ).rejects.toThrow();
+    expect(await rows()).toEqual(before);
+  });
+
   it('the bare guard fails for another organization', async () => {
     const sessions = createIngestSessions(database.executor);
     const h = await sessions.acquire(org, pkg('widget'), A, 60);

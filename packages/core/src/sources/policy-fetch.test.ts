@@ -294,7 +294,7 @@ describe('createPolicyFetch redirects and credentials', () => {
     expect(hops).toHaveLength(1);
   });
 
-  it('refuses https to http even when http is allowlisted', async () => {
+  it('refuses https to http even with an explicit port allowlist entry', async () => {
     const lax = createOutboundPolicy({
       allowPrivateHosts: ['plain.example.com:80'],
       runtime: 'node',
@@ -304,7 +304,7 @@ describe('createPolicyFetch redirects and credentials', () => {
     const run = createPolicyFetch({ fetchImpl: f.fetchImpl, policy: lax, userAgent: 'pb-test/1' });
     const error = await failure(run(request()));
     expect(error.code).toBe('refused');
-    expect(error.reason).toBe('downgrade');
+    expect(error.reason).toBe('scheme');
     expect(f.hops).toHaveLength(1);
   });
 

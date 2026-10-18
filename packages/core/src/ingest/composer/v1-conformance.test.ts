@@ -21,7 +21,7 @@ import { readV1Index, type V1Index, type V1IndexResult } from './v1-index.js';
 import { describeComposerV1 } from './v1-package.js';
 
 const FIXTURE_DIR = new URL('../../../test-fixtures/composer-v1/', import.meta.url);
-const ORIGIN = 'http://127.0.0.1:8851';
+const ORIGIN = 'https://127.0.0.1:8851';
 const policy = createOutboundPolicy({
   allowPrivateHosts: ['127.0.0.1:8851'],
   runtime: 'node',
@@ -83,10 +83,15 @@ function loadFixture(id: string): Tree {
     for (const entry of readdirSync(url, { withFileTypes: true })) {
       if (entry.isDirectory()) walk(`${dir}/${entry.name}`, `${prefix}${entry.name}/`);
       else if (entry.name.endsWith('.body')) {
-        tree.set(
-          `${prefix}${entry.name.slice(0, -'.body'.length)}`,
-          new Uint8Array(readFileSync(new URL(`${dir}/${entry.name}`, FIXTURE_DIR))),
-        );
+        const body = readFileSync(new URL(`${dir}/${entry.name}`, FIXTURE_DIR));
+        // Upgrade root URLs without changing the bytes of hash-verified includes.
+        const bytes =
+          entry.name === 'packages.json.body'
+            ? new TextEncoder().encode(
+                body.toString('utf8').replaceAll('http://127.0.0.1:8851', ORIGIN),
+              )
+            : new Uint8Array(body);
+        tree.set(`${prefix}${entry.name.slice(0, -'.body'.length)}`, bytes);
       }
     }
   };

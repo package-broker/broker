@@ -1,6 +1,6 @@
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
-import { engineGrantOf, packageActorOf } from '../authz/engine.js';
+import { engineGrantOf } from '../authz/engine.js';
 import { packageKey } from '../catalogue/names.js';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -55,7 +55,8 @@ import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './regist
 import type { RegisteredJob, Registration } from './registry.js';
 import { bindPluginPorts } from './plugin-ports.js';
 import type { PlatformServices } from './plugin-ports.js';
-import { setResolvedPackage } from './package-context.js';
+import { setResolvedPackage } from '../internal/package-context.js';
+import { packageActorOf } from '../internal/package-actor.js';
 import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
 import {
   routeApiProblems,

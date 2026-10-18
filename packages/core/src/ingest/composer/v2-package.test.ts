@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { fixedClock } from '../../ids.js';
 import { ExpansionLimitError } from '../../registry/composer/minify.js';
 import type { DocumentValidators, PackageDescription } from '../../sources/provider.js';
-import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
+import {
+  createPolicyFetch,
+  UpstreamError,
+  type UpstreamCredential,
+} from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
 import { JsonExtractError } from '../json-stream.js';
 import type { ComposerRoot } from './root.js';
@@ -233,7 +237,7 @@ describe('describeComposerV2 forms', () => {
   it('treats a ~dev 404 with p2 200 as an empty dev form that stores no validators', async () => {
     const { fetch } = setup({
       [P2]: [ok(stable, '"s2"')],
-      [DEV]: [{ status: 404, body: '{"status":"error"}' }],
+      [DEV]: [{ status: 404, body: '{"packages":[]}' }],
     });
     const description = await found(
       await describeComposerV2(fetch, source(), NAME, opts({ dev: true })),
@@ -248,12 +252,18 @@ describe('describeComposerV2 forms', () => {
   });
 
   it('answers not_modified when the persisted dev-404 description is asked again', async () => {
-    const first = setup({ [P2]: [ok(stable, '"s2"')], [DEV]: [{ status: 404, body: '{}' }] });
+    const first = setup({
+      [P2]: [ok(stable, '"s2"')],
+      [DEV]: [{ status: 404, body: '{"packages":[]}' }],
+    });
     const description = await found(
       await describeComposerV2(first.fetch, source(), NAME, opts({ dev: true })),
     );
     await drain(description);
-    const again = setup({ [P2]: [{ status: 304 }], [DEV]: [{ status: 404, body: '{}' }] });
+    const again = setup({
+      [P2]: [{ status: 304 }],
+      [DEV]: [{ status: 404, body: '{"packages":[]}' }],
+    });
     const result = await describeComposerV2(
       again.fetch,
       source(),
@@ -266,7 +276,7 @@ describe('describeComposerV2 forms', () => {
   it('refetches p2 when ~dev turns 404 after stored dev validators', async () => {
     const { fetch, calls } = setup({
       [P2]: [{ status: 304 }, ok(stable, '"s1"')],
-      [DEV]: [{ status: 404, body: '{}' }],
+      [DEV]: [{ status: 404, body: '{"packages":[]}' }],
     });
     const description = await found(
       await describeComposerV2(fetch, source(), NAME, opts({ dev: true, validators })),
@@ -293,7 +303,8 @@ describe('describeComposerV2 forms', () => {
       );
       return description.forms?.[1]?.snapshot.id;
     };
-    expect(await run('{"a":1}')).toBe(await run('<html>other</html>'));
+    expect(await run('{"packages":[]}')).toMatch(/^sha256:/);
+    expect(await run('{"packages":[]}')).toBe(await run(' { "packages": [] } '));
   });
 
   it('marks the description incomplete when ~dev answers 500', async () => {
@@ -470,8 +481,8 @@ describe('describeComposerV2 names and listings', () => {
     }
   });
 
-  it('answers a p2 404 as not_found, definitive only with a JSON body', async () => {
-    const json = setup({ [P2]: [{ status: 404, body: '{"status":"error"}' }] });
+  it('answers a p2 404 as not_found, definitive only with recognised evidence', async () => {
+    const json = setup({ [P2]: [{ status: 404, body: '{"packages":[]}' }] });
     expect(await describeComposerV2(json.fetch, source(), NAME, opts())).toEqual({
       kind: 'not_found',
       definitive: true,
@@ -592,7 +603,7 @@ describe('describeComposerV2 retries and failures', () => {
         NAME,
         opts({ path: 'request', sleep: noSleep() }),
       ),
-    ).toEqual({ kind: 'not_found', definitive: true });
+    ).toEqual({ kind: 'not_found', definitive: false });
     expect(request.calls).toHaveLength(1);
   });
 
@@ -805,5 +816,170 @@ describe('describeComposerV2 large non-array package values', () => {
     const description = await found(await describeComposerV2(fetch, source(), NAME, opts()));
     expect((await drain(description)).map((m) => m.version)).toEqual(['1.0.0']);
     expect(description.upstreamComplete).toBe(true);
+  });
+});
+
+describe('Composer v2 404 absence evidence', () => {
+  const credential: UpstreamCredential = {
+    origins: [ORIGIN],
+    queryParams: [],
+    apply: (headers, url) => ({ headers, url }),
+  };
+
+  it.each([
+    ['null', 'null'],
+    ['HTML', '<html>not found</html>'],
+    ['empty body', ''],
+    ['array', '[]'],
+    ['number', '404'],
+    ['boolean', 'false'],
+    ['string', '"not found"'],
+    ['empty object', '{}'],
+    ['gateway error', '{"status":"error","message":"unauthorized"}'],
+    ['nonempty packages', '{"packages":["acme/widget"]}'],
+    ['extra error field', '{"packages":[],"error":"unauthorized"}'],
+    ['malformed JSON', '{'],
+  ])('stable 404 rejects %s as absence evidence', async (_label, body) => {
+    const { fetch } = setup({ [P2]: [{ status: 404, body }] });
+    expect(await describeComposerV2(fetch, source(), NAME, opts())).toEqual({
+      kind: 'not_found',
+      definitive: false,
+    });
+  });
+
+  it('stable 404 accepts Packagist empty packages without credentials', async () => {
+    const { fetch } = setup({ [P2]: [{ status: 404, body: '{"packages":[]}' }] });
+    expect(await describeComposerV2(fetch, source(), NAME, opts())).toEqual({
+      kind: 'not_found',
+      definitive: true,
+    });
+  });
+
+  it('stable 404 rejects recognised evidence with configured credentials', async () => {
+    const { fetch } = setup({ [P2]: [{ status: 404, body: '{"packages":[]}' }] });
+    expect(await describeComposerV2(fetch, source({ credential }), NAME, opts())).toEqual({
+      kind: 'not_found',
+      definitive: false,
+    });
+  });
+
+  it.each([
+    ['HTML', '<html>not found</html>'],
+    ['null', 'null'],
+    ['empty body', ''],
+    ['array', '[]'],
+    ['gateway error', '{"status":"error"}'],
+  ])('dev 404 rejects %s and leaves the package incomplete', async (_label, body) => {
+    const { fetch } = setup({ [P2]: [ok(stable, '"s1"')], [DEV]: [{ status: 404, body }] });
+    const description = await found(
+      await describeComposerV2(fetch, source(), NAME, opts({ dev: true })),
+    );
+    await drain(description);
+    expect(description.upstreamComplete).toBe(false);
+    expect(description.forms?.map((form) => form.status)).toEqual(['present']);
+  });
+
+  it('dev 404 rejects recognised evidence with configured credentials', async () => {
+    const { fetch } = setup({
+      [P2]: [ok(stable, '"s1"')],
+      [DEV]: [{ status: 404, body: '{"packages":[]}' }],
+    });
+    const description = await found(
+      await describeComposerV2(fetch, source({ credential }), NAME, opts({ dev: true })),
+    );
+    await drain(description);
+    expect(description.upstreamComplete).toBe(false);
+    expect(description.forms?.map((form) => form.status)).toEqual(['present']);
+  });
+
+  it('reports newly confirmed dev absence after an incomplete refresh with unchanged stable metadata', async () => {
+    const first = setup({
+      [P2]: [ok(stable, '"s1"')],
+      [DEV]: [{ status: 404, body: '<html>not found</html>' }],
+    });
+    const incomplete = await found(
+      await describeComposerV2(first.fetch, source(), NAME, opts({ dev: true })),
+    );
+    await drain(incomplete);
+    expect(incomplete.upstreamComplete).toBe(false);
+    expect(incomplete.forms?.map((form) => form.status)).toEqual(['present']);
+
+    const stableConditions: (string | null)[] = [];
+    const fetch = createPolicyFetch({
+      policy,
+      userAgent: 'pb-test/1',
+      fetchImpl: async (input, init) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url === DEV) return new Response('{"packages":[]}', { status: 404 });
+        const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+        const condition = headers.get('if-none-match');
+        stableConditions.push(condition);
+        return condition === '"s1"'
+          ? new Response(null, { status: 304 })
+          : new Response(stable, { status: 200, headers: { etag: '"s1"' } });
+      },
+    });
+    const complete = await found(
+      await describeComposerV2(
+        fetch,
+        source(),
+        NAME,
+        opts({ dev: true, validators: incomplete.validators }),
+      ),
+    );
+    expect((await drain(complete)).map((member) => member.version)).toEqual(['1.1.0', '1.0.0']);
+    expect(complete.upstreamComplete).toBe(true);
+    expect(complete.forms?.map((form) => [form.form, form.status])).toEqual([
+      ['composer-p2', 'present'],
+      ['composer-p2-dev', 'absent'],
+    ]);
+    expect(complete.snapshot.id).not.toBe(incomplete.snapshot.id);
+    expect(stableConditions).toEqual([null]);
+  });
+
+  it('dev HTML 404 with stable 304 refetches stable and stays incomplete', async () => {
+    const { fetch, calls } = setup({
+      [P2]: [{ status: 304 }, ok(stable, '"s1"')],
+      [DEV]: [{ status: 404, body: '<html>not found</html>' }],
+    });
+    const description = await found(
+      await describeComposerV2(
+        fetch,
+        source(),
+        NAME,
+        opts({ dev: true, validators: { 'composer-p2': { etag: '"s1"' } } }),
+      ),
+    );
+    await drain(description);
+    expect(description.upstreamComplete).toBe(false);
+    expect(calls.filter((call) => call.url === P2)).toHaveLength(2);
+  });
+});
+
+describe('Composer v2 unreadable 404 evidence', () => {
+  it('leaves an unreadable dev 404 incomplete without recording absence', async () => {
+    const { fetch } = setup({ [P2]: [ok(stable, '"s1"')], [DEV]: [{ status: 404 }] });
+    const description = await found(
+      await describeComposerV2(
+        async (request) => {
+          const response = await fetch(request);
+          if (request.url !== DEV) return response;
+          return {
+            ...response,
+            body: new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.error(new UpstreamError('network'));
+              },
+            }),
+          };
+        },
+        source(),
+        NAME,
+        opts({ dev: true }),
+      ),
+    );
+    await drain(description);
+    expect(description.upstreamComplete).toBe(false);
+    expect(description.forms?.map((form) => form.status)).toEqual(['present']);
   });
 });

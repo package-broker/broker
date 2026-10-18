@@ -1,6 +1,7 @@
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
-import { engineGrantOf } from '../authz/engine.js';
+import { engineGrantOf, packageActorOf } from '../authz/engine.js';
+import { packageKey } from '../catalogue/names.js';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { OrgContext } from '../db/port.js';
@@ -54,7 +55,8 @@ import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './regist
 import type { RegisteredJob, Registration } from './registry.js';
 import { bindPluginPorts } from './plugin-ports.js';
 import type { PlatformServices } from './plugin-ports.js';
-import type { PackageVisibilityResolver } from './routes.js';
+import { setResolvedPackage } from './package-context.js';
+import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
 import {
   routeApiProblems,
   routeBoundaryProblems,
@@ -84,7 +86,7 @@ export interface KernelOptions {
   /** Routes under `/_pb/`, registered before plugin routes and served through the same pipeline. */
   readonly coreRoutes?: readonly RouteDefinition[];
   /** Package-visibility resolver bound by the package-visibility feature; required by project:packages:* routes. */
-  readonly packageResolver?: PackageVisibilityResolver;
+  readonly packageResolver?: PackageVisibilityPort;
   /** Default denyAllEngine. */
   readonly authorization?: AuthorizationEngine;
   /** Default defaultLog. Ignored when `observability` is set. */
@@ -230,7 +232,7 @@ function withRequestId(response: Response, requestId: string): Response {
 
 function validateCoreRoutes(
   routes: readonly RouteDefinition[],
-  packageResolver: PackageVisibilityResolver | undefined,
+  packageResolver: PackageVisibilityPort | undefined,
 ): readonly string[] {
   const problems: string[] = [];
   const eligible: RouteDefinition[] = [];
@@ -411,6 +413,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     principal: Principal | null,
     projectId: string | null,
     snapshot: AccessContextSnapshot | null,
+    resolved: Exclude<PackageVisibility, { kind: 'absent' }> | null = null,
   ): Promise<Response> {
     const context: RequestContext = Object.freeze({
       request: c.req.raw,
@@ -428,6 +431,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     if (snapshot !== null) {
       try {
         setAccessContext(context, snapshot);
+        if (resolved !== null) setResolvedPackage(context, resolved);
       } catch (error) {
         c.env.guard.reason(hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN));
         c.env.scope.obs({ plugin: hookPlugin(ENGINE_PLUGIN) }).log({
@@ -531,7 +535,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         method: route.method,
         path: route.path,
         permission,
-        ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
+        ...(route.boundary === undefined
+          ? {}
+          : { boundary: route.boundary === 'package' ? 'project' : route.boundary }),
       },
       params: Object.freeze({ ...c.req.param() }),
     };
@@ -554,36 +560,81 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
     scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
     const grant = engineGrantOf(authorizationRequest);
-    if (grant === null) return invoke(route, c, org, decision.principal, decision.projectId, null);
-    if (route.boundary === 'package') {
-      onHookError({
-        plugin: ENGINE_PLUGIN,
-        error: new TypeError('package route holds an engine grant'),
-      });
-      return denialResponse(c.req.raw, requestId);
+    const packageActor = route.boundary === 'package' ? packageActorOf(authorizationRequest) : null;
+    if (grant === null && route.boundary !== 'package') {
+      return invoke(route, c, org, decision.principal, decision.projectId, null);
     }
     if (
+      grant === null ||
       grant.principal.kind !== decision.principal.kind ||
       grant.principal.id !== decision.principal.id ||
-      grant.projectId !== decision.projectId
+      grant.projectId !== decision.projectId ||
+      (route.boundary === 'package' &&
+        (packageActor === null ||
+          packageActor.userId !== decision.principal.id ||
+          packageActor.projectId !== decision.projectId ||
+          packageActor.orgId !== org.orgId))
     ) {
       onHookError({ plugin: ENGINE_PLUGIN, error: new TypeError('inconsistent engine grant') });
       return authorizationUnavailable(requestId);
     }
+    let resolved: Exclude<PackageVisibility, { kind: 'absent' }> | null = null;
+    if (route.boundary === 'package') {
+      const binding = route.package;
+      if (binding === undefined || packageActor === null || options.packageResolver === undefined) {
+        throw new TypeError('package resolution is not configured');
+      }
+      const name = binding.name(authorizationRequest.params);
+      const absent = (): Response => {
+        guard.reason(engineStatusReason(404));
+        return routeNotFound(requestId);
+      };
+      if (typeof name !== 'string' || name.length === 0) return absent();
+      const outcome = await options.packageResolver.resolve(packageActor, binding.ecosystem, name);
+      if (outcome.kind === 'absent') return absent();
+      const key = packageKey(name, {
+        ecosystem: binding.ecosystem,
+        legacyCase: binding.ecosystem === 'npm',
+      });
+      if (outcome.kind === 'visible') {
+        if (
+          outcome.pkg.projectId !== packageActor.projectId ||
+          outcome.pkg.ecosystem !== binding.ecosystem ||
+          outcome.pkg.key !== key
+        ) {
+          throw new TypeError('inconsistent resolved package');
+        }
+        resolved = Object.freeze({ ...outcome, pkg: Object.freeze({ ...outcome.pkg }) });
+      } else if (outcome.kind === 'proxy_admissible') {
+        if (
+          outcome.projectId !== packageActor.projectId ||
+          outcome.ecosystem !== binding.ecosystem ||
+          outcome.key !== key ||
+          outcome.sourceIds.length === 0
+        ) {
+          throw new TypeError('inconsistent proxy admission');
+        }
+        if (binding.fetchOnAdmission !== true || c.req.method === 'HEAD') return absent();
+        resolved = Object.freeze({ ...outcome, sourceIds: Object.freeze([...outcome.sourceIds]) });
+      } else {
+        throw new TypeError('unknown package resolution');
+      }
+    }
+    const boundary = route.boundary === 'package' ? 'project' : (route.boundary ?? 'none');
     const snapshot: AccessContextSnapshot = {
       principal: grant.principal,
       projectId: grant.projectId,
-      boundary: route.boundary ?? 'none',
+      boundary,
       sessionId: grant.sessionId,
       actor: grant.actor,
       rateKey: {
         stage: 'authenticated',
         tokenSelector: grant.tokenSelector,
         principalId: grant.principal.id,
-        routeClass: route.boundary ?? 'none',
+        routeClass: boundary,
       },
     };
-    return invoke(route, c, org, decision.principal, decision.projectId, snapshot);
+    return invoke(route, c, org, decision.principal, decision.projectId, snapshot, resolved);
   }
 
   const app = new Hono<KernelEnv>();

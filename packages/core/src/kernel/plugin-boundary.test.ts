@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition, type RouteDefinition } from '../plugin.js';
 import { KernelConfigError, collectRegistrations, type RegistrationOptions } from './registry.js';
-import { routeBoundaryProblems, type PackageVisibilityResolver } from './routes.js';
+import { routeBoundaryProblems } from './routes.js';
+import type { PackageVisibilityPort } from '../db/catalogue.js';
 
 const handler = () => new Response('ok');
-const resolver: PackageVisibilityResolver = { isVisible: () => true };
+const resolver: PackageVisibilityPort = { resolve: async () => ({ kind: 'absent' }) };
 
 function route(overrides: Record<string, unknown>): RouteDefinition {
   return { method: 'GET', path: '/x', permission: null, handler, ...overrides } as RouteDefinition;

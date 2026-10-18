@@ -88,6 +88,7 @@ const MAX_UPSTREAM_PATTERNS = 1000;
 const MAX_UPSTREAM_PATTERN_LENGTH = 255;
 const STRONG_ETAG = /^"[^"]+"$/;
 const ABSENT_SNAPSHOT = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const COMPOSER_V2_NOT_FOUND_SHAPES: readonly string[] = ['{"packages":[]}'];
 const CHUNK = 64 * 1024;
 const encoder = new TextEncoder();
 
@@ -138,10 +139,10 @@ async function digest(scheme: string, parts: readonly Uint8Array[]): Promise<str
   return `sha256:${Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-function isJson(bytes: Uint8Array): boolean {
+function isNotFoundShape(bytes: Uint8Array): boolean {
   try {
-    JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    return true;
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return COMPOSER_V2_NOT_FOUND_SHAPES.includes(JSON.stringify(parsed));
   } catch {
     return false;
   }
@@ -302,12 +303,17 @@ export async function describeComposerV2(
   if (p2.kind === 'busy') return p2;
   if (dev?.kind === 'busy') return dev;
   if (p2.kind === 'failed') throw p2.error;
-  if (p2.kind === 'missing') return { kind: 'not_found', definitive: isJson(p2.bytes) };
+  const definitiveAbsence = (bytes: Uint8Array): boolean =>
+    source.credential === undefined && isNotFoundShape(bytes);
+  if (p2.kind === 'missing') {
+    return { kind: 'not_found', definitive: definitiveAbsence(p2.bytes) };
+  }
 
   const devChanged =
     dev !== null &&
     (dev.kind === 'body' ||
-      (dev.kind === 'missing' && hasValidator(options.validators?.['composer-p2-dev'])));
+      (dev.kind === 'missing' &&
+        (hasValidator(options.validators?.['composer-p2-dev']) || !definitiveAbsence(dev.bytes))));
   if (p2.kind === 'not_modified') {
     if (dev?.kind === 'failed') throw dev.error;
     if (!devChanged) return { kind: 'not_modified' };
@@ -328,6 +334,7 @@ export async function describeComposerV2(
   let strong = true;
   const record = async (form: ComposerForm, fetched: Fetched | null): Promise<boolean> => {
     if (fetched?.kind === 'missing') {
+      if (!definitiveAbsence(fetched.bytes)) return false;
       forms.push({
         form,
         status: 'absent',
@@ -355,6 +362,7 @@ export async function describeComposerV2(
   };
   await record('composer-p2', p2);
   const devRecorded = await record('composer-p2-dev', dev);
+  if (options.dev === true && !devRecorded) delete validators['composer-p2'];
   const snapshot = await digest(strong ? 'composer-v2-etag' : 'composer-v2-body', parts);
 
   const expansion = source.expansion ?? DEFAULT_EXPANSION;

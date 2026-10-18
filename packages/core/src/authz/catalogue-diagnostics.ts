@@ -27,7 +27,9 @@ export function catalogueDiagnostics(
   seededAdminPermissions: readonly string[],
   options: DiagnosticOptions,
 ): string[] {
-  const packageResolver = options.packageResolver ? { isVisible: () => true } : undefined;
+  const packageResolver = options.packageResolver
+    ? { resolve: () => Promise.resolve({ kind: 'absent' as const }) }
+    : undefined;
   const problems = routes.flatMap((route) =>
     routeBoundaryProblems(route, labelOf(route), {
       allowSelf: route.plugin === CORE_PLUGIN,

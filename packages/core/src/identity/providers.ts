@@ -2,6 +2,7 @@ import { reportableErrorName } from '../kernel/error-name.js';
 import { KernelConfigError, type Registration } from '../kernel/registry.js';
 import type { PluginDefinition } from '../plugin.js';
 import { domainPolicyProblems } from './policy.js';
+import { ENV_PREFIX } from './secret-name.js';
 import {
   isReservedProviderId,
   isValidProviderId,
@@ -11,11 +12,8 @@ import {
   type IdentityProvider,
 } from './port.js';
 
-const ENV_PREFIX = 'PB_IDP_';
-export const PROVIDER_SECRET_SUFFIXES: readonly string[] = Object.freeze([
-  'CLIENT_ID',
-  'CLIENT_SECRET',
-]);
+export { PROVIDER_SECRET_SUFFIXES, providerSecretName } from './secret-name.js';
+
 const UNSAFE_DISPLAY_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
 const MAX_QUOTED_LENGTH = 80;
@@ -55,16 +53,6 @@ export function scopedReader(read: (name: string) => string | undefined) {
     const value: unknown = read(name);
     return typeof value === 'string' ? value : undefined;
   };
-}
-
-export function providerSecretName(providerId: string, suffix: string): string {
-  if (!isValidProviderId(providerId) || isReservedProviderId(providerId)) {
-    throw new RangeError('provider id is not valid for a secret name');
-  }
-  if (!PROVIDER_SECRET_SUFFIXES.includes(suffix)) {
-    throw new RangeError(`secret suffix must be one of ${PROVIDER_SECRET_SUFFIXES.join(', ')}`);
-  }
-  return `${ENV_PREFIX}${providerId.toUpperCase().replaceAll('-', '_')}_${suffix}`;
 }
 
 function quoted(value: string): string {

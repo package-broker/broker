@@ -18,6 +18,7 @@ import { blobEligibleCondition } from '../repositories/blob-references.js';
 import { actorHolds } from '../repositories/actor-authority.js';
 import { servicePrincipalAuthorityGuard } from '../repositories/service-principal-authority.js';
 import {
+  admissionCondition,
   attachedSourceCondition,
   col,
   proxyEligibleCondition,
@@ -455,7 +456,7 @@ const proxyShadowedByForeignPackage: ContractCase = {
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
     await seedSource(seed, 'S-PROXY', own.orgId, 'packagist_proxy');
-    await seedSource(seed, 'S-FOREIGN', foreign.orgId, 'vcs');
+    await seedSource(seed, 'S-FOREIGN', own.orgId, 'vcs');
     await seedPackage(seed, 'K-PROXY', own.orgId, 'S-PROXY', 'acme/a');
     await seedPackage(seed, 'K-FOREIGN', foreign.orgId, 'S-FOREIGN', 'acme/a');
     expect(
@@ -468,6 +469,87 @@ const proxyShadowedByForeignPackage: ContractCase = {
     ).toEqual(['K-PROXY']);
   },
 };
+
+const proxyShadowedByForeignSource: ContractCase = {
+  name: 'a competing package with a foreign organization source does not shadow a proxy',
+  async run(context) {
+    const seed = seeder(context.executor);
+    const { own, foreign } = orgOf(context);
+    await seedSource(seed, 'S-PROXY', own.orgId, 'packagist_proxy');
+    await seedSource(seed, 'S-FOREIGN', foreign.orgId, 'vcs');
+    await seedPackage(seed, 'K-PROXY', own.orgId, 'S-PROXY', 'acme/a');
+    await seedPackage(seed, 'K-ODD', own.orgId, 'S-FOREIGN', 'acme/a');
+    expect(
+      await ids(
+        context,
+        packageRows()
+          .where('pkg.id', '=', 'K-PROXY')
+          .where(proxyEligibleCondition({ package: 'pkg', source: 'src' })),
+      ),
+    ).toEqual(['K-PROXY']);
+  },
+};
+
+const admissionAliases = ['bad', 'ci', 'cx', 'i', 'im', 'x'] as const;
+
+function admissionCase(alias: (typeof admissionAliases)[number]): ContractCase {
+  return {
+    name: `foreign pattern rows do not affect admission through ${alias}`,
+    async run(context) {
+      const seed = seeder(context.executor);
+      const { own, foreign } = orgOf(context);
+      await seedProject(seed, 'P1', own.orgId);
+      await seedSource(seed, 'S1', own.orgId, 'vcs');
+      await seedPackage(seed, 'K1', own.orgId, 'S1', 'acme/a');
+      const pattern = async (id: string, orgId: string, text: string, effect: string) => {
+        await seed(
+          'INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES (?, ?, ?, ?, ?, ?)',
+          id,
+          orgId,
+          'P1',
+          'S1',
+          text,
+          effect,
+        );
+      };
+      if (alias === 'im') await pattern('OWN', own.orgId, 'zzz/*', 'include');
+      const count = alias === 'ci' || alias === 'cx' ? 65 : 1;
+      for (let index = 0; index < count; index += 1) {
+        const text =
+          alias === 'bad'
+            ? 'acme/?'
+            : alias === 'i'
+              ? 'zzz/*'
+              : alias === 'im' || alias === 'x'
+                ? 'acme/*'
+                : `zzz/${String(index)}`;
+        await pattern(
+          `FOREIGN-${String(index)}`,
+          foreign.orgId,
+          text,
+          alias === 'cx' || alias === 'x' || alias === 'bad' ? 'exclude' : 'include',
+        );
+      }
+      expect(
+        await ids(
+          context,
+          db
+            .selectFrom('package as pkg')
+            .select('pkg.id')
+            .where(
+              admissionCondition(
+                own,
+                sql.lit('P1'),
+                col('pkg.source_id'),
+                col('pkg.name'),
+                col('pkg.visible_to_new_projects'),
+              ),
+            ),
+        ),
+      ).toEqual(alias === 'im' ? [] : ['K1']);
+    },
+  };
+}
 
 const proxyBlockedByForeignName: ContractCase = {
   name: 'a registered name of another organization does not block a proxy package',
@@ -564,10 +646,33 @@ const coveredByForeignName: ContractCase = {
       context.mutate(
         compile(
           db.selectNoFrom(
-            sql<number>`(${coveredByRegisteredNames(own, 'S1' as never, 'acme/a')})`.as('held'),
+            sql<number>`(${coveredByRegisteredNames(own, 'S1', 'composer', 'acme/a')})`.as('held'),
           ),
         ),
       ) as never,
+    );
+    expect(rows[0]?.held).toBe(0);
+  },
+};
+
+const coveredByOtherEcosystem: ContractCase = {
+  name: 'only a registered name of the requested ecosystem covers a key',
+  async run(context) {
+    const seed = seeder(context.executor);
+    const { own } = orgOf(context);
+    await seedSource(seed, 'S1', own.orgId, 'vcs');
+    await seed(
+      "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('R1', ?, 'S1', 'npm', 'acme/*')",
+      own.orgId,
+    );
+    const rows = await context.executor.all<{ held: number }>(
+      context.mutate(
+        compile(
+          db.selectNoFrom(
+            sql<number>`(${coveredByRegisteredNames(own, 'S1', 'composer', 'acme/a')})`.as('held'),
+          ),
+        ),
+      ),
     );
     expect(rows[0]?.held).toBe(0);
   },
@@ -707,6 +812,34 @@ const tagRemovalSpares: ContractCase = {
     expect(await historyCount(context)).toBe(0);
   },
 };
+
+function tagForeignRowCase(sameVersion: boolean): ContractCase {
+  return {
+    name: sameVersion
+      ? 'a foreign tag at the requested version does not suppress own history'
+      : 'a foreign tag is neither the previous value nor updated on conflict',
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      await seedTagFixture(context, { packageOrg: own.orgId, versionOrg: own.orgId });
+      await seeder(context.executor)(
+        "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K-NPM', 'latest', ?)",
+        foreign.orgId,
+        sameVersion ? 'V2' : 'V1',
+      );
+      expect(await applyTagPlan(context, { latest: '2.0.0' }, 'sync')).not.toBeNull();
+      const history = await context.executor.all<{ previous_version_id: string | null }>({
+        sql: "SELECT previous_version_id FROM dist_tag_history WHERE org_id = ? AND package_id = 'K-NPM' AND tag = 'latest'",
+        params: [own.orgId],
+      });
+      expect(history).toEqual([{ previous_version_id: null }]);
+      const tags = await context.executor.all<{ org_id: string; version_id: string }>({
+        sql: "SELECT org_id, version_id FROM dist_tag WHERE org_id = ? AND package_id = 'K-NPM' AND tag = 'latest'",
+        params: [foreign.orgId],
+      });
+      expect(tags).toEqual([{ org_id: foreign.orgId, version_id: sameVersion ? 'V2' : 'V1' }]);
+    },
+  };
+}
 
 const tagPlanStatements = (tagCountInRequest: number): readonly Statement[] => {
   const org = { orgId: '01J00000000000000000000A0A' } as OrgContext;
@@ -1753,7 +1886,7 @@ export const mutationTable: readonly MutationEntry[] = [
         reason: 'restricts the rows of the test query, not part of the builder',
       },
     ],
-    cases: [proxyShadowedByForeignPackage, proxyBlockedByForeignName],
+    cases: [proxyShadowedByForeignPackage, proxyShadowedByForeignSource, proxyBlockedByForeignName],
     predicates: [
       {
         name: 'proxy shadow check is scoped to the package organization',
@@ -1762,12 +1895,31 @@ export const mutationTable: readonly MutationEntry[] = [
         caseName: proxyShadowedByForeignPackage.name,
       },
       {
+        name: 'competing source is scoped to the package organization',
+        locate: ref('guard_qs', 'org_id', '"pkg"\\."org_id"'),
+        neutral: ALWAYS,
+        copies: 1,
+        caseName: proxyShadowedByForeignSource.name,
+      },
+      {
         name: 'registered name check is scoped to the package organization',
         locate: ref('guard_r', 'org_id', '"pkg"\\."org_id"'),
         neutral: ALWAYS,
         caseName: proxyBlockedByForeignName.name,
       },
     ],
+  },
+  {
+    builder: 'admissionCondition',
+    file: 'repositories/catalogue-predicates.ts',
+    cases: admissionAliases.map(admissionCase),
+    predicates: admissionAliases.map((alias) => ({
+      name: `${alias} pattern rows are scoped to the organization`,
+      locate: ref(`guard_${alias}`, 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      copies: 1,
+      caseName: admissionCase(alias).name,
+    })),
   },
   {
     builder: 'attachedSourceCondition',
@@ -1810,13 +1962,20 @@ export const mutationTable: readonly MutationEntry[] = [
   {
     builder: 'coveredByRegisteredNames',
     file: 'repositories/registered-name.ts',
-    cases: [coveredByForeignName],
+    cases: [coveredByForeignName, coveredByOtherEcosystem],
     predicates: [
       {
         name: 'registered name row is scoped to the organization',
         locate: ref('rn_cov', 'org_id', '\\?'),
         neutral: NOT_NULL,
         caseName: coveredByForeignName.name,
+      },
+      {
+        name: 'registered name matches the requested ecosystem',
+        locate: /rn_cov\.ecosystem = \?/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: coveredByOtherEcosystem.name,
       },
     ],
   },
@@ -1854,7 +2013,13 @@ export const mutationTable: readonly MutationEntry[] = [
         reason: 'the lease guard statement, owned by jobLeaseGuard (allowlisted)',
       },
     ],
-    cases: [tagOnForeignPackage, tagToForeignVersion, tagRemovalSpares],
+    cases: [
+      tagOnForeignPackage,
+      tagToForeignVersion,
+      tagRemovalSpares,
+      tagForeignRowCase(false),
+      tagForeignRowCase(true),
+    ],
     decisions: [revisionClockCheck(1), revisionClockCheck(3)],
     predicates: [
       {
@@ -1884,6 +2049,28 @@ export const mutationTable: readonly MutationEntry[] = [
         locate: ref('dist_tag', 'org_id', '\\?'),
         neutral: NOT_NULL,
         caseName: tagRemovalSpares.name,
+      },
+      {
+        name: 'previous tag value is scoped to the organization',
+        locate: /dist_tag\.org_id = \?(?=\s+AND dist_tag.tag = \?\))/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: tagForeignRowCase(false).name,
+      },
+      {
+        name: 'unchanged tag check is scoped to the organization',
+        locate:
+          /dist_tag\.org_id = \?(?=\s+AND dist_tag.tag = \? AND dist_tag.version_id = version.id)/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: tagForeignRowCase(true).name,
+      },
+      {
+        name: 'conflict update is scoped to the organization',
+        locate: /dist_tag\.org_id = \?(?= AND dist_tag.version_id IS NOT excluded.version_id)/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: tagForeignRowCase(false).name,
       },
     ],
   },
@@ -1966,8 +2153,6 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
   'repositories/ingest-session.ts#sweepStatements':
     'global maintenance intentionally spans orgs; same-org generation comparison has ingest-session-latest contract coverage but no mutation case yet',
   'repositories/blob-lease-guard.ts#blobLeaseNotLive': UNREGISTERED,
-  'repositories/catalogue-predicates.ts#admissionCondition':
-    'admission pattern rules carry no organization column; their scoping is project and source ids, which T716 registers',
   'repositories/catalogue-predicates.ts#winnerOrder': NO_ORG_COLUMN,
   'repositories/catalogue-read.ts#visibleWinner': UNREGISTERED,
   'repositories/catalogue-status.ts#quarantineStatements': UNREGISTERED,

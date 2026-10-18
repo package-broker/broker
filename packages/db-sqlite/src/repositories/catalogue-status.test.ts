@@ -365,6 +365,19 @@ describe('versionStatusStatements', () => {
     expect(await epoch()).toBe(before);
   });
 
+  it('leaves version.updated_at to reconciliation across status transitions', async () => {
+    const stamp = '2001-02-03T04:05:06.000Z';
+    await database.executor.batch([
+      stmt('UPDATE version SET updated_at = ? WHERE id = ?', stamp, VERSION),
+    ]);
+    await quarantine();
+    await transition('active', 'admin_release');
+    const rows = await database.executor.all(
+      stmt('SELECT updated_at FROM version WHERE id = ?', VERSION),
+    );
+    expect(rows).toEqual([{ updated_at: stamp }]);
+  });
+
   it('clears removed_upstream_at when releasing a previously removed version', async () => {
     await database.executor.batch([
       stmt(

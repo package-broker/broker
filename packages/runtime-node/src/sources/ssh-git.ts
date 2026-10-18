@@ -235,7 +235,7 @@ export async function openSshGitSession(
   const maxStdout = options.maxStdoutBytes ?? DEFAULT_MAX_STDOUT;
   const maxRepo = options.maxRepoBytes ?? DEFAULT_MAX_REPO;
 
-  const resolution = await options.dnsGuard.forTarget(target.host, target.port).resolve();
+  const resolution = await options.dnsGuard.forTarget(target.host, target.port, 'ssh').resolve();
   const addresses = orderAddresses(resolution.addresses);
   if (addresses.length === 0) throw new SshGitError('no_address');
 

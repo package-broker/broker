@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES } from '@package-broker/core/authz/permissions';
+import { DbError } from '@package-broker/core/db/errors';
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
@@ -170,6 +171,13 @@ async function body(response) {
   return response.text().catch(() => '<unreadable body>');
 }
 
+async function envelopeOf(response) {
+  return {
+    status: response.status,
+    body: (await body(response)).replace(/"requestId":"[^"]*"/, ''),
+  };
+}
+
 async function expectStatus(label, response, status) {
   if (response.status !== status) {
     throw new Error(
@@ -327,6 +335,51 @@ async function run() {
     const afterLogin = await send('/_pb/session', limitMs, { cookie: cookiesOf(loggedIn) });
     await expectStatus('/_pb/session after login', afterLogin, 200);
     console.log('smoke:cloudflare workerd: session after login ok');
+
+    step = 'uniform 401 for unusable credentials on /_pb/session';
+    const anonymous = await envelopeOf(await dispatch('/_pb/session', limitMs));
+    if (anonymous.status !== 401) {
+      throw new Error(`/_pb/session anonymous: expected 401, got ${anonymous.status}`);
+    }
+    for (const [label, headers] of [
+      ['bogus bearer', { authorization: 'Bearer pb_pat_bogus' }],
+      ['malformed bearer', { authorization: 'Bearer nonsense' }],
+      ['unknown session cookie', { cookie: '__Host-pb_session=nope' }],
+    ]) {
+      const refused = await envelopeOf(
+        await mf.dispatchFetch('http://broker.test/_pb/session', {
+          headers,
+          signal: AbortSignal.timeout(limitMs),
+        }),
+      );
+      if (refused.status !== anonymous.status || refused.body !== anonymous.body) {
+        throw new Error(
+          `/_pb/session ${label}: expected the anonymous 401 envelope, got ${JSON.stringify(refused)}`,
+        );
+      }
+    }
+    console.log('smoke:cloudflare workerd: unusable credentials share one 401 envelope');
+
+    step = 'foreign keys enforced on the D1 binding';
+    const insertGrant = (roleId) =>
+      executor.all({
+        sql: 'INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        params: [ulid(), orgId, 'email', 'fk@example.test', null, 'organization', null, roleId],
+      });
+    const fkFailure = await insertGrant(ulid()).then(
+      () => undefined,
+      (error) => error,
+    );
+    if (!(fkFailure instanceof DbError) || fkFailure.kind !== 'foreign_key') {
+      throw new Error('access_grant insert with an unknown role: expected DbError foreign_key');
+    }
+    const [role] = await executor.all({
+      sql: "SELECT id FROM role WHERE org_id = ? AND scope = 'organization' LIMIT 1",
+      params: [orgId],
+    });
+    if (role === undefined) throw new Error('no organization role');
+    await insertGrant(role.id);
+    console.log('smoke:cloudflare workerd: D1 enforces foreign keys');
 
     step = 'done';
     console.log('smoke:cloudflare ok');

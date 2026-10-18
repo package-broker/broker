@@ -1,4 +1,4 @@
-import type { IdentityContext } from '@package-broker/core/identity/port';
+import type { IdentityContext } from '@package-broker/core/plugin';
 
 export type BoundedFetchFailure =
   'redirect' | 'status' | 'content_type' | 'too_large' | 'timeout' | 'network' | 'bad_json';

@@ -13,7 +13,7 @@ The product must run on Cloudflare Workers and as a Docker image for operators o
 ### Decision
 
 - Ship two runtimes, `runtime-cloudflare` and `runtime-node`, over one core.
-- Core code depends only on ports: database, migration runner, blob store, cache, job, session, observability, secrets, identity and source provider.
+- Core code depends only on ports: database, migration runner, blob store, cache, job, observability, identity and source provider.
 - Cloudflare bindings: D1 (SQLite dialect), R2 (`BlobStore`), Queues plus Cron Triggers (jobs), Durable Objects (fetch coalescing), Workers Logs and Analytics Engine.
 - Docker bindings: `better-sqlite3` on SQLite, filesystem or S3-compatible storage, a database queue with leases, heartbeats, fencing and dead letters, single replica.
 - The Workers Paid plan ($5/month) is a documented prerequisite for a working service. No Free-plan mode is built. The requirement is recorded in the deployment documentation and the README requirement list.

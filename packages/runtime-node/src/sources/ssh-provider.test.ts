@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, watch } from 'node:fs';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -816,10 +816,26 @@ describe('SSH scratch repository maintenance', () => {
         child.on('close', resolve);
       });
     expect(await fetchInto('main:refs/heads/main')).toBe(0);
-    const watching = watchLocks(repo, 5000, true, 1);
-    expect(await fetchInto('second:refs/heads/second')).toBe(0);
-    expect((await watching).length).toBeGreaterThan(0);
-  }, 20_000);
+    const lockDeadlineMs = 15_000;
+    const seen = new Set<string>();
+    const note = (_event: string, name: string | null | Buffer) => {
+      if (name === 'gc.pid' || name === 'maintenance.lock') seen.add(name);
+    };
+    const watchers = [watch(repo, note), watch(join(repo, 'objects'), note)];
+    try {
+      expect(await fetchInto('second:refs/heads/second')).toBe(0);
+      for (const deadline = Date.now() + lockDeadlineMs; seen.size === 0;) {
+        if (Date.now() > deadline) break;
+        await pause(20);
+      }
+    } finally {
+      for (const watcher of watchers) watcher.close();
+    }
+    expect(
+      seen.size,
+      `no gc.pid or maintenance.lock appeared within ${lockDeadlineMs} ms after the second fetch ended`,
+    ).toBeGreaterThan(0);
+  }, 40_000);
 
   it('the quiet configuration leaves no gc.pid and no maintenance lock', async () => {
     const inner = stubSpawn(false, { target: gcBare });

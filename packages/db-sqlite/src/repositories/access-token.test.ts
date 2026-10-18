@@ -41,6 +41,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 
 const ORG_PERMISSIONS = ['org:read', 'org:users:write', 'project:read', 'project:packages:read'];
@@ -190,7 +191,7 @@ interface TokenOptions {
   readonly org?: OrgContext;
   readonly userId?: string;
   readonly projectId?: string | null;
-  readonly mode?: 'all' | 'selected';
+  readonly mode?: 'all' | 'selected' | null;
   readonly scopes?: string;
   readonly readOnly?: number;
   readonly validationKind?: 'sso' | 'local' | null;
@@ -215,7 +216,7 @@ function pat(label: string, options: TokenOptions = {}): Statement {
     options.readOnly ?? 0,
     options.userId ?? U1,
     options.projectId ?? null,
-    options.mode ?? 'all',
+    options.mode === undefined ? 'all' : options.mode,
     validationKind,
     validationKind === 'sso' ? identityId : null,
     options.expiresAt ?? at(HOUR),
@@ -990,6 +991,38 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
     }
   });
 
+  it('reports a failed binding check on the envelope', async () => {
+    await seed(
+      principal(SP1, 'ci', P1, U3),
+      svc('svc-skew2', SP1, { projectId: P2 }),
+      svc('svc-ok', SP1, { projectId: P1 }),
+      pat('pat-bound2', { projectId: P1 }),
+      pat('pat-free'),
+    );
+
+    expect((await lookup('svc-skew2'))?.token.bindingOk).toBe(false);
+    expect((await lookup('pat-bound2'))?.token.bindingOk).toBe(false);
+    expect((await lookup('svc-ok'))?.token.bindingOk).toBe(true);
+    expect((await lookup('pat-free'))?.token.bindingOk).toBe(true);
+  });
+
+  it('refuses a PAT without a project mode at the schema and reports a stored one', async () => {
+    await expect(seed(pat('pat-nomode', { mode: null }))).rejects.toThrow(/constraint/i);
+    await seed(pat('pat-mode', { mode: 'selected' }));
+
+    expect((await lookup('pat-mode'))?.token.projectMode).toBe('selected');
+  });
+
+  it('reports a null scope for a read_only flag that disagrees with the scope list', async () => {
+    await seed(
+      pat('pat-skew', { scopes: '["write"]', readOnly: 1 }),
+      pat('pat-garbled', { scopes: '["bogus"]' }),
+    );
+
+    expect((await lookup('pat-skew'))?.token.scope).toBeNull();
+    expect((await lookup('pat-garbled'))?.token.scope).toBeNull();
+  });
+
   it('derives the project mode and denies a missing or unknown one', () => {
     expect(tokenProjectMode('pat', null, null)).toBeNull();
     expect(tokenProjectMode('pat', 'bogus', null)).toBeNull();
@@ -1004,8 +1037,22 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
 
     for (const anchors of [
       [],
-      [{ provider: 'oidc', anchor: 'https://changed.example.test', emailAuthoritative: true }],
-      [{ provider: 'other', anchor: ANCHOR, emailAuthoritative: true }],
+      [
+        {
+          provider: 'oidc',
+          anchor: 'https://changed.example.test',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ],
+      [
+        {
+          provider: 'other',
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ],
     ]) {
       const result = await lookup('pat-anchor', { providerAnchors: anchors });
       expect(result?.validation?.fresh).toBe(false);
@@ -1117,6 +1164,7 @@ describe('bound parameters', () => {
       provider: `idp${index}`,
       anchor: `https://idp${index}.example.test/"quoted"/'single'/\\`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
 
   for (const boundary of ['project', 'organization'] as const) {
@@ -1334,6 +1382,7 @@ describe('lookupToken projectVisible', () => {
       provider: `idp${index}`,
       anchor: `https://idp${index}.example.test`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
 
     const statement = lookupTokenStatement(a, input('pat-params', { providerAnchors: anchors }));

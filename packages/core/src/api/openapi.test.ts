@@ -4,6 +4,7 @@ import { generateOpenApi } from './openapi.js';
 import { IF_MATCH, defineApi, type ApiRouteSpec } from './route.js';
 import { toJsonSchema, type JsonValue } from './json-schema.js';
 
+import { API_ERROR_CODES } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 
 const info = { title: 'Package Broker', version: '2.0.0' };
@@ -412,4 +413,35 @@ describe('generateOpenApi', () => {
     );
     expect(document()).not.toHaveProperty('servers');
   });
+});
+
+describe('OpenAPI follow-ups', () => {
+  it('labels duplicate path and method errors', () => {
+    expect(() =>
+      generateOpenApi(
+        [specs[0]!, { ...specs[0]!, api: { ...specs[0]!.api, operationId: 'otherStatus' } }],
+        info,
+      ),
+    ).toThrow('GET /_pb/status: Duplicate path and method');
+  });
+  it.each([
+    [
+      409,
+      'Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required',
+    ],
+    [503, API_ERROR_CODES.unavailable.message],
+    [418, 'Error'],
+  ] as const)(
+    'describes declared error %s from the code table when available',
+    (status, description) => {
+      const doc = generateOpenApi(
+        [{ ...specs[0]!, api: { ...specs[0]!.api, responses: { 200: result, [status]: null } } }],
+        info,
+      );
+      expect(doc.paths['/_pb/status']!.get!.responses).toHaveProperty(
+        `${status}.description`,
+        description,
+      );
+    },
+  );
 });

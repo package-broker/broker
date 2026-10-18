@@ -31,6 +31,7 @@ export function catalogueDiagnostics(
   const problems = routes.flatMap((route) =>
     routeBoundaryProblems(route, labelOf(route), {
       allowSelf: route.plugin === CORE_PLUGIN,
+      allowAuthenticated: route.plugin === CORE_PLUGIN,
       ...(packageResolver === undefined ? {} : { packageResolver }),
     }),
   );

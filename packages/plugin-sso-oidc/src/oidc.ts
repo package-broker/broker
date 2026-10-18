@@ -1,13 +1,12 @@
 import {
   base64urlEncode,
   constantTimeEqual,
-  randomToken,
-  sha256Hex,
-} from '@package-broker/core/auth/primitives';
-import {
   isReservedProviderId,
   isValidProviderId,
   isValidTrustAnchor,
+  providerSecretName,
+  randomToken,
+  sha256Hex,
   type DomainPolicy,
   type IdentityContext,
   type IdentityFailure,
@@ -15,8 +14,7 @@ import {
   type IdentityResult,
   type LoginStateData,
   type StartResult,
-} from '@package-broker/core/identity/port';
-import { providerSecretName } from '@package-broker/core/identity/providers';
+} from '@package-broker/core/plugin';
 import {
   checkPolicy,
   copyList,

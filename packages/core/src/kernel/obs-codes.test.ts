@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DbErrorKind } from '../db/errors.js';
 import { INPUT_PLUGIN } from './authorize.js';
 import {
+  AUDIT_EVENTS,
   KERNEL_EVENTS,
   KERNEL_REASON_CODES,
   dbReason,
@@ -17,6 +18,16 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
+  it('has exactly the 2 audit events', () => {
+    expect([...AUDIT_EVENTS].sort()).toEqual(['audit.seal.contended', 'audit.sealed']);
+    expect(Object.isFrozen(AUDIT_EVENTS)).toBe(true);
+    for (const value of AUDIT_EVENTS) expect(value).toMatch(CODE);
+    expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
+    expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
+    expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
+    expect(AUDIT_EVENTS.size).toBe(2);
+  });
+
   it('has exactly the 4 kernel events', () => {
     expect([...KERNEL_EVENTS].sort()).toEqual(
       ['authz.denied', 'authz.error', 'http.error', 'http.request'].sort(),

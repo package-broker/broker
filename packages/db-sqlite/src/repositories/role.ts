@@ -4,6 +4,7 @@ import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fe
 import {
   DEFAULT_ROLES,
   isPermission,
+  PERMISSIONS,
   type DefaultRoleKey,
 } from '@package-broker/core/authz/permissions';
 import type {
@@ -104,7 +105,7 @@ const loose = db as unknown as Kysely<LooseDatabase>;
 
 export interface RoleRepositoryOptions {
   /** Trust anchors the actor's e-mail and group evidence is checked against; none means local administrators only. */
-  readonly providerAnchors?: readonly ProtectedHolderProvider[];
+  readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
 interface AuthorityScope {
@@ -151,7 +152,8 @@ function actorAuthority(
   );
   const old = within(
     sql`select op.permission from role_permission op
-        where op.org_id = ${org} and op.role_id = ${scope.oldRoleId ?? null}`,
+        where op.org_id = ${org} and op.role_id = ${scope.oldRoleId ?? null}
+          and op.permission in (select value from json_each(${JSON.stringify(PERMISSIONS.map(({ name }) => name))}))`,
   );
   return sql<SqlBool>`(
     exists (
@@ -387,9 +389,12 @@ interface RoleFacts {
 
 export function createRoleRepository(
   executor: ScalarSqlExecutor,
-  options: RoleRepositoryOptions = {},
+  options: RoleRepositoryOptions,
 ): RoleRepository {
-  const providers = options.providerAnchors ?? [];
+  if (!Array.isArray(options?.providerAnchors)) {
+    throw new TypeError('providerAnchors must be supplied explicitly');
+  }
+  const providers = options.providerAnchors;
 
   async function facts(ctx: OrgContext, id: string): Promise<RoleFacts | null> {
     const rows = await run<RoleFacts>(

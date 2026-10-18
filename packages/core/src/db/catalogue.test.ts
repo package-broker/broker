@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { ActorContext } from '../authz/administration.js';
 import type { ProjectActor } from '../authz/project-actor.js';
+import { MetadataError, normalizeVersionMetadata } from '../catalogue/metadata.js';
 import type { Statement } from './port.js';
 import {
   ABSENCE_MIN_NOT_FOUND,
@@ -239,5 +240,60 @@ describe('validateLimit', () => {
     expect(CATALOGUE_SYNC_VERSIONS_PER_CALL).toBe(50);
     expect(ABSENCE_MIN_NOT_FOUND).toBe(2);
     expect(ABSENCE_MIN_SPAN_MS).toBe(3_600_000);
+  });
+});
+
+describe('normalized metadata writer boundary', () => {
+  const literal = {
+    json: '{}',
+    license: null,
+    deprecatedMessage: null,
+    composerShasum: null,
+    npmIntegrity: null,
+  };
+
+  it('rejects structural metadata in syncPackage', () => {
+    type Metadata = Parameters<CatalogueWriter['syncPackage']>[2]['versions'][number]['metadata'];
+    // @ts-expect-error metadata must come from the normaliser
+    const metadata: Metadata = literal;
+    expect(metadata).toBe(literal);
+  });
+
+  it('rejects structural metadata in VersionInput', () => {
+    // @ts-expect-error metadata must come from the normaliser
+    const metadata: VersionInput['metadata'] = literal;
+    expect(metadata).toBe(literal);
+  });
+
+  it('rejects replacing normalized json through a spread', () => {
+    const normalized = normalizeVersionMetadata('composer', {});
+    // @ts-expect-error replacement json must come from the normaliser
+    const metadata: VersionInput['metadata'] = { ...normalized, json: '{}' };
+    expect(metadata.json).toBe('{}');
+  });
+
+  it('rejects assigning normalized json', () => {
+    const metadata = normalizeVersionMetadata('composer', {});
+    // @ts-expect-error normalized fields are readonly
+    metadata.json = '{}';
+    // @ts-expect-error even normalized json cannot replace a readonly field
+    metadata.json = normalizeVersionMetadata('composer', {}).json;
+    expect(metadata.json).toBe('{}');
+  });
+
+  it('normaliser rejects userinfo credentials', () => {
+    const url = new URL('https://dist.example/package.zip');
+    url.username = 'fixture-user';
+    expect(() => normalizeVersionMetadata('composer', { dist: { url: url.href } })).toThrow(
+      MetadataError,
+    );
+  });
+
+  it('normaliser rejects credential parameters', () => {
+    const url = new URL('https://dist.example/package.tgz');
+    url.searchParams.set('token', 'fixture-value');
+    expect(() => normalizeVersionMetadata('npm', { dist: { tarball: url.href } })).toThrow(
+      MetadataError,
+    );
   });
 });

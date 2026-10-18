@@ -1,6 +1,7 @@
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp, isUlid } from '../ids.js';
+import { isPermissionView, type PermissionView } from './actor.js';
 import type { ActorContext, AdminLog } from './administration.js';
 import type { MutationFence } from './fence.js';
 import type { ProjectActor } from './project-actor.js';
@@ -140,7 +141,7 @@ const OPERATIONS: ReadonlySet<string> = new Set([
 ]);
 interface OrgActor {
   readonly userId: string;
-  readonly permissions: ReadonlySet<string>;
+  readonly permissions: PermissionView;
 }
 
 const UNSAFE_NAME_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
@@ -206,8 +207,8 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
     if (typeof raw !== 'object' || raw === null) return null;
     const { userId, permissions, kind } = raw as Record<string, unknown>;
     if (kind !== scope) return null;
-    if (typeof userId !== 'string' || userId === '' || !(permissions instanceof Set)) return null;
-    return { userId, permissions: permissions as ReadonlySet<string> };
+    if (typeof userId !== 'string' || userId === '' || !isPermissionView(permissions)) return null;
+    return { userId, permissions };
   }
 
   function requireFence(actor: OrgActor, fence: MutationFence | undefined): MutationFence {

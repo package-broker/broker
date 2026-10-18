@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, watch } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,6 +48,8 @@ let archiveCalls: number;
 let showCalls: number;
 let tzBare: string;
 let gcBare: string;
+let trunkBare: string;
+let movedHeadBare: string;
 
 function git(cwd: string, args: string[], date?: string): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], {
@@ -125,6 +127,17 @@ beforeAll(async () => {
   git(gc, ['commit', '-q', '-m', 'second'], DATES.feature);
   gcBare = join(root, 'gc.git');
   git(root, ['clone', '-q', '--bare', gc, gcBare]);
+
+  const trunk = join(root, 'trunk');
+  git(root, ['init', '-q', '-b', 'main', trunk]);
+  commitComposer(trunk, { name: 'other/main-branch' }, DATES.main);
+  git(trunk, ['checkout', '-q', '-b', 'trunk']);
+  commitComposer(trunk, { name: 'acme/lib' }, DATES.feature);
+  trunkBare = join(root, 'trunk.git');
+  git(root, ['clone', '-q', '--bare', trunk, trunkBare]);
+  movedHeadBare = join(root, 'moved-head.git');
+  git(root, ['clone', '-q', '--bare', trunkBare, movedHeadBare]);
+  git(movedHeadBare, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
 
   const alt = join(root, 'alt');
   git(root, ['init', '-q', '-b', 'main', alt]);
@@ -582,6 +595,29 @@ describe('SSH ref metadata', () => {
     expect(await snapshotOf(bare)).toEqual(await snapshotOf(clean));
   });
 
+  it('prefers the remote default branch over main when resolving the package name', async () => {
+    const page = await provider(memoryStore(), false, undefined, {
+      target: trunkBare,
+    }).listPackages?.(ctx, source(), null);
+    expect(page).toMatchObject({ names: ['acme/lib'], last: true });
+  });
+
+  it('changes the snapshot id when HEAD moves to another branch', async () => {
+    const snapshotOf = async (target: string) => {
+      const result = await provider(memoryStore(), false, undefined, { target }).describe(
+        ctx,
+        source({ packageName: 'acme/lib' }),
+        'acme/lib',
+        {},
+      );
+      if (result.kind !== 'found') throw new Error('expected found');
+      return result.description.snapshot.id;
+    };
+    const before = await snapshotOf(trunkBare);
+    expect(await snapshotOf(trunkBare)).toBe(before);
+    expect(await snapshotOf(movedHeadBare)).not.toBe(before);
+  });
+
   it('normalizes commit times to UTC and forbids lazy fetches', async () => {
     const envs: Record<string, string | undefined>[] = [];
     const inner = stubSpawn(false, { target: tzBare });
@@ -715,6 +751,89 @@ describe('SSH scratch repository maintenance', () => {
       packs = packCount(repo);
     }
     expect(packs).toBe(1);
+  });
+
+  const lockFiles = (repo: string): string[] =>
+    ['gc.pid', join('objects', 'maintenance.lock')].filter((file) => existsSync(join(repo, file)));
+  const watchLocks = async (
+    repo: string,
+    ms: number,
+    stopOnSight: boolean,
+    every = 5,
+  ): Promise<string[]> => {
+    const seen = new Set<string>();
+    for (const deadline = Date.now() + ms; Date.now() < deadline;) {
+      for (const file of lockFiles(repo)) seen.add(file);
+      if (stopOnSight && seen.size > 0) break;
+      await pause(every);
+    }
+    return [...seen];
+  };
+
+  it('control: with gc.auto=1 the second fetch leaves a gc.pid or maintenance lock', async () => {
+    const repo = join(root, `gc-lock-control-${Date.now()}.git`);
+    git(root, ['init', '-q', '--bare', repo]);
+    const fetchInto = (refspec: string) =>
+      new Promise<number | null>((resolve) => {
+        const child = spawn(
+          'git',
+          [`--git-dir=${repo}`, 'fetch', '--no-tags', '--depth=1', `file://${gcBare}`, refspec],
+          {
+            stdio: 'ignore',
+            env: {
+              PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+              HOME: root,
+              GIT_CONFIG_NOSYSTEM: '1',
+              GIT_ALLOW_PROTOCOL: 'file',
+              ...autoGcEnv,
+            },
+          },
+        );
+        child.on('error', () => resolve(null));
+        child.on('close', resolve);
+      });
+    expect(await fetchInto('main:refs/heads/main')).toBe(0);
+    const lockDeadlineMs = 15_000;
+    const seen = new Set<string>();
+    const note = (_event: string, name: string | null | Buffer) => {
+      if (name === 'gc.pid' || name === 'maintenance.lock') seen.add(name);
+    };
+    const watchers = [watch(repo, note), watch(join(repo, 'objects'), note)];
+    try {
+      expect(await fetchInto('second:refs/heads/second')).toBe(0);
+      for (const deadline = Date.now() + lockDeadlineMs; seen.size === 0;) {
+        if (Date.now() > deadline) break;
+        await pause(20);
+      }
+    } finally {
+      for (const watcher of watchers) watcher.close();
+    }
+    expect(
+      seen.size,
+      `no gc.pid or maintenance.lock appeared within ${lockDeadlineMs} ms after the second fetch ended`,
+    ).toBeGreaterThan(0);
+  }, 40_000);
+
+  it('the quiet configuration leaves no gc.pid and no maintenance lock', async () => {
+    const inner = stubSpawn(false, { target: gcBare });
+    const session = await openFixtureSession(gcBare, (command, args, options) =>
+      inner(command, args, { ...options, env: { ...autoGcEnv, ...options.env } }),
+    );
+    try {
+      await session.lsRemote();
+      await session.fetchRefs(['refs/heads/main'], { filter: 'none', depth: 1 });
+      const scratch = readdirSync(root).find((entry) => entry.startsWith('ssh-git-')) ?? '';
+      const repo = join(root, scratch, 'repo.git');
+      expect(existsSync(join(repo, 'objects'))).toBe(true);
+      const during = watchLocks(repo, 1500, false);
+      await session.fetchRefs(['refs/heads/second'], { filter: 'none', depth: 1 });
+      const after = watchLocks(repo, 1500, false);
+      expect(await during).toEqual([]);
+      expect(await after).toEqual([]);
+      expect(lockFiles(repo)).toEqual([]);
+    } finally {
+      await session.close();
+    }
   });
 
   it('the flagged session never starts gc or maintenance', async () => {

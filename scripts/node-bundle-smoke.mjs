@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { cp, mkdtemp, realpath, rename, rm } from 'node:fs/promises';
+import { createHmac } from 'node:crypto';
+import { cp, mkdtemp, readFile, realpath, rename, rm } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,10 @@ const REQUEST_TIMEOUT_MS = 2_000;
 const EXIT_TIMEOUT_MS = 5_000;
 const DEFAULT_DEADLINE_MS = 60_000;
 const BREAK = process.argv.includes('--break');
+const CLI = join(REPO_ROOT, 'packages', 'cli', 'dist', 'bin.js');
+const ADMIN_EMAIL = 'admin@smoke.test';
+const ADMIN_PASSWORD = 'smoke horse battery staple 42';
+const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
 function positiveInteger(name, raw, fallback) {
   if (raw === undefined || raw === '') return fallback;
@@ -65,6 +70,96 @@ async function request(url, expected) {
     throw new Error(`${url}: expected ${expected}, got ${response.status}: ${body}`);
   }
   return body;
+}
+
+function base32Decode(text) {
+  const bytes = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const char of text) {
+    const value = BASE32.indexOf(char);
+    if (value < 0) throw new Error('the setup secret is not base32');
+    buffer = (buffer << 5) | value;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((buffer >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+    buffer &= (1 << bits) - 1;
+  }
+  return Buffer.from(bytes);
+}
+
+function totpCode(secret, step) {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(step));
+  const digest = createHmac('sha1', secret).update(counter).digest();
+  const offset = digest[digest.length - 1] & 15;
+  const binary = digest.readUInt32BE(offset) & 0x7fffffff;
+  return String(binary % 1_000_000).padStart(6, '0');
+}
+
+function cookieHeader(response) {
+  return response.headers
+    .getSetCookie()
+    .map((line) => line.split(';')[0])
+    .join('; ');
+}
+
+function post(base, route, body, headers = {}) {
+  return fetch(`${base}${route}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: base, ...headers },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+}
+
+async function expectStatus(response, expected, label) {
+  if (response.status !== expected) {
+    const body = await response.text().catch(() => '<unreadable body>');
+    throw new Error(`${label}: expected ${expected}, got ${response.status}: ${body}`);
+  }
+}
+
+async function mintSession(base, database) {
+  const tokenFile = join(copy, 'setup-token');
+  const issued = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      'admin',
+      'bootstrap',
+      '--email',
+      ADMIN_EMAIL,
+      '--sqlite',
+      database,
+      '--token-file',
+      tokenFile,
+    ],
+    { cwd: REPO_ROOT, encoding: 'utf8' },
+  );
+  if (issued.status !== 0) {
+    throw new Error(`pb admin bootstrap exited with ${issued.status}: ${issued.stderr}`);
+  }
+  const token = (await readFile(tokenFile, 'utf8')).trim();
+  const started = await post(base, '/_pb/auth/local/setup/start', { token });
+  await expectStatus(started, 200, 'POST /_pb/auth/local/setup/start');
+  const secret = base32Decode((await started.json()).secret);
+  const now = Math.floor(Date.now() / 30_000);
+  const finished = await post(base, '/_pb/auth/local/setup/finish', {
+    token,
+    password: ADMIN_PASSWORD,
+    code: totpCode(secret, now - 1),
+  });
+  await expectStatus(finished, 204, 'POST /_pb/auth/local/setup/finish');
+  const login = await post(base, '/_pb/auth/local/login', {
+    email: ADMIN_EMAIL,
+    password: ADMIN_PASSWORD,
+    code: totpCode(secret, now),
+  });
+  await expectStatus(login, 204, 'POST /_pb/auth/local/login');
+  return cookieHeader(login);
 }
 
 let step = 'startup';
@@ -149,7 +244,7 @@ async function run() {
     PB_ORG_SLUG: 'smoke',
     PB_ORG_NAME: 'Smoke',
     PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
-    PB_PUBLIC_URL: 'http://127.0.0.1',
+    PB_PUBLIC_URL: `http://127.0.0.1:${port}`,
     PB_BLOB_ROOT: join(copy, 'data', 'blobs'),
     DEPLOYMENT_ID: 'smoke',
   };
@@ -181,6 +276,20 @@ async function run() {
     throw new Error(`/nope: expected error.code "not_found", got ${JSON.stringify(envelope)}`);
   }
   console.log('smoke:node GET /nope 404 error.code=not_found');
+
+  step = 'checking the authenticated route';
+  const anonymous = await fetch(`${base}/_pb/session`, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  await expectStatus(anonymous, 401, 'GET /_pb/session without credentials');
+  console.log('smoke:node GET /_pb/session without credentials 401');
+  const cookie = await mintSession(base, env['PB_SQLITE_PATH']);
+  const signedIn = await fetch(`${base}/_pb/session`, {
+    headers: { cookie },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  await expectStatus(signedIn, 200, 'GET /_pb/session with the minted session');
+  console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
 
   step = 'shutting down';
   child.kill('SIGTERM');

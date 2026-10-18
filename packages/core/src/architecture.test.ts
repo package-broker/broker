@@ -519,8 +519,13 @@ const ACCESS_CONTEXT_RULE: ImportRule = {
       'organizationActorOf',
       'authenticatedActorOf',
     ],
-    'packages/core/src/authz/engine': ['engineGrantOf', 'packageActorOf'],
-    'packages/core/src/kernel/package-context': ['setResolvedPackage'],
+    'packages/core/src/authz/engine': ['engineGrantOf'],
+    'packages/core/src/internal/package-actor': [
+      'packageActorOf',
+      'setPackageActor',
+      'clearPackageActor',
+    ],
+    'packages/core/src/internal/package-context': ['setResolvedPackage'],
   },
   allowedRoots: [
     'packages/core/src/',

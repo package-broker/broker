@@ -135,6 +135,34 @@ const tagRemovalSpares: ContractCase = {
   },
 };
 
+function tagForeignRowCase(sameVersion: boolean): ContractCase {
+  return {
+    name: sameVersion
+      ? 'a foreign tag at the requested version does not suppress own history'
+      : 'a foreign tag is neither the previous value nor updated on conflict',
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      await seedTagFixture(context, { packageOrg: own.orgId, versionOrg: own.orgId });
+      await seeder(context.executor)(
+        "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K-NPM', 'latest', ?)",
+        foreign.orgId,
+        sameVersion ? 'V2' : 'V1',
+      );
+      expect(await applyTagPlan(context, { latest: '2.0.0' }, 'sync')).not.toBeNull();
+      const history = await context.executor.all<{ previous_version_id: string | null }>({
+        sql: "SELECT previous_version_id FROM dist_tag_history WHERE org_id = ? AND package_id = 'K-NPM' AND tag = 'latest'",
+        params: [own.orgId],
+      });
+      expect(history).toEqual([{ previous_version_id: null }]);
+      const tags = await context.executor.all<{ org_id: string; version_id: string }>({
+        sql: "SELECT org_id, version_id FROM dist_tag WHERE org_id = ? AND package_id = 'K-NPM' AND tag = 'latest'",
+        params: [foreign.orgId],
+      });
+      expect(tags).toEqual([{ org_id: foreign.orgId, version_id: sameVersion ? 'V2' : 'V1' }]);
+    },
+  };
+}
+
 const tagsAdvanceOnce: ContractCase = {
   name: 'multiple tag changes advance the package revision once per batch',
   async run(context) {
@@ -189,7 +217,14 @@ export const entries: readonly MutationEntry[] = [
         reason: 'the lease guard statement, owned by the jobLeaseGuard registration',
       },
     ],
-    cases: [tagOnForeignPackage, tagToForeignVersion, tagRemovalSpares, tagsAdvanceOnce],
+    cases: [
+      tagOnForeignPackage,
+      tagToForeignVersion,
+      tagRemovalSpares,
+      tagsAdvanceOnce,
+      tagForeignRowCase(false),
+      tagForeignRowCase(true),
+    ],
     batchDecisions: [
       {
         name: 'package revision advances once for multiple tags',
@@ -227,6 +262,28 @@ export const entries: readonly MutationEntry[] = [
         locate: ref('dist_tag', 'org_id', '\\?'),
         neutral: NOT_NULL,
         caseName: tagRemovalSpares.name,
+      },
+      {
+        name: 'previous tag value is scoped to the organization',
+        locate: /dist_tag\.org_id = \?(?=\s+AND dist_tag.tag = \?\))/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: tagForeignRowCase(false).name,
+      },
+      {
+        name: 'unchanged tag check is scoped to the organization',
+        locate:
+          /dist_tag\.org_id = \?(?=\s+AND dist_tag.tag = \? AND dist_tag.version_id = version.id)/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: tagForeignRowCase(true).name,
+      },
+      {
+        name: 'conflict update is scoped to the organization',
+        locate: /dist_tag\.org_id = \?(?= AND dist_tag.version_id IS NOT excluded.version_id)/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: tagForeignRowCase(false).name,
       },
     ],
   },

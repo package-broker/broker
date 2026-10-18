@@ -189,6 +189,22 @@ export function describeExecutorContract(name: string, open: () => Promise<Opene
       });
     });
 
+    it('rejects 201 statements before executing any SQL, and accepts 200', async () => {
+      await withExecutor(open, async (executor) => {
+        await createTables(executor, 'CREATE TABLE batch_budget (value TEXT)');
+        const insert = { sql: 'INSERT INTO batch_budget VALUES (?)', params: ['private-value'] };
+        const error = await rejection(executor.batch(Array.from({ length: 201 }, () => insert)));
+        expect(error).toBeInstanceOf(DbError);
+        expect((error as DbError).kind).toBe('too_big');
+        expect((error as Error).message).not.toContain('private-value');
+        expect((error as Error).message).not.toContain(insert.sql);
+        expect(await executor.all({ sql: 'SELECT * FROM batch_budget', params: [] })).toEqual([]);
+        const results = await executor.batch(Array.from({ length: 200 }, () => insert));
+        expect(results).toHaveLength(200);
+        expect(results.every((result) => result.changes === 1)).toBe(true);
+      });
+    });
+
     it('9. an unsafe integer parameter rejects with TypeError', async () => {
       await withExecutor(open, async (executor) => {
         const unsafe = 2 ** 53;

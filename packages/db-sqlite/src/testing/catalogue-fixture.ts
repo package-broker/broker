@@ -1,8 +1,14 @@
+import {
+  D1_STATEMENTS_PER_BATCH,
+  D1_STATEMENTS_PER_INVOCATION,
+} from '@package-broker/core/db/port';
 import type { ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import type { CatalogueSourceType } from '@package-broker/core/db/catalogue';
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import { isValidPattern } from '@package-broker/core/catalogue/patterns';
 import { deriveVisibility, type VisibilityConfig } from '@package-broker/core/catalogue/visibility';
+
+export { D1_STATEMENTS_PER_INVOCATION } from '@package-broker/core/db/port';
 
 export interface FixtureOrganization {
   readonly id: string;
@@ -91,9 +97,8 @@ const ORGANIZATIONS: readonly FixtureOrganization[] = [
   { id: '01J00000000000000000000B0B', slug: 'org-b', name: 'Organization B' },
 ];
 
-const STATEMENTS_PER_BATCH = 200;
-/** D1 allows 500 statements per invocation; seedCatalogue refuses a configuration that needs more unless told otherwise. */
-export const D1_STATEMENTS_PER_INVOCATION = 500;
+const STATEMENTS_PER_BATCH = D1_STATEMENTS_PER_BATCH;
+
 const FIXED_TIME = '2020-01-01T00:00:00.000Z';
 const NON_PROXY_TYPES: Record<NameEcosystem, readonly CatalogueSourceType[]> = {
   composer: ['vcs', 'composer_repository', 'hosted'],

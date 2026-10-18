@@ -1,3 +1,4 @@
+import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
 import {
@@ -577,4 +578,21 @@ describe('versionInsertStatements', () => {
     ).toThrow(TypeError);
     expect(await versions()).toEqual([]);
   });
+});
+
+it('rejects an oversized planned batch including its lease guard', () => {
+  const oversized = registerCatalogueWriteGuard(
+    org,
+    Array.from({ length: 200 }, () => ({
+      sql: 'SELECT 1',
+      params: [],
+    })),
+  );
+  expect(() =>
+    versionInsertStatements(org, oversized, {
+      packageId: PACKAGE,
+      ecosystem: 'composer',
+      versions: [composerInput('1.0.0', '1.0.0.0')],
+    }),
+  ).toThrowError(expect.objectContaining({ name: 'DbError', kind: 'too_big' }));
 });

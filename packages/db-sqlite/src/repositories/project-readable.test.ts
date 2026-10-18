@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ActorContext, Permission } from '@package-broker/core/authz/administration';
 import { createProjectLister } from '@package-broker/core/authz/project-list';
@@ -71,9 +72,7 @@ function projectId(n: number): string {
 }
 
 async function seed(...statements: Statement[]): Promise<void> {
-  for (let i = 0; i < statements.length; i += 500) {
-    await executor.batch(statements.slice(i, i + 500));
-  }
+  await seedStatements(executor, statements);
 }
 
 function role(

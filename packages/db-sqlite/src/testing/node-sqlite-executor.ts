@@ -1,5 +1,9 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { DbError, classifySqliteError } from '@package-broker/core/db/errors';
+import {
+  assertBatchStatementCount,
+  DbError,
+  classifySqliteError,
+} from '@package-broker/core/db/errors';
 import type {
   SqlExecutor,
   SqlValue,
@@ -132,6 +136,7 @@ export function openNodeSqliteExecutor(
       }
     },
     async batch(statements: readonly Statement[]): Promise<StatementResult[]> {
+      assertBatchStatementCount(statements.length);
       if (statements.length === 0) return [];
       for (const statement of statements) assertParams(statement.params);
       try {

@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveWinner } from '@package-broker/core/catalogue/visibility';
 import type {
@@ -600,7 +601,7 @@ describe('page bounds and proxy safety', () => {
         params: [id, ctx.orgId, id, id, T0],
       });
     }
-    await database.executor.batch(statements);
+    await seedStatements(database.executor, statements);
     const first = page(await reader().resolveVersions(ctx, query('acme/a')));
     expect(first.versions).toHaveLength(200);
     expect(first.next).toEqual({ publishedAt: T0, id: 'V-199' });

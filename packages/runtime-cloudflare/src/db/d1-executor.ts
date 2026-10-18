@@ -1,4 +1,8 @@
-import { DbError, classifySqliteError } from '@package-broker/core/db/errors';
+import {
+  assertBatchStatementCount,
+  DbError,
+  classifySqliteError,
+} from '@package-broker/core/db/errors';
 import type {
   SqlExecutor,
   SqlValue,
@@ -95,6 +99,7 @@ export function createD1Executor(db: D1DatabaseLike): SqlExecutor {
       }
     },
     async batch(statements: readonly Statement[]): Promise<StatementResult[]> {
+      assertBatchStatementCount(statements.length);
       if (statements.length === 0) return [];
       for (const statement of statements) assertParams(statement.params);
       try {

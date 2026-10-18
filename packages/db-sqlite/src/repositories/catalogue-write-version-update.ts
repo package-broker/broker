@@ -1,3 +1,4 @@
+import { assertBatchStatementCount } from '@package-broker/core/db/errors';
 import { sql } from 'kysely';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
@@ -301,6 +302,7 @@ export function versionUpdateStatements(
     push('inplace', compile(inPlace));
   }
 
+  assertBatchStatementCount(statements.length);
   const bytes = statements
     .flatMap((statement) => statement.params)
     .reduce<number>(

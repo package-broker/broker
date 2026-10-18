@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
@@ -72,7 +73,7 @@ function seq(prefix: string): string {
 }
 
 async function seed(...statements: Statement[]): Promise<void> {
-  await executor.batch(statements);
+  await seedStatements(executor, statements);
 }
 
 function role(

@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -374,7 +375,7 @@ function rolesFor(org: OrgContext, admin: string, extra: boolean): Statement[] {
 }
 
 async function seed(statements: readonly Statement[]): Promise<void> {
-  await executor.batch(statements);
+  await seedStatements(executor, statements);
 }
 
 beforeEach(async () => {
@@ -2159,7 +2160,7 @@ describe('spike scale', () => {
 
   it('8: holder ids and the guarded answers match a JavaScript model, before and after ANALYZE', async () => {
     const world = build();
-    await executor.batch(world.statements);
+    await seedStatements(executor, world.statements);
     expect(world.memberships).toBeGreaterThanOrEqual(1000);
     expect(world.grants.length).toBeGreaterThanOrEqual(600);
     await expectHolders(world);

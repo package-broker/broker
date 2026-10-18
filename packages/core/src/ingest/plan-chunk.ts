@@ -1,3 +1,4 @@
+import { D1_STATEMENTS_PER_INVOCATION, D1_INVOCATION_STATEMENT_RESERVE } from '../db/port.js';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
   type CatalogueWriteMethod,
@@ -5,7 +6,7 @@ import {
 } from '../db/catalogue.js';
 import type { SourceType } from '../sources/config.js';
 
-export const INVOCATION_BUDGET = 450;
+export const INVOCATION_BUDGET = D1_STATEMENTS_PER_INVOCATION - D1_INVOCATION_STATEMENT_RESERVE;
 export const MARK_KEYS_PER_STATEMENT = 1000;
 
 const PROXY_TYPES: readonly SourceType[] = ['packagist_proxy', 'npmjs_proxy'];

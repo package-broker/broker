@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { describeTokenContract } from '../contract/token-contract.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -90,7 +91,7 @@ function seq(prefix: string): string {
 }
 
 async function seed(...statements: Statement[]): Promise<void> {
-  await executor.batch(statements);
+  await seedStatements(executor, statements);
 }
 
 function role(

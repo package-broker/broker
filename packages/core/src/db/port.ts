@@ -1,3 +1,9 @@
+/** Shared portability limits; invocation scheduling remains the caller's responsibility. */
+export const D1_STATEMENTS_PER_BATCH = 200;
+export const D1_STATEMENTS_PER_INVOCATION = 500;
+/** Leave room for reads, lease checks and completion outside the ingest chunk. */
+export const D1_INVOCATION_STATEMENT_RESERVE = 50;
+
 export type ScalarSqlValue = string | number | null; // number: finite; integers must be safe integers
 export type SqlValue = ScalarSqlValue | Uint8Array;
 

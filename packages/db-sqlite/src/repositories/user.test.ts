@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { createUserRepository } from './user.js';
@@ -853,9 +854,7 @@ describe('invitation predicate at spike scale', () => {
       sequence += 1;
     }
 
-    for (let start = 0; start < statements.length; start += 400) {
-      await executor.batch(statements.slice(start, start + 400));
-    }
+    await seedStatements(executor, statements);
     return { grants, random, memberships };
   }
 

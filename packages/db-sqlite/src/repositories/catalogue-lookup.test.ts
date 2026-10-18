@@ -1,3 +1,4 @@
+import { seedStatements } from '../testing/seed-statements.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PackageRef } from '@package-broker/core/db/catalogue';
 import type { OrgContext, ScalarStatement } from '@package-broker/core/db/port';
@@ -143,7 +144,7 @@ describe('lookupVersion', () => {
         ],
       });
     }
-    await database.executor.batch(statements);
+    await seedStatements(database.executor, statements);
     const found = await lookup().lookupVersion(ctx, {
       ...ref('left-pad'),
       versionNormalized: '1.0.249',

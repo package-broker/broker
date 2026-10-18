@@ -1,3 +1,4 @@
+import { assertBatchStatementCount } from '@package-broker/core/db/errors';
 import { sql } from 'kysely';
 import type { CatalogueWriteGuard, SyncResult } from '@package-broker/core/db/catalogue';
 import type { OrgContext, Statement, StatementResult } from '@package-broker/core/db/port';
@@ -218,6 +219,7 @@ export function distTagStatements(
 
   const head = [...guard, ...packageMatches, ...checks];
   const statements = [...head, ...probes, ...sets, removeHistory, remove, advance];
+  assertBatchStatementCount(statements.length);
   const setOffset = head.length + probes.length;
   return {
     statements,

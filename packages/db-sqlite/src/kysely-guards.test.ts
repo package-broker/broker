@@ -1,3 +1,4 @@
+import { seedStatements } from './testing/seed-statements.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sql, type Expression, type SqlBool } from 'kysely';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
@@ -146,7 +147,7 @@ function identity(
 }
 
 async function seed(statements: readonly Statement[]): Promise<void> {
-  await fixture.database.executor.batch(statements);
+  await seedStatements(fixture.database.executor, statements);
 }
 
 async function holds(guard: Expression<SqlBool>, org: OrgContext = fixture.a): Promise<boolean> {

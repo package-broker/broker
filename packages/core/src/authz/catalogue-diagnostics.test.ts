@@ -44,6 +44,13 @@ describe('catalogueDiagnostics', () => {
     expect(run({ path: '/me', boundary: 'self' }).join('\n')).toMatch(/self boundary.*plugin/);
   });
 
+  it('accepts an authenticated core route and refuses one from a plugin', () => {
+    expect(run({ plugin: 'core', path: '/me', boundary: 'authenticated' })).toEqual([]);
+    expect(run({ path: '/me', boundary: 'authenticated' }).join('\n')).toMatch(
+      /authenticated boundary.*plugin/,
+    );
+  });
+
   it('refuses a project:packages:* route without a resolver', () => {
     const problems = run(
       { path: '/p/:project/pkg', permission: 'project:packages:read', boundary: 'project' },

@@ -397,6 +397,41 @@ export function boundVerifiedIdentity(
   return identityWithAnchor(bindings.org, alias, bindings.anchors(authoritativeOnly), undefined);
 }
 
+function evidenceWithin(column: string, bindings?: GuardBindings, now?: DatabaseTime) {
+  const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
+  if (now !== undefined) {
+    return sql<SqlBool>`(${ms} >= ${now} - ${sql.lit(EVIDENCE_MAX_AGE_MS)} and ${ms} <= ${now} + ${sql.lit(EVIDENCE_FUTURE_SKEW_MS)})`;
+  }
+  if (bindings !== undefined) {
+    return sql<SqlBool>`(${ms} >= ${bindings.value('lower_ms')} and ${ms} <= ${bindings.value('upper_ms')})`;
+  }
+  return sql<SqlBool>`${ms} between ${databaseTimeMs} - ${sql.lit(EVIDENCE_MAX_AGE_MS)} and ${databaseTimeMs} + ${sql.lit(EVIDENCE_FUTURE_SKEW_MS)}`;
+}
+
+/**
+ * Fresh membership backed by a verified identity of the same provider and a current anchor.
+ * Uses the database clock by default; `boundWindow` uses the bindings' lower_ms and upper_ms,
+ * and `now` overrides either window. `excludeIdentity` uses the bindings' excluded_identity.
+ */
+export function freshGroupMembership(
+  bindings: GuardBindings,
+  alias: HolderAlias,
+  options: {
+    readonly excludeIdentity?: boolean;
+    readonly boundWindow?: boolean;
+    readonly now?: DatabaseTime;
+  } = {},
+): Expression<SqlBool> {
+  const window = options.boundWindow === true ? bindings : undefined;
+  let identity = boundVerifiedIdentity(bindings, alias, false)
+    .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
+    .where(evidenceWithin(`${alias.identity}.validated_at`, window, options.now));
+  if (options.excludeIdentity === true) {
+    identity = identity.where(`${alias.identity}.id`, '<>', bindings.value('excluded_identity'));
+  }
+  return sql<SqlBool>`(${sql.ref(`${alias.member}.org_id`)} = ${bindings.org} and ${evidenceWithin(`${alias.member}.refreshed_at`, window, options.now)} and exists ${identity})`;
+}
+
 const HOLDER_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export function requireProviders(providers: readonly ProtectedHolderProvider[]): void {
@@ -534,19 +569,6 @@ export function protectedHolder(
   );
   if (input.kind === 'local_recovery') return existsOf(localAdmin);
 
-  const evidence = (column: string) => {
-    const ms = sql`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
-    const lower =
-      options.now === undefined
-        ? bindings.value('lower_ms')
-        : sql`${options.now} - ${sql.lit(EVIDENCE_MAX_AGE_MS)}`;
-    const upper =
-      options.now === undefined
-        ? bindings.value('upper_ms')
-        : sql`${options.now} + ${sql.lit(EVIDENCE_FUTURE_SKEW_MS)}`;
-    return sql<SqlBool>`(${ms} >= ${lower} and ${ms} <= ${upper})`;
-  };
-
   const branches: (typeof localAdmin)[] = [];
 
   if (input.providers.some((entry) => entry.emailAuthoritative)) {
@@ -578,13 +600,12 @@ export function protectedHolder(
       .$if(options.includeSuspended !== true, (qb) =>
         qb.where(`${alias.user}.status`, '=', sql.lit('active')),
       )
-      .where(evidence(`${alias.member}.refreshed_at`))
-      .where((eb) =>
-        eb.exists(
-          verified(false)
-            .whereRef(`${alias.identity}.provider`, '=', `${alias.member}.provider`)
-            .where(evidence(`${alias.identity}.validated_at`)),
-        ),
+      .where(
+        freshGroupMembership(bindings, alias, {
+          excludeIdentity: exclude?.identityId !== undefined,
+          boundWindow: true,
+          ...(options.now === undefined ? {} : { now: options.now }),
+        }),
       );
     if (exclude?.grantId !== undefined) {
       byGroup = byGroup.where(`${alias.grant}.id`, '<>', bindings.value('excluded_grant'));

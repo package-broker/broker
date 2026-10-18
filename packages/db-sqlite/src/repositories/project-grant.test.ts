@@ -12,13 +12,15 @@ import {
   projectGrantRoleKey,
 } from './project-grant.js';
 import type { ProjectGrantRepository } from './project-grant.js';
+import { createGrantRepository } from './grant.js';
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
   { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
   { provider: 'okta', anchor: 'oidc:https://okta.example.test', emailAuthoritative: true },
 ];
 const HOUR = 3_600_000;
-const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const SEED_AT = Date.now();
+const ago = (ms: number) => new Date(SEED_AT - ms).toISOString();
 
 const NOW = '2026-10-15T12:00:00.000Z';
 const LATER = '2026-10-15T13:00:00.000Z';
@@ -883,6 +885,7 @@ describe('project grant delete', () => {
       groupGrant(G_NEW, 'oidc', 'team', ORG_PLAIN),
       stmt("UPDATE access_grant SET scope = 'organization', project_id = NULL WHERE id = ?", G_NEW),
       member(OTHER + 'target', 'oidc', 'team'),
+      identity(a, 'T1', OTHER + 'target', 'target@example.test'),
     ]);
     expect(await revokeWithCallback()).not.toHaveBeenCalled();
   });
@@ -892,6 +895,7 @@ describe('project grant delete', () => {
       user(a, OTHER + 'target', 'target@example.test'),
       groupGrant(G_NEW, 'oidc', 'team'),
       member(OTHER + 'target', 'oidc', 'team', ago(60_000), b),
+      identity(a, 'T1', OTHER + 'target', 'target@example.test'),
     ]);
     expect(
       await repository.delete(a, fence(), {
@@ -966,6 +970,7 @@ describe('project grant delete', () => {
       user(a, OTHER + 'target', 'target@example.test'),
       groupGrant(G_NEW, 'oidc', 'team'),
       member(OTHER + 'target', 'oidc', 'team'),
+      identity(a, 'T1', OTHER + 'target', 'target@example.test'),
     ]);
     expect(
       await repository.delete(a, fence(), {
@@ -985,6 +990,247 @@ describe('project grant delete', () => {
         providerAnchors: ANCHORS,
       }),
     ).toEqual({ status: 'deleted', offboardedUserId: null });
+  });
+
+  describe('group membership evidence', () => {
+    const TARGET = OTHER + 'target';
+    const hours = (count: number) => ago(count * HOUR);
+
+    async function seedGroup(
+      options: {
+        refreshedAt?: string;
+        identity?: Parameters<typeof identity>[4] | null;
+        identityOrg?: OrgContext;
+      } = {},
+    ) {
+      await executor.batch([
+        user(a, TARGET, 'target@example.test'),
+        groupGrant(G_NEW, 'okta', 'team', ORG_PLAIN),
+        stmt(
+          "UPDATE access_grant SET scope = 'organization', project_id = NULL WHERE id = ?",
+          G_NEW,
+        ),
+        member(TARGET, 'okta', 'team', options.refreshedAt),
+        ...(options.identity === null
+          ? []
+          : [
+              identity(options.identityOrg ?? a, 'T1', TARGET, 'target@example.test', {
+                provider: 'okta',
+                ...options.identity,
+              }),
+            ]),
+      ]);
+    }
+
+    const revoke = (anchors = ANCHORS) =>
+      repository.delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: anchors,
+      });
+
+    it('fresh membership with a matching anchor suppresses the offboarding', async () => {
+      await seedGroup();
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: null });
+    });
+
+    it('a stale membership row does not suppress the offboarding', async () => {
+      await seedGroup({ refreshedAt: hours(25) });
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('a membership dated more than 60 seconds ahead does not suppress the offboarding', async () => {
+      await seedGroup({ refreshedAt: new Date(SEED_AT + 5 * 60_000).toISOString() });
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('stale identity evidence does not suppress the offboarding', async () => {
+      await seedGroup({ identity: { validatedAt: hours(25) } });
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('a provider whose anchor no longer matches does not suppress the offboarding', async () => {
+      await seedGroup();
+      const rotated = ANCHORS.map((entry) =>
+        entry.provider === 'okta'
+          ? { ...entry, anchor: 'oidc:https://rotated.example.test' }
+          : entry,
+      );
+      expect(await revoke(rotated)).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('a membership without an identity of the provider does not suppress the offboarding', async () => {
+      await seedGroup({ identity: null });
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('an identity of another provider does not suppress the offboarding', async () => {
+      await seedGroup({ identity: { provider: 'oidc' } });
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('an unverified identity does not suppress the offboarding', async () => {
+      await seedGroup({ identity: { verified: 0 } });
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('an identity row of another organization for the same user does not suppress the offboarding', async () => {
+      await seedGroup({ identity: null });
+      await executor.batch([
+        identity(b, 'T2', TARGET, 'target@example.test', { provider: 'okta' }),
+      ]);
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('a provider binding of another organization does not satisfy the anchor', async () => {
+      await seedGroup();
+      await executor.batch([
+        stmt(
+          'DELETE FROM identity_provider_binding WHERE org_id = ? AND provider = ?',
+          a.orgId,
+          'okta',
+        ),
+      ]);
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('a direct organization e-mail grant suppresses the offboarding without any evidence', async () => {
+      await executor.batch([
+        user(a, TARGET, 'target@example.test'),
+        grant(a, G_NEW, 'target@example.test', ORG_PLAIN, null),
+      ]);
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: null });
+    });
+
+    it('a project group grant in the same project follows the same evidence rule', async () => {
+      await executor.batch([
+        user(a, TARGET, 'target@example.test'),
+        groupGrant(G_NEW, 'okta', 'team'),
+        member(TARGET, 'okta', 'team', hours(25)),
+        identity(a, 'T1', TARGET, 'target@example.test', { provider: 'okta' }),
+      ]);
+      expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+    });
+
+    it('binds at most 100 parameters per statement however many providers are configured', async () => {
+      await seedGroup();
+      const many = Array.from({ length: 60 }, (_, index) => ({
+        provider: `idp${index}`,
+        anchor: `oidc:https://idp${index}.example.test`,
+        emailAuthoritative: false,
+      }));
+      const statements: Statement[] = [];
+      const recording: SqlExecutor = {
+        ...executor,
+        batch: async (batch) => {
+          statements.push(...batch);
+          return executor.batch(batch);
+        },
+      };
+      const result = await createProjectGrantRepository(recording).delete(a, fence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: [...ANCHORS, ...many],
+      });
+      expect(result).toEqual({ status: 'deleted', offboardedUserId: null });
+      expect(
+        Math.max(...statements.map((statement) => statement.params.length)),
+      ).toBeLessThanOrEqual(100);
+    });
+
+    it('decides like the protected-holder predicate for every evidence case', async () => {
+      const cases = [
+        { name: 'fresh', options: {}, anchors: ANCHORS },
+        { name: 'stale membership', options: { refreshedAt: hours(25) }, anchors: ANCHORS },
+        {
+          name: 'stale identity',
+          options: { identity: { validatedAt: hours(25) } },
+          anchors: ANCHORS,
+        },
+        { name: 'no identity', options: { identity: null }, anchors: ANCHORS },
+        { name: 'unverified', options: { identity: { verified: 0 } }, anchors: ANCHORS },
+        {
+          name: 'anchor mismatch',
+          options: {},
+          anchors: [ANCHORS[0]!, { ...ANCHORS[1]!, anchor: 'oidc:https://rotated.example.test' }],
+        },
+      ];
+      const outcomes: Record<string, { protectedHolder: boolean; retained: boolean }> = {};
+      for (const entry of cases) {
+        await database.close();
+        database = await openMigratedDatabase({ twoOrganizations: true });
+        ({ a, b } = database.orgs!);
+        executor = database.executor;
+        repository = createProjectGrantRepository(executor);
+        await executor.batch([
+          ...role(a, OWNER, 'owner', 'project', 'project:grants:write', 'project:read'),
+          ...role(a, VIEWER, 'viewer', 'project', 'project:read'),
+          stmt(
+            'INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES (?, ?, ?, ?, ?, 1)',
+            ORG_ADMIN,
+            a.orgId,
+            'org_admin',
+            'org_admin',
+            'organization',
+          ),
+          user(a, ACTOR, 'actor@example.test'),
+          user(a, TARGET, 'target@example.test'),
+          project(a, P1, 'one'),
+          session(a, S_ACTOR, ACTOR),
+          ...ANCHORS.map((anchor) =>
+            stmt(
+              'INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+              a.orgId,
+              anchor.provider,
+              anchor.anchor,
+            ),
+          ),
+          identity(a, 'I1', ACTOR, 'actor@example.test'),
+          grant(a, G_ACTOR, 'actor@example.test', OWNER, P1),
+          grant(a, G_TARGET, 'target@example.test', VIEWER, P1),
+          groupGrant(G_NEW, 'okta', 'team', ORG_ADMIN),
+          stmt(
+            "UPDATE access_grant SET scope = 'organization', project_id = NULL WHERE id = ?",
+            G_NEW,
+          ),
+          member(TARGET, 'okta', 'team', (entry.options as { refreshedAt?: string }).refreshedAt),
+          ...((entry.options as { identity?: unknown }).identity === null
+            ? []
+            : [
+                identity(a, 'T1', TARGET, 'target@example.test', {
+                  provider: 'okta',
+                  ...(entry.options as { identity?: Parameters<typeof identity>[4] }).identity,
+                }),
+              ]),
+        ]);
+        const now = new Date(SEED_AT).toISOString();
+        const holders = createGrantRepository(executor, {
+          providerAnchors: entry.anchors,
+          holderInput: () => ({ kind: 'fresh', now, providers: entry.anchors }),
+        });
+        const holder = await holders.isProtectedHolder(a, TARGET, {
+          kind: 'fresh',
+          now,
+          providers: entry.anchors,
+        });
+        const result = await repository.delete(a, fence(), {
+          id: G_TARGET,
+          projectId: P1,
+          providerAnchors: entry.anchors,
+        });
+        outcomes[entry.name] = {
+          protectedHolder: holder,
+          retained:
+            typeof result === 'object' &&
+            result.status === 'deleted' &&
+            result.offboardedUserId === null,
+        };
+      }
+      for (const [name, outcome] of Object.entries(outcomes)) {
+        expect(outcome.retained, name).toBe(outcome.protectedHolder);
+      }
+      expect(outcomes['fresh']?.retained).toBe(true);
+    });
   });
 
   it('reports null for an email with no account in the organization', async () => {
@@ -1096,7 +1342,11 @@ describe('project grant delete', () => {
 
   it('requires the fence to carry the target revision', async () => {
     await expect(
-      repository.delete(a, actorFence(), { id: G_TARGET, projectId: P1, providerAnchors: ANCHORS }),
+      repository.delete(a, actorFence(), {
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
     ).rejects.toThrow(TypeError);
   });
 

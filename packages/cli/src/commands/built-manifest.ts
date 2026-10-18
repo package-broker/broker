@@ -151,7 +151,7 @@ function parseRoute(raw: unknown, index: number): DiagnosticRoute {
   if (permission !== null && typeof permission !== 'string') {
     throw new BuiltManifestError(`${label}: permission must be a string or null`);
   }
-  if (boundary !== undefined && typeof boundary !== 'string') {
+  if (boundary !== undefined && boundary !== null && typeof boundary !== 'string') {
     throw new BuiltManifestError(`${label}: boundary must be a string`);
   }
   if (needsOrg !== undefined && typeof needsOrg !== 'boolean') {
@@ -166,7 +166,7 @@ function parseRoute(raw: unknown, index: number): DiagnosticRoute {
     plugin,
     permission,
     handler: () => new Response(null),
-    ...(boundary === undefined ? {} : { boundary: boundary as RouteBoundary }),
+    ...(boundary === undefined || boundary === null ? {} : { boundary: boundary as RouteBoundary }),
     ...(needsOrg === undefined ? {} : { needsOrg }),
     ...(flag === true ? { package: PACKAGE_PLACEHOLDER } : {}),
   };

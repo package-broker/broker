@@ -64,6 +64,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test', 'actor.test'],
 };
 const OTHER: ProtectedHolderProvider = {
   provider: 'other',
@@ -1585,4 +1586,42 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+it('requires explicit provider anchors at construction', () => {
+  // @ts-expect-error provider anchors are required
+  expect(() => createFencedRoleRepository(database.executor)).toThrow(TypeError);
+  // @ts-expect-error provider anchors are required
+  expect(() => createFencedRoleRepository(database.executor, {})).toThrow(TypeError);
+  expect(() =>
+    createFencedRoleRepository(database.executor, { providerAnchors: [] }),
+  ).not.toThrow();
+});
+
+it('lets a non-admin rename a role with a retired permission and preserves it', async () => {
+  const repository = createFencedRoleRepository(database.executor, { providerAnchors: PROVIDERS });
+  const admin = await actorFor(a);
+  expect(
+    await repository.create(a, fenceFor(admin), {
+      ...CUSTOM,
+      scope: 'organization',
+      permissions: ['org:read'],
+      opId: opId(),
+    }),
+  ).toBe('created');
+  await database.executor.batch([
+    {
+      sql: 'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+      params: [a.orgId, CUSTOM.id, 'retired:permission'],
+    },
+  ]);
+  const manager = await actorFor(a, {
+    name: 'RETIRED',
+    protects: false,
+    permissions: ['org:roles:write', 'org:read'],
+  });
+  expect(
+    await repository.rename(a, fenceFor(manager, 1), CUSTOM.id, 'Renamed', LATER, opId()),
+  ).toBe('renamed');
+  expect((await repository.get(a, CUSTOM.id))?.permissions).toContain('retired:permission');
 });

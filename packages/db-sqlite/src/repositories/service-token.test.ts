@@ -31,7 +31,14 @@ const SP = '01J0SERVICE000000000000001';
 const SP_WIDE = '01J0SERVICE000000000000002';
 const SP_OTHER_ORG = '01J0SERVICE000000000000003';
 const TOKEN = '01J0TOKEN0000000000000000A';
-const ANCHORS = [{ provider: 'idp', anchor: 'anchor-1', emailAuthoritative: true }];
+const ANCHORS = [
+  {
+    provider: 'idp',
+    anchor: 'anchor-1',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+];
 const DAY = 86_400_000;
 const ISSUER_PERMISSIONS = [
   'org:service-principals:write',

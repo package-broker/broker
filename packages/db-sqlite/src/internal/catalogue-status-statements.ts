@@ -90,7 +90,6 @@ export function versionStatusStatements(
       status: to,
       revision: sql<number>`version.revision + 1`,
       last_op_id: opId,
-      updated_at: NOW,
       ...(to === 'active' ? { removed_upstream_at: null } : {}),
       ...(tombstone ? { tombstoned_at: NOW, tombstone_reason: reason } : {}),
     })

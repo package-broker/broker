@@ -4,12 +4,13 @@ import type { AddressInfo } from 'node:net';
 import { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   SUPPORTED_PLUGIN_API,
   type PluginDefinition,
   type PluginPorts,
 } from '@package-broker/core/plugin';
+import { AUTH_REASON_CODES, type AuthReasonCode } from '@package-broker/core/auth/reason-codes';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { MigrationChecksumError } from '@package-broker/db-sqlite/migrations/runner';
 import {
@@ -19,11 +20,11 @@ import {
 import { createObservability, type ObsRecord } from '@package-broker/core/platform/observability';
 import {
   AUTH_EVENTS,
-  AUTH_REASON_CODES,
   AlreadyBootstrappedError,
   NODE_RUNTIME_EVENTS,
   StartupConfigError,
   sinkLog,
+  registeredAuthReason,
   startNode,
   type StartOptions,
 } from './startup.js';
@@ -136,6 +137,11 @@ function counters(records: readonly ObsRecord[]): ObsRecord[] {
 }
 
 describe('auth sink log', () => {
+  it('only forwards reasons from the core auth reason set', () => {
+    expectTypeOf(registeredAuthReason).returns.toEqualTypeOf<AuthReasonCode | undefined>();
+    expectTypeOf<string>().not.toExtend<AuthReasonCode>();
+  });
+
   it('23: an SSO start failure keeps its detail as reason_code', () => {
     const { records, log } = authSink();
     log({

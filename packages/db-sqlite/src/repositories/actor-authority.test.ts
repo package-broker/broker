@@ -26,7 +26,12 @@ let b: OrgContext;
 let executor: SqlExecutor;
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 const PERMISSION = 'project:packages:write';
 const ORG_PERMISSION = 'org:settings:write';
@@ -463,6 +468,7 @@ describe('actorHolds bound parameters', () => {
       provider: `idp${index}`,
       anchor: `oidc:https://idp${index}.example.test`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
     const count = (providerAnchors: readonly ProtectedHolderProvider[], projectId: string | null) =>
       compile(

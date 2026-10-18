@@ -41,6 +41,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 
 const ORG_PERMISSIONS = ['org:read', 'org:users:write', 'project:read', 'project:packages:read'];
@@ -1004,8 +1005,22 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
 
     for (const anchors of [
       [],
-      [{ provider: 'oidc', anchor: 'https://changed.example.test', emailAuthoritative: true }],
-      [{ provider: 'other', anchor: ANCHOR, emailAuthoritative: true }],
+      [
+        {
+          provider: 'oidc',
+          anchor: 'https://changed.example.test',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ],
+      [
+        {
+          provider: 'other',
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ],
     ]) {
       const result = await lookup('pat-anchor', { providerAnchors: anchors });
       expect(result?.validation?.fresh).toBe(false);
@@ -1117,6 +1132,7 @@ describe('bound parameters', () => {
       provider: `idp${index}`,
       anchor: `https://idp${index}.example.test/"quoted"/'single'/\\`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
 
   for (const boundary of ['project', 'organization'] as const) {
@@ -1334,6 +1350,7 @@ describe('lookupToken projectVisible', () => {
       provider: `idp${index}`,
       anchor: `https://idp${index}.example.test`,
       emailAuthoritative: index % 2 === 0,
+      emailAuthoritativeDomains: ['example.test'],
     }));
 
     const statement = lookupTokenStatement(a, input('pat-params', { providerAnchors: anchors }));

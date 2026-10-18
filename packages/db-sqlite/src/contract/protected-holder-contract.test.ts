@@ -25,6 +25,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 
 const ADMIN = '01J0ROLEADMIN0000000000000';

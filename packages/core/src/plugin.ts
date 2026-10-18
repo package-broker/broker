@@ -97,7 +97,8 @@ export interface PluginRegistry {
   job(definition: JobDefinition): void;
 }
 
-export type RouteBoundary = 'none' | 'organization' | 'project' | 'self' | 'package';
+export type RouteBoundary =
+  'none' | 'organization' | 'project' | 'self' | 'package' | 'authenticated';
 
 export type PackageEcosystem = 'composer' | 'npm';
 

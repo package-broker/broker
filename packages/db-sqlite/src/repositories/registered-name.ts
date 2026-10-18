@@ -6,6 +6,7 @@ import {
   isValidPattern,
 } from '@package-broker/core/catalogue/patterns';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import type { RegisteredNameRepository } from '@package-broker/core/db/source';
 import {
   assertCheck,
   assertGuard,
@@ -17,6 +18,8 @@ import {
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
 
+export type { RegisteredNameRepository } from '@package-broker/core/db/source';
+
 const PROXY_TYPES = ['packagist_proxy', 'npmjs_proxy'] as const;
 const COMPOSER_PATTERN = /^[a-z0-9._*-]+\/[a-z0-9._*-]+$/;
 const NPM_UNSCOPED_PATTERN = /^[a-z0-9._~!*-]+$/;
@@ -24,68 +27,6 @@ const NPM_SCOPED_PATTERN = /^@[a-z0-9._~!*-]+\/[a-z0-9._~!*-]+$/;
 
 type SourceRef = string | Expression<string>;
 type Ecosystem = 'composer' | 'npm';
-
-export interface NewRegisteredName {
-  readonly id: string;
-  readonly sourceId: string;
-  readonly pattern: string;
-  readonly providerAnchors: readonly ProtectedHolderProvider[];
-}
-
-export interface RegisteredNameTarget {
-  readonly id: string;
-  readonly providerAnchors: readonly ProtectedHolderProvider[];
-}
-
-/**
- * Every registered-name write needs `org:sources:write`, also for project-level sources, and
- * `forbidden` is answered before existence is revealed. `pattern_taken`: another source of the
- * organization holds the pattern; the answer names neither that source nor its project.
- * `indeterminate`: the response was lost and the write may have committed; re-read.
- */
-export interface RegisteredNameRepository {
-  add(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: NewRegisteredName,
-  ): Promise<
-    | 'added'
-    | 'invalid_pattern'
-    | 'proxy_source'
-    | 'pattern_taken'
-    | 'duplicate'
-    | 'not_found'
-    | 'forbidden'
-    | 'conflict'
-    | 'indeterminate'
-  >;
-  /** An active non-proxy source left without coverage is paused in the same batch. */
-  remove(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: RegisteredNameTarget,
-  ): Promise<
-    'removed' | 'removed_and_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
-  >;
-  /**
-   * The only path that activates a paused non-proxy source. Authority is the source owner's:
-   * `org:sources:write` for an organization source, `project:sources:write` for a project source.
-   * `already_enabled`: the source is not paused; nothing is written.
-   */
-  enable(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: RegisteredNameTarget,
-  ): Promise<
-    | 'enabled'
-    | 'already_enabled'
-    | 'activation_requires_registered_names'
-    | 'not_found'
-    | 'forbidden'
-    | 'conflict'
-    | 'indeterminate'
-  >;
-}
 
 export function isRegistrablePattern(pattern: string, ecosystem: Ecosystem): boolean {
   if (!isValidPattern(pattern)) return false;

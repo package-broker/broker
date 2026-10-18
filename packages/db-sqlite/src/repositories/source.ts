@@ -2,7 +2,15 @@ import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
-import type { JobGuard } from '@package-broker/core/platform/job-repository';
+import type {
+  RemovalPolicy,
+  SourceEcosystem,
+  SourceErrorCode,
+  SourceRecord,
+  SourceRepository,
+  SourceStatus,
+  SourceType,
+} from '@package-broker/core/db/source';
 import {
   assertCheck,
   assertGuard,
@@ -14,6 +22,8 @@ import {
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
+
+export type { NewSource, SourceRepository } from '@package-broker/core/db/source';
 
 const MAX_DUE = 50;
 const MAX_BACKOFF_EXPONENT = 20;
@@ -34,180 +44,6 @@ export const SOURCE_ERROR_CODES = [
   'credential_unavailable',
   'internal',
 ] as const;
-
-export type SourceErrorCode = (typeof SOURCE_ERROR_CODES)[number];
-export type SourceEcosystem = 'composer' | 'npm';
-export type SourceType =
-  'vcs' | 'composer_repository' | 'npm_registry' | 'packagist_proxy' | 'npmjs_proxy' | 'hosted';
-export type SourceStatus = 'active' | 'degraded' | 'failing' | 'paused';
-export type RemovalPolicy = 'flag' | 'exclude';
-
-export interface SourceRecord {
-  readonly id: string;
-  readonly projectId: string | null;
-  readonly name: string;
-  readonly ecosystem: SourceEcosystem;
-  readonly type: SourceType;
-  readonly url: string | null;
-  readonly credentialId: string | null;
-  readonly configJson: string;
-  readonly userAgent: string | null;
-  readonly defaultVisibleToNewProjects: boolean;
-  readonly removalPolicy: RemovalPolicy;
-  readonly retentionDaysOverride: number | null;
-  readonly status: SourceStatus;
-  readonly pollIntervalSeconds: number;
-  readonly nextPollAt: string | null;
-  readonly lastPolledAt: string | null;
-  readonly lastSuccessAt: string | null;
-  readonly lastError: string | null;
-  readonly consecutiveFailures: number;
-  readonly rootHash: string | null;
-  readonly listingHash: string | null;
-  readonly pollEtag: string | null;
-  readonly pollLastModified: string | null;
-}
-
-export interface NewSource {
-  readonly id: string;
-  /** Null for an organization-level source. */
-  readonly projectId: string | null;
-  readonly name: string;
-  readonly ecosystem: SourceEcosystem;
-  readonly type: SourceType;
-  readonly url: string | null;
-  readonly configJson: string;
-  readonly userAgent?: string | null;
-  readonly pollIntervalSeconds?: number;
-  readonly removalPolicy?: RemovalPolicy;
-  readonly retentionDaysOverride?: number | null;
-  readonly defaultVisibleToNewProjects?: boolean;
-  /**
-   * `statement` is the insert from `CredentialStore.prepare` and `projectId` the owner of the row it
-   * inserts; without a statement the credential must already exist.
-   */
-  readonly credential:
-    | { readonly id: string }
-    | {
-        readonly id: string;
-        readonly projectId: string | null;
-        readonly statement: Statement;
-      }
-    | null;
-  readonly providerAnchors: readonly ProtectedHolderProvider[];
-}
-
-export interface SourceChanges {
-  readonly url?: string | null;
-  readonly configJson?: string;
-  readonly credentialId?: string | null;
-  readonly userAgent?: string | null;
-  readonly pollIntervalSeconds?: number;
-  readonly removalPolicy?: RemovalPolicy;
-  readonly retentionDaysOverride?: number | null;
-  readonly defaultVisibleToNewProjects?: boolean;
-}
-
-export interface SourceTarget {
-  readonly id: string;
-  readonly providerAnchors: readonly ProtectedHolderProvider[];
-}
-
-export interface SourceUpdate extends SourceTarget {
-  readonly changes: SourceChanges;
-}
-
-interface PollValidators {
-  readonly rootHash?: string | null;
-  readonly listingHash?: string | null;
-  readonly pollEtag?: string | null;
-  readonly pollLastModified?: string | null;
-}
-
-export type PollOutcome =
-  | ({ readonly id: string; readonly outcome: 'success' } & PollValidators)
-  | {
-      readonly id: string;
-      readonly outcome: 'failure';
-      readonly error: SourceErrorCode;
-    };
-
-/**
- * `indeterminate` on any fenced write: the response was lost and the write may have committed;
- * re-read. `conflict` also covers a failure that could not be classified.
- */
-export interface SourceRepository {
-  /**
-   * Non-proxy sources are created paused, proxies active; nothing is attached to a project.
-   * `credential_scope_mismatch`: the credential does not belong to the source's owner. `forbidden`:
-   * no `org:sources:write` (organization source) or `project:sources:write` on an active owner
-   * project. `duplicate`: the id or the name within its owner exists.
-   */
-  create(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: NewSource,
-  ): Promise<
-    | 'created'
-    | 'duplicate'
-    | 'forbidden'
-    | 'credential_scope_mismatch'
-    | 'conflict'
-    | 'indeterminate'
-  >;
-  update(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: SourceUpdate,
-  ): Promise<
-    | 'updated'
-    | 'paused_for_reactivation'
-    | 'not_found'
-    | 'forbidden'
-    | 'credential_scope_mismatch'
-    | 'conflict'
-    | 'indeterminate'
-  >;
-  /**
-   * Proxies only. A non-proxy source answers `activation_requires_registered_names` and nothing is
-   * written: its activation belongs to the registered-name enable path.
-   */
-  resume(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: SourceTarget,
-  ): Promise<
-    | 'resumed'
-    | 'activation_requires_registered_names'
-    | 'not_found'
-    | 'forbidden'
-    | 'conflict'
-    | 'indeterminate'
-  >;
-  /** `has_packages` while a package references the source, `has_history` while webhook deliveries do. */
-  delete(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: SourceTarget,
-  ): Promise<
-    | 'deleted'
-    | 'has_packages'
-    | 'has_history'
-    | 'not_found'
-    | 'forbidden'
-    | 'conflict'
-    | 'indeterminate'
-  >;
-  get(ctx: OrgContext, id: string): Promise<SourceRecord | null>;
-  /** Non-paused sources with `next_poll_at` reached on database time, oldest first. `limit` is an integer from 1 to 50. */
-  listDue(ctx: OrgContext, limit: number): Promise<SourceRecord[]>;
-  /** `stale` when the job guard no longer holds; nothing is written then. */
-  pollState(
-    ctx: OrgContext,
-    guard: JobGuard,
-    input: PollOutcome,
-  ): Promise<'written' | 'stale' | 'not_found'>;
-}
 
 const CHANGE_KEYS: ReadonlySet<string> = new Set([
   'url',
@@ -534,6 +370,12 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         throw new TypeError('changes must name one or more updatable source fields');
       }
       const changes = input.changes;
+      if (
+        input.preparedCredential !== undefined &&
+        input.preparedCredential.id !== changes.credentialId
+      ) {
+        return 'credential_scope_mismatch';
+      }
       const set: Record<string, string | number | null> = {};
       if (changes.url !== undefined) set.url = nullableText('url', changes.url);
       if (changes.configJson !== undefined) set.config_json = jsonText(changes.configJson);
@@ -596,10 +438,17 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         ctx,
         fence,
         assertGuard(allowed, ctx),
-        [...(credentialOk === null ? [] : assertCheck(credentialOk)), statusBefore, update],
+        [
+          ...(input.preparedCredential === undefined ? [] : [input.preparedCredential.statement]),
+          ...(credentialOk === null ? [] : assertCheck(credentialOk)),
+          statusBefore,
+          update,
+        ],
         {
           authority: probe(authority(ctx, fence, current.projectId, input.providerAnchors), true),
-          ...(credentialOk === null ? {} : { conflict: probe(credentialOk, true) }),
+          ...(credentialOk === null || input.preparedCredential !== undefined
+            ? {}
+            : { conflict: probe(credentialOk, true) }),
         },
       );
       if (outcome.ok) {

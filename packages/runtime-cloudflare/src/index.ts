@@ -1,6 +1,35 @@
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
 import { createAuthModule } from '@package-broker/core/auth/module';
 import type { AuthModule } from '@package-broker/core/auth/module';
+import type { SessionService } from '@package-broker/core/auth/session';
+import {
+  createPersonalTokenService,
+  type PersonalTokenService,
+} from '@package-broker/core/authz/pat-service';
+import {
+  createProjectAdministration,
+  type ProjectAdministration,
+} from '@package-broker/core/authz/project-administration';
+import { createProjectLister, type ProjectLister } from '@package-broker/core/authz/project-list';
+import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
+import {
+  createProjectService,
+  type ProjectService,
+} from '@package-broker/core/authz/project-service';
+import {
+  createServicePrincipalService,
+  type ServicePrincipalService,
+} from '@package-broker/core/authz/service-principal-service';
+import {
+  createServiceTokenService,
+  type ServiceTokenService,
+} from '@package-broker/core/authz/service-token-service';
+import type { TokenReader } from '@package-broker/core/authz/token-read';
+import {
+  createTokenRevokeService,
+  type TokenRevokeService,
+} from '@package-broker/core/authz/token-revoke';
+import type { CatalogueReader } from '@package-broker/core/db/catalogue';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
@@ -16,7 +45,8 @@ import {
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
 import {
-  createProviderAnchorReader,
+  providerAnchorsOf,
+  type ConfiguredProviderAnchor,
   type ProviderAnchorReader,
 } from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
@@ -43,11 +73,21 @@ import { createJobRepository } from '@package-broker/db-sqlite/repositories/job'
 import { createJobScheduleRepository } from '@package-broker/db-sqlite/repositories/job-schedule';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
+import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
 } from '@package-broker/db-sqlite/repositories/organization';
+import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
+import { createProjectGrantRepository } from '@package-broker/db-sqlite/repositories/project-grant';
+import { createReadableProjectRepository } from '@package-broker/db-sqlite/repositories/project-readable';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { createServicePrincipalAuthority } from '@package-broker/db-sqlite/repositories/service-principal-authority';
+import { createTokenRepository } from '@package-broker/db-sqlite/repositories/token';
+import { createTokenReader } from '@package-broker/db-sqlite/repositories/token-read';
+import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
 import { createR2ByteStore } from './blob/r2.js';
 import type { R2BucketLike } from './blob/r2.js';
 import { createCacheApiAdapter, DEFAULT_CACHE_NAMESPACE } from './cache/cache-api.js';
@@ -87,10 +127,27 @@ export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;
 }
 
+/** The step 5 domain services; PB-32 resolves each one from here. */
+export interface WorkerAccessServices {
+  readonly engine: AuthorizationEngine;
+  readonly sessions: SessionService;
+  readonly projects: ProjectService;
+  readonly projectGrants: ProjectAdministration;
+  readonly projectList: ProjectLister;
+  readonly personalTokens: PersonalTokenService;
+  readonly servicePrincipals: ServicePrincipalService;
+  readonly serviceTokens: ServiceTokenService;
+  readonly tokenRevoke: TokenRevokeService;
+  readonly tokenList: TokenReader;
+}
+
 export interface WorkerServices {
   readonly providerAnchors: ProviderAnchorReader;
   /** Starts `run` off the request path; a request in flight keeps it alive through `waitUntil`. */
   readonly dispatch: (run: () => Promise<void>) => void;
+  readonly catalogue: Pick<CatalogueReader, 'resolveVersions'>;
+  /** Null without a DB binding. */
+  readonly access: WorkerAccessServices | null;
 }
 
 export interface WorkerOptions {
@@ -148,21 +205,35 @@ export function publicOriginOf(raw: string | undefined): string {
   return url.origin;
 }
 
+function wired<T>(name: string, value: T | undefined): T {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError(`${name} is not wired`);
+  }
+  return value;
+}
+
+function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchorReader {
+  return Object.freeze({ anchors: () => Promise.resolve(list) });
+}
+
 async function buildAuth(
-  executor: ScalarSqlExecutor,
+  executor: SqlExecutor,
   plugins: readonly PluginDefinition[],
   env: Env,
   log: KernelLog,
+  dispatch: (run: () => Promise<void>) => void,
 ): Promise<{
   auth: AuthModule;
   registration: Registration;
   providerAnchors: ProviderAnchorReader;
+  access: WorkerAccessServices;
 }> {
   const keyring = createKeyring(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
   );
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
   await selfTestPasswordHashing(keyring);
+  await keyring.hmacKey('token-pepper', keyring.currentVersion);
   const registration = collectRegistrations(plugins);
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) =>
@@ -172,17 +243,108 @@ async function buildAuth(
     clock: systemClock,
     env: scopedEnv(env),
   });
+  const anchorList = providerAnchorsOf(providers);
+  const providerAnchors = anchorReader(anchorList);
+  const ids = { ulid };
   const auth = createAuthModule({
     repositories: createAuthRepositories(executor),
     keyring,
     clock: systemClock,
-    ids: { ulid },
+    ids,
     publicOrigin,
     providers,
     hooks: registration.hooks,
     log,
+    access: {
+      access: wired('access repository', createAccessRepository(executor)),
+      providerAnchors: providerAnchors.anchors,
+      dispatch,
+    },
+    unlink: {
+      unlinks: wired(
+        'unlink repository',
+        createUnlinkRepository(executor, {
+          holderInput: () => ({
+            kind: 'fresh',
+            now: systemClock.now().toISOString(),
+            providers: anchorList,
+          }),
+        }),
+      ),
+      providers: providerAnchors,
+    },
   });
-  return { auth, registration, providerAnchors: createProviderAnchorReader(providers) };
+
+  const projectRepository = wired(
+    'project repository',
+    createProjectRepository(executor, {
+      reservedSlugs: reservedFirstSegments([...registration.routes, ...auth.coreRoutes]),
+      providerAnchors: anchorList,
+    }),
+  );
+  const tokenRepository = wired('token repository', createTokenRepository(executor));
+  const principalRepository = wired(
+    'service principal repository',
+    createServicePrincipalRepository(executor),
+  );
+  const authority = wired(
+    'service principal authority',
+    createServicePrincipalAuthority({ executor, providerAnchors: anchorList }),
+  );
+  const organizations = wired('organization repository', createOrganizationRepository(executor));
+  const common = { clock: systemClock, ids, log };
+
+  const access: WorkerAccessServices = Object.freeze({
+    engine: auth.authorization,
+    sessions: auth.sessions,
+    projects: createProjectService({ projects: projectRepository, ...common }),
+    projectGrants: createProjectAdministration({
+      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      providers,
+      providerAnchors: anchorList,
+      ...common,
+    }),
+    projectList: createProjectLister({
+      source: projectRepository,
+      readable: wired(
+        'readable project repository',
+        createReadableProjectRepository(executor, { providerAnchors: anchorList }),
+      ),
+    }),
+    personalTokens: createPersonalTokenService({
+      tokens: tokenRepository,
+      sessions: auth.sessions,
+      organizations,
+      providers: providerAnchors,
+      keyring,
+      ...common,
+    }),
+    servicePrincipals: createServicePrincipalService({
+      principals: principalRepository,
+      authority,
+      directory: principalRepository,
+      ...common,
+    }),
+    serviceTokens: createServiceTokenService({
+      tokens: tokenRepository,
+      principals: principalRepository,
+      authority,
+      sessions: auth.sessions,
+      organizations,
+      providers: providerAnchors,
+      keyring,
+      ...common,
+    }),
+    tokenRevoke: createTokenRevokeService({
+      tokens: tokenRepository,
+      authority,
+      ownership: tokenRepository,
+      clock: systemClock,
+      log,
+    }),
+    tokenList: wired('token reader', createTokenReader(executor)),
+  });
+  return { auth, registration, providerAnchors, access };
 }
 
 const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
@@ -704,7 +866,26 @@ export function createWorker(
     const organizations = createOrganizationRepository(executor);
     const resolveOrg = createOrgResolver(bootstrap);
 
-    const built = db === undefined ? undefined : await buildAuth(executor, plugins, env ?? {}, log);
+    let untrackedLogged = false;
+    const dispatch = (run: () => Promise<void>): void => {
+      const work = Promise.resolve().then(run);
+      if (services !== undefined) services.track('deferred.untracked', work);
+      else if (!scopes.track(work)) {
+        work.catch(() => undefined);
+        if (untrackedLogged) return;
+        untrackedLogged = true;
+        try {
+          log({ level: 'warn', event: 'deferred.untracked' });
+        } catch {
+          return;
+        }
+      }
+    };
+
+    const built =
+      db === undefined
+        ? undefined
+        : await buildAuth(executor as SqlExecutor, plugins, env ?? {}, log, dispatch);
     const registration = built?.registration ?? collectRegistrations(plugins);
     const auth = built?.auth;
     const services =
@@ -718,24 +899,13 @@ export function createWorker(
       ids: { ulid },
     };
 
-    let untrackedLogged = false;
     const applicationServices: WorkerServices = Object.freeze({
       providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
-      dispatch: (run: () => Promise<void>) => {
-        const work = Promise.resolve().then(run);
-        if (services !== undefined) services.track('deferred.untracked', work);
-        else if (!scopes.track(work)) {
-          work.catch(() => undefined);
-          if (untrackedLogged) return;
-          untrackedLogged = true;
-          try {
-            log({ level: 'warn', event: 'deferred.untracked' });
-          } catch {
-            return;
-          }
-        }
-      },
+      dispatch,
+      catalogue: createCatalogueReader(executor as SqlExecutor),
+      access: built?.access ?? null,
     });
+    const authorization = options.authorization ?? auth?.authorization;
 
     try {
       const kernel = await createKernel({
@@ -747,7 +917,7 @@ export function createWorker(
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
         ...(auth === undefined ? {} : { coreRoutes: auth.coreRoutes }),
-        ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
+        ...(authorization === undefined ? {} : { authorization }),
         ...(services === undefined
           ? { log }
           : {

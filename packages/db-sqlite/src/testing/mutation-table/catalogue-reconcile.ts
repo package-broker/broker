@@ -10,7 +10,6 @@ import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.
 import { FUTURE, NOT_NULL, seedPackage, seedSource, seedVersion } from './fixtures.js';
 
 const OLD = '2020-01-01T00:00:00.000Z';
-const STAMP = '2024-01-01T00:00:00.000Z';
 
 function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
   return {
@@ -36,6 +35,13 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         for (const key of ['present', 'missing', 'returned']) {
           if (kind === 'source') {
             await seedPackage(seed, `${prefix}-${key}`, org.orgId, 'OS', key);
+            await seedVersion(
+              seed,
+              `V-${prefix}-${key}`,
+              org.orgId,
+              `O-${key}`,
+              `${prefix}-${key}`,
+            );
           } else {
             await seedVersion(
               seed,
@@ -53,8 +59,6 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         `UPDATE ${table} SET status = 'removed_upstream', removed_upstream_at = ? WHERE id IN ('O-returned', 'F-returned')`,
         OLD,
       );
-      // A foreign row already marked in this run also exposes a widened mark-count assertion.
-      await seed(`UPDATE ${table} SET updated_at = ? WHERE id = 'F-returned'`, STAMP);
       const snapshot = async () => {
         const rows = [];
         for (const name of ['package', 'version', 'version_revision', 'cache_epoch']) {
@@ -67,7 +71,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         }
         return rows;
       };
-      const before = await snapshot();
+      let before = await snapshot();
       const mutating: SqlExecutor = {
         driver: executor.driver,
         all: (statement) => executor.all(context.mutate(statement)),
@@ -92,19 +96,25 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
           kind === 'source'
             ? { kind: 'source' as const, sourceId: 'OS' }
             : { kind: 'package' as const, packageId: 'OK' };
-        await expect(reconciler.openListing(own, guard, scope)).resolves.toHaveProperty('stamp');
+        const { stamp } = await reconciler.openListing(own, guard, scope);
+        await seed(
+          `UPDATE ${table} SET updated_at = ?, listing_seen_stamp = ? WHERE id = 'F-returned'`,
+          stamp,
+          stamp,
+        );
+        before = await snapshot();
         await expect(
           reconciler.markListing(own, guard, {
             scope,
-            stamp: STAMP,
+            stamp,
             present: ['present', 'returned'],
           }),
         ).resolves.toMatchObject({ changed: true });
         expect(await snapshot()).toEqual(before);
         const listing =
           kind === 'source'
-            ? completeSourceListing({ sourceId: 'OS', stamp: STAMP, count: 2 })
-            : completeVersionListing({ packageId: 'OK', stamp: STAMP, count: 2 });
+            ? completeSourceListing({ sourceId: 'OS', stamp, count: 2 })
+            : completeVersionListing({ packageId: 'OK', stamp, count: 2 });
         await expect(reconciler.finalizeListing(own, guard, listing)).resolves.toMatchObject({
           removed: 1,
           restored: 1,
@@ -136,11 +146,26 @@ export const entries: readonly MutationEntry[] = [
       },
       {
         name: 'source mark count includes only own rows',
-        locate:
-          /package.org_id = \?(?= AND package.source_id = \?\s+AND package.updated_at >= \? AND package.name IN)/,
+        locate: /package.org_id = \?(?= AND package.source_id = \?\s+AND package.name IN)/,
         neutral: NOT_NULL,
         copies: 1,
         caseName: reconcileCase('source').name,
+      },
+      {
+        name: 'source finalize counts only own marked packages',
+        locate:
+          /package.org_id = \?(?= AND package.source_id = \?\s+AND package.listing_seen_stamp)/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: reconcileCase('source').name,
+      },
+      {
+        name: 'version finalize counts only own marked versions',
+        locate:
+          /version.org_id = \?(?= AND version.package_id = \?\s+AND version.listing_seen_stamp)/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: reconcileCase('package').name,
       },
       {
         name: 'source sweep updates only own packages',
@@ -150,7 +175,7 @@ export const entries: readonly MutationEntry[] = [
         copies: 2,
         caseName: reconcileCase('source').name,
       },
-      ...(['package', 'absent'] as const).map((kind) => ({
+      ...(['source', 'package', 'absent'] as const).map((kind) => ({
         name: `${kind} transitions select only own versions`,
         locate: /version.org_id = \?(?=\s+AND version.status = \? AND)/,
         neutral: NOT_NULL,
@@ -197,12 +222,12 @@ export const entries: readonly MutationEntry[] = [
       {
         locate: /version.org_id = \?(?!\s+AND version.status = \? AND)/,
         reason:
-          'Version mark counts are redundant with UNIQUE(package_id, version_normalized) for own keys; widening finalize count cannot invalidate its lower bound.',
+          'Version mark counts are redundant with UNIQUE(package_id, version_normalized) for own keys; the finalize count predicate is independently mutation-tested.',
       },
       {
         locate: /(?<=AND )org_id = \?/,
         reason:
-          'last_synced_at targets the globally unique package ID already checked by scopeExists.',
+          'Open binding, open stamp updates and last_synced_at target a globally unique scope ID already checked by scopeExists.',
       },
       {
         locate: /upstream_state.org_id = \?/,

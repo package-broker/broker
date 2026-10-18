@@ -30,6 +30,7 @@ import {
   type VersionCandidate,
 } from '../../sources/provider.js';
 import { ARRAY_ELEMENTS, extractMembers } from '../json-stream.js';
+import { retryAfterOf } from './retry-after.js';
 import type { ComposerRoot } from './root.js';
 
 export type ComposerV2ErrorCode =
@@ -81,7 +82,7 @@ const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_VERSION_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_EXPANSION: ExpansionLimits = { maxVersions: 20_000 };
-const MAX_RETRY_AFTER_SECONDS = 60;
+const MAX_RETRY_WAIT_SECONDS = 60;
 const RECHECK_MS = 1500;
 const MAX_UPSTREAM_PATTERNS = 1000;
 const MAX_UPSTREAM_PATTERN_LENGTH = 255;
@@ -116,14 +117,6 @@ function listing(root: ComposerRoot, key: string): boolean | null {
     if (matchesPattern(pattern, key)) return true;
   }
   return false;
-}
-
-function retryAfterOf(value: string | null, now: number): number | null {
-  if (value === null) return null;
-  const text = value.trim();
-  if (/^\d+$/.test(text)) return Number(text);
-  const at = Date.parse(text);
-  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 async function readAll(response: UpstreamResponse): Promise<Uint8Array> {
@@ -254,12 +247,12 @@ export async function describeComposerV2(
             response.headers.get('retry-after'),
             options.clock.now().getTime(),
           );
-          if (job && !retried && seconds !== null && seconds <= MAX_RETRY_AFTER_SECONDS) {
+          if (job && !retried && seconds !== undefined && seconds <= MAX_RETRY_WAIT_SECONDS) {
             retried = true;
             await pause(seconds * 1000);
             continue;
           }
-          return { kind: 'busy', retryAfterSeconds: seconds };
+          return { kind: 'busy', retryAfterSeconds: seconds ?? null };
         }
         if (response.status === 304) {
           if (sent) return { kind: 'not_modified' };

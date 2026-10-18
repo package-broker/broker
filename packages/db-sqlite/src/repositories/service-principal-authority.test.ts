@@ -315,6 +315,13 @@ describe('servicePrincipalAuthorityGuard', () => {
     expect(await createWith(PROJECT_MANAGE)).toBe('authority');
   });
 
+  it('counts a local session as local admin only when it belongs to the fence user', () => {
+    const guard = servicePrincipalAuthorityGuard(a, fence(), ORG_MANAGE);
+    expect(guard.some((statement) => statement.sql.includes('"sa_session"."user_id" = ?'))).toBe(
+      true,
+    );
+  });
+
   it('keeps every guard statement within the 100 bound-parameter limit', () => {
     for (const input of [PROJECT_MANAGE, ORG_MANAGE]) {
       const guard = servicePrincipalAuthorityGuard(a, fence(), input);

@@ -53,6 +53,9 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
   readonly token: TokenAccessView['token'] & {
     readonly userId: string | null;
     readonly servicePrincipalId: string | null;
+    readonly bindingOk: boolean;
+    readonly projectMode: 'all' | 'selected' | null;
+    readonly scope: { readonly level: string; readonly readOnly: boolean } | null;
   };
 }
 
@@ -188,10 +191,11 @@ function tokenEffective(found: EngineTokenAccess, boundary: EngineBoundary): Set
 
 function decideFrom(
   found: Authenticated,
-  permission: string,
+  permission: string | null,
   boundary: EngineBoundary,
   slugValid: boolean,
 ): AuthorizationDecision {
+  if (permission === null) return { allow: true, principal: found.principal, projectId: null };
   if (boundary === 'organization') {
     return found.effective.has(permission)
       ? { allow: true, principal: found.principal, projectId: null }
@@ -230,7 +234,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     request: AuthorizationRequest,
     secret: string,
     input: EngineLookupInput,
-    permission: string,
+    permission: string | null,
     slugValid: boolean,
   ): Promise<AuthorizationDecision> {
     const found = await access.lookupSession(request.org, {
@@ -292,7 +296,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     token: { readonly canonical: string; readonly selector: string },
     scheme: 'bearer' | 'basic',
     input: EngineLookupInput,
-    permission: string,
+    permission: string | null,
     slugValid: boolean,
   ): Promise<AuthorizationDecision> {
     if (scheme === 'basic' && UNSAFE_METHODS.has(request.request.method.toUpperCase())) {
@@ -319,6 +323,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     );
     if (!result.ok) return UNAUTHORIZED;
     const found = result.access;
+    if (
+      permission === null &&
+      (!found.token.bindingOk || found.token.scope === null || found.token.projectMode === null)
+    ) {
+      return UNAUTHORIZED;
+    }
     const principal = principalOf(found);
     if (principal === undefined) return UNAUTHORIZED;
     const decision = decideFrom(
@@ -333,7 +343,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       slugValid,
     );
     if (!decision.allow) return decision;
-    if (!catalogueTokenEligible(permission)) return FORBIDDEN;
+    if (permission !== null && !catalogueTokenEligible(permission)) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
     grants.set(
       request,
@@ -351,8 +361,16 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
   return Object.freeze({
     async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
       grants.delete(request);
-      const { permission, boundary } = request.route;
-      if (boundary !== 'organization' && boundary !== 'project') return FORBIDDEN;
+      const { boundary: routeBoundary } = request.route;
+      if (
+        routeBoundary !== 'organization' &&
+        routeBoundary !== 'project' &&
+        routeBoundary !== 'authenticated'
+      ) {
+        return FORBIDDEN;
+      }
+      const permission = routeBoundary === 'authenticated' ? null : request.route.permission;
+      const boundary: EngineBoundary = routeBoundary === 'project' ? 'project' : 'organization';
       const slug = boundary === 'project' ? request.params['project'] : undefined;
       const slugValid = boundary === 'organization' || isValidProjectSlug(slug);
       const credential = parseAuthorization(request.request.headers.get('authorization'));

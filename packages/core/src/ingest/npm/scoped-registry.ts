@@ -88,7 +88,7 @@ export function createNpmRegistryProvider(
       const registry = registryOf(ctx, source);
       const scope = scopeOf(name);
       if (scope === undefined || !registry.scopes.includes(scope)) {
-        return { kind: 'not_found', definitive: true };
+        return { kind: 'not_found', definitive: false };
       }
       return describeNpm(
         staging,

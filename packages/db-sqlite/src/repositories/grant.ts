@@ -583,6 +583,31 @@ export function createGrantRepository(
       );
       const revision = grantRevisionHolds(ctx, id, expected);
       const lastHolder = sql<SqlBool>`(not ${grantOnProtectedRole(ctx, id)} or ${anotherHolder(ctx, holders, { grantId: id })})`;
+      const offboarded = scalar(
+        db.selectNoFrom(
+          sql<string | null>`(
+            select subject.id from user_account as subject
+            join access_grant as removed on removed.org_id = subject.org_id
+              and removed.subject_type = 'email' and removed.subject_value = subject.email
+            where removed.id = ${id} and removed.org_id = ${ctx.orgId}
+              and removed.scope = 'organization' and removed.revision = ${expected}
+              and not exists (
+                select 1 from access_grant as remaining
+                where remaining.org_id = subject.org_id and remaining.id <> removed.id
+                  and remaining.scope = 'organization'
+                  and (
+                    (remaining.subject_type = 'email' and remaining.subject_value = subject.email)
+                    or (remaining.subject_type = 'group' and exists (
+                      select 1 from user_group as membership
+                      where membership.org_id = subject.org_id and membership.user_id = subject.id
+                        and membership.provider = remaining.subject_provider
+                        and membership.group_name = remaining.subject_value
+                    ))
+                  )
+              )
+          )`.as('offboarded_user_id'),
+        ),
+      );
       const outcome = await runOrgFenced(
         executor,
         ctx,
@@ -592,6 +617,7 @@ export function createGrantRepository(
           ...assertCheck(authority.reach),
           ...assertCheck(revision),
           ...assertCheck(lastHolder),
+          offboarded,
           scalar(
             db
               .deleteFrom('access_grant')
@@ -606,8 +632,12 @@ export function createGrantRepository(
       );
       if (outcome.ok) {
         const deleted = outcome.results[outcome.results.length - 1];
-        if ((deleted?.rows.length ?? 0) > 0) return 'deleted';
-        throw new Error('grant delete matched no row after its guards held');
+        if ((deleted?.rows.length ?? 0) === 0) {
+          throw new Error('grant delete matched no row after its guards held');
+        }
+        const row = outcome.results.at(-2)?.rows[0] as
+          { offboarded_user_id: string | null } | undefined;
+        return { outcome: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };
       }
       const reason = refusedBy(outcome, 'grant delete');
       if (reason !== 'collision') return reason;

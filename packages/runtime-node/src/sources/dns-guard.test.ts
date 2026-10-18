@@ -1,5 +1,6 @@
 import type { LookupFunction } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
+import { parseSshRepository } from './ssh-provider.js';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import {
   createDnsGuard,
@@ -23,8 +24,8 @@ const wrap = (pol: ReturnType<typeof policy>, options: TestOptions) => {
   const guard = createDnsGuard(pol, guardOptions);
   return {
     resolve: (host: string = HOST, hostPort: number = port) =>
-      guard.forTarget(host, hostPort).resolve(),
-    lookup: guard.forTarget(HOST, port).lookup,
+      guard.forTarget(host, hostPort, 'https').resolve(),
+    lookup: guard.forTarget(HOST, port, 'https').lookup,
     guard,
   };
 };
@@ -33,6 +34,61 @@ const guardFor = (addresses: ResolvedAddress[], allow: string[] = [], extra: Tes
   wrap(policy(allow), { resolver: async () => addresses, ...extra });
 
 describe('createDnsGuard', () => {
+  it.each([
+    ['git.corp.internal:22', true],
+    ['git.corp.internal', false],
+    ['git.corp.internal:2222', false],
+  ])('scopes SSH private-host access to an explicit matching port: %s', async (entry, allowed) => {
+    const remote = parseSshRepository('git@git.corp.internal:repo');
+    const guard = createDnsGuard(policy([entry]), { resolver: async () => [v4('10.0.0.5')] });
+    const target = guard.forTarget(remote.host, remote.port ?? 22, 'ssh');
+    if (allowed) {
+      await expect(target.resolve()).resolves.toMatchObject({ addresses: [v4('10.0.0.5')] });
+    } else {
+      await expect(target.resolve()).rejects.toMatchObject({ reason: 'blocked_address' });
+    }
+    const error = await new Promise<unknown>((resolve) => {
+      target.lookup(remote.host, { all: true }, resolve);
+    });
+    if (allowed) expect(error).toBeNull();
+    else expect(error).toMatchObject({ reason: 'blocked_address' });
+  });
+
+  it('never admits SSH through a bare entry even on port 443', async () => {
+    const guard = createDnsGuard(policy(['git.corp.internal']), {
+      resolver: async () => [v4('10.0.0.5')],
+    });
+    await expect(guard.forTarget('git.corp.internal', 443, 'ssh').resolve()).rejects.toMatchObject({
+      reason: 'blocked_address',
+    });
+  });
+
+  it('requires a scheme instead of defaulting an omitted scheme', async () => {
+    const resolver = vi.fn(async () => [v4('127.0.0.1')]);
+    const guard = createDnsGuard(policy([HOST]), { resolver });
+    // @ts-expect-error A caller must state the scheme.
+    const target = guard.forTarget(HOST, 443);
+    await expect(target.resolve()).rejects.toMatchObject({ reason: 'scheme' });
+    const error = await new Promise<unknown>((resolve) => {
+      target.lookup(HOST, { all: true }, resolve);
+    });
+    expect(error).toMatchObject({ reason: 'scheme' });
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it.each([80, 443, 8080, 8443])('refuses HTTP on explicit DNS allowlist port %s', async (port) => {
+    const resolver = vi.fn(async () => [v4('127.0.0.1')]);
+    const guard = createDnsGuard(policy([`${HOST}:${port}`]), { resolver });
+    const target = guard.forTarget(HOST, port, 'http');
+    await expect(target.resolve()).rejects.toMatchObject({ reason: 'scheme' });
+    const error = await new Promise<unknown>((resolve) => {
+      target.lookup(HOST, { all: true }, resolve);
+    });
+    expect(error).toMatchObject({ reason: 'scheme' });
+    expect(resolver).not.toHaveBeenCalled();
+    await expect(guard.forTarget(HOST, port, 'https').resolve()).resolves.toBeDefined();
+  });
+
   it('refuses a host resolving to loopback', async () => {
     await expect(guardFor([v4('127.0.0.1')]).resolve(HOST)).rejects.toMatchObject({
       name: 'DnsGuardError',
@@ -123,8 +179,8 @@ describe('createDnsGuard', () => {
       await expect(target([HOST], 'https', 443)).resolves.toBeDefined();
     });
 
-    it('allows http on port 80 under an explicit host:80 entry', async () => {
-      await expect(target([`${HOST}:80`], 'http', 80)).resolves.toBeDefined();
+    it('refuses http on port 80 under an explicit host:80 entry', async () => {
+      await expect(target([`${HOST}:80`], 'http', 80)).rejects.toMatchObject({ reason: 'scheme' });
     });
 
     it('refuses http on port 443 before any resolution', async () => {
@@ -258,7 +314,7 @@ describe('createDnsGuard', () => {
 
   it('a target lookup refuses a different hostname', async () => {
     const guard = createDnsGuard(policy(), { resolver: async () => [v4('93.184.216.34')] });
-    const target = guard.forTarget(HOST, 443);
+    const target = guard.forTarget(HOST, 443, 'https');
     const [error] = await new Promise<unknown[]>((resolve) => {
       target.lookup('other.example.com', { all: true }, (...args) => resolve(args));
     });
@@ -273,17 +329,19 @@ describe('createDnsGuard', () => {
     const guard = createDnsGuard(policy([`${HOST}:8080`]), {
       resolver: async () => [v4('10.0.0.5')],
     });
-    await expect(guard.forTarget(HOST, 8080).resolve()).resolves.toBeDefined();
-    await expect(guard.forTarget(HOST, 443).resolve()).rejects.toBeInstanceOf(DnsGuardError);
+    await expect(guard.forTarget(HOST, 8080, 'https').resolve()).resolves.toBeDefined();
+    await expect(guard.forTarget(HOST, 443, 'https').resolve()).rejects.toBeInstanceOf(
+      DnsGuardError,
+    );
   });
 
   it('caps in-flight resolutions and fails fast when full', async () => {
     const never = () => new Promise<ResolvedAddress[]>(() => undefined);
     const guard = createDnsGuard(policy(), { resolver: never, timeoutMs: 30, maxInFlight: 2 });
-    const first = guard.forTarget(HOST, 443).resolve();
-    const second = guard.forTarget(HOST, 443).resolve();
+    const first = guard.forTarget(HOST, 443, 'https').resolve();
+    const second = guard.forTarget(HOST, 443, 'https').resolve();
     const started = Date.now();
-    await expect(guard.forTarget(HOST, 443).resolve()).rejects.toMatchObject({
+    await expect(guard.forTarget(HOST, 443, 'https').resolve()).rejects.toMatchObject({
       reason: 'resolution_timeout',
     });
     expect(Date.now() - started).toBeLessThan(25);
@@ -297,7 +355,7 @@ describe('createDnsGuard', () => {
       maxInFlight: 1,
     });
     for (let i = 0; i < 3; i += 1) {
-      await expect(guard.forTarget(HOST, 443).resolve()).resolves.toBeDefined();
+      await expect(guard.forTarget(HOST, 443, 'https').resolve()).resolves.toBeDefined();
     }
   });
 

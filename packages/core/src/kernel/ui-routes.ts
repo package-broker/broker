@@ -11,6 +11,13 @@ const IMMUTABLE = 'public, max-age=31536000, immutable';
 const HSTS = 'max-age=31536000';
 const CONTENT_HASH = /\.[0-9a-f]{12}\./;
 const SAFE_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const STRONG_ETAG_LIST =
+  /^"[\x21\x23-\x7e\x80-\xff]*"(?:[ \t]*,[ \t]*"[\x21\x23-\x7e\x80-\xff]*")*$/;
+
+function matchesEtag(validator: string | null, etag: string): boolean {
+  if (validator === null || !STRONG_ETAG_LIST.test(validator)) return false;
+  return Array.from(validator.matchAll(/"[^"]*"/g)).some(([value]) => value === etag);
+}
 
 export interface UiRouteOptions {
   readonly publicOrigin: string;
@@ -69,7 +76,11 @@ export function createUiRoutes(
     return secured(envelopeResponse(404, 'not_found', 'Route not found', requestId));
   }
 
-  async function serve(requestId: string, name: string | null): Promise<Response> {
+  async function serve(
+    request: Request,
+    requestId: string,
+    name: string | null,
+  ): Promise<Response> {
     const manifest = await assets.manifest();
     if (manifest === null) return notFound(requestId);
     const file = name ?? manifest.entry;
@@ -82,17 +93,24 @@ export function createUiRoutes(
       log({ level: 'warn', event: 'ui.asset_type_mismatch', file });
       return notFound(requestId);
     }
+    const body = await new Response(
+      asset.body as ConstructorParameters<typeof Response>[0],
+    ).arrayBuffer();
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', body));
+    const etag = `"${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}"`;
     const contentType = expectedType === 'text/html' ? 'text/html; charset=utf-8' : expectedType;
     const headers = new Headers({
+      etag,
       'content-type': contentType,
       'cache-control': name !== null && CONTENT_HASH.test(file) ? IMMUTABLE : NO_CACHE,
       'x-request-id': requestId,
     });
-    if (asset.body instanceof Uint8Array) {
-      headers.set('content-length', String(asset.body.byteLength));
+    if (matchesEtag(request.headers.get('if-none-match'), etag)) {
+      return secured(new Response(null, { status: 304, headers }));
     }
+    headers.set('content-length', String(body.byteLength));
     return secured(
-      new Response(asset.body as ConstructorParameters<typeof Response>[0], {
+      new Response(body, {
         status: 200,
         headers,
       }),
@@ -105,14 +123,14 @@ export function createUiRoutes(
       path: UI_PATH,
       permission: null,
       needsOrg: false,
-      handler: (ctx: RequestContext) => serve(ctx.requestId, null),
+      handler: (ctx: RequestContext) => serve(ctx.request, ctx.requestId, null),
     }),
     Object.freeze({
       method: 'GET',
       path: `${UI_PATH}/assets/:file`,
       permission: null,
       needsOrg: false,
-      handler: (ctx: RequestContext) => serve(ctx.requestId, ctx.params['file'] ?? ''),
+      handler: (ctx: RequestContext) => serve(ctx.request, ctx.requestId, ctx.params['file'] ?? ''),
     }),
   ] satisfies RouteDefinition[]);
 }

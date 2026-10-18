@@ -369,6 +369,7 @@ export interface CatalogueWriter {
     guard: CatalogueWriteGuard,
     scope: ListingScope,
   ): Promise<{ readonly stamp: string }>;
+  /** Mark only keys successfully processed in this run; refused stored keys remain unmarked. */
   markListing(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
@@ -378,6 +379,7 @@ export interface CatalogueWriter {
       readonly present: readonly string[];
     },
   ): Promise<WriteEffect>;
+  /** Count upstream keys minus this run's refusals; use the current open's stamp. Empty documents use markPackageAbsent. */
   finalizeListing(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
@@ -400,7 +402,17 @@ export interface CatalogueWriter {
 
 export type VisibilityWriteResult =
   | { readonly ok: true; readonly opId: string }
-  | { readonly ok: false; readonly reason: FailureReason | 'indeterminate' | 'not_found' };
+  | {
+      readonly ok: false;
+      readonly reason:
+        | FailureReason
+        | 'indeterminate'
+        | 'not_found'
+        | 'invalid_pattern'
+        | 'too_many_patterns'
+        | 'not_attached'
+        | 'not_eligible';
+    };
 
 /** Every method checks the fence actor's authority inside its own batch. */
 export interface VisibilityStore {

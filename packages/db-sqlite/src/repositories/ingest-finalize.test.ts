@@ -400,7 +400,7 @@ describe('ingest session finalize', () => {
   });
 
   it('8: a stable 200 with a dev HTML 404 keeps every seeded version through finalization', async () => {
-    await seedVersions('1.0.0.0', '1.1.0.0');
+    await seedVersions('1.0.0.0', '1.1.0.0', 'dev-main');
     const body = JSON.stringify({
       minified: 'composer/2.0',
       packages: {
@@ -464,20 +464,27 @@ describe('ingest session finalize', () => {
         (member as unknown as { input: { versionNormalized: string } }).input.versionNormalized,
       );
     }
-    expect(result.description.upstreamComplete).toBe(true);
+    expect(present).toEqual(['1.1.0.0', '1.0.0.0']);
+    expect(result.description.upstreamComplete).toBe(false);
+    expect(result.description.forms?.map(({ form, status }) => ({ form, status }))).toEqual([
+      { form: 'composer-p2', status: 'present' },
+    ]);
 
     const { session, mark } = await begin('package');
     await mark(present);
+    await setValidators(session);
     const outcome = await createIngestFinalizer(database.executor).finalize(
       org,
       session,
       input(present.length, { upstreamComplete: result.description.upstreamComplete }),
     );
-    expect(outcome).toMatchObject({ status: 'complete', empty: false });
+    expect(outcome).toEqual({ status: 'refused', reason: 'incomplete' });
     expect(await versionStatuses()).toEqual([
       { id: 'V-1.0.0.0', status: 'active' },
       { id: 'V-1.1.0.0', status: 'active' },
+      { id: 'V-dev-main', status: 'active' },
     ]);
-    expect((await refetchable()).map((b) => b.refetchable)).toEqual([1, 1]);
+    expect((await refetchable()).map((b) => b.refetchable)).toEqual([1, 1, 1]);
+    await expectUntouched();
   });
 });

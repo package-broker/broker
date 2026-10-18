@@ -17,6 +17,11 @@ export interface OrganizationGrant {
   readonly revision: number;
 }
 
+export interface OrganizationGrantDeleted {
+  readonly outcome: 'deleted';
+  readonly offboardedUserId: string | null;
+}
+
 export interface GrantRepository {
   /** Organization-scope grants only, oldest first. */
   listOrganization(ctx: OrgContext): Promise<OrganizationGrant[]>;
@@ -50,14 +55,16 @@ export interface GrantRepository {
    * One fenced batch. `fence.expected.grant` is the grant revision; a different revision answers
    * `conflict`. Needs `org:grants:write` but no subset of the removed role; a protected role is
    * admin-only. `last_holder`: no other active holder of a protected role would remain; nothing
-   * changes.
+   * changes. On success `offboardedUserId` is the user of the organization whose e-mail grant was
+   * removed when, inside the same batch, no other organization grant reaches them by e-mail or
+   * group membership; a group grant answers null.
    */
   deleteOrganization(
     ctx: OrgContext,
     fence: MutationFence,
     id: string,
     opId: string,
-  ): Promise<'deleted' | 'not_found' | 'last_holder' | FencedRefusal>;
+  ): Promise<OrganizationGrantDeleted | 'not_found' | 'last_holder' | FencedRefusal>;
   /**
    * One fenced batch with the revision comparison of `deleteOrganization`; a non-admin needs the
    * current and the replacement role to be subsets of its live permissions and neither protected.

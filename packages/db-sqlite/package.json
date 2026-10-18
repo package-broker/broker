@@ -54,6 +54,10 @@
       "types": "./dist/contract/cache-contract.d.ts",
       "default": "./dist/contract/cache-contract.js"
     },
+    "./contract/catalogue-read-contract": {
+      "types": "./dist/contract/catalogue-read-contract.d.ts",
+      "default": "./dist/contract/catalogue-read-contract.js"
+    },
     "./contract/count-calls": {
       "types": "./dist/contract/count-calls.d.ts",
       "default": "./dist/contract/count-calls.js"

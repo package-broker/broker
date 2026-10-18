@@ -9,11 +9,11 @@ import {
 } from '../plugin.js';
 import { createKernel } from './kernel.js';
 import { KernelConfigError, collectRegistrations, type RegistrationOptions } from './registry.js';
-import type { PackageVisibilityResolver } from './routes.js';
+import type { PackageVisibilityPort } from '../db/catalogue.js';
 
 const handler = () => new Response('ok');
 const API = SUPPORTED_PLUGIN_API[1];
-const resolver: PackageVisibilityResolver = { isVisible: () => true };
+const resolver: PackageVisibilityPort = { resolve: async () => ({ kind: 'absent' }) };
 
 const ports: PluginPorts = {
   organizations: { get: () => Promise.resolve(null) },
@@ -164,13 +164,13 @@ describe.each(surfaces)('route boundary via %s', (_name, problemsOf, isCore) => 
     expect(await problemsOf(r, { packageResolver: resolver })).toEqual([]);
   });
 
-  it('refuses a package resolver without isVisible', async () => {
+  it('refuses a package resolver without resolve', async () => {
     const r = route({
       path: '/p/:project/pk',
       permission: 'project:packages:read',
       boundary: 'project',
     });
-    const broken = {} as PackageVisibilityResolver;
+    const broken = {} as PackageVisibilityPort;
     expect((await problemsOf(r, { packageResolver: broken })).length).toBeGreaterThan(0);
   });
 

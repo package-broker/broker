@@ -796,12 +796,16 @@ describe('cloudflare access wiring on Miniflare D1', () => {
         params: [org, roleId, 'project:read'],
       },
     ];
-    for (let n = 1; n <= 2501; n += 1) {
-      seed.push({
-        sql: 'INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)',
-        params: [projectId(n), org, `p${n}`, `Project ${n}`],
-      });
-    }
+    // Generate the rows inside D1 to avoid thousands of Miniflare prepare/bind RPCs.
+    seed.push({
+      sql: `WITH RECURSIVE projects(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM projects WHERE n < 2501
+      )
+      INSERT INTO project (id, org_id, slug, name)
+      SELECT '01J0PR0J' || printf('%018d', n), ?, 'p' || n, 'Project ' || n
+      FROM projects`,
+      params: [org],
+    });
     seed.push({
       sql: 'INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       params: [
@@ -816,7 +820,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
       ],
     });
     const executor = createD1Executor(booted.raw);
-    for (let i = 0; i < seed.length; i += 500) await executor.batch(seed.slice(i, i + 500));
+    await executor.batch(seed);
 
     const listed = await services?.projectList.list(
       orgContext(org),

@@ -357,6 +357,8 @@ export interface SourceTable {
   poll_last_modified: string | null;
   root_hash: string | null;
   listing_hash: string | null;
+  listing_open_stamp: string | null;
+  listing_opened_at: string | null;
   consecutive_failures: Generated<number>;
   last_error: string | null;
   created_at: Generated<string>;
@@ -384,6 +386,11 @@ export interface PackageTable {
   visible_to_new_projects: Generated<number>;
   status: Generated<PackageStatus>;
   removed_upstream_at: string | null;
+  removal_cause: 'document_absent' | 'source_listing' | null;
+  last_op_id: string | null;
+  listing_open_stamp: string | null;
+  listing_opened_at: string | null;
+  listing_seen_stamp: string | null;
   rev: Generated<number>;
   modified_at: Generated<string>;
   last_synced_at: string | null;
@@ -422,6 +429,7 @@ export interface ProjectPackagePatternTable {
 
 /** Mirrors `version` in `migrations/0001_init.sql`. */
 export interface VersionTable {
+  listing_seen_stamp: string | null;
   id: string;
   org_id: string;
   package_id: string;

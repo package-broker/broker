@@ -1,6 +1,11 @@
+import {
+  START_FAILURE_DETAILS,
+  IDENTITY_FAILURES,
+  LOGIN_REFUSALS,
+  REAUTH_REFUSALS,
+} from './reason-codes.js';
 import { CsrfError, assertSameOrigin } from './csrf.js';
-import type { LoginOutcome, LoginRefusal } from './identity-login.js';
-import type { ReauthRefusal } from './identity-reauth.js';
+import type { LoginOutcome } from './identity-login.js';
 import { clearLoginState, openLoginState, safeReturnTo, sealLoginState } from './login-state.js';
 import type { LoginState } from './login-state.js';
 import { sessionMetaOf } from './session.js';
@@ -9,12 +14,7 @@ import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import { isValidProviderId } from '../identity/port.js';
-import type {
-  IdentityFailure,
-  IdentityProvider,
-  LoginStateData,
-  VerifiedIdentity,
-} from '../identity/port.js';
+import type { IdentityProvider, LoginStateData, VerifiedIdentity } from '../identity/port.js';
 import { reportableErrorName } from '../kernel/error-name.js';
 import { envelopeResponse, errorResponse } from '../kernel/errors.js';
 import type { KernelLog } from '../kernel/errors.js';
@@ -48,57 +48,6 @@ export interface SsoRouteDeps {
 }
 
 const MAX_BODY_BYTES = 8192;
-const START_FAILURE_DETAILS: ReadonlySet<string> = new Set([
-  'secret_missing',
-  'callback_invalid',
-  'purpose_invalid',
-  'discovery_invalid',
-  'discovery_failed',
-  'discovery_redirect',
-  'discovery_status',
-  'discovery_content_type',
-  'discovery_too_large',
-  'discovery_timeout',
-  'discovery_network',
-  'discovery_bad_json',
-]);
-const IDENTITY_FAILURES: ReadonlySet<string> = new Set<IdentityFailure>([
-  'missing_credentials',
-  'invalid_token',
-  'state_mismatch',
-  'provider_error',
-  'email_missing',
-]);
-const LOGIN_REFUSALS: ReadonlySet<string> = new Set(
-  Object.keys({
-    email_missing: true,
-    email_unverified: true,
-    domain_not_verified: true,
-    not_invited: true,
-    user_suspended: true,
-    hook_denied: true,
-    too_many_groups: true,
-    already_linked: true,
-    link_requires_admin: true,
-    invalid_identity: true,
-    provider_rebound: true,
-    email_changed: true,
-    conflict: true,
-  } satisfies Record<LoginRefusal, true>),
-);
-const REAUTH_REFUSALS: ReadonlySet<string> = new Set(
-  Object.keys({
-    not_sso_session: true,
-    not_supported: true,
-    state_mismatch: true,
-    identity_mismatch: true,
-    no_auth_time: true,
-    stale_auth_time: true,
-    policy: true,
-    hook_denied: true,
-    not_updated: true,
-  } satisfies Record<ReauthRefusal, true>),
-);
 const LOOPBACK_IPV4 = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -114,7 +63,9 @@ function startFailureDetail(error: unknown): string | null {
   try {
     if (typeof error !== 'object' || error === null) return null;
     const detail: unknown = (error as { detail?: unknown }).detail;
-    return typeof detail === 'string' && START_FAILURE_DETAILS.has(detail) ? detail : null;
+    return typeof detail === 'string' && (START_FAILURE_DETAILS as ReadonlySet<string>).has(detail)
+      ? detail
+      : null;
   } catch {
     return null;
   }
@@ -320,7 +271,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     const reason = result['reason'];
     return {
       reason:
-        typeof reason === 'string' && IDENTITY_FAILURES.has(reason) ? reason : 'provider_error',
+        typeof reason === 'string' && (IDENTITY_FAILURES as ReadonlySet<string>).has(reason)
+          ? reason
+          : 'provider_error',
     };
   }
 

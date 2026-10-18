@@ -6,7 +6,7 @@ import {
 } from '../../sources/policy-fetch.js';
 import { classifyUrl, type OutboundPolicy } from '../../sources/url-policy.js';
 import { JsonExtractError, extractMembers, type MemberSelector } from '../json-stream.js';
-import { JsonStreamError } from '../json-tokenizer.js';
+import { JsonStreamError, JsonTokenizer, type JsonToken } from '../json-tokenizer.js';
 
 export type ComposerMode = 'v2' | 'v1-providers' | 'v1-lazy' | 'v1-includes';
 export type ComposerRootErrorCode =
@@ -296,6 +296,42 @@ async function* rootChunks(
   }
 }
 
+// Member extraction omits empty and malformed containers; preserve their shape for validation.
+async function* rootPackageShapes(
+  chunks: AsyncIterable<Uint8Array>,
+  root: Json,
+): AsyncGenerator<Uint8Array> {
+  const tokenizer = new JsonTokenizer();
+  let depth = 0;
+  let packages = false;
+  const observe = (token: JsonToken): void => {
+    if (token.type === 'endObject' || token.type === 'endArray') {
+      depth--;
+      return;
+    }
+    if (token.type === 'key' && depth === 1) {
+      packages = token.value === 'packages';
+      if (packages) tokenizer.structureOnlyNext();
+      else tokenizer.skipNext();
+      return;
+    }
+    if (packages) {
+      if (depth === 1) {
+        root.packages = token.type === 'beginObject' ? {} : token.type === 'beginArray' ? [] : null;
+      } else if (depth === 2) {
+        root.packages = Array.isArray(root.packages) ? [true] : { inline: true };
+      }
+      if (token.type === 'key') tokenizer.skipNext();
+    }
+    if (token.type === 'beginObject' || token.type === 'beginArray') depth++;
+  };
+  for await (const chunk of chunks) {
+    tokenizer.write(chunk, observe);
+    yield chunk;
+  }
+  tokenizer.end(observe);
+}
+
 async function streamRoot(
   body: ReadableStream<Uint8Array>,
   streaming: ComposerRootStreaming,
@@ -307,11 +343,13 @@ async function streamRoot(
   const encoder = new TextEncoder();
   const maxMemberBytes = streaming.maxMemberBytes ?? DEFAULT_MAX_BYTES;
   let retained = 0;
-  let packages = false;
   let providers = false;
   try {
     const members = extractMembers(
-      rootChunks(body.pipeThrough(tap.transform), streaming.maxDocumentBytes),
+      rootPackageShapes(
+        rootChunks(body.pipeThrough(tap.transform), streaming.maxDocumentBytes),
+        root,
+      ),
       STREAM_SELECTORS,
       {
         maxDocumentBytes: streaming.maxDocumentBytes,
@@ -323,8 +361,7 @@ async function streamRoot(
       const size = encoder.encode(member.raw).byteLength;
       if (member.path.length === 2) {
         if (size > maxMemberBytes) throw new ComposerRootError('too_large');
-        if (field === 'packages') packages = true;
-        else providers = true;
+        if (field === 'providers') providers = true;
         continue;
       }
       retained += size;
@@ -332,7 +369,6 @@ async function streamRoot(
       root[field as string] = JSON.parse(member.raw);
     }
     const digest = (await tap.digests).sha256;
-    if (packages) root.packages = { inline: true };
     if (providers) root.providers = { inline: true };
     return { root, sha256: toHex(digest) };
   } catch (error) {
@@ -437,6 +473,13 @@ export async function readComposerRoot(
   } else {
     root = streamed.root;
   }
+  if (
+    'packages' in root &&
+    !isObject(root.packages) &&
+    !(Array.isArray(root.packages) && root.packages.length === 0)
+  ) {
+    throw new ComposerRootError('unsupported', 'packages');
+  }
 
   const base = baseOf(packagesJsonUrl);
   const prefixed = (value: string): string => (value.startsWith('/') ? rootOrigin + value : value);
@@ -485,7 +528,7 @@ export async function readComposerRoot(
     }
     availablePackages = stringList(root['available-packages'])?.map((n) => n.toLowerCase());
     availablePatterns = stringList(root['available-package-patterns']);
-    partialPackages = hasInline;
+    if (hasInline) throw new ComposerRootError('unsupported', 'packages');
   } else if (hasProviders) {
     if (nonEmptyString(root['providers-url'])) {
       mode = 'v1-providers';
@@ -511,6 +554,9 @@ export async function readComposerRoot(
           };
         });
       }
+      if (providerIncludes === undefined && !inlineProviders && providersLazyUrl === undefined) {
+        throw new ComposerRootError('unsupported', 'provider-includes');
+      }
     } else if (nonEmptyString(root['providers-lazy-url'])) {
       mode = 'v1-lazy';
       providersLazyUrl = absolute(root['providers-lazy-url'], 'providers-lazy-url');
@@ -519,6 +565,12 @@ export async function readComposerRoot(
       throw new ComposerRootError('unsupported', 'providers');
     }
   } else {
+    if (!('packages' in root) && !isObject(root.includes)) {
+      throw new ComposerRootError('unsupported', 'packages');
+    }
+    if (nonEmptyObject(root['provider-includes'])) {
+      throw new ComposerRootError('unsupported', 'provider-includes');
+    }
     mode = 'v1-includes';
   }
 

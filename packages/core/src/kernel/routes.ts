@@ -1,3 +1,5 @@
+import { PACKAGE_BOUNDARY_PERMISSIONS } from '../authz/project-actor.js';
+import type { PackageVisibilityPort } from '../db/catalogue.js';
 import { PERMISSIONS } from '../authz/permissions.js';
 import type { PackageEcosystem } from '../plugin.js';
 
@@ -65,10 +67,6 @@ const BOUNDARIES: ReadonlySet<string> = new Set([
 ]);
 const PROJECT_PARAMETER = ':project';
 const PACKAGE_PERMISSION_PREFIX = 'project:packages:';
-const PACKAGE_BOUNDARY_PERMISSIONS: ReadonlySet<string> = new Set([
-  'project:packages:read',
-  'project:packages:write',
-]);
 export const PACKAGE_ECOSYSTEMS = [
   'composer',
   'npm',
@@ -77,12 +75,8 @@ const ECOSYSTEM_NAMES: ReadonlySet<string> = new Set(PACKAGE_ECOSYSTEMS);
 const BOUNDARY_API_VERSION = 3;
 const MAX_REPORTED_LENGTH = 80;
 
-export interface PackageVisibilityResolver {
-  isVisible(projectId: string, packageName: string): Promise<boolean> | boolean;
-}
-
 export interface RouteBoundaryOptions {
-  readonly packageResolver?: PackageVisibilityResolver;
+  readonly packageResolver?: PackageVisibilityPort;
   /** Set for plugin routes: the declaring plugin's apiVersion. Absent for core routes. */
   readonly apiVersion?: number;
   /** Only core routes may be 'self'. */
@@ -92,15 +86,15 @@ export interface RouteBoundaryOptions {
 }
 
 interface BoundaryInput {
+  readonly method?: unknown;
   readonly path: unknown;
   readonly permission: unknown;
-  readonly method?: unknown;
   readonly boundary?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;
 }
 
-function packageBindingProblems(binding: unknown): string[] {
+function packageBindingProblems(binding: unknown, route: BoundaryInput): string[] {
   if (typeof binding !== 'object' || binding === null) {
     return ['the package boundary requires a package binding'];
   }
@@ -117,14 +111,20 @@ function packageBindingProblems(binding: unknown): string[] {
   if (fetchOnAdmission !== undefined && typeof fetchOnAdmission !== 'boolean') {
     problems.push('the package binding fetchOnAdmission must be a boolean');
   }
+  if (
+    fetchOnAdmission === true &&
+    (route.method !== 'GET' || route.permission !== 'project:packages:read')
+  ) {
+    problems.push('fetchOnAdmission requires GET with project:packages:read');
+  }
   return problems;
 }
 
-function hasResolver(resolver: unknown): boolean {
+function hasVisibilityPort(resolver: unknown): boolean {
   return (
     typeof resolver === 'object' &&
     resolver !== null &&
-    typeof (resolver as { isVisible?: unknown }).isVisible === 'function'
+    typeof (resolver as { resolve?: unknown }).resolve === 'function'
   );
 }
 
@@ -161,11 +161,11 @@ export function routeBoundaryProblems(
     }
   }
   if (boundary === 'package') {
-    if (!hasResolver(options.packageResolver)) {
+    if (!hasVisibilityPort(options.packageResolver)) {
       fail('the package boundary is reserved until a package resolver exists');
       return problems;
     }
-    for (const problem of packageBindingProblems(route.package)) fail(problem);
+    for (const problem of packageBindingProblems(route.package, route)) fail(problem);
     if (!hasProject) fail('the package boundary requires :project in the path');
     if (typeof permission !== 'string' || !PACKAGE_BOUNDARY_PERMISSIONS.has(permission)) {
       fail(
@@ -223,7 +223,10 @@ export function routeBoundaryProblems(
   } else if (boundary !== 'package') {
     fail(`unsupported boundary ${reported(boundary)}`);
   }
-  if (permission.startsWith(PACKAGE_PERMISSION_PREFIX) && !hasResolver(options.packageResolver)) {
+  if (
+    permission.startsWith(PACKAGE_PERMISSION_PREFIX) &&
+    !hasVisibilityPort(options.packageResolver)
+  ) {
     fail(`"${permission}" needs a package-visibility resolver, none is registered`);
   }
   return problems;

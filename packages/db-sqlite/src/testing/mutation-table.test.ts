@@ -225,14 +225,40 @@ describe('mutation harness', () => {
     expect(await judge(entry, entry.predicates[0]!)).toMatchObject({ verdict: 'errored' });
   });
 
-  it('flags every registered predicate once stripping is disabled', async () => {
-    for (const entry of mutationTable) {
-      for (const predicate of entry.predicates) {
-        const result = await judge(entry, predicate, { strip: false });
-        expect(result.verdict, `${entry.builder}: ${predicate.name}`).not.toBe('killed');
-      }
-    }
+  const entriesByModule = new Map<string, MutationEntry[]>();
+  for (const entry of mutationTable) {
+    const entries = entriesByModule.get(entry.file) ?? [];
+    entries.push(entry);
+    entriesByModule.set(entry.file, entries);
+  }
+  const registrationModules = Array.from(entriesByModule, ([module, entries]) => ({
+    module,
+    entries,
+  }));
+
+  it('exercises every registered entry in the per-module stripping checks', () => {
+    const groupedEntries = registrationModules.flatMap(({ entries }) => entries);
+    expect(groupedEntries).toHaveLength(mutationTable.length);
+    expect(new Set(groupedEntries)).toEqual(new Set(mutationTable));
   });
+
+  for (const { module, entries } of registrationModules) {
+    const predicateCount = entries.reduce((count, entry) => count + entry.predicates.length, 0);
+    it(`${module}: flags every registered predicate once stripping is disabled (${entries.length} entries, ${predicateCount} predicates)`, async () => {
+      let checkedEntries = 0;
+      let checkedPredicates = 0;
+      for (const entry of entries) {
+        for (const predicate of entry.predicates) {
+          const result = await judge(entry, predicate, { strip: false });
+          expect(result.verdict, `${entry.builder}: ${predicate.name}`).not.toBe('killed');
+          checkedPredicates += 1;
+        }
+        checkedEntries += 1;
+      }
+      expect(checkedEntries).toBe(entries.length);
+      expect(checkedPredicates).toBe(predicateCount);
+    });
+  }
 });
 
 describe('batch decision harness', () => {

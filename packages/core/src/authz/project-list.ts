@@ -1,5 +1,6 @@
 import type { OrgContext } from '../db/port.js';
 import { isUlid } from '../ids.js';
+import { isPermissionView } from './actor.js';
 import type { ActorContext } from './administration.js';
 import type { ProjectStatus } from './project-service.js';
 
@@ -118,6 +119,8 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       if (typeof actor !== 'object' || actor === null) return fail('forbidden');
       const { userId, isOrganizationAdmin } = actor;
       if (typeof userId !== 'string' || userId === '') return fail('forbidden');
+      const orgPermissions = actor.permissions;
+      if (!isPermissionView(orgPermissions)) return fail('forbidden');
       const admin = isOrganizationAdmin === true;
 
       const { limit, afterId } = request;
@@ -131,8 +134,6 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       if (status !== 'active' && status !== 'archived') return fail('invalid_status');
       if (status === 'archived' && !admin) return fail('forbidden');
 
-      const orgPermissions =
-        actor.permissions instanceof Set ? actor.permissions : new Set<string>();
       const inheritsAll = orgPermissions.has('project:read');
 
       if (!inheritsAll && readable !== undefined) {

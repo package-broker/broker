@@ -1,3 +1,4 @@
+import { PACKAGE_BOUNDARY_PERMISSIONS, type ProjectActor } from './project-actor.js';
 import type { ActorAccessSnapshot } from './actor.js';
 import { catalogueTokenEligible } from './catalogue.js';
 import { assertCsrfToken, assertSameOrigin, UNSAFE_METHODS } from '../auth/csrf.js';
@@ -26,6 +27,51 @@ export interface EngineGrant {
 }
 
 const grants = new WeakMap<AuthorizationRequest, EngineGrant>();
+const packageActors = new WeakMap<AuthorizationRequest, ProjectActor>();
+
+export function packageActorOf(request: AuthorizationRequest): ProjectActor | null {
+  return packageActors.get(request) ?? null;
+}
+
+function packagePermissionView(names: readonly string[]): ReadonlySet<string> {
+  const values = new Set(names);
+  const view: ReadonlySet<string> = {
+    size: values.size,
+    has: (name) => values.has(name),
+    forEach: (callback, thisArg?: unknown) => {
+      values.forEach((name) => callback.call(thisArg, name, name, view));
+    },
+    entries: () => values.entries(),
+    keys: () => values.keys(),
+    values: () => values.values(),
+    [Symbol.iterator]: () => values.values(),
+  };
+  return Object.freeze(view);
+}
+
+function setPackageActor(
+  request: AuthorizationRequest,
+  decision: Extract<AuthorizationDecision, { allow: true }>,
+  effective: ReadonlySet<string>,
+  token: boolean,
+): void {
+  if (request.route.boundary !== 'project' || decision.projectId === null) return;
+  packageActors.set(
+    request,
+    Object.freeze({
+      kind: 'project',
+      userId: decision.principal.id,
+      orgId: request.org.orgId,
+      projectId: decision.projectId,
+      permissions: packagePermissionView(
+        [...effective].filter(
+          (name) =>
+            PACKAGE_BOUNDARY_PERMISSIONS.has(name) && (!token || catalogueTokenEligible(name)),
+        ),
+      ),
+    }),
+  );
+}
 
 export function engineGrantOf(request: AuthorizationRequest): EngineGrant | null {
   return grants.get(request) ?? null;
@@ -250,11 +296,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         return FORBIDDEN;
       }
     }
+    const effective = sessionEffective(found, input.boundary);
     const decision = decideFrom(
       {
         principal: { kind: 'user', id: found.user.id },
         project: found.project,
-        effective: sessionEffective(found, input.boundary),
+        effective,
         projectVisible: false,
       },
       permission,
@@ -271,6 +318,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       });
     }
     if (decision.allow) {
+      setPackageActor(request, decision, effective, false);
       grants.set(
         request,
         Object.freeze({
@@ -331,11 +379,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     }
     const principal = principalOf(found);
     if (principal === undefined) return UNAUTHORIZED;
+    const effective = tokenEffective(found, input.boundary);
     const decision = decideFrom(
       {
         principal,
         project: found.project,
-        effective: tokenEffective(found, input.boundary),
+        effective,
         projectVisible: found.projectVisible === true,
       },
       permission,
@@ -345,6 +394,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     if (!decision.allow) return decision;
     if (permission !== null && !catalogueTokenEligible(permission)) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
+    setPackageActor(request, decision, effective, true);
     grants.set(
       request,
       Object.freeze({
@@ -361,6 +411,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
   return Object.freeze({
     async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
       grants.delete(request);
+      packageActors.delete(request);
       const { boundary: routeBoundary } = request.route;
       if (
         routeBoundary !== 'organization' &&

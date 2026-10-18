@@ -430,7 +430,7 @@ describe('kernel access snapshots', () => {
     },
   );
 
-  it('answers a package-boundary route that holds an engine grant with the denial page, not 503', async () => {
+  it('fails closed for a package route without a package actor', async () => {
     const spy = vi.spyOn(engineModule, 'engineGrantOf').mockReturnValue({
       principal: { kind: 'user', id: 'user-1' },
       projectId: 'proj-1',
@@ -440,6 +440,7 @@ describe('kernel access snapshots', () => {
     });
     try {
       const contexts: RequestContext[] = [];
+      const logs: unknown[] = [];
       const pkgPlugin: PluginDefinition = {
         ...plugin,
         register(registry) {
@@ -467,14 +468,17 @@ describe('kernel access snapshots', () => {
             projectId: 'proj-1',
           }),
         },
-        packageResolver: { isVisible: () => true },
+        packageResolver: { resolve: async () => ({ kind: 'absent' }) },
         resolveOrg: async () => ORG,
         health: async () => true,
-        log: () => undefined,
+        log: (entry) => {
+          logs.push(entry);
+        },
       });
       const response = await k.fetch(call('/p/demo/pkg/vendor-x', { headers: cookie }));
-      expect(response.status).toBe(403);
-      expect(response.headers.has('retry-after')).toBe(false);
+      expect(response.status).toBe(503);
+      expect(response.headers.has('retry-after')).toBe(true);
+      expect(logs).toContainEqual(expect.objectContaining({ event: 'authz.error' }));
       expect(contexts).toHaveLength(0);
     } finally {
       spy.mockRestore();

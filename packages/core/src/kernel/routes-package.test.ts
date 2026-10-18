@@ -1,4 +1,5 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { PackageVisibilityPort } from '../db/catalogue.js';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { SESSION_COOKIE } from '../auth/cookies.js';
 import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
 import { orgContext } from '../db/port.js';
@@ -15,14 +16,10 @@ import { formatToken } from '../secrets/token-format.js';
 import type { AuthorizationEngine } from './authorize.js';
 import { createKernel } from './kernel.js';
 import { KernelConfigError, collectRegistrations } from './registry.js';
-import {
-  PACKAGE_ECOSYSTEMS,
-  routeBoundaryProblems,
-  type PackageVisibilityResolver,
-} from './routes.js';
+import { PACKAGE_ECOSYSTEMS, routeBoundaryProblems } from './routes.js';
 
 const handler = () => new Response('ok');
-const resolver: PackageVisibilityResolver = { isVisible: () => true };
+const resolver: PackageVisibilityPort = { resolve: async () => ({ kind: 'absent' }) };
 const binding = {
   ecosystem: 'composer',
   name: (params: Readonly<Record<string, string>>) => params['name'] ?? null,
@@ -103,6 +100,11 @@ describe.each([
       { package: { ...binding, fetchOnAdmission: 'yes' } },
       'fetchOnAdmission',
     ],
+    [
+      'fetchOnAdmission with write permission',
+      { permission: 'project:packages:write', package: { ...binding, fetchOnAdmission: true } },
+      'fetchOnAdmission',
+    ],
     ['no :project in the path', { path: '/pkg/:name' }, ':project'],
     ['an org permission', { permission: 'org:read' }, 'project:packages:read'],
     ['a project:read permission', { permission: 'project:read' }, 'project:packages:read'],
@@ -113,6 +115,17 @@ describe.each([
     expect(problems.length).toBeGreaterThan(0);
     expect(problems.join('\n')).toContain(fragment);
   });
+
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'] as const)(
+    'refuses fetchOnAdmission on %s',
+    (method) => {
+      const problems = problemsOf(
+        packageRoute({ method, package: { ...binding, fetchOnAdmission: true } }),
+        true,
+      );
+      expect(problems.join('\n')).toContain('fetchOnAdmission');
+    },
+  );
 
   it('refuses a package binding on a non-package boundary', () => {
     const r = packageRoute({ boundary: 'project' });
@@ -144,6 +157,28 @@ describe('package boundary on a plugin route', () => {
     const { routes } = collectRegistrations([plugin], { packageResolver: resolver });
     expect(routes[0]?.package?.name({ name: 'vendor/x' })).toBe('vendor/x');
     expect(routes[0]?.package?.ecosystem).toBe('composer');
+  });
+  it('copies and freezes the validated package binding', () => {
+    const supplied = { ...binding, fetchOnAdmission: false };
+    const plugin: PluginDefinition = {
+      id: 'pkgplugin',
+      package: '@test/pkgplugin',
+      apiVersion: SUPPORTED_PLUGIN_API[1],
+      platforms: ['node'],
+      register(registry) {
+        registry.route(packageRoute({ package: supplied }));
+      },
+    };
+    const { routes } = collectRegistrations([plugin], { packageResolver: resolver });
+    const registered = routes[0]!.package!;
+    supplied.ecosystem = 'npm';
+    supplied.name = () => 'other/pkg';
+    supplied.fetchOnAdmission = true;
+    expect(registered).not.toBe(supplied);
+    expect(Object.isFrozen(registered)).toBe(true);
+    expect(registered.ecosystem).toBe('composer');
+    expect(registered.name({ name: 'vendor/x' })).toBe('vendor/x');
+    expect(registered.fetchOnAdmission).toBe(false);
   });
 });
 
@@ -193,8 +228,9 @@ describe('package boundary at request time', () => {
   async function serve(
     headers: Record<string, string>,
     authorization?: AuthorizationEngine,
-  ): Promise<{ status: number; handled: number; response: Response }> {
+  ): Promise<{ status: number; handled: number; response: Response; portCalls: number }> {
     let handled = 0;
+    const resolve = vi.fn<PackageVisibilityPort['resolve']>(async () => ({ kind: 'absent' }));
     const plugin: PluginDefinition = {
       id: 'pkgplugin',
       package: '@test/pkgplugin',
@@ -218,26 +254,34 @@ describe('package boundary at request time', () => {
       resolveOrg: () => Promise.resolve(orgContext('org-1')),
       health: () => Promise.resolve(true),
       log: () => undefined,
-      packageResolver: resolver,
+      packageResolver: { resolve },
       ...(authorization === undefined ? {} : { authorization }),
     });
     const response = await kernel.fetch(
       new Request('https://broker.test/p/demo/pkg/vendor-x', { headers }),
     );
-    return { status: response.status, handled, response };
+    return { status: response.status, handled, response, portCalls: resolve.mock.calls.length };
   }
 
   it.each([
-    ['a bearer token', { authorization: `Bearer ${formatToken('pat', 'abcdefghijkl', secret)}` }],
-    ['a session cookie', { cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` }],
-    ['no credential', {}],
-  ])('denies a registered package route with %s before any lookup', async (_label, headers) => {
-    const lookups: string[] = [];
-    const { status, handled } = await serve(headers, realEngine(lookups));
-    expect(status).toBe(403);
-    expect(handled).toBe(0);
-    expect(lookups).toEqual([]);
-  });
+    [
+      'a bearer token',
+      { authorization: `Bearer ${formatToken('pat', 'abcdefghijkl', secret)}` },
+      ['token'],
+    ],
+    ['a session cookie', { cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` }, ['session']],
+    ['no credential', {}, []],
+  ])(
+    'authenticates a registered package route with %s',
+    async (_label, headers, expectedLookups) => {
+      const lookups: string[] = [];
+      const { status, handled, portCalls } = await serve(headers, realEngine(lookups));
+      expect(status).toBe(401);
+      expect(handled).toBe(0);
+      expect(lookups).toEqual(expectedLookups);
+      expect(portCalls).toBe(0);
+    },
+  );
 
   it('returns 503 unavailable for a registered package route under the default engine', async () => {
     const { status, handled, response } = await serve({});

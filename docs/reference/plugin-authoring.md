@@ -15,3 +15,7 @@ Every other subpath of `@package-broker/core`, such as `kernel/*`, `db/*`, `auth
 A plugin supplies only the `identity` and `source` ports, by listing them in `binds` and providing `identityProviders` or `sourceProviders`. The blob store, cache, jobs and observability are adapters chosen in `broker.config.ts` (the config key for the `job` port is `jobs`); the database is fixed by the runtime (D1 or SQLite). A plugin cannot bind any of them.
 
 An identity factory receives `fetch`, a clock and an env reader limited to its own `PB_IDP_*` secrets. A source factory receives nothing. Both are validated at `pb build` and at boot.
+
+## `access.check` hook
+
+On core routes with the authenticated boundary, the `access.check` hook input carries `permission: 'authenticated'`. This is a placeholder meaning any logged-in principal, not a permission in the catalogue, and it cannot be assigned to roles. A hook that wants to restrict these routes decides using the fields of `principal`.

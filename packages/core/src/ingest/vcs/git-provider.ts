@@ -95,6 +95,21 @@ function transientUpstream(error: FetchFailure): boolean {
   );
 }
 
+function retryBackoff(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, 100);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function repository(source: ProviderSource) {
   if (
     source.type !== 'vcs' ||
@@ -218,7 +233,7 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
     capabilities: Promise<GitCapabilities>,
   ): void {
     if (discovered.size >= CAPABILITIES_MAX_ENTRIES) discovered.clear();
-    const key = `${source.id}\0${url}`;
+    const key = `${ctx.org.orgId}\0${source.id}\0${url}`;
     const entry = { at: ctx.clock.now().getTime(), capabilities };
     discovered.set(key, entry);
     capabilities.catch(() => {
@@ -231,7 +246,7 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
     source: ProviderSource,
     url: string,
   ): Promise<GitCapabilities> | undefined {
-    const entry = discovered.get(`${source.id}\0${url}`);
+    const entry = discovered.get(`${ctx.org.orgId}\0${source.id}\0${url}`);
     return entry !== undefined && ctx.clock.now().getTime() - entry.at < CAPABILITIES_TTL_MS
       ? entry.capabilities
       : undefined;
@@ -359,15 +374,18 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
               }
               let succeeded = false;
               const attempt = async (refs: typeof unread): Promise<FetchFailure | undefined> => {
-                ctx.signal.throwIfAborted();
-                try {
-                  await read(refs);
-                  succeeded = true;
-                  return undefined;
-                } catch (failure) {
+                for (let retry = 0; ; retry++) {
                   ctx.signal.throwIfAborted();
-                  if (!isFetchFailure(failure)) throw failure;
-                  return failure;
+                  try {
+                    await read(refs);
+                    succeeded = true;
+                    return undefined;
+                  } catch (failure) {
+                    ctx.signal.throwIfAborted();
+                    if (!isFetchFailure(failure)) throw failure;
+                    if (retry > 0 || !transientUpstream(failure)) return failure;
+                    await retryBackoff(ctx.signal);
+                  }
                 }
               };
               const isolate = async (refs: typeof unread, failure: FetchFailure): Promise<void> => {
@@ -383,6 +401,7 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
                   refs === unread &&
                   first !== undefined &&
                   second !== undefined &&
+                  !transientUpstream(first) &&
                   sameFailure(first, second)
                 ) {
                   const probed = await Promise.all(
@@ -555,9 +574,7 @@ async function blobPlan(
       { used: 0 },
     );
     if (loaded.size === 0) return { plan: full, attributes };
-    const plan = blobs
-      .filter((entry) => loaded.has(entry.path) || !matcher.ignored(entry.path))
-      .map((entry) => entry.oid);
+    const plan = blobs.filter((entry) => !matcher.ignored(entry.path)).map((entry) => entry.oid);
     return { plan, attributes };
   } catch {
     return { plan: full, attributes };

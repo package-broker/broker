@@ -33,6 +33,7 @@ function localSession(ctx: OrgContext, fence: MutationFence) {
     .select(sql.lit(1).as('one'))
     .where('sa_session.org_id', '=', ctx.orgId)
     .where('sa_session.id', '=', fence.sessionId)
+    .where('sa_session.user_id', '=', fence.userId)
     .where('sa_session.revoked_at', 'is', null)
     .where('sa_session.identity_id', 'is', null)}`;
 }

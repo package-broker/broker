@@ -18,7 +18,7 @@ import {
   type JobDefinition,
 } from '../platform/jobs.js';
 import { reportableErrorName } from './error-name.js';
-import type { PackageVisibilityResolver } from './routes.js';
+import type { PackageVisibilityPort } from '../db/catalogue.js';
 import {
   routeApiProblems,
   routeBoundaryProblems,
@@ -59,7 +59,7 @@ export interface Registration {
 }
 
 export interface RegistrationOptions {
-  readonly packageResolver?: PackageVisibilityResolver;
+  readonly packageResolver?: PackageVisibilityPort;
   readonly coreJobs?: readonly RegisteredCoreJob[];
 }
 
@@ -337,7 +337,11 @@ export function collectRegistrations(
         boundaryProblems.length === 0 &&
         apiProblems.length === 0
       ) {
-        routes.push({ ...route, plugin: id });
+        routes.push({
+          ...route,
+          ...(route.package === undefined ? {} : { package: Object.freeze({ ...route.package }) }),
+          plugin: id,
+        });
       }
     }
   }

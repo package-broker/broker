@@ -56,7 +56,7 @@ describe('creator removal mutation', () => {
         ...repository,
         async deleteOrganization(...args) {
           const result = await repository.deleteOrganization(...args);
-          if (result === 'deleted') {
+          if (typeof result === 'object' && result.outcome === 'deleted') {
             await executor.batch([
               {
                 sql: 'UPDATE token SET revoked_at = ? WHERE org_id = ?',

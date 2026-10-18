@@ -9,6 +9,7 @@ import {
 import {
   normalizeVersionMetadata,
   type NormalizedMetadata,
+  type NormalizedJson,
 } from '@package-broker/core/catalogue/metadata';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
@@ -418,7 +419,7 @@ describe('versionInsertStatements', () => {
   it('refuses invalid identities and oversized metadata without writing them', async () => {
     const oversized: NormalizedMetadata = {
       ...composerMeta(),
-      json: JSON.stringify({ pad: 'x'.repeat(262144) }),
+      json: JSON.stringify({ pad: 'x'.repeat(262144) }) as NormalizedJson,
     };
     const plan = await run([
       composerInput('1.0.0', '1.0.0.0'),

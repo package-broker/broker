@@ -4,7 +4,7 @@ import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
 import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
 import { ComposerRootError, type ComposerRootSource } from './root.js';
-import { readV1Index, type V1IndexResult } from './v1-index.js';
+import { documentKey, readV1Index, type V1IndexResult } from './v1-index.js';
 
 const policy = createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] });
 const BASE = 'https://repo.example.com';
@@ -259,6 +259,130 @@ describe('readV1Index includes', () => {
     expect(requests).toHaveLength(4);
   });
 
+  it('records the document and hashes each package was read from', async () => {
+    const root = JSON.stringify({
+      packages: { 'vendor/inline': { '2.0.0': { name: 'vendor/inline' } } },
+      includes: { 'include/all$abc.json': { sha256: sha256(included) } },
+    });
+    const { fetch } = setup({
+      [`${BASE}/packages.json`]: root,
+      [`${BASE}/include/all%24abc.json`]: included,
+      [`${BASE}/include/deep.json`]: nested,
+    });
+    const result = await readV1Index(fetch, options);
+    if (result.status !== 'updated') throw new Error('expected updated');
+    const documents = Object.fromEntries(
+      [...result.index.entries].map(([name, entry]) => [
+        name,
+        entry.kind === 'package' ? entry.document : undefined,
+      ]),
+    );
+    expect(documents).toEqual({
+      'vendor/inline': { url: `${BASE}/packages.json`, sha256: sha256(root) },
+      'vendor/inc': { url: `${BASE}/include/all%24abc.json`, sha256: sha256(included) },
+      'vendor/deep': { url: `${BASE}/include/deep.json`, sha1: sha1(nested) },
+    });
+  });
+
+  const includeRoot = JSON.stringify({
+    includes: { 'include/all$abc.json': { sha256: sha256(included) } },
+  });
+  const served = {
+    [`${BASE}/packages.json`]: includeRoot,
+    [`${BASE}/include/all%24abc.json`]: included,
+    [`${BASE}/include/deep.json`]: nested,
+  };
+  const docsOf = (result: V1IndexResult) => {
+    if (result.status !== 'updated') throw new Error('expected updated');
+    return result.index.documents;
+  };
+  const deepKey = documentKey({ url: `${BASE}/include/deep.json`, sha1: sha1(nested) });
+
+  it('hands the packages of each verified document to the index', async () => {
+    const { fetch } = setup(served);
+    const documents = docsOf(await readV1Index(fetch, options));
+    expect([...(documents.get(deepKey)?.members.keys() ?? [])]).toEqual(['vendor/deep']);
+    expect(documents.get(deepKey)?.partial).toBe(false);
+  });
+
+  it('keeps a document that failed its hash out of the cache', async () => {
+    const root = JSON.stringify({
+      includes: { 'include/all$abc.json': { sha256: 'f'.repeat(64) } },
+    });
+    const { fetch } = setup({ ...served, [`${BASE}/packages.json`]: root });
+    const result = await readV1Index(fetch, options);
+    expect(result.status === 'updated' && result.index.complete).toBe(false);
+    expect(docsOf(result).size).toBe(0);
+  });
+
+  it('does not carry first-pass documents into the retry pass', async () => {
+    const solo = JSON.stringify({
+      packages: { 'vendor/solo': { '1.0.0': { name: 'vendor/solo' } } },
+    });
+    const first = JSON.stringify({
+      includes: {
+        'include/solo.json': { sha1: sha1(solo) },
+        'include/b.json': { sha1: sha1(included) },
+      },
+    });
+    const second = JSON.stringify({ includes: { 'include/b.json': { sha1: sha1(included) } } });
+    const { fetch } = setup({
+      [`${BASE}/packages.json`]: (n) => (n <= 2 ? first : second),
+      [`${BASE}/include/solo.json`]: solo,
+      [`${BASE}/include/deep.json`]: nested,
+      [`${BASE}/include/b.json`]: (n) => (n === 1 ? '{"packages":{}}' : included),
+    });
+    const result = await readV1Index(fetch, options);
+    expect(result.status === 'updated' && result.index.complete).toBe(true);
+    const documents = docsOf(result);
+    expect(documents.has(documentKey({ url: `${BASE}/include/solo.json`, sha1: sha1(solo) }))).toBe(
+      false,
+    );
+    expect(documents.has(deepKey)).toBe(true);
+  });
+
+  it('keeps only selected names in the cache and marks the document partial', async () => {
+    const { fetch } = setup(served);
+    const selection = { packages: ['vendor/inc'], patterns: [], expandPatterns: false };
+    const result = await readV1Index(fetch, { ...options, selection });
+    const documents = docsOf(result);
+    const key = documentKey({
+      url: `${BASE}/include/all%24abc.json`,
+      sha256: sha256(included),
+    });
+    expect([...(documents.get(key)?.members.keys() ?? [])]).toEqual(['vendor/inc']);
+    expect(documents.get(deepKey)?.members.size).toBe(0);
+    expect(documents.get(deepKey)?.partial).toBe(true);
+    expect(result.status === 'updated' && result.index.entries.size).toBe(2);
+  });
+
+  it('stops caching raw package text at the byte budget but still lists every name', async () => {
+    const both = JSON.stringify({
+      packages: {
+        'vendor/a': { '1.0.0': { name: 'vendor/a' } },
+        'vendor/b': { '1.0.0': { name: 'vendor/b' } },
+      },
+    });
+    const root = JSON.stringify({ includes: { 'include/both.json': { sha1: sha1(both) } } });
+    const { fetch } = setup({
+      [`${BASE}/packages.json`]: root,
+      [`${BASE}/include/both.json`]: both,
+    });
+    const one = JSON.stringify({ '1.0.0': { name: 'vendor/a' } }).length;
+    const result = await readV1Index(fetch, { ...options, maxCachedBytes: one });
+    const cached = docsOf(result).get(
+      documentKey({ url: `${BASE}/include/both.json`, sha1: sha1(both) }),
+    );
+    expect([...(cached?.members.keys() ?? [])]).toEqual(['vendor/a']);
+    expect(cached?.partial).toBe(true);
+    expect(result.status === 'updated' && result.index.entries.size).toBe(2);
+  });
+
+  it('refuses a non-positive cache budget', async () => {
+    const { fetch } = setup(served);
+    await expect(readV1Index(fetch, { ...options, maxCachedBytes: 0 })).rejects.toThrow(RangeError);
+  });
+
   it('lists the packages of a legacy root without includes', async () => {
     const root = JSON.stringify({ packages: { 'vendor/legacy': { '1.0.0': {} } } });
     const { fetch } = setup({ [`${BASE}/packages.json`]: root });
@@ -392,6 +516,88 @@ describe('readV1Index round 2 hardening', () => {
       'v.e_n-d0r/pkg--name.x_y': H1,
     });
   });
+
+  it.each(['provider', 'package'] as const)(
+    'keeps one identical %s listing across include documents',
+    async (kind) => {
+      const raw = { '1.0.0': {} };
+      const a = kind === 'provider' ? providerFile({ 'Vendor/A': H1 }) : pkgs({ 'Vendor/A': raw });
+      const b = kind === 'provider' ? providerFile({ 'vendor/a': H1 }) : pkgs({ 'vendor/a': raw });
+      const files = { 'include/a.json': a, 'include/b.json': b, 'include/c.json': b };
+      const root = kind === 'provider' ? providersRoot(files) : includesRoot(files);
+      const { fetch } = setup({
+        [`${BASE}/packages.json`]: root,
+        ...Object.fromEntries(
+          Object.entries(files).map(([path, body]) => [`${BASE}/${path}`, body]),
+        ),
+      });
+      const result = await readV1Index(fetch, { ...options, maxEntries: 1 });
+      expect(entriesOf(result)).toEqual({
+        'vendor/a': kind === 'provider' ? H1 : sha256(JSON.stringify(raw)),
+      });
+      expect(result.status === 'updated' && result.index.complete).toBe(true);
+      if (result.status === 'updated' && kind === 'package') {
+        expect(result.index.entries.get('vendor/a')).toMatchObject({
+          document: { url: `${BASE}/include/a.json` },
+        });
+      }
+    },
+  );
+
+  it.each(['provider', 'package'] as const)(
+    'rejects a conflicting %s listing after an identical duplicate',
+    async (kind) => {
+      const a =
+        kind === 'provider'
+          ? providerFile({ 'vendor/a': H1 })
+          : pkgs({ 'vendor/a': { '1.0.0': {} } });
+      const c =
+        kind === 'provider'
+          ? providerFile({ 'vendor/a': H2 })
+          : pkgs({ 'vendor/a': { '2.0.0': {} } });
+      const files = { 'include/a.json': a, 'include/b.json': a, 'include/c.json': c };
+      const { fetch } = setup({
+        [`${BASE}/packages.json`]: kind === 'provider' ? providersRoot(files) : includesRoot(files),
+        ...Object.fromEntries(
+          Object.entries(files).map(([path, body]) => [`${BASE}/${path}`, body]),
+        ),
+      });
+      const result = await readV1Index(fetch, options);
+      expect(incomplete(result)).toBe('duplicate');
+      expect(result.status === 'updated' && result.index.documents.size).toBe(0);
+    },
+  );
+
+  it.each([
+    ['provider', false],
+    ['provider', true],
+    ['package', false],
+    ['package', true],
+  ] as const)(
+    'rejects a document-local duplicate %s listing with duplicate include first: %s',
+    async (kind, duplicateFirst) => {
+      const raw = { '1.0.0': {} };
+      const single =
+        kind === 'provider' ? providerFile({ 'vendor/a': H1 }) : pkgs({ 'vendor/a': raw });
+      const duplicate =
+        kind === 'provider'
+          ? providerFile({ 'Vendor/A': H1, 'vendor/a': H1 })
+          : pkgs({ 'Vendor/A': raw, 'vendor/a': raw });
+      const files = duplicateFirst
+        ? { 'include/duplicate.json': duplicate, 'include/single.json': single }
+        : { 'include/single.json': single, 'include/duplicate.json': duplicate };
+      const { fetch } = setup({
+        [`${BASE}/packages.json`]: kind === 'provider' ? providersRoot(files) : includesRoot(files),
+        ...Object.fromEntries(
+          Object.entries(files).map(([path, body]) => [`${BASE}/${path}`, body]),
+        ),
+      });
+      const result = await readV1Index(fetch, options);
+      expect(incomplete(result)).toBe('duplicate');
+      expect(entriesOf(result)).toEqual({});
+      expect(result.status === 'updated' && result.index.documents.size).toBe(0);
+    },
+  );
 
   it('fails on a case-insensitive duplicate name across documents', async () => {
     const a = providerFile({ 'Vendor/A': H1 });

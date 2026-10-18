@@ -141,12 +141,17 @@ export function createNpmjsProxyProvider(staging: NpmStaging, id = 'npmjs'): Sou
     ecosystems: ['npm'],
     async describe(ctx, source, name, options) {
       assertNpmjs(ctx, source);
-      if (!validNpmName(name)) return { kind: 'not_found', definitive: true };
+      if (!validNpmName(name)) return { kind: 'not_found', definitive: false };
+      const url = npmPackumentUrl(NPMJS_REGISTRY, name);
       return describeNpm(
         staging,
         ctx,
         source,
-        { name, url: npmPackumentUrl(NPMJS_REGISTRY, name), destinations: [NPMJS_REGISTRY] },
+        {
+          name,
+          url,
+          destinations: [NPMJS_REGISTRY],
+        },
         options,
       );
     },

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { sha256Hex } from '../auth/primitives.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
+import { createKernel } from '../kernel/kernel.js';
+import { fixedClock } from '../ids.js';
 import { authorizeRoute } from '../kernel/authorize.js';
 import type { AuthorizationRequest } from '../kernel/authorize.js';
 import { createKeyring } from '../secrets/keyring.js';
@@ -38,6 +40,9 @@ interface State {
     projectPermissions: string[];
     organizationPermissions: string[];
     hashOf: string;
+    bindingOk: boolean;
+    projectMode: 'all' | 'selected' | null;
+    scope: { level: string; readOnly: boolean } | null;
     lastUsedAt: string | null;
   };
   lookups: number;
@@ -61,6 +66,9 @@ function freshState(): State {
       projectPermissions: ['project:read', 'project:packages:read'],
       organizationPermissions: ['org:read'],
       hashOf: PAT,
+      bindingOk: true,
+      projectMode: 'all',
+      scope: { level: 'full', readOnly: false },
       lastUsedAt: null,
     },
     lookups: 0,
@@ -80,6 +88,9 @@ async function tokenEnvelope(state: State): Promise<EngineTokenAccess> {
       lastUsedAt: t.lastUsedAt,
       userId: t.kind === 'pat' ? 'user-1' : null,
       servicePrincipalId: t.kind === 'svc' ? 'svc-1' : null,
+      bindingOk: t.bindingOk,
+      projectMode: t.projectMode,
+      scope: t.scope,
     },
     projectVisible: false,
     principalStatus: t.principalStatus,
@@ -1079,5 +1090,241 @@ describe('token scope shortfall on a visible project', () => {
       allow: false,
       status: 404,
     });
+  });
+});
+
+describe('authenticated boundary', () => {
+  const ask = (headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
+    req({
+      headers,
+      boundary: 'authenticated' as never,
+      permission: 'authenticated',
+      params: {},
+      ...extra,
+    });
+
+  it('allows a valid session with no permission check and a null project', async () => {
+    const state = freshState();
+    state.sessionOrg = [];
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(cookie))).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+    });
+  });
+
+  it('allows a token that holds no permission at all', async () => {
+    const state = freshState();
+    state.token.organizationPermissions = [];
+    state.token.projectPermissions = [];
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+      tokenId: 'tok-1',
+    });
+  });
+
+  it('answers 401 without a credential', async () => {
+    const engine = createAuthorizationEngine(deps(freshState()));
+    expect(await engine.authorize(ask({}))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a malformed Authorization header', async () => {
+    const engine = createAuthorizationEngine(deps(freshState()));
+    expect(await engine.authorize(ask({ authorization: 'Bearer' }))).toEqual({
+      allow: false,
+      status: 401,
+    });
+  });
+
+  it('answers 401 for a revoked session', async () => {
+    const state = freshState();
+    state.sessionRevoked = true;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(cookie))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a revoked token', async () => {
+    const state = freshState();
+    state.token.revoked = true;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a token whose binding is inconsistent', async () => {
+    const state = freshState();
+    state.token.bindingOk = false;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a token whose scope is unparseable or inconsistent', async () => {
+    const state = freshState();
+    state.token.scope = null;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a token with no project mode', async () => {
+    const state = freshState();
+    state.token.projectMode = null;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a token whose principal is inactive', async () => {
+    const state = freshState();
+    state.token.principalStatus = 'suspended';
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('answers 401 for a PAT whose validation is stale', async () => {
+    const state = freshState();
+    state.token.fresh = false;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('allows a read-level token', async () => {
+    const state = freshState();
+    state.token.scope = { level: 'read', readOnly: true };
+    const engine = createAuthorizationEngine(deps(state));
+    expect((await engine.authorize(ask(bearer(PAT)))).allow).toBe(true);
+  });
+
+  it('allows a project-scoped PAT with a null project id', async () => {
+    const state = freshState();
+    state.token.organizationPermissions = [];
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toMatchObject({
+      allow: true,
+      projectId: null,
+    });
+  });
+
+  it('allows a project-bound service token as a service principal', async () => {
+    const state = freshState();
+    state.token.kind = 'svc';
+    state.token.hashOf = SVC;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(SVC)))).toEqual({
+      allow: true,
+      principal: { kind: 'service', id: 'svc-1' },
+      projectId: null,
+      tokenId: 'tok-1',
+    });
+  });
+
+  it('accepts a Basic credential on the GET route, as organization routes do', async () => {
+    const engine = createAuthorizationEngine(deps(freshState()));
+    const basic = `Basic ${btoa(`${PAT}:x`)}`;
+    expect((await engine.authorize(ask({ authorization: basic }))).allow).toBe(true);
+  });
+
+  it('answers 401 for an expired token', async () => {
+    const state = freshState();
+    state.token.expired = true;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
+  });
+
+  it('still answers 403 for the self boundary with a valid session', async () => {
+    const state = freshState();
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(req({ headers: cookie, boundary: 'self' }))).toEqual({
+      allow: false,
+      status: 403,
+    });
+    expect(state.lookups).toBe(0);
+  });
+});
+
+describe('authenticated boundary through the kernel', () => {
+  const BASE = 'http://broker.test';
+
+  async function kernelWith(state: State, calls: unknown[]) {
+    return createKernel({
+      platform: 'node',
+      plugins: [],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock: fixedClock('2026-10-16T12:00:00.000Z'),
+        ids: { ulid: () => '01JA0000000000000000000000' },
+      },
+      resolveOrg: () => Promise.resolve(org),
+      health: () => Promise.resolve(true),
+      log: () => undefined,
+      authorization: createAuthorizationEngine(deps(state)),
+      coreRoutes: [
+        {
+          method: 'GET',
+          path: '/_pb/whoami',
+          permission: null,
+          boundary: 'authenticated',
+          handler: (context) => {
+            calls.push({ principal: context.principal, projectId: context.projectId });
+            return Response.json({ ok: true });
+          },
+        },
+        {
+          method: 'GET',
+          path: '/_pb/open',
+          permission: null,
+          handler: () => Response.json({ open: true }),
+        },
+      ],
+    });
+  }
+
+  const strip = (body: { error: { requestId?: string } }) => ({
+    ...body,
+    error: { ...body.error, requestId: undefined },
+  });
+
+  it('answers anonymous, malformed and revoked-session requests with one identical 401 body', async () => {
+    const state = freshState();
+    state.sessionRevoked = true;
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls);
+    const bodies: unknown[] = [];
+    for (const headers of [{}, { authorization: 'Bearer' }, cookie]) {
+      const response = await kernel.fetch(new Request(`${BASE}/_pb/whoami`, { headers }));
+      expect(response.status).toBe(401);
+      bodies.push(strip((await response.json()) as never));
+    }
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(bodies[2]).toEqual(bodies[0]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('runs the handler once with the principal for a valid session', async () => {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(freshState(), calls);
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/whoami`, { headers: cookie }));
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([{ principal: { kind: 'user', id: 'user-1' }, projectId: null }]);
+  });
+
+  it('runs the handler once with the principal for a valid read-scope token', async () => {
+    const state = freshState();
+    state.token.organizationPermissions = ['org:read'];
+    state.token.projectPermissions = [];
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls);
+    const response = await kernel.fetch(
+      new Request(`${BASE}/_pb/whoami`, { headers: bearer(PAT) }),
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([{ principal: { kind: 'user', id: 'user-1' }, projectId: null }]);
+  });
+
+  it('still serves a permission-less route without a boundary to anonymous callers', async () => {
+    const kernel = await kernelWith(freshState(), []);
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/open`));
+    expect(response.status).toBe(200);
   });
 });

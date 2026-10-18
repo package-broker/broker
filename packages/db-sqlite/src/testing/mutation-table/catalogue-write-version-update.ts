@@ -21,6 +21,13 @@ export const entries: readonly MutationEntry[] = [
     ],
     batchDecisions: [
       {
+        name: 'multiple updated versions read the clock once',
+        pattern: /(?:strftime\('[^']*', 'now'(?:, '[^']*')?\)|unixepoch\('now'(?:, '[^']*')?\))/,
+        expected: 1,
+        caseName: writeTimeCase('update', 'future').name,
+        case: writeTimeCase('update', 'future'),
+      },
+      {
         name: 'multiple updated versions advance the package clock once',
         pattern: /update "package" set/,
         expected: 1,

@@ -1,4 +1,5 @@
 import type { CatalogueDocKind, FetchDescriptor } from '../db/catalogue.js';
+import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import type { Codecs } from '../platform/codec.js';
 import type { Sha256 } from '../platform/blob.js';
@@ -40,6 +41,7 @@ export function assertSnapshotRef(ref: SnapshotRef): void {
 }
 
 export interface ProviderContext {
+  readonly org: OrgContext;
   readonly fetch: PolicyFetch;
   readonly credential: UpstreamCredential | null;
   readonly codecs: Codecs;

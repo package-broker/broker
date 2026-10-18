@@ -111,23 +111,48 @@ describe('classifyUrl', () => {
     expect(classifyUrl(url, node)).toEqual({ ok: true, origin });
   });
 
+  it.each(['http://u:p@h/', 'http://u:p@h:8080/', 'http://@h/'])(
+    'refuses HTTP userinfo before checking the scheme: %s',
+    (url) => {
+      const policy = createOutboundPolicy({
+        allowPrivateHosts: ['h:80', 'h:8080'],
+        runtime: 'node',
+        selfOrigins: [],
+      });
+      expect(classifyUrl(url, policy)).toEqual({ ok: false, reason: 'userinfo' });
+    },
+  );
+
   it('has at least 40 table rows', () => {
     expect(refused.length + accepted.length).toBeGreaterThanOrEqual(40);
   });
 
-  it('passes an allowlisted private host on node, with http and a custom port', () => {
+  it.each([80, 443, 8080, 8443])('refuses HTTP on explicit allowlist port %s', (port) => {
+    const policy = createOutboundPolicy({
+      allowPrivateHosts: [`repo.corp.internal:${port}`],
+      runtime: 'node',
+      selfOrigins: [],
+    });
+    expect(classifyUrl(`http://repo.corp.internal:${port}/`, policy)).toEqual({
+      ok: false,
+      reason: 'scheme',
+    });
+    expect(classifyUrl(`https://repo.corp.internal:${port}/`, policy).ok).toBe(true);
+  });
+
+  it('passes an allowlisted private host on node, with https and a custom port', () => {
     const policy = createOutboundPolicy({
       allowPrivateHosts: ['registry.internal:8080', 'localhost:3000', '10.0.0.5'],
       runtime: 'node',
       selfOrigins: [],
     });
-    expect(classifyUrl('http://registry.internal:8080/x', policy)).toEqual({
+    expect(classifyUrl('https://registry.internal:8080/x', policy)).toEqual({
       ok: true,
-      origin: 'http://registry.internal:8080',
+      origin: 'https://registry.internal:8080',
     });
-    expect(classifyUrl('http://localhost:3000/', policy)).toEqual({
+    expect(classifyUrl('https://localhost:3000/', policy)).toEqual({
       ok: true,
-      origin: 'http://localhost:3000',
+      origin: 'https://localhost:3000',
     });
     expect(classifyUrl('https://10.0.0.5/', policy)).toEqual({
       ok: true,
@@ -160,7 +185,8 @@ describe('classifyUrl', () => {
       ok: false,
       reason: 'scheme',
     });
-    expect(classifyUrl('http://p80.internal/', policy).ok).toBe(true);
+    expect(classifyUrl('http://p80.internal/', policy)).toEqual({ ok: false, reason: 'scheme' });
+    expect(classifyUrl('https://p80.internal:80/', policy).ok).toBe(true);
     expect(classifyUrl('https://p443.internal/', policy).ok).toBe(true);
     expect(classifyUrl('http://p443.internal/', policy)).toEqual({
       ok: false,
@@ -185,7 +211,7 @@ describe('classifyUrl', () => {
     expect(classifyUrl('http://example.com:443/', node)).toEqual({ ok: false, reason: 'scheme' });
   });
 
-  describe('explicit ports for HTTP allowlist entries', () => {
+  describe('HTTPS-only allowlist entries', () => {
     const policyFor = (entry: string) =>
       createOutboundPolicy({ allowPrivateHosts: [entry], runtime: 'node', selfOrigins: [] });
 
@@ -213,21 +239,21 @@ describe('classifyUrl', () => {
     });
 
     it.each(['http://repo.corp.internal/', 'http://repo.corp.internal:80/'])(
-      'allows %s with an explicit port 80 entry',
+      'refuses %s with an explicit port 80 entry',
       (url) => {
         expect(classifyUrl(url, policyFor('repo.corp.internal:80'))).toEqual({
-          ok: true,
-          origin: 'http://repo.corp.internal',
+          ok: false,
+          reason: 'scheme',
         });
       },
     );
 
-    it('allows HTTP on the explicit custom port', () => {
+    it('refuses HTTP on the explicit custom port', () => {
       expect(
         classifyUrl('http://repo.corp.internal:8080/', policyFor('repo.corp.internal:8080')),
       ).toEqual({
-        ok: true,
-        origin: 'http://repo.corp.internal:8080',
+        ok: false,
+        reason: 'scheme',
       });
     });
 

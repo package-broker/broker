@@ -3,23 +3,34 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
 import { build } from 'esbuild';
-import { checkBudget, findInlineCode } from './src/manifest.ts';
+import { checkBudget, findInlineCode } from '../src/manifest.ts';
 
 const run = promisify(execFile);
-const here = (path) => fileURLToPath(new URL(path, import.meta.url));
-const outDir = here('./dist/assets');
-const budgetArg = process.argv.indexOf('--budget');
-const budgetPath = budgetArg > 0 ? process.argv[budgetArg + 1] : here('./bundle-budget.json');
+const here = (target) => fileURLToPath(new URL(target, import.meta.url));
+const packageRoot = here('../');
+
+function flag(name, fallback) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return fallback;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) throw new Error(`${name} needs a value`);
+  return path.resolve(value);
+}
+
+const outDir = flag('--out', path.join(packageRoot, 'dist/assets'));
+const entryPath = flag('--entry', path.join(packageRoot, 'src/main.tsx'));
+const budgetPath = flag('--budget', path.join(packageRoot, 'bundle-budget.json'));
 
 const hashOf = (bytes) => createHash('sha256').update(bytes).digest('hex').slice(0, 12);
 
 async function bundleScript() {
   const { outputFiles } = await build({
-    entryPoints: [here('./src/main.tsx')],
+    entryPoints: [entryPath],
     bundle: true,
     write: false,
     outdir: outDir,
@@ -46,8 +57,8 @@ async function compileStyles() {
     const output = `${scratch}/app.css`;
     await run(
       process.execPath,
-      [bin, '--input', here('./src/styles.css'), '--output', output, '--minify'],
-      { cwd: here('./') },
+      [bin, '--input', path.join(packageRoot, 'src/styles.css'), '--output', output, '--minify'],
+      { cwd: packageRoot },
     );
     return await readFile(output);
   } finally {

@@ -370,6 +370,12 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         throw new TypeError('changes must name one or more updatable source fields');
       }
       const changes = input.changes;
+      if (
+        input.preparedCredential !== undefined &&
+        input.preparedCredential.id !== changes.credentialId
+      ) {
+        return 'credential_scope_mismatch';
+      }
       const set: Record<string, string | number | null> = {};
       if (changes.url !== undefined) set.url = nullableText('url', changes.url);
       if (changes.configJson !== undefined) set.config_json = jsonText(changes.configJson);
@@ -432,10 +438,17 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         ctx,
         fence,
         assertGuard(allowed, ctx),
-        [...(credentialOk === null ? [] : assertCheck(credentialOk)), statusBefore, update],
+        [
+          ...(input.preparedCredential === undefined ? [] : [input.preparedCredential.statement]),
+          ...(credentialOk === null ? [] : assertCheck(credentialOk)),
+          statusBefore,
+          update,
+        ],
         {
           authority: probe(authority(ctx, fence, current.projectId, input.providerAnchors), true),
-          ...(credentialOk === null ? {} : { conflict: probe(credentialOk, true) }),
+          ...(credentialOk === null || input.preparedCredential !== undefined
+            ? {}
+            : { conflict: probe(credentialOk, true) }),
         },
       );
       if (outcome.ok) {

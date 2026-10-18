@@ -61,6 +61,7 @@ import {
   routePathProblem,
   routesConflict,
 } from './routes.js';
+import { finaliseSecurityHeaders } from './security-headers.js';
 import { uiRootRedirect } from './ui-routes.js';
 
 export interface KernelObservability {
@@ -72,6 +73,8 @@ export interface KernelObservability {
 
 export interface KernelOptions {
   readonly platform: Platform;
+  /** Configured public origin; HSTS is disabled when absent. */
+  readonly publicOrigin?: string | undefined;
   readonly plugins: readonly PluginDefinition[];
   readonly registration?: Registration;
   readonly ports: PluginPorts;
@@ -114,6 +117,7 @@ export interface Kernel {
 
 type KernelEnv = {
   Bindings: {
+    readonly responsePolicy: { noStore: boolean };
     readonly requestId: string;
     readonly markLogged: () => void;
     readonly scope: RequestScope;
@@ -132,6 +136,15 @@ const RESERVED_ROOTS = ['/health', '/_pb'] as const;
 const REQUEST_ID_HEADER = 'x-request-id';
 const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
 const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
+
+function authOrSessionPath(path: string): boolean {
+  return (
+    path === '/_pb/auth' ||
+    path.startsWith('/_pb/auth/') ||
+    path === '/_pb/session' ||
+    path.startsWith('/_pb/session/')
+  );
+}
 
 function portAccepts(field: 'route' | 'deployment_id', value: string): boolean {
   return safeRecord({ level: 'debug', event: 'probe', [field]: value })?.[field] === value;
@@ -442,6 +455,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
   async function serve(route: RegisteredRoute, c: Context<KernelEnv>): Promise<Response> {
     const { requestId, scope, guard } = c.env;
+    if (route.boundary === 'self' || authOrSessionPath(route.path)) {
+      c.env.responsePolicy.noStore = true;
+    }
     scope.set({ route: route.path });
     const permission =
       route.permission ?? (route.boundary === 'authenticated' ? AUTHENTICATED_PLACEHOLDER : null);
@@ -615,7 +631,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     return response;
   });
 
+  const https =
+    options.publicOrigin !== undefined && new URL(options.publicOrigin).protocol === 'https:';
+
   async function fetch(request: Request): Promise<Response> {
+    const responsePolicy = { noStore: false };
     const scope = createRequestScope(obsContext, request);
     const guard = createCompletionGuard(scope, httpMetrics, request.signal);
     const { requestId } = scope;
@@ -625,7 +645,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     let response: Response | undefined;
     try {
       try {
+        const path = app.getPath(request);
+        responsePolicy.noStore = authOrSessionPath(path);
         response = await app.fetch(request, {
+          responsePolicy,
           requestId,
           markLogged: () => {
             logged = true;
@@ -645,6 +668,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         const failure = await failed(error, requestId, logged ? silent : log, guard);
         response = isHead ? new Response(null, failure) : failure;
       }
+      response = finaliseSecurityHeaders(response, https, responsePolicy.noStore);
       return response;
     } finally {
       guard.complete(response?.status ?? 500);

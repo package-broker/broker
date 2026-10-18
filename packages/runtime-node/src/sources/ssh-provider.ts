@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { OrgContext } from '@package-broker/core/db/port';
 import { packageKey } from '@package-broker/core/catalogue/names';
 import { composerVersionInput } from '@package-broker/core/registry/composer/version-object';
 import {
@@ -49,8 +50,8 @@ export interface SshBuiltArchive extends SshArchiveRecord {
 }
 
 /**
- * Immutable archives built during SSH source ingestion, bound to one organization.
- * Implementations must include the organization, source.id, canonical package name,
+ * Immutable archives built during SSH source ingestion, scoped per call by OrgContext.
+ * Implementations must include `ctx.orgId`, source.id, canonical package name,
  * normalized version and commit in every storage key. Names are opaque key components,
  * never filesystem paths; a hash of the tuple is suitable for filesystem naming.
  *
@@ -69,12 +70,18 @@ export interface SshBuiltArchive extends SshArchiveRecord {
  */
 export interface SshArchiveStore {
   find(
+    ctx: OrgContext,
     source: ProviderSource,
     name: string,
     versionNormalized: string,
     commit: string,
   ): Promise<SshArchiveRecord | null>;
-  store(source: ProviderSource, name: string, archive: SshBuiltArchive): Promise<void>;
+  store(
+    ctx: OrgContext,
+    source: ProviderSource,
+    name: string,
+    archive: SshBuiltArchive,
+  ): Promise<void>;
 }
 
 export interface SshGitProviderOptions {
@@ -407,7 +414,13 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
         const commit = commitOf(version);
         const manifest = commit === undefined ? null : (manifests.get(commit) ?? null);
         if (commit === undefined || manifest === null || manifestName(manifest) !== key) continue;
-        const record = await options.archives.find(source, key, version.versionNormalized, commit);
+        const record = await options.archives.find(
+          ctx.org,
+          source,
+          key,
+          version.versionNormalized,
+          commit,
+        );
         const planned: Planned = { version, commit, manifest, record };
         if (check(planned, record ?? { sha1: PLACEHOLDER_SHA1, time: null }).ok) plan.push(planned);
       }
@@ -436,7 +449,7 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
               sha1: createHash('sha1').update(zip).digest('hex'),
               time,
             };
-            await options.archives.store(source, key, built);
+            await options.archives.store(ctx.org, source, key, built);
             planned.record = { sha1: built.sha1, time: built.time };
           }
           return false;

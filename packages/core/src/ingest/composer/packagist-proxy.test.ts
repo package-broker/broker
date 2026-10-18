@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { orgContext } from '../../db/port.js';
 import { fixedClock } from '../../ids.js';
 import { bindCredential, parseCredentialMaterial } from '../../sources/credentials.js';
 import { createPolicyFetch, type UpstreamCredential } from '../../sources/policy-fetch.js';
@@ -58,6 +59,7 @@ function ctx(
   credential: UpstreamCredential | null = null,
 ): ProviderContext {
   return {
+    org: orgContext('org-test'),
     fetch,
     credential,
     clock: fixedClock(NOW),

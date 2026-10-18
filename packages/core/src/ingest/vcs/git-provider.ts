@@ -7,12 +7,12 @@ import {
 } from '../../sources/credentials.js';
 import { versionsFromRefs } from '../../registry/composer/version-rules.js';
 import {
-  MAX_ATTRIBUTES_FILE_BYTES,
   buildZipFromTree,
+  loadAttributes,
+  type ArchiveBlobSource,
   type ArchiveStaging,
   type BuiltArchive,
 } from '../../sources/git/archive.js';
-import { ExportIgnore } from '../../sources/git/export-ignore.js';
 import {
   GitFetchError,
   createGitBlobReader,
@@ -66,13 +66,32 @@ export interface GitProvider extends SourceProvider {
 const SHA = /^[a-f0-9]{40}$/;
 const TAGS = 'refs/tags/';
 const HEADS = 'refs/heads/';
-const ATTRIBUTES_FILE = '.gitattributes';
 
 function isFetchFailure(error: unknown): error is GitFetchError | GitRemoteError | UpstreamError {
   return (
     error instanceof GitFetchError ||
     error instanceof GitRemoteError ||
     error instanceof UpstreamError
+  );
+}
+
+type FetchFailure = GitFetchError | GitRemoteError | UpstreamError;
+
+function sameFailure(a: FetchFailure, b: FetchFailure): boolean {
+  return (
+    a.constructor === b.constructor &&
+    a.code === b.code &&
+    (a instanceof UpstreamError ? a.status : undefined) ===
+      (b instanceof UpstreamError ? b.status : undefined)
+  );
+}
+
+function transientUpstream(error: FetchFailure): boolean {
+  return (
+    error instanceof UpstreamError &&
+    (error.code === 'timeout' ||
+      error.code === 'network' ||
+      (error.code === 'http_status' && error.status === 429))
   );
 }
 
@@ -186,7 +205,38 @@ async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+const CAPABILITIES_TTL_MS = 5 * 60_000;
+const CAPABILITIES_MAX_ENTRIES = 256;
+
 export function createGitProvider(options: GitProviderOptions): GitProvider {
+  const discovered = new Map<string, { at: number; capabilities: Promise<GitCapabilities> }>();
+
+  function remember(
+    ctx: ProviderContext,
+    source: ProviderSource,
+    url: string,
+    capabilities: Promise<GitCapabilities>,
+  ): void {
+    if (discovered.size >= CAPABILITIES_MAX_ENTRIES) discovered.clear();
+    const key = `${source.id}\0${url}`;
+    const entry = { at: ctx.clock.now().getTime(), capabilities };
+    discovered.set(key, entry);
+    capabilities.catch(() => {
+      if (discovered.get(key) === entry) discovered.delete(key);
+    });
+  }
+
+  function cachedCapabilities(
+    ctx: ProviderContext,
+    source: ProviderSource,
+    url: string,
+  ): Promise<GitCapabilities> | undefined {
+    const entry = discovered.get(`${source.id}\0${url}`);
+    return entry !== undefined && ctx.clock.now().getTime() - entry.at < CAPABILITIES_TTL_MS
+      ? entry.capabilities
+      : undefined;
+  }
+
   async function listRefs(ctx: ProviderContext, source: ProviderSource) {
     const repo = repository(source);
     const base = fetchContext(ctx, options, repo.url);
@@ -199,6 +249,7 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
         capabilities = advertised;
       },
     );
+    if (capabilities !== undefined) remember(ctx, source, repo.url, Promise.resolve(capabilities));
     const { git, url } =
       capabilities === undefined ? base : fetchContext(ctx, options, repo.url, capabilities);
     const { config } = repo;
@@ -307,26 +358,56 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
                 throw error;
               }
               let succeeded = false;
-              const isolate = async (refs: typeof unread): Promise<void> => {
+              const attempt = async (refs: typeof unread): Promise<FetchFailure | undefined> => {
                 ctx.signal.throwIfAborted();
                 try {
                   await read(refs);
                   succeeded = true;
-                } catch (error) {
+                  return undefined;
+                } catch (failure) {
                   ctx.signal.throwIfAborted();
-                  if (!isFetchFailure(error)) throw error;
-                  if (refs.length > 1 && !(error instanceof UpstreamError)) {
-                    const middle = Math.floor(refs.length / 2);
-                    await isolate(refs.slice(0, middle));
-                    await isolate(refs.slice(middle));
-                  } else {
-                    fail(refs, error);
-                  }
+                  if (!isFetchFailure(failure)) throw failure;
+                  return failure;
                 }
               };
-              const middle = Math.floor(unread.length / 2);
-              await isolate(unread.slice(0, middle));
-              await isolate(unread.slice(middle));
+              const isolate = async (refs: typeof unread, failure: FetchFailure): Promise<void> => {
+                if (refs.length === 1 || transientUpstream(failure)) {
+                  fail(refs, failure);
+                  return;
+                }
+                const middle = Math.floor(refs.length / 2);
+                const halves = [refs.slice(0, middle), refs.slice(middle)] as const;
+                const failures = [await attempt(halves[0]), await attempt(halves[1])] as const;
+                const [first, second] = failures;
+                if (
+                  refs === unread &&
+                  first !== undefined &&
+                  second !== undefined &&
+                  sameFailure(first, second)
+                ) {
+                  const probed = await Promise.all(
+                    halves.map(async (half, n) => ({
+                      ref: half[0] as (typeof half)[number],
+                      failure: half.length > 1 ? await attempt(half.slice(0, 1)) : failures[n],
+                    })),
+                  );
+                  if (probed.every((probe) => probe.failure !== undefined)) {
+                    for (const probe of probed) fail([probe.ref], probe.failure);
+                    const probedNames = new Set(probed.map((probe) => probe.ref.name));
+                    for (const ref of refs) {
+                      if (probedNames.has(ref.name)) continue;
+                      const single = await attempt([ref]);
+                      if (single !== undefined) fail([ref], single);
+                    }
+                    return;
+                  }
+                }
+                for (const [n, half] of halves.entries()) {
+                  const halfFailure = failures[n];
+                  if (halfFailure !== undefined) await isolate(half, halfFailure);
+                }
+              };
+              await isolate(unread, error);
               if (!succeeded) throw error;
             } else {
               fail(unread, error);
@@ -412,14 +493,20 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
         throw new GitProviderError('invalid_request');
       }
       const base = fetchContext(ctx, options, repo.url);
-      const capabilities = await discoverCapabilities(
-        base.git.policyFetch,
-        base.url,
-        base.git.credential,
-      );
-      const { git, url } = fetchContext(ctx, options, repo.url, capabilities);
+      let pending = cachedCapabilities(ctx, source, repo.url);
+      if (pending === undefined) {
+        pending = discoverCapabilities(base.git.policyFetch, base.url, base.git.credential);
+        remember(ctx, source, repo.url, pending);
+      }
+      const { git, url } = fetchContext(ctx, options, repo.url, await pending);
       const tree = await readTreeAtCommit(git, url, commit);
-      const blobs = createGitBlobReader(git, url, await blobPlan(git, url, tree.entries));
+      const { plan, attributes } = await blobPlan(git, url, tree.entries);
+      const reader = createGitBlobReader(
+        git,
+        url,
+        plan.filter((id) => !attributes.has(id)),
+      );
+      const blobs = attributes.size === 0 ? reader : withPreloaded(reader, attributes);
       return buildZipFromTree(tree, ctx.codecs, { blobs, staging: options.staging });
     },
   };
@@ -439,49 +526,56 @@ function parseManifest(
 }
 
 const ARCHIVED_MODES = new Set(['100644', '100755']);
-const attributesDecoder = new TextDecoder();
 
 /**
  * Blobs the archive reads: everything except export-ignored paths, plus the attribute files the
- * archive builder loads itself. Any failure while evaluating the rules returns the full plan so
- * the archive build reports it.
+ * archive builder loads itself, whose bytes come back so the build does not fetch them again. Any
+ * failure while evaluating the rules returns the full plan so the archive build reports it.
  */
 async function blobPlan(
   git: GitFetchContext,
   url: string,
   entries: readonly GitTreeEntry[],
-): Promise<string[]> {
+): Promise<{ plan: string[]; attributes: ReadonlyMap<string, Uint8Array> }> {
   const blobs = entries.filter((entry) => entry.type === 'blob');
-  const sources = blobs
-    .filter(
-      (entry) =>
-        ARCHIVED_MODES.has(entry.mode) &&
-        (entry.path === ATTRIBUTES_FILE || entry.path.endsWith(`/${ATTRIBUTES_FILE}`)),
-    )
-    .map((entry) => ({ entry, dir: entry.path.slice(0, -(ATTRIBUTES_FILE.length + 1)) }))
-    .sort((a, b) => depth(a.dir) - depth(b.dir));
   const full = blobs.map((entry) => entry.oid);
-  if (sources.length === 0) return full;
+  const attributes = new Map<string, Uint8Array>();
+  const recording: ArchiveBlobSource = {
+    async read(oid, maxBytes) {
+      const { size, body } = await createGitBlobReader(git, url, [oid]).read(oid, maxBytes);
+      const bytes = new Uint8Array(await new Response(body).arrayBuffer());
+      attributes.set(oid, bytes);
+      return { size, body: new Blob([bytes]).stream() };
+    },
+  };
   try {
-    const rules = new ExportIgnore();
-    const loaded = new Set<string>();
-    for (const { entry, dir } of sources) {
-      if (dir !== '' && rules.dirIgnored(dir)) continue;
-      const reader = createGitBlobReader(git, url, [entry.oid]);
-      const { body } = await reader.read(entry.oid, MAX_ATTRIBUTES_FILE_BYTES);
-      rules.add(dir, attributesDecoder.decode(await new Response(body).arrayBuffer()));
-      loaded.add(entry.path);
-    }
-    return blobs
-      .filter((entry) => loaded.has(entry.path) || !rules.ignored(entry.path))
+    const { matcher, loaded } = await loadAttributes(
+      recording,
+      blobs.filter((entry) => ARCHIVED_MODES.has(entry.mode)),
+      { used: 0 },
+    );
+    if (loaded.size === 0) return { plan: full, attributes };
+    const plan = blobs
+      .filter((entry) => loaded.has(entry.path) || !matcher.ignored(entry.path))
       .map((entry) => entry.oid);
+    return { plan, attributes };
   } catch {
-    return full;
+    return { plan: full, attributes };
   }
 }
 
-function depth(dir: string): number {
-  return dir === '' ? 0 : dir.split('/').length;
+function withPreloaded(
+  blobs: ArchiveBlobSource,
+  preloaded: ReadonlyMap<string, Uint8Array>,
+): ArchiveBlobSource {
+  return {
+    read(oid, maxBytes) {
+      const bytes = preloaded.get(oid);
+      return bytes === undefined
+        ? blobs.read(oid, maxBytes)
+        : Promise.resolve({ size: bytes.length, body: new Blob([bytes]).stream() });
+    },
+  };
 }
 
 function unreadableReason(file: FileAtRef | undefined): string | undefined {

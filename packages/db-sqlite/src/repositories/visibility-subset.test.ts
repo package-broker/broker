@@ -26,7 +26,12 @@ import {
 
 const MAX_PROVIDERS = 64;
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 const NOW = '2026-10-15T12:00:00.000Z';
 
@@ -792,6 +797,7 @@ describe('visibility subset authority and refusals', () => {
         provider: `idp${n}`,
         anchor: `oidc:https://idp${n}.example.test`,
         emailAuthoritative: n % 2 === 0,
+        emailAuthoritativeDomains: ['example.test'],
       })),
     ];
     expect(anchors).toHaveLength(MAX_PROVIDERS);

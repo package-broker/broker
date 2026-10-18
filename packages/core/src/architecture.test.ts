@@ -55,7 +55,12 @@ const RULES: Readonly<Record<string, Rule>> = {
     allow: [...ws('core', 'db-sqlite'), 'hono', '@cloudflare/workers-types'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
-    onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },
+    onlyIn: {
+      node: [
+        'packages/runtime-cloudflare/src/codec/workers-codec.ts',
+        'packages/runtime-cloudflare/src/request-scope.ts',
+      ],
+    },
   },
   'runtime-node': {
     allow: [
@@ -70,7 +75,11 @@ const RULES: Readonly<Record<string, Rule>> = {
   },
   cli: { allow: [ANY_WORKSPACE, 'esbuild', 'node', 'typescript'], testOnly: ['vitest'] },
   plugin: { allow: ws('core'), testOnly: ['vitest'] },
-  ui: { allow: [], testOnly: ['vitest'] },
+  ui: {
+    allow: ['react', 'react-dom', 'class-variance-authority', 'clsx', 'tailwind-merge'],
+    testOnly: ['vitest'],
+    testsAndScripts: ['node', 'esbuild'],
+  },
 };
 
 type PackageImports = Readonly<Record<string, unknown>>;
@@ -238,7 +247,7 @@ function findViolations(
   return violations;
 }
 
-function walk(directory: string, extension: string, found: string[]): void {
+function walk(directory: string, extensions: readonly string[], found: string[]): void {
   let entries: Dirent[];
   try {
     entries = readdirSync(directory, { withFileTypes: true });
@@ -248,16 +257,16 @@ function walk(directory: string, extension: string, found: string[]): void {
   for (const entry of entries) {
     if (entry.name === 'dist' || entry.name === 'node_modules') continue;
     const full = path.join(directory, entry.name);
-    if (entry.isDirectory()) walk(full, extension, found);
-    else if (entry.name.endsWith(extension)) found.push(full);
+    if (entry.isDirectory()) walk(full, extensions, found);
+    else if (extensions.some((extension) => entry.name.endsWith(extension))) found.push(full);
   }
 }
 
 function sourceFiles(pkg: string): string[] {
   const root = path.join(REPO_ROOT, 'packages', pkg);
   const files: string[] = [];
-  walk(path.join(root, 'src'), '.ts', files);
-  walk(path.join(root, 'scripts'), '.mjs', files);
+  walk(path.join(root, 'src'), ['.ts', '.tsx'], files);
+  walk(path.join(root, 'scripts'), ['.mjs'], files);
   return files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/')).sort();
 }
 
@@ -374,6 +383,22 @@ describe('classifier', () => {
     expect(findViolations(file, "import '#local';", imports)).toEqual([]);
     expect(findViolations(file, "import '#up';", imports)).toHaveLength(1);
     expect(findViolations('packages/runtime-node/src/a.ts', "import '#db';", imports)).toEqual([]);
+  });
+
+  it('scans ui components and limits ui imports to the listed packages', () => {
+    const text = "import { createRoot } from 'react-dom/client'; import { clsx } from 'clsx';";
+    expect(findViolations('packages/ui/src/main.tsx', text)).toEqual([]);
+    expect(findViolations('packages/ui/src/main.tsx', "import 'lodash';")).toHaveLength(1);
+    expect(
+      findViolations('packages/ui/src/main.tsx', "import { build } from 'esbuild';"),
+    ).toHaveLength(1);
+    expect(
+      findViolations('packages/ui/src/build.test.ts', "import 'node:fs'; import 'esbuild';"),
+    ).toEqual([]);
+    expect(
+      findViolations('packages/ui/scripts/build.mjs', "import 'esbuild'; import 'node:fs';"),
+    ).toEqual([]);
+    expect(findViolations('packages/ui/scripts/build.mjs', "import 'lodash';")).toHaveLength(1);
   });
 
   it('applies the cli workspace wildcard to workspace packages only', () => {

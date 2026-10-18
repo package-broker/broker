@@ -71,6 +71,7 @@ const staging = { store: unusedStore, orgOf: () => org };
 
 function context(fetch: ProviderContext['fetch'], credential: UpstreamCredential | null = null) {
   return {
+    org: orgContext('org-test'),
     fetch,
     credential,
     codecs: {} as Codecs,
@@ -173,6 +174,37 @@ describe('npmjs proxy provider', () => {
     expect(hops).toHaveLength(1);
     expect(hops[0]?.headers.get('authorization')).toBeNull();
     expect(hops[0]?.headers.get('user-agent')).toBe('pb-test (ops@example.test)');
+  });
+
+  it('is definitive about a 404 only for the registry not-found body', async () => {
+    const url = 'https://registry.npmjs.org/left-pad';
+    const reply = (body: string) => () => {
+      const response = new Response(body, { status: 404 });
+      expect(response.redirected).toBe(false);
+      return response;
+    };
+    const definite = upstream({ [url]: reply('{"error":"Not found"}') });
+    await expect(
+      provider.describe(context(definite.fetch), npmjsSource, 'left-pad', {}),
+    ).resolves.toEqual({ kind: 'not_found', definitive: true });
+    const vague = upstream({ [url]: reply('{}') });
+    await expect(
+      provider.describe(context(vague.fetch), npmjsSource, 'left-pad', {}),
+    ).resolves.toEqual({ kind: 'not_found', definitive: false });
+  });
+
+  it('never makes a redirected npmjs not-found body definitive', async () => {
+    const start = 'https://registry.npmjs.org/left-pad';
+    const end = 'https://registry.npmjs.org/redirect-target';
+    const { fetch, hops } = upstream({
+      [start]: redirect(end),
+      [end]: () => new Response('{"error":"Not found"}', { status: 404 }),
+    });
+    await expect(provider.describe(context(fetch), npmjsSource, 'left-pad', {})).resolves.toEqual({
+      kind: 'not_found',
+      definitive: false,
+    });
+    expect(hops.map((hop) => hop.url)).toEqual([start, end]);
   });
 
   it('ignores a different source url and always asks registry.npmjs.org', async () => {
@@ -280,12 +312,12 @@ describe('npmjs proxy provider', () => {
   });
 
   it.each(['../etc', '@scope/..', '@scope/.', '@a/b/c', 'node_modules'])(
-    'answers an invalid name %s with a definitive not_found and no request',
+    'answers an invalid name %s with a non-definitive not_found and no request',
     async (name) => {
       const { hops, fetch } = upstream({});
       await expect(provider.describe(context(fetch), npmjsSource, name, {})).resolves.toEqual({
         kind: 'not_found',
-        definitive: true,
+        definitive: false,
       });
       expect(hops).toHaveLength(0);
     },
@@ -325,11 +357,51 @@ describe('npm registry provider (GitHub Packages)', () => {
   const tgz = `${GH}/download/@acme/widget/1.0.0/abc123`;
   const storage = `${GH_STORAGE}/npm/acme/widget/1.0.0.tgz?X-Amz-Signature=sig`;
 
+  it('never makes a credentialed npmjs registry 404 definitive', async () => {
+    const origin = 'https://registry.npmjs.org';
+    const { fetch, hops } = upstream({
+      [`${origin}/@acme%2fwidget`]: () => new Response('{"error":"Not found"}', { status: 404 }),
+    });
+    const credential = bindCredential(
+      parseCredentialMaterial('npm_token', JSON.stringify({ token: TOKEN })),
+      [origin],
+    );
+    await expect(
+      provider.describe(
+        context(fetch, credential),
+        { ...ghSource, url: origin },
+        '@acme/widget',
+        {},
+      ),
+    ).resolves.toEqual({ kind: 'not_found', definitive: false });
+    expect(hops).toHaveLength(1);
+    expect(hops[0]?.headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it('never makes a registry 404 definitive, including the npmjs body', async () => {
+    const reply = (body: string) => () => new Response(body, { status: 404 });
+    const definite = upstream({ [pkgUrl]: reply('{"error":"Not found"}') });
+    await expect(
+      provider.describe(context(definite.fetch, ghToken()), ghSource, '@acme/widget', {}),
+    ).resolves.toEqual({ kind: 'not_found', definitive: false });
+    const vague = upstream({ [pkgUrl]: reply('{}') });
+    await expect(
+      provider.describe(context(vague.fetch, ghToken()), ghSource, '@acme/widget', {}),
+    ).resolves.toEqual({ kind: 'not_found', definitive: false });
+  });
+
   it('makes zero upstream requests for a name outside the scopes', async () => {
     const { hops, fetch } = upstream({});
-    for (const name of ['@other/widget', 'widget', '@acmex/widget']) {
+    for (const name of [
+      '@other/widget',
+      'widget',
+      '@acmex/widget',
+      '@acme/..',
+      '@acme/a/b',
+      'node_modules',
+    ]) {
       const result = await provider.describe(context(fetch, ghToken()), ghSource, name, {});
-      expect(result).toEqual({ kind: 'not_found', definitive: true });
+      expect(result).toEqual({ kind: 'not_found', definitive: false });
     }
     expect(hops).toHaveLength(0);
   });
@@ -433,7 +505,7 @@ describe('npm registry provider (GitHub Packages)', () => {
       const { hops, fetch } = upstream({});
       await expect(
         provider.describe(context(fetch, ghToken()), ghSource, name, {}),
-      ).resolves.toEqual({ kind: 'not_found', definitive: true });
+      ).resolves.toEqual({ kind: 'not_found', definitive: false });
       expect(hops).toHaveLength(0);
     },
   );

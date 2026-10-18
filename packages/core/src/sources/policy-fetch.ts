@@ -56,6 +56,7 @@ export interface UpstreamRequest {
 
 export interface UpstreamResponse {
   readonly status: number;
+  readonly redirected?: boolean;
   readonly headers: Headers;
   readonly body: ReadableStream<Uint8Array> | null;
 }
@@ -383,6 +384,7 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
       tracking.arrived(response.status);
       return {
         status: response.status,
+        redirected: redirects > 0,
         headers: response.headers,
         body:
           response.body === null

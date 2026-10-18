@@ -59,10 +59,11 @@ import { setResolvedPackage } from '../internal/package-context.js';
 import { packageActorOf } from '../internal/package-actor.js';
 import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
 import {
+  compareRoutePrecedence,
+  ownedRoutesConflict,
   routeApiProblems,
   routeBoundaryProblems,
   routePathProblem,
-  routesConflict,
 } from './routes.js';
 import { uiRootRedirect } from './ui-routes.js';
 
@@ -83,6 +84,8 @@ export interface KernelOptions {
   readonly health: () => Promise<boolean>;
   /** Routes under `/_pb/`, registered before plugin routes and served through the same pipeline. */
   readonly coreRoutes?: readonly RouteDefinition[];
+  /** Core ecosystem routes under /:project/, served through the plugin boundary pipeline. */
+  readonly ecosystemRoutes?: readonly RouteDefinition[];
   /** Package-visibility resolver bound by the package-visibility feature; required by project:packages:* routes. */
   readonly packageResolver?: PackageVisibilityPort;
   /** Default denyAllEngine. */
@@ -221,27 +224,29 @@ function withRequestId(response: Response, requestId: string): Response {
 function validateCoreRoutes(
   routes: readonly RouteDefinition[],
   packageResolver: PackageVisibilityPort | undefined,
+  ecosystem = false,
 ): readonly string[] {
   const problems: string[] = [];
   const eligible: RouteDefinition[] = [];
+  const prefix = ecosystem ? '/:project/' : CORE_PREFIX;
   for (const route of routes) {
-    const label = `core route ${String(route.method)} ${String(route.path)}`;
+    const label = `${ecosystem ? 'ecosystem' : 'core'} route ${String(route.method)} ${String(route.path)}`;
     let placeable = true;
     if (typeof route.path !== 'string') {
       problems.push(`${label}: path must be a string`);
       placeable = false;
-    } else if (!route.path.startsWith(CORE_PREFIX)) {
-      problems.push(
-        `${label}: path ${JSON.stringify(route.path)} must start with "${CORE_PREFIX}"`,
-      );
+    } else if (!route.path.startsWith(prefix)) {
+      problems.push(`${label}: path ${JSON.stringify(route.path)} must start with "${prefix}"`);
       placeable = false;
-    } else if (route.path === CORE_PREFIX) {
+    } else if (route.path === prefix) {
       problems.push(
-        `${label}: path ${JSON.stringify(route.path)} must name a path below "${CORE_PREFIX}"`,
+        `${label}: path ${JSON.stringify(route.path)} must name a path below "${prefix}"`,
       );
       placeable = false;
     } else {
-      const pathProblem = routePathProblem(`/${route.path.slice(CORE_PREFIX.length)}`);
+      const pathProblem = routePathProblem(
+        ecosystem ? route.path : `/${route.path.slice(CORE_PREFIX.length)}`,
+      );
       if (pathProblem !== null) {
         problems.push(`${label}: path ${JSON.stringify(route.path)}: ${pathProblem}`);
         placeable = false;
@@ -253,8 +258,7 @@ function validateCoreRoutes(
     }
     problems.push(
       ...routeBoundaryProblems(route, label, {
-        allowSelf: true,
-        allowAuthenticated: true,
+        ...(ecosystem ? { apiVersion: 3 } : { allowSelf: true, allowAuthenticated: true }),
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
     );
@@ -265,7 +269,8 @@ function validateCoreRoutes(
     for (let j = i + 1; j < eligible.length; j++) {
       const a = eligible[i]!;
       const b = eligible[j]!;
-      if (routesConflict(a, b)) {
+      const owner = ecosystem ? 'ecosystem' : 'core';
+      if (ownedRoutesConflict({ ...a, owner }, { ...b, owner })) {
         problems.push(`core route ${a.method} ${a.path} conflicts with ${b.method} ${b.path}`);
       }
     }
@@ -277,7 +282,18 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const coreRoutes = Object.freeze(
     (options.coreRoutes ?? []).map((route) => Object.freeze({ ...route })),
   );
-  const coreProblems = [...validateCoreRoutes(coreRoutes, options.packageResolver)];
+  const ecosystemRoutes = Object.freeze(
+    (options.ecosystemRoutes ?? []).map((route) =>
+      Object.freeze({
+        ...route,
+        ...(route.package === undefined ? {} : { package: Object.freeze({ ...route.package }) }),
+      }),
+    ),
+  );
+  const coreProblems = [
+    ...validateCoreRoutes(coreRoutes, options.packageResolver),
+    ...validateCoreRoutes(ecosystemRoutes, options.packageResolver, true),
+  ];
   let registration: Registration;
   try {
     registration =
@@ -295,6 +311,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   for (const route of registration.routes) {
     if (route.path === '/') {
       coreProblems.push('plugin root route is reserved for core');
+    }
+    for (const ecosystem of ecosystemRoutes) {
+      if (typeof ecosystem.path !== 'string' || !ROUTE_METHODS.has(ecosystem.method)) continue;
+      if (
+        ownedRoutesConflict({ ...ecosystem, owner: 'ecosystem' }, { ...route, owner: 'plugin' })
+      ) {
+        coreProblems.push(
+          `ecosystem route ${ecosystem.method} ${ecosystem.path} conflicts with ${route.method} ${route.path} of plugin "${route.plugin}"`,
+        );
+      }
     }
   }
   if (coreProblems.length > 0) throw new KernelConfigError(coreProblems);
@@ -330,6 +356,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       '/',
       ...registration.routes.map((route) => route.path),
       ...coreRoutes.map((route) => route.path),
+      ...ecosystemRoutes.map((route) => route.path),
       ...HEALTH_ROUTES,
     ].filter((path) => portAccepts('route', path)),
   );
@@ -656,6 +683,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   for (const root of RESERVED_ROOTS) {
     app.all(root, reservedNotFound);
     app.all(`${root}/*`, reservedNotFound);
+  }
+  for (const route of [...ecosystemRoutes].sort(compareRoutePrecedence)) {
+    const registered: RegisteredRoute = { ...route, plugin: CORE_PLUGIN };
+    app.on(route.method, route.path, (c) => serve(registered, c));
   }
   for (const route of registration.routes) {
     app.on(route.method, route.path, (c) => serve(route, c));

@@ -5,25 +5,17 @@ import { assertRepresentable } from './json-schema.js';
 import { apiError, jsonResponse, type ApiErrorCode } from './response.js';
 import {
   readJsonBody,
+  VALIDATION_CODES,
   validateInput,
   type ValidationCode,
   type ValidationDetail,
 } from './validate.js';
 
 const MAX_DETAILS = 20;
-const VALIDATION_CODES: ReadonlySet<ValidationCode> = new Set([
-  'invalid_type',
-  'too_small',
-  'too_big',
-  'invalid_format',
-  'invalid_value',
-  'unrecognized_keys',
-  'invalid_union',
-  'invalid',
-]);
+const VALIDATION_CODE_SET: ReadonlySet<ValidationCode> = new Set(VALIDATION_CODES);
 const BODY_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH']);
 const CONCURRENCY_METHODS: ReadonlySet<string> = new Set(['PUT', 'PATCH', 'DELETE']);
-const IF_MATCH = /^"r([1-9][0-9]*)"$/;
+export const IF_MATCH = /^"r([1-9][0-9]*)"$/;
 
 export interface ApiRouteSpec {
   readonly method: RouteDefinition['method'];
@@ -111,7 +103,7 @@ function handlerDetails(details: readonly ValidationDetail[]): ValidationDetail[
     const { location } = detail as ValidationDetail & { readonly location?: unknown };
     return {
       path: detail.path,
-      code: VALIDATION_CODES.has(detail.code) ? detail.code : 'invalid',
+      code: VALIDATION_CODE_SET.has(detail.code) ? detail.code : 'invalid',
       ...(location === 'params' || location === 'query' || location === 'body' ? { location } : {}),
     };
   });

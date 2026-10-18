@@ -49,7 +49,7 @@ function setup(answer: unknown = undefined) {
   const grants = {
     listOrganization: vi.fn(async () => [grant]),
     createOrganization: vi.fn(async () => answer ?? 'created'),
-    deleteOrganization: vi.fn(async () => answer ?? 'deleted'),
+    deleteOrganization: vi.fn(async () => answer ?? { outcome: 'deleted', offboardedUserId: null }),
     changeRole: vi.fn(async () => answer ?? 'updated'),
   };
   const log = vi.fn();
@@ -168,7 +168,7 @@ describe('revocation needs no subset of the removed role', () => {
       roles: { list: vi.fn(async () => [wide]), get: vi.fn(async () => wide) } as never,
       grants: {
         listOrganization: vi.fn(async () => [{ ...grant, roleId: 'role-wide' }]),
-        deleteOrganization: vi.fn(async () => 'deleted'),
+        deleteOrganization: vi.fn(async () => ({ outcome: 'deleted', offboardedUserId: null })),
       } as never,
       users: { get: vi.fn() },
       providers: new Map<string, IdentityProvider>(),

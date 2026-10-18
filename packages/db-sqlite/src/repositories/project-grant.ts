@@ -10,6 +10,9 @@ import {
   assertGuard,
   compile,
   db,
+  freshGroupMembership,
+  guardAliases,
+  guardBindings,
   newOpId,
   runOrgFenced,
   type Guard,
@@ -436,26 +439,50 @@ export function createProjectGrantRepository(
         select 1 from access_grant as tombstoned
         where tombstoned.id = ${input.id} and tombstoned.last_op_id = ${opId}
       )`;
+      const alias = guardAliases(
+        [
+          'user',
+          'grant',
+          'role',
+          'member',
+          'identity',
+          'binding',
+          'login',
+          'credential',
+          'values',
+          'anchors',
+        ],
+        null,
+      );
+      const bindings = guardBindings(
+        { values: alias.values, anchors: alias.anchors },
+        { org_id: ctx.orgId },
+        input.providerAnchors,
+      );
+      const subject = sql.id(alias.user);
+      const membership = sql.id(alias.member);
       const offboarded = compile(
-        db.selectNoFrom(
+        bindings.creator.selectNoFrom(
           sql<string | null>`(
-          select subject.id from user_account as subject
-          join access_grant as removed on removed.org_id = subject.org_id
-            and removed.subject_type = 'email' and removed.subject_value = subject.email
-          where removed.id = ${input.id} and removed.org_id = ${ctx.orgId}
+          select ${subject}.id from user_account as ${subject}
+          join access_grant as removed on removed.org_id = ${subject}.org_id
+            and removed.subject_type = 'email' and removed.subject_value = ${subject}.email
+          where removed.id = ${input.id} and removed.org_id = ${bindings.org}
             and removed.last_op_id = ${opId}
             and not exists (
               select 1 from access_grant as remaining
-              where remaining.org_id = subject.org_id and remaining.id <> removed.id
+              where remaining.org_id = ${subject}.org_id and remaining.id <> removed.id
                 and (remaining.scope = 'organization'
                   or (remaining.scope = 'project' and remaining.project_id = removed.project_id))
                 and (
-                  (remaining.subject_type = 'email' and remaining.subject_value = subject.email)
+                  (remaining.subject_type = 'email' and remaining.subject_value = ${subject}.email)
                   or (remaining.subject_type = 'group' and exists (
-                    select 1 from user_group as membership
-                    where membership.org_id = subject.org_id and membership.user_id = subject.id
-                      and membership.provider = remaining.subject_provider
-                      and membership.group_name = remaining.subject_value
+                    select 1 from user_group as ${membership}
+                    where ${membership}.org_id = ${subject}.org_id
+                      and ${membership}.user_id = ${subject}.id
+                      and ${membership}.provider = remaining.subject_provider
+                      and ${membership}.group_name = remaining.subject_value
+                      and ${freshGroupMembership(bindings, alias)}
                   ))
                 )
             )

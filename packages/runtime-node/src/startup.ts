@@ -43,6 +43,7 @@ import { createS3ByteStore, S3ConfigError } from './blob/s3.js';
 import { createLruCache } from './cache/lru.js';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import { createNodeServer, type NodeBroker } from './index.js';
+import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
 import { createJobLoop, JOB_EVENTS, type JobLoop } from './jobs/loop.js';
 import { createStdioSink, type StdioStream } from './observability/stdio.js';
 
@@ -52,6 +53,7 @@ export interface StartOptions {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly log?: KernelLog;
   readonly platformPorts?: PlatformPortConfig | null;
+  readonly observability?: BrokerConfig['observability'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -596,6 +598,15 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     await mkdir(dirname(path), { recursive: true });
     opened = openBetterSqliteExecutor(path);
 
+    const observabilityProblems = brokerObservabilityProblems({
+      platform: 'node',
+      plugins: options.plugins,
+      ...(options.observability === undefined ? {} : { observability: options.observability }),
+    });
+    if (observabilityProblems.length > 0) {
+      throw new StartupConfigError('observability', observabilityProblems.join('; '));
+    }
+
     let services: PlatformServices | undefined;
     if (ports !== null) {
       const problems = validatePlatformPorts({ node: ports }, 'node');
@@ -641,7 +652,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
             observability: {
               sink: telemetry.sink,
               deploymentId: telemetry.deploymentId,
-              trustInboundTraceparent: false,
+              trustInboundTraceparent: options.observability?.trustInboundTraceparent === true,
             },
           }),
       ...(services === undefined ? {} : { platformServices: services }),

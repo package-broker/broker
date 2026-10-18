@@ -419,6 +419,33 @@ for (const { pkg, result } of outcomes)
   if (result.pkgJson)
     result.problems.push(...checkCorePeer(pkg, result.pkgJson, packedCoreVersion));
 
+const coreOutcome = outcomes.find(({ pkg }) => pkg === 'core');
+if (coreOutcome && coreOutcome.result.problems.length === 0) {
+  try {
+    const output = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { generateOpenApi } from '@package-broker/core/api/openapi';
+         import { openApiRoute } from '@package-broker/core/api/openapi-route';
+         const document = generateOpenApi([], { title: 'Package Broker', version: '2.0.0' });
+         console.log(JSON.stringify({ version: document.openapi, path: openApiRoute(document).path }));`,
+      ],
+      { cwd: join(ROOT, 'packages', 'cli'), encoding: 'utf8' },
+    );
+    const resolved = JSON.parse(output);
+    if (resolved.version !== '3.1.0' || resolved.path !== '/_pb/openapi.json')
+      coreOutcome.result.problems.push(
+        `./api/* imported from the cli package returned ${output.trim()}`,
+      );
+  } catch (error) {
+    coreOutcome.result.problems.push(
+      `./api/* is not importable from the cli package: ${error.message}`,
+    );
+  }
+}
+
 for (const { pkg, result } of outcomes) {
   if (result.problems.length > 0) {
     process.exitCode = 1;

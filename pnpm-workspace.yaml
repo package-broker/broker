@@ -7,9 +7,14 @@ catalog:
   '@cloudflare/workers-types': 5.20261013.1
   '@eslint/js': 10.0.1
   '@hono/node-server': 2.1.4
+  '@tailwindcss/cli': 4.3.3
   '@types/better-sqlite3': 9.6.0
   '@types/node': 24.19.2
+  '@types/react': 19.3.0
+  '@types/react-dom': 19.3.0
   better-sqlite3: 13.0.3
+  class-variance-authority: 0.7.1
+  clsx: 2.1.1
   esbuild: 0.28.2
   eslint: 10.12.0
   globals: 17.13.0
@@ -17,6 +22,10 @@ catalog:
   kysely: 0.29.6
   miniflare: 5.20261006.1-alpha
   prettier: 3.9.10
+  react: 19.3.0
+  react-dom: 19.3.0
+  tailwind-merge: 3.7.0
+  tailwindcss: 4.3.3
   typescript: 6.0.3
   typescript-eslint: 8.71.1
   vitest: 5.0.3
@@ -25,6 +34,7 @@ catalog:
 minimumReleaseAge: 4320
 trustPolicy: no-downgrade
 allowBuilds:
+  '@parcel/watcher': false
   better-sqlite3: false
   esbuild: true
   workerd: true

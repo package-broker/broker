@@ -1,7 +1,10 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
 import type { MutationFence } from '@package-broker/core/authz/fence';
-import { MAX_KEY_LENGTH } from '@package-broker/core/catalogue/names';
-import { MAX_PATTERN_WILDCARDS, isValidPattern } from '@package-broker/core/catalogue/patterns';
+import {
+  MAX_PATTERN_BYTES,
+  MAX_PATTERN_WILDCARDS,
+  isValidPattern,
+} from '@package-broker/core/catalogue/patterns';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
   assertCheck,
@@ -108,7 +111,7 @@ export function sourceActivatable(ctx: OrgContext, sourceId: SourceRef): Guard {
                 and rn_act_c.pattern = rn_act_j.value || '/*'))))))`;
 }
 
-/** A row outside the T305 grammar (alphabet, length, wildcard count) never covers a key. */
+/** Patterns must satisfy the alphabet, 50-byte bound and wildcard limit; invalid rows never cover a key. */
 export function coveredByRegisteredNames(
   ctx: OrgContext,
   sourceId: SourceRef,
@@ -116,12 +119,12 @@ export function coveredByRegisteredNames(
 ): Guard {
   return sql<SqlBool>`exists (select 1 from registered_name as rn_cov
     where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}
-      and rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'
+      and (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'
       and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)
-      and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_KEY_LENGTH)}
+      and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}
       and length(rn_cov.pattern) - length(replace(rn_cov.pattern, '*', ''))
         <= ${sql.lit(MAX_PATTERN_WILDCARDS)}
-      and ${key} glob rn_cov.pattern)`;
+        then ${key} glob rn_cov.pattern else 0 end))`;
 }
 
 function probe(condition: Guard, negate: boolean): Statement {

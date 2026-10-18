@@ -8,11 +8,13 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 const OTHER: ProtectedHolderProvider = {
   provider: 'github',
   anchor: 'https://github.example.test',
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 
 const ROLE = '01J0ROLEORG0000000000000AA';

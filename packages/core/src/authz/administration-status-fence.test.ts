@@ -29,6 +29,7 @@ function userOf(status: 'active' | 'suspended'): User {
 
 function setup(options: { answer?: unknown; status?: 'active' | 'suspended' } = {}) {
   const grants = {
+    isProtectedHolder: vi.fn(async () => false),
     listOrganization: vi.fn(async () => []),
     suspendUser: vi.fn(async () => options.answer ?? 'suspended'),
     reactivateUser: vi.fn(async () => options.answer ?? 'reactivated'),

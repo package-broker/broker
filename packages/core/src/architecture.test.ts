@@ -16,6 +16,8 @@ interface Rule {
 }
 
 const ANY_WORKSPACE = 'workspace:*';
+const CORE_SPECIFIER = '@package-broker/core';
+const PLUGIN_CORE_SPECIFIERS = new Set([CORE_SPECIFIER, `${CORE_SPECIFIER}/plugin`]);
 const WORKSPACE_PREFIX = '@package-broker/';
 const NODE_BUILTINS = new Set(builtinModules);
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -53,7 +55,12 @@ const RULES: Readonly<Record<string, Rule>> = {
     allow: [...ws('core', 'db-sqlite'), 'hono', '@cloudflare/workers-types'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
-    onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },
+    onlyIn: {
+      node: [
+        'packages/runtime-cloudflare/src/codec/workers-codec.ts',
+        'packages/runtime-cloudflare/src/request-scope.ts',
+      ],
+    },
   },
   'runtime-node': {
     allow: [
@@ -219,6 +226,14 @@ function findViolations(
     }
     const dependency = classify(specifier);
     if (dependency === `${WORKSPACE_PREFIX}${pkg}`) return;
+    if (
+      pkg.startsWith('plugin-') &&
+      kind !== 'test' &&
+      dependency === CORE_SPECIFIER &&
+      !PLUGIN_CORE_SPECIFIERS.has(specifier)
+    ) {
+      return report(`${pkg} may import only ${CORE_SPECIFIER} and ${CORE_SPECIFIER}/plugin`);
+    }
     if (!rule || !isAllowed(rule, dependency, kind, relativePath)) {
       report(`${pkg} must not import ${dependency || specifier} from a ${kind} file`);
     }
@@ -283,6 +298,37 @@ describe('classifier', () => {
     const text = "import { x } from '@package-broker/runtime-node/entry';";
     expect(findViolations('packages/plugin-github/src/a.ts', text)).toHaveLength(1);
     expect(findViolations('packages/cli/src/a.ts', text)).toHaveLength(0);
+  });
+
+  it('limits plugin source files to the core root and the plugin subpath', () => {
+    const file = 'packages/plugin-github/src/a.ts';
+    expect(
+      findViolations(file, "import { definePlugin } from '@package-broker/core/plugin';"),
+    ).toEqual([]);
+    expect(findViolations(file, "import type { X } from '@package-broker/core';")).toEqual([]);
+    expect(
+      format(findViolations(file, "import { k } from '@package-broker/core/kernel/kernel';")),
+    ).toEqual([
+      `${file}:1: @package-broker/core/kernel/kernel (plugin-github may import only @package-broker/core and @package-broker/core/plugin)`,
+    ]);
+    expect(
+      findViolations(file, "import type { K } from '@package-broker/core/kernel/kernel';"),
+    ).toHaveLength(1);
+    expect(
+      findViolations(file, "export type { K } from '@package-broker/core/kernel/kernel';"),
+    ).toHaveLength(1);
+    expect(findViolations(file, "export * from '@package-broker/core/plugin/extra';")).toHaveLength(
+      1,
+    );
+    expect(
+      findViolations(file, "const m = await import('@package-broker/core/ids');"),
+    ).toHaveLength(1);
+    expect(
+      findViolations('packages/plugin-github/src/a.test.ts', "import '@package-broker/core/ids';"),
+    ).toEqual([]);
+    expect(findViolations('packages/cli/src/a.ts', "import '@package-broker/core/ids';")).toEqual(
+      [],
+    );
   });
 
   it('allows relative imports inside the package and imports of the package itself', () => {

@@ -1,5 +1,8 @@
-import type { IdentityProvider } from '@package-broker/core/identity/port';
-import { definePlugin, type PluginDefinition } from '@package-broker/core/plugin';
+import {
+  definePlugin,
+  type IdentityProvider,
+  type PluginDefinition,
+} from '@package-broker/core/plugin';
 import {
   type CloudflareAccessConfig,
   cloudflareAccessProblems,

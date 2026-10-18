@@ -557,7 +557,12 @@ describe('initial role and identity-backed actors', () => {
   const R_BOTH = uid('RB');
   const R_NARROW = uid('RN');
   const R_ORG = uid('RG');
-  const OIDC = { provider: 'oidc', anchor: 'https://idp.example.test', emailAuthoritative: true };
+  const OIDC = {
+    provider: 'oidc',
+    anchor: 'https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  };
   let sso: ProjectRepository;
 
   async function role(id: string, key: string, scope: string, permissions: string[]) {
@@ -985,6 +990,7 @@ describe('authority read parameter budget', () => {
         provider: 'oidc',
         anchor: `https://idp-${index}.example.test`,
         emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
       }));
       const repository = createProjectRepository(recording, { providerAnchors });
       const f = fence({ project: 1 }, U2, S_OTHER);

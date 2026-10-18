@@ -103,9 +103,41 @@ describe('manifest routes', () => {
     const manifest = renderManifestJson([routed], new Map(), 'node', { registration });
     expect(manifest.routes.map((route) => Object.keys(route))).toEqual([
       ['method', 'path', 'plugin', 'permission', 'boundary'],
-      ['method', 'path', 'plugin', 'permission', 'needsOrg'],
+      ['method', 'path', 'plugin', 'permission', 'boundary', 'needsOrg'],
     ]);
     expect(manifest.routes[0]?.boundary).toBe('organization');
     expect(manifest.routes[1]?.needsOrg).toBe(false);
   });
+});
+
+it('serializes declared and absent route boundaries explicitly', () => {
+  const routed = definePlugin({
+    id: 'boundary-fixture',
+    package: '@package-broker/plugin-boundary-fixture',
+    apiVersion: 3,
+    platforms: ['node'],
+    register: (registrar) => {
+      registrar.route({
+        method: 'GET',
+        path: '/org',
+        permission: 'org:read',
+        boundary: 'organization',
+        handler: () => new Response(null),
+      });
+      registrar.route({
+        method: 'GET',
+        path: '/public',
+        permission: null,
+        handler: () => new Response(null),
+      });
+    },
+  });
+  const manifest = renderManifestJson([routed], new Map(), 'node', {
+    registration: collectRegistrations([routed]),
+  });
+  expect(
+    JSON.parse(JSON.stringify(manifest)).routes.map(
+      (route: { boundary: unknown }) => route.boundary,
+    ),
+  ).toEqual(['organization', null]);
 });

@@ -11,7 +11,12 @@ import {
 } from '../platform/cache.js';
 import type { CacheKey } from '../platform/cache.js';
 import type { NameEcosystem } from './names.js';
-import { boundEpochReader, catalogueCacheKey, catalogueNegativeKey } from './cache-keys.js';
+import {
+  boundEpochReader,
+  catalogueCacheKey,
+  catalogueNegativeKey,
+  createCatalogueCache,
+} from './cache-keys.js';
 
 const ctx = orgContext('org-1');
 const origin = { status: 200, authenticated: true, authorized: true };
@@ -59,7 +64,12 @@ function memoryCache(): Cache & {
 
 async function digestOf(p: ResolvedPackage, docKind: Parameters<typeof catalogueCacheKey>[1]) {
   const raw = memoryCache();
-  const cache = createScopedCache(raw, boundEpochReader(p), { deploymentId: 'dep' });
+  const cache = createCatalogueCache(
+    raw,
+    p,
+    { read: () => Promise.resolve(p.cacheEpoch) },
+    { deploymentId: 'dep' },
+  );
   const { version } = await cache.get(ctx, catalogueCacheKey(p, docKind));
   await cache.set(
     ctx,
@@ -98,7 +108,12 @@ describe('catalogueCacheKey', () => {
 
   it('is accepted by the scoped cache (stored, not refused)', async () => {
     const raw = memoryCache();
-    const cache = createScopedCache(raw, boundEpochReader(pkg), { deploymentId: 'dep' });
+    const cache = createCatalogueCache(
+      raw,
+      pkg,
+      { read: () => Promise.resolve(pkg.cacheEpoch) },
+      { deploymentId: 'dep' },
+    );
     const key = catalogueCacheKey(pkg, 'npm-full');
     const { version } = await cache.get(ctx, key);
     const result = await cache.set(
@@ -116,7 +131,12 @@ describe('catalogueCacheKey', () => {
   it('misses after the package epoch changes', async () => {
     const raw = memoryCache();
     const key = catalogueCacheKey(pkg, 'composer-p2');
-    const first = createScopedCache(raw, boundEpochReader(pkg), { deploymentId: 'dep' });
+    const first = createCatalogueCache(
+      raw,
+      pkg,
+      { read: () => Promise.resolve(pkg.cacheEpoch) },
+      { deploymentId: 'dep' },
+    );
     const { version } = await first.get(ctx, key);
     const entry = defaultEntry('metadata', new Uint8Array([1]), new Date());
     expect(await first.set(ctx, key, entry, { expectedVersion: version ?? '', origin })).toBe(
@@ -124,14 +144,24 @@ describe('catalogueCacheKey', () => {
     );
     expect((await first.get(ctx, key)).hit).not.toBeNull();
     const bumped = { ...pkg, cacheEpoch: 'e2' };
-    const second = createScopedCache(raw, boundEpochReader(bumped), { deploymentId: 'dep' });
+    const second = createCatalogueCache(
+      raw,
+      bumped,
+      { read: () => Promise.resolve(bumped.cacheEpoch) },
+      { deploymentId: 'dep' },
+    );
     expect((await second.get(ctx, catalogueCacheKey(bumped, 'composer-p2'))).hit).toBeNull();
   });
 
   it('stores and separates package ids containing / : and @', async () => {
     const odd = { ...pkg, packageId: 'a:b/c@d' };
     const raw = memoryCache();
-    const cache = createScopedCache(raw, boundEpochReader(odd), { deploymentId: 'dep' });
+    const cache = createCatalogueCache(
+      raw,
+      odd,
+      { read: () => Promise.resolve(odd.cacheEpoch) },
+      { deploymentId: 'dep' },
+    );
     const key = catalogueCacheKey(odd, 'composer-p2');
     const { version } = await cache.get(ctx, key);
     const entry = defaultEntry('metadata', new Uint8Array([1]), new Date());
@@ -217,7 +247,12 @@ describe('boundEpochReader', () => {
   it('bypasses read and fill when cacheEpoch is null', async () => {
     const raw = memoryCache();
     const nullPkg = { ...pkg, cacheEpoch: null };
-    const cache = createScopedCache(raw, boundEpochReader(nullPkg), { deploymentId: 'dep' });
+    const cache = createCatalogueCache(
+      raw,
+      nullPkg,
+      { read: () => Promise.resolve(nullPkg.cacheEpoch) },
+      { deploymentId: 'dep' },
+    );
     const key = catalogueCacheKey(nullPkg, 'composer-p2');
     expect(await cache.get(ctx, key)).toEqual({ hit: null, version: null });
     const result = await cache.set(
@@ -232,5 +267,30 @@ describe('boundEpochReader', () => {
     expect(result).toBe('bypassed');
     expect(raw.store.size).toBe(0);
     expect(raw.calls).toEqual({ gets: 0, sets: 0 });
+  });
+});
+
+describe('createCatalogueCache', () => {
+  it.each([false, true])('validates the live epoch at set time (bump: %s)', async (bump) => {
+    let liveVersion = pkg.cacheEpoch;
+    const raw = memoryCache();
+    const cache = createCatalogueCache(
+      raw,
+      pkg,
+      { read: () => Promise.resolve(liveVersion) },
+      { deploymentId: 'dep' },
+    );
+    const key = catalogueCacheKey(pkg, 'composer-p2');
+    if (bump) liveVersion = 'epoch-2';
+    // The get key stays bound to the authorized read even if the live epoch has moved on.
+    expect(await cache.get(ctx, key)).toEqual({ hit: null, version: pkg.cacheEpoch });
+    const result = await cache.set(
+      ctx,
+      key,
+      defaultEntry('metadata', new Uint8Array([1]), new Date()),
+      { expectedVersion: pkg.cacheEpoch!, origin },
+    );
+    expect(result).toBe(bump ? 'discarded' : 'stored');
+    expect(raw.calls.sets).toBe(bump ? 0 : 1);
   });
 });

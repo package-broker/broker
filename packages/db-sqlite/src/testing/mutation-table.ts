@@ -1,4 +1,5 @@
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
+import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
 import { entries as projectReadableEntries } from './mutation-table/project-readable.js';
 import { entries as catalogueStatusEntries } from './mutation-table/catalogue-status-statements.js';
 import { entries as visibilityDeriveEntries } from './mutation-table/visibility-derive.js';
@@ -18,6 +19,7 @@ import { entries as ingestSessionEntries } from './mutation-table/ingest-session
 import { entries as cataloguePredicatesEntries } from './mutation-table/catalogue-predicates.js';
 import { entries as registeredNameEntries } from './mutation-table/registered-name.js';
 import { entries as catalogueWriteTagsEntries } from './mutation-table/catalogue-write-tags.js';
+import { entries as accessBuilderEntries } from './mutation-table/access-builders.js';
 import { entries as accessEntries } from './mutation-table/access.js';
 import { entries as actorAuthorityEntries } from './mutation-table/actor-authority.js';
 import { entries as servicePrincipalAuthorityEntries } from './mutation-table/service-principal-authority.js';
@@ -29,6 +31,7 @@ import { entries as catalogueEpochEntries } from './mutation-table/catalogue-epo
 import { entries as cacheEpochEntries } from './mutation-table/cache-epoch.js';
 import { entries as sourceEntries } from './mutation-table/source.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
+import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
 import {
@@ -41,6 +44,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...catalogueWriterEntries,
   ...catalogueReconcileEntries,
   ...projectReadableEntries,
   ...catalogueStatusEntries,
@@ -56,6 +60,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...registeredNameEntries,
   ...catalogueWriteTagsEntries,
   ...accessEntries,
+  ...accessBuilderEntries,
   ...actorAuthorityEntries,
   ...servicePrincipalAuthorityEntries,
   ...blobReferencesEntries,
@@ -66,6 +71,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueEpochEntries,
   ...sourceEntries,
   ...auditSealEntries,
+  ...auditVerifyEntries,
   ...auditQueryEntries,
   ...catalogueReblobEntries,
   ...blobLeaseEntries,

@@ -33,7 +33,12 @@ const OWNER = id(7),
   ORG_ROLE = id(10),
   TARGET = id(11);
 const anchors = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 const origin = 'https://broker.example.test';
 const sessionSecret = 'A'.repeat(43),

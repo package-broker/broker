@@ -2,7 +2,7 @@ import {
   GITHUB_API_VERSION,
   type PolicyFetch,
   type UpstreamCredential,
-} from '@package-broker/core/sources/policy-fetch';
+} from '@package-broker/core/plugin';
 import { createAppJwt } from './app-jwt.js';
 
 export type InstallationTokenErrorCode =

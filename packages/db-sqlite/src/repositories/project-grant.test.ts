@@ -14,8 +14,18 @@ import {
 import type { ProjectGrantRepository } from './project-grant.js';
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
-  { provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true },
-  { provider: 'okta', anchor: 'oidc:https://okta.example.test', emailAuthoritative: true },
+  {
+    provider: 'oidc',
+    anchor: 'oidc:https://idp.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+  {
+    provider: 'okta',
+    anchor: 'oidc:https://okta.example.test',
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
 ];
 const HOUR = 3_600_000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();

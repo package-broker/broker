@@ -7,6 +7,8 @@ import {
   countDecisions,
   exportedBuilders,
   judge,
+  judgeBatchDecision,
+  judgeSqlDecision,
   mutationTable,
   orgOf,
   plantRepeatedDecision,
@@ -29,6 +31,81 @@ function repositorySources(): Record<string, string> {
 }
 
 describe('mutation table', () => {
+  it('closes the nine original Round B gaps with executable registrations or SQL exemptions', () => {
+    const keys = mutationTable.map(({ file, builder }) => `${file}#${builder}`);
+    for (const key of [
+      'repositories/catalogue-read.ts#visibleWinner',
+      'repositories/catalogue-status.ts#quarantineStatements',
+      'repositories/project-readable.ts#listReadableProjectsStatement',
+      'repositories/proxy-admission.ts#admittedProxySources',
+      'repositories/role.ts#seedDefaultsStatements',
+      'repositories/visibility-attach.ts#attachSourceStatements',
+      'repositories/visibility-derive.ts#rederiveStatements',
+      'internal/catalogue-status-statements.ts#versionStatusStatements',
+      'internal/catalogue-status-statements.ts#conditionalEpochBumpStatement',
+    ]) {
+      if (keys.includes(key)) {
+        const entry = mutationTable.find(({ file, builder }) => `${file}#${builder}` === key)!;
+        expect(entry.predicates.length, key).toBeGreaterThan(0);
+        expect(builderAllowlist).not.toHaveProperty(key);
+      } else {
+        expect(builderAllowlist[key], key).toMatch(/adds no SQL|no organization column/);
+      }
+    }
+  });
+
+  it('registers behavioral time decisions for package upserts and version writes', () => {
+    for (const builder of [
+      'packageUpsertStatements',
+      'versionInsertStatements',
+      'versionUpdateStatements',
+    ]) {
+      const entry = mutationTable.find((candidate) => candidate.builder === builder)!;
+      expect(entry.sqlDecisions?.length, builder).toBeGreaterThan(0);
+      expect(entry.decisions ?? [], builder).toEqual([]);
+    }
+  });
+
+  it('registers this round of lease and shared guard builders', () => {
+    const keys = mutationTable.map(({ file, builder }) => `${file}#${builder}`);
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        'repositories/blob-lease-guard.ts#blobLeaseNotLive',
+        'repositories/fetch-lease.ts#fetchLeaseGuard',
+        'repositories/fetch-lease.ts#createFetchLeaseWriteGuard',
+        'repositories/job-lease-guard.ts#jobLeaseGuard',
+        'repositories/catalogue-write-package.ts#createCatalogueWriteGuard',
+        ...[
+          'opGuard',
+          'ownsIdentity',
+          'anchorMatches',
+          'adminEligibility',
+          'usableLocalLogin',
+          'verifiedIdentity',
+          'boundVerifiedIdentity',
+          'protectedHolder',
+          'cacheEpochBumpStatements',
+          'assertGuard',
+        ].map((builder) => `kysely.ts#${builder}`),
+        'repositories/cache-epoch-bump.ts#cacheEpochBumpStatements',
+        'repositories/session.ts#revokePreviousStatement',
+      ]),
+    );
+    for (const key of keys) expect(builderAllowlist).not.toHaveProperty(key);
+  });
+
+  it('registers a behavioral once-per-batch decision for multi-tag writes', () => {
+    const entry = mutationTable.find(({ builder }) => builder === 'distTagStatements');
+    expect(entry?.batchDecisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          expected: 1,
+          caseName: 'multiple tag changes advance the package revision once per batch',
+        }),
+      ]),
+    );
+  });
+
   it('registers at least five builders', () => {
     expect(mutationTable.length).toBeGreaterThanOrEqual(5);
   });
@@ -37,6 +114,18 @@ describe('mutation table', () => {
     for (const predicate of entry.predicates) {
       it(`${entry.builder}: ${predicate.name} is needed by "${predicate.caseName}"`, async () => {
         const result = await judge(entry, predicate);
+        expect(`${result.verdict}: ${result.detail}`).toMatch(/^killed/);
+      });
+    }
+    for (const decision of entry.batchDecisions ?? []) {
+      it(`${entry.builder}: ${decision.name} is needed by "${decision.caseName}"`, async () => {
+        const result = await judgeBatchDecision(entry, decision);
+        expect(`${result.verdict}: ${result.detail}`).toMatch(/^killed/);
+      });
+    }
+    for (const decision of entry.sqlDecisions ?? []) {
+      it(`${entry.builder}: ${decision.name} is needed by "${decision.case.name}"`, async () => {
+        const result = await judgeSqlDecision(decision);
         expect(`${result.verdict}: ${result.detail}`).toMatch(/^killed/);
       });
     }
@@ -146,6 +235,145 @@ describe('mutation harness', () => {
   });
 });
 
+describe('batch decision harness', () => {
+  const decision = {
+    name: 'advances the project name once',
+    pattern: /update project set/,
+    expected: 1,
+    caseName: 'project name advances once',
+  };
+  const once: ContractCase = {
+    name: decision.caseName,
+    async run(context) {
+      const { own } = orgOf(context);
+      await seeder(context.executor)(
+        "INSERT INTO project (id, org_id, slug, name) VALUES ('P', ?, 'p', 'start')",
+        own.orgId,
+      );
+      await context.executor.batch(
+        context.mutateBatch([
+          { sql: "update project set name = name || 'x' WHERE id = 'P'", params: [] },
+        ]),
+      );
+      const rows = await context.executor.all({
+        sql: "SELECT name FROM project WHERE id = 'P'",
+        params: [],
+      });
+      expect(rows).toEqual([{ name: 'startx' }]);
+    },
+  };
+  const entry = (contractCase: ContractCase): MutationEntry => ({
+    builder: 'fixture',
+    file: 'fixture.ts',
+    cases: [contractCase],
+    predicates: [],
+  });
+
+  it('kills a repeated statement through its observable effect', async () => {
+    expect(await judgeBatchDecision(entry(once), decision)).toMatchObject({ verdict: 'killed' });
+  });
+
+  it('supports a separate time case and refuses a mismatched case name', async () => {
+    const timeEntry = { ...entry(once), cases: [] };
+    expect(await judgeBatchDecision(timeEntry, { ...decision, case: once })).toMatchObject({
+      verdict: 'killed',
+    });
+    expect(
+      await judgeBatchDecision(timeEntry, { ...decision, case: { ...once, name: 'different' } }),
+    ).toMatchObject({ verdict: 'errored' });
+  });
+
+  it('reports a repetition that has no observable effect as vacuous', async () => {
+    const vacuous: ContractCase = {
+      name: decision.caseName,
+      async run(context) {
+        await context.executor.batch(context.mutateBatch([{ sql: 'SELECT 1', params: [] }]));
+      },
+    };
+    expect(
+      await judgeBatchDecision(entry(vacuous), { ...decision, pattern: /SELECT 1/ }),
+    ).toMatchObject({ verdict: 'vacuous' });
+  });
+
+  it('reports nonassertion mutant failures as errors', async () => {
+    const crashing: ContractCase = {
+      name: decision.caseName,
+      async run(context) {
+        const statements = [{ sql: 'SELECT 1', params: [] }];
+        if (context.mutateBatch(statements).length !== 1) throw new TypeError('bad batch');
+      },
+    };
+    expect(
+      await judgeBatchDecision(entry(crashing), { ...decision, pattern: /SELECT 1/ }),
+    ).toMatchObject({ verdict: 'errored' });
+  });
+
+  it('requires the exact decision count, a reached statement and a passing baseline', async () => {
+    expect(await judgeBatchDecision(entry(once), { ...decision, expected: 2 })).toMatchObject({
+      verdict: 'errored',
+    });
+    expect(
+      await judgeBatchDecision(entry(once), { ...decision, pattern: /missing/ }),
+    ).toMatchObject({ verdict: 'not-reached' });
+    expect(
+      await judgeBatchDecision(
+        entry({ name: decision.caseName, run: () => Promise.reject(new Error('baseline')) }),
+        decision,
+      ),
+    ).toMatchObject({ verdict: 'baseline-failed' });
+    expect(await judgeBatchDecision({ ...entry(once), cases: [] }, decision)).toMatchObject({
+      verdict: 'errored',
+    });
+  });
+});
+
+describe('SQL decision harness', () => {
+  const conditional: ContractCase = {
+    name: 'chooses the true branch',
+    async run(context) {
+      const rows = await context.executor.all(
+        context.mutate({ sql: 'SELECT CASE WHEN 1 = 1 THEN 2 ELSE 1 END AS value', params: [] }),
+      );
+      expect(rows).toEqual([{ value: 2 }]);
+    },
+  };
+  const decision = {
+    name: 'branch condition',
+    pattern: /1 = 1/,
+    replacement: '1 = 0',
+    expected: 1,
+    case: conditional,
+  };
+
+  it('kills a changed branch through the executed result', async () => {
+    expect(await judgeSqlDecision(decision)).toMatchObject({ verdict: 'killed' });
+  });
+
+  it('rejects a surviving mutant, incorrect count and unreached decision', async () => {
+    expect(await judgeSqlDecision({ ...decision, replacement: '2 = 2' })).toMatchObject({
+      verdict: 'vacuous',
+    });
+    expect(await judgeSqlDecision({ ...decision, expected: 2 })).toMatchObject({
+      verdict: 'errored',
+    });
+    expect(await judgeSqlDecision({ ...decision, pattern: /missing/ })).toMatchObject({
+      verdict: 'not-reached',
+    });
+  });
+
+  it('rejects a broken baseline and a nonassertion mutant error', async () => {
+    expect(
+      await judgeSqlDecision({
+        ...decision,
+        case: { name: 'broken', run: () => Promise.reject(new Error('broken baseline')) },
+      }),
+    ).toMatchObject({ verdict: 'baseline-failed' });
+    expect(await judgeSqlDecision({ ...decision, replacement: 'missing_column' })).toMatchObject({
+      verdict: 'errored',
+    });
+  });
+});
+
 describe('mutation table completeness', () => {
   it('has no unregistered, stale or doubly listed builder', () => {
     expect(checkCompleteness(repositorySources())).toEqual([]);
@@ -191,6 +419,20 @@ describe('mutation table completeness', () => {
     ).toEqual([]);
   });
 
+  it('requires registration for SQL factories, including create arrow constants', () => {
+    const sources = {
+      'factory.ts': [
+        'export function createGuard(): CatalogueWriteGuard { return guard; }',
+        'export const createReader = (): Reader => reader;',
+        'export async function createRemote(): Promise<Reader> { return reader; }',
+      ].join('\n'),
+    };
+    expect(checkCompleteness(sources, [], {})).toEqual([
+      'factory.ts#createGuard has no registration',
+      'factory.ts#createReader has no registration',
+    ]);
+  });
+
   it('fails for an exported arrow constant without a registration', () => {
     const sources = {
       ...repositorySources(),
@@ -213,7 +455,7 @@ describe('mutation table completeness', () => {
     ]);
   });
 
-  it('recognises builders by return type and ignores factories and plain helpers', () => {
+  it('recognises builders and create factories while ignoring plain helpers', () => {
     const source = [
       'export function guardOne(a: number): Guard {',
       'export function planOne(): DistTagPlan {',
@@ -225,7 +467,13 @@ describe('mutation table completeness', () => {
       'export const arrowTwo = (a: number): Statement[] => x;',
       'export const notAFunction = sql`select 1`;',
     ].join('\n');
-    expect(exportedBuilders(source)).toEqual(['guardOne', 'planOne', 'inferred', 'arrowTwo']);
+    expect(exportedBuilders(source)).toEqual([
+      'guardOne',
+      'planOne',
+      'createThing',
+      'inferred',
+      'arrowTwo',
+    ]);
   });
 });
 

@@ -4,6 +4,7 @@ import type { CatalogueWriteGuard, VersionInput } from '@package-broker/core/db/
 import {
   MAX_METADATA_BYTES,
   normalizeVersionMetadata,
+  type NormalizedJson,
 } from '@package-broker/core/catalogue/metadata';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
@@ -588,7 +589,7 @@ describe('versionUpdateStatements', () => {
           ...base,
           metadata: {
             ...base.metadata,
-            json: JSON.stringify({ description: 'x'.repeat(MAX_METADATA_BYTES) }),
+            json: JSON.stringify({ description: 'x'.repeat(MAX_METADATA_BYTES) }) as NormalizedJson,
           },
         },
       ],

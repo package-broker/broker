@@ -18,7 +18,7 @@ flowchart LR
 
 ## Two runtimes and a shared core
 
-Package Broker runs on Cloudflare Workers or as a Node process, and both run the same code. `packages/core` holds the kernel, which is a Hono application, and depends only on ports: database, blob store, cache, jobs, observability, secrets, identity and source provider. Each runtime supplies the adapters. `packages/runtime-cloudflare` binds D1, R2, the Cache API, Queues and Cron Triggers, and Workers Logs with Analytics Engine. `packages/runtime-node` binds `better-sqlite3`, a filesystem or S3-compatible blob store, an in-memory cache and a database-backed job loop. `packages/db-sqlite` holds the SQLite schema, repositories and migration runner that both runtimes share, along with the contract tests each adapter must pass.
+Package Broker runs on Cloudflare Workers or as a Node process, and both run the same code. `packages/core` holds the kernel, which is a Hono application, and depends only on ports: database, blob store, cache, jobs, observability, identity and source provider. Each runtime supplies the adapters. `packages/runtime-cloudflare` binds D1, R2, the Cache API, Queues and Cron Triggers, and Workers Logs with Analytics Engine. `packages/runtime-node` binds `better-sqlite3`, a filesystem or S3-compatible blob store, an in-memory cache and a database-backed job loop. `packages/db-sqlite` holds the SQLite schema, repositories and migration runner that both runtimes share, along with the contract tests each adapter must pass.
 
 ## Build-time composition of plugins
 

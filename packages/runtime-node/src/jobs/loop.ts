@@ -50,9 +50,13 @@ class PollStageError extends Error {
   }
 }
 
+export interface JobLoopStop {
+  readonly abandoned: number;
+}
+
 export interface JobLoop {
   start(): void;
-  stop(): Promise<void>;
+  stop(): Promise<JobLoopStop>;
 }
 
 export type JobScope = (
@@ -315,8 +319,9 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
     arm(0);
   }
 
-  async function stop(): Promise<void> {
-    if (stopping) return;
+  let stopped: Promise<JobLoopStop> | undefined;
+
+  async function drain(): Promise<JobLoopStop> {
     stopping = true;
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
@@ -333,8 +338,15 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
       }),
     ]);
     clearTimeout(deadline);
+    const abandoned = active.size;
     for (const task of active.values()) task.abandon();
     active.clear();
+    return { abandoned };
+  }
+
+  function stop(): Promise<JobLoopStop> {
+    stopped ??= drain();
+    return stopped;
   }
 
   return Object.freeze({ start, stop });

@@ -1,8 +1,35 @@
 import { expect } from 'vitest';
-import { blobLeaseNotLive } from '../../repositories/blob-lease-guard.js';
+import { sql } from 'kysely';
+import { compile, db } from '../../kysely.js';
+import { blobLeaseNotLive, leaseLive } from '../../repositories/blob-lease-guard.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 const hash = 'a'.repeat(64);
 const FUTURE = '2099-01-01T00:00:00.000Z';
+
+const leaseBoundaries = [
+  ['absent', null, 0],
+  ['one tick before', '2026-10-17T11:59:59.999Z', 0],
+  ['equal to now', '2026-10-17T12:00:00.000Z', 0],
+  ['one tick after', '2026-10-17T12:00:00.001Z', 1],
+] as const;
+
+const leaseCases: ContractCase[] = leaseBoundaries.map(([label, lease, live]) => ({
+  name: `a purge lease ${label} has liveness ${live}`,
+  async run(context) {
+    const statement = compile(
+      db
+        .selectFrom(sql`(select ${lease} as purge_lease_until)`.as('lease'))
+        .select(leaseLive('lease.purge_lease_until').as('live')),
+    );
+    const rows = await context.executor.all(
+      context.mutate({
+        ...statement,
+        sql: statement.sql.replaceAll("'now'", "'2026-10-17T12:00:00.000Z'"),
+      }),
+    );
+    expect(rows).toEqual([{ live }]);
+  },
+}));
 
 const blobCase: ContractCase = {
   name: 'a foreign blob purge lease does not block the version',
@@ -39,6 +66,19 @@ const blobCase: ContractCase = {
 };
 
 export const entries: readonly MutationEntry[] = [
+  {
+    builder: 'leaseLive',
+    file: 'repositories/blob-lease-guard.ts',
+    cases: leaseCases,
+    predicates: [],
+    sqlDecisions: leaseCases.map((boundaryCase, index) => ({
+      name: boundaryCase.name,
+      pattern: index === 0 ? /is not null/ : /> strftime/,
+      replacement: index === 0 ? 'is null' : index === 2 ? '>= strftime' : '<= strftime',
+      expected: 1,
+      case: boundaryCase,
+    })),
+  },
   {
     builder: 'blobLeaseNotLive',
     file: 'repositories/blob-lease-guard.ts',

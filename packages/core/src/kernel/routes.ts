@@ -57,6 +57,27 @@ export function routesConflict(a: RouteKey, b: RouteKey): boolean {
   });
 }
 
+type OwnedRouteKey = RouteKey & { readonly owner: 'core' | 'ecosystem' | 'plugin' };
+
+export function ownedRoutesConflict(a: OwnedRouteKey, b: OwnedRouteKey): boolean {
+  if (!routesConflict(a, b)) return false;
+  if (a.owner !== 'ecosystem' || b.owner !== 'ecosystem') return true;
+  const right = b.path.split('/');
+  return !a.path
+    .split('/')
+    .some((segment, i) => segment.startsWith(':') !== right[i]!.startsWith(':'));
+}
+
+export function compareRoutePrecedence(a: RouteKey, b: RouteKey): number {
+  const left = a.path.split('/');
+  const right = b.path.split('/');
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const difference = Number(left[i]!.startsWith(':')) - Number(right[i]!.startsWith(':'));
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
+}
+
 const BOUNDARIES: ReadonlySet<string> = new Set([
   'none',
   'organization',

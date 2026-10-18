@@ -1,5 +1,6 @@
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
 import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
+import { entries as attachedProxyEntries } from './mutation-table/source-attached-proxy.js';
 import { entries as projectReadableEntries } from './mutation-table/project-readable.js';
 import { entries as catalogueStatusEntries } from './mutation-table/catalogue-status-statements.js';
 import { entries as catalogueStatusRepositoryEntries } from './mutation-table/catalogue-status.js';
@@ -72,6 +73,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...cacheEpochEntries,
   ...catalogueEpochEntries,
   ...sourceEntries,
+  ...attachedProxyEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,
   ...auditQueryEntries,

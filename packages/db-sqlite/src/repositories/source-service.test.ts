@@ -42,6 +42,27 @@ const input = {
   url: 'https://packages.example.test',
   configJson: '{}',
 };
+const projectActor = (orgId: OrgContext['orgId'], projectId: string): SourceActor => ({
+  kind: 'project',
+  actor: {
+    kind: 'project',
+    userId: USER,
+    orgId,
+    projectId,
+    permissions: new Set(['project:sources:write']),
+  },
+});
+const githubApp = {
+  appId: '12345',
+  privateKeyPem: '-----BEGIN PRIVATE KEY-----\nc3VwM3JzM2NyZXR2YWx1ZQ==\n-----END PRIVATE KEY-----',
+  webhookSecret: 'github-webhook-secret',
+};
+const githubSource = {
+  ...input,
+  type: 'vcs' as const,
+  url: null,
+  configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+};
 const credential = (token: string) => ({
   kind: 'bearer' as const,
   plaintext: JSON.stringify({ token: `${token}-token` }),
@@ -132,6 +153,7 @@ beforeEach(async () => {
   service = createSourceService({
     sources,
     credentials,
+    credentialRepository: credentialRows,
     registeredNames: createRegisteredNameRepository(observed),
     organizations: createOrganizationRepository(observed),
     catalogue: { previewWinners: async () => [] },
@@ -293,6 +315,136 @@ describe('source service with the SQLite repositories and credential store', () 
     expect(await sources.get(ctx, SOURCE)).toMatchObject({
       credentialId: null,
       pollIntervalSeconds: 600,
+    });
+  });
+
+  describe('linking an existing credential', () => {
+    const put = (context: OrgContext, kind: string, projectId: string | null, material: object) =>
+      credentials.put(context, {
+        kind,
+        projectId,
+        plaintext: new TextEncoder().encode(JSON.stringify(material)),
+      });
+    const countRows = async (table: 'credential' | 'source') =>
+      (
+        await database.executor.all(
+          statement(`SELECT COUNT(*) AS n FROM ${table} WHERE org_id = ?`, ctx.orgId),
+        )
+      )[0];
+
+    beforeEach(async () => {
+      await database.executor.batch([
+        statement(
+          "INSERT INTO project (id, org_id, slug, name) VALUES ('project-a', ?, 'project-a', 'A'), ('project-b', ?, 'project-b', 'B')",
+          ctx.orgId,
+          ctx.orgId,
+        ),
+        statement(
+          "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('project-source-role', ?, 'project-sources', 'Project sources', 'project', 0)",
+          ctx.orgId,
+        ),
+        statement(
+          "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'project-source-role', 'project:sources:write')",
+          ctx.orgId,
+        ),
+        statement(
+          "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, project_id, role_id) VALUES ('grant-a', ?, 'email', 'admin@example.test', 'project', 'project-a', 'project-source-role'), ('grant-b', ?, 'email', 'admin@example.test', 'project', 'project-b', 'project-source-role')",
+          ctx.orgId,
+          ctx.orgId,
+        ),
+      ]);
+    });
+
+    it('stores the id of an organization credential without inserting a credential row', async () => {
+      const id = await put(ctx, 'bearer', null, { token: 'shared-token' });
+      const before = await countRows('credential');
+      expect(await service.create(ctx, actor, fence, { ...input, credentialId: id })).toEqual({
+        ok: true,
+        value: { id: SOURCE },
+      });
+      expect((await sources.get(ctx, SOURCE))?.credentialId).toBe(id);
+      expect(await countRows('credential')).toEqual(before);
+    });
+
+    it('refuses plaintext and credentialId together without writing', async () => {
+      const id = await put(ctx, 'bearer', null, { token: 'shared-token' });
+      batches = [];
+      expect(
+        await service.create(ctx, actor, fence, {
+          ...input,
+          credential: credential('both'),
+          credentialId: id,
+        }),
+      ).toMatchObject({ ok: false, error: 'invalid_config', problems: [{ field: 'credential' }] });
+      expect(batches).toHaveLength(0);
+      expect(await sources.get(ctx, SOURCE)).toBeNull();
+    });
+
+    it.each([
+      ['project source, organization credential', 'project-a', null, 'project-a'],
+      ['organization source, project credential', null, 'project-a', null],
+      ['project source, other project credential', 'project-a', 'project-b', 'project-a'],
+    ] as const)(
+      'refuses an owner mismatch: %s',
+      async (_name, sourceProject, owner, actorProject) => {
+        const id = await put(ctx, 'bearer', owner, { token: 'shared-token' });
+        const result = await service.create(
+          ctx,
+          actorProject === null ? actor : projectActor(ctx.orgId, actorProject),
+          fence,
+          { ...input, projectId: sourceProject, credentialId: id },
+        );
+        expect(result).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+        expect(await sources.get(ctx, SOURCE)).toBeNull();
+        expect(
+          await service.create(
+            ctx,
+            actorProject === null ? actor : projectActor(ctx.orgId, actorProject),
+            fence,
+            { ...input, projectId: sourceProject },
+          ),
+        ).toMatchObject({ ok: true });
+      },
+    );
+
+    it.each(['bearer', 'github_app'] as const)(
+      'answers a foreign and a missing credential identically (%s)',
+      async (kind) => {
+        if (database.orgs === null) throw new Error('organizations were not seeded');
+        const material = kind === 'github_app' ? githubApp : { token: 'foreign-token' };
+        const foreign = await put(database.orgs.b, kind, null, material);
+        const base = kind === 'github_app' ? githubSource : input;
+        const refusedForeign = await service.create(ctx, actor, fence, {
+          ...base,
+          credentialId: foreign,
+        });
+        const refusedMissing = await service.create(ctx, actor, fence, {
+          ...base,
+          credentialId: 'does-not-exist',
+        });
+        expect(refusedForeign).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+        expect(refusedMissing).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+        expect(refusedForeign).toEqual(refusedMissing);
+        expect(await sources.get(ctx, SOURCE)).toBeNull();
+      },
+    );
+
+    it('accepts a github_app credential and refuses another kind for a GitHub App source', async () => {
+      const app = await put(ctx, 'github_app', null, githubApp);
+      const token = await put(ctx, 'bearer', null, { token: 'shared-token' });
+      const refused = await service.create(ctx, actor, fence, {
+        ...githubSource,
+        credentialId: token,
+      });
+      expect(refused).toMatchObject({ ok: false });
+      expect(refused).toEqual(
+        await service.create(ctx, actor, fence, { ...githubSource, credentialId: 'missing' }),
+      );
+      expect(await sources.get(ctx, SOURCE)).toBeNull();
+      expect(
+        await service.create(ctx, actor, fence, { ...githubSource, credentialId: app }),
+      ).toMatchObject({ ok: true });
+      expect((await sources.get(ctx, SOURCE))?.credentialId).toBe(app);
     });
   });
 });

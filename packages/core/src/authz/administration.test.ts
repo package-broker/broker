@@ -106,7 +106,7 @@ function setup(
   const grants = {
     listOrganization: vi.fn(async () => [...(overrides.storedGrants ?? [grantOf('g1', 'role-1')])]),
     createOrganization: vi.fn(async () => 'created'),
-    deleteOrganization: vi.fn(async () => 'deleted'),
+    deleteOrganization: vi.fn(async () => ({ outcome: 'deleted', offboardedUserId: null })),
     changeRole: vi.fn(async () => 'updated'),
     suspendUser: vi.fn(async () => 'suspended'),
     reactivateUser: vi.fn(async () => 'reactivated'),
@@ -1664,7 +1664,7 @@ describe('repository contract: invalid input is answered, never thrown', () => {
         if (!TIMESTAMP.test(input.now)) throw new TypeError('now');
         return 'created';
       },
-      deleteOrganization: async () => 'deleted',
+      deleteOrganization: async () => ({ outcome: 'deleted', offboardedUserId: null }),
       changeRole: async () => 'updated',
       suspendUser: async () => 'suspended',
       reactivateUser: async () => 'reactivated',
@@ -1852,6 +1852,81 @@ describe('creator offboarding', () => {
         value: null,
       },
     );
+  });
+});
+
+describe('creator offboarding on organization grant revoke', () => {
+  const revoked = (offboardedUserId: string | null) => ({
+    deleteOrganization: vi.fn(async () => ({ outcome: 'deleted', offboardedUserId })),
+  });
+
+  it('reports the user whose last organization grant was revoked once with cause membership_removed', async () => {
+    const onCreatorOffboarded = vi.fn(async () => undefined);
+    const { admin, log } = setup({ grants: revoked('u1'), onCreatorOffboarded });
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1'),
+    ).toEqual({ ok: true, value: null });
+    expect(onCreatorOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'u1',
+      cause: 'membership_removed',
+    });
+    expect(log).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ event: 'grant.changed', action: 'revoked', grantId: 'g1' }),
+    );
+  });
+
+  it('does not report a revoke that leaves no offboarded user', async () => {
+    const onCreatorOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ grants: revoked(null), onCreatorOffboarded });
+    expect(
+      (await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1')).ok,
+    ).toBe(true);
+    expect(onCreatorOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('does not report a refused revoke', async () => {
+    const onCreatorOffboarded = vi.fn(async () => undefined);
+    for (const repo of ['authority', 'conflict', 'indeterminate', 'last_holder', 'not_found']) {
+      const { admin } = setup({
+        grants: { deleteOrganization: vi.fn(async () => repo) },
+        onCreatorOffboarded,
+      });
+      expect(
+        (await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1')).ok,
+      ).toBe(false);
+    }
+    expect(onCreatorOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('revokes without a callback configured', async () => {
+    const { admin } = setup({ grants: revoked('u1') });
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1'),
+    ).toEqual({ ok: true, value: null });
+  });
+
+  it('keeps the revoke ok and logs the failure by name when the callback throws', async () => {
+    const onCreatorOffboarded = vi.fn(async () => {
+      throw new RangeError('secret-bearing detail');
+    });
+    const { admin, log } = setup({ grants: revoked('u1'), onCreatorOffboarded });
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1'),
+    ).toEqual({ ok: true, value: null });
+    const failures = log.mock.calls
+      .map(([entry]) => entry as Record<string, unknown>)
+      .filter((entry) => entry['event'] === 'user.offboarding_callback_failed');
+    expect(failures).toEqual([
+      {
+        level: 'warn',
+        event: 'user.offboarding_callback_failed',
+        orgId: 'org-a',
+        userId: 'u1',
+        cause: 'membership_removed',
+        error: 'RangeError',
+      },
+    ]);
+    expect(JSON.stringify(log.mock.calls)).not.toContain('secret-bearing detail');
   });
 });
 

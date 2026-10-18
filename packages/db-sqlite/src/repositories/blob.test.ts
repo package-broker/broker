@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
   BlobBusyError,
   BlobConflictError,
@@ -10,6 +10,7 @@ import {
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createBlobRepository } from './blob.js';
+import * as leaseGuard from './blob-lease-guard.js';
 
 const D1 = 'a'.repeat(64) as Sha256;
 const D2 = 'b'.repeat(64) as Sha256;
@@ -872,5 +873,42 @@ describe('isolation and effects', () => {
     expect(generation).toMatch(TOKEN);
     expect(await read()).toEqual(before);
     expect(await guard()).toEqual(guardBefore);
+  });
+});
+
+describe('blob writer shared purge lease boundary', () => {
+  it.each([
+    ['one tick before', '2026-10-17T11:59:59.999Z', true],
+    ['equal to now', '2026-10-17T12:00:00.000Z', true],
+    ['one tick after', '2026-10-17T12:00:00.001Z', false],
+  ] as const)('publish handles a lease %s', async (_label, lease, available) => {
+    const shared = vi.spyOn(leaseGuard, 'leaseLive');
+    try {
+      const freeze = (statement: Statement): Statement => ({
+        ...statement,
+        sql: statement.sql.replaceAll("'now'", "'2026-10-17T12:00:00.000Z'"),
+      });
+      const realExecutor = executor;
+      executor = {
+        driver: realExecutor.driver,
+        all: (statement) => realExecutor.all(freeze(statement)),
+        batch: (statements) => realExecutor.batch(statements.map(freeze)),
+      };
+      const repo = createBlobRepository(executor);
+      const { generation } = await publish(repo);
+      await exec(
+        'UPDATE blob SET purge_lease_until = ? WHERE org_id = ? AND sha256 = ?',
+        lease,
+        a.orgId,
+        D1,
+      );
+      shared.mockClear();
+      const result = await repo.publish(a, { ...input(), generation });
+      expect(result !== null).toBe(available);
+      expect(shared).toHaveBeenCalledWith('blob.purge_lease_until');
+      expect((await rowOf(a, D1))?.purge_lease_until).toBe(available ? null : lease);
+    } finally {
+      shared.mockRestore();
+    }
   });
 });

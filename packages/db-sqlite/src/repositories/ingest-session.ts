@@ -3,75 +3,36 @@ import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { JobGuard } from '@package-broker/core/platform/job-repository';
 import { ulid } from '@package-broker/core/ids';
+import type {
+  IngestScopeRef,
+  IngestSessionHandle,
+  IngestSessionLatest,
+  IngestSessionMaintenance,
+  IngestSessions,
+} from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
 import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 import { leaseKey } from './fetch-lease.js';
+import { FORMAT, NOW, seconds, until } from '../internal/lease-time.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 
-const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
-const NOW = sql.raw(`strftime('${FORMAT}','now')`);
+export type {
+  IngestScopeRef,
+  IngestSessionHandle,
+  IngestSessionLatest,
+  IngestSessionProgress,
+  IngestSessionMaintenance,
+  IngestSessionState,
+  IngestSessions,
+} from '@package-broker/core/ingest/session';
+
 const MAX_TEXT = 512;
-const MAX_LEASE_SECONDS = 3600;
 const MAX_VALIDATORS_BYTES = 16_384;
 const SHA256 = /^[0-9a-f]{64}$/;
 export const INGEST_CURSOR_MAX_BYTES = 4096;
 export const INGEST_SESSION_GC_LIMIT = 20;
-
-export type IngestScopeRef =
-  | { readonly scope: 'source'; readonly sourceId: string }
-  | { readonly scope: 'package'; readonly sourceId: string; readonly packageKey: string };
-
-export interface IngestSessionHandle {
-  readonly id: string;
-  readonly scopeKey: string;
-  readonly owner: string;
-  readonly fence: number;
-  readonly leaseSeconds: number;
-  readonly generation: number;
-  readonly stamp: string | null;
-  readonly snapshotId: string | null;
-  readonly snapshotBlobSha256: string | null;
-  readonly cursor: string | null;
-  readonly seenCount: number;
-  readonly pagesSoFar: number;
-  readonly pendingValidators: Readonly<Record<string, unknown>> | null;
-}
-
-export interface IngestSessionProgress {
-  readonly seenCount: number;
-  readonly pagesSoFar: number;
-}
-
-export interface IngestSessions {
-  acquire(
-    ctx: OrgContext,
-    scope: IngestScopeRef,
-    owner: string,
-    leaseSeconds: number,
-  ): Promise<IngestSessionHandle | 'held'>;
-  /** Records the snapshot and stamp of a new generation; false when the stamp is already set or the handle is superseded. */
-  start(
-    ctx: OrgContext,
-    guard: IngestSessionHandle,
-    input: {
-      readonly snapshot: { readonly id: string; readonly blobSha256?: string };
-      readonly stamp: string;
-    },
-  ): Promise<boolean>;
-  /** Extends the lease by the acquired duration; null when the handle is expired or superseded. */
-  advance(
-    ctx: OrgContext,
-    guard: IngestSessionHandle,
-    input: { readonly cursor: string | null; readonly addSeen: number },
-  ): Promise<IngestSessionProgress | null>;
-  setPendingValidators(
-    ctx: OrgContext,
-    guard: IngestSessionHandle,
-    validators: Readonly<Record<string, unknown>> | null,
-  ): Promise<boolean>;
-  /** An expired holder must re-acquire (fence + 1), then abandon with the new handle. */
-  abandon(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;
-}
+export const INGEST_SESSION_SWEEP_LIMIT = 100;
+export const INGEST_SESSION_DEAD_DAYS = 7;
 
 function text(field: string, value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_TEXT) {
@@ -89,27 +50,11 @@ function positive(field: string, value: unknown): number {
   return value;
 }
 
-function seconds(value: unknown): number {
-  if (
-    typeof value !== 'number' ||
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > MAX_LEASE_SECONDS
-  ) {
-    throw new RangeError(`leaseSeconds must be an integer from 1 to ${String(MAX_LEASE_SECONDS)}`);
-  }
-  return value;
-}
-
 function sha(field: string, value: unknown): string {
   if (typeof value !== 'string' || !SHA256.test(value)) {
     throw new RangeError(`${field} must be 64 lowercase hex characters`);
   }
   return value;
-}
-
-function until(leaseSeconds: number) {
-  return sql<string>`strftime('${sql.raw(FORMAT)}','now', ${`+${String(leaseSeconds)} seconds`})`;
 }
 
 function scopeParts(scope: IngestScopeRef): { sourceId: string; packageKey: string | null } {
@@ -169,6 +114,14 @@ interface SessionRow {
   seen_count: number;
   pages_so_far: number;
   pending_validators: string | null;
+}
+
+interface LatestRow {
+  state: IngestSessionLatest['state'];
+  generation: number;
+  fence: number;
+  seen_count: number;
+  pages_so_far: number;
 }
 
 function handleOf(row: SessionRow, leaseSeconds: number): IngestSessionHandle {
@@ -406,6 +359,37 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions {
       );
     },
 
+    async latest(ctx, scope) {
+      const { sourceId, packageKey } = scopeParts(scope);
+      const scopeKey = await leaseKey([
+        ctx.orgId,
+        'ingest',
+        scope.scope,
+        sourceId,
+        packageKey ?? '',
+      ]);
+      const [row] = (await executor.all(
+        compile(
+          db
+            .selectFrom('ingest_session')
+            .select(['state', 'generation', 'fence', 'seen_count', 'pages_so_far'])
+            .where('org_id', '=', ctx.orgId)
+            .where('scope_key', '=', scopeKey)
+            .orderBy('generation', 'desc')
+            .limit(1),
+        ),
+      )) as LatestRow[];
+      return row === undefined
+        ? null
+        : {
+            state: row.state,
+            generation: row.generation,
+            fence: row.fence,
+            seenCount: row.seen_count,
+            pagesSoFar: row.pages_so_far,
+          };
+    },
+
     abandon(ctx, guard) {
       return changed(
         compile(
@@ -415,6 +399,71 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions {
             .where(holds(ctx, guard)),
         ),
       );
+    },
+  };
+}
+
+export function sweepStatements(limit: number, cutoff: string, now: string): readonly Statement[] {
+  return [
+    compile(
+      db
+        .updateTable('ingest_session')
+        .set({ state: 'abandoned', updated_at: now })
+        .where(
+          'id',
+          'in',
+          db
+            .selectFrom('ingest_session as dead')
+            .select('dead.id')
+            .where('dead.state', '=', 'running')
+            .where('dead.lease_until', '<', cutoff)
+            .orderBy('dead.lease_until')
+            .limit(limit),
+        ),
+    ),
+    compile(
+      db.deleteFrom('ingest_session').where(
+        'id',
+        'in',
+        db
+          .selectFrom('ingest_session as old')
+          .select('old.id')
+          .where('old.state', 'in', ['complete', 'abandoned'])
+          .where(
+            sql<boolean>`EXISTS (SELECT 1 FROM ingest_session AS newer
+              WHERE newer.org_id = old.org_id AND newer.scope_key = old.scope_key
+                AND newer.generation > old.generation)`,
+          )
+          .orderBy('old.lease_until')
+          .limit(limit),
+      ),
+    ),
+  ];
+}
+
+export function createIngestSessionMaintenance(executor: SqlExecutor): IngestSessionMaintenance {
+  return {
+    async sweep(limit) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > INGEST_SESSION_SWEEP_LIMIT) {
+        throw new RangeError(
+          `limit must be an integer from 1 to ${String(INGEST_SESSION_SWEEP_LIMIT)}`,
+        );
+      }
+      const [clock] = (await executor.all(
+        compile(
+          db.selectNoFrom([
+            sql<string>`strftime('${sql.raw(FORMAT)}','now')`.as('now'),
+            sql<string>`strftime('${sql.raw(FORMAT)}','now', ${`-${String(INGEST_SESSION_DEAD_DAYS)} days`})`.as(
+              'cutoff',
+            ),
+          ]),
+        ),
+      )) as { now: string; cutoff: string }[];
+      if (clock === undefined) throw new Error('database clock unavailable');
+      const [abandoned, deleted] = await executor.batch([
+        ...sweepStatements(limit, clock.cutoff, clock.now),
+      ]);
+      return { abandoned: abandoned?.changes ?? 0, deleted: deleted?.changes ?? 0 };
     },
   };
 }

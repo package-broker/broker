@@ -120,7 +120,10 @@ export interface AdministrationDeps {
   readonly clock: Clock;
   readonly ids: { ulid(): string };
   readonly log: AdminLog;
-  /** Runs after a user is suspended; production passes `ServicePrincipalService.creatorOffboarded`. */
+  /**
+   * Runs after a user is suspended or loses their last organization grant; production passes
+   * `ServicePrincipalService.creatorOffboarded`.
+   */
   readonly onCreatorOffboarded?: (
     ctx: OrgContext,
     input: { readonly userId: string; readonly cause: CreatorOffboardingCause },
@@ -257,7 +260,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
           error: error instanceof Error ? error.name : typeof error,
         });
       } catch {
-        // The suspension is stored; neither the callback nor the sink may report it as failed.
+        // The change is stored; neither the callback nor the sink may report it as failed.
       }
     }
   }
@@ -525,8 +528,11 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'revoked', result);
       }
-      if (result !== 'deleted') return fail(result);
+      if (typeof result === 'string') return fail(result);
       grantEvent(ctx, actor, 'revoked', id, grant.roleId);
+      if (result.offboardedUserId !== null) {
+        await creatorOffboarded(ctx, result.offboardedUserId, 'membership_removed');
+      }
       return OK;
     },
 

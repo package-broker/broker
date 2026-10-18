@@ -787,7 +787,7 @@ describe('writers use the freshness-aware predicate', () => {
     await seed(stmt('UPDATE user_group SET refreshed_at = ? WHERE user_id = ?', ago(HOUR), U2));
 
     expect(await grants.countProtectedHolders(a)).toBe(2);
-    expect(await deleteGrant(G_EMAIL)).toBe('deleted');
+    expect(await deleteGrant(G_EMAIL)).toMatchObject({ outcome: 'deleted' });
   });
 });
 

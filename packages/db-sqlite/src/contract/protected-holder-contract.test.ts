@@ -430,7 +430,7 @@ describe('removing a contribution counts holders after exclusion', () => {
   it('lets the writer remove one contribution and refuses the last one', async () => {
     expect(
       await repository().deleteOrganization(a, fence({ grant: await revisionOf(G1) }), G1, 'OP-1'),
-    ).toBe('deleted');
+    ).toMatchObject({ outcome: 'deleted' });
     expect(await holders()).toBe(1);
     expect(
       await repository().deleteOrganization(
@@ -492,12 +492,13 @@ describe('concurrent last-admin operations', () => {
 
   async function deleteOf(grantId: string, connection: SqlExecutor): Promise<string> {
     counter += 1;
-    return repository(connection).deleteOrganization(
+    const result = await repository(connection).deleteOrganization(
       a,
       fence({ grant: await revisionOf(grantId) }),
       grantId,
       `OP-${counter}`,
     );
+    return typeof result === 'string' ? result : result.outcome;
   }
 
   const suspendOf = (userId: string) => (connection: SqlExecutor) =>

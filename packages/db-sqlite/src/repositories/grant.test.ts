@@ -73,10 +73,8 @@ type UnfencedGrants = Pick<GrantRepository, 'listOrganization' | 'countProtected
     ctx: OrgContext,
     input: Omit<Parameters<GrantRepository['createOrganization']>[2], 'opId'>,
   ): ReturnType<GrantRepository['createOrganization']>;
-  deleteOrganization(
-    ctx: OrgContext,
-    id: string,
-  ): ReturnType<GrantRepository['deleteOrganization']>;
+  deleteOrganization(ctx: OrgContext, id: string): Promise<string>;
+  revoke(ctx: OrgContext, id: string): ReturnType<GrantRepository['deleteOrganization']>;
   changeRole(
     ctx: OrgContext,
     id: string,
@@ -180,6 +178,10 @@ async function fenceFor(org: OrgContext, id?: string): Promise<MutationFence> {
   );
 }
 
+function outcomeOf(result: Awaited<ReturnType<GrantRepository['deleteOrganization']>>): string {
+  return typeof result === 'string' ? result : result.outcome;
+}
+
 function nextOp(): string {
   operations += 1;
   return `OP${String(operations).padStart(24, '0')}`;
@@ -207,7 +209,10 @@ function createGrantRepository(
     countProtectedHolders: (ctx) => fenced.countProtectedHolders(ctx),
     createOrganization: async (ctx, input) =>
       fenced.createOrganization(ctx, await fenceFor(ctx), { ...input, opId: nextOp() }),
-    deleteOrganization: async (ctx, id) =>
+    deleteOrganization: async (ctx, id) => {
+      return outcomeOf(await fenced.deleteOrganization(ctx, await fenceFor(ctx, id), id, nextOp()));
+    },
+    revoke: async (ctx, id) =>
       fenced.deleteOrganization(ctx, await fenceFor(ctx, id), id, nextOp()),
     changeRole: async (ctx, id, roleId, now) =>
       fenced.changeRole(ctx, await fenceFor(ctx, id), id, roleId, now, nextOp()),
@@ -939,6 +944,86 @@ describe('deleteOrganization', () => {
       holderInput,
     }).deleteOrganization(a, G1);
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
+  });
+});
+
+describe('deleteOrganization reports the user it offboards', () => {
+  const deleted = (offboardedUserId: string | null) => ({ outcome: 'deleted', offboardedUserId });
+
+  it('reports the user of an e-mail grant that was their only organization grant', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
+    expect(await grants.revoke(a, G1)).toEqual(deleted(U1));
+  });
+
+  it('reports no one for an e-mail grant without a user account', async () => {
+    await seed([emailGrant(a, G1, 'nobody@example.test', AUDITOR)]);
+    expect(await grants.revoke(a, G1)).toEqual(deleted(null));
+  });
+
+  it('reports no one while a group grant still reaches the user, nor for the group grant itself', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      groupGrant(a, G2, 'oidc', 'auditors', AUDITOR),
+      membership(a, U1, 'oidc', 'auditors'),
+    ]);
+    expect(await grants.revoke(a, G1)).toEqual(deleted(null));
+    expect(await grants.revoke(a, G2)).toEqual(deleted(null));
+  });
+
+  it('reports no one when the user keeps their e-mail grant and loses a group grant', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      groupGrant(a, G2, 'oidc', 'auditors', AUDITOR),
+      membership(a, U1, 'oidc', 'auditors'),
+    ]);
+    expect(await grants.revoke(a, G2)).toEqual(deleted(null));
+  });
+
+  it('a project grant does not keep the organization membership', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      emailGrant(a, G2, 'u1@example.test', PROJECT_ROLE, PROJECT),
+    ]);
+    expect(await grants.revoke(a, G1)).toEqual(deleted(U1));
+  });
+
+  it('another organization with the same e-mail neither reports nor keeps the user', async () => {
+    await seed([
+      user(b, '01J0USER0000000000000000B2', 'u1@example.test'),
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      emailGrant(b, GB, 'u1@example.test', ADMIN_B),
+    ]);
+    expect(await grants.revoke(a, G1)).toEqual(deleted(U1));
+  });
+
+  it('a refused revoke reports no user', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    expect(await grants.revoke(a, G1)).toBe('last_holder');
+  });
+
+  it('keeps every statement of the batch within the 100 bound-parameter limit', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
+    const statements: Statement[] = [];
+    const recording: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: (batch) => {
+        statements.push(...batch);
+        return executor.batch(batch);
+      },
+    };
+    expect(
+      await createFencedGrantRepository(recording, {
+        providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+          provider,
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+        })),
+        holderInput,
+      }).deleteOrganization(a, await fenceFor(a, G1), G1, nextOp()),
+    ).toEqual(deleted(U1));
+    expect(statements.length).toBeGreaterThan(0);
+    for (const statement of statements) expect(statement.params.length).toBeLessThanOrEqual(100);
   });
 });
 
@@ -2377,7 +2462,7 @@ describe('fenced grant mutators', () => {
               success = 'created';
               break;
             case 'delete':
-              result = await fenced.deleteOrganization(a, fence, G2, 'OPRECOVERY');
+              result = outcomeOf(await fenced.deleteOrganization(a, fence, G2, 'OPRECOVERY'));
               success = 'deleted';
               break;
             case 'changeRole':
@@ -2491,7 +2576,9 @@ describe('fenced grant mutators', () => {
   it('2: a non-admin revokes a grant whose role holds permissions it lacks', async () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'departing@example.test', HIGH)]);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toBe('deleted');
+    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toMatchObject({
+      outcome: 'deleted',
+    });
     expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([]);
   });
 
@@ -2510,7 +2597,9 @@ describe('fenced grant mutators', () => {
       'authority',
     );
     expect(await worldState()).toBe(before);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(admin, 1), G1, 'OP3')).toBe('deleted');
+    expect(await fenced.deleteOrganization(a, fenceOfActing(admin, 1), G1, 'OP3')).toMatchObject({
+      outcome: 'deleted',
+    });
   });
 
   it('2: removing or demoting the last protected holder is refused inside the batch', async () => {
@@ -2556,9 +2645,9 @@ describe('fenced grant mutators', () => {
     ]);
     expect(await fenced.changeRole(a, stale, G1, LOW, LATER, 'OPAGAIN')).toBe('conflict');
     expect(await fenced.deleteOrganization(a, stale, G1, 'OPDELETE')).toBe('conflict');
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 2), G1, 'OPDELETE')).toBe(
-      'deleted',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 2), G1, 'OPDELETE'),
+    ).toMatchObject({ outcome: 'deleted' });
   });
 
   it('3: an unknown grant is not_found and a missing role is role_scope_mismatch', async () => {
@@ -2771,9 +2860,9 @@ describe('fenced grant mutators', () => {
     );
     const revision = await revisionOfListed();
     expect(revision).toBe(2);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, revision), G1, 'OP3')).toBe(
-      'deleted',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, revision), G1, 'OP3'),
+    ).toMatchObject({ outcome: 'deleted' });
   });
 
   it('a createdBy outside the organization is refused inside the batch: nothing commits, then it throws', async () => {

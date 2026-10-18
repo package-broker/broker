@@ -271,7 +271,7 @@ const creatorRemoved: Case = (open, wrap) =>
           grant!.id,
           'contract-remove-creator',
         ),
-      ).toBe('deleted');
+      ).toEqual({ outcome: 'deleted', offboardedUserId: USER });
       expect(
         await executor.all(st('SELECT id FROM access_grant WHERE org_id = ?', ctx.orgId)),
       ).toEqual([]);

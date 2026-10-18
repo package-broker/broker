@@ -36,7 +36,7 @@ function setup() {
   const grants = {
     listOrganization: vi.fn(async () => []),
     createOrganization: vi.fn(async () => 'created'),
-    deleteOrganization: vi.fn(async () => 'deleted'),
+    deleteOrganization: vi.fn(async () => ({ outcome: 'deleted', offboardedUserId: null })),
     changeRole: vi.fn(async () => 'updated'),
     suspendUser: vi.fn(async () => 'suspended'),
     reactivateUser: vi.fn(async () => 'reactivated'),

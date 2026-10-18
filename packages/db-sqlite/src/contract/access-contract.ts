@@ -70,7 +70,9 @@ const ANCHORS = {
   idp1: 'oidc:https://idp1.example.test',
   idp2: 'oidc:https://idp2.example.test',
 } as const;
-const anchors: readonly EngineProviderAnchor[] = [
+const anchors: readonly (EngineProviderAnchor & {
+  readonly emailAuthoritativeDomains?: readonly string[];
+})[] = [
   {
     provider: 'idp0',
     anchor: ANCHORS.idp0,

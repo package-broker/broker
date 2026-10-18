@@ -71,6 +71,7 @@ const staging = { store: unusedStore, orgOf: () => org };
 
 function context(fetch: ProviderContext['fetch'], credential: UpstreamCredential | null = null) {
   return {
+    org: orgContext('org-test'),
     fetch,
     credential,
     codecs: {} as Codecs,

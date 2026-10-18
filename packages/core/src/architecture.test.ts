@@ -55,7 +55,12 @@ const RULES: Readonly<Record<string, Rule>> = {
     allow: [...ws('core', 'db-sqlite'), 'hono', '@cloudflare/workers-types'],
     testOnly: [],
     testsAndScripts: ['miniflare', 'node', 'vitest'],
-    onlyIn: { node: ['packages/runtime-cloudflare/src/codec/workers-codec.ts'] },
+    onlyIn: {
+      node: [
+        'packages/runtime-cloudflare/src/codec/workers-codec.ts',
+        'packages/runtime-cloudflare/src/request-scope.ts',
+      ],
+    },
   },
   'runtime-node': {
     allow: [

@@ -39,6 +39,11 @@ export interface SafeLogRecord {
   readonly attempt?: number;
   readonly error_name?: ErrorName;
   readonly reason_code?: string;
+  readonly head_seq?: number;
+  readonly seq?: number;
+  readonly rows?: number;
+  readonly head_hash?: string;
+  readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
 }
 
 export const LOG_FIELDS = [
@@ -62,6 +67,11 @@ export const LOG_FIELDS = [
   'attempt',
   'error_name',
   'reason_code',
+  'head_seq',
+  'seq',
+  'rows',
+  'head_hash',
+  'reason',
 ] as const satisfies readonly (keyof SafeLogRecord)[];
 
 export type LogField = (typeof LOG_FIELDS)[number];
@@ -263,6 +273,11 @@ const FIELD_CHECKS: Readonly<
   job_id: matches(ENTITY_ID),
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),
+  head_seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  rows: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  head_hash: matches(/^[0-9a-f]{64}$/),
+  reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
 };
 
 const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;

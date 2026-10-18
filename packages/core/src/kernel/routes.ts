@@ -61,6 +61,7 @@ const BOUNDARIES: ReadonlySet<string> = new Set([
   'project',
   'self',
   'package',
+  'authenticated',
 ]);
 const PROJECT_PARAMETER = ':project';
 const PACKAGE_PERMISSION_PREFIX = 'project:packages:';
@@ -86,11 +87,14 @@ export interface RouteBoundaryOptions {
   readonly apiVersion?: number;
   /** Only core routes may be 'self'. */
   readonly allowSelf?: boolean;
+  /** Only core routes may be 'authenticated'. */
+  readonly allowAuthenticated?: boolean;
 }
 
 interface BoundaryInput {
   readonly path: unknown;
   readonly permission: unknown;
+  readonly method?: unknown;
   readonly boundary?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;
@@ -175,10 +179,19 @@ export function routeBoundaryProblems(
     fail('the self boundary is not available to plugin routes');
   }
 
+  if (boundary === 'authenticated') {
+    if (options.allowAuthenticated !== true) {
+      fail('the authenticated boundary is not available to plugin routes');
+    }
+    if (route.method !== 'GET') fail('an authenticated route must be a GET route');
+    if (hasProject) fail('an authenticated route must not have :project in its path');
+    if (route.needsOrg === false) fail('an authenticated route needs organization context');
+  }
+
   if (permission === null) {
     if (boundary === 'self') {
       if (hasProject) fail('a self route must not have :project in its path');
-    } else if (boundary !== undefined && boundary !== 'none') {
+    } else if (boundary !== undefined && boundary !== 'none' && boundary !== 'authenticated') {
       fail(`a public route (permission null) cannot have the ${boundary} boundary`);
     }
     return problems;
@@ -196,6 +209,8 @@ export function routeBoundaryProblems(
     fail('a protected route needs an explicit boundary (organization or project)');
   } else if (boundary === 'self') {
     fail('a self route must not require a permission');
+  } else if (boundary === 'authenticated') {
+    fail('an authenticated route must not require a permission');
   } else if (boundary === 'organization') {
     if (info.scope !== 'organization') {
       fail(`the organization boundary requires an org:* permission, got "${permission}"`);

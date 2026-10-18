@@ -342,6 +342,7 @@ describe('rederiveStatements invariants', () => {
       .where('guard_i.project_id', '=', 'P1')
       .where(
         admissionCondition(
+          ctx,
           col('guard_i.project_id'),
           col('guard_x.source_id'),
           col('guard_x.name'),
@@ -350,6 +351,33 @@ describe('rederiveStatements invariants', () => {
       );
     const ids = await database.executor.all<{ id: string }>(compile(admitted));
     expect(ids.map((r) => r.id)).toEqual(['K-1']);
+    await rederive(database, ctx, { kind: 'package', packageId: 'K-1' });
+    expect(await rows(database)).toEqual([
+      { orgId: ctx.orgId, projectId: 'P1', packageId: 'K-1', origin: 'subscription' },
+    ]);
+  });
+
+  it('a mismatched-org include pattern does not turn a subscription into a pattern origin', async () => {
+    if (database.orgs === null) throw new Error('organizations were not seeded');
+    await exec("INSERT INTO project (id, org_id, slug, name) VALUES ('P1', ?, 'p1', 'P1')", [
+      ctx.orgId,
+    ]);
+    await exec(
+      "INSERT INTO source (id, org_id, name, ecosystem, type, removal_policy) VALUES ('S1', ?, 'S1', 'composer', 'vcs', 'flag')",
+      [ctx.orgId],
+    );
+    await exec(
+      "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('K-1', ?, 'S1', 'composer', 'acme/a')",
+      [ctx.orgId],
+    );
+    await exec(
+      "INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, 'P1', 'S1', 100)",
+      [ctx.orgId],
+    );
+    await exec(
+      "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('M', ?, 'P1', 'S1', 'acme/*', 'include')",
+      [database.orgs.b.orgId],
+    );
     await rederive(database, ctx, { kind: 'package', packageId: 'K-1' });
     expect(await rows(database)).toEqual([
       { orgId: ctx.orgId, projectId: 'P1', packageId: 'K-1', origin: 'subscription' },

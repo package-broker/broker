@@ -554,6 +554,54 @@ export interface RepresentationClockTable {
   package_id: Generated<string>;
 }
 
+/** Mirrors `import_run` in `migrations/0001_init.sql` and `migrations/0012_import.sql`. */
+export interface ImportRunTable {
+  id: string;
+  org_id: string;
+  source_system: string;
+  state: Generated<
+    | 'planned'
+    | 'applying'
+    | 'failed'
+    | 'applied'
+    | 'verifying'
+    | 'verified'
+    | 'rolled_back'
+    | 'cancelled'
+  >;
+  plan_hash: string | null;
+  planned_count: Generated<number>;
+  applied_count: Generated<number>;
+  started_by_user_id: string | null;
+  started_by_service_principal_id: string | null;
+  approved_by_user_id: string | null;
+  approved_at: string | null;
+  credential_window_until: string | null;
+  manifest_blob_sha256: string | null;
+  before_image_expires_at: string | null;
+  accepted_at: string | null;
+  last_error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+/** Mirrors `import_ref` in `migrations/0001_init.sql` and `migrations/0012_import.sql`. */
+export interface ImportRefTable {
+  id: string;
+  org_id: string;
+  import_run_id: string;
+  entity_type: string;
+  entity_id: string;
+  external_ref: string;
+  action: 'create' | 'update';
+  before_image_json: string | null;
+  content_hash: string | null;
+  conflict_state: Generated<'none' | 'changed_after_import' | 'resolved'>;
+  published_at_basis: 'source_release' | 'packagist_added' | 'import_time' | null;
+  rolled_back_at: string | null;
+  created_at: Generated<string>;
+}
+
 /** Mirrors `audit_pending` in `migrations/0011_api_audit.sql`. */
 export interface AuditPendingTable {
   id: string;
@@ -586,6 +634,8 @@ export interface ApiIdempotencyTable {
 export interface Database {
   audit_pending: AuditPendingTable;
   api_idempotency: ApiIdempotencyTable;
+  import_run: ImportRunTable;
+  import_ref: ImportRefTable;
   organization: OrganizationTable;
   schema_migration: SchemaMigrationTable;
   migration_lock: MigrationLockTable;

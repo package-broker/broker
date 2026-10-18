@@ -17,12 +17,14 @@ export type DeriveScope =
 const ROW = 'project_package';
 
 function derivedOrigin(
+  ctx: OrgContext,
   projectRef: Ref,
   sourceRef: Expression<unknown>,
 ): RawBuilder<ProjectPackageOrigin> {
   return sql<ProjectPackageOrigin>`case when exists (
     select 1 from project_package_pattern as derive_include
-    where derive_include.project_id = ${projectRef}
+    where derive_include.org_id = ${ctx.orgId}
+      and derive_include.project_id = ${projectRef}
       and derive_include.source_id = ${sourceRef}
       and derive_include.effect = 'include'
   ) then 'pattern' else 'subscription' end`;
@@ -33,7 +35,7 @@ function derivedFor(ctx: OrgContext, projectRef: Ref, pkg: string): Expression<S
   return sql<SqlBool>`(
     ${k('org_id')} = ${ctx.orgId}
     and ${attachedSourceCondition(ctx, projectRef, k('source_id'), k('ecosystem'))}
-    and ${admissionCondition(projectRef, k('source_id'), k('name'), k('visible_to_new_projects'))}
+    and ${admissionCondition(ctx, projectRef, k('source_id'), k('name'), k('visible_to_new_projects'))}
   )`;
 }
 
@@ -82,7 +84,7 @@ export function rederiveStatements(ctx: OrgContext, scope: DeriveScope): Stateme
       )`,
     );
 
-  const origin = derivedOrigin(rowProject, rowSource);
+  const origin = derivedOrigin(ctx, rowProject, rowSource);
   const retag = db
     .updateTable(ROW)
     .set({ origin })
@@ -108,7 +110,7 @@ export function rederiveStatements(ctx: OrgContext, scope: DeriveScope): Stateme
           'derive_package.org_id',
           'derive_attachment.project_id',
           'derive_package.id',
-          derivedOrigin(attachmentProject, col('derive_package.source_id')).as('origin'),
+          derivedOrigin(ctx, attachmentProject, col('derive_package.source_id')).as('origin'),
         ])
         .where('derive_attachment.org_id', '=', ctx.orgId)
         .where(candidateInScope(scope))

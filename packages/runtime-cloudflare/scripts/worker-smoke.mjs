@@ -208,6 +208,7 @@ async function run() {
         modules: true,
         scriptPath: basename(workerScript),
         compatibilityDate: '2026-10-01',
+        compatibilityFlags: ['nodejs_compat'],
         d1Databases: ['DB'],
         r2Buckets: ['STORAGE'],
         queueProducers: { JOBS: 'pb-smoke-jobs' },
@@ -267,6 +268,14 @@ async function run() {
     if (envelope?.error?.code !== 'not_found') {
       throw new Error(`/nope: expected error.code "not_found", got ${JSON.stringify(envelope)}`);
     }
+
+    step = 'GET /_pb/session without credentials';
+    await expectStatus(
+      '/_pb/session without credentials',
+      await dispatch('/_pb/session', limitMs),
+      401,
+    );
+    console.log('smoke:cloudflare workerd: session without credentials refused (401)');
 
     step = 'POST /_pb/auth/local/setup/start';
     const started = await send('/_pb/auth/local/setup/start', limitMs, {

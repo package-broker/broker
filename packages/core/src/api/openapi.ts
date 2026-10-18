@@ -4,6 +4,7 @@ import { PERMISSIONS } from '../authz/permissions.js';
 import { toJsonSchema, type JsonObject, type JsonValue } from './json-schema.js';
 import { routeApiProblems } from '../kernel/routes.js';
 import { IF_MATCH, type ApiRouteSpec } from './route.js';
+import { API_ERROR_CODES } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 
 export interface OpenApiDocument extends JsonObject {
@@ -126,7 +127,7 @@ export function generateOpenApi(
     templates.set(template, spec.path);
     const method = spec.method.toLowerCase();
     const methods = (paths[path] ??= Object.create(null) as Record<string, JsonObject>);
-    if (Object.hasOwn(methods, method)) throw new TypeError('Duplicate path and method');
+    if (Object.hasOwn(methods, method)) throw new TypeError(`${label}: Duplicate path and method`);
     const sessionOnly =
       spec.boundary === 'self' ||
       PERMISSIONS.some(
@@ -144,7 +145,14 @@ export function generateOpenApi(
     for (const [status, schema] of Object.entries(api.responses)) {
       if (Number(status) >= 400) {
         if (schema !== null) throw new TypeError(`${label}: error response ${status} must be null`);
-        error(Number(status), 'Error');
+        const messages = [
+          ...new Set(
+            Object.values(API_ERROR_CODES)
+              .filter((entry) => entry.status === Number(status))
+              .map((entry) => entry.message),
+          ),
+        ];
+        error(Number(status), messages.length > 0 ? messages.join('; ') : 'Error');
       } else {
         responses[status] = {
           description: schema === null ? 'No content' : 'Response',

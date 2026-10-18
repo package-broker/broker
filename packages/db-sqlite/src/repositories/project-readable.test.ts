@@ -24,6 +24,7 @@ const OIDC: ProtectedHolderProvider = {
   provider: 'oidc',
   anchor: ANCHOR,
   emailAuthoritative: true,
+  emailAuthoritativeDomains: ['example.test'],
 };
 const OTHER: ProtectedHolderProvider = {
   provider: 'other',
@@ -359,6 +360,46 @@ describe('listReadableProjects', () => {
     ]);
   });
 
+  it('returns an e-mail grant only when the provider is authoritative for the e-mail domain', async () => {
+    await seed(grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(2) }));
+    const list = (domains: string[]) =>
+      createReadableProjectRepository(executor, {
+        providerAnchors: [{ ...OIDC, emailAuthoritativeDomains: domains }, OTHER],
+      }).listReadableProjects(a, { userId: U1 }, { limit: 10, status: 'active' });
+
+    expect(await list(['other.test'])).toEqual([]);
+    expect((await list(['other.test', 'example.test'])).map((row) => row.id)).toEqual([
+      projectId(2),
+    ]);
+  });
+
+  it('never lets a parent domain vouch for an e-mail of a subdomain', async () => {
+    await seed(
+      stmt("UPDATE user_account SET email = 'u1@sub.example.test' WHERE id = ?", U1),
+      stmt("UPDATE identity SET email = 'u1@sub.example.test' WHERE user_id = ?", U1),
+      grant(a, 'email', 'u1@sub.example.test', PROJECT_READER, { projectId: projectId(2) }),
+    );
+    const list = (domains: string[]) =>
+      createReadableProjectRepository(executor, {
+        providerAnchors: [{ ...OIDC, emailAuthoritativeDomains: domains }, OTHER],
+      }).listReadableProjects(a, { userId: U1 }, { limit: 10, status: 'active' });
+
+    expect(await list(['example.test'])).toEqual([]);
+    expect((await list(['sub.example.test'])).map((row) => row.id)).toEqual([projectId(2)]);
+  });
+
+  it('does not let one provider vouch for a domain another provider is authoritative for', async () => {
+    await seed(grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(2) }));
+    const rows = await createReadableProjectRepository(executor, {
+      providerAnchors: [
+        { ...OIDC, emailAuthoritativeDomains: ['other.test'] },
+        { ...OTHER, emailAuthoritative: true, emailAuthoritativeDomains: ['example.test'] },
+      ],
+    }).listReadableProjects(a, { userId: U1 }, { limit: 10, status: 'active' });
+
+    expect(rows).toEqual([]);
+  });
+
   it('leaves organization project:read to the caller and never crosses organizations', async () => {
     await seed(
       grant(a, 'email', 'u1@example.test', ORG_READER),
@@ -530,7 +571,12 @@ describe('query shape', () => {
       { afterId: projectId(1), limit: 200, status: 'active' },
       [
         ...ANCHORS,
-        { provider: 'third', anchor: 'https://third.example.test', emailAuthoritative: true },
+        {
+          provider: 'third',
+          anchor: 'https://third.example.test',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
       ],
     );
     expect(statement.params.length).toBeLessThan(100);

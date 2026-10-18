@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:http';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -56,7 +57,12 @@ function harness(start: () => Promise<NodeBroker>): Harness {
     error,
     exit,
     signals,
-    runtime: { start, exit, error, onSignal: (signal, listener) => signals.set(signal, listener) },
+    runtime: {
+      start: vi.fn(start),
+      exit,
+      error,
+      onSignal: (signal, listener) => signals.set(signal, listener),
+    },
   };
 }
 
@@ -156,7 +162,8 @@ describe('runEntry', () => {
     const test = harness(() => Promise.resolve(broker));
     await runEntry(manifest, { PORT: 'abc' }, test.runtime);
     expect(listen).not.toHaveBeenCalled();
-    expect(close).toHaveBeenCalledTimes(1);
+    expect(test.runtime.start).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
     expect(test.error).toHaveBeenCalledWith(expect.stringContaining('PORT must be an integer'));
     expect(test.exit).toHaveBeenCalledWith(1);
     expect(test.signals.size).toBe(0);
@@ -165,7 +172,15 @@ describe('runEntry', () => {
   it('exits 1 without listening when start-up rejects', async () => {
     const test = harness(() => Promise.reject(new Error('init failed')));
     await runEntry(manifest, {}, test.runtime);
-    expect(test.error).toHaveBeenCalledWith('Error: init failed');
+    expect(test.error).toHaveBeenCalledWith(
+      JSON.stringify({
+        level: 'error',
+        event: 'startup.failed',
+        service: 'package-broker',
+        runtime: 'node',
+        error_name: 'Error',
+      }),
+    );
     expect(test.exit).toHaveBeenCalledWith(1);
     expect(test.signals.size).toBe(0);
   });
@@ -226,5 +241,133 @@ describe('isMainEntry', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('entry platform ports and failure handling', () => {
+  const platformPorts: PlatformPortConfig = {
+    blob: { adapter: 'filesystem', rootEnv: 'BLOB_ROOT', maxBytes: 1024 },
+    cache: { adapter: 'lru', maxBytes: 1024 },
+    jobs: { adapter: 'database', maxRunning: 1 },
+    observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
+  };
+
+  function expectRecord(error: ReturnType<typeof vi.fn>, event: string): void {
+    expect(error).toHaveBeenCalledTimes(1);
+    const line: unknown = error.mock.calls[0]?.[0];
+    expect(typeof line).toBe('string');
+    expect(JSON.parse(line as string)).toEqual({
+      level: 'error',
+      event,
+      service: 'package-broker',
+      runtime: 'node',
+      error_name: 'Error',
+    });
+    expect(line).not.toMatch(/postgres|pw|host/);
+  }
+
+  it('forwards the exact configured platform ports object', async () => {
+    const { broker } = fakeBroker();
+    const start = vi.fn(() => Promise.resolve(broker));
+    const test = harness(start);
+    await runEntry(
+      Promise.resolve({ plugins: [], migrations: [], platformPorts }),
+      {},
+      test.runtime,
+    );
+    expect(start.mock.calls).toHaveLength(1);
+    expect(test.runtime.start).toHaveBeenCalledWith({
+      plugins: [],
+      migrations: [],
+      env: {},
+      platformPorts,
+    });
+    const options = vi.mocked(test.runtime.start).mock.calls[0]?.[0];
+    expect(options?.platformPorts).toBe(platformPorts);
+  });
+
+  it.each([null, undefined])('disables platform services for %s', async (ports) => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    const input =
+      ports === undefined
+        ? { plugins: [], migrations: [] }
+        : { plugins: [], migrations: [], platformPorts: ports };
+    await runEntry(Promise.resolve(input), {}, test.runtime);
+    expect(test.runtime.start).toHaveBeenCalledWith({ plugins: [], migrations: [], env: {} });
+  });
+
+  it('sanitizes a rejected start before exiting', async () => {
+    const test = harness(() => Promise.reject(new Error('postgres://user:pw@host/db')));
+    await runEntry(manifest, {}, test.runtime);
+    expectRecord(test.error, 'startup.failed');
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(test.error.mock.invocationCallOrder[0]).toBeLessThan(
+      test.exit.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('sanitizes a rejected manifest import without starting', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    await runEntry(Promise.reject(new Error('postgres://user:pw@host/db')), {}, test.runtime);
+    expectRecord(test.error, 'startup.failed');
+    expect(test.runtime.start).not.toHaveBeenCalled();
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it('rejects invalid PORT before migration or bootstrap can run', async () => {
+    const migrate = vi.fn();
+    const bootstrap = vi.fn();
+    const { broker } = fakeBroker();
+    const test = harness(() => {
+      migrate();
+      bootstrap();
+      return Promise.resolve(broker);
+    });
+    await runEntry(manifest, { PORT: 'invalid' }, test.runtime);
+    expect(test.runtime.start).not.toHaveBeenCalled();
+    expect(migrate).not.toHaveBeenCalled();
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it('uses the requested failure exit code after a successful close', async () => {
+    const close = vi.fn(() => Promise.resolve());
+    const exit = vi.fn();
+    createShutdown(close, exit, 1)();
+    await flush();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it.each([
+    ['uncaughtException', 'process.uncaught_exception'],
+    ['unhandledRejection', 'process.unhandled_rejection'],
+  ] as const)('sanitizes %s and closes only once while closing', async (event, recordEvent) => {
+    const gate = deferred();
+    const { broker, close, listen } = fakeBroker(() => gate.promise);
+    const test = harness(() => Promise.resolve(broker));
+    const listeners = new Map<string, (error: unknown) => void>();
+    const onProcessError = vi.fn((name: string, listener: (error: unknown) => void) => {
+      expect(listen).toHaveBeenCalledTimes(1);
+      listeners.set(name, listener);
+    });
+    await runEntry(manifest, {}, { ...test.runtime, onProcessError });
+    expect(onProcessError).toHaveBeenCalledTimes(2);
+    expect(listeners.has('uncaughtException')).toBe(true);
+    expect(listeners.has('unhandledRejection')).toBe(true);
+    const listener = listeners.get(event);
+    expect(listener).toBeDefined();
+    listener!(new Error('postgres://user:pw@host/db'));
+    expectRecord(test.error, recordEvent);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(test.exit).not.toHaveBeenCalled();
+    listener!(new Error('postgres://user:pw@host/db'));
+    signalHandler(test.signals, 'SIGTERM')();
+    expect(close).toHaveBeenCalledTimes(1);
+    gate.resolve();
+    await flush();
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
   });
 });

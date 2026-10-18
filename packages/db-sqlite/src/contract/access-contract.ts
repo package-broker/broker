@@ -71,8 +71,18 @@ const ANCHORS = {
   idp2: 'oidc:https://idp2.example.test',
 } as const;
 const anchors: readonly EngineProviderAnchor[] = [
-  { provider: 'idp0', anchor: ANCHORS.idp0, emailAuthoritative: true },
-  { provider: 'idp1', anchor: ANCHORS.idp1, emailAuthoritative: true },
+  {
+    provider: 'idp0',
+    anchor: ANCHORS.idp0,
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
+  {
+    provider: 'idp1',
+    anchor: ANCHORS.idp1,
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test'],
+  },
   { provider: 'idp2', anchor: ANCHORS.idp2, emailAuthoritative: false },
 ];
 

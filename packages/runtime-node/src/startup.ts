@@ -1,5 +1,10 @@
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import {
+  AUTH_REASON_CODES,
+  isAuthReasonCode,
+  type AuthReasonCode,
+} from '@package-broker/core/auth/reason-codes';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
@@ -237,56 +242,6 @@ export const AUTH_EVENTS = Object.freeze([
   'token_touch_failed',
 ] as const);
 
-export const AUTH_REASON_CODES: ReadonlySet<string> = new Set([
-  'secret_missing',
-  'callback_invalid',
-  'purpose_invalid',
-  'discovery_invalid',
-  'discovery_failed',
-  'discovery_redirect',
-  'discovery_status',
-  'discovery_content_type',
-  'discovery_too_large',
-  'discovery_timeout',
-  'discovery_network',
-  'discovery_bad_json',
-  'missing_credentials',
-  'invalid_token',
-  'state_mismatch',
-  'provider_error',
-  'email_missing',
-  'email_unverified',
-  'domain_not_verified',
-  'not_invited',
-  'user_suspended',
-  'hook_denied',
-  'too_many_groups',
-  'already_linked',
-  'link_requires_admin',
-  'invalid_identity',
-  'provider_rebound',
-  'email_changed',
-  'conflict',
-  'login_refused',
-  'not_sso_session',
-  'not_supported',
-  'identity_mismatch',
-  'no_auth_time',
-  'stale_auth_time',
-  'policy',
-  'not_updated',
-  'reauth_refused',
-  'no_session',
-  'direct_reauth',
-  'state_invalid',
-  'cross_site',
-  'origin_mismatch',
-  'origin_missing',
-  'token_missing',
-  'token_mismatch',
-  'attempts',
-]);
-
 export const NODE_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
   ...AUDIT_EVENTS,
   ...JOB_EVENTS,
@@ -320,8 +275,8 @@ const LOGIN_OUTCOMES: Readonly<Record<string, string>> = {
   'auth.login.refused': 'refused',
 };
 
-function registered(value: unknown): string | undefined {
-  return typeof value === 'string' && AUTH_REASON_CODES.has(value) ? value : undefined;
+export function registeredAuthReason(value: unknown): AuthReasonCode | undefined {
+  return isAuthReasonCode(value) ? value : undefined;
 }
 
 export function sinkLog(observe: (scope?: ObserveScope) => Observability): KernelLog {
@@ -343,7 +298,9 @@ export function sinkLog(observe: (scope?: ObserveScope) => Observability): Kerne
     }
     const error = entry['error_name'] ?? entry['error'];
     const reason =
-      registered(entry['detail']) ?? registered(entry['reason']) ?? registered(entry['code']);
+      registeredAuthReason(entry['detail']) ??
+      registeredAuthReason(entry['reason']) ??
+      registeredAuthReason(entry['code']);
     const event = entry['event'] as string;
     observability.log({
       level: entry['level'] as LogLevel,

@@ -17,10 +17,12 @@ export type BodyResult =
       readonly ok: false;
       readonly status: 400;
       readonly code: 'invalid_request';
-      readonly detail: 'invalid_encoding' | 'too_deep' | 'invalid_json' | 'invalid_request';
+      readonly detail: BadDetail;
     };
 
-type BadDetail = 'invalid_encoding' | 'too_deep' | 'invalid_json' | 'invalid_request';
+const BODY_VALIDATION_CODES = ['invalid_encoding', 'too_deep', 'invalid_json'] as const;
+
+type BadDetail = (typeof BODY_VALIDATION_CODES)[number] | 'invalid_request';
 
 const unsupported = (): BodyResult => ({ ok: false, status: 415, code: 'unsupported_media_type' });
 const tooLarge = (): BodyResult => ({ ok: false, status: 413, code: 'payload_too_large' });
@@ -148,15 +150,20 @@ export async function readJsonBody(request: Request, limits: BodyLimits = {}): P
   return { ok: true, value };
 }
 
-export type ValidationCode =
-  | 'invalid_type'
-  | 'too_small'
-  | 'too_big'
-  | 'invalid_format'
-  | 'invalid_value'
-  | 'unrecognized_keys'
-  | 'invalid_union'
-  | 'invalid';
+export const VALIDATION_CODES = [
+  'invalid_type',
+  'too_small',
+  'too_big',
+  'invalid_format',
+  'invalid_value',
+  'unrecognized_keys',
+  'invalid_union',
+  'invalid',
+] as const;
+
+export const VALIDATION_DETAIL_CODES = [...VALIDATION_CODES, ...BODY_VALIDATION_CODES] as const;
+
+export type ValidationCode = (typeof VALIDATION_CODES)[number];
 
 export interface ValidationDetail {
   readonly path: string;
@@ -167,15 +174,7 @@ export type ValidationResult<T> =
   | { readonly ok: true; readonly data: T }
   | { readonly ok: false; readonly details: readonly ValidationDetail[] };
 
-const KNOWN_CODES: ReadonlySet<string> = new Set([
-  'invalid_type',
-  'too_small',
-  'too_big',
-  'invalid_format',
-  'invalid_value',
-  'unrecognized_keys',
-  'invalid_union',
-]);
+const KNOWN_CODES: ReadonlySet<string> = new Set(VALIDATION_CODES);
 
 interface SchemaDef {
   readonly type?: string;

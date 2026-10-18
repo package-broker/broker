@@ -1587,7 +1587,7 @@ const versionUpdateEntry: MutationEntry = {
         ecosystem: 'npm',
         versions: npmVersions(count),
       }).statements,
-    (count) => count + 1,
+    () => 1,
   ),
 };
 

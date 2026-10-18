@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { OrgContext } from '@package-broker/core/db/port';
+import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import {
   BlobBusyError,
   BlobConflictError,
@@ -65,6 +65,48 @@ export interface BlobLifecycleFixture extends BlobContractFixture {
     input: { key: Sha256; size: number; mediaType: string },
   ) => Promise<BlobInfo | null>;
   readonly generationOf: (ctx: OrgContext, key: Sha256) => Promise<string | null>;
+}
+
+/**
+ * `reserve` and `claimPurge` are the metadata and lifecycle operations of the same name.
+ * `reserveWithLeaseExpiringBetweenStatements` runs `reserve` on a metadata port whose executor
+ * expires the row's live purge lease after the first statement of each batch.
+ */
+export interface BlobReserveFixture extends BlobContractFixture {
+  readonly reserve: (ctx: OrgContext, key: Sha256) => Promise<PurgeGeneration>;
+  readonly claimPurge: (ctx: OrgContext, key: Sha256) => Promise<PurgeGeneration | null>;
+  readonly expireLease: (ctx: OrgContext, key: Sha256) => Promise<void>;
+  readonly generationOf: (ctx: OrgContext, key: Sha256) => Promise<string | null>;
+  readonly reserveWithLeaseExpiringBetweenStatements: (
+    ctx: OrgContext,
+    key: Sha256,
+  ) => Promise<PurgeGeneration>;
+}
+
+export function executorExpiringLeaseAfterFirstStatement(
+  inner: SqlExecutor,
+  ctx: OrgContext,
+  key: Sha256,
+): SqlExecutor {
+  return {
+    driver: inner.driver,
+    all: (statement) => inner.all(statement),
+    async batch(statements) {
+      const results = [];
+      for (const [index, statement] of statements.entries()) {
+        results.push(...(await inner.batch([statement])));
+        if (index === 0) {
+          await inner.batch([
+            {
+              sql: "UPDATE blob SET purge_lease_until = strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute') WHERE org_id = ? AND sha256 = ? AND purge_lease_until IS NOT NULL",
+              params: [ctx.orgId, key],
+            },
+          ]);
+        }
+      }
+      return results;
+    },
+  };
 }
 
 const FUNCTION_HOOKS = [
@@ -863,6 +905,54 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.cancelPurge(org, key, generation)).toBe(true);
       expect(await readText(f.store, org, key)).toBe('claim cancelled');
       expect((await f.store.head(org, key))?.purgeAfter).toBeNull();
+    });
+  });
+}
+
+export function describeBlobReserveContract(
+  name: string,
+  make: () => Promise<BlobReserveFixture>,
+): void {
+  describe(`blob reserve contract: ${name}`, () => {
+    async function leased(label: string) {
+      const f = await make();
+      requireBlobFixtureHooks(f);
+      const org = await f.seed(nextOrg());
+      const key = await put(f.store, org, bytes(label));
+      await f.softDelete(org, key, { removedAt: await f.now() });
+      await f.expireRetention(org, key);
+      const claimed = await f.claimPurge(org, key);
+      expect(claimed).not.toBeNull();
+      return { f, org, key, claimed: claimed! };
+    }
+
+    it('throws BlobBusyError during a live lease and leaves the generation unchanged', async () => {
+      const { f, org, key, claimed } = await leased('reserve under a live lease');
+      expectErrorOf(await rejection(f.reserve(org, key)), BlobBusyError);
+      expect(await f.generationOf(org, key)).toBe(claimed);
+    });
+
+    it('returns a stored new generation once the lease has expired', async () => {
+      const { f, org, key, claimed } = await leased('reserve after the lease expired');
+      await f.expireLease(org, key);
+      const next = await f.reserve(org, key);
+      expect(next).not.toBe(claimed);
+      expect(await f.generationOf(org, key)).toBe(next);
+    });
+
+    it('throws BlobBusyError when the lease expires between the batch statements and leaves the generation unchanged', async () => {
+      const { f, org, key, claimed } = await leased('lease expires mid-reserve');
+      const error = await rejection(f.reserveWithLeaseExpiringBetweenStatements(org, key));
+      expect(error).toBeInstanceOf(BlobBusyError);
+      expect(await f.generationOf(org, key)).toBe(claimed);
+    });
+
+    it('rejects an invalid digest with BlobValidationError', async () => {
+      const f = await make();
+      requireBlobFixtureHooks(f);
+      const org = await f.seed(nextOrg());
+      const error = await rejection(f.reserve(org, 'nope' as Sha256));
+      expect(error).toBeInstanceOf(BlobValidationError);
     });
   });
 }

@@ -417,6 +417,8 @@ async function indexPass(
   options: V1IndexOptions,
   limits: Limits,
   root: ComposerRoot,
+  rootBytes: number,
+  deadline: number,
 ): Promise<PassOutcome> {
   const pass: Pass = {
     fetch,
@@ -427,12 +429,14 @@ async function indexPass(
       ...options.source.allowedOrigins.map((origin) => new URL(origin).origin),
     ],
     base: baseOf(root.packagesJsonUrl),
-    deadline: Date.now() + limits.passTimeoutMs,
+    deadline,
     entries: new Map(),
     files: 0,
-    bytes: 0,
+    bytes: rootBytes,
   };
   try {
+    if (pass.bytes > limits.maxPassBytes) throw new IncludeFailure('bytes');
+    if (Date.now() >= deadline) throw new IncludeFailure('deadline');
     const selectors = rootSelectors(root);
     if (selectors.length > 0) {
       await readDocument(
@@ -456,10 +460,43 @@ async function indexPass(
   return { entries: pass.entries };
 }
 
-async function readV1Root(fetch: PolicyFetch, source: ComposerRootSource): Promise<ComposerRoot> {
-  const root = await readComposerRoot(fetch, source);
+interface RootRead {
+  readonly root: ComposerRoot;
+  readonly bytes: number;
+}
+
+async function readV1Root(
+  fetch: PolicyFetch,
+  options: V1IndexOptions,
+  limits: Limits,
+  deadline: number,
+): Promise<RootRead> {
+  let bytes = 0;
+  const counted: PolicyFetch = async (request) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new ComposerRootError('timeout');
+    const response = await fetch({
+      ...request,
+      timeoutMs: Math.min(request.timeoutMs, remaining),
+    });
+    if (response.body === null) return response;
+    const body = response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          bytes += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      }),
+    );
+    return { status: response.status, headers: response.headers, body };
+  };
+  const root = await readComposerRoot(counted, options.source, {
+    codecs: options.codecs,
+    maxDocumentBytes: limits.maxDocumentBytes,
+    maxMemberBytes: limits.maxMemberBytes,
+  });
   if (root.mode === 'v2') throw new ComposerRootError('unsupported', 'metadata-url');
-  return root;
+  return { root, bytes };
 }
 
 function updated(root: ComposerRoot, rootSha256: string, outcome: PassOutcome): V1IndexResult {
@@ -492,15 +529,18 @@ export async function readV1Index(
   const { signal } = options;
   const send: PolicyFetch =
     signal === undefined ? fetch : (request) => fetch({ ...request, signal });
-  const first = await readV1Root(send, options.source);
+  const firstDeadline = Date.now() + limits.passTimeoutMs;
+  const { root: first, bytes: firstBytes } = await readV1Root(send, options, limits, firstDeadline);
   if (previous?.complete === true && previous.rootSha256 === first.validator.sha256) {
     return { status: 'not_modified', root: first };
   }
-  const outcome = await indexPass(send, options, limits, first);
-  if ('entries' in outcome) return updated(first, first.validator.sha256, outcome);
-  let root: ComposerRoot;
+  const outcome = await indexPass(send, options, limits, first, firstBytes, firstDeadline);
+  if ('entries' in outcome || firstBytes > limits.maxPassBytes)
+    return updated(first, first.validator.sha256, outcome);
+  let again: RootRead;
+  const retryDeadline = Date.now() + limits.passTimeoutMs;
   try {
-    root = await readV1Root(send, options.source);
+    again = await readV1Root(send, options, limits, retryDeadline);
   } catch (error) {
     aborted(options);
     if (error instanceof ComposerRootError) {
@@ -508,5 +548,10 @@ export async function readV1Index(
     }
     throw error;
   }
-  return updated(root, root.validator.sha256, await indexPass(send, options, limits, root));
+  const { root, bytes } = again;
+  return updated(
+    root,
+    root.validator.sha256,
+    await indexPass(send, options, limits, root, bytes, retryDeadline),
+  );
 }

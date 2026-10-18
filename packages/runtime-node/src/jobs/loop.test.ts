@@ -442,6 +442,51 @@ describe('createJobLoop', () => {
     expect(h.logs.some((record) => record.event === 'job.settle_failed')).toBe(false);
   });
 
+  it('stop() resolves abandoned: 1 for a handler that never settles', async () => {
+    const h = await harness();
+    await h.enqueue('core:stuck:v1', 'one');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let started = false;
+    const loop = h.loop([
+      job('stuck', () => {
+        started = true;
+        return new Promise<void>(() => undefined);
+      }),
+    ]);
+    loop.start();
+    await vi.waitFor(() => expect(started).toBe(true), WAIT);
+    const stopping = loop.stop();
+    await vi.advanceTimersByTimeAsync(JOB_DRAIN_MS);
+    await expect(stopping).resolves.toEqual({ abandoned: 1 });
+    await expect(loop.stop()).resolves.toEqual({ abandoned: 1 });
+  });
+
+  it('stop() resolves abandoned: 0 after a handler drains on abort', async () => {
+    const h = await harness();
+    await h.enqueue('core:long:v1', 'one');
+    let started = false;
+    const loop = h.loop([
+      job('long', (_payload, context) => {
+        started = true;
+        return new Promise<void>((_resolve, reject) => {
+          context.signal.addEventListener('abort', () => reject(context.signal.reason));
+        });
+      }),
+    ]);
+    loop.start();
+    await vi.waitFor(() => expect(started).toBe(true), WAIT);
+    await expect(loop.stop()).resolves.toEqual({ abandoned: 0 });
+  });
+
+  it('stop() resolves abandoned: 0 for a loop that never started or never ran work', async () => {
+    const h = await harness();
+    const idle = h.loop([job('idle', () => Promise.resolve())]);
+    await expect(idle.stop()).resolves.toEqual({ abandoned: 0 });
+    const started = h.loop([job('idle2', () => Promise.resolve())]);
+    started.start();
+    await expect(started.stop()).resolves.toEqual({ abandoned: 0 });
+  });
+
   it('unrefs the budget and heartbeat timers', async () => {
     const h = await harness();
     await h.enqueue('core:unref:v1', 'one');

@@ -1,0 +1,514 @@
+fixture	assertion	expected	actual	result
+f01-inline-full	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f01-inline-full	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f01-inline-full	adapter sync exit	0	0	PASS
+f01-inline-full	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f01-inline-full	adapter mode detected	v1-includes	v1-includes	PASS
+f01-inline-full	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f01-inline-full	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f01-inline-full	adapter per-package errors	0	0	PASS
+f01-inline-full	adapter poll exit	0	0	PASS
+f01-inline-full	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f01-inline-full	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f01-inline-full	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f02-inline-minimal	composer direct: versions of fx/lib	["1.1.0","dev-main","v1.0.0"]	["1.1.0","dev-main","v1.0.0"]	PASS
+f02-inline-minimal	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f02-inline-minimal	adapter sync exit	0	0	PASS
+f02-inline-minimal	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f02-inline-minimal	adapter mode detected	v1-includes	v1-includes	PASS
+f02-inline-minimal	adapter ingested versions of fx/lib	["1.1.0","dev-main","v1.0.0"]	["1.1.0","dev-main","v1.0.0"]	PASS
+f02-inline-minimal	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f02-inline-minimal	adapter per-package errors	0	0	PASS
+f02-inline-minimal	adapter poll exit	0	0	PASS
+f02-inline-minimal	mirror (composer show) versions of fx/lib	["1.1.0","dev-main","v1.0.0"]	["1.1.0","dev-main","v1.0.0"]	PASS
+f02-inline-minimal	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f02-inline-minimal	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f03-satis-includes	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f03-satis-includes	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f03-satis-includes	adapter sync exit	0	0	PASS
+f03-satis-includes	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f03-satis-includes	adapter mode detected	v1-includes	v1-includes	PASS
+f03-satis-includes	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f03-satis-includes	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f03-satis-includes	adapter per-package errors	0	0	PASS
+f03-satis-includes	adapter poll exit	0	0	PASS
+f03-satis-includes	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f03-satis-includes	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f03-satis-includes	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f03-satis-includes	adapter cold sync requests: 1 root, 1 include, no provider or p2 requests	{"root":1,"include":1,"provider-file":0,"p2":0}	{"root":1,"include":1,"provider-file":0,"p2":0}	PASS
+f03-satis-includes	Composer show of one package requests: 1 root, 1 include	{"root":1,"include":1,"p2":0}	{"root":1,"include":1,"p2":0}	PASS
+f03-satis-includes	include path contains a literal $ hash separator and carries a sha1	true	true	PASS
+f03-satis-includes	adapter requests the include with $ encoded as %24 like Composer	true	true	PASS
+f04-includes-sha256-nested	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f04-includes-sha256-nested	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f04-includes-sha256-nested	adapter sync exit	0	0	PASS
+f04-includes-sha256-nested	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f04-includes-sha256-nested	adapter mode detected	v1-includes	v1-includes	PASS
+f04-includes-sha256-nested	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f04-includes-sha256-nested	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f04-includes-sha256-nested	adapter per-package errors	0	0	PASS
+f04-includes-sha256-nested	adapter poll exit	0	0	PASS
+f04-includes-sha256-nested	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f04-includes-sha256-nested	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f04-includes-sha256-nested	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f05-includes-hash-mismatch	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f05-includes-hash-mismatch	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f05-includes-hash-mismatch	adapter sync exit	0	0	PASS
+f05-includes-hash-mismatch	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f05-includes-hash-mismatch	adapter mode detected	v1-includes	v1-includes	PASS
+f05-includes-hash-mismatch	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f05-includes-hash-mismatch	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f05-includes-hash-mismatch	adapter per-package errors	0	0	PASS
+f05-includes-hash-mismatch	adapter poll exit	0	0	PASS
+f05-includes-hash-mismatch	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f05-includes-hash-mismatch	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f05-includes-hash-mismatch	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f05-includes-hash-mismatch	adapter logs a hash-mismatch event per failed algorithm and still ingests (Composer verifies neither sha1 nor sha256 of includes)	true	true	PASS
+f06-satis-providers	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f06-satis-providers	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f06-satis-providers	adapter sync exit	0	0	PASS
+f06-satis-providers	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f06-satis-providers	adapter mode detected	v1-providers	v1-providers	PASS
+f06-satis-providers	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f06-satis-providers	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f06-satis-providers	adapter per-package errors	0	0	PASS
+f06-satis-providers	adapter poll exit	0	0	PASS
+f06-satis-providers	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f06-satis-providers	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f06-satis-providers	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f07-providers-includes-one	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f07-providers-includes-one	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f07-providers-includes-one	adapter sync exit	0	0	PASS
+f07-providers-includes-one	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f07-providers-includes-one	adapter mode detected	v1-providers	v1-providers	PASS
+f07-providers-includes-one	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f07-providers-includes-one	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f07-providers-includes-one	adapter per-package errors	0	0	PASS
+f07-providers-includes-one	adapter poll exit	0	0	PASS
+f07-providers-includes-one	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f07-providers-includes-one	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f07-providers-includes-one	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f07-providers-includes-one	adapter cold sync requests: 1 root, 1 provider-include, 2 provider files	{"root":1,"provider-include":1,"provider-file":2}	{"root":1,"provider-include":1,"provider-file":2}	PASS
+f07-providers-includes-one	Composer show of one package requests: 1 root, 1 provider-include, 1 provider file	{"root":1,"provider-include":1,"provider-file":1}	{"root":1,"provider-include":1,"provider-file":1}	PASS
+f08-providers-includes-multi	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","1.3.0","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","1.3.0","dev-main"]	PASS
+f08-providers-includes-multi	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f08-providers-includes-multi	composer direct: versions of fx/extra	["3.0.0"]	["3.0.0"]	PASS
+f08-providers-includes-multi	adapter sync exit	0	0	PASS
+f08-providers-includes-multi	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f08-providers-includes-multi	adapter mode detected	v1-providers	v1-providers	PASS
+f08-providers-includes-multi	adapter ingested versions of fx/lib	["1.0.0","1.1.0","1.3.0","dev-main"]	["1.0.0","1.1.0","1.3.0","dev-main"]	PASS
+f08-providers-includes-multi	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f08-providers-includes-multi	adapter ingested versions of fx/extra	["3.0.0"]	["3.0.0"]	PASS
+f08-providers-includes-multi	adapter per-package errors	0	0	PASS
+f08-providers-includes-multi	adapter poll exit	0	0	PASS
+f08-providers-includes-multi	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","1.3.0","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","1.3.0","dev-main"]	PASS
+f08-providers-includes-multi	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f08-providers-includes-multi	mirror (composer show) versions of fx/extra	["3.0.0"]	["3.0.0"]	PASS
+f08-providers-includes-multi	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f08-providers-includes-multi	adapter cold sync requests: 3 provider-includes, 3 provider files	{"provider-include":3,"provider-file":3}	{"provider-include":3,"provider-file":3}	PASS
+f08-providers-includes-multi	Composer loads every provider-includes file before the first package (3) and then one provider file	{"provider-include":3,"provider-file":1}	{"provider-include":3,"provider-file":1}	PASS
+f09-providers-inline-no-url	composer direct: versions of fx/lib	[]	[]	PASS
+f09-providers-inline-no-url	adapter sync exit	non-zero	non-zero	PASS
+f09-providers-inline-no-url	adapter ingested nothing for fx/lib	[]	[]	PASS
+f09-providers-inline-no-url	adapter poll exit	non-zero	non-zero	PASS
+f09-providers-inline-no-url	adapter names the unsupported layout in its error	true	true	PASS
+f10-lazy	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f10-lazy	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f10-lazy	adapter sync exit	0	0	PASS
+f10-lazy	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f10-lazy	adapter mode detected	v1-lazy	v1-lazy	PASS
+f10-lazy	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f10-lazy	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f10-lazy	adapter per-package errors	0	0	PASS
+f10-lazy	adapter poll exit	0	0	PASS
+f10-lazy	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f10-lazy	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f10-lazy	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f10-lazy	adapter cold sync: one lazy request per tracked package (2), no provider-include	{"root":1,"provider-file":2,"provider-include":0}	{"root":1,"provider-file":2,"provider-include":0}	PASS
+f10-lazy	Composer sends the lazy request only for the name it is asked about	{"root":1,"provider-file":1}	{"root":1,"provider-file":1}	PASS
+f10-lazy	Composer lazy request is for fx/lib only	1	1	PASS
+f11-lazy-partial	composer direct: versions of fx/lib	["5.0.0"]	["5.0.0"]	PASS
+f11-lazy-partial	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f11-lazy-partial	composer direct: versions of fx/inline	["1.0.0"]	["1.0.0"]	PASS
+f11-lazy-partial	adapter sync exit	0	0	PASS
+f11-lazy-partial	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f11-lazy-partial	adapter mode detected	v1-lazy	v1-lazy	PASS
+f11-lazy-partial	adapter ingested versions of fx/lib	["5.0.0"]	["5.0.0"]	PASS
+f11-lazy-partial	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f11-lazy-partial	adapter ingested versions of fx/inline	["1.0.0"]	["1.0.0"]	PASS
+f11-lazy-partial	adapter per-package errors	0	0	PASS
+f11-lazy-partial	adapter poll exit	0	0	PASS
+f11-lazy-partial	mirror (composer show) versions of fx/lib	["5.0.0"]	["5.0.0"]	PASS
+f11-lazy-partial	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f11-lazy-partial	mirror (composer show) versions of fx/inline	["1.0.0"]	["1.0.0"]	PASS
+f11-lazy-partial	adapter does not request lazy files for names shadowed by inline packages	{"lib":0,"inline":0,"app":1}	{"lib":0,"inline":0,"app":1}	PASS
+f11-lazy-partial	Composer does not request the lazy file for a name found in inline packages	0	0	PASS
+f12-other-names-in-file	composer direct: versions of fx/one	["1.0.0"]	["1.0.0"]	PASS
+f12-other-names-in-file	composer direct: versions of fx/two	["2.0.0"]	["2.0.0"]	PASS
+f12-other-names-in-file	composer direct: versions of fx/ghost	[]	[]	PASS
+f12-other-names-in-file	adapter sync exit	0	0	PASS
+f12-other-names-in-file	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f12-other-names-in-file	adapter mode detected	v1-providers	v1-providers	PASS
+f12-other-names-in-file	adapter ingested versions of fx/one	["1.0.0"]	["1.0.0"]	PASS
+f12-other-names-in-file	adapter ingested versions of fx/two	["2.0.0"]	["2.0.0"]	PASS
+f12-other-names-in-file	adapter ingested versions of fx/ghost	[]	[]	PASS
+f12-other-names-in-file	adapter per-package errors	0	0	PASS
+f12-other-names-in-file	adapter poll exit	0	0	PASS
+f12-other-names-in-file	mirror (composer show) versions of fx/one	["1.0.0"]	["1.0.0"]	PASS
+f12-other-names-in-file	mirror (composer show) versions of fx/two	["2.0.0"]	["2.0.0"]	PASS
+f12-other-names-in-file	versions of fx/two listed inside the fx/one file are attributed to neither	{"one":["1.0.0"],"two":["2.0.0"]}	{"one":["1.0.0"],"two":["2.0.0"]}	PASS
+f12-other-names-in-file	every stored version of fx/one has name fx/one	true	true	PASS
+f13-key-name-mismatch	composer direct: versions of fx/key-a	["1.0.0"]	["1.0.0"]	PASS
+f13-key-name-mismatch	adapter sync exit	0	0	PASS
+f13-key-name-mismatch	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f13-key-name-mismatch	adapter mode detected	v1-providers	v1-providers	PASS
+f13-key-name-mismatch	adapter ingested versions of fx/key-a	["1.0.0"]	["1.0.0"]	PASS
+f13-key-name-mismatch	adapter per-package errors	0	0	PASS
+f13-key-name-mismatch	adapter poll exit	0	0	PASS
+f13-key-name-mismatch	mirror (composer show) versions of fx/key-a	["1.0.0"]	["1.0.0"]	PASS
+f14-notify-mirrors-messages	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f14-notify-mirrors-messages	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f14-notify-mirrors-messages	adapter sync exit	0	0	PASS
+f14-notify-mirrors-messages	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f14-notify-mirrors-messages	adapter mode detected	v1-providers	v1-providers	PASS
+f14-notify-mirrors-messages	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f14-notify-mirrors-messages	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f14-notify-mirrors-messages	adapter per-package errors	0	0	PASS
+f14-notify-mirrors-messages	adapter poll exit	0	0	PASS
+f14-notify-mirrors-messages	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f14-notify-mirrors-messages	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f14-notify-mirrors-messages	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f14-notify-mirrors-messages	adapter never requests notify, notify-batch, search, providers-api, list or mirror URLs	0	0	PASS
+f14-notify-mirrors-messages	adapter surfaces upstream warning and info messages as events with their versions constraint	true	true	PASS
+f14-notify-mirrors-messages	Composer direct require: exit 0	0	0	PASS
+f14-notify-mirrors-messages	Composer prints warning whose warning-versions matches its version and the matching modern warning, not the non-matching info	{"warning":true,"modern":true,"info":false}	{"warning":true,"modern":true,"info":false}	PASS
+f14-notify-mirrors-messages	Composer tries the preferred dist mirror first and falls back to dist.url	true	true	PASS
+f14-notify-mirrors-messages	Composer posts install notifications to notify-batch	true	true	PASS
+f14-notify-mirrors-messages	require against the mirror: no POST, no mirror/search/api request reaches the upstream	0	0	PASS
+f14-notify-mirrors-messages	mirror metadata has no notification-url and no uid	{"notificationUrl":false,"uid":false}	{"notificationUrl":false,"uid":false}	PASS
+f14-notify-mirrors-messages	composer.lock from the mirror carries no notification-url	false	false	PASS
+f15-dist-shapes	composer direct: versions of fx/s-zip	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-tar	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-noshasum	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-badshasum	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-git	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-hg	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-svn	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	composer direct: versions of fx/s-both	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter sync exit	0	0	PASS
+f15-dist-shapes	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f15-dist-shapes	adapter mode detected	v1-includes	v1-includes	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-zip	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-tar	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-noshasum	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-badshasum	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-git	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-hg	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-svn	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter ingested versions of fx/s-both	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	adapter per-package errors	1	1	PASS
+f15-dist-shapes	adapter poll exit	0	0	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-zip	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-tar	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-noshasum	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-badshasum	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-git	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-hg	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-svn	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	mirror (composer show) versions of fx/s-both	["1.0.0"]	["1.0.0"]	PASS
+f15-dist-shapes	source-only versions (git, hg, svn) are ingested and served with their source and no dist	{"git":[true,false],"hg":[true,false],"svn":[true,false]}	{"git":[true,false],"hg":[true,false],"svn":[true,false]}	PASS
+f15-dist-shapes	version with dist and source is served with the broker dist and without source	[true,false]	[true,false]	PASS
+f15-dist-shapes	tar dist keeps type tar and a .tar route	["tar",true]	["tar",true]	PASS
+f15-dist-shapes	missing upstream shasum is replaced by the sha1 the broker computed	true	true	PASS
+f15-dist-shapes	wrong upstream shasum: dist not stored, other dists stored	{"bad":false,"others":4}	{"bad":false,"others":4}	PASS
+f15-dist-shapes	wrong upstream shasum is logged as shasum-mismatch and does not abort the sync	true	true	PASS
+f15-dist-shapes	composer require of the wrong-shasum package through the mirror fails	true	true	PASS
+f15-dist-shapes	Composer direct against the upstream also fails on the wrong shasum	true	true	PASS
+f15-dist-shapes	composer require fx/s-zip through the mirror installs	0	0	PASS
+f15-dist-shapes	composer require fx/s-tar through the mirror installs	0	0	PASS
+f15-dist-shapes	composer require fx/s-noshasum through the mirror installs	0	0	PASS
+f15-dist-shapes	composer require fx/s-both through the mirror installs	0	0	PASS
+f16-version-shapes	composer direct: versions of fx/shapes	["1.0.0","2.4.6","2.4.6-p1","2.4.7.0","2.x-dev","3.0.0-RC1","3.0.0-alpha1","3.0.0-beta2","4.x-dev","dev-main","dev-master"]	["1.0.0","2.4.6","2.4.6-p1","2.4.7.0","2.x-dev","3.0.0-RC1","3.0.0-alpha1","3.0.0-beta2","4.x-dev","dev-main","dev-master"]	PASS
+f16-version-shapes	composer direct: versions of fx/eager1	["2.4.6","2.4.6-p1","2.4.7"]	["2.4.6","2.4.6-p1","2.4.7"]	PASS
+f16-version-shapes	composer direct: versions of fx/eager2	["2.4.6-p3","2.4.7","2.4.7-p1"]	["2.4.6-p3","2.4.7","2.4.7-p1"]	PASS
+f16-version-shapes	adapter sync exit	0	0	PASS
+f16-version-shapes	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f16-version-shapes	adapter mode detected	v1-providers	v1-providers	PASS
+f16-version-shapes	adapter ingested versions of fx/shapes	["1.0.0","2.4.6","2.4.6-p1","2.4.7.0","2.x-dev","3.0.0-RC1","3.0.0-alpha1","3.0.0-beta2","dev-main","dev-master"]	["1.0.0","2.4.6","2.4.6-p1","2.4.7.0","2.x-dev","3.0.0-RC1","3.0.0-alpha1","3.0.0-beta2","dev-main","dev-master"]	PASS
+f16-version-shapes	adapter ingested versions of fx/eager1	["2.4.6","2.4.6-p1","2.4.7"]	["2.4.6","2.4.6-p1","2.4.7"]	PASS
+f16-version-shapes	adapter ingested versions of fx/eager2	["2.4.6-p3","2.4.7","2.4.7-p1"]	["2.4.6-p3","2.4.7","2.4.7-p1"]	PASS
+f16-version-shapes	adapter per-package errors	0	0	PASS
+f16-version-shapes	adapter poll exit	0	0	PASS
+f16-version-shapes	mirror (composer show) versions of fx/shapes	["1.0.0","2.4.6","2.4.6-p1","2.4.7.0","2.x-dev","3.0.0-RC1","3.0.0-alpha1","3.0.0-beta2","4.x-dev","dev-main","dev-master"]	["1.0.0","2.4.6","2.4.6-p1","2.4.7.0","2.x-dev","3.0.0-RC1","3.0.0-alpha1","3.0.0-beta2","4.x-dev","dev-main","dev-master"]	PASS
+f16-version-shapes	mirror (composer show) versions of fx/eager1	["2.4.6","2.4.6-p1","2.4.7"]	["2.4.6","2.4.6-p1","2.4.7"]	PASS
+f16-version-shapes	mirror (composer show) versions of fx/eager2	["2.4.6-p3","2.4.7","2.4.7-p1"]	["2.4.6-p3","2.4.7","2.4.7-p1"]	PASS
+f16-version-shapes	eagerLatest 1: 2.4.7 beats 2.4.6-p1	["2.4.7"]	["2.4.7"]	PASS
+f16-version-shapes	eagerLatest 1: 2.4.7-p1 beats 2.4.7 and 2.4.6-p3	["2.4.7-p1"]	["2.4.7-p1"]	PASS
+f16-version-shapes	default-branch and branch-alias survive the rewrite	[true,"4.x-dev"]	[true,"4.x-dev"]	PASS
+f16-version-shapes	composer require fx/shapes:2.4.6-p1 through the mirror installs (lazy dist fill)	0	0	PASS
+f16-version-shapes	composer require fx/shapes:2.4.7.0 through the mirror installs	0	0	PASS
+f16-version-shapes	locked version is the requested patch release	2.4.6-p1	2.4.6-p1	PASS
+f17-duplicate-versions	composer direct: versions of fx/dup	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f17-duplicate-versions	adapter sync exit	0	0	PASS
+f17-duplicate-versions	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f17-duplicate-versions	adapter mode detected	v1-includes	v1-includes	PASS
+f17-duplicate-versions	adapter ingested versions of fx/dup	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f17-duplicate-versions	adapter per-package errors	0	0	PASS
+f17-duplicate-versions	adapter poll exit	0	0	PASS
+f17-duplicate-versions	mirror (composer show) versions of fx/dup	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f17-duplicate-versions	duplicate version across include files is stored once	2	2	PASS
+f18-provider-file-duplicates	composer direct: versions of fx/dup	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f18-provider-file-duplicates	adapter sync exit	0	0	PASS
+f18-provider-file-duplicates	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f18-provider-file-duplicates	adapter mode detected	v1-providers	v1-providers	PASS
+f18-provider-file-duplicates	adapter ingested versions of fx/dup	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f18-provider-file-duplicates	adapter per-package errors	0	0	PASS
+f18-provider-file-duplicates	adapter poll exit	0	0	PASS
+f18-provider-file-duplicates	mirror (composer show) versions of fx/dup	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f18-provider-file-duplicates	duplicate version in one provider file is stored once	2	2	PASS
+f19-provider-no-uid	composer direct: versions of fx/lib	[]	[]	PASS
+f19-provider-no-uid	adapter sync exit	0	0	PASS
+f19-provider-no-uid	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f19-provider-no-uid	adapter mode detected	v1-providers	v1-providers	PASS
+f19-provider-no-uid	adapter ingested versions of fx/lib	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f19-provider-no-uid	adapter per-package errors	0	0	PASS
+f19-provider-no-uid	adapter poll exit	0	0	PASS
+f19-provider-no-uid	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0"]	["1.0.0","1.1.0"]	PASS
+f19-provider-no-uid	Composer rejects provider files whose versions lack uid (whatProvides reads $version[uid])	true	true	PASS
+f20-transport-gzip-private	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f20-transport-gzip-private	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f20-transport-gzip-private	adapter sync exit	0	0	PASS
+f20-transport-gzip-private	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f20-transport-gzip-private	adapter mode detected	v1-providers	v1-providers	PASS
+f20-transport-gzip-private	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f20-transport-gzip-private	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f20-transport-gzip-private	adapter per-package errors	0	0	PASS
+f20-transport-gzip-private	adapter poll exit	0	0	PASS
+f20-transport-gzip-private	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f20-transport-gzip-private	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f20-transport-gzip-private	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f20-transport-gzip-private	adapter received gzip-encoded metadata and ingested it	true	true	PASS
+f20-transport-gzip-private	no validators on the origin: poll gets 200 on packages.json and no 304	{"notModified":0,"exit":0}	{"notModified":0,"exit":0}	PASS
+f21-auth	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f21-auth	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f21-auth	adapter sync exit	0	0	PASS
+f21-auth	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f21-auth	adapter mode detected	v1-providers	v1-providers	PASS
+f21-auth	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f21-auth	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f21-auth	adapter per-package errors	0	0	PASS
+f21-auth	adapter poll exit	0	0	PASS
+f21-auth	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f21-auth	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f21-auth	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f21-auth	anonymous request answers 401	401	401	PASS
+f21-auth	wrong credentials fail the sync with a non-zero exit and ingest nothing	["non-zero",[]]	["non-zero",[]]	PASS
+f21-auth	with credentials every upstream request is authenticated	0	0	PASS
+f22-ua-gate	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f22-ua-gate	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f22-ua-gate	adapter sync exit	0	0	PASS
+f22-ua-gate	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f22-ua-gate	adapter mode detected	v1-providers	v1-providers	PASS
+f22-ua-gate	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f22-ua-gate	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f22-ua-gate	adapter per-package errors	0	0	PASS
+f22-ua-gate	adapter poll exit	0	0	PASS
+f22-ua-gate	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f22-ua-gate	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f22-ua-gate	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f22-ua-gate	default broker User-Agent: dist answers 403, errors recorded, metadata still ingested	{"exit":0,"errorsPositive":true,"versions":3,"dists":0}	{"exit":0,"errorsPositive":true,"versions":3,"dists":0}	PASS
+f22-ua-gate	with a Composer User-Agent: dists stored	true	true	PASS
+f22-ua-gate	origin gate: non-Composer UA 403, Composer UA 200	[403,200]	[403,200]	PASS
+f23-p2-redirect	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f23-p2-redirect	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f23-p2-redirect	adapter sync exit	0	0	PASS
+f23-p2-redirect	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f23-p2-redirect	adapter mode detected	v1-providers	v1-providers	PASS
+f23-p2-redirect	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f23-p2-redirect	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f23-p2-redirect	adapter per-package errors	0	0	PASS
+f23-p2-redirect	adapter poll exit	0	0	PASS
+f23-p2-redirect	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f23-p2-redirect	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f23-p2-redirect	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f23-p2-redirect	adapter makes no /p2/ request against a v1 root	0	0	PASS
+f23-p2-redirect	Composer makes no /p2/ request against a v1 root	0	0	PASS
+f23-p2-redirect	origin answers 302 on /p2/	302	302	PASS
+f24-stale-and-corrupt-hash	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f24-stale-and-corrupt-hash	composer direct: versions of fx/broken	[]	[]	PASS
+f24-stale-and-corrupt-hash	composer direct: versions of fx/bad	[]	[]	PASS
+f24-stale-and-corrupt-hash	adapter sync exit	0	0	PASS
+f24-stale-and-corrupt-hash	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f24-stale-and-corrupt-hash	adapter mode detected	v1-providers	v1-providers	PASS
+f24-stale-and-corrupt-hash	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f24-stale-and-corrupt-hash	adapter ingested versions of fx/broken	[]	[]	PASS
+f24-stale-and-corrupt-hash	adapter ingested versions of fx/bad	[]	[]	PASS
+f24-stale-and-corrupt-hash	adapter per-package errors	2	2	PASS
+f24-stale-and-corrupt-hash	adapter poll exit	0	0	PASS
+f24-stale-and-corrupt-hash	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f24-stale-and-corrupt-hash	missing provider file: listing re-fetched once, then recorded as a package error	true	true	PASS
+f24-stale-and-corrupt-hash	corrupt provider file: 3 attempts like Composer, then rejected and not ingested	{"attempts":3,"ingested":[]}	{"attempts":3,"ingested":[]}	PASS
+f24-stale-and-corrupt-hash	the healthy package is still ingested	3	3	PASS
+f25-no-root	composer direct: versions of fx/lib	[]	[]	PASS
+f25-no-root	adapter sync exit	non-zero	non-zero	PASS
+f25-no-root	adapter ingested nothing for fx/lib	[]	[]	PASS
+f25-no-root	adapter poll exit	non-zero	non-zero	PASS
+f25-no-root	adapter reports the 404 on packages.json	true	true	PASS
+f25-no-root	Composer fails on a missing packages.json	true	true	PASS
+f26-429-once	composer direct: versions of fx/lib	[]	[]	PASS
+f26-429-once	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f26-429-once	adapter sync exit	0	0	PASS
+f26-429-once	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f26-429-once	adapter mode detected	v1-providers	v1-providers	PASS
+f26-429-once	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f26-429-once	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f26-429-once	adapter per-package errors	0	0	PASS
+f26-429-once	adapter poll exit	0	0	PASS
+f26-429-once	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f26-429-once	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f26-429-once	adapter honours Retry-After once and ingests	{"retry429":1,"versions":3}	{"retry429":1,"versions":3}	PASS
+f26-429-once	Composer does not retry a 429 on a provider file	true	true	PASS
+f27-mixed-v2-v1	composer direct: versions of fx/lib	["2.0.0"]	["2.0.0"]	PASS
+f27-mixed-v2-v1	adapter sync exit	0	0	PASS
+f27-mixed-v2-v1	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f27-mixed-v2-v1	adapter mode detected	v2	v2	PASS
+f27-mixed-v2-v1	adapter ingested versions of fx/lib	["2.0.0"]	["2.0.0"]	PASS
+f27-mixed-v2-v1	adapter per-package errors	0	0	PASS
+f27-mixed-v2-v1	adapter poll exit	0	0	PASS
+f27-mixed-v2-v1	mirror (composer show) versions of fx/lib	["2.0.0"]	["2.0.0"]	PASS
+f27-mixed-v2-v1	metadata-url wins: adapter requests p2 only	{"p2Positive":true,"providerFile":0}	{"p2Positive":true,"providerFile":0}	PASS
+f27-mixed-v2-v1	metadata-url wins: Composer requests p2 only	{"p2Positive":true,"providerFile":0}	{"p2Positive":true,"providerFile":0}	PASS
+f28-mixed-includes-providers	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f28-mixed-includes-providers	adapter sync exit	0	0	PASS
+f28-mixed-includes-providers	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f28-mixed-includes-providers	adapter mode detected	v1-providers	v1-providers	PASS
+f28-mixed-includes-providers	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f28-mixed-includes-providers	adapter per-package errors	0	0	PASS
+f28-mixed-includes-providers	adapter poll exit	0	0	PASS
+f28-mixed-includes-providers	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f28-mixed-includes-providers	providers-url wins over includes: adapter requests no include	0	0	PASS
+f28-mixed-includes-providers	providers-url wins over includes: Composer requests no include	0	0	PASS
+f29-mixed-inline-providers	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f29-mixed-inline-providers	composer direct: versions of fx/inline	[]	[]	PASS
+f29-mixed-inline-providers	adapter sync exit	0	0	PASS
+f29-mixed-inline-providers	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f29-mixed-inline-providers	adapter mode detected	v1-providers	v1-providers	PASS
+f29-mixed-inline-providers	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f29-mixed-inline-providers	adapter ingested versions of fx/inline	[]	[]	PASS
+f29-mixed-inline-providers	adapter per-package errors	0	0	PASS
+f29-mixed-inline-providers	adapter poll exit	0	0	PASS
+f29-mixed-inline-providers	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f29-mixed-inline-providers	inline packages next to providers-url (no lazy url) are not used by Composer	true	true	PASS
+f30-lazy-stray-available	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f30-lazy-stray-available	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f30-lazy-stray-available	adapter sync exit	0	0	PASS
+f30-lazy-stray-available	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f30-lazy-stray-available	adapter mode detected	v1-lazy	v1-lazy	PASS
+f30-lazy-stray-available	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f30-lazy-stray-available	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f30-lazy-stray-available	adapter per-package errors	0	0	PASS
+f30-lazy-stray-available	adapter poll exit	0	0	PASS
+f30-lazy-stray-available	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f30-lazy-stray-available	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f30-lazy-stray-available	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f30-lazy-stray-available	adapter ignores available-packages outside metadata-url repositories	undefined	undefined	PASS
+f31-v2-partial	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f31-v2-partial	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f31-v2-partial	composer direct: versions of fx/inline	["1.0.0"]	["1.0.0"]	PASS
+f31-v2-partial	adapter sync exit	0	0	PASS
+f31-v2-partial	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f31-v2-partial	adapter mode detected	v2	v2	PASS
+f31-v2-partial	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f31-v2-partial	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f31-v2-partial	adapter ingested versions of fx/inline	["1.0.0"]	["1.0.0"]	PASS
+f31-v2-partial	adapter per-package errors	0	0	PASS
+f31-v2-partial	adapter poll exit	0	0	PASS
+f31-v2-partial	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f31-v2-partial	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f31-v2-partial	mirror (composer show) versions of fx/inline	["1.0.0"]	["1.0.0"]	PASS
+f31-v2-partial	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f31-v2-partial	no p2 request for the name found in inline packages	0	0	PASS
+f31-v2-partial	Composer makes no p2 request for the name found in inline packages	0	0	PASS
+f32-json-url	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f32-json-url	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f32-json-url	adapter sync exit	0	0	PASS
+f32-json-url	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f32-json-url	adapter mode detected	v1-includes	v1-includes	PASS
+f32-json-url	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f32-json-url	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f32-json-url	adapter per-package errors	0	0	PASS
+f32-json-url	adapter poll exit	0	0	PASS
+f32-json-url	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f32-json-url	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f32-json-url	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f32-json-url	repository url ending in packages.json: base url is the directory	true	true	PASS
+f33-legacy-format	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f33-legacy-format	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f33-legacy-format	adapter sync exit	0	0	PASS
+f33-legacy-format	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f33-legacy-format	adapter mode detected	v1-includes	v1-includes	PASS
+f33-legacy-format	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f33-legacy-format	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f33-legacy-format	adapter per-package errors	0	0	PASS
+f33-legacy-format	adapter poll exit	0	0	PASS
+f33-legacy-format	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f33-legacy-format	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f33-legacy-format	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f34-includes-validators	composer direct: versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f34-includes-validators	composer direct: versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f34-includes-validators	adapter sync exit	0	0	PASS
+f34-includes-validators	adapter changes does not crash (no metadata-changes-url: supported=false)	0	0	PASS
+f34-includes-validators	adapter mode detected	v1-includes	v1-includes	PASS
+f34-includes-validators	adapter ingested versions of fx/lib	["1.0.0","1.1.0","dev-main"]	["1.0.0","1.1.0","dev-main"]	PASS
+f34-includes-validators	adapter ingested versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f34-includes-validators	adapter per-package errors	0	0	PASS
+f34-includes-validators	adapter poll exit	0	0	PASS
+f34-includes-validators	mirror (composer show) versions of fx/lib	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	["1.0.0","1.1.0","1.2.x-dev","dev-main"]	PASS
+f34-includes-validators	mirror (composer show) versions of fx/app	["1.0.0"]	["1.0.0"]	PASS
+f34-includes-validators	composer require fx/app against the mirror	exit 0, closure locked, every dist from the mirror	exit 0, 2 locked, 2 from mirror	PASS
+f34-includes-validators	poll with validators: packages.json answers 304, include served from cache	{"exit":0,"notModified":1,"include":0}	{"exit":0,"notModified":1,"include":0}	PASS
+cd-providers	providers: cold sync	{"root":1,"provider-include":1,"provider-file":2,"dist":2,"changed":2}	{"root":1,"provider-include":1,"provider-file":2,"dist":2,"changed":2}	PASS
+cd-providers	providers: poll, nothing changed	{"root":1,"provider-include":0,"provider-file":0,"dist":0,"changed":0}	{"root":1,"provider-include":0,"provider-file":0,"dist":0,"changed":0}	PASS
+cd-providers	providers: packages.json changed only (new warning key)	{"root":1,"provider-include":0,"provider-file":0,"changed":0}	{"root":1,"provider-include":0,"provider-file":0,"changed":0}	PASS
+cd-providers	providers: provider-includes hash changed, per-package hashes unchanged	{"root":1,"provider-include":1,"provider-file":0,"changed":0}	{"root":1,"provider-include":1,"provider-file":0,"changed":0}	PASS
+cd-providers	providers: one package hash changed (fx/lib 1.2.0)	{"root":1,"provider-include":1,"provider-file":1,"dist":1,"changed":1}	{"root":1,"provider-include":1,"provider-file":1,"dist":1,"changed":1}	PASS
+cd-providers	providers: changed package ingested, dist for the new latest stored	[4,true]	[4,true]	PASS
+cd-providers	providers: package removed from the index	{"root":1,"provider-include":1,"provider-file":0,"changed":0}	{"root":1,"provider-include":1,"provider-file":0,"changed":0}	PASS
+cd-providers	providers: removed package is marked missing, nothing requested for it	true	true	PASS
+cd-providers	providers: package renamed (fx/lib -> fx/lib-new), pattern fx/* selects it	{"root":1,"provider-include":1,"provider-file":2,"changed":2}	{"root":1,"provider-include":1,"provider-file":2,"changed":2}	PASS
+cd-providers	providers: old name missing, new name ingested through the expanded pattern	[true,1]	[true,1]	PASS
+cd-includes	includes: cold sync	{"root":1,"include":1,"dist":1,"changed":1}	{"root":1,"include":1,"dist":1,"changed":1}	PASS
+cd-includes	includes: poll, nothing changed (sha1 matches the cached include)	{"root":1,"include":0,"dist":0,"changed":0}	{"root":1,"include":0,"dist":0,"changed":0}	PASS
+cd-includes	includes: packages.json changed only	{"root":1,"include":0,"changed":0}	{"root":1,"include":0,"changed":0}	PASS
+cd-includes	includes: include content changed (new sha1 and file name)	{"root":1,"include":1,"dist":1,"changed":1}	{"root":1,"include":1,"dist":1,"changed":1}	PASS
+cd-includes-validators	includes with validators: cold sync	{"root":1,"include":1,"notModified":0}	{"root":1,"include":1,"notModified":0}	PASS
+cd-includes-validators	includes with validators: poll, nothing changed: packages.json answers 304	{"root":1,"include":0,"notModified":1,"changed":0}	{"root":1,"include":0,"notModified":1,"changed":0}	PASS
+cd-lazy	lazy: cold sync	{"root":1,"provider-file":2,"changed":2}	{"root":1,"provider-file":2,"changed":2}	PASS
+cd-lazy	lazy: poll without validators: one request per tracked package, nothing re-ingested	{"root":1,"provider-file":2,"changed":0}	{"root":1,"provider-file":2,"changed":0}	PASS
+cd-lazy	lazy: one package changed	{"root":1,"provider-file":2,"changed":1}	{"root":1,"provider-file":2,"changed":1}	PASS
+cd-lazy-validators	lazy with validators: cold sync	{"root":1,"provider-file":2,"notModified":0}	{"root":1,"provider-file":2,"notModified":0}	PASS
+cd-lazy-validators	lazy with validators: poll: every lazy file answers 304 (If-Modified-Since)	{"root":1,"provider-file":2,"notModified":3,"changed":0}	{"root":1,"provider-file":2,"notModified":3,"changed":0}	PASS
+norm	normalize(1.0.0) matches composer/semver VersionParser::normalize	1.0.0.0	1.0.0.0	PASS
+norm	normalize(v1.0.0) matches composer/semver VersionParser::normalize	1.0.0.0	1.0.0.0	PASS
+norm	normalize(1.0) matches composer/semver VersionParser::normalize	1.0.0.0	1.0.0.0	PASS
+norm	normalize(1) matches composer/semver VersionParser::normalize	1.0.0.0	1.0.0.0	PASS
+norm	normalize(2.4.6-p1) matches composer/semver VersionParser::normalize	2.4.6.0-patch1	2.4.6.0-patch1	PASS
+norm	normalize(2.4.6-p12) matches composer/semver VersionParser::normalize	2.4.6.0-patch12	2.4.6.0-patch12	PASS
+norm	normalize(2.4.7.0) matches composer/semver VersionParser::normalize	2.4.7.0	2.4.7.0	PASS
+norm	normalize(3.0.0-RC1) matches composer/semver VersionParser::normalize	3.0.0.0-RC1	3.0.0.0-RC1	PASS
+norm	normalize(3.0.0-rc.2) matches composer/semver VersionParser::normalize	3.0.0.0-RC2	3.0.0.0-RC2	PASS
+norm	normalize(3.0.0-beta2) matches composer/semver VersionParser::normalize	3.0.0.0-beta2	3.0.0.0-beta2	PASS
+norm	normalize(3.0.0-alpha1) matches composer/semver VersionParser::normalize	3.0.0.0-alpha1	3.0.0.0-alpha1	PASS
+norm	normalize(1.0.0-stable) matches composer/semver VersionParser::normalize	1.0.0.0	1.0.0.0	PASS
+norm	normalize(1.0.0-patch1) matches composer/semver VersionParser::normalize	1.0.0.0-patch1	1.0.0.0-patch1	PASS
+norm	normalize(1.0.0-pl2) matches composer/semver VersionParser::normalize	1.0.0.0-patch2	1.0.0.0-patch2	PASS
+norm	normalize(2.x-dev) matches composer/semver VersionParser::normalize	2.9999999.9999999.9999999-dev	2.9999999.9999999.9999999-dev	PASS
+norm	normalize(1.2.x-dev) matches composer/semver VersionParser::normalize	1.2.9999999.9999999-dev	1.2.9999999.9999999-dev	PASS
+norm	normalize(2.0.0-dev) matches composer/semver VersionParser::normalize	2.0.0.0-dev	2.0.0.0-dev	PASS
+norm	normalize(dev-main) matches composer/semver VersionParser::normalize	dev-main	dev-main	PASS
+norm	normalize(dev-master) matches composer/semver VersionParser::normalize	dev-master	dev-master	PASS
+norm	normalize(10.0.0.1) matches composer/semver VersionParser::normalize	10.0.0.1	10.0.0.1	PASS
+norm	normalize(1.0.0+build5) matches composer/semver VersionParser::normalize	1.0.0.0	1.0.0.0	PASS
+norm	normalize(2024.01.15) matches composer/semver VersionParser::normalize	2024.01.15.0	2024.01.15.0	PASS
+norm	normalize(1.2.3-beta) matches composer/semver VersionParser::normalize	1.2.3.0-beta	1.2.3.0-beta	PASS
+norm	normalize(0.0.1) matches composer/semver VersionParser::normalize	0.0.1.0	0.0.1.0	PASS

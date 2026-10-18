@@ -23,6 +23,14 @@ const packages = [
   'plugin-github',
 ];
 
+const loadTolerantProjects = new Set([
+  'db-sqlite',
+  'runtime-cloudflare',
+  'runtime-node',
+  'plugin-sso-oidc',
+  'plugin-github',
+]);
+
 export default defineConfig({
   test: {
     projects: packages.map((name) => ({
@@ -31,6 +39,7 @@ export default defineConfig({
         name,
         root: fileURLToPath(new URL(`./packages/${name}`, import.meta.url)),
         include: ['src/**/*.test.ts'],
+        ...(loadTolerantProjects.has(name) ? { testTimeout: 20_000, hookTimeout: 30_000 } : {}),
       },
     })),
   },

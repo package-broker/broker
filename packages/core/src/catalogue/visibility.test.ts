@@ -275,6 +275,22 @@ describe('resolveWinner', () => {
     expect(win(c)).toBeUndefined();
   });
 
+  it('blocks a non-matching proxy key for a stored 51-byte registered pattern', () => {
+    const c = config({
+      sources: [source({ id: 's1', type: 'packagist_proxy' })],
+      registeredNames: [{ orgId: 'o1', ecosystem: 'composer', pattern: `acme/${'a'.repeat(45)}*` }],
+    });
+    expect(win(c)).toBeUndefined();
+  });
+
+  it('keeps a proxy key available for a valid non-matching registered pattern', () => {
+    const c = config({
+      sources: [source({ id: 's1', type: 'packagist_proxy' })],
+      registeredNames: [{ orgId: 'o1', ecosystem: 'composer', pattern: `acme/${'a'.repeat(44)}*` }],
+    });
+    expect(win(c)).toBe('k1');
+  });
+
   it('does not mix ecosystems', () => {
     const c = config({ sources: [source({ id: 's1', ecosystem: 'npm', type: 'npm_registry' })] });
     expect(win(c)).toBeUndefined();

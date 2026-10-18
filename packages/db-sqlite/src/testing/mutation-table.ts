@@ -16,6 +16,7 @@ import { entries as ingestSessionEntries } from './mutation-table/ingest-session
 import { entries as cataloguePredicatesEntries } from './mutation-table/catalogue-predicates.js';
 import { entries as registeredNameEntries } from './mutation-table/registered-name.js';
 import { entries as catalogueWriteTagsEntries } from './mutation-table/catalogue-write-tags.js';
+import { entries as accessBuilderEntries } from './mutation-table/access-builders.js';
 import { entries as accessEntries } from './mutation-table/access.js';
 import { entries as actorAuthorityEntries } from './mutation-table/actor-authority.js';
 import { entries as servicePrincipalAuthorityEntries } from './mutation-table/service-principal-authority.js';
@@ -51,6 +52,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...registeredNameEntries,
   ...catalogueWriteTagsEntries,
   ...accessEntries,
+  ...accessBuilderEntries,
   ...actorAuthorityEntries,
   ...servicePrincipalAuthorityEntries,
   ...blobReferencesEntries,

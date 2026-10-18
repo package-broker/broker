@@ -174,12 +174,12 @@ describe('readComposerRoot precedence', () => {
     const { fetch, requests } = setup({
       'metadata-url': '/p2/%package%.json',
       'providers-url': '/p/%package%$%hash%.json',
-      packages: { 'a/b': { '1.0.0': { name: 'a/b' } } },
+      packages: [],
     });
     const root = await readComposerRoot(fetch, source('https://r.example.com'));
     expect(root.mode).toBe('v2');
     expect(root.providersUrl).toBeUndefined();
-    expect(root.partialPackages).toBe(true);
+    expect(root.partialPackages).toBe(false);
     expect(requests).toHaveLength(1);
   });
 
@@ -227,6 +227,88 @@ describe('readComposerRoot precedence', () => {
     });
   });
 });
+
+describe.each([
+  ['buffered', undefined],
+  ['streamed', () => STREAMING],
+] as const)(
+  'readComposerRoot fails closed on shapes it cannot interpret (%s)',
+  (_path, options) => {
+    const unsupported = async (body: unknown): Promise<ComposerRootError> => {
+      const { fetch } = setup(body);
+      const error = await readRoot(fetch, source('https://r.example.com'), options?.()).catch(
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(ComposerRootError);
+      expect(error).toMatchObject({ code: 'unsupported' });
+      return error as ComposerRootError;
+    };
+
+    it('refuses a legacy root keyed by package name', async () => {
+      const error = await unsupported({
+        'fx/lib': { versions: { '1.0.0': { name: 'fx/lib', version: '1.0.0' } } },
+      });
+      expect(error.field).toBe('packages');
+    });
+
+    it('refuses an empty root and a root with only unrelated keys', async () => {
+      await unsupported({});
+      await unsupported({ 'notify-batch': '/downloads/' });
+    });
+
+    it('refuses includes that are not an object when there is no packages key', async () => {
+      await unsupported({ includes: ['a.json'] });
+    });
+
+    it.each([null, false, 0, 'packages', ['a/b'], [{}]].map((packages) => ({ packages })))(
+      'refuses a malformed packages container: $packages',
+      async ({ packages }) => {
+        for (const extra of [{}, { includes: {} }, { 'metadata-url': '/p2/%package%.json' }]) {
+          const error = await unsupported({ ...extra, packages });
+          expect(error.field).toBe('packages');
+        }
+      },
+    );
+
+    it('refuses inline packages next to a metadata-url', async () => {
+      const error = await unsupported({
+        'metadata-url': '/p2/%package%.json',
+        packages: { 'fx/inline': { '1.0.0': { name: 'fx/inline' } } },
+      });
+      expect(error.field).toBe('packages');
+    });
+
+    it.each([{ packages: [] }, { packages: {} }])(
+      'still accepts empty packages $packages next to a metadata-url',
+      async ({ packages }) => {
+        const { fetch } = setup({ 'metadata-url': '/p2/%package%.json', packages });
+        const root = await readRoot(fetch, source('https://r.example.com'), options?.());
+        expect(root).toMatchObject({ mode: 'v2', inlinePackages: false, partialPackages: false });
+      },
+    );
+
+    it('refuses providers-url when no provider file is listed', async () => {
+      const error = await unsupported({ 'providers-url': '/p/%package%$%hash%.json' });
+      expect(error.field).toBe('provider-includes');
+    });
+
+    it('refuses provider-includes without providers-url', async () => {
+      await unsupported({
+        packages: [],
+        'provider-includes': { 'p/all$%hash%.json': { sha256: SHA } },
+      });
+    });
+
+    it.each([{ packages: [] }, { packages: {} }])(
+      'accepts empty packages $packages as an empty repository',
+      async ({ packages }) => {
+        const { fetch } = setup({ packages });
+        const root = await readRoot(fetch, source('https://r.example.com'), options?.());
+        expect(root).toMatchObject({ mode: 'v1-includes', inlinePackages: false });
+      },
+    );
+  },
+);
 
 describe('readComposerRoot hygiene', () => {
   it('keeps mirrors internal and exposes no ignored endpoint', async () => {
@@ -497,9 +579,7 @@ describe('readComposerRoot origins and limits', () => {
       readComposerRoot(setup(body).fetch, source('https://r.example.com'));
     expect((await read(inline)).inlinePackages).toBe(true);
     expect((await read({ packages: {} })).inlinePackages).toBe(false);
-    expect((await read({})).inlinePackages).toBe(false);
-    const v2 = await read({ 'metadata-url': '/p2/%package%.json', ...inline });
-    expect(v2).toMatchObject({ inlinePackages: true, partialPackages: true });
+    expect((await read({ 'metadata-url': '/p2/%package%.json' })).inlinePackages).toBe(false);
     const lazy = await read({ 'providers-lazy-url': '/p/%package%.json', ...inline });
     expect(lazy.inlinePackages).toBe(true);
   });
@@ -507,6 +587,7 @@ describe('readComposerRoot origins and limits', () => {
   it('reads available-package-patterns only for metadata-url roots', async () => {
     const { fetch } = setup({
       'providers-url': '/p/%package%$%hash%.json',
+      providers: { 'a/b': { sha256: SHA } },
       'available-package-patterns': ['a/*'],
     });
     const root = await readComposerRoot(fetch, source('https://r.example.com'));
@@ -658,13 +739,12 @@ const STREAM_FIXTURES: Record<string, { body: unknown; extra?: Partial<ComposerR
     },
     extra: { allowedOrigins: ['https://packagist.org'] },
   },
-  satis: {
+  satisMetadata: {
     body: {
       includes: { 'include/all$0123abcd.json': { sha1: 'b'.repeat(40) } },
       'metadata-url': '/p2/%package%.json',
       'available-packages': ['Fixture/Lib', 'fixture/other'],
       'available-package-patterns': ['fixture/*'],
-      packages: { 'a/b': { '1.0.0': {} } },
     },
   },
   wpackagist: {
@@ -701,7 +781,17 @@ const STREAM_FIXTURES: Record<string, { body: unknown; extra?: Partial<ComposerR
   },
   emptyPackages: { body: { packages: {}, includes: {} } },
   packagesArray: { body: { packages: [] } },
-  empty: { body: {} },
+};
+
+const STREAM_REFUSAL_FIXTURES = {
+  empty: {},
+  satis: {
+    includes: { 'include/all$0123abcd.json': { sha1: 'b'.repeat(40) } },
+    'metadata-url': '/p2/%package%.json',
+    'available-packages': ['Fixture/Lib', 'fixture/other'],
+    'available-package-patterns': ['fixture/*'],
+    packages: { 'a/b': { '1.0.0': {} } },
+  },
 };
 
 describe('readComposerRoot streaming path', () => {
@@ -716,6 +806,27 @@ describe('readComposerRoot streaming path', () => {
     expect(streamed).toEqual(buffered);
     expect(streamed.validator.sha256).toBe(createHash('sha256').update(text).digest('hex'));
   });
+
+  it.each(Object.entries(STREAM_REFUSAL_FIXTURES))(
+    'matches the buffered refusal for %s',
+    async (_name, body) => {
+      const text = JSON.stringify(body);
+      const errors = await Promise.all(
+        [undefined, STREAMING].map((options) =>
+          readRoot(serve(text), source('https://r.example.com'), options).catch(
+            (error: unknown) => error,
+          ),
+        ),
+      );
+      const verdicts = errors.map((error) => {
+        expect(error).toBeInstanceOf(ComposerRootError);
+        expect(error).toMatchObject({ code: 'unsupported', field: 'packages' });
+        const { code, field } = error as ComposerRootError;
+        return { code, field };
+      });
+      expect(verdicts[1]).toEqual(verdicts[0]);
+    },
+  );
 
   it('classifies 20,000 inline packages in 5 MiB as v1-includes without holding them', async () => {
     const packages = Object.fromEntries(
@@ -794,7 +905,7 @@ describe('readComposerRoot streaming regressions', () => {
   );
 
   it('counts retained UTF-8 bytes near the cap', async () => {
-    const text = JSON.stringify({ info: '界'.repeat(10), warning: '界'.repeat(10) });
+    const text = JSON.stringify({ info: '界'.repeat(10), warning: '界'.repeat(10), packages: {} });
     const read = (maxBytes: number) =>
       readComposerRoot(serve(text), source('https://r.example.com', { maxBytes }), STREAMING);
     expect((await read(64)).messages).toHaveLength(2);

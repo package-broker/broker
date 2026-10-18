@@ -26,6 +26,7 @@ type ExpectedNotNull<T extends VersionTableName> = {
 
 const declared: { [T in VersionTableName]: ExpectedNotNull<T> } = {
   version: {
+    listing_seen_stamp: 0,
     id: 1,
     org_id: 1,
     package_id: 1,
@@ -112,8 +113,8 @@ describe('version table types match the migrated database', () => {
     });
   }
 
-  it('version declares 26 columns', () => {
-    expect(Object.keys(declared.version)).toHaveLength(26);
+  it('version declares 27 columns', () => {
+    expect(Object.keys(declared.version)).toHaveLength(27);
   });
 });
 

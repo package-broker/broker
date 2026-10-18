@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isUlid } from '@package-broker/core/ids';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
@@ -415,5 +416,64 @@ describe('distTagStatements', () => {
     expect(await tags(foreignPackage)).toEqual(beforeTags);
     expect(await history(foreignPackage)).toEqual(beforeHistory);
     expect(await clock(foreignPackage)).toEqual(beforeClock);
+  });
+});
+
+describe('distTagStatements org consistency', () => {
+  interface RawTag {
+    orgId: string;
+    version: string;
+  }
+
+  async function seedMismatchedTag(tag: string, version: string): Promise<void> {
+    if (database.orgs === null) throw new Error('organizations were not seeded');
+    await database.executor.batch([
+      stmt(
+        `INSERT INTO dist_tag (org_id, package_id, tag, version_id)
+          SELECT ?, ?, ?, id FROM version WHERE package_id = ? AND version_normalized = ?`,
+        database.orgs.b.orgId,
+        PACKAGE,
+        tag,
+        PACKAGE,
+        version,
+      ),
+    ]);
+  }
+
+  const rawTag = async (tag: string): Promise<RawTag[]> =>
+    database.executor.all<RawTag>({
+      sql: `SELECT t.org_id AS orgId, v.version_normalized AS version FROM dist_tag t
+            JOIN version v ON v.id = t.version_id WHERE t.package_id = ? AND t.tag = ?`,
+      params: [PACKAGE, tag],
+    });
+
+  it('does not read a mismatched-org tag row as the previous value', async () => {
+    await seedMismatchedTag('latest', '1.0.0');
+    await apply({ latest: '1.1.0' });
+    expect(await history()).toMatchObject([{ tag: 'latest', version: '1.1.0', previous: null }]);
+  });
+
+  it('does not update a mismatched-org tag row', async () => {
+    await seedMismatchedTag('latest', '1.0.0');
+    await apply({ latest: '1.1.0' });
+    expect(await rawTag('latest')).toEqual([{ orgId: database.orgs?.b.orgId, version: '1.0.0' }]);
+  });
+
+  it('records history for a target that only a mismatched-org tag row points at', async () => {
+    await seedMismatchedTag('latest', '1.1.0');
+    await apply({ latest: '1.1.0' });
+    expect(await history()).toMatchObject([{ tag: 'latest', version: '1.1.0', previous: null }]);
+  });
+
+  it('writes every dist_tag_history id from the operation id generator', async () => {
+    await apply({ latest: '1.0.0', next: '1.1.0' });
+    await apply({ next: '1.0.0' });
+    const rows = await database.executor.all<{ id: string }>({
+      sql: 'SELECT id FROM dist_tag_history WHERE package_id = ?',
+      params: [PACKAGE],
+    });
+    expect(rows).toHaveLength(4);
+    expect(await history()).toContainEqual(expect.objectContaining({ action: 'remove' }));
+    for (const row of rows) expect(isUlid(row.id)).toBe(true);
   });
 });

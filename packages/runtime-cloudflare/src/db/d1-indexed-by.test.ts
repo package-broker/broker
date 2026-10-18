@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
+import type { OrgContext, ScalarStatement, SqlExecutor } from '@package-broker/core/db/port';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import { compile, db } from '@package-broker/db-sqlite/kysely';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
@@ -13,6 +13,7 @@ import {
 } from '@package-broker/db-sqlite/migrations/source';
 import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
 import { createCatalogueList } from '@package-broker/db-sqlite/repositories/catalogue-list';
+import { createClosureEdges } from '@package-broker/db-sqlite/repositories/closure-edges';
 import { createCatalogueLookup } from '@package-broker/db-sqlite/repositories/catalogue-lookup';
 import { proxyEligibleCondition } from '@package-broker/db-sqlite/repositories/catalogue-predicates';
 import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
@@ -160,5 +161,50 @@ describe('INDEXED BY statements on D1', () => {
       ),
     );
     expect(rows.map((row) => row.id)).toEqual(['K1']);
+  });
+
+  async function planOf(run: (recording: SqlExecutor) => Promise<unknown>): Promise<string> {
+    const statements: ScalarStatement[] = [];
+    await run({
+      driver: executor.driver,
+      all: async (statement) => {
+        statements.push(statement as ScalarStatement);
+        return executor.all(statement);
+      },
+      batch: (queries) => executor.batch(queries),
+    });
+    expect(statements).toHaveLength(1);
+    const statement = statements[0] as ScalarStatement;
+    const plan = await executor.all<{ detail: string }>({
+      sql: `EXPLAIN QUERY PLAN ${statement.sql}`,
+      params: statement.params,
+    });
+    return plan.map((row) => row.detail).join('\n');
+  }
+
+  it('closure edges page (package_by_name)', async () => {
+    let page: Awaited<ReturnType<ReturnType<typeof createClosureEdges>['pageEdges']>> | undefined;
+    const details = await planOf(async (recording) => {
+      page = await createClosureEdges(recording).pageEdges(a, {
+        projectId: 'P1',
+        ecosystem: 'composer',
+        limit: 10,
+      });
+    });
+    expect(page?.rows.map((row) => row.versionId)).toEqual(['V1']);
+    expect(details).toContain('USING INDEX package_by_name');
+  });
+
+  it('closure edges classify (package_by_name)', async () => {
+    let classes: Awaited<ReturnType<ReturnType<typeof createClosureEdges>['classify']>> | undefined;
+    const details = await planOf(async (recording) => {
+      classes = await createClosureEdges(recording).classify(a, {
+        projectId: 'P1',
+        ecosystem: 'composer',
+        keys: ['acme/a'],
+      });
+    });
+    expect(classes).toEqual([{ key: 'acme/a', class: 'proxy_admissible' }]);
+    expect(details).toContain('USING INDEX package_by_name');
   });
 });

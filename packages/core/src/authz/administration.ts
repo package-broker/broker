@@ -7,8 +7,9 @@ import type { Clock } from '../ids.js';
 import { isoTimestamp } from '../ids.js';
 import type { IdentityProvider } from '../identity/port.js';
 import { normalizeEmail } from '../identity/policy.js';
+import { isPermissionView, type PermissionView } from './actor.js';
 import type { MutationFence } from './fence.js';
-import { DEFAULT_ROLES, rolePermissionProblems } from './permissions.js';
+import { DEFAULT_ROLES, isPermission, rolePermissionProblems } from './permissions.js';
 import type { CreatorOffboardingCause } from './service-principal-service.js';
 
 export type AdminError =
@@ -180,7 +181,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 interface Actor {
   readonly userId: string;
-  readonly permissions: ReadonlySet<Permission>;
+  readonly permissions: PermissionView;
   readonly isAdmin: boolean;
 }
 
@@ -188,10 +189,10 @@ function normalizeActor(raw: unknown): Actor | null {
   if (!isObject(raw)) return null;
   if (raw['kind'] !== 'organization') return null;
   const { userId, permissions, isOrganizationAdmin } = raw;
-  if (!isId(userId) || !(permissions instanceof Set)) return null;
+  if (!isId(userId) || !isPermissionView(permissions)) return null;
   return {
     userId,
-    permissions: permissions as ReadonlySet<Permission>,
+    permissions,
     isAdmin: isOrganizationAdmin === true,
   };
 }
@@ -334,21 +335,6 @@ export function createAdministration(deps: AdministrationDeps): Administration {
     return all.find((grant) => grant.id === id) ?? null;
   }
 
-  async function mayTouchHolder(ctx: OrgContext, email: string): Promise<boolean> {
-    const [allRoles, allGrants] = await Promise.all([
-      roles.list(ctx),
-      grants.listOrganization(ctx),
-    ]);
-    const protectedIds = new Set(
-      allRoles.filter((role) => role.protectsLastHolder).map((role) => role.id),
-    );
-    return !allGrants.some(
-      (grant) =>
-        protectedIds.has(grant.roleId) &&
-        (grant.subject.type === 'group' || grant.subject.value === email),
-    );
-  }
-
   async function changeStatus(
     ctx: OrgContext,
     rawActor: ActorContext,
@@ -363,7 +349,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
     if (!isId(userId)) return fail('not_found');
     const user = await users.get(ctx, userId);
     if (user === null) return fail('not_found');
-    if (!actor.isAdmin && !(await mayTouchHolder(ctx, user.email))) {
+    if (!actor.isAdmin && (await grants.isProtectedHolder(ctx, userId))) {
       return deny(ctx, actor, action);
     }
     return run(actor, held);
@@ -424,7 +410,8 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if (!actor.isAdmin) {
         const role = await roles.get(ctx, id);
         if (role === null) return fail('not_found');
-        if (!withinActor(actor, role.permissions)) return deny(ctx, actor, 'renamed');
+        if (!withinActor(actor, role.permissions.filter(isPermission)))
+          return deny(ctx, actor, 'renamed');
       }
       const result = await roles.rename(ctx, held, id, name, now(), ids.ulid());
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
@@ -444,7 +431,8 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       const role = await roles.get(ctx, id);
       if (role === null) return fail('not_found');
       if (role.protectsLastHolder) return fail('locked');
-      if (!withinActor(actor, role.permissions)) return deny(ctx, actor, 'permissions_set');
+      if (!withinActor(actor, role.permissions.filter(isPermission)))
+        return deny(ctx, actor, 'permissions_set');
       const problems = permissionProblems(role.scope, permissions);
       if (problems.length > 0) return fail('invalid_permission', problems);
       if (!withinActor(actor, permissions)) return deny(ctx, actor, 'permissions_set');
@@ -469,7 +457,8 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if (!actor.isAdmin) {
         const role = await roles.get(ctx, id);
         if (role === null) return fail('not_found');
-        if (!withinActor(actor, role.permissions)) return deny(ctx, actor, 'deleted');
+        if (!withinActor(actor, role.permissions.filter(isPermission)))
+          return deny(ctx, actor, 'deleted');
       }
       const result = await roles.delete(ctx, held, id, ids.ulid());
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {

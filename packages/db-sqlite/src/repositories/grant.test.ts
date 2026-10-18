@@ -54,6 +54,7 @@ function holderInput(): ProtectedHolderInput {
       provider,
       anchor: ANCHOR,
       emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test', 'actor.test'],
     })),
   };
 }
@@ -191,6 +192,7 @@ function createGrantRepository(
   options: GrantRepositoryOptions,
 ): UnfencedGrants {
   const fenced = createFencedGrantRepository(target, {
+    providerAnchors: options.providerAnchors,
     holderInput: async (ctx) => ({
       ...(await options.holderInput(ctx)),
       exclude: { identityId: actorOf(ctx).identity },
@@ -381,7 +383,15 @@ beforeEach(async () => {
   if (database.orgs === null) throw new Error('two organizations were not seeded');
   ({ a, b } = database.orgs);
   executor = database.executor;
-  grants = createGrantRepository(executor, { holderInput });
+  grants = createGrantRepository(executor, {
+    providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+      provider,
+      anchor: ANCHOR,
+      emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test', 'actor.test'],
+    })),
+    holderInput,
+  });
   storage = executor;
   await seed([
     ...rolesFor(a, ADMIN, true),
@@ -605,7 +615,15 @@ describe('listOrganization', () => {
 
   it('is one statement', async () => {
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor, { holderInput }).listOrganization(a);
+    await createGrantRepository(counted.executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    }).listOrganization(a);
     expect(counted.counts()).toEqual({ all: 1, batch: 0 });
   });
 });
@@ -727,7 +745,15 @@ describe('createOrganization', () => {
 
   it('rejects malformed input before any SQL', async () => {
     const counted = countCalls(executor);
-    const repository = createGrantRepository(counted.executor, { holderInput });
+    const repository = createGrantRepository(counted.executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     await expect(repository.createOrganization(a, email(G1, 'Upper@example.test'))).rejects.toThrow(
       TypeError,
     );
@@ -837,10 +863,15 @@ describe('createOrganization', () => {
 
   it('is one statement', async () => {
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor, { holderInput }).createOrganization(
-      a,
-      email(G1, 'x@example.test'),
-    );
+    await createGrantRepository(counted.executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    }).createOrganization(a, email(G1, 'x@example.test'));
     expect(counted.counts().all + counted.counts().batch).toBe(1);
   });
 });
@@ -904,7 +935,15 @@ describe('deleteOrganization', () => {
   it('is one batch', async () => {
     await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor, { holderInput }).deleteOrganization(a, G1);
+    await createGrantRepository(counted.executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    }).deleteOrganization(a, G1);
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
   });
 });
@@ -999,7 +1038,15 @@ describe('changeRole', () => {
   it('is one batch', async () => {
     await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
     const counted = countCalls(executor);
-    await createGrantRepository(counted.executor, { holderInput }).changeRole(a, G1, ADMIN, LATER);
+    await createGrantRepository(counted.executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    }).changeRole(a, G1, ADMIN, LATER);
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
   });
 });
@@ -1020,7 +1067,15 @@ describe('suspendUser and reactivateUser', () => {
     );
     const counted = countCalls(executor);
     expect(
-      await createGrantRepository(counted.executor, { holderInput }).suspendUser(a, U2, LATER),
+      await createGrantRepository(counted.executor, {
+        providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+          provider,
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
+        })),
+        holderInput,
+      }).suspendUser(a, U2, LATER),
     ).toBe('suspended');
     expect(counted.counts()).toEqual({ all: 0, batch: 1 });
     expect(await statusOf(U2)).toBe('suspended');
@@ -1106,7 +1161,15 @@ describe('suspendUser and reactivateUser', () => {
   it('reactivateUser is unchanged for an active user: one batch and four reads', async () => {
     const counted = countCalls(executor);
     expect(
-      await createGrantRepository(counted.executor, { holderInput }).reactivateUser(a, U1, LATER),
+      await createGrantRepository(counted.executor, {
+        providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+          provider,
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
+        })),
+        holderInput,
+      }).reactivateUser(a, U1, LATER),
     ).toBe('unchanged');
     expect(counted.counts()).toEqual({ all: 4, batch: 1 });
   });
@@ -1190,7 +1253,15 @@ describe('user status fence', () => {
       emailGrant(a, G2, 'u2@example.test', ADMIN),
       session(a, '01J0SESSION0000000000000001', U2),
     ]);
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     const epoch = await epochOf(a);
     expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('authority');
     expect(await statusOf(U2)).toBe('active');
@@ -1207,7 +1278,15 @@ describe('user status fence', () => {
       groupGrant(a, G2, 'oidc', 'admins', ADMIN),
       membership(a, U2, 'oidc', 'admins'),
     ]);
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('authority');
     expect(await statusOf(U2)).toBe('active');
   });
@@ -1220,19 +1299,43 @@ describe('user status fence', () => {
       membership(a, U2, 'oidc', 'admins'),
     ]);
     await executor.all(stmt("UPDATE user_group SET refreshed_at = '2020-01-01T00:00:00.000Z'"));
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('suspended');
   });
 
   it('a non-admin may suspend a user who is no holder', async () => {
     await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('suspended');
   });
 
   it('an actor without org:users:write is refused by the batch', async () => {
     await seed([...limitedActor(a, 'org:read'), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
     expect(await statusOf(U3)).toBe('active');
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
@@ -1245,7 +1348,15 @@ describe('user status fence', () => {
     await executor.all(
       stmt('UPDATE session SET revoked_at = ? WHERE id = ?', NOW, LIMITED.session),
     );
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
     expect(await statusOf(U3)).toBe('active');
   });
@@ -1255,7 +1366,15 @@ describe('user status fence', () => {
     await executor.all(
       stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", LIMITED.user),
     );
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
   });
 
@@ -1297,7 +1416,15 @@ describe('user status fence', () => {
       emailGrant(a, G2, 'u2@example.test', ADMIN),
     ]);
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U2));
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     const before = await snapshot();
     const epoch = await epochOf(a);
     expect(await repository.reactivateUser(a, limitedFence(), U2, LATER)).toBe('authority');
@@ -1315,7 +1442,15 @@ describe('user status fence', () => {
       membership(a, U2, 'oidc', 'admins'),
     ]);
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U2));
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     const before = await snapshot();
     expect(await repository.reactivateUser(a, limitedFence(), U2, LATER)).toBe('authority');
     expect(await snapshot()).toBe(before);
@@ -1325,7 +1460,15 @@ describe('user status fence', () => {
   it('a non-admin may reactivate a suspended user who would hold no protected role', async () => {
     await seed([...limitedActor(a), emailGrant(a, G1, 'u1@example.test', ADMIN)]);
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
-    const repository = createFencedGrantRepository(executor, { holderInput });
+    const repository = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.reactivateUser(a, limitedFence(), U3, LATER)).toBe('reactivated');
   });
 
@@ -1349,7 +1492,15 @@ describe('user status fence', () => {
       },
       batch: (statements) => executor.batch(statements),
     };
-    const repository = createFencedGrantRepository(promoting, { holderInput });
+    const repository = createFencedGrantRepository(promoting, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('conflict');
     expect(await statusOf(U2)).toBe('active');
   });
@@ -1361,12 +1512,24 @@ describe('user status fence', () => {
     ]);
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U2));
     const injected = createGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
       holderInput: async () =>
         ({ ...(await holderInput()), includeSuspended: true }) as unknown as ProtectedHolderInput,
     });
     expect(await injected.suspendUser(a, U1, LATER)).toBe('last_holder');
     expect(await statusOf(U1)).toBe('active');
     const protectedInjected = createFencedGrantRepository(executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
       holderInput: () =>
         ({
           ...holderInput(),
@@ -1386,10 +1549,26 @@ describe('user status fence', () => {
         throw new DbError(kind, `${kind}: injected`);
       },
     });
-    const busy = createFencedGrantRepository(failing('busy'), { holderInput });
+    const busy = createFencedGrantRepository(failing('busy'), {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     expect(await busy.suspendUser(a, limitedFence(), U3, LATER)).toBe('conflict');
     expect(await busy.reactivateUser(a, limitedFence(), U3, LATER)).toBe('conflict');
-    const big = createFencedGrantRepository(failing('too_big'), { holderInput });
+    const big = createFencedGrantRepository(failing('too_big'), {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     await expect(big.suspendUser(a, limitedFence(), U3, LATER)).rejects.toMatchObject({
       kind: 'too_big',
     });
@@ -1452,9 +1631,25 @@ describe('concurrent guarded operations on one file database', () => {
       ...bindings(org),
       ...actorStatements(org),
     ]);
-    first = createGrantRepository(shared.executor, { holderInput });
+    first = createGrantRepository(shared.executor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
     secondExecutor = await shared.second();
-    second = createGrantRepository(secondExecutor, { holderInput });
+    second = createGrantRepository(secondExecutor, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
   });
 
   afterEach(async () => {
@@ -1662,6 +1857,12 @@ describe('concurrent guarded operations on one file database', () => {
         const suspendGate = held(shared.executor, 'batch');
         const unlinkGate = held(secondExecutor, 'batch');
         const suspending = createGrantRepository(suspendGate.executor, {
+          providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+            provider,
+            anchor: provider === 'oidc' ? UNLINK_ANCHOR : ANCHOR,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
+          })),
           holderInput: boundHolderInput,
         }).suspendUser(org, U2, LATER);
         const unlinking = unlinkHolderEvidence(U1, unlinkGate.executor);
@@ -1674,7 +1875,15 @@ describe('concurrent guarded operations on one file database', () => {
         expect(outcomes).toEqual(
           suspendFirst ? ['suspended', 'last_holder'] : ['last_holder', 'unlinked'],
         );
-        const counter = createGrantRepository(shared.executor, { holderInput: boundHolderInput });
+        const counter = createGrantRepository(shared.executor, {
+          providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+            provider,
+            anchor: provider === 'oidc' ? UNLINK_ANCHOR : ANCHOR,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
+          })),
+          holderInput: boundHolderInput,
+        });
         expect(await counter.countProtectedHolders(org)).toBe(1);
       });
     }
@@ -1689,6 +1898,12 @@ describe('concurrent guarded operations on one file database', () => {
         createAdministration({
           roles: { list: async () => [], get: async () => null } as never,
           grants: createFencedGrantRepository(gate.executor, {
+            providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+              provider,
+              anchor: ANCHOR,
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test', 'actor.test'],
+            })),
             holderInput: async (ctx) => ({
               ...holderInput(),
               exclude: { identityId: actorOf(ctx).identity },
@@ -2089,6 +2304,12 @@ describe('fenced grant mutators', () => {
       },
     };
     fenced = createFencedGrantRepository(recording, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
       holderInput: () => ({ ...holderInput(), exclude: { identityId: uncounted } }),
     });
     uncounted = '01J0NONE';
@@ -2126,6 +2347,96 @@ describe('fenced grant mutators', () => {
       now: NOW,
       opId: `OP${id}`,
     });
+
+  describe.each(['create', 'delete', 'changeRole', 'suspend', 'reactivate'] as const)(
+    '%s actor authority in local recovery',
+    (operation) => {
+      it.each([
+        { recovery: true, local: false, allowed: false },
+        { recovery: false, local: false, allowed: true },
+        { recovery: true, local: true, allowed: true },
+      ])(
+        'recovery=$recovery local=$local allowed=$allowed',
+        async ({ recovery, local, allowed }) => {
+          const actor = await actingAs('recovery', [...WRITER, 'org:users:write'], true);
+          if (local) {
+            await seed([
+              stmt('DELETE FROM identity WHERE user_id = ?', actor.userId),
+              stmt(
+                "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', x'00', x'000000000000000000000000', 1, 'test')",
+                'recovery-totp',
+                a.orgId,
+              ),
+              stmt(
+                'INSERT INTO local_login (user_id, org_id, password_hash, totp_credential_id, totp_enabled_at) VALUES (?, ?, ?, ?, ?)',
+                actor.userId,
+                a.orgId,
+                'pbkdf2-sha256$test',
+                'recovery-totp',
+                NOW,
+              ),
+            ]);
+          }
+          fenced = createFencedGrantRepository(executor, {
+            providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+              provider,
+              anchor: ANCHOR,
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test', 'actor.test'],
+            })),
+            holderInput: () =>
+              recovery ? { kind: 'local_recovery' } : { ...holderInput(), providers: [] },
+          });
+          await seed([
+            stmt(
+              'UPDATE user_account SET status = ? WHERE id = ?',
+              operation === 'reactivate' ? 'suspended' : 'active',
+              U1,
+            ),
+            emailGrant(a, G2, 'u1@example.test', LOW),
+          ]);
+          const before = JSON.stringify([
+            await worldState(),
+            await rows('SELECT * FROM user_account ORDER BY id'),
+          ]);
+          const fence = fenceOfActing(actor, 1);
+          let result: string;
+          let success: string;
+          switch (operation) {
+            case 'create':
+              result = await create(actor, LOW);
+              success = 'created';
+              break;
+            case 'delete':
+              result = await fenced.deleteOrganization(a, fence, G2, 'OPRECOVERY');
+              success = 'deleted';
+              break;
+            case 'changeRole':
+              result = await fenced.changeRole(a, fence, G2, HIGH, LATER, 'OPRECOVERY');
+              success = 'updated';
+              break;
+            case 'suspend':
+              result = await fenced.suspendUser(a, fence, U1, LATER);
+              success = 'suspended';
+              break;
+            case 'reactivate':
+              result = await fenced.reactivateUser(a, fence, U1, LATER);
+              success = 'reactivated';
+              break;
+          }
+          expect(result).toBe(allowed ? success : 'authority');
+          if (!allowed) {
+            expect(
+              JSON.stringify([
+                await worldState(),
+                await rows('SELECT * FROM user_account ORDER BY id'),
+              ]),
+            ).toBe(before);
+          }
+        },
+      );
+    },
+  );
 
   it('1: a non-admin cannot grant a role with a permission it lacks, nor a protected role', async () => {
     const writer = await actingAs('writer', WRITER);
@@ -2398,6 +2709,12 @@ describe('fenced grant mutators', () => {
         ),
       ]);
       const options = {
+        providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+          provider,
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
+        })),
         holderInput: () => ({ ...holderInput(), exclude: { identityId: '01J0NONE' } }),
       };
       const one = createFencedGrantRepository(shared.executor, options);
@@ -2433,7 +2750,15 @@ describe('fenced grant mutators', () => {
         all: (statement) => executor.all(statement),
         batch: () => Promise.reject(new DbError(kind, `simulated ${kind}`)),
       };
-      const repository = createFencedGrantRepository(failing, { holderInput });
+      const repository = createFencedGrantRepository(failing, {
+        providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+          provider,
+          anchor: ANCHOR,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test', 'actor.test'],
+        })),
+        holderInput,
+      });
       await expect(
         repository.createOrganization(a, fenceOfActing(writer), {
           id: G1,
@@ -2598,8 +2923,16 @@ describe('fenced grant mutators', () => {
       };
       let next = 0;
       admin = createAdministration({
-        roles: createRoleRepository(shared.executor),
-        grants: createFencedGrantRepository(barrier, { holderInput }),
+        roles: createRoleRepository(shared.executor, { providerAnchors: [] }),
+        grants: createFencedGrantRepository(barrier, {
+          providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+            provider,
+            anchor: ANCHOR,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test', 'actor.test'],
+          })),
+          holderInput,
+        }),
         users: { get: async () => ({ id: actorIds.user }) as never },
         providers: new Map(),
         clock: fixedClock(LATER),
@@ -2698,4 +3031,63 @@ describe('fenced grant mutators', () => {
       expect(JSON.stringify(await grantRows())).toBe(before);
     });
   });
+});
+
+it('requires explicit grant provider anchors at construction', () => {
+  // @ts-expect-error provider anchors are required
+  expect(() => createFencedGrantRepository(executor, { holderInput })).toThrow(TypeError);
+  expect(() =>
+    createFencedGrantRepository(executor, { holderInput, providerAnchors: [] }),
+  ).not.toThrow();
+});
+
+it('checks holders with database time, matching anchors and at most 100 parameters', async () => {
+  await seed([
+    groupGrant(a, G1, 'oidc', 'admins', ADMIN),
+    membership(a, U1, 'oidc', 'admins'),
+    membership(a, U2, 'oidc', 'admins'),
+  ]);
+  const statements: Statement[] = [];
+  const providers = HOLDER_PROVIDERS.map((provider) => ({
+    provider,
+    anchor: ANCHOR,
+    emailAuthoritative: true,
+    emailAuthoritativeDomains: ['example.test', 'actor.test'],
+  }));
+  const recording = {
+    ...executor,
+    all: <T>(statement: Statement) => {
+      statements.push(statement);
+      return executor.all<T>(statement);
+    },
+  };
+  const repository = createFencedGrantRepository(recording, {
+    holderInput,
+    providerAnchors: [
+      ...providers,
+      ...Array.from({ length: 6 }, (_, i) => ({
+        provider: `extra${i}`,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+    ],
+  });
+  expect(await repository.isProtectedHolder(a, U1)).toBe(true);
+  expect(statements).toHaveLength(1);
+  expect(statements[0]?.params.length).toBeLessThanOrEqual(100);
+  expect(statements[0]?.sql).toContain("unixepoch('now', 'subsec')");
+  await executor.batch([
+    stmt(
+      'UPDATE user_group SET refreshed_at = ? WHERE user_id = ?',
+      new Date(Date.now() - 25 * 3600_000).toISOString(),
+      U1,
+    ),
+  ]);
+  expect(await repository.isProtectedHolder(a, U1)).toBe(false);
+  const wrong = createFencedGrantRepository(executor, {
+    holderInput,
+    providerAnchors: providers.map((p) => ({ ...p, anchor: 'https://wrong.example.test' })),
+  });
+  expect(await wrong.isProtectedHolder(a, U2)).toBe(false);
 });

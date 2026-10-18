@@ -1,5 +1,5 @@
 import type { LookupFunction } from 'node:net';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import {
   createDnsGuard,
@@ -64,13 +64,21 @@ describe('createDnsGuard', () => {
       );
     });
 
-    it('a bare host entry matches only the default ports', async () => {
+    it('a bare host entry admits port 443', async () => {
       const address = [v4('10.0.0.5')];
       await expect(guardFor(address, [HOST]).resolve(HOST, 443)).resolves.toBeDefined();
-      await expect(guardFor(address, [HOST]).resolve(HOST, 80)).resolves.toBeDefined();
-      await expect(guardFor(address, [HOST]).resolve(HOST, 8080)).rejects.toBeInstanceOf(
-        DnsGuardError,
-      );
+    });
+
+    it('a bare host entry refuses port 80', async () => {
+      await expect(guardFor([v4('10.0.0.5')], [HOST]).resolve(HOST, 80)).rejects.toMatchObject({
+        reason: 'blocked_address',
+      });
+    });
+
+    it('a bare host entry refuses other ports', async () => {
+      await expect(guardFor([v4('10.0.0.5')], [HOST]).resolve(HOST, 8080)).rejects.toMatchObject({
+        reason: 'blocked_address',
+      });
     });
 
     it('uses the port given at creation and compares case-insensitively', async () => {
@@ -82,6 +90,60 @@ describe('createDnsGuard', () => {
       const guard = guardFor([v6('::1')], ['[::1]:8080']);
       await expect(guard.resolve('::1', 8080)).resolves.toBeDefined();
       await expect(guard.resolve('::1', 443)).rejects.toBeInstanceOf(DnsGuardError);
+    });
+  });
+
+  describe('scheme-scoped allowlist', () => {
+    const target = (allow: string[], scheme: 'http' | 'https', port: number) =>
+      createDnsGuard(policy(allow), { resolver: async () => [v4('10.0.0.5')] })
+        .forTarget(HOST, port, scheme)
+        .resolve();
+
+    it('refuses http on port 443 under an explicit host:443 entry', async () => {
+      await expect(target([`${HOST}:443`], 'http', 443)).rejects.toMatchObject({
+        reason: 'scheme',
+      });
+    });
+
+    it('allows https on port 443 under an explicit host:443 entry', async () => {
+      await expect(target([`${HOST}:443`], 'https', 443)).resolves.toBeDefined();
+    });
+
+    it('refuses http on port 443 under a bare entry', async () => {
+      await expect(target([HOST], 'http', 443)).rejects.toMatchObject({ reason: 'scheme' });
+    });
+
+    it('refuses http on port 80 under a bare entry', async () => {
+      await expect(target([HOST], 'http', 80)).rejects.toMatchObject({
+        reason: 'blocked_address',
+      });
+    });
+
+    it('allows https on port 443 under a bare entry', async () => {
+      await expect(target([HOST], 'https', 443)).resolves.toBeDefined();
+    });
+
+    it('allows http on port 80 under an explicit host:80 entry', async () => {
+      await expect(target([`${HOST}:80`], 'http', 80)).resolves.toBeDefined();
+    });
+
+    it('refuses http on port 443 before any resolution', async () => {
+      const resolver = vi.fn(async () => [v4('93.184.216.34')]);
+      const guard = createDnsGuard(policy(), { resolver });
+      await expect(guard.forTarget(HOST, 443, 'http').resolve()).rejects.toMatchObject({
+        reason: 'scheme',
+      });
+      expect(resolver).not.toHaveBeenCalled();
+    });
+
+    it('refuses http on port 443 on the connect-time lookup too', async () => {
+      const guard = createDnsGuard(policy([`${HOST}:443`]), {
+        resolver: async () => [v4('10.0.0.5')],
+      });
+      const [error] = await new Promise<unknown[]>((resolve) => {
+        guard.forTarget(HOST, 443, 'http').lookup(HOST, { all: true }, (...args) => resolve(args));
+      });
+      expect(error).toMatchObject({ name: 'DnsGuardError', reason: 'scheme' });
     });
   });
 

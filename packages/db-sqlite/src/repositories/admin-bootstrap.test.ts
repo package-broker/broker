@@ -1082,3 +1082,36 @@ describe('two connections', () => {
     expect((await reader.findByEmail(org, OTHER_EMAIL))?.adminEligible).toBe(true);
   });
 });
+
+describe('import and package default grants', () => {
+  const permissions = ['org:packages:manage', 'org:import:write', 'org:import:approve'];
+
+  it('seeds all three permissions to Organization Admin', async () => {
+    await executor.batch(seedDefaultsStatements(a, { now: NOW, ids: ROLE_IDS }));
+    const granted = await rows<{ permission: string }>(
+      'SELECT permission FROM role_permission WHERE org_id = ? AND role_id = ?',
+      a.orgId,
+      ROLE_IDS.organization_admin,
+    );
+    expect(granted.map(({ permission }) => permission)).toEqual(
+      expect.arrayContaining(permissions),
+    );
+  });
+
+  it.each([
+    'organization_auditor',
+    'project_owner',
+    'project_developer',
+    'project_auditor',
+  ] as const)('does not seed the new permissions to %s', async (key) => {
+    await executor.batch(seedDefaultsStatements(a, { now: NOW, ids: ROLE_IDS }));
+    const granted = await rows<{ permission: string }>(
+      'SELECT permission FROM role_permission WHERE org_id = ? AND role_id = ?',
+      a.orgId,
+      ROLE_IDS[key],
+    );
+    for (const permission of permissions) {
+      expect(granted.map((row) => row.permission)).not.toContain(permission);
+    }
+  });
+});

@@ -378,6 +378,13 @@ describe('resolveRegistryConfig', () => {
     ['10.0.0.5:8080', 'http://10.0.0.5:8080/', true],
     ['[::1]:3000', 'http://[::1]:3000/', true],
     ['localhost:80', 'http://localhost/', true],
+    ['registry.internal', 'http://registry.internal/', false],
+    ['registry.internal', 'http://registry.internal:80/', false],
+    ['registry.internal', 'https://registry.internal:80/', false],
+    ['registry.internal', 'https://registry.internal:8443/', false],
+    ['registry.internal:443', 'http://registry.internal:443/', false],
+    ['registry.internal:443', 'https://registry.internal/', true],
+    ['registry.internal', 'https://registry.internal/', true],
   ])('round-trips allowlist entry %s through the outbound policy for %s', (entry, url, ok) => {
     const resolved = resolveRegistryConfig(
       { outbound: { allowPrivateHosts: [entry] } },

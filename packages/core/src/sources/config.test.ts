@@ -652,6 +652,36 @@ describe('round 3', () => {
     ).toBe(false);
   });
 
+  it('refuses http and non-443 ports under a bare allowlist entry', () => {
+    const allow = createOutboundPolicy({
+      allowPrivateHosts: ['repo.corp.internal'],
+      runtime: 'node',
+      selfOrigins: [],
+    });
+    const opts = { runtime: 'node', policy: allow, hasCredential: false } as const;
+    const url = (value: string) =>
+      parseSourceConfig('composer_repository', 'composer', value, '{}', opts).ok;
+    expect(url('https://repo.corp.internal/')).toBe(true);
+    expect(url('http://repo.corp.internal/')).toBe(false);
+    expect(url('http://repo.corp.internal:80/')).toBe(false);
+    expect(url('https://repo.corp.internal:80/')).toBe(false);
+    expect(url('https://repo.corp.internal:8443/')).toBe(false);
+  });
+
+  it('refuses http on port 443 under a host:443 allowlist entry', () => {
+    const allow = createOutboundPolicy({
+      allowPrivateHosts: ['repo.corp.internal:443'],
+      runtime: 'node',
+      selfOrigins: [],
+    });
+    const opts = { runtime: 'node', policy: allow, hasCredential: false } as const;
+    const ok = (value: string) =>
+      parseSourceConfig('composer_repository', 'composer', value, '{}', opts).ok;
+    expect(ok('http://repo.corp.internal:443/')).toBe(false);
+    expect(ok('https://repo.corp.internal/')).toBe(true);
+    expect(ok('https://repo.corp.internal:443/')).toBe(true);
+  });
+
   it('stores composer names lowercase and dedupes on the key', () => {
     const sel = (packages: string[]) =>
       parse('composer_repository', 'composer', 'https://repo.example.com', {

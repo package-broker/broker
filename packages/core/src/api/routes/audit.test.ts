@@ -183,11 +183,10 @@ it('hides absent, foreign, archived and invisible projects uniformly', async () 
       },
     ],
   });
-  const responses = await Promise.all(
-    ['absent', 'foreign', 'archived', 'invisible'].map((id) =>
-      f.request(`/_pb/projects/${id}/audit`),
-    ),
-  );
+  const responses: Response[] = [];
+  for (const id of ['absent', 'foreign', 'archived', 'invisible']) {
+    responses.push(await f.request(`/_pb/projects/${id}/audit`));
+  }
   const dumps = await Promise.all(
     responses.map(async (r) => {
       expect(r.status).toBe(404);

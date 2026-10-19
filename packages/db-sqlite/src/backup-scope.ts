@@ -25,6 +25,7 @@ export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   job: 'exclude',
   job_attempt: 'exclude',
   job_schedule: 'exclude',
+  keyring_verifier: 'include',
   local_login: 'include',
   migration_lock: 'exclude',
   organization: 'include',

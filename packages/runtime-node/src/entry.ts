@@ -9,6 +9,7 @@ import type { NodeBroker } from './index.js';
 import { startNode, type StartOptions } from './startup.js';
 
 const DEFAULT_PORT = 8787;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8000;
 
 export interface EntryManifest {
   readonly observability?: BrokerConfig['observability'];
@@ -41,19 +42,52 @@ export function parsePort(raw: string | undefined): number {
   throw new Error(`PORT must be an integer between 1 and 65535, received ${JSON.stringify(raw)}`);
 }
 
+function parseShutdownTimeout(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  if (/^\d+$/.test(raw)) {
+    const timeout = Number(raw);
+    if (timeout >= 1000 && timeout <= 120000) return timeout;
+  }
+  throw new Error('PB_SHUTDOWN_TIMEOUT_MS must be an integer between 1000 and 120000');
+}
+
 export function createShutdown(
   close: () => Promise<void>,
   exit: (code: number) => void,
   code = 0,
+  options: {
+    readonly timeoutMs?: number;
+    readonly error?: (message: string) => void;
+  } = {},
 ): () => void {
   let closing = false;
   return () => {
     if (closing) return;
     closing = true;
-    close().then(
-      () => exit(code),
-      () => exit(1),
-    );
+    let finished = false;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      (options.error ?? console.error)(
+        JSON.stringify({ level: 'error', event: 'shutdown.forced', timeout_ms: timeoutMs }),
+      );
+      exit(1);
+    }, timeoutMs);
+    const finish = (exitCode: number): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      exit(exitCode);
+    };
+    try {
+      close().then(
+        () => finish(code),
+        () => finish(1),
+      );
+    } catch {
+      finish(1);
+    }
   };
 }
 
@@ -64,10 +98,12 @@ export async function runEntry(
 ): Promise<void> {
   let broker: NodeBroker;
   let port: number;
+  let timeoutMs: number;
   try {
     const { plugins, migrations, platformPorts, observability } = await manifest;
     try {
       port = parsePort(env['PORT']);
+      timeoutMs = parseShutdownTimeout(env['PB_SHUTDOWN_TIMEOUT_MS']);
     } catch (error) {
       runtime.error(describeError(error));
       runtime.exit(1);
@@ -91,6 +127,8 @@ export async function runEntry(
   const stop = createShutdown(
     () => broker.close(),
     (code) => runtime.exit(processFailed ? 1 : code),
+    0,
+    { timeoutMs, error: runtime.error },
   );
   runtime.onSignal('SIGTERM', stop);
   runtime.onSignal('SIGINT', stop);

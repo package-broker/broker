@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -96,6 +98,7 @@ const NO_REVISION = (): ReturnType<typeof mutationFence> => mutationFence(actor(
 
 function create(overrides: Partial<Parameters<ServicePrincipalRepository['create']>[3]> = {}) {
   return principals.create(a, NO_REVISION(), actorGuard(), {
+    audit: mutationAudit(),
     opId: 'op-create',
     id: SP1,
     name: 'ci',
@@ -228,6 +231,7 @@ describe('create', () => {
     const before = await snapshot();
     expect(
       await principals.create(a, NO_REVISION(), actorGuard('01J0USER0000000000000000ZZ'), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         name: 'ci',
         projectId: PROJECT,
@@ -274,6 +278,7 @@ describe('create', () => {
     await create();
     expect(
       await principals.create(b, NO_REVISION(), actorGuard(UB, b.orgId), {
+        audit: mutationAudit('service_principal.create'),
         opId: 'op-b',
         id: SP3,
         name: 'ci',
@@ -304,9 +309,19 @@ it('is assignable to the service port', () => {
 
 describe('suspend and restore', () => {
   const stop = (ctx: OrgContext = a, guard: FenceGuard = actorGuard(), now = LATER) =>
-    principals.suspend(ctx, NO_REVISION(), guard, { id: SP1, now: now, opId: 'op-stop' });
+    principals.suspend(ctx, NO_REVISION(), guard, {
+      audit: mutationAudit('service_principal.create'),
+      id: SP1,
+      now: now,
+      opId: 'op-stop',
+    });
   const resume = (ctx: OrgContext = a, guard: FenceGuard = actorGuard()) =>
-    principals.restore(ctx, NO_REVISION(), guard, { id: SP1, now: LATER, opId: 'op-resume' });
+    principals.restore(ctx, NO_REVISION(), guard, {
+      audit: mutationAudit('service_principal.create'),
+      id: SP1,
+      now: LATER,
+      opId: 'op-resume',
+    });
 
   it('suspends without touching permissions, stamps the op, and restores', async () => {
     await create();
@@ -356,7 +371,12 @@ describe('suspend and restore', () => {
   it('rejects an empty opId', async () => {
     await create();
     await expect(
-      principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: '' }),
+      principals.suspend(a, NO_REVISION(), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
+        id: SP1,
+        now: LATER,
+        opId: '',
+      }),
     ).rejects.toThrow(TypeError);
   });
 
@@ -384,6 +404,7 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -400,11 +421,17 @@ describe('setPermissions', () => {
 
   it('answers conflict and changes nothing when the guard refuses on a stale revision', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-s' });
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
+      id: SP1,
+      now: LATER,
+      opId: 'op-s',
+    });
     const before = await snapshot();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -416,12 +443,23 @@ describe('setPermissions', () => {
 
   it('answers conflict when the expected revision is stale, and succeeds on the fresh one', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-s' });
-    await principals.restore(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-r' });
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
+      id: SP1,
+      now: LATER,
+      opId: 'op-s',
+    });
+    await principals.restore(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
+      id: SP1,
+      now: LATER,
+      opId: 'op-r',
+    });
     const before = await snapshot();
     const stale = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(a, stale, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -432,6 +470,7 @@ describe('setPermissions', () => {
     const fresh = mutationFence(actor(), { service_principal: 3 });
     expect(
       await principals.setPermissions(a, fresh, setGuard(SP1, 3), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -447,6 +486,7 @@ describe('setPermissions', () => {
     const guard = setGuard(SP1, 1);
     expect(
       await principals.setPermissions(a, fence, guard, {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -456,6 +496,7 @@ describe('setPermissions', () => {
     const before = await snapshot();
     expect(
       await principals.setPermissions(a, fence, guard, {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: [],
         now: LATER,
@@ -472,6 +513,7 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -487,6 +529,7 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(a, fence, setGuard(SP1, 1, UB), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -501,6 +544,7 @@ describe('setPermissions', () => {
     const before = await snapshot();
     await expect(
       principals.setPermissions(a, NO_REVISION(), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -513,14 +557,25 @@ describe('setPermissions', () => {
   it('enforces its own revision check when the caller guard is for another principal', async () => {
     await create();
     await create({ id: SP2, name: 'other' });
-    await principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-s' });
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
+      id: SP1,
+      now: LATER,
+      opId: 'op-s',
+    });
     const before = await snapshot();
     expect(
       await principals.setPermissions(
         a,
         mutationFence(actor(), { service_principal: 1 }),
         setGuard(SP2, 1),
-        { id: SP1, permissions: ['project:packages:read'], now: LATER, opId: 'op-1' },
+        {
+          audit: mutationAudit('service_principal.create'),
+          id: SP1,
+          permissions: ['project:packages:read'],
+          now: LATER,
+          opId: 'op-1',
+        },
       ),
     ).toBe('conflict');
     expect(await snapshot()).toBe(before);
@@ -534,7 +589,13 @@ describe('setPermissions', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         actorGuard('01J0USER0000000000000000ZZ'),
-        { id: SP1, permissions: ['project:packages:read'], now: LATER, opId: 'op-1' },
+        {
+          audit: mutationAudit('service_principal.create'),
+          id: SP1,
+          permissions: ['project:packages:read'],
+          now: LATER,
+          opId: 'op-1',
+        },
       ),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
@@ -547,6 +608,7 @@ describe('setPermissions', () => {
     for (const name of ['project:tokens:create', 'project:packages:manage']) {
       expect(
         await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+          audit: mutationAudit('service_principal.create'),
           id: SP1,
           permissions: [name],
           now: LATER,
@@ -564,7 +626,13 @@ describe('setPermissions', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         setGuard(SP1, 1),
-        { id: SP1, permissions: [], now: LATER, opId: '' },
+        {
+          audit: mutationAudit('service_principal.create'),
+          id: SP1,
+          permissions: [],
+          now: LATER,
+          opId: '',
+        },
       ),
     ).rejects.toThrow(TypeError);
   });
@@ -575,6 +643,7 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(b, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['project:packages:read'],
         now: LATER,
@@ -590,6 +659,7 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['packages:fly'],
         now: LATER,
@@ -598,6 +668,7 @@ describe('setPermissions', () => {
     ).toBe('invalid_permissions');
     expect(
       await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: ['org:read'],
         now: LATER,
@@ -611,6 +682,7 @@ describe('setPermissions', () => {
     await create();
     const fence = mutationFence(actor(), { service_principal: 1 });
     await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+      audit: mutationAudit('service_principal.create'),
       id: SP1,
       permissions: [],
       now: LATER,
@@ -645,6 +717,7 @@ describe('cache_epoch', () => {
     const created = await epoch(a);
     const fence = mutationFence(actor(), { service_principal: 1 });
     await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+      audit: mutationAudit('service_principal.create'),
       id: SP1,
       permissions: [],
       now: LATER,
@@ -653,6 +726,7 @@ describe('cache_epoch', () => {
     const updated = await epoch(a);
     expect(updated).not.toBe(created);
     await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
       id: SP1,
       now: LATER,
       opId: 'op-stop',
@@ -665,11 +739,17 @@ describe('cache_epoch', () => {
     const before = await versions();
     const outsider = actorGuard('01J0USER0000000000000000ZZ');
     expect(
-      await principals.suspend(a, NO_REVISION(), outsider, { id: SP1, now: LATER, opId: 'op-x' }),
+      await principals.suspend(a, NO_REVISION(), outsider, {
+        audit: mutationAudit('service_principal.create'),
+        id: SP1,
+        now: LATER,
+        opId: 'op-x',
+      }),
     ).toBe('authority');
     const stale = mutationFence(actor(), { service_principal: 9 });
     expect(
       await principals.setPermissions(a, stale, actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: [],
         now: LATER,
@@ -698,6 +778,7 @@ describe('cache_epoch', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
       await repository.setPermissions(a, fence, setGuard(SP1, 1), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         permissions: [],
         now: LATER,
@@ -714,6 +795,7 @@ describe('cache_epoch', () => {
     const foreign = actorGuard(UB, b.orgId);
     await expect(
       principals.create(a, NO_REVISION(), foreign, {
+        audit: mutationAudit('service_principal.create'),
         opId: 'op-create',
         id: SP1,
         name: 'ci',
@@ -860,6 +942,7 @@ describe('constraint failures', () => {
   }
 
   const input = {
+    audit: mutationAudit(),
     opId: 'op-create',
     id: SP1,
     name: 'ci',
@@ -912,11 +995,22 @@ describe('constraint failures', () => {
     await create();
     for (const run of [
       (r: ServicePrincipalRepository) =>
-        r.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-stop' }),
+        r.suspend(a, NO_REVISION(), actorGuard(), {
+          audit: mutationAudit('service_principal.create'),
+          id: SP1,
+          now: LATER,
+          opId: 'op-stop',
+        }),
       (r: ServicePrincipalRepository) =>
-        r.restore(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-resume' }),
+        r.restore(a, NO_REVISION(), actorGuard(), {
+          audit: mutationAudit('service_principal.create'),
+          id: SP1,
+          now: LATER,
+          opId: 'op-resume',
+        }),
       (r: ServicePrincipalRepository) =>
         r.setPermissions(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+          audit: mutationAudit('service_principal.create'),
           id: SP1,
           permissions: ['project:packages:read'],
           now: LATER,
@@ -934,6 +1028,7 @@ describe('constraint failures', () => {
     const { repository } = over({});
     expect(
       await repository.suspend(a, NO_REVISION(), actorGuard('01J0USER0000000000000000ZZ'), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         now: LATER,
         opId: 'op-stop',
@@ -957,6 +1052,7 @@ describe('a principal deleted between the load and the batch', () => {
     await create();
     expect(
       await latched().suspend(a, NO_REVISION(), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         now: LATER,
         opId: 'op-stop',
@@ -968,6 +1064,7 @@ describe('a principal deleted between the load and the batch', () => {
     await create();
     expect(
       await latched().restore(a, NO_REVISION(), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         now: LATER,
         opId: 'op-resume',
@@ -979,11 +1076,21 @@ describe('a principal deleted between the load and the batch', () => {
     await create();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await latched().suspend(a, fence, actorGuard(), { id: SP1, now: LATER, opId: 'op-stop' }),
+      await latched().suspend(a, fence, actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
+        id: SP1,
+        now: LATER,
+        opId: 'op-stop',
+      }),
     ).toBe('not_found');
     await create();
     expect(
-      await latched().restore(a, fence, actorGuard(), { id: SP1, now: LATER, opId: 'op-resume' }),
+      await latched().restore(a, fence, actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
+        id: SP1,
+        now: LATER,
+        opId: 'op-resume',
+      }),
     ).toBe('not_found');
   });
 
@@ -994,7 +1101,13 @@ describe('a principal deleted between the load and the batch', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         actorGuard(),
-        { id: SP1, permissions: ['project:packages:read'], now: LATER, opId: 'op-set' },
+        {
+          audit: mutationAudit('service_principal.create'),
+          id: SP1,
+          permissions: ['project:packages:read'],
+          now: LATER,
+          opId: 'op-set',
+        },
       ),
     ).toBe('not_found');
   });
@@ -1004,6 +1117,7 @@ describe('suspending an already suspended principal', () => {
   it('answers unchanged for a stale revision and rewrites nothing', async () => {
     await create();
     await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
       id: SP1,
       now: LATER,
       opId: 'op-stop',
@@ -1011,6 +1125,7 @@ describe('suspending an already suspended principal', () => {
     const before = await snapshot();
     expect(
       await principals.suspend(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         now: '2026-10-15T14:00:00.000Z',
         opId: 'op-again',
@@ -1022,6 +1137,7 @@ describe('suspending an already suspended principal', () => {
   it('answers authority, not unchanged, when the guard refuses a stale-revision suspend', async () => {
     await create();
     await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
       id: SP1,
       now: LATER,
       opId: 'op-stop',
@@ -1032,7 +1148,7 @@ describe('suspending an already suspended principal', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         actorGuard('01J0USER0000000000000000ZZ'),
-        { id: SP1, now: LATER, opId: 'op-again' },
+        { audit: mutationAudit('service_principal.create'), id: SP1, now: LATER, opId: 'op-again' },
       ),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
@@ -1041,6 +1157,7 @@ describe('suspending an already suspended principal', () => {
   it('answers conflict and writes nothing when a restore commits between the status read and the rerun', async () => {
     await create();
     await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      audit: mutationAudit('service_principal.create'),
       id: SP1,
       now: LATER,
       opId: 'op-stop',
@@ -1057,7 +1174,12 @@ describe('suspending an already suspended principal', () => {
               a,
               mutationFence(actor(), { service_principal: 2 }),
               actorGuard(),
-              { id: SP1, now: LATER, opId: 'op-resume' },
+              {
+                audit: mutationAudit('service_principal.create'),
+                id: SP1,
+                now: LATER,
+                opId: 'op-resume',
+              },
             ),
           ).toBe('restored');
         }
@@ -1066,6 +1188,7 @@ describe('suspending an already suspended principal', () => {
     } as SqlExecutor);
     expect(
       await racing.suspend(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         now: LATER,
         opId: 'op-again',
@@ -1082,6 +1205,7 @@ describe('suspending an already suspended principal', () => {
     await executor.batch([stmt('UPDATE service_principal SET revision = 5 WHERE id = ?', SP1)]);
     expect(
       await principals.suspend(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+        audit: mutationAudit('service_principal.create'),
         id: SP1,
         now: LATER,
         opId: 'op-stop',
@@ -1106,4 +1230,75 @@ describe('creator retention control', () => {
     expect(await rows('SELECT id FROM user_account WHERE id = ?', other)).toEqual([]);
     expect(await rows('SELECT id FROM user_account WHERE id = ?', U1)).toHaveLength(1);
   });
+});
+
+function mutationAudit(action: AuditAction = 'service_principal.create') {
+  const result = auditEvent({
+    id: ulid(),
+    now: NOW,
+    action,
+    actor: { type: 'user', id: U1 },
+    target: { type: 'service_principal', id: SP1 },
+    context: { opId: ulid(), requestId: ulid(), sourceIp: null, tokenSelector: null },
+  });
+  if (!result.ok) throw new Error('Invalid test audit');
+  return result.event;
+}
+
+describe('atomic principal audit', () => {
+  it.each(['create', 'permissions_set', 'suspend', 'restore'] as const)(
+    'stages exactly one event for %s',
+    async (operation) => {
+      if (operation !== 'create') await create();
+      if (operation === 'restore')
+        await principals.suspend(a, NO_REVISION(), actorGuard(), {
+          id: SP1,
+          now: LATER,
+          opId: 'setup-suspend',
+          audit: mutationAudit('service_principal.suspend'),
+        });
+      await executor.batch([stmt('DELETE FROM audit_pending')]);
+      const action: AuditAction = `service_principal.${operation}`;
+      const input = {
+        id: SP1,
+        now: LATER,
+        opId: ulid(),
+        audit: mutationAudit(action),
+        idempotency: {
+          principalKey: U1,
+          key: operation,
+          route: 'POST /principals',
+          requestHash: 'a'.repeat(64),
+          status: 200,
+          responseJson: '{}',
+          createdAt: NOW,
+          expiresAt: LATER,
+        },
+      };
+      const result =
+        operation === 'create'
+          ? await create(input)
+          : operation === 'permissions_set'
+            ? await principals.setPermissions(
+                a,
+                mutationFence(actor(), { service_principal: 1 }),
+                actorGuard(),
+                { ...input, permissions: [] },
+              )
+            : await principals[operation](a, NO_REVISION(), actorGuard(), input);
+      expect(result).toBe(
+        operation === 'create'
+          ? 'created'
+          : operation === 'permissions_set'
+            ? 'updated'
+            : operation === 'suspend'
+              ? 'suspended'
+              : 'restored',
+      );
+      expect(await rows('SELECT action, target_type, target_id FROM audit_pending')).toEqual([
+        { action, target_type: 'service_principal', target_id: SP1 },
+      ]);
+      expect(await rows('SELECT key FROM api_idempotency')).toEqual([{ key: operation }]);
+    },
+  );
 });

@@ -430,6 +430,13 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       const slugValid = boundary === 'organization' || isValidProjectSlug(slug);
       const credential = parseAuthorization(request.request.headers.get('authorization'));
       if (credential.outcome === 'invalid') return UNAUTHORIZED;
+      if (
+        routeBoundary === 'authenticated' &&
+        request.route.bearerOnly === true &&
+        (credential.outcome !== 'token' || credential.scheme !== 'bearer')
+      ) {
+        return UNAUTHORIZED;
+      }
       if (routeBoundary === 'self' && credential.outcome === 'token') {
         if (credential.scheme !== 'bearer') return UNAUTHORIZED;
         return selfBearerDecision(request, credential.token, {

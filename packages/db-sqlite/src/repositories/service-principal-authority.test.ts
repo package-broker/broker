@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -130,6 +132,7 @@ const ORG_MANAGE: ServicePrincipalGuardInput = {
 
 function createWith(input: ServicePrincipalGuardInput, f = fence(), projectId = input.projectId) {
   return principals.create(a, f, servicePrincipalAuthorityGuard(a, f, input), {
+    audit: mutationAudit('service_principal.create'),
     id: SP,
     name: 'ci',
     projectId,
@@ -272,14 +275,14 @@ describe('servicePrincipalAuthorityGuard', () => {
       a,
       f,
       servicePrincipalAuthorityGuard(a, f, { ...PROJECT_MANAGE, covers: [] }),
-      { id: SP, now: NOW, opId: 'op-1' },
+      { audit: mutationAudit('service_principal.create'), id: SP, now: NOW, opId: 'op-1' },
     );
     expect(refused).toBe('authority');
     const allowed = await principals.suspend(
       a,
       f,
       servicePrincipalAuthorityGuard(a, f, { ...PROJECT_MANAGE, covers: [], allowArchived: true }),
-      { id: SP, now: NOW, opId: 'op-2' },
+      { audit: mutationAudit('service_principal.create'), id: SP, now: NOW, opId: 'op-2' },
     );
     expect(allowed).toBe('suspended');
   });
@@ -377,6 +380,7 @@ describe('servicePrincipalAuthorityGuard', () => {
     const f = fence();
     const guard = servicePrincipalAuthorityGuard(a, f, PROJECT_MANAGE);
     const racing = createServicePrincipalRepository(gated).create(a, f, guard, {
+      audit: mutationAudit('service_principal.create'),
       id: SP,
       name: 'ci',
       projectId: PA,
@@ -440,9 +444,14 @@ describe('servicePrincipalAuthorityGuard', () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       await suspended(['project:packages:read']);
       const { f, guard } = restoreWith();
-      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
-        'restored',
-      );
+      expect(
+        await principals.restore(a, f, guard, {
+          audit: mutationAudit('service_principal.create'),
+          id: SP,
+          now: NOW,
+          opId: 'op-r',
+        }),
+      ).toBe('restored');
       expect(await statusOf()).toEqual([{ status: 'active', revision: 2 }]);
     });
 
@@ -450,9 +459,14 @@ describe('servicePrincipalAuthorityGuard', () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       await suspended(['project:packages:read', 'project:sources:read']);
       const { f, guard } = restoreWith();
-      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
-        'authority',
-      );
+      expect(
+        await principals.restore(a, f, guard, {
+          audit: mutationAudit('service_principal.create'),
+          id: SP,
+          now: NOW,
+          opId: 'op-r',
+        }),
+      ).toBe('authority');
       expect(await statusOf()).toEqual([{ status: 'suspended', revision: 1 }]);
     });
 
@@ -460,9 +474,14 @@ describe('servicePrincipalAuthorityGuard', () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       await suspended(['project:packages:read']);
       const { f, guard } = restoreWith(fence(USER, SESSION, { service_principal: 7 }));
-      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
-        'conflict',
-      );
+      expect(
+        await principals.restore(a, f, guard, {
+          audit: mutationAudit('service_principal.create'),
+          id: SP,
+          now: NOW,
+          opId: 'op-r',
+        }),
+      ).toBe('conflict');
       expect(await statusOf()).toEqual([{ status: 'suspended', revision: 1 }]);
     });
 
@@ -473,6 +492,7 @@ describe('servicePrincipalAuthorityGuard', () => {
       const gate = gated();
       const { f, guard } = restoreWith();
       const racing = createServicePrincipalRepository(gate.executor).restore(a, f, guard, {
+        audit: mutationAudit('service_principal.create'),
         id: SP,
         now: NOW,
         opId: 'op-r',
@@ -494,14 +514,24 @@ describe('servicePrincipalAuthorityGuard', () => {
     it('answers not_found for an unknown id carrying an expected revision', async () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       const { f, guard } = restoreWith();
-      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
-        'not_found',
-      );
+      expect(
+        await principals.restore(a, f, guard, {
+          audit: mutationAudit('service_principal.create'),
+          id: SP,
+          now: NOW,
+          opId: 'op-r',
+        }),
+      ).toBe('not_found');
       const stop = fence(USER, SESSION, { service_principal: 1 });
       const stopGuard = servicePrincipalAuthorityGuard(a, stop, { ...PROJECT_MANAGE, covers: [] });
-      expect(await principals.suspend(a, stop, stopGuard, { id: SP, now: NOW, opId: 'op-s' })).toBe(
-        'not_found',
-      );
+      expect(
+        await principals.suspend(a, stop, stopGuard, {
+          audit: mutationAudit('service_principal.create'),
+          id: SP,
+          now: NOW,
+          opId: 'op-s',
+        }),
+      ).toBe('not_found');
     });
 
     it('answers not_found when a rival deletes the principal between the read and the commit', async () => {
@@ -511,6 +541,7 @@ describe('servicePrincipalAuthorityGuard', () => {
       const gate = gated();
       const { f, guard } = restoreWith();
       const racing = createServicePrincipalRepository(gate.executor).restore(a, f, guard, {
+        audit: mutationAudit('service_principal.create'),
         id: SP,
         now: NOW,
         opId: 'op-r',
@@ -529,6 +560,7 @@ describe('servicePrincipalAuthorityGuard', () => {
       const gate = gated();
       const { f, guard } = restoreWith();
       const racing = createServicePrincipalRepository(gate.executor).restore(a, f, guard, {
+        audit: mutationAudit('service_principal.create'),
         id: SP,
         now: NOW,
         opId: 'op-r',
@@ -693,6 +725,7 @@ describe('createServicePrincipalAuthority', () => {
       covers: ['project:packages:read'],
     };
     const input = {
+      audit: mutationAudit('service_principal.create'),
       id: SP,
       name: 'ci',
       projectId: PA,
@@ -904,3 +937,17 @@ const apiCall: ApiCall = {
     tokenSelector: null,
   },
 };
+
+function mutationAudit(action: AuditAction = 'token.issue', targetId: string | null = null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

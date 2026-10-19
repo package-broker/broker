@@ -92,6 +92,7 @@ function corpus(rows = pairs.map(([pretty, normalized], i) => seed(pretty, norma
   };
   const render = (dev = false, name = pkg.key, who = actor) =>
     renderComposerP2({
+      requestId: 'corpus-request',
       actor: who,
       access,
       clock,
@@ -193,7 +194,13 @@ describe('PB-109 Composer lookup and version corpus', () => {
     expect(response.status).toBe(404);
     expect(response.headers.get('Cache-Control')).toBe('private, max-age=300');
     expect(response.headers.get('Vary')).toBe('Authorization');
-    expect(await response.text()).toBe('');
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'not_found',
+        message: 'Not found',
+        requestId: response.headers.get('x-request-id'),
+      },
+    });
   });
 
   it.each([
@@ -203,7 +210,13 @@ describe('PB-109 Composer lookup and version corpus', () => {
   ])('returns a uniform 404 outside the authorized project scope: %j', async (who) => {
     const response = await corpus().render(false, pkg.key, who);
     expect(response.status).toBe(404);
-    expect(await response.text()).toBe('');
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'not_found',
+        message: 'Not found',
+        requestId: response.headers.get('x-request-id'),
+      },
+    });
   });
 
   it.each([false, true])(

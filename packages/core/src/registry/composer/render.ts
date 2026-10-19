@@ -1,3 +1,4 @@
+import { apiError } from '../../api/response.js';
 import type { ProjectActor } from '../../authz/project-actor.js';
 import { catalogueCacheKey } from '../../catalogue/cache-keys.js';
 import { PACKAGES_READ, type PackageAccess } from '../../catalogue/package-access.js';
@@ -15,6 +16,8 @@ import { composerDistPath } from './dist-url.js';
 import { minifyVersions } from './minify.js';
 
 export interface ComposerRenderOptions {
+  /** The request id supplied by the caller. */
+  readonly requestId: string;
   readonly actor: ProjectActor;
   readonly access: PackageAccess;
   readonly projectSlug: string;
@@ -36,15 +39,20 @@ function authorized(actor: ProjectActor): boolean {
   return actor.kind === 'project' && actor.permissions.has(PACKAGES_READ);
 }
 
-function missing(): Response {
-  return new Response(null, {
-    status: 404,
-    headers: { 'Cache-Control': CACHE_CONTROL, Vary: 'Authorization' },
-  });
+function missing(options: ComposerRenderOptions): Response {
+  const requestId = options.requestId;
+  const response = apiError('not_found', requestId);
+  response.headers.set('x-request-id', requestId);
+  response.headers.set('Cache-Control', CACHE_CONTROL);
+  response.headers.set('Vary', 'Authorization');
+  return response;
 }
 
-function unavailable(): Response {
-  return new Response(null, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+function unavailable(options: ComposerRenderOptions): Response {
+  const requestId = options.requestId;
+  const response = apiError('unavailable', requestId);
+  response.headers.set('x-request-id', requestId);
+  return response;
 }
 
 type Json = Record<string, unknown>;
@@ -134,7 +142,7 @@ async function* document(
 }
 
 export async function renderComposerP2(options: ComposerP2Options): Promise<Response> {
-  if (!authorized(options.actor)) return missing();
+  if (!authorized(options.actor)) return missing(options);
   const ctx = { orgId: options.actor.orgId };
   const form = options.dev ? 'composer-p2-dev' : 'composer-p2';
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -142,7 +150,7 @@ export async function renderComposerP2(options: ComposerP2Options): Promise<Resp
     const first = await options.access.versions(options.actor, 'composer', options.name, {
       limit: CATALOGUE_PAGE_MAX,
     });
-    if (first === null) return missing();
+    if (first === null) return missing(options);
     if ('changed' in first) continue;
     const iterator = document(first, options);
     const chunks: Uint8Array[] = [];
@@ -160,10 +168,10 @@ export async function renderComposerP2(options: ComposerP2Options): Promise<Resp
       }
     } catch (error) {
       if (error instanceof CatalogueChangedError) continue;
-      if (error instanceof ListingIncompleteError) return unavailable();
+      if (error instanceof ListingIncompleteError) return unavailable(options);
       throw error;
     }
-    if (size === 0) return missing();
+    if (size === 0) return missing(options);
     const validators = await composerValidators(options.clock, ctx, first.pkg, form, 1, {
       projectSlug: options.projectSlug,
       origin: options.publicUrl,
@@ -222,11 +230,11 @@ export async function renderComposerP2(options: ComposerP2Options): Promise<Resp
       { headers },
     );
   }
-  return unavailable();
+  return unavailable(options);
 }
 
 export async function renderPackagesJson(options: ComposerRenderOptions): Promise<Response> {
-  if (!authorized(options.actor)) return missing();
+  if (!authorized(options.actor)) return missing(options);
   const names: string[] = [];
   let after: string | undefined;
   let bounded = true;

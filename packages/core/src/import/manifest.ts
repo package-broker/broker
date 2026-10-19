@@ -34,7 +34,17 @@ const MAX_PACKAGE_LENGTH = 428;
 const MAX_DETAILS = 20;
 
 const externalRef = z.string().check(z.regex(/^[A-Za-z0-9._:/-]{1,200}$/));
-const credentialRef = z.string().check(z.regex(/^op:\/\/[A-Za-z0-9 ._/-]{1,200}$/));
+const credentialRef = z.string().check(
+  z.refine((value) => {
+    if (/\p{Cc}/u.test(value)) return false;
+    if (value.startsWith('env:')) {
+      return /^env:[A-Z_][A-Z0-9_]{0,127}$/.exec(value)?.[0] === value;
+    }
+    if (!value.startsWith('file:')) return false;
+    const path = value.slice(5);
+    return path.length > 0 && new TextEncoder().encode(path).byteLength <= 1024;
+  }),
+);
 
 const FORBIDDEN_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 

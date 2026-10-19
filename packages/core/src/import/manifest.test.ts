@@ -53,7 +53,7 @@ function base(): Doc {
         source_type: 'vcs',
         project: { ref: 'p1' },
         url: null,
-        credential_ref: 'op://Vault/Item/field',
+        credential_ref: 'env:REGISTRY_TOKEN',
         config: {
           provider: 'github',
           repository: 'acme/widgets',
@@ -520,26 +520,93 @@ describe('credential_ref', () => {
     ['a pasted token', `ghp_${SENTINEL}`],
     ['an https URL', `https://example.test/${SENTINEL}`],
     ['an empty string', ''],
-    ['an op reference with a query', `op://Vault/${SENTINEL}?attribute=otp`],
+    ['the retired scheme', `op:${'//'}Vault/${SENTINEL}`],
+    ['an unknown scheme', `secret:${SENTINEL}`],
+    ['an uppercase environment scheme', 'ENV:TOKEN'],
+    ['an uppercase file scheme', 'FILE:/tmp/token'],
+    ['an empty environment name', 'env:'],
+    ['a lowercase environment name', 'env:token'],
+    ['an environment name starting with a digit', 'env:1TOKEN'],
+    ['an environment name with a hyphen', `env:${SENTINEL}`],
+    ['an environment name with a space', 'env:MY TOKEN'],
+    ['an environment name with a non-ASCII letter', 'env:TOKÉN'],
+    ['an environment name with a query', 'env:TOKEN?value=1'],
+    ['an environment name ending in a line separator', 'env:TOKEN\u2028'],
+    ['an environment name ending in a paragraph separator', 'env:TOKEN\u2029'],
+    ['an environment name of 129 characters', `env:${'A'.repeat(129)}`],
+    ['an empty file path', 'file:'],
+    ['a file path containing a NUL', `file:/secrets/${SENTINEL}\u0000`],
+    ['a file path of 1025 bytes', `file:${'a'.repeat(1025)}`],
+    ['a multibyte file path of 1025 bytes', `file:${'é'.repeat(512)}a`],
   ];
   for (const [label, value] of bad) {
     it(`refuses ${label} and does not echo it`, () => {
-      const result = parseManifest(mutated((d) => void (item(d, 's1').credential_ref = value)));
+      const doc = mutated((d) => void (item(d, 's1').credential_ref = value));
+      const result = parseManifest(doc);
       expect(result.ok).toBe(false);
+      expect(details(doc)).toEqual([
+        { path: pathOf(doc, 's1', 'credential_ref'), code: 'invalid' },
+      ]);
+      if (value) expect(JSON.stringify(result)).not.toContain(value);
       expect(JSON.stringify(result)).not.toContain(SENTINEL);
     });
   }
 
-  it('refuses an op reference of 201 characters after the scheme', () => {
-    expectRefused(mutated((d) => void (item(d, 's1').credential_ref = `op://${'a'.repeat(201)}`)));
-  });
+  for (const code of [
+    ...Array.from({ length: 32 }, (_, i) => i),
+    ...Array.from({ length: 33 }, (_, i) => i + 127),
+  ]) {
+    for (const scheme of ['env:', 'file:']) {
+      it(`refuses control U+${code.toString(16).padStart(4, '0')} in ${scheme}`, () => {
+        const value = `${scheme}TOKEN${String.fromCharCode(code)}`;
+        expectRefused(mutated((d) => void (item(d, 's1').credential_ref = value)));
+      });
+    }
+  }
 
-  it('accepts an op reference with spaces', () => {
-    expect(
-      parseManifest(
-        mutated((d) => void (item(d, 's1').credential_ref = 'op://My Vault/My Item/token')),
-      ).ok,
-    ).toBe(true);
+  const good = [
+    'env:A',
+    'env:_',
+    'env:_TOKEN_123',
+    `env:${'A'.repeat(128)}`,
+    'file:/run/secrets/registry-token',
+    'file:./My Secrets/token',
+    'file:../token',
+    'file:C:\\secrets\\token',
+    `file:${'a'.repeat(1024)}`,
+    `file:${'é'.repeat(512)}`,
+    `file:${'🔑'.repeat(256)}`,
+  ];
+  for (const value of good) {
+    it(`accepts and preserves ${value.slice(0, 45)}`, () => {
+      const doc = parsed(mutated((d) => void (item(d, 's1').credential_ref = value)));
+      expect(
+        doc.items.find((entry) => entry.type === 'source' && entry.external_ref === 's1'),
+      ).toMatchObject({ credential_ref: value });
+      expect(canonicalManifest(doc)).toContain(JSON.stringify(value));
+    });
+  }
+
+  for (const value of [`env:LEAK_${SENTINEL.replaceAll('-', '_')}`, `file:/secrets/${SENTINEL}`]) {
+    it(`does not echo a valid ${value.split(':')[0]} reference on a consistency refusal`, () => {
+      const doc = mutated((d) => void (item(d, 's3').credential_ref = value));
+      const result = parseManifest(doc);
+      expect(details(doc)).toContainEqual({
+        path: pathOf(doc, 's3', 'credential_ref'),
+        code: 'credential_mismatch',
+      });
+      expect(JSON.stringify(result)).not.toContain(value);
+      expect(JSON.stringify(result)).not.toContain(SENTINEL);
+      expect(JSON.stringify(result)).not.toContain(SENTINEL.replaceAll('-', '_'));
+    });
+  }
+
+  it('changes the hash when the credential reference changes', async () => {
+    const original = parsed(base());
+    const other = parsed(
+      mutated((d) => void (item(d, 's1').credential_ref = 'file:/run/secrets/token')),
+    );
+    expect(await planHash(other)).not.toBe(await planHash(original));
   });
 
   it('accepts null', () => {
@@ -766,7 +833,7 @@ describe('refusal paths', () => {
     [
       'a proxy credential without githubToken',
       (d) => {
-        item(d, 's3').credential_ref = 'op://Vault/Item/field';
+        item(d, 's3').credential_ref = 'env:REGISTRY_TOKEN';
         return pathOf(d, 's3', 'credential_ref');
       },
       'credential_mismatch',
@@ -786,7 +853,7 @@ describe('refusal paths', () => {
           source_type: 'npmjs_proxy',
           url: 'https://registry.npmjs.org',
           config: {},
-          credential_ref: 'op://Vault/Item/field',
+          credential_ref: 'env:REGISTRY_TOKEN',
         });
         return pathOf(d, 's2', 'credential_ref');
       },

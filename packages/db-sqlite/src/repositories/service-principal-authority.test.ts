@@ -1,5 +1,6 @@
 import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
 import { ulid } from '@package-broker/core/ids';
+import { createSessionService, type AuthenticatedSession } from '@package-broker/core/auth/session';
 import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -25,6 +26,20 @@ import {
 const NOW = '2026-10-15T12:00:00.000Z';
 const USER = '01J0USER000000000000000001';
 const SESSION = '01J0SESSION000000000000001';
+const authenticated: AuthenticatedSession = {
+  session: {
+    id: SESSION,
+    userId: USER,
+    identityId: null,
+    csrfHash: 'x',
+    createdAt: NOW,
+    expiresAt: '2999-01-01T00:00:00.000Z',
+    lastSeenAt: NOW,
+    reauthAt: NOW,
+    user: { id: USER, email: 'u1@example.test', displayName: null },
+  },
+  principal: { kind: 'user', id: USER },
+};
 const PA = '01J0PROJECT00000000000000A1';
 const SP = '01J0SERVICEPRINCIPAL0000A1';
 const MANAGER_ROLE = '01J0ROLEMANAGER0000000000A1';
@@ -189,7 +204,7 @@ beforeEach(async () => {
       new Date(Date.now() - 60_000).toISOString(),
     ),
     stmt(
-      'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, last_seen_at, expires_at, reauth_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       SESSION,
       a.orgId,
       USER,
@@ -198,6 +213,7 @@ beforeEach(async () => {
       new Date().toISOString(),
       new Date().toISOString(),
       '2999-01-01T00:00:00.000Z',
+      new Date().toISOString(),
     ),
     ...role(MANAGER_ROLE, 'project', 0, [
       'project:service-principals:write',
@@ -223,6 +239,40 @@ afterEach(async () => {
 });
 
 describe('servicePrincipalAuthorityGuard', () => {
+  describe.each([
+    ['project', PROJECT_MANAGE, MANAGER_ROLE],
+    ['organization', ORG_MANAGE, ADMIN_ROLE],
+  ] as const)('%s creation reauth boundaries', (_scope, requirement, roleId) => {
+    it.each([
+      ['one millisecond stale', -600_001, 'authority'],
+      ['one millisecond in the future', 1, 'authority'],
+      ['exactly ten minutes old', -600_000, 'created'],
+      ['exactly database now', 0, 'created'],
+    ] as const)('%s', async (_name, offset, expected) => {
+      const databaseNow = Math.floor(Date.now() / 1000) * 1000 + 500;
+      const atDatabaseTime = (statement: Statement): Statement => ({
+        ...statement,
+        sql: statement.sql.replaceAll("'now'", `'${new Date(databaseNow).toISOString()}'`),
+      });
+      principals = createServicePrincipalRepository({
+        driver: executor.driver,
+        all: (statement) => executor.all(atDatabaseTime(statement)),
+        batch: (statements) => executor.batch(statements.map(atDatabaseTime)),
+      });
+      await executor.batch([
+        grant('G1', roleId, requirement.projectId),
+        stmt(
+          'UPDATE session SET reauth_at = ? WHERE org_id = ? AND id = ?',
+          new Date(databaseNow + offset).toISOString(),
+          a.orgId,
+          SESSION,
+        ),
+      ]);
+      expect(await createWith({ ...requirement, freshReauth: true })).toBe(expected);
+      expect(await stored()).toBe(expected === 'created' ? 1 : 0);
+    });
+  });
+
   it('commits a project create for a manager whose live set covers the snapshot', async () => {
     await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
     expect(await createWith(PROJECT_MANAGE)).toBe('created');
@@ -756,6 +806,11 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     const log: Record<string, unknown>[] = [];
     let next = 0;
     const service = createServicePrincipalService({
+      sessions: createSessionService({
+        sessions: {} as never,
+        clock: fixedClock(NOW),
+        publicOrigin: 'https://broker.example.test',
+      }),
       principals,
       authority: createServicePrincipalAuthority({ executor, providerAnchors: ANCHORS }),
       directory: principals,
@@ -774,6 +829,7 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     const { service } = compose();
     const result = await service.create(
       a,
+      authenticated,
       manager,
       fence(),
       { name: 'ci', projectId: PA },
@@ -800,7 +856,14 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     ]);
     const { service, log } = compose();
     expect(
-      await service.create(a, manager, fence(), { name: 'ci', projectId: PA }, apiCall),
+      await service.create(
+        a,
+        authenticated,
+        manager,
+        fence(),
+        { name: 'ci', projectId: PA },
+        apiCall,
+      ),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -813,7 +876,14 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     await executor.batch([grant('G1', ORG_OPS_ROLE, null)]);
     const { service } = compose();
     expect(
-      await service.create(a, admin, fence(), { name: 'ops', projectId: null }, apiCall),
+      await service.create(
+        a,
+        authenticated,
+        admin,
+        fence(),
+        { name: 'ops', projectId: null },
+        apiCall,
+      ),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -824,6 +894,7 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     ]);
     const created = await service.create(
       a,
+      authenticated,
       admin,
       fence(),
       { name: 'ops', projectId: null },
@@ -838,6 +909,7 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     const { service } = compose();
     const created = await service.create(
       a,
+      authenticated,
       manager,
       fence(),
       { name: 'ci', projectId: PA },
@@ -888,6 +960,7 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     const { service } = compose();
     const created = await service.create(
       a,
+      authenticated,
       manager,
       fence(),
       { name: 'ci', projectId: PA },
@@ -906,6 +979,7 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     const { service, log } = compose();
     const created = await service.create(
       a,
+      authenticated,
       manager,
       fence(),
       { name: 'ci', projectId: PA },

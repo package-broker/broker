@@ -1,4 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  parsePendingValidators,
+  UPSTREAM_FORMS,
+  type PendingValidators,
+} from '@package-broker/core/ingest/validators';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { packageUpsertStatements } from './catalogue-write-package.js';
@@ -208,10 +213,70 @@ describe('ingest session state', () => {
     await expect(sessions.advance(org, h, { cursor: 'ok', addSeen: -1 })).rejects.toThrow(
       RangeError,
     );
-    expect(await sessions.setPendingValidators(org, h, { p2: { etag: '"1"' } })).toBe(true);
+    expect(
+      await sessions.setPendingValidators(
+        org,
+        h,
+        parsePendingValidators({ 'composer-p2': { etag: '"1"' } }),
+      ),
+    ).toBe(true);
     const [row] = await rows();
-    expect(JSON.parse(String(row?.pending_validators))).toEqual({ p2: { etag: '"1"' } });
+    expect(JSON.parse(String(row?.pending_validators))).toEqual({
+      'composer-p2': { etag: '"1"', lastModified: null, contentSha256: null },
+    });
     expect(row).toMatchObject({ cursor: 'y', seen_count: 5, pages_so_far: 2 });
+  });
+
+  it('rejects invalid validators without executing a write and preserves the stored column', async () => {
+    const sessions = createIngestSessions(database.executor);
+    const h = await sessions.acquire(org, pkg('widget'), A, 60);
+    if (h === 'held') throw new Error('unreachable');
+    const valid = parsePendingValidators({ 'composer-p2': { etag: '"1"' } });
+    await sessions.setPendingValidators(org, h, valid);
+    const [before] = await rows();
+    const batch = vi.spyOn(database.executor, 'batch');
+    const invalid: [unknown, typeof RangeError | typeof TypeError][] = [
+      [{ bogus: {} }, RangeError],
+      [{ 'composer-p2': null }, TypeError],
+      [{ 'composer-p2': [] }, TypeError],
+      [{ 'composer-p2': { etag: 1 } }, TypeError],
+      [{ 'composer-p2': { lastModified: false } }, TypeError],
+      [{ 'composer-p2': { contentSha256: 1 } }, TypeError],
+      [{ 'composer-p2': { etag: 'bad\n' } }, TypeError],
+      [{ 'composer-p2': { lastModified: 'bad\x7f' } }, TypeError],
+      [{ 'composer-p2': { contentSha256: 'A'.repeat(64) } }, TypeError],
+      [{ 'composer-p2': { etag: 'x'.repeat(1025) } }, TypeError],
+      [[], RangeError],
+      [1, RangeError],
+    ];
+    for (const [value, error] of invalid) {
+      expect(() => sessions.setPendingValidators(org, h, value as PendingValidators)).toThrow(
+        error,
+      );
+      expect(batch).not.toHaveBeenCalled();
+      expect((await rows())[0]).toEqual(before);
+    }
+    batch.mockRestore();
+    expect(await sessions.setPendingValidators(org, h, null)).toBe(true);
+    expect((await rows())[0]?.pending_validators).toBeNull();
+  });
+
+  it('caps normalised validators by UTF-8 byte length before writing', async () => {
+    const sessions = createIngestSessions(database.executor);
+    const h = await sessions.acquire(org, pkg('widget'), A, 60);
+    if (h === 'held') throw new Error('unreachable');
+    const oversized = Object.fromEntries(
+      UPSTREAM_FORMS.map((form) => [
+        form,
+        {
+          etag: '界'.repeat(1024),
+          lastModified: '界'.repeat(1024),
+          contentSha256: null,
+        },
+      ]),
+    );
+    expect(() => sessions.setPendingValidators(org, h, oversized)).toThrow(RangeError);
+    expect((await rows())[0]?.pending_validators).toBeNull();
   });
 
   it('3: abandon then acquire starts generation + 1 with no stamp and an empty cursor', async () => {

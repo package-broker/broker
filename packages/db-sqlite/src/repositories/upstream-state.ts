@@ -1,56 +1,22 @@
 import { sql, type RawBuilder } from 'kysely';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import { assertHeaderValue } from '@package-broker/core/ingest/validators';
 import { compile, db } from '../kysely.js';
-import type { UpstreamForm } from '../schema.js';
+import type {
+  PublishedValidators,
+  UpstreamForm,
+  UpstreamStateRepository,
+} from '@package-broker/core/db/upstream-state';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
 const SHA256 = /^[0-9a-f]{64}$/;
-const MAX_VALIDATOR_LENGTH = 1024;
-const hasControl = (value: string): boolean =>
-  [...value].some((char) => {
-    const code = char.charCodeAt(0);
-    return code < 0x20 || code === 0x7f;
-  });
 const MAX_TTL_SECONDS = 366 * 24 * 60 * 60;
 
-export interface UpstreamState {
-  readonly etag: string | null;
-  readonly lastModified: string | null;
-  readonly contentSha256: string | null;
-  readonly checkedAt: string;
-  readonly freshUntil: string;
-  readonly notFoundCount: number;
-  readonly firstNotFoundAt: string | null;
-}
-
-export interface PublishedValidators {
-  readonly etag: string | null;
-  readonly lastModified: string | null;
-  readonly contentSha256: string | null;
-}
-
-export interface UpstreamStateRepository {
-  get(ctx: OrgContext, packageId: string, form: UpstreamForm): Promise<UpstreamState | null>;
-  publishStatements(
-    ctx: OrgContext,
-    packageId: string,
-    form: UpstreamForm,
-    validators: PublishedValidators,
-    ttlSeconds: number,
-  ): ScalarStatement[];
-  touchStatements(
-    ctx: OrgContext,
-    packageId: string,
-    form: UpstreamForm,
-    ttlSeconds: number,
-  ): ScalarStatement[];
-  notFoundStatements(
-    ctx: OrgContext,
-    packageId: string,
-    form: UpstreamForm,
-    ttlSeconds: number,
-  ): ScalarStatement[];
-}
+export type {
+  PublishedValidators,
+  UpstreamState,
+  UpstreamStateRepository,
+} from '@package-broker/core/db/upstream-state';
 
 interface StateRow {
   readonly etag: string | null;
@@ -70,14 +36,6 @@ const later = (ttlSeconds: number): RawBuilder<string> => {
   }
   return sql<string>`strftime(${sql.lit(FORMAT)}, 'now', ${sql.lit(`+${ttlSeconds} seconds`)})`;
 };
-
-function assertHeaderValue(name: string, value: string | null): void {
-  if (value !== null && (value.length > MAX_VALIDATOR_LENGTH || hasControl(value))) {
-    throw new TypeError(
-      `${name} must be at most ${MAX_VALIDATOR_LENGTH} characters without control characters`,
-    );
-  }
-}
 
 function assertValidators(validators: PublishedValidators): void {
   assertHeaderValue('etag', validators.etag);

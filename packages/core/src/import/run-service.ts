@@ -1,4 +1,5 @@
 import type { OrgContext, OrgId, Statement } from '../db/port.js';
+import type { Clock } from '../ids.js';
 import {
   fenceKind,
   type FencedOutcome,
@@ -6,6 +7,24 @@ import {
   type TokenMutationFence,
 } from '../authz/fence.js';
 import { canonicalManifest, MAX_MANIFEST_BYTES, parseManifest, planHash } from './manifest.js';
+
+export interface ImportRunJobPayload {
+  readonly runId: string;
+}
+
+export const IMPORT_RUN_JOB = {
+  apply: 'core:import-apply:v1',
+  rollback: 'core:import-rollback:v1',
+  resourceKey: (runId: string): string => `import:${runId}`,
+  payload: (runId: string): ImportRunJobPayload => ({ runId }),
+} as const;
+
+/** Approval evidence permits at most one minute of clock skew. */
+export function validImportApprovalTimestamp(value: string | null, nowMs: number): boolean {
+  if (value === null) return false;
+  const time = timestamp(value);
+  return time !== null && time <= nowMs + 60_000;
+}
 
 export type ImportRunState =
   | 'planned'
@@ -206,8 +225,9 @@ function outcome<T>(answer: ImportRunWriteOutcome, value: T): ImportRunResult<T>
 export function createImportRunService(deps: {
   readonly store: ImportRunStore;
   readonly ids: { ulid(): string };
+  readonly clock: Clock;
 }): ImportRunService {
-  const { store } = deps;
+  const { store, clock } = deps;
 
   async function transition(
     ctx: OrgContext,
@@ -225,7 +245,16 @@ export function createImportRunService(deps: {
     if (run === null || run.orgId !== ctx.orgId || run.id !== input.runId) return fail('not_found');
     if (!access.allowed) return fail('forbidden');
     if (!access.reauthFresh) return fail('reauth_required');
-    if (operation === 'requestApply' && run.approvedAt === null) return fail('not_approved');
+    if (
+      operation === 'approveRun' &&
+      !validImportApprovalTimestamp(input.now, clock.now().getTime())
+    )
+      return fail('invalid_time');
+    if (
+      operation === 'requestApply' &&
+      !validImportApprovalTimestamp(run.approvedAt, clock.now().getTime())
+    )
+      return fail('not_approved');
     let extra: Partial<ImportRunWrite> = {};
     switch (operation) {
       case 'approveRun': {

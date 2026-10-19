@@ -24,15 +24,15 @@ export type VisibilityResult =
     };
 
 type Operation = keyof VisibilityStore;
-type Input<K extends Operation> = K extends 'setOrder'
-  ? Pick<Parameters<VisibilityStore['setOrder']>[2], 'projectId' | 'sourceIds'>
-  : Parameters<VisibilityStore[K]>[2];
+type AuditedOperation =
+  'attachSource' | 'detachSource' | 'setPrecedence' | 'setOrder' | 'addPattern' | 'removePattern';
+type Input<K extends Operation> = Omit<Parameters<VisibilityStore[K]>[2], 'audit' | 'idempotency'>;
 export type VisibilityService = {
   [K in Operation]: (
     ctx: OrgContext,
     fence: MutationFence,
     input: Input<K>,
-    ...call: K extends 'setOrder' ? [call: ApiCall] : []
+    ...call: K extends AuditedOperation ? [call: ApiCall] : []
   ) => Promise<VisibilityResult>;
 };
 
@@ -167,49 +167,75 @@ export function createVisibilityService(deps: {
     return result;
   }
 
+  async function audited<K extends AuditedOperation>(
+    operation: K,
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: Input<K>,
+    call: ApiCall,
+  ): Promise<VisibilityResult> {
+    if (fenceKind(fence) !== 'session') throw new TypeError('visibility requires a session fence');
+    validate(operation, input);
+    if (operation === 'setOrder' && fence.expected['project'] === undefined) {
+      throw new TypeError('fence must carry an expected project revision');
+    }
+    const action = {
+      attachSource: 'source.attach',
+      detachSource: 'source.detach',
+      setPrecedence: 'source.reorder',
+      setOrder: 'source.reorder',
+      addPattern: 'source.update',
+      removePattern: 'source.update',
+    } as const;
+    const extraFields = {
+      attachSource: ['precedence'],
+      detachSource: [],
+      setPrecedence: ['precedence'],
+      setOrder: ['sourceIds'],
+      addPattern: ['pattern', 'effect'],
+      removePattern: ['pattern'],
+    } as const;
+    const fields = input as Record<string, unknown>;
+    const cleanInput = Object.fromEntries(
+      [...ID_FIELDS[operation], ...extraFields[operation]]
+        .filter((field) => Object.hasOwn(fields, field))
+        .map((field) => [field, fields[field]]),
+    );
+    const event = auditEvent({
+      id: ulid(),
+      now: new Date().toISOString(),
+      action: action[operation],
+      actor: { type: 'user', id: fence.userId },
+      context: call.audit,
+      target:
+        operation !== 'setOrder'
+          ? { type: 'source', id: cleanInput['sourceId'] as string }
+          : { type: 'project', id: input.projectId },
+      projectId: input.projectId,
+    });
+    if (!event.ok) throw new TypeError('invalid visibility audit event');
+    return execute(
+      operation,
+      ctx,
+      fence,
+      {
+        ...cleanInput,
+        audit: event.event,
+        ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+      } as Parameters<VisibilityStore[K]>[2],
+      deps.store[operation],
+    );
+  }
+
   return {
-    attachSource: (ctx, fence, input) =>
-      execute('attachSource', ctx, fence, input, deps.store.attachSource),
-    detachSource: (ctx, fence, input) =>
-      execute('detachSource', ctx, fence, input, deps.store.detachSource),
-    setPrecedence: (ctx, fence, input) =>
-      execute('setPrecedence', ctx, fence, input, deps.store.setPrecedence),
-    setOrder: async (ctx, fence, input, call) => {
-      if (fenceKind(fence) !== 'session')
-        throw new TypeError('visibility requires a session fence');
-      validate('setOrder', input);
-      if (fence.expected['project'] === undefined) {
-        throw new TypeError('fence must carry an expected project revision');
-      }
-      const event = auditEvent({
-        id: ulid(),
-        now: new Date().toISOString(),
-        action: 'source.reorder',
-        actor: { type: 'user', id: fence.userId },
-        context: call.audit,
-        target: { type: 'project', id: input.projectId },
-        projectId: input.projectId,
-      });
-      if (!event.ok) throw new TypeError('invalid visibility audit event');
-      return execute(
-        'setOrder',
-        ctx,
-        fence,
-        {
-          projectId: input.projectId,
-          sourceIds: input.sourceIds,
-          audit: event.event,
-          ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
-        },
-        deps.store.setOrder,
-      );
-    },
+    attachSource: (ctx, fence, input, call) => audited('attachSource', ctx, fence, input, call),
+    detachSource: (ctx, fence, input, call) => audited('detachSource', ctx, fence, input, call),
+    setPrecedence: (ctx, fence, input, call) => audited('setPrecedence', ctx, fence, input, call),
+    setOrder: (ctx, fence, input, call) => audited('setOrder', ctx, fence, input, call),
     setPackageFlag: (ctx, fence, input) =>
       execute('setPackageFlag', ctx, fence, input, deps.store.setPackageFlag),
-    addPattern: (ctx, fence, input) =>
-      execute('addPattern', ctx, fence, input, deps.store.addPattern),
-    removePattern: (ctx, fence, input) =>
-      execute('removePattern', ctx, fence, input, deps.store.removePattern),
+    addPattern: (ctx, fence, input, call) => audited('addPattern', ctx, fence, input, call),
+    removePattern: (ctx, fence, input, call) => audited('removePattern', ctx, fence, input, call),
     addExplicit: (ctx, fence, input) =>
       execute('addExplicit', ctx, fence, input, deps.store.addExplicit),
     removeExplicit: (ctx, fence, input) =>

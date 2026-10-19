@@ -21,6 +21,7 @@ import {
   WRITE_GUARD,
   WRITE_ORG,
   REVISION_CLOCK,
+  guardPasses,
   ref,
   NOT_NULL,
   seedSource,
@@ -154,6 +155,90 @@ function reblobCase(stage: ReblobStage, table: ReblobTable): ContractCase {
   };
 }
 
+type Stage = 'precheck' | 'before-image' | 'replace' | 'postcondition' | 'advance';
+type Table = 'version' | 'package' | 'blob' | 'before';
+const stages: readonly [Stage, readonly Table[]][] = [
+  ['precheck', ['version', 'package', 'blob']],
+  ['before-image', ['version', 'package', 'blob']],
+  ['replace', ['version', 'blob', 'before']],
+  ['postcondition', ['version', 'blob', 'before']],
+  ['advance', ['package', 'version']],
+];
+
+function probe(stage: Stage, table: Table): ContractCase {
+  return {
+    name: `re-blob scopes ${table} in its ${stage}`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      const scopedOrg = (candidate: Table) => (candidate === table ? foreign.orgId : own.orgId);
+      await seedSource(seed, 'S', own.orgId, 'composer_repository');
+      await seedPackage(seed, 'K', scopedOrg('package'), 'S', 'acme/widget');
+      await seedVersion(seed, 'V', scopedOrg('version'), 'K', '1.0.0');
+      await seed(
+        'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key) VALUES (?, ?, ?, 1, ?)',
+        'OLD',
+        own.orgId,
+        HASH,
+        'old',
+      );
+      await seed(
+        'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key) VALUES (?, ?, ?, 1, ?)',
+        'NEW',
+        scopedOrg('blob'),
+        OTHER_HASH,
+        'new',
+      );
+      await seed("UPDATE version SET blob_id = 'OLD' WHERE id = 'V'");
+      const guard = createCatalogueWriteGuard(own, WRITE_GUARD);
+      const plan = replaceBlobStatements(own, guard, {
+        versionId: 'V',
+        expectedRevision: 1,
+        oldBlobId: 'OLD',
+        newSha256: OTHER_HASH as Sha256,
+        reason: 'refetch_changed',
+      });
+      const statements = plan.statements.slice(guard.length);
+      const index = stages.findIndex(([name]) => name === stage);
+      const statement = statements[index];
+      if (statement === undefined) throw new Error('re-blob statement missing');
+      if (stage === 'replace' || stage === 'postcondition') {
+        await seed(
+          `INSERT INTO version_revision (id, org_id, version_id, revision, blob_id,
+            metadata_json, reason, op_id) VALUES ('R', ?, 'V', 1, 'OLD', '{}', 'refetch_changed', ?)`,
+          scopedOrg('before'),
+          plan.opId,
+        );
+      }
+      if (stage === 'postcondition') {
+        await seed(
+          "UPDATE version SET blob_id = 'NEW', revision = 2, last_op_id = ? WHERE id = 'V'",
+          plan.opId,
+        );
+      } else if (stage === 'advance') {
+        await seed("UPDATE version SET last_op_id = ? WHERE id = 'V'", plan.opId);
+      }
+      if (stage === 'precheck' || stage === 'postcondition') {
+        expect(await guardPasses(context, [statement], true)).toBe(false);
+        return;
+      }
+      const [result] = await context.executor.batch([context.mutate(statement)]);
+      if (stage === 'replace' && table === 'blob') {
+        // The standalone update can assign NULL; the batch postcondition refuses that result.
+        expect(result?.changes).toBe(1);
+        expect(
+          await context.executor.all({
+            sql: "SELECT blob_id FROM version WHERE id = 'V'",
+            params: [],
+          }),
+        ).toEqual([{ blob_id: null }]);
+      } else {
+        expect(result?.changes).toBe(0);
+      }
+    },
+  };
+}
+
 const reblobCases = REBLOB_STAGES.flatMap(([stage, tables]) =>
   tables.map((table) => ({ stage, table, contractCase: reblobCase(stage, table) })),
 );
@@ -161,14 +246,28 @@ const reblobCases = REBLOB_STAGES.flatMap(([stage, tables]) =>
 const reblobEntry: MutationEntry = {
   builder: 'replaceBlobStatements',
   file: 'repositories/catalogue-reblob.ts',
-  cases: reblobCases.map(({ contractCase }) => contractCase),
-  predicates: reblobCases.map(({ stage, table, contractCase }) => ({
-    name: `${stage} scopes ${table} to the organization`,
-    locate: ref(table, 'org_id', '\\?'),
-    neutral: NOT_NULL,
-    copies: 1,
-    caseName: contractCase.name,
-  })),
+  cases: [
+    ...reblobCases.map(({ contractCase }) => contractCase),
+    ...stages.flatMap(([stage, tables]) => tables.map((table) => probe(stage, table))),
+  ],
+  predicates: [
+    ...reblobCases.map(({ stage, table, contractCase }) => ({
+      name: `${stage} scopes ${table} to the organization`,
+      locate: ref(table, 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      copies: 1,
+      caseName: contractCase.name,
+    })),
+    ...stages.flatMap(([stage, tables]) =>
+      tables.map((table) => ({
+        name: `${stage} ${table}`,
+        locate: ref(table, 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: probe(stage, table).name,
+      })),
+    ),
+  ],
   decisions: [
     {
       name: 'blob replacement reads the revision clock once',
@@ -177,10 +276,10 @@ const reblobEntry: MutationEntry = {
       build: () => reblobPlan(WRITE_ORG).statements,
     },
     {
-      name: 'blob replacement reads the clock four times including its lease guard',
+      name: 'blob replacement reads the clock twice including its lease guard',
       pattern:
         /(?:strftime\('[^']*',\s*'now'(?:,\s*'[^']*')?\)|unixepoch\('now'(?:,\s*'[^']*')?\))/,
-      expected: 4,
+      expected: 2,
       build: () => reblobPlan(WRITE_ORG).statements,
     },
   ],

@@ -11,7 +11,7 @@ import { MAX_METADATA_BYTES } from '@package-broker/core/catalogue/metadata';
 import { validateVersion, type VersionEcosystem } from '@package-broker/core/catalogue/versions';
 import { parseHistoryDate } from '@package-broker/core/catalogue/version-rules';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
-import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import { assertCatalogueWriteGuard, monotonicNow } from '../internal/catalogue-write-guard.js';
 
 export const MAX_UPDATE_VERSIONS_PER_CALL = CATALOGUE_SYNC_VERSIONS_PER_CALL;
 const MAX_BATCH_PARAMETER_BYTES = 4 * 1024 * 1024;
@@ -154,10 +154,7 @@ export function versionUpdateStatements(
         .updateTable('package')
         .set({
           rev: sql<number>`package.rev + 1`,
-          modified_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', max(
-            unixepoch('now', 'subsec'),
-            unixepoch(package.modified_at, 'subsec') + 0.001
-          ), 'unixepoch')`,
+          modified_at: monotonicNow,
         })
         .where('package.id', '=', packageId)
         .where('package.org_id', '=', ctx.orgId)

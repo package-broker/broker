@@ -135,7 +135,7 @@ type KernelEnv = {
 type RegisteredRoute = Registration['routes'][number];
 
 const CORE_PLUGIN = 'core';
-/** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated boundary. */
+/** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated and self boundaries. */
 const AUTHENTICATED_PLACEHOLDER = 'authenticated';
 const CORE_PREFIX = '/_pb/';
 const RESERVED_ROOTS = ['/health', '/_pb'] as const;
@@ -493,11 +493,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
     scope.set({ route: route.path });
     const permission =
-      route.permission ?? (route.boundary === 'authenticated' ? AUTHENTICATED_PLACEHOLDER : null);
-    if (route.boundary === 'self') {
-      guard.reason('authz.unauthenticated');
-      return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
-    }
+      route.permission ??
+      (route.boundary === 'authenticated' || route.boundary === 'self'
+        ? AUTHENTICATED_PLACEHOLDER
+        : null);
     if (permission === null) {
       const org = route.needsOrg === false ? null : await resolveOrg();
       return invoke(route, c, org, null, null, {

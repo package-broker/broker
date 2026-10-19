@@ -17,5 +17,5 @@ How you verified the change, for example the commands you ran and the cases you 
 - [ ] Signed-off-by on every commit (`git commit -s`)
 - [ ] Title follows Conventional Commits, with the package directory as scope
 - [ ] A change to a published contract (exports, plugin API, HTTP routes, configuration) adds entries to `BACKWARD_COMPATIBILITY.md` and `UPGRADE_NOTES.md` (once present)
-- [ ] A change to a recorded decision updates `docs/decisions/` (once present)
+- [ ] A change to a recorded decision updates `docs/decisions/`
 - [ ] Docs and tests are updated

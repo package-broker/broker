@@ -6,9 +6,9 @@ Contributions are welcome. This repository is pre-release, so the API and the pl
 
 For anything beyond a small fix, open an issue first and describe the problem you want to solve, so the approach can be agreed before you invest time in it. Small fixes (typos, documentation, clear bugs) can go straight to a pull request. The issue forms cover bug reports, feature requests, plugin proposals and documentation requests.
 
-## Set up
+## Setup
 
-You need Node 24 or newer (`.nvmrc` and the `engines` field in `package.json` say which) and pnpm. The pnpm version is pinned in `package.json`; `corepack enable` provides it. You do not need a Cloudflare account: the Cloudflare runtime runs locally in Miniflare, and the Node runtime runs as a plain process.
+You need Node 24 or newer (`.nvmrc` and the `engines` field in `package.json` say which) and pnpm. The pnpm version is pinned in `package.json`; `corepack enable` provides it. You do not need a Cloudflare account to develop or to run the checks: the Cloudflare runtime runs locally in Miniflare, and the Node runtime runs as a plain process. An account is needed only to deploy (see README.md).
 
 One command installs, builds, tests and exercises both runtimes:
 
@@ -22,17 +22,19 @@ corepack enable && pnpm install --frozen-lockfile && pnpm check && pnpm bundle &
 
 A pull request must pass the checks CI runs:
 
-| Command                                    | What it checks                                                    |
-| ------------------------------------------ | ----------------------------------------------------------------- |
-| `pnpm typecheck`                           | TypeScript project references                                     |
-| `pnpm lint`                                | ESLint and the Prettier style                                     |
-| `pnpm test`                                | Unit tests (Vitest)                                               |
-| `pnpm build`                               | TypeScript build and the UI build                                 |
-| `pnpm check`                               | All four of the above                                             |
-| `pnpm check:treeshake`                     | Each runtime bundle excludes code it must not ship; needs a build |
-| `pnpm check:pack`                          | Packed packages contain what they publish; needs a build          |
-| `pnpm smoke:cloudflare`, `pnpm smoke:node` | The runtime bundles start and answer; need `pnpm bundle`          |
-| `pnpm client-matrix`                       | Package manager client matrix                                     |
+| Command                                    | What it checks                                                                                                        |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                           | TypeScript project references                                                                                         |
+| `pnpm lint`                                | ESLint and the Prettier style                                                                                         |
+| `pnpm test`                                | Unit tests (Vitest)                                                                                                   |
+| `pnpm build`                               | TypeScript build and the UI build                                                                                     |
+| `pnpm check`                               | All four of the above                                                                                                 |
+| `pnpm check:treeshake`                     | Each runtime bundle excludes code it must not ship; needs a build                                                     |
+| `pnpm check:pack`                          | Packed packages contain what they publish; needs a build                                                              |
+| `pnpm smoke:cloudflare`, `pnpm smoke:node` | The runtime bundles start and answer; need `pnpm bundle`                                                              |
+| `pnpm client-matrix`                       | Installs through one package manager client; set `CLIENT` and `CLIENT_VERSION` as CI does (composer, npm, pnpm, yarn) |
+
+CI also checks the `Signed-off-by` trailer on every commit and the pull request title format (see below).
 
 `pnpm format` rewrites files to the Prettier style that `pnpm lint` checks.
 
@@ -58,7 +60,7 @@ A change to a published contract (package `exports` maps, the plugin API, HTTP r
 
 ## Proposing a plugin or adapter
 
-Plugins are composed into the bundle at build time and may import only the `@package-broker/core` root and `@package-broker/core/plugin`. Open a plugin proposal issue naming the port or hook you target and the first adapter or use case, and say why it cannot live in its own repository. See [ADR-004](docs/decisions/plugin-api-and-composition.md) for the composition model.
+Plugins are composed into the bundle at build time and may import only the `@package-broker/core` root and `@package-broker/core/plugin`. Open a plugin proposal issue naming the port or hook you target and the first adapter or use case, and say why it cannot live in its own repository. See [ADR-004](docs/decisions/plugin-api-and-composition.md#adr-004-modular-build-composition-at-build-time-with-deny-only-hooks) for the composition model.
 
 ## What is not accepted
 

@@ -185,6 +185,7 @@ describe('node access smoke over HTTP', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'own',
             },
             apiCall,
           );

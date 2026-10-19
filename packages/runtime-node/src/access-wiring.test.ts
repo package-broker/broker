@@ -303,6 +303,7 @@ describe('node access wiring', () => {
                 mutationFence(authenticated, {}),
                 {
                   servicePrincipalId: principal.value.id,
+                  routeProjectId: projectId,
                   name: 'ci',
                   scope: 'read',
                   expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
@@ -332,6 +333,7 @@ describe('node access wiring', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'own',
             },
             apiCall,
           );

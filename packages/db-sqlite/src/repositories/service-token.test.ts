@@ -782,6 +782,7 @@ describe('core service over the real repository', () => {
 
   const request = {
     servicePrincipalId: SP,
+    routeProjectId: PROJECT,
     name: 'deploy',
     scope: 'write' as const,
     expiresAt: iso(7 * DAY),

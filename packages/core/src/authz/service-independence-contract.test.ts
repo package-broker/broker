@@ -287,6 +287,7 @@ function world() {
       fenceOf(userId),
       {
         servicePrincipalId: principalId,
+        routeProjectId: principals.get(principalId)!.projectId,
         name: 'deploy',
         scope,
         expiresAt: new Date(NOW_MS + 30 * DAY).toISOString(),

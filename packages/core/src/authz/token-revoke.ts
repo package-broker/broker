@@ -73,6 +73,7 @@ export type TokenRevokeResult =
   | { readonly ok: false; readonly error: TokenRevokeError };
 
 export interface TokenRevokeInput {
+  readonly via: 'own' | 'organization' | 'project';
   readonly tokenId: string;
   /** The project in the route URL; null on the own-token and organization routes. */
   readonly routeProjectId: string | null;
@@ -141,12 +142,28 @@ export function createTokenRevokeService(deps: TokenRevokeDeps): TokenRevokeServ
         throw new TypeError('routeProjectId must be null or a non-empty string');
       }
 
+      if (
+        (input.via === 'project' && routeProjectId === null) ||
+        ((input.via === 'own' || input.via === 'organization') && routeProjectId !== null)
+      ) {
+        throw new TypeError('via must agree with routeProjectId');
+      }
+      if (input.via !== 'own' && input.via !== 'organization' && input.via !== 'project') {
+        throw new TypeError('via must be own, organization or project');
+      }
+
       const found =
         typeof tokenId === 'string' && tokenId !== '' ? await tokens.get(ctx, tokenId) : null;
       const target =
         found !== null && (routeProjectId === null || found.projectId === routeProjectId)
           ? found
           : null;
+      if (
+        input.via === 'own' &&
+        (target === null || target.kind !== 'pat' || target.userId !== actorUserId)
+      ) {
+        return fail('not_found');
+      }
       let via: Via;
       let guard: FenceGuard;
       if (target !== null && target.kind === 'pat' && target.userId === actorUserId) {

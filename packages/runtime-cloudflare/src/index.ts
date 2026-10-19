@@ -405,6 +405,7 @@ async function buildAuth(
       ...common,
     }),
     servicePrincipals: createServicePrincipalService({
+      sessions: auth.sessions,
       principals: principalRepository,
       authority,
       directory: principalRepository,
@@ -670,6 +671,28 @@ function queueBatchOf(batch: unknown): QueueBatchLike {
   return { messages: Array.isArray(messages) ? (messages as QueueMessageLike[]) : [] };
 }
 
+export const BLOB_PURGE_LEASE_SECONDS = 900;
+export const BLOB_DELETE_TIMEOUT_MS = 30_000;
+
+export function blobPurgeTiming(
+  deleteTimeoutMs: number,
+  purgeLeaseSeconds: number,
+): { deleteTimeoutMs: number; leaseMs: number } {
+  const leaseMs = purgeLeaseSeconds * 1000;
+  if (
+    !Number.isInteger(leaseMs) ||
+    leaseMs <= 0 ||
+    !Number.isInteger(deleteTimeoutMs) ||
+    deleteTimeoutMs < 1000 ||
+    deleteTimeoutMs > leaseMs / 10
+  ) {
+    throw new KernelConfigError([
+      'blob.deleteTimeoutMs: must be at least 1000 ms and at most a tenth of the purge lease',
+    ]);
+  }
+  return { deleteTimeoutMs, leaseMs };
+}
+
 const uploadAdmission = createBlobUploadAdmission();
 
 function retryAll(messages: readonly QueueMessageLike[], report: (error: unknown) => void): void {
@@ -877,11 +900,16 @@ export function createWorker(
     const observability = delegatingObservability(() => current);
 
     const definitions = registration.jobs.map((job) => job.qualifiedName);
+    blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
     const platformServices: PlatformServices = Object.freeze({
-      blob: createBlobStore(createR2ByteStore(bound.bucket), createBlobRepository(executor), {
-        admission: uploadAdmission,
-        maxBytes: config.blob.maxBytes,
-      }),
+      blob: createBlobStore(
+        createR2ByteStore(bound.bucket),
+        createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+        {
+          admission: uploadAdmission,
+          maxBytes: config.blob.maxBytes,
+        },
+      ),
       cache: createCacheApiAdapter(
         bound.cacheStorage,
         config.cache.namespace ?? DEFAULT_CACHE_NAMESPACE,

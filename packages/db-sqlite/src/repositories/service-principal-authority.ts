@@ -1,4 +1,5 @@
 import { sql, type Kysely, type SqlBool } from 'kysely';
+import { REAUTH_WINDOW_MS } from '@package-broker/core/auth/session';
 import type { FenceGuard, MutationFence } from '@package-broker/core/authz/fence';
 import { catalogueTokenEligible } from '@package-broker/core/authz/catalogue';
 import { isPermission } from '@package-broker/core/authz/permissions';
@@ -9,6 +10,8 @@ import { actorHolds } from './actor-authority.js';
 import { permissionRows } from './access.js';
 
 type LooseDatabase = Record<string, Record<string, unknown>>;
+
+const REAUTH_WINDOW_SECONDS = REAUTH_WINDOW_MS / 1000;
 
 const loose = db as unknown as Kysely<LooseDatabase>;
 
@@ -25,6 +28,7 @@ export interface ServicePrincipalGuardInput {
   readonly coversStoredOf?: string;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
   readonly allowArchived?: boolean;
+  readonly freshReauth?: boolean;
 }
 
 function localSession(ctx: OrgContext, fence: MutationFence) {
@@ -100,7 +104,21 @@ export function servicePrincipalAuthorityGuard(
           select 1 from service_principal_permission stored
           where stored.org_id = ${ctx.orgId} and stored.service_principal_id = ${input.coversStoredOf}
             and stored.permission not in (select sa_stored.permission from ${live('sa_stored')}))`;
-  return assertGuard(sql<SqlBool>`(${held} and ${admin} and ${covered} and ${storedCovered})`, ctx);
+  const reauth = input.freshReauth
+    ? sql<SqlBool>`exists ${loose
+        .selectFrom('session as sp_reauth')
+        .select(sql.lit(1).as('one'))
+        .where('sp_reauth.org_id', '=', ctx.orgId)
+        .where('sp_reauth.id', '=', fence.sessionId)
+        .where('sp_reauth.user_id', '=', fence.userId)
+        .where(sql<SqlBool>`unixepoch(sp_reauth.reauth_at, 'subsec')
+          between unixepoch('now', 'subsec') - ${sql.lit(REAUTH_WINDOW_SECONDS)}
+            and unixepoch('now', 'subsec')`)}`
+    : sql<SqlBool>`1`;
+  return assertGuard(
+    sql<SqlBool>`(${held} and ${admin} and ${covered} and ${storedCovered} and ${reauth})`,
+    ctx,
+  );
 }
 
 export interface ServicePrincipalAuthorityOptions {

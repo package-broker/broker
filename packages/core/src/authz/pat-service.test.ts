@@ -21,6 +21,7 @@ import {
   type PersonalTokenIssueOutcome,
   type PersonalTokenServiceDeps,
 } from './pat-service.js';
+import { resolveTokenLifetimePolicy } from './token-lifetime.js';
 
 const ctx = orgContext('org-a');
 const NOW = '2026-10-16T12:00:00.000Z';
@@ -89,6 +90,7 @@ function rig(
   const logs: Record<string, unknown>[] = [];
   const minted: Rig['minted'] = [];
   const deps: PersonalTokenServiceDeps = {
+    lifetime: resolveTokenLifetimePolicy(undefined),
     tokens: {
       async issuePersonal(callCtx, callFence, input, mint) {
         calls.push({ ctx: callCtx, fence: callFence, input, mint });
@@ -350,7 +352,18 @@ describe('personal token issuance', () => {
     expect(JSON.stringify(Object.keys(result.value))).not.toContain('hash');
     expect(r.logs).toHaveLength(1);
     expect(Object.keys(r.logs[0]!).sort()).toEqual(
-      ['actorUserId', 'event', 'kind', 'level', 'orgId', 'projectMode', 'scope', 'tokenId'].sort(),
+      [
+        'actorUserId',
+        'defaulted',
+        'event',
+        'expiresAt',
+        'kind',
+        'level',
+        'orgId',
+        'projectMode',
+        'scope',
+        'tokenId',
+      ].sort(),
     );
   });
 
@@ -463,7 +476,10 @@ describe('personal token issuance', () => {
 
     it('allows exactly the configured maximum and refuses one millisecond more', async () => {
       const r = rig({ days: 30 });
-      const service = createPersonalTokenService(r.deps);
+      const service = createPersonalTokenService({
+        ...r.deps,
+        lifetime: resolveTokenLifetimePolicy({ maxLifetimeDays: { personal: 30 } }),
+      });
       expect(
         (await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(30) }), apiCall))
           .ok,
@@ -479,19 +495,26 @@ describe('personal token issuance', () => {
       ).toEqual({ ok: false, error: 'invalid_expiry' });
     });
 
-    it('caps a larger configured default at 90 days', async () => {
+    it('uses the operator maximum of 365 days', async () => {
       const r = rig({ days: 365 });
       const service = createPersonalTokenService(r.deps);
       expect(
-        (await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(90) }), apiCall))
-          .ok,
+        (
+          await service.issue(
+            ctx,
+            session(),
+            fence(),
+            allInput({ expiresAt: inDays(365) }),
+            apiCall,
+          )
+        ).ok,
       ).toBe(true);
       expect(
         await service.issue(
           ctx,
           session(),
           fence(),
-          allInput({ expiresAt: inDays(90, 1) }),
+          allInput({ expiresAt: inDays(365, 1) }),
           apiCall,
         ),
       ).toEqual({ ok: false, error: 'invalid_expiry' });

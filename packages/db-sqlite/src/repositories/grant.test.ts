@@ -1,3 +1,7 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { idempotencyInsertStatement } from './idempotency.js';
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -213,21 +217,38 @@ function createGrantRepository(
     listOrganization: async (ctx) =>
       (await fenced.listOrganization(ctx)).filter((grant) => grant.id !== actorOf(ctx).grant),
     suspendUser: async (ctx, userId, now) =>
-      fenced.suspendUser(ctx, await fenceFor(ctx), { userId: userId, now: now }),
+      fenced.suspendUser(ctx, await fenceFor(ctx), {
+        audit: mutationAudit('user.suspend', userId),
+        userId: userId,
+        now: now,
+      }),
     reactivateUser: async (ctx, userId, now) =>
-      fenced.reactivateUser(ctx, await fenceFor(ctx), { userId: userId, now: now }),
+      fenced.reactivateUser(ctx, await fenceFor(ctx), {
+        audit: mutationAudit('user.reactivate', userId),
+        userId: userId,
+        now: now,
+      }),
     countProtectedHolders: (ctx) => fenced.countProtectedHolders(ctx),
     createOrganization: async (ctx, input) =>
       fenced.createOrganization(ctx, await fenceFor(ctx), { ...input, opId: nextOp() }),
     deleteOrganization: async (ctx, id) => {
       return outcomeOf(
-        await fenced.deleteOrganization(ctx, await fenceFor(ctx, id), { id: id, opId: nextOp() }),
+        await fenced.deleteOrganization(ctx, await fenceFor(ctx, id), {
+          audit: mutationAudit('grant.revoke', id),
+          id: id,
+          opId: nextOp(),
+        }),
       );
     },
     revoke: async (ctx, id) =>
-      fenced.deleteOrganization(ctx, await fenceFor(ctx, id), { id: id, opId: nextOp() }),
+      fenced.deleteOrganization(ctx, await fenceFor(ctx, id), {
+        audit: mutationAudit('grant.revoke', id),
+        id: id,
+        opId: nextOp(),
+      }),
     changeRole: async (ctx, id, roleId, now) =>
       fenced.changeRole(ctx, await fenceFor(ctx, id), {
+        audit: mutationAudit('grant.role_change', id),
         id: id,
         roleId: roleId,
         now: now,
@@ -659,9 +680,15 @@ describe('createOrganization', () => {
   });
 
   it('creates an e-mail grant and a group grant', async () => {
-    expect(await grants.createOrganization(a, email(G1, 'new@example.test'))).toBe('created');
     expect(
       await grants.createOrganization(a, {
+        ...email(G1, 'new@example.test'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('created');
+    expect(
+      await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', G2),
         id: G2,
         subject: { type: 'group', provider: 'oidc', value: 'Admins' },
         roleId: AUDITOR,
@@ -695,17 +722,27 @@ describe('createOrganization', () => {
   });
 
   it('6: a project-scope, missing or foreign role gives role_scope_mismatch and stores nothing', async () => {
-    expect(await grants.createOrganization(a, email(G1, 'x@example.test', PROJECT_ROLE))).toBe(
-      'role_scope_mismatch',
-    );
-    expect(
-      await grants.createOrganization(a, email(G1, 'x@example.test', '01J0ROLEMISSING000000000AA')),
-    ).toBe('role_scope_mismatch');
-    expect(await grants.createOrganization(a, email(G1, 'x@example.test', ADMIN_B))).toBe(
-      'role_scope_mismatch',
-    );
     expect(
       await grants.createOrganization(a, {
+        ...email(G1, 'x@example.test', PROJECT_ROLE),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('role_scope_mismatch');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G1, 'x@example.test', '01J0ROLEMISSING000000000AA'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('role_scope_mismatch');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G1, 'x@example.test', ADMIN_B),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('role_scope_mismatch');
+    expect(
+      await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G1, 'x@example.test').id),
         ...email(G1, 'x@example.test'),
         subject: { type: 'group', provider: 'oidc', value: 'g' },
         roleId: PROJECT_ROLE,
@@ -715,48 +752,91 @@ describe('createOrganization', () => {
   });
 
   it('6: a second grant for the same subject is a duplicate, in either subject kind', async () => {
-    expect(await grants.createOrganization(a, email(G1, 'x@example.test'))).toBe('created');
-    expect(await grants.createOrganization(a, email(G2, 'x@example.test', AUDITOR))).toBe(
-      'duplicate',
-    );
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G1, 'x@example.test'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('created');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G2, 'x@example.test', AUDITOR),
+        audit: mutationAudit('grant.create', G2),
+      }),
+    ).toBe('duplicate');
     const group = {
       subject: { type: 'group', provider: 'oidc', value: 'g' } as const,
       roleId: AUDITOR,
       createdBy: null,
       now: NOW,
     };
-    expect(await grants.createOrganization(a, { id: G2, ...group })).toBe('created');
-    expect(await grants.createOrganization(a, { id: G3, ...group })).toBe('duplicate');
     expect(
       await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', G2),
+        id: G2,
+        ...group,
+      }),
+    ).toBe('created');
+    expect(
+      await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', G3),
+        id: G3,
+        ...group,
+      }),
+    ).toBe('duplicate');
+    expect(
+      await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', G3),
         id: G3,
         ...group,
         subject: { type: 'group', provider: 'access', value: 'g' },
       }),
     ).toBe('created');
-    expect(await grants.createOrganization(a, email(G1, 'other@example.test'))).toBe('duplicate');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G1, 'other@example.test'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('duplicate');
     expect(await grants.listOrganization(a)).toHaveLength(3);
   });
 
   it('6: a project grant of the same e-mail does not make an organization grant a duplicate', async () => {
     await seed([emailGrant(a, G1, 'x@example.test', PROJECT_ROLE, PROJECT)]);
-    expect(await grants.createOrganization(a, email(G2, 'x@example.test'))).toBe('created');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G2, 'x@example.test'),
+        audit: mutationAudit('grant.create', G2),
+      }),
+    ).toBe('created');
   });
 
   it('6: organizations are isolated', async () => {
-    expect(await grants.createOrganization(a, email(G1, 'x@example.test'))).toBe('created');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G1, 'x@example.test'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('created');
     await expect(
-      grants.createOrganization(b, email(GB, 'x@example.test', ADMIN_B)),
+      grants.createOrganization(b, {
+        ...email(GB, 'x@example.test', ADMIN_B),
+        audit: mutationAudit('grant.create', GB),
+      }),
     ).rejects.toThrow(TypeError);
     expect(
       await grants.createOrganization(b, {
+        audit: mutationAudit('grant.create', email(GB, 'x@example.test', ADMIN_B).id),
         ...email(GB, 'x@example.test', ADMIN_B),
         createdBy: UB,
       }),
     ).toBe('created');
-    expect(await grants.createOrganization(b, email(G2, 'y@example.test', ADMIN))).toBe(
-      'role_scope_mismatch',
-    );
+    expect(
+      await grants.createOrganization(b, {
+        ...email(G2, 'y@example.test', ADMIN),
+        audit: mutationAudit('grant.create', G2),
+      }),
+    ).toBe('role_scope_mismatch');
     expect(await grants.listOrganization(a)).toHaveLength(1);
     expect(await grants.listOrganization(b)).toHaveLength(1);
     expect(await rows('SELECT org_id, role_id FROM access_grant WHERE id = ?', GB)).toEqual([
@@ -775,10 +855,18 @@ describe('createOrganization', () => {
       })),
       holderInput,
     });
-    await expect(repository.createOrganization(a, email(G1, 'Upper@example.test'))).rejects.toThrow(
-      TypeError,
-    );
-    await expect(repository.createOrganization(a, email(G1, ''))).rejects.toThrow(TypeError);
+    await expect(
+      repository.createOrganization(a, {
+        ...email(G1, 'Upper@example.test'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      repository.createOrganization(a, {
+        ...email(G1, ''),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).rejects.toThrow(TypeError);
     for (const value of [
       ' x@example.test',
       'x@example.test ',
@@ -791,11 +879,17 @@ describe('createOrganization', () => {
       'x@example.test\n',
       `${'x'.repeat(250)}@example.test`,
     ]) {
-      await expect(repository.createOrganization(a, email(G1, value))).rejects.toThrow(TypeError);
+      await expect(
+        repository.createOrganization(a, {
+          ...email(G1, value),
+          audit: mutationAudit('grant.create', G1),
+        }),
+      ).rejects.toThrow(TypeError);
     }
     for (const provider of ['', 'OIDC', 'oidc ', 'a_b', '-oidc', 'x'.repeat(65)]) {
       await expect(
         repository.createOrganization(a, {
+          audit: mutationAudit('grant.create', email(G1, 'x@example.test').id),
           ...email(G1, 'x@example.test'),
           subject: { type: 'group', provider, value: 'g' },
         }),
@@ -813,6 +907,7 @@ describe('createOrganization', () => {
     ]) {
       await expect(
         repository.createOrganization(a, {
+          audit: mutationAudit('grant.create', email(G1, 'x@example.test').id),
           ...email(G1, 'x@example.test'),
           subject: { type: 'group', provider: 'oidc', value },
         }),
@@ -820,18 +915,24 @@ describe('createOrganization', () => {
     }
     await expect(
       repository.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G1, 'x@example.test').id),
         ...email(G1, 'x@example.test'),
         subject: { type: 'group', provider: ' oidc', value: 'g' },
       }),
     ).rejects.toThrow(TypeError);
     await expect(
       repository.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G1, 'x@example.test').id),
         ...email(G1, 'x@example.test'),
         subject: { type: 'group', provider: 'oidc', value: '' },
       }),
     ).rejects.toThrow(TypeError);
     await expect(
-      repository.createOrganization(a, { ...email(G1, 'x@example.test'), now: '2026-10-15' }),
+      repository.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G1, 'x@example.test').id),
+        ...email(G1, 'x@example.test'),
+        now: '2026-10-15',
+      }),
     ).rejects.toThrow(TypeError);
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
   });
@@ -840,13 +941,17 @@ describe('createOrganization', () => {
     const group = '\u{1f600}'.repeat(256);
     expect(
       await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G1, 'first.last+tag@sub.example.test').id),
         ...email(G1, 'first.last+tag@sub.example.test'),
         subject: { type: 'group', provider: 'oidc', value: group },
       }),
     ).toBe('created');
-    expect(await grants.createOrganization(a, email(G2, 'first.last+tag@sub.example.test'))).toBe(
-      'created',
-    );
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G2, 'first.last+tag@sub.example.test'),
+        audit: mutationAudit('grant.create', G2),
+      }),
+    ).toBe('created');
     expect((await grants.listOrganization(a)).map((grant) => grant.subject)).toContainEqual({
       type: 'group',
       provider: 'oidc',
@@ -855,12 +960,22 @@ describe('createOrganization', () => {
   });
 
   it('stores createdBy only for a user of the same organization', async () => {
-    expect(await grants.createOrganization(a, email(G1, 'x@example.test'))).toBe('created');
+    expect(
+      await grants.createOrganization(a, {
+        ...email(G1, 'x@example.test'),
+        audit: mutationAudit('grant.create', G1),
+      }),
+    ).toBe('created');
     await expect(
-      grants.createOrganization(a, { ...email(G2, 'y@example.test'), createdBy: UB }),
+      grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G2, 'y@example.test').id),
+        ...email(G2, 'y@example.test'),
+        createdBy: UB,
+      }),
     ).rejects.toThrow(TypeError);
     await expect(
       grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G2, 'y@example.test').id),
         ...email(G2, 'y@example.test'),
         createdBy: '01J0USER00000000000000ZZZZ',
       }),
@@ -869,13 +984,18 @@ describe('createOrganization', () => {
       await rows("SELECT id, created_by FROM access_grant WHERE id NOT LIKE '01J0ACTOR%'"),
     ).toEqual([{ id: G1, created_by: U1 }]);
     expect(
-      await grants.createOrganization(a, { ...email(G2, 'y@example.test'), createdBy: null }),
+      await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G2, 'y@example.test').id),
+        ...email(G2, 'y@example.test'),
+        createdBy: null,
+      }),
     ).toBe('created');
   });
 
   it('a missing role is reported before a createdBy problem', async () => {
     expect(
       await grants.createOrganization(a, {
+        audit: mutationAudit('grant.create', email(G1, 'x@example.test', PROJECT_ROLE).id),
         ...email(G1, 'x@example.test', PROJECT_ROLE),
         createdBy: UB,
       }),
@@ -892,7 +1012,10 @@ describe('createOrganization', () => {
         emailAuthoritativeDomains: ['example.test', 'actor.test'],
       })),
       holderInput,
-    }).createOrganization(a, email(G1, 'x@example.test'));
+    }).createOrganization(a, {
+      ...email(G1, 'x@example.test'),
+      audit: mutationAudit('grant.create', G1),
+    });
     expect(counted.counts().all + counted.counts().batch).toBe(1);
   });
 });
@@ -1043,7 +1166,11 @@ describe('deleteOrganization reports the user it offboards', () => {
           emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput,
-      }).deleteOrganization(a, await fenceFor(a, G1), { id: G1, opId: nextOp() }),
+      }).deleteOrganization(a, await fenceFor(a, G1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: nextOp(),
+      }),
     ).toEqual(deleted(U1));
     expect(statements.length).toBeGreaterThan(0);
     for (const statement of statements) expect(statement.params.length).toBeLessThanOrEqual(100);
@@ -1365,9 +1492,13 @@ describe('user status fence', () => {
       holderInput,
     });
     const epoch = await epochOf(a);
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U2),
+        userId: U2,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await statusOf(U2)).toBe('active');
     expect(await rows("SELECT revoked_at FROM session WHERE id LIKE '01J0SESSION%'")).toEqual([
       { revoked_at: null },
@@ -1391,9 +1522,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U2),
+        userId: U2,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await statusOf(U2)).toBe('active');
   });
 
@@ -1414,9 +1549,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
-      'suspended',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U2),
+        userId: U2,
+        now: LATER,
+      }),
+    ).toBe('suspended');
   });
 
   it('a non-admin may suspend a user who is no holder', async () => {
@@ -1430,9 +1569,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'suspended',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('suspended');
   });
 
   it('an actor without org:users:write is refused by the batch', async () => {
@@ -1446,14 +1589,22 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await statusOf(U3)).toBe('active');
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
-    expect(await repository.reactivateUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.reactivateUser(a, limitedFence(), {
+        audit: mutationAudit('user.reactivate', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await statusOf(U3)).toBe('suspended');
   });
 
@@ -1471,9 +1622,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await statusOf(U3)).toBe('active');
   });
 
@@ -1491,9 +1646,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('authority');
   });
 
   it('reactivating a user who is not suspended writes nothing', async () => {
@@ -1545,9 +1704,13 @@ describe('user status fence', () => {
     });
     const before = await snapshot();
     const epoch = await epochOf(a);
-    expect(await repository.reactivateUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.reactivateUser(a, limitedFence(), {
+        audit: mutationAudit('user.reactivate', U2),
+        userId: U2,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await snapshot()).toBe(before);
     expect(await epochOf(a)).toBe(epoch);
     expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
@@ -1572,9 +1735,13 @@ describe('user status fence', () => {
       holderInput,
     });
     const before = await snapshot();
-    expect(await repository.reactivateUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.reactivateUser(a, limitedFence(), {
+        audit: mutationAudit('user.reactivate', U2),
+        userId: U2,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(await snapshot()).toBe(before);
     expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
   });
@@ -1591,9 +1758,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.reactivateUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'reactivated',
-    );
+    expect(
+      await repository.reactivateUser(a, limitedFence(), {
+        audit: mutationAudit('user.reactivate', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('reactivated');
   });
 
   it('a refusal whose cause is gone by the time it is classified is a retryable conflict', async () => {
@@ -1625,9 +1796,13 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
-      'conflict',
-    );
+    expect(
+      await repository.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U2),
+        userId: U2,
+        now: LATER,
+      }),
+    ).toBe('conflict');
     expect(await statusOf(U2)).toBe('active');
   });
 
@@ -1684,10 +1859,20 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await busy.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe('conflict');
-    expect(await busy.reactivateUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
-      'conflict',
-    );
+    expect(
+      await busy.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('conflict');
+    expect(
+      await busy.reactivateUser(a, limitedFence(), {
+        audit: mutationAudit('user.reactivate', U3),
+        userId: U3,
+        now: LATER,
+      }),
+    ).toBe('conflict');
     const big = createFencedGrantRepository(failing('too_big'), {
       providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
         provider,
@@ -1698,12 +1883,20 @@ describe('user status fence', () => {
       holderInput,
     });
     await expect(
-      big.suspendUser(a, limitedFence(), { userId: U3, now: LATER }),
+      big.suspendUser(a, limitedFence(), {
+        audit: mutationAudit('user.suspend', U3),
+        userId: U3,
+        now: LATER,
+      }),
     ).rejects.toMatchObject({
       kind: 'too_big',
     });
     await expect(
-      big.reactivateUser(a, limitedFence(), { userId: U3, now: LATER }),
+      big.reactivateUser(a, limitedFence(), {
+        audit: mutationAudit('user.reactivate', U3),
+        userId: U3,
+        now: LATER,
+      }),
     ).rejects.toMatchObject({
       kind: 'too_big',
     });
@@ -2046,7 +2239,7 @@ describe('concurrent guarded operations on one file database', () => {
           },
           providers: new Map(),
           clock: fixedClock(LATER),
-          ids: { ulid: () => 'ID' },
+          ids: { ulid },
           log: (entry) => events.push(entry as { event?: string }),
         }),
       );
@@ -2472,6 +2665,7 @@ describe('fenced grant mutators', () => {
 
   const create = (acting: Acting, roleId: string, id = G1, email = 'new@example.test') =>
     fenced.createOrganization(a, fenceOfActing(acting), {
+      audit: mutationAudit('grant.create', id),
       id,
       subject: { type: 'email', value: email },
       roleId,
@@ -2541,12 +2735,17 @@ describe('fenced grant mutators', () => {
               break;
             case 'delete':
               result = outcomeOf(
-                await fenced.deleteOrganization(a, fence, { id: G2, opId: 'OPRECOVERY' }),
+                await fenced.deleteOrganization(a, fence, {
+                  audit: mutationAudit('grant.revoke', G2),
+                  id: G2,
+                  opId: 'OPRECOVERY',
+                }),
               );
               success = 'deleted';
               break;
             case 'changeRole':
               result = await fenced.changeRole(a, fence, {
+                audit: mutationAudit('grant.role_change', G2),
                 id: G2,
                 roleId: HIGH,
                 now: LATER,
@@ -2555,11 +2754,19 @@ describe('fenced grant mutators', () => {
               success = 'updated';
               break;
             case 'suspend':
-              result = await fenced.suspendUser(a, fence, { userId: U1, now: LATER });
+              result = await fenced.suspendUser(a, fence, {
+                audit: mutationAudit('user.suspend', U1),
+                userId: U1,
+                now: LATER,
+              });
               success = 'suspended';
               break;
             case 'reactivate':
-              result = await fenced.reactivateUser(a, fence, { userId: U1, now: LATER });
+              result = await fenced.reactivateUser(a, fence, {
+                audit: mutationAudit('user.reactivate', U1),
+                userId: U1,
+                now: LATER,
+              });
               success = 'reactivated';
               break;
           }
@@ -2601,6 +2808,7 @@ describe('fenced grant mutators', () => {
     const before = await worldState();
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: LOW,
         now: LATER,
@@ -2609,6 +2817,7 @@ describe('fenced grant mutators', () => {
     ).toBe('authority');
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G2),
         id: G2,
         roleId: HIGH,
         now: LATER,
@@ -2617,6 +2826,7 @@ describe('fenced grant mutators', () => {
     ).toBe('authority');
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G2),
         id: G2,
         roleId: ADMIN,
         now: LATER,
@@ -2626,6 +2836,7 @@ describe('fenced grant mutators', () => {
     expect(await worldState()).toBe(before);
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G2),
         id: G2,
         roleId: LOW,
         now: LATER,
@@ -2646,6 +2857,7 @@ describe('fenced grant mutators', () => {
     ]);
     expect(
       await fenced.createOrganization(a, fence, {
+        audit: mutationAudit('grant.create', G1),
         id: G1,
         subject: { type: 'email', value: 'new@example.test' },
         roleId: HIGH,
@@ -2662,18 +2874,30 @@ describe('fenced grant mutators', () => {
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     await seed([stmt('UPDATE session SET revoked_at = ? WHERE id = ?', NOW, writer.sessionId)]);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP1' }),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP1',
+      }),
     ).toBe('authority');
     const other = await actingAs('other', WRITER);
     await seed([
       stmt('UPDATE user_account SET status = ? WHERE id = ?', 'suspended', other.userId),
     ]);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(other, 1), { id: G1, opId: 'OP2' }),
+      await fenced.deleteOrganization(a, fenceOfActing(other, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP2',
+      }),
     ).toBe('authority');
     const foreign = await actingAs('foreign', WRITER);
     expect(
-      await fenced.deleteOrganization(b, fenceOfActing(foreign, 1), { id: G1, opId: 'OP3' }),
+      await fenced.deleteOrganization(b, fenceOfActing(foreign, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP3',
+      }),
     ).toBe('authority');
     expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([{ id: G1 }]);
   });
@@ -2682,7 +2906,11 @@ describe('fenced grant mutators', () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'departing@example.test', HIGH)]);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP1' }),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP1',
+      }),
     ).toMatchObject({
       outcome: 'deleted',
     });
@@ -2698,10 +2926,15 @@ describe('fenced grant mutators', () => {
     ]);
     const before = await worldState();
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP1' }),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP1',
+      }),
     ).toBe('authority');
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: LOW,
         now: LATER,
@@ -2710,7 +2943,11 @@ describe('fenced grant mutators', () => {
     ).toBe('authority');
     expect(await worldState()).toBe(before);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(admin, 1), { id: G1, opId: 'OP3' }),
+      await fenced.deleteOrganization(a, fenceOfActing(admin, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP3',
+      }),
     ).toMatchObject({
       outcome: 'deleted',
     });
@@ -2728,10 +2965,15 @@ describe('fenced grant mutators', () => {
     ]);
     const before = await worldState();
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(admin, 1), { id: G1, opId: 'OP1' }),
+      await fenced.deleteOrganization(a, fenceOfActing(admin, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP1',
+      }),
     ).toBe('last_holder');
     expect(
       await fenced.changeRole(a, fenceOfActing(admin, 1), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: LOW,
         now: LATER,
@@ -2746,10 +2988,15 @@ describe('fenced grant mutators', () => {
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     const before = await worldState();
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 7), { id: G1, opId: 'OP1' }),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 7), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP1',
+      }),
     ).toBe('conflict');
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 7), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: LOW,
         now: LATER,
@@ -2764,19 +3011,39 @@ describe('fenced grant mutators', () => {
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     const stale = fenceOfActing(writer, 1);
     expect(
-      await fenced.changeRole(a, stale, { id: G1, roleId: LOW, now: LATER, opId: 'OPCHANGE' }),
+      await fenced.changeRole(a, stale, {
+        audit: mutationAudit('grant.role_change', G1),
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OPCHANGE',
+      }),
     ).toBe('updated');
     expect(await rows('SELECT revision, last_op_id FROM access_grant WHERE id = ?', G1)).toEqual([
       { revision: 2, last_op_id: 'OPCHANGE' },
     ]);
     expect(
-      await fenced.changeRole(a, stale, { id: G1, roleId: LOW, now: LATER, opId: 'OPAGAIN' }),
+      await fenced.changeRole(a, stale, {
+        audit: mutationAudit('grant.role_change', G1),
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OPAGAIN',
+      }),
     ).toBe('conflict');
-    expect(await fenced.deleteOrganization(a, stale, { id: G1, opId: 'OPDELETE' })).toBe(
-      'conflict',
-    );
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 2), { id: G1, opId: 'OPDELETE' }),
+      await fenced.deleteOrganization(a, stale, {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OPDELETE',
+      }),
+    ).toBe('conflict');
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 2), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OPDELETE',
+      }),
     ).toMatchObject({ outcome: 'deleted' });
   });
 
@@ -2784,10 +3051,15 @@ describe('fenced grant mutators', () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G3, opId: 'OP1' }),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.revoke', G3),
+        id: G3,
+        opId: 'OP1',
+      }),
     ).toBe('not_found');
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G3),
         id: G3,
         roleId: LOW,
         now: LATER,
@@ -2797,6 +3069,7 @@ describe('fenced grant mutators', () => {
     await seed([role(a, '01J0ROLEPROJECTOPEN000000', 'open_project', 'project', 0)]);
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: '01J0ROLEPROJECTOPEN000000',
         now: LATER,
@@ -2810,13 +3083,27 @@ describe('fenced grant mutators', () => {
     const writer = await actingAs('writer', WRITER);
     statements.length = 0;
     await expect(
-      fenced.deleteOrganization(a, fenceOfActing(writer), { id: G1, opId: 'OP1' }),
+      fenced.deleteOrganization(a, fenceOfActing(writer), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP1',
+      }),
     ).rejects.toThrow(TypeError);
     await expect(
-      fenced.changeRole(a, fenceOfActing(writer), { id: G1, roleId: LOW, now: LATER, opId: 'OP1' }),
+      fenced.changeRole(a, fenceOfActing(writer), {
+        audit: mutationAudit('grant.role_change', G1),
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP1',
+      }),
     ).rejects.toThrow(TypeError);
     await expect(
-      fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: '' }),
+      fenced.deleteOrganization(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: '',
+      }),
     ).rejects.toThrow(TypeError);
     expect(statements).toEqual([]);
   });
@@ -2831,33 +3118,68 @@ describe('fenced grant mutators', () => {
     await create(writer, HIGH, G3, 'z@example.test');
     await create(writer, LOW, G3, 'z@example.test');
     await fenced.changeRole(a, fenceOfActing(writer, 1), {
+      audit: mutationAudit('grant.role_change', G2),
       id: G2,
       roleId: HIGH,
       now: LATER,
       opId: 'OP1',
     });
     await fenced.changeRole(a, fenceOfActing(writer, 9), {
+      audit: mutationAudit('grant.role_change', G2),
       id: G2,
       roleId: LOW,
       now: LATER,
       opId: 'OP2',
     });
     await fenced.changeRole(a, fenceOfActing(writer, 1), {
+      audit: mutationAudit('grant.role_change', G2),
       id: G2,
       roleId: LOW,
       now: LATER,
       opId: 'OP3',
     });
-    await fenced.deleteOrganization(a, fenceOfActing(writer, 9), { id: G1, opId: 'OP4' });
-    await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP5' });
+    await fenced.deleteOrganization(a, fenceOfActing(writer, 9), {
+      audit: mutationAudit('grant.revoke', G1),
+      id: G1,
+      opId: 'OP4',
+    });
+    await fenced.deleteOrganization(a, fenceOfActing(writer, 1), {
+      audit: mutationAudit('grant.revoke', G1),
+      id: G1,
+      opId: 'OP5',
+    });
     const manager = await actingAs('manager', ['org:users:write', 'org:read']);
     const lowManager = await actingAs('lowmanager', ['org:read']);
-    await fenced.suspendUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
-    await fenced.suspendUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
-    await fenced.suspendUser(a, fenceOfActing(lowManager), { userId: U2, now: LATER });
-    await fenced.reactivateUser(a, fenceOfActing(lowManager), { userId: U1, now: LATER });
-    await fenced.reactivateUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
-    await fenced.reactivateUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
+    await fenced.suspendUser(a, fenceOfActing(manager), {
+      audit: mutationAudit('user.suspend', U1),
+      userId: U1,
+      now: LATER,
+    });
+    await fenced.suspendUser(a, fenceOfActing(manager), {
+      audit: mutationAudit('user.suspend', U1),
+      userId: U1,
+      now: LATER,
+    });
+    await fenced.suspendUser(a, fenceOfActing(lowManager), {
+      audit: mutationAudit('user.suspend', U2),
+      userId: U2,
+      now: LATER,
+    });
+    await fenced.reactivateUser(a, fenceOfActing(lowManager), {
+      audit: mutationAudit('user.reactivate', U1),
+      userId: U1,
+      now: LATER,
+    });
+    await fenced.reactivateUser(a, fenceOfActing(manager), {
+      audit: mutationAudit('user.reactivate', U1),
+      userId: U1,
+      now: LATER,
+    });
+    await fenced.reactivateUser(a, fenceOfActing(manager), {
+      audit: mutationAudit('user.reactivate', U1),
+      userId: U1,
+      now: LATER,
+    });
     expect(statements.length).toBeGreaterThan(20);
     expect(Math.max(...statements.map((statement) => statement.params.length))).toBeLessThanOrEqual(
       100,
@@ -2933,8 +3255,20 @@ describe('fenced grant mutators', () => {
         { grant: 1 },
       );
       const outcomes = await Promise.all([
-        one.changeRole(org, fence, { id: G1, roleId: ADMIN_TWO, now: LATER, opId: 'OPONE' }),
-        two.changeRole(org, fence, { id: G1, roleId: ADMIN, now: LATER, opId: 'OPTWO' }),
+        one.changeRole(org, fence, {
+          audit: mutationAudit('grant.role_change', G1),
+          id: G1,
+          roleId: ADMIN_TWO,
+          now: LATER,
+          opId: 'OPONE',
+        }),
+        two.changeRole(org, fence, {
+          audit: mutationAudit('grant.role_change', G1),
+          id: G1,
+          roleId: ADMIN,
+          now: LATER,
+          opId: 'OPTWO',
+        }),
       ]);
       expect([...outcomes].sort()).toEqual(['conflict', 'updated']);
       expect(
@@ -2967,6 +3301,7 @@ describe('fenced grant mutators', () => {
       });
       await expect(
         repository.createOrganization(a, fenceOfActing(writer), {
+          audit: mutationAudit('grant.create', G1),
           id: G1,
           subject: { type: 'email', value: 'new@example.test' },
           roleId: LOW,
@@ -3004,6 +3339,7 @@ describe('fenced grant mutators', () => {
     expect(await revisionOfListed()).toBe(1);
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: HIGH,
         now: LATER,
@@ -3012,6 +3348,7 @@ describe('fenced grant mutators', () => {
     ).toBe('authority');
     expect(
       await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        audit: mutationAudit('grant.role_change', G1),
         id: G1,
         roleId: LOW,
         now: LATER,
@@ -3021,7 +3358,11 @@ describe('fenced grant mutators', () => {
     const revision = await revisionOfListed();
     expect(revision).toBe(2);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, revision), { id: G1, opId: 'OP3' }),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, revision), {
+        audit: mutationAudit('grant.revoke', G1),
+        id: G1,
+        opId: 'OP3',
+      }),
     ).toMatchObject({ outcome: 'deleted' });
   });
 
@@ -3030,6 +3371,7 @@ describe('fenced grant mutators', () => {
     const before = await worldState();
     await expect(
       fenced.createOrganization(a, fenceOfActing(writer), {
+        audit: mutationAudit('grant.create', G1),
         id: G1,
         subject: { type: 'email', value: 'new@example.test' },
         roleId: LOW,
@@ -3137,7 +3479,6 @@ describe('fenced grant mutators', () => {
           return shared.executor.batch(batch);
         },
       };
-      let next = 0;
       admin = createAdministration({
         roles: createRoleRepository(shared.executor, { providerAnchors: [] }),
         grants: createFencedGrantRepository(barrier, {
@@ -3152,7 +3493,7 @@ describe('fenced grant mutators', () => {
         users: { get: async () => ({ id: actorIds.user }) as never },
         providers: new Map(),
         clock: fixedClock(LATER),
-        ids: { ulid: () => `01J0STALEID${String(next++).padStart(15, '0')}` },
+        ids: { ulid },
         log: () => undefined,
       });
     });
@@ -3312,4 +3653,278 @@ it('checks holders with database time, matching anchors and at most 100 paramete
     providerAnchors: providers.map((p) => ({ ...p, anchor: 'https://wrong.example.test' })),
   });
   expect(await wrong.isProtectedHolder(a, U2)).toBe(false);
+});
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+
+describe('grant mutation audit and idempotency', () => {
+  const cases = [
+    ['createOrganization', 'grant.create', 'created'],
+    ['deleteOrganization', 'grant.revoke', 'deleted'],
+    ['changeRole', 'grant.role_change', 'updated'],
+    ['suspendUser', 'user.suspend', 'suspended'],
+    ['reactivateUser', 'user.reactivate', 'reactivated'],
+  ] as const;
+  type Method = (typeof cases)[number][0];
+
+  function record(requestHash = 'a'.repeat(64)): IdempotencyRecord {
+    return {
+      principalKey: 'user:admin',
+      key: 'grant-request',
+      route: '/grants',
+      requestHash,
+      status: 200,
+      responseJson: '{"ok":true}',
+      createdAt: NOW,
+      expiresAt: LATER,
+    };
+  }
+
+  async function snapshot() {
+    return Promise.all(
+      [
+        'access_grant',
+        'user_account',
+        'session',
+        'cache_epoch',
+        'audit_pending',
+        'api_idempotency',
+      ].map((table) =>
+        executor.all({
+          sql: `SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1, 2`,
+          params: [a.orgId],
+        }),
+      ),
+    );
+  }
+
+  async function fixture(method: Method, target: SqlExecutor = executor) {
+    const repository = createFencedGrantRepository(target, {
+      providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
+        provider,
+        anchor: ANCHOR,
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test', 'actor.test'],
+      })),
+      holderInput,
+    });
+    const ids = method === 'suspendUser' || method === 'reactivateUser' ? [U1, U2] : [G1, G2];
+    if (method === 'deleteOrganization' || method === 'changeRole') {
+      await seed([
+        emailGrant(a, G1, 'u1@example.test', AUDITOR),
+        emailGrant(a, G2, 'u2@example.test', AUDITOR),
+      ]);
+    }
+    if (method === 'reactivateUser') {
+      await seed([
+        stmt(
+          "UPDATE user_account SET status = 'suspended' WHERE org_id = ? AND id IN (?, ?)",
+          a.orgId,
+          U1,
+          U2,
+        ),
+      ]);
+    }
+    async function invoke(
+      index: number,
+      audit: ReturnType<typeof mutationAudit>,
+      idempotency?: IdempotencyRecord,
+      revision = 1,
+    ) {
+      const id = ids[index]!;
+      const actor = actorOf(a);
+      const fence = mutationFence(
+        { userId: actor.user, sessionId: actor.session } as unknown as AuthenticatedActor,
+        { grant: revision },
+      );
+      const common = {
+        id,
+        audit,
+        ...(idempotency === undefined ? {} : { idempotency }),
+        opId: nextOp(),
+      };
+      switch (method) {
+        case 'createOrganization':
+          return repository.createOrganization(a, fence, {
+            ...common,
+            subject: { type: 'email', value: `audit${index}@example.test` },
+            roleId: AUDITOR,
+            createdBy: null,
+            now: NOW,
+          });
+        case 'deleteOrganization': {
+          const result = await repository.deleteOrganization(a, fence, common);
+          return typeof result === 'string' ? result : result.outcome;
+        }
+        case 'changeRole':
+          return repository.changeRole(a, fence, { ...common, roleId: ADMIN_TWO, now: LATER });
+        case 'suspendUser':
+          return repository.suspendUser(a, fence, { ...common, userId: id, now: LATER });
+        case 'reactivateUser':
+          return repository.reactivateUser(a, fence, { ...common, userId: id, now: LATER });
+      }
+    }
+    return { ids, invoke };
+  }
+
+  for (const withIdempotency of [false, true]) {
+    it.each(cases)(
+      `%s persists one audit event (idempotency: ${withIdempotency})`,
+      async (method, action, success) => {
+        const f = await fixture(method);
+        const audit = mutationAudit(action, f.ids[0]!);
+        expect(await f.invoke(0, audit, withIdempotency ? record() : undefined)).toBe(success);
+        expect(
+          await executor.all(
+            stmt('SELECT org_id, action, target_type, target_id FROM audit_pending'),
+          ),
+        ).toEqual([
+          { org_id: a.orgId, action, target_type: action.split('.')[0], target_id: f.ids[0] },
+        ]);
+        expect(
+          await executor.all(
+            stmt(
+              'SELECT org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at FROM api_idempotency',
+            ),
+          ),
+        ).toEqual(
+          withIdempotency
+            ? [
+                {
+                  org_id: a.orgId,
+                  principal_key: record().principalKey,
+                  key: record().key,
+                  route: record().route,
+                  request_hash: record().requestHash,
+                  status: 200,
+                  response_json: record().responseJson,
+                  created_at: NOW,
+                  expires_at: LATER,
+                },
+              ]
+            : [],
+        );
+      },
+    );
+  }
+
+  it.each(cases)('%s authority refusal stores neither event nor record', async (method, action) => {
+    const f = await fixture(method);
+    await seed([
+      stmt(
+        'DELETE FROM role_permission WHERE org_id = ? AND role_id = ?',
+        a.orgId,
+        actorOf(a).role,
+      ),
+    ]);
+    const before = await snapshot();
+    expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record())).toBe('authority');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(cases.filter(([method]) => method === 'deleteOrganization' || method === 'changeRole'))(
+    '%s stale revision stores neither event nor record',
+    async (method, action) => {
+      const f = await fixture(method);
+      const before = await snapshot();
+      expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record(), 2)).toBe('conflict');
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  for (const hash of ['a'.repeat(64), 'b'.repeat(64)]) {
+    it.each(cases)(
+      `%s rolls back a repeated idempotency key (hash ${hash[0]})`,
+      async (method, action, success) => {
+        const f = await fixture(method);
+        expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record())).toBe(success);
+        const before = await snapshot();
+        expect(await f.invoke(1, mutationAudit(action, f.ids[1]!), record(hash))).toBe('conflict');
+        expect(await snapshot()).toEqual(before);
+      },
+    );
+  }
+
+  it.each(cases)(
+    '%s rolls back mutation, event and record when a later statement fails',
+    async (method, action) => {
+      const failing: SqlExecutor = {
+        driver: executor.driver,
+        all: executor.all,
+        batch: (statements) =>
+          executor.batch([
+            ...statements,
+            stmt("INSERT INTO access_mutation_guard (key) VALUES ('injected'), ('injected')"),
+          ]),
+      };
+      const f = await fixture(method, failing);
+      const before = await snapshot();
+      const call = f.invoke(0, mutationAudit(action, f.ids[0]!), record());
+      if (method === 'suspendUser' || method === 'reactivateUser')
+        await expect(call).resolves.toBe('conflict');
+      else await expect(call).rejects.toThrow(/unclassified/);
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  it.each(cases.filter(([method]) => method === 'suspendUser' || method === 'reactivateUser'))(
+    '%s unchanged status writes neither event nor record',
+    async (method, action, success) => {
+      const f = await fixture(method);
+      expect(await f.invoke(0, mutationAudit(action, f.ids[0]!))).toBe(success);
+      const before = await snapshot();
+      expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record())).toBe('unchanged');
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  it('duplicate grant stores neither event nor record', async () => {
+    const f = await fixture('createOrganization');
+    expect(await f.invoke(0, mutationAudit('grant.create', f.ids[0]!))).toBe('created');
+    const before = await snapshot();
+    expect(await f.invoke(0, mutationAudit('grant.create', f.ids[0]!), record())).toBe('duplicate');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('the same idempotency key in another organization does not conflict', async () => {
+    const f = await fixture('createOrganization');
+    await executor.batch([idempotencyInsertStatement(b, record())]);
+    expect(
+      await f.invoke(0, mutationAudit('grant.create', f.ids[0]!), record('b'.repeat(64))),
+    ).toBe('created');
+  });
+
+  it('the same idempotency key for another principal does not conflict', async () => {
+    const f = await fixture('createOrganization');
+    await executor.batch([
+      idempotencyInsertStatement(a, { ...record(), principalKey: 'user:other' }),
+    ]);
+    expect(
+      await f.invoke(0, mutationAudit('grant.create', f.ids[0]!), record('b'.repeat(64))),
+    ).toBe('created');
+  });
+
+  it('audit organization comes from context despite a foreign organization in the payload', async () => {
+    const f = await fixture('createOrganization');
+    const audit = {
+      ...mutationAudit('grant.create', f.ids[0]!),
+      payloadJson: JSON.stringify({ orgId: b.orgId }),
+    };
+    expect(await f.invoke(0, audit)).toBe('created');
+    expect(await executor.all(stmt('SELECT org_id, payload_json FROM audit_pending'))).toEqual([
+      { org_id: a.orgId, payload_json: audit.payloadJson },
+    ]);
+  });
 });

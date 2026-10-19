@@ -13,9 +13,11 @@ import {
   type Sha256,
 } from '@package-broker/core/platform/blob';
 import { compile, db } from '../kysely.js';
+import { blobEligibleCondition } from './blob-references.js';
 import { leaseLive } from './blob-lease-guard.js';
 
 export interface BlobLifecycleMetadata {
+  unschedule(ctx: OrgContext, key: Sha256): Promise<boolean>;
   softDelete(ctx: OrgContext, key: Sha256, input: { removedAt: string }): Promise<boolean>;
   claimPurge(ctx: OrgContext, key: Sha256): Promise<PurgeGeneration | null>;
   canStartRemove(
@@ -61,6 +63,15 @@ function info(row: InfoRow): BlobInfo {
 
 function statement(query: Compilable): ScalarStatement {
   return compile(query) as ScalarStatement;
+}
+
+function eligibleStatement(ctx: OrgContext, query: Compilable, suffix = ''): ScalarStatement {
+  const base = statement(query);
+  const eligible = blobEligibleCondition(ctx, 'blob');
+  return {
+    sql: `${base.sql} AND ${eligible.sql}${suffix}`,
+    params: [...base.params, ...eligible.params],
+  };
 }
 
 function requireGeneration(generation: string): void {
@@ -279,10 +290,26 @@ export function createBlobRepository(
       );
     },
 
+    async unschedule(ctx, key) {
+      const sha256 = parseSha256(key);
+      const eligible = blobEligibleCondition(ctx, 'blob');
+      const [result] = await executor.batch([
+        {
+          sql: `UPDATE blob SET purge_after = NULL
+WHERE org_id = ? AND sha256 = ? AND deleted_at IS NULL AND purge_after IS NOT NULL
+AND (purge_lease_until IS NULL OR purge_lease_until <= strftime('${FORMAT}', 'now'))
+AND NOT ${eligible.sql}`,
+          params: [ctx.orgId, sha256, ...eligible.params],
+        } satisfies ScalarStatement,
+      ]);
+      return result?.changes === 1;
+    },
+
     async claimPurge(ctx, key) {
       const sha256 = parseSha256(key);
       const [result] = await executor.batch([
-        statement(
+        eligibleStatement(
+          ctx,
           db
             .updateTable('blob')
             .set({
@@ -294,8 +321,8 @@ export function createBlobRepository(
             .where('deleted_at', 'is', null)
             .where('purge_after', 'is not', null)
             .where(sql<SqlBool>`purge_after <= ${NOW}`)
-            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
-            .returning('purge_generation'),
+            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`),
+          ' RETURNING purge_generation',
         ),
       ]);
       const row = result?.rows[0] as { purge_generation: string } | undefined;
@@ -310,7 +337,8 @@ export function createBlobRepository(
       }
       const modifier = `+${Math.ceil(deleteTimeoutMs / 1000)} seconds`;
       const rows = await executor.all(
-        statement(
+        eligibleStatement(
+          ctx,
           db
             .selectFrom('blob')
             .select(sql<number>`1`.as('ok'))

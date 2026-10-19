@@ -30,7 +30,7 @@ export interface ProjectGrantStore {
       readonly subject: GrantSubject;
       readonly roleId: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly providerAnchors: readonly ProviderAnchor[];
     },
@@ -49,7 +49,7 @@ export interface ProjectGrantStore {
       readonly projectId: string;
       readonly roleId: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly providerAnchors: readonly ProviderAnchor[];
     },
@@ -63,7 +63,7 @@ export interface ProjectGrantStore {
     input: {
       readonly id: string;
       readonly projectId: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly providerAnchors: readonly ProviderAnchor[];
     },

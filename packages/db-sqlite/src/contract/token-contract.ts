@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
@@ -270,7 +272,11 @@ const creatorRemoved: Case = (open, wrap) =>
           mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
             grant: grant!.revision,
           }),
-          { id: grant!.id, opId: 'contract-remove-creator' },
+          {
+            audit: mutationAudit('grant.revoke', grant!.id),
+            id: grant!.id,
+            opId: 'contract-remove-creator',
+          },
         ),
       ).toEqual({ outcome: 'deleted', offboardedUserId: USER });
       expect(
@@ -766,4 +772,18 @@ export function describeTokenContract(label: string, open: Open) {
       it(name, () => run(open), 120_000);
     }
   });
+}
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
 }

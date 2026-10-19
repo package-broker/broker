@@ -21,11 +21,13 @@ import {
   type VersionCandidate,
 } from '../sources/provider.js';
 import {
+  APPLY_MEMBER_WINDOW,
   APPLY_WINDOW_BYTES,
   applyChunk,
   continuationOptions,
   type ApplyInput,
 } from './apply-description.js';
+import { SnapshotCorruptError } from './snapshot.js';
 import { INVOCATION_BUDGET } from './plan-chunk.js';
 import type { IngestFinalizeInput, IngestFinalizeResult, IngestFinalizer } from './finalize.js';
 import type { IngestSessionHandle, IngestSessions } from './session.js';
@@ -749,6 +751,106 @@ describe('applyChunk refusal accounting', () => {
 });
 
 describe('applyChunk bounds and guards', () => {
+  it('drains beyond the member window before writing and discards the remaining payloads', async () => {
+    const f = fixture();
+    let drained = false;
+    let converted = 0;
+    const desc = createPackageDescription({
+      name: KEY,
+      snapshot: snapshotRef(SNAPSHOT),
+      validators: {},
+      documentsComplete: true,
+      members: (async function* () {
+        for (let ordinal = 0; ordinal < APPLY_MEMBER_WINDOW + 2; ordinal++) {
+          expect(f.calls).toEqual([]);
+          const version = `1.0.${ordinal}`;
+          yield { ordinal, version, form: 'npm-full', raw: manifest(version) } as const;
+        }
+        drained = true;
+      })(),
+    });
+    const outcome = await applyChunk(ctx, f.deps, {
+      ...input(handle(), desc),
+      toVersion: (candidate) => {
+        converted++;
+        return toVersion(candidate);
+      },
+    });
+    expect(drained).toBe(true);
+    expect(converted).toBe(APPLY_MEMBER_WINDOW);
+    expect(outcome.status).toBe('progress');
+  });
+
+  it.each([
+    handle(),
+    handle({ stamp: STAMP, snapshotId: SNAPSHOT }),
+    continued({ packageId: 'pkg-1', ordinal: 0, attempted: 1, tail: null }),
+    continued({ packageId: 'pkg-1', ordinal: 0, attempted: 1, tail: 'tags' }),
+    continued({ packageId: 'pkg-1', ordinal: 0, attempted: 1, tail: 'finalize' }),
+  ])('abandons a corrupt pass before any writes for session %j', async (session) => {
+    const f = fixture();
+    const desc = createPackageDescription({
+      name: KEY,
+      snapshot: snapshotRef(SNAPSHOT),
+      validators: {},
+      documentsComplete: true,
+      members: (async function* () {
+        for (let ordinal = 0; ordinal < APPLY_MEMBER_WINDOW + 2; ordinal++) {
+          const version = `1.0.${ordinal}`;
+          yield { ordinal, version, form: 'npm-full', raw: manifest(version) } as const;
+        }
+        throw new SnapshotCorruptError();
+      })(),
+    });
+    expect(await applyChunk(ctx, f.deps, input(session, desc))).toMatchObject({
+      done: true,
+      status: 'refused',
+      refusal: 'incomplete',
+      planned: 1,
+    });
+    expect(f.calls).toEqual([]);
+    expect(f.advanced).toEqual([]);
+    expect(f.finalized).toEqual([]);
+    expect(f.abandoned).toBe(1);
+  });
+
+  it('still verifies EOF after exceeding the byte window', async () => {
+    const f = fixture();
+    let converted = 0;
+    const large = 'x'.repeat(200 * 1024);
+    const desc = createPackageDescription({
+      name: KEY,
+      snapshot: snapshotRef(SNAPSHOT),
+      validators: {},
+      documentsComplete: true,
+      members: (async function* () {
+        for (let ordinal = 0; ordinal < 100; ordinal++) {
+          const version = `1.0.${ordinal}`;
+          yield { ordinal, version, form: 'npm-full', raw: manifest(version) } as const;
+        }
+        throw new SnapshotCorruptError();
+      })(),
+    });
+    const outcome = await applyChunk(ctx, f.deps, {
+      ...input(handle(), desc),
+      toVersion: (candidate) => {
+        converted++;
+        const version = toVersion(candidate) as VersionInput;
+        return {
+          ...version,
+          metadata: normalizeVersionMetadata('npm', {
+            version: candidate.version,
+            description: large,
+          }),
+        };
+      },
+    });
+    expect(converted).toBe(41);
+    expect(outcome).toMatchObject({ status: 'refused', refusal: 'incomplete' });
+    expect(f.calls).toEqual([]);
+    expect(f.abandoned).toBe(1);
+  });
+
   it('bounds the retained metadata of one window by bytes, admitting at least one member', async () => {
     const f = fixture();
     const big = 'x'.repeat(200 * 1024);

@@ -1,3 +1,4 @@
+import type { SourceError } from '../sources/source-service.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { AdminError } from '../authz/administration.js';
 import type { ProjectError } from '../authz/project-service.js';
@@ -34,6 +35,12 @@ const statuses = {
 } as const;
 
 const expectedCodes: Record<string, ApiErrorCode> = {
+  credential_scope_mismatch: 'not_found',
+  proxy_source: 'invalid_request',
+  pattern_taken: 'conflict',
+  activation_requires_registered_names: 'conflict',
+  has_packages: 'conflict',
+  has_history: 'conflict',
   unknown_provider: 'invalid_request',
   role_scope_mismatch: 'invalid_request',
   project_mismatch: 'invalid_request',
@@ -296,6 +303,40 @@ describe('ProjectListError', () => {
       expect(
         Object.hasOwn(API_ERROR_CODES, SERVICE_ERROR_TABLE.ProjectListError[member].code),
       ).toBe(true);
+    }
+  });
+});
+
+describe('SourceError', () => {
+  const members = [
+    'forbidden',
+    'not_found',
+    'invalid_config',
+    'credential_scope_mismatch',
+    'duplicate',
+    'conflict',
+    'indeterminate',
+    'activation_requires_registered_names',
+    'has_packages',
+    'has_history',
+    'invalid_pattern',
+    'proxy_source',
+    'pattern_taken',
+    'invalid_name',
+  ] as const satisfies readonly SourceError[];
+  it('covers every member with the specified code and status', () => {
+    expectTypeOf<Exclude<SourceError, (typeof members)[number]>>().toEqualTypeOf<never>();
+    expect(Object.keys(SERVICE_ERROR_TABLE.SourceError).sort()).toEqual([...members].sort());
+    for (const member of members) {
+      const code = member.startsWith('invalid_') ? 'invalid_request' : expectedCodes[member];
+      expect(code).toBeDefined();
+      expect(SERVICE_ERROR_TABLE.SourceError[member]).toEqual({
+        code,
+        status: statuses[code!],
+      });
+      expect(Object.hasOwn(API_ERROR_CODES, SERVICE_ERROR_TABLE.SourceError[member].code)).toBe(
+        true,
+      );
     }
   });
 });

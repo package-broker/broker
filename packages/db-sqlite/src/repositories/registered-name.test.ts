@@ -261,6 +261,47 @@ afterEach(async () => {
   await database.close();
 });
 
+describe('registered-name ownership', () => {
+  it.each([
+    [SRC_ORG, null],
+    [SRC_P1, P1],
+  ] as const)('reads the owner of %s', async (sourceId, projectId) => {
+    expect(await add(orgFence(), NAME_1, sourceId, 'acme/*')).toBe('added');
+    expect(await names.owner(a, NAME_1)).toEqual({ sourceId, projectId });
+  });
+
+  it('answers null for a foreign organization name', async () => {
+    expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
+    expect(await names.owner(b, NAME_1)).toBeNull();
+  });
+
+  it('answers null for an absent name', async () => {
+    expect(await names.owner(a, NAME_1)).toBeNull();
+  });
+
+  it.each([
+    ['source', SRC_P1],
+    ['registered_name', SRC_ORG],
+  ])('refuses a mismatched pause target %s:%s without writes', async (type, id) => {
+    expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
+    await rows("UPDATE source SET status = 'active' WHERE org_id = ? AND id = ?", a.orgId, SRC_ORG);
+    const before = await snapshot();
+    const pending = await rows('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', a.orgId);
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: { ...audit('source.pause', SRC_ORG), target: { type, id } },
+      }),
+    ).toBe('conflict');
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', a.orgId)).toEqual(
+      pending,
+    );
+  });
+});
+
 describe('enable', () => {
   it('refuses a composer_repository source without a registered name and enables it with one', async () => {
     const before = await snapshot();
@@ -440,7 +481,7 @@ describe('remove', () => {
         id: NAME_2,
         providerAnchors: ANCHORS,
         audit: audit('registered_name.remove', NAME_2),
-        pauseAudit: audit('source.pause', SRC_ORG),
+        pauseAudit: audit('source.pause', SRC_NPM),
       }),
     ).toBe('removed_and_paused');
     expect(await status(SRC_NPM)).toBe('paused');
@@ -809,7 +850,7 @@ describe('round 2', () => {
         id: NAME_1,
         providerAnchors: ANCHORS,
         audit: audit('registered_name.remove', NAME_1),
-        pauseAudit: audit('source.pause', SRC_ORG),
+        pauseAudit: audit('source.pause', SRC_PROXY),
       }),
     ).toBe('removed');
     expect(await status(SRC_PROXY)).toBe('active');

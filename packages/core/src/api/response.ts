@@ -1,3 +1,4 @@
+import type { SourceError } from '../sources/source-service.js';
 import type { AdminError } from '../authz/administration.js';
 import type { ProjectError } from '../authz/project-service.js';
 import type { PersonalTokenError } from '../authz/pat-service.js';
@@ -37,6 +38,22 @@ type ServiceErrorMapping = {
 }[ApiErrorCode];
 
 export const SERVICE_ERROR_TABLE = {
+  SourceError: {
+    forbidden: { status: 403, code: 'forbidden' },
+    not_found: { status: 404, code: 'not_found' },
+    invalid_config: { status: 400, code: 'invalid_request' },
+    credential_scope_mismatch: { status: 404, code: 'not_found' },
+    duplicate: { status: 409, code: 'duplicate' },
+    conflict: { status: 409, code: 'conflict' },
+    indeterminate: { status: 503, code: 'unavailable' },
+    activation_requires_registered_names: { status: 409, code: 'conflict' },
+    has_packages: { status: 409, code: 'conflict' },
+    has_history: { status: 409, code: 'conflict' },
+    invalid_pattern: { status: 400, code: 'invalid_request' },
+    proxy_source: { status: 400, code: 'invalid_request' },
+    pattern_taken: { status: 409, code: 'conflict' },
+    invalid_name: { status: 400, code: 'invalid_request' },
+  } satisfies Record<SourceError, ServiceErrorMapping>,
   AdminError: {
     invalid_permission: { status: 400, code: 'invalid_request' },
     invalid_key: { status: 400, code: 'invalid_request' },

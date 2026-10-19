@@ -95,6 +95,29 @@ export class StartupConfigError extends Error {
   }
 }
 
+export const BLOB_PURGE_LEASE_SECONDS = 900;
+export const BLOB_DELETE_TIMEOUT_MS = 30_000;
+
+export function blobPurgeTiming(
+  deleteTimeoutMs: number,
+  purgeLeaseSeconds: number,
+): { deleteTimeoutMs: number; leaseMs: number } {
+  const leaseMs = purgeLeaseSeconds * 1000;
+  if (
+    !Number.isInteger(leaseMs) ||
+    leaseMs <= 0 ||
+    !Number.isInteger(deleteTimeoutMs) ||
+    deleteTimeoutMs < 1000 ||
+    deleteTimeoutMs > leaseMs / 10
+  ) {
+    throw new StartupConfigError(
+      'blob.deleteTimeoutMs',
+      'must be at least 1000 ms and at most a tenth of the purge lease',
+    );
+  }
+  return { deleteTimeoutMs, leaseMs };
+}
+
 const DEFAULT_DATABASE_PATH = './data/broker.sqlite';
 const IDENTITY_ENV_PREFIX = 'PB_IDP_';
 
@@ -470,13 +493,18 @@ async function buildServices(
   options: StartOptions,
   executor: SqlExecutor,
 ): Promise<PlatformServices> {
+  blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
   const byteStore = await openByteStore(ports.blob, options.env, options.fetch);
   let blob;
   try {
-    blob = createBlobStore(byteStore, createBlobRepository(executor), {
-      admission: createBlobUploadAdmission(),
-      maxBytes: ports.blob.maxBytes,
-    });
+    blob = createBlobStore(
+      byteStore,
+      createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+      {
+        admission: createBlobUploadAdmission(),
+        maxBytes: ports.blob.maxBytes,
+      },
+    );
   } catch (error) {
     if (!(error instanceof BlobValidationError)) throw error;
     throw new StartupConfigError('blob.maxBytes', 'is not usable with the upload budget');

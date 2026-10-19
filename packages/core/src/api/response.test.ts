@@ -216,6 +216,7 @@ describe('ServiceTokenError', () => {
 
 describe('ServicePrincipalError', () => {
   const members = [
+    'reauth_required',
     'forbidden',
     'invalid_name',
     'invalid_permission',

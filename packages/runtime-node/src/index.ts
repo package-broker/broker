@@ -284,6 +284,7 @@ async function assembleAccess(
       ...common,
     }),
     servicePrincipals: createServicePrincipalService({
+      sessions: module.sessions,
       principals: principalRepository,
       authority,
       directory: principalRepository,

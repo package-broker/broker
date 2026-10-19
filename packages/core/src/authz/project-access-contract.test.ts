@@ -1,3 +1,11 @@
+const call = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import type { GrantRepository } from '../db/grants.js';
@@ -109,13 +117,25 @@ describe('kernel permission views across services', () => {
     });
     const allowed = kernelActor(['org:projects:create']);
     expect(
-      await service.createProject(ctx, allowed, fenceFor(allowed), { slug: 'shop', name: 'Shop' }),
+      await service.createProject(
+        ctx,
+        allowed,
+        fenceFor(allowed),
+        { slug: 'shop', name: 'Shop' },
+        call,
+      ),
     ).toEqual({ ok: true, value: { id: PROJECT_ID, slug: 'shop' } });
     expect(create).toHaveBeenCalledOnce();
     create.mockClear();
     const denied = kernelActor(['org:projects:archive']);
     expect(
-      await service.createProject(ctx, denied, fenceFor(denied), { slug: 'shop', name: 'Shop' }),
+      await service.createProject(
+        ctx,
+        denied,
+        fenceFor(denied),
+        { slug: 'shop', name: 'Shop' },
+        call,
+      ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(create).not.toHaveBeenCalled();
   });
@@ -185,7 +205,7 @@ describe('kernel permission views across services', () => {
         projectId: PROJECT_ID,
         permissions: kernel.permissions,
       };
-      const result = await service.grant(ctx, actor, fenceFor(kernel), PROJECT_ID, input);
+      const result = await service.grant(ctx, actor, fenceFor(kernel), PROJECT_ID, input, call);
       if (permitted) {
         expect(result).toMatchObject({ ok: true, value: { projectId: PROJECT_ID } });
         expect(create).toHaveBeenCalledOnce();
@@ -198,7 +218,7 @@ describe('kernel permission views across services', () => {
     const organization = kernelActor(['project:grants:write']);
     expect(
       // @ts-expect-error A kernel organization actor cannot supply project-bound authority.
-      await service.grant(ctx, organization, fenceFor(organization), PROJECT_ID, input),
+      await service.grant(ctx, organization, fenceFor(organization), PROJECT_ID, input, call),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(create).not.toHaveBeenCalled();
   });

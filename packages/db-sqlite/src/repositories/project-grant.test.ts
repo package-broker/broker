@@ -875,6 +875,14 @@ describe('project grant delete', () => {
       fence(),
       P1,
       G_TARGET,
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: true, value: null });
     expect(await grantRow(G_TARGET)).toBeUndefined();

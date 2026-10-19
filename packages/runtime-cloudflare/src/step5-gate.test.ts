@@ -170,6 +170,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             { ...viewed, permissions: new Set(viewed.permissions) },
             mutationFence(authenticated, {}),
             { slug, name: slug },
+            auditCall(ctx.requestId),
           );
           return Response.json(created.ok ? { id: created.value.id } : { error: created.error }, {
             status: created.ok ? 200 : 409,

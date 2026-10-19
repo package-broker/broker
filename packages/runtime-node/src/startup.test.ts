@@ -1,3 +1,6 @@
+import { BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS, blobPurgeTiming } from './startup.js';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import type { ByteStore } from '@package-broker/core/platform/blob';
 import { access, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
@@ -1105,4 +1108,49 @@ describe('startNode', () => {
       expect((failure as Error).message).not.toContain('secret-path');
     });
   });
+});
+
+describe('blob purge timing', () => {
+  const invalidTimeouts = [900_000, 90_001, 999, 1500.5];
+  it.each(invalidTimeouts)('refuses delete timeout %s as misconfigured', (timeout) => {
+    expect(() => blobPurgeTiming(timeout, 900)).toThrow(StartupConfigError);
+    expect(() => blobPurgeTiming(timeout, 900)).toThrow('blob.deleteTimeoutMs');
+  });
+
+  it('accepts the shipped purge timing', () => {
+    expect(blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS)).toEqual({
+      deleteTimeoutMs: 30_000,
+      leaseMs: 900_000,
+    });
+  });
+
+  it.each([...invalidTimeouts, BLOB_DELETE_TIMEOUT_MS, 1000, 90_000])(
+    'agrees with lifecycle validation for delete timeout %s',
+    (deleteTimeoutMs) => {
+      const metadata = {
+        softDelete: async () => false,
+        claimPurge: async () => null,
+        canStartRemove: async () => false,
+        markDeleted: async () => false,
+        cancelPurge: async () => false,
+        unschedule: async () => false,
+      };
+      const lifecycle = () =>
+        createBlobLifecycle({
+          metadata,
+          store: {} as ByteStore,
+          observability: { counter() {}, histogram() {}, log() {} },
+          deleteTimeoutMs,
+          leaseMs: BLOB_PURGE_LEASE_SECONDS * 1000,
+        });
+      const timing = () => blobPurgeTiming(deleteTimeoutMs, BLOB_PURGE_LEASE_SECONDS);
+      if (invalidTimeouts.includes(deleteTimeoutMs)) {
+        expect(lifecycle).toThrow(TypeError);
+        expect(timing).toThrow(StartupConfigError);
+      } else {
+        expect(lifecycle).not.toThrow();
+        expect(timing).not.toThrow();
+      }
+    },
+  );
 });

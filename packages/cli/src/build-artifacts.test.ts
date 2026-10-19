@@ -168,6 +168,7 @@ describe('renderBuildManifest', () => {
         'import config from "C:/broker files/config.ts";',
         ...manifestBody([]),
         'export const platformPorts = null;',
+        'export const observability = config.observability;',
         '',
       ].join('\n'),
     );
@@ -188,6 +189,7 @@ describe('renderBuildManifest', () => {
         '  throw new Error(`config.plugins has ${config.plugins.length} plugins, expected ${plugins.length}`);',
         '}',
         'export const platformPorts = null;',
+        'export const observability = config.observability;',
         '',
       ].join('\n'),
     );
@@ -210,6 +212,7 @@ describe('renderBuildManifest', () => {
         String.raw`import config from "/srv/broker\\config.ts";`,
         ...manifestBody([]),
         'export const platformPorts = null;',
+        'export const observability = config.observability;',
         '',
       ].join('\n'),
     );

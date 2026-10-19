@@ -81,7 +81,8 @@ import {
 } from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
-import { collectRegistrations, registerCoreJob } from '@package-broker/core/kernel/registry';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';

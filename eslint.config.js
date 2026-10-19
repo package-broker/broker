@@ -14,6 +14,33 @@ const rawSqlSelectors = [
   },
 ];
 
+const responseMessageSelectors = [
+  'CallExpression[callee.name=/^(errorEnvelope|envelopeResponse|jsonResponse)$/]',
+  "CallExpression[callee.object.name='Response'][callee.property.name='json']",
+  "NewExpression[callee.name='Response']",
+  "CallExpression[callee.object.name='c'][callee.property.name=/^(json|text)$/]",
+].map((sink) => {
+  const member =
+    "[object.type='Identifier']:matches([computed=false][property.name=/^(message|stack)$/], [computed=true][property.value=/^(message|stack)$/])";
+  return {
+    selector: `${sink} > MemberExpression.arguments${member}, ${sink} > *.arguments MemberExpression${member}`,
+    message: 'Response errors must use fixed client-safe messages, never an error message',
+  };
+});
+
+const uiSelectors = [
+  ...rawSqlSelectors,
+  {
+    selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+    message: 'dangerouslySetInnerHTML is banned in the UI (CSP, no raw HTML injection)',
+  },
+  {
+    selector:
+      "Property[key.name='dangerouslySetInnerHTML'], Property[key.value='dangerouslySetInnerHTML']",
+    message: 'dangerouslySetInnerHTML is banned in the UI (CSP, no raw HTML injection)',
+  },
+];
+
 export default tseslint.config(
   { ignores: ['**/dist/**', '**/.pb/**', '**/node_modules/**'] },
   js.configs.recommended,
@@ -25,26 +52,24 @@ export default tseslint.config(
     files: ['packages/*/src/**/*.ts'],
     ignores: ['packages/db-sqlite/src/**', 'packages/runtime-*/src/db/**', '**/*.test.ts'],
     rules: {
-      'no-restricted-syntax': ['error', ...rawSqlSelectors],
+      'no-restricted-syntax': ['error', ...rawSqlSelectors, ...responseMessageSelectors],
+    },
+  },
+  {
+    files: ['packages/db-sqlite/src/**/*.ts', 'packages/runtime-*/src/db/**/*.ts'],
+    ignores: ['**/*.test.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...responseMessageSelectors],
     },
   },
   {
     files: ['packages/ui/**/*.{ts,tsx,js,jsx}'],
-    rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...rawSqlSelectors,
-        {
-          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
-          message: 'dangerouslySetInnerHTML is banned in the UI (CSP, no raw HTML injection)',
-        },
-        {
-          selector:
-            "Property[key.name='dangerouslySetInnerHTML'], Property[key.value='dangerouslySetInnerHTML']",
-          message: 'dangerouslySetInnerHTML is banned in the UI (CSP, no raw HTML injection)',
-        },
-      ],
-    },
+    rules: { 'no-restricted-syntax': ['error', ...uiSelectors] },
+  },
+  {
+    files: ['packages/ui/src/**/*.ts'],
+    ignores: ['**/*.test.ts'],
+    rules: { 'no-restricted-syntax': ['error', ...uiSelectors, ...responseMessageSelectors] },
   },
   {
     files: ['packages/core/src/**/*.ts'],

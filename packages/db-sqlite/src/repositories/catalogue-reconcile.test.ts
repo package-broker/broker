@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
@@ -6,6 +7,7 @@ import {
   type CatalogueWriteGuard,
   type VersionInput,
 } from '@package-broker/core/db/catalogue';
+import { parseSha256 } from '@package-broker/core/platform/blob';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
 import {
   completeSourceListing,
@@ -13,6 +15,8 @@ import {
 } from '@package-broker/core/catalogue/version-rules';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
+import { createBlobReferenceReader } from './blob-references.js';
+import { createBlobRepository } from './blob.js';
 import { versionInsertStatements } from './catalogue-write-version-insert.js';
 import { createCatalogueReconciler, type CatalogueReconciler } from './catalogue-reconcile.js';
 
@@ -774,4 +778,180 @@ describe('reconciliation safeguards', () => {
       }
     },
   );
+});
+
+async function attachBlob(name: string, packageId = PACKAGE): Promise<string> {
+  const id = `B-${packageId}-${name}`;
+  const digest = createHash('sha256').update(id).digest('hex');
+  await run(
+    stmt(
+      `INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, media_type, refetchable)
+        VALUES (?, ?, ?, 1, ?, 'application/zip', 1)`,
+      id,
+      org.orgId,
+      digest,
+      id,
+    ),
+    stmt('UPDATE version SET blob_id = ? WHERE id = ?', id, `V-${packageId}-${name}`),
+  );
+  return digest;
+}
+
+it.each([0, 1])(
+  'removed-upstream purge remains eligible with refetchable = %i',
+  async (refetchable) => {
+    await seedVersions(PACKAGE, '1.0.0');
+    const digest = await attachBlob('1.0.0');
+    await run(
+      stmt("UPDATE version SET status = 'removed_upstream', removed_upstream_at = ?", OLD),
+      stmt('UPDATE blob SET refetchable = ?, purge_after = ?', refetchable, OLD),
+    );
+    expect(await createBlobReferenceReader(database.executor).stillEligible(org, digest)).toBe(
+      true,
+    );
+    expect(
+      await createBlobRepository(database.executor).claimPurge(org, parseSha256(digest)),
+    ).not.toBeNull();
+  },
+);
+
+async function packageListing(present: readonly string[]) {
+  const scope = { kind: 'package', packageId: PACKAGE } as const;
+  const { stamp } = await reconciler.openListing(org, guard, scope);
+  await reconciler.markListing(org, guard, { scope, stamp, present });
+  return completeVersionListing({ packageId: PACKAGE, stamp, count: present.length });
+}
+
+const blobState = () => database.executor.all(stmt('SELECT * FROM blob ORDER BY id'));
+
+it.each(['package', 'source', 'absent'] as const)(
+  '%s removal retains bytes while respecting purge ownership and organization boundaries',
+  async (kind) => {
+    reconciler = createCatalogueReconciler({
+      ...database.executor,
+      batch: (statements) => {
+        expect(statements.length).toBeLessThanOrEqual(100);
+        expect(statements.every((statement) => statement.params.length <= 100)).toBe(true);
+        return database.executor.batch(statements);
+      },
+    });
+    const names = [
+      'removed',
+      'scheduled',
+      'deleted',
+      'leased',
+      'expired',
+      'shared',
+      'stays',
+      'previous',
+    ];
+    await seedVersions(PACKAGE, ...names);
+    await seedVersions(PACKAGE_B, 'shared');
+    for (const name of names) await attachBlob(name);
+    await run(
+      stmt(
+        'UPDATE version SET blob_id = ? WHERE id = ?',
+        `B-${PACKAGE}-shared`,
+        `V-${PACKAGE_B}-shared`,
+      ),
+      stmt(
+        "UPDATE version SET status = 'removed_upstream', removed_upstream_at = '2020-01-01T00:00:00.000Z', last_op_id = 'previous-operation' WHERE id = ?",
+        `V-${PACKAGE}-previous`,
+      ),
+      stmt('UPDATE blob SET purge_after = ? WHERE id = ?', OLD, `B-${PACKAGE}-scheduled`),
+      stmt('UPDATE blob SET deleted_at = ? WHERE id = ?', OLD, `B-${PACKAGE}-deleted`),
+      stmt('UPDATE blob SET purge_lease_until = ? WHERE id = ?', FUTURE, `B-${PACKAGE}-leased`),
+      stmt('UPDATE blob SET purge_lease_until = ? WHERE id = ?', OLD, `B-${PACKAGE}-expired`),
+      stmt(
+        `INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, refetchable)
+        SELECT 'foreign', ?, sha256, size_bytes, 'foreign', 1 FROM blob WHERE id = ?`,
+        other.orgId,
+        `B-${PACKAGE}-removed`,
+      ),
+    );
+    if (kind !== 'package') {
+      await run(
+        stmt("UPDATE version SET status = 'quarantined' WHERE id = ?", `V-${PACKAGE}-stays`),
+      );
+    }
+    const before = await blobState();
+    let statements: number;
+    if (kind === 'absent') {
+      expect(await reconciler.markPackageAbsent(org, guard, { packageId: PACKAGE })).toMatchObject({
+        changed: false,
+      });
+      expect(await blobState()).toEqual(before);
+      await run(
+        stmt(
+          `INSERT INTO upstream_state
+        (org_id, package_id, form, checked_at, fresh_until, not_found_count, first_not_found_at)
+        VALUES (?, ?, 'composer-p2', ?, ?, ?, ?)`,
+          org.orgId,
+          PACKAGE,
+          OLD,
+          OLD,
+          ABSENCE_MIN_NOT_FOUND,
+          OLD,
+        ),
+      );
+      const effect = await reconciler.markPackageAbsent(org, guard, { packageId: PACKAGE });
+      expect(effect.changed).toBe(true);
+      statements = effect.statements;
+    } else {
+      const listing =
+        kind === 'source' ? await sourceListing(['acme/two']) : await packageListing(['stays']);
+      const effect = await reconciler.finalizeListing(org, guard, listing);
+      expect(effect.removed).toBe(kind === 'source' ? 1 : 6);
+      expect(effect.restored).toBe(0);
+      statements = effect.statements;
+    }
+    expect(statements).toBe({ package: 14, source: 11, absent: 9 }[kind]);
+    expect(statements).toBeLessThanOrEqual(100);
+    const after = await blobState();
+    expect(after).toEqual(
+      before.map((blob) =>
+        ['removed', 'expired', 'shared'].some((name) => blob['id'] === `B-${PACKAGE}-${name}`)
+          ? { ...blob, refetchable: 0 }
+          : blob,
+      ),
+    );
+    expect(
+      await scalar('SELECT status AS v FROM version WHERE id = ?', `V-${PACKAGE_B}-shared`),
+    ).toBe('active');
+    const revisions = await scalar('SELECT count(*) AS v FROM version_revision');
+    if (kind === 'absent') {
+      expect(await reconciler.markPackageAbsent(org, guard, { packageId: PACKAGE })).toMatchObject({
+        changed: false,
+      });
+    } else {
+      await reconciler.finalizeListing(
+        org,
+        guard,
+        kind === 'source' ? await sourceListing(['acme/two']) : await packageListing(['stays']),
+      );
+    }
+    expect(await blobState()).toEqual(after);
+    expect(await scalar('SELECT count(*) AS v FROM version_revision')).toBe(revisions);
+  },
+);
+
+it('restoration preserves non-refetchability and a later removal narrows re-fetched bytes again', async () => {
+  await seedVersions(PACKAGE, '1.0.0', '2.0.0');
+  await attachBlob('1.0.0');
+  await attachBlob('2.0.0');
+  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0']));
+  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0', '2.0.0']));
+  expect(await scalar('SELECT refetchable AS v FROM blob WHERE id = ?', `B-${PACKAGE}-2.0.0`)).toBe(
+    0,
+  );
+  await run(stmt('UPDATE blob SET refetchable = 1 WHERE id = ?', `B-${PACKAGE}-2.0.0`));
+  await run(stmt('UPDATE version SET updated_at = ? WHERE id = ?', OLD, `V-${PACKAGE}-2.0.0`));
+  const listing = await packageListing(['1.0.0']);
+  expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 1 });
+  expect(await scalar('SELECT refetchable AS v FROM blob WHERE id = ?', `B-${PACKAGE}-2.0.0`)).toBe(
+    0,
+  );
+  const before = await blobState();
+  expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 0 });
+  expect(await blobState()).toEqual(before);
 });

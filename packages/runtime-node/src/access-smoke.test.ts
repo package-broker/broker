@@ -1,3 +1,11 @@
+const call = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
@@ -130,6 +138,7 @@ describe('node access smoke over HTTP', () => {
             { ...viewed, permissions: new Set(viewed.permissions) },
             mutationFence(authenticated, {}),
             { slug: 'alpha', name: 'Alpha' },
+            call,
           );
           return Response.json(created.ok ? { id: created.value.id } : { error: created.error }, {
             status: created.ok ? 200 : 409,
@@ -185,6 +194,7 @@ describe('node access smoke over HTTP', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'own',
             },
             apiCall,
           );

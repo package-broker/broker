@@ -577,6 +577,7 @@ function svcRig(
 function svcInput(extra: Partial<ServiceTokenIssueInput> = {}): ServiceTokenIssueInput {
   return {
     servicePrincipalId: 'sp-1',
+    routeProjectId: 'proj-1',
     name: 'ci',
     scope: 'read',
     expiresAt: inDays(30),

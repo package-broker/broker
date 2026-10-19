@@ -74,6 +74,10 @@
       "types": "./dist/contract/catalogue-write-contract.d.ts",
       "default": "./dist/contract/catalogue-write-contract.js"
     },
+    "./contract/codec-contract": {
+      "types": "./dist/contract/codec-contract.d.ts",
+      "default": "./dist/contract/codec-contract.js"
+    },
     "./contract/count-calls": {
       "types": "./dist/contract/count-calls.d.ts",
       "default": "./dist/contract/count-calls.js"

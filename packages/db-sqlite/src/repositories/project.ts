@@ -9,8 +9,6 @@ import { PROJECT_LIST_MAX_LIMIT } from '@package-broker/core/authz/project-list'
 import {
   PROJECT_NAME_MAX_LENGTH,
   TOKEN_MAX_SCOPES,
-  type ProjectChanges,
-  type ProjectCreateInput,
   type ProjectStatus,
   type ProjectStore,
   type TokenMaxScope,
@@ -85,7 +83,7 @@ export interface ProjectRepository extends ProjectStore {
   create(
     ctx: OrgContext,
     fence: MutationFence,
-    input: ProjectCreateInput & { readonly id: string; readonly now: string },
+    input: Parameters<ProjectStore['create']>[2],
   ): Promise<
     | 'created'
     | 'duplicate'
@@ -103,9 +101,7 @@ export interface ProjectRepository extends ProjectStore {
   update(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    changes: ProjectChanges,
-    now: string,
+    input: Parameters<ProjectStore['update']>[2],
   ): Promise<
     'updated' | 'unchanged' | 'archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -113,15 +109,13 @@ export interface ProjectRepository extends ProjectStore {
   archive(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    now: string,
+    input: Parameters<ProjectStore['archive']>[2],
   ): Promise<'archived' | 'not_active' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
   /** Requires org:projects:archive and a session reauthenticated within the last ten minutes. */
   restore(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    now: string,
+    input: Parameters<ProjectStore['restore']>[2],
   ): Promise<
     'restored' | 'not_archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -578,7 +572,7 @@ export function createProjectRepository(
       return reason === 'conflict' ? 'initial_role_not_allowed' : reason;
     },
 
-    async update(ctx, fence, id, changes, now) {
+    async update(ctx, fence, { id, changes, now }) {
       const stamp = timestamp(now);
       const expected = expectedRevision(fence);
       if (changes.name !== undefined) requireName(changes.name);
@@ -643,11 +637,11 @@ export function createProjectRepository(
       return changed !== undefined && changed.rows.length > 0 ? 'updated' : 'unchanged';
     },
 
-    archive(ctx, fence, id, now) {
+    archive(ctx, fence, { id, now }) {
       return transition(ctx, fence, id, now, 'active', 'archived', 'archived', 'not_active', false);
     },
 
-    restore(ctx, fence, id, now) {
+    restore(ctx, fence, { id, now }) {
       return transition(
         ctx,
         fence,

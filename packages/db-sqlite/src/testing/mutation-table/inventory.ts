@@ -88,6 +88,10 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Factories still awaiting semantic cases, and builders with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/import-credential.ts#createImportCredentialRepository':
+    'DEFERRED: credential binding and window guards need independent import fixtures; owner T782n follow-up',
+  'repositories/import-authority.ts#importWriteAuthority':
+    'DEFERRED: session branch is actorHolds, registered in actor-authority.ts; token branch is covered by import-authority.test.ts until a token fixture exists; owner T782n follow-up',
   'repositories/blob-access.ts#createBlobAccessRepository':
     'DEFERRED: blob authorization read paths need independent child fixtures; owner T782n follow-up',
   'repositories/fetch-lease.ts#createFetchLeases':

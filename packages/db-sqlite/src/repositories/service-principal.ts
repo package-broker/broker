@@ -1,3 +1,7 @@
+import type { AuditEvent } from '@package-broker/core/audit/actions';
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 import type { ServicePrincipalStore } from '@package-broker/core/authz/service-principal-service';
 import { sql, type Compilable } from 'kysely';
 import { PERMISSIONS, isPermission } from '@package-broker/core/authz/permissions';
@@ -42,15 +46,7 @@ export interface ServicePrincipalRepository {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    input: {
-      readonly id: string;
-      readonly name: string;
-      readonly projectId: string | null;
-      readonly createdByUserId: string;
-      readonly permissions: readonly string[];
-      readonly now: string;
-      readonly opId: string;
-    },
+    input: Parameters<ServicePrincipalStore['create']>[3],
   ): Promise<
     | 'created'
     | 'duplicate'
@@ -280,6 +276,30 @@ function permissionSource(ctx: OrgContext, id: string, permissions: readonly str
     .where('sp.org_id', '=', ctx.orgId);
 }
 
+function mutationStatements(
+  ctx: OrgContext,
+  input: { audit: AuditEvent; idempotency?: IdempotencyRecord },
+  when?: ScalarStatement,
+) {
+  const replay =
+    input.idempotency === undefined
+      ? undefined
+      : idempotencyInsertStatement(ctx, input.idempotency);
+  return [
+    auditPendingStatement(ctx, input.audit, when),
+    ...(replay === undefined
+      ? []
+      : [
+          when === undefined
+            ? replay
+            : {
+                sql: `${replay.sql.replace('VALUES (', 'SELECT * FROM (VALUES (')}) WHERE ${when.sql}`,
+                params: [...replay.params, ...when.params],
+              },
+        ]),
+  ];
+}
+
 export function createServicePrincipalRepository(
   executor: ScalarSqlExecutor,
 ): ServicePrincipalRepository {
@@ -441,7 +461,14 @@ export function createServicePrincipalRepository(
         ctx,
         fence,
         guard,
-        [scalar(principal), permissions],
+        [
+          scalar(principal),
+          permissions,
+          ...mutationStatements(ctx, input, {
+            sql: 'exists (select 1 from service_principal where org_id = ? and id = ? and last_op_id = ?)',
+            params: [ctx.orgId, input.id, input.opId],
+          }),
+        ],
         ALWAYS,
       );
       if (!outcome.ok) {
@@ -493,7 +520,7 @@ export function createServicePrincipalRepository(
       throw new TypeError('service principal was not stored');
     },
 
-    async setPermissions(ctx, fence, guard, { id, permissions, now, opId }) {
+    async setPermissions(ctx, fence, guard, { id, permissions, now, opId, audit, idempotency }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const stamp = timestamp(now);
@@ -548,6 +575,10 @@ export function createServicePrincipalRepository(
               .where('org_id', '=', ctx.orgId)
               .where('id', '=', id),
           ),
+          ...mutationStatements(ctx, {
+            audit,
+            ...(idempotency === undefined ? {} : { idempotency }),
+          }),
         ],
         probes,
       );
@@ -559,29 +590,17 @@ export function createServicePrincipalRepository(
       return failed(outcome);
     },
 
-    async suspend(ctx, fence, guard, { id, now, opId }) {
-      const result = await transition(
-        ctx,
-        fence,
-        guard,
-        id,
-        now,
-        opId,
-        'active',
-        'suspended',
-        'suspended',
-      );
+    async suspend(ctx, fence, guard, input) {
+      const result = await transition(ctx, fence, guard, input, 'active', 'suspended', 'suspended');
       if (result === 'not_suspended') return 'unchanged';
       if (result !== 'conflict') return result;
-      const current = await load(ctx, id);
+      const current = await load(ctx, input.id);
       if (current?.status !== 'suspended') return result;
       const again = await transition(
         ctx,
         fence,
         guard,
-        id,
-        now,
-        opId,
+        input,
         'active',
         'suspended',
         'suspended',
@@ -590,8 +609,8 @@ export function createServicePrincipalRepository(
       return again === 'not_suspended' ? 'unchanged' : again;
     },
 
-    async restore(ctx, fence, guard, { id, now, opId }) {
-      return transition(ctx, fence, guard, id, now, opId, 'suspended', 'active', 'restored');
+    async restore(ctx, fence, guard, input) {
+      return transition(ctx, fence, guard, input, 'suspended', 'active', 'restored');
     },
   };
 
@@ -599,14 +618,13 @@ export function createServicePrincipalRepository(
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    now: string,
-    opId: string,
+    input: Parameters<ServicePrincipalStore['suspend']>[3],
     from: 'active' | 'suspended',
     to: 'active' | 'suspended',
     done: Done,
     revisionOverride?: number,
   ): Promise<Done | 'not_found' | 'not_suspended' | 'conflict' | 'authority' | 'indeterminate'> {
+    const { id, now, opId } = input;
     requireNonEmpty(id, 'id');
     requireNonEmpty(opId, 'opId');
     const stamp = timestamp(now);
@@ -667,6 +685,10 @@ export function createServicePrincipalRepository(
             .where('org_id', '=', ctx.orgId)
             .where('id', '=', id),
         ),
+        ...mutationStatements(ctx, input, {
+          sql: 'exists (select 1 from service_principal where org_id = ? and id = ? and last_op_id = ? and status = ?)',
+          params: [ctx.orgId, id, opId, to],
+        }),
       ],
       probes,
     );

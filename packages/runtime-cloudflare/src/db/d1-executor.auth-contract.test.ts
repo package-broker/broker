@@ -16,12 +16,37 @@ import {
 import { seedDefaultsStatements } from '@package-broker/db-sqlite/repositories/role';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
+const BRIDGE_SCRIPT = `
+const decode = (value) =>
+  value !== null && typeof value === 'object'
+    ? Uint8Array.from(atob(value.base64), (char) => char.charCodeAt(0))
+    : value;
+export default {
+  async fetch(request, env) {
+    const { binding, mode, statements } = await request.json();
+    try {
+      const prepared = statements.map(({ sql, params }) =>
+        env[binding].prepare(sql).bind(...params.map(decode)),
+      );
+      const result = mode === 'all' ? [await prepared[0].all()] : await env[binding].batch(prepared);
+      return Response.json({ ok: true, result });
+    } catch (error) {
+      return Response.json({
+        ok: false,
+        message: String(error && error.message),
+        cause: error && error.cause ? String(error.cause.message) : null,
+      });
+    }
+  },
+};
+`;
+
 const bindings = Array.from({ length: 64 }, (_, index) => `MDB${index}`);
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
-    script: 'export default { fetch() { return new Response("ok") } }',
+    script: BRIDGE_SCRIPT,
     compatibilityDate: '2026-10-01',
     d1Databases: bindings,
   } as Parameters<typeof convertV4MiniflareOptions>[0]),
@@ -32,15 +57,69 @@ afterAll(async () => {
   await mf.dispose();
 });
 
-async function database(): Promise<D1DatabaseLike> {
+function allocateBinding(): string {
   const binding = bindings[next];
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
-  return (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
+  return binding;
+}
+
+async function database(): Promise<D1DatabaseLike> {
+  return (await mf.getD1Database(allocateBinding())) as unknown as D1DatabaseLike;
+}
+
+type Send = (mode: 'all' | 'batch', statements: BridgedStatement[]) => Promise<unknown[]>;
+
+class BridgedStatement {
+  constructor(
+    readonly sql: string,
+    readonly params: readonly unknown[],
+    private readonly send: Send,
+  ) {}
+
+  bind(...params: unknown[]): BridgedStatement {
+    return new BridgedStatement(this.sql, params, this.send);
+  }
+
+  async all(): Promise<unknown> {
+    return (await this.send('all', [this]))[0];
+  }
+}
+
+function encodeParam(value: unknown): unknown {
+  return value instanceof Uint8Array ? { base64: Buffer.from(value).toString('base64') } : value;
+}
+
+// Statements are prepared and bound inside workerd; the Node-side prepare/bind
+// calls are synchronous Miniflare RPCs that block the main thread.
+function bridged(binding: string): D1DatabaseLike {
+  const send: Send = async (mode, statements) => {
+    const response = await mf.dispatchFetch('http://bridge.test/', {
+      method: 'POST',
+      body: JSON.stringify({
+        binding,
+        mode,
+        statements: statements.map(({ sql, params }) => ({
+          sql,
+          params: params.map(encodeParam),
+        })),
+      }),
+    });
+    const body = (await response.json()) as
+      { ok: true; result: unknown[] } | { ok: false; message: string; cause: string | null };
+    if (body.ok) return body.result;
+    throw new Error(body.message, {
+      cause: body.cause === null ? undefined : new Error(body.cause),
+    });
+  };
+  return {
+    prepare: (sql: string) => new BridgedStatement(sql, [], send),
+    batch: (statements: BridgedStatement[]) => send('batch', statements),
+  } as unknown as D1DatabaseLike;
 }
 
 async function openPair() {
-  const db = await database();
+  const db = bridged(allocateBinding());
   return {
     executor: createD1Executor(db),
     second: async () => createD1Executor(db),

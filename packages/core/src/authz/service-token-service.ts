@@ -47,7 +47,7 @@ export interface ServiceTokenStoreInput {
   readonly authority: ServiceTokenAuthority;
   /** Provider anchors of the organization, for the issuer's group and e-mail evidence. */
   readonly providerAnchors: readonly ProviderAnchor[];
-  readonly audit?: AuditEvent;
+  readonly audit: AuditEvent;
   readonly idempotency?: IdempotencyRecord;
 }
 
@@ -81,6 +81,7 @@ export interface ServiceTokenStore {
 }
 
 export interface ServiceTokenIssueInput {
+  readonly routeProjectId: string | null;
   readonly servicePrincipalId: string;
   readonly name: string;
   readonly scope: ScopeLevel;
@@ -233,6 +234,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
     async issue(ctx, authenticated, actor, fence, request, call) {
       const input = {
         servicePrincipalId: request.servicePrincipalId,
+        routeProjectId: request.routeProjectId,
         name: request.name,
         scope: request.scope,
         readOnly: request.readOnly,
@@ -252,6 +254,12 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
         actor.userId !== session.userId
       ) {
         return deny(ctx, null);
+      }
+      if (
+        input.routeProjectId !== null &&
+        (typeof input.routeProjectId !== 'string' || input.routeProjectId === '')
+      ) {
+        throw new TypeError('routeProjectId must be null or a non-empty string');
       }
       if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
       if (!isValidName(input.name)) return fail('invalid_name');
@@ -282,7 +290,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
         typeof principalId === 'string' && principalId !== ''
           ? await principals.get(ctx, principalId)
           : null;
-      if (target === null) {
+      if (target === null || target.projectId !== input.routeProjectId) {
         const live = await authority.livePermissions(ctx, fence, null);
         return live.has(PROJECT_ISSUE) || live.has(ORG_ISSUE)
           ? fail('not_found')

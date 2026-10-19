@@ -208,13 +208,43 @@ const STANZA: PlatformPortConfig = {
 };
 
 function fakeD1(): D1DatabaseLike {
-  const statement: D1PreparedStatementLike = {
-    bind: () => statement,
-    all: () => Promise.resolve({ results: [] }),
+  const verifier = new Map<number, string>();
+  type Recorded = D1PreparedStatementLike & { sql: string; values: unknown[] };
+  const make = (sql: string, values: unknown[]): Recorded => ({
+    sql,
+    values,
+    bind: (...next) => make(sql, next),
+    all: () => Promise.resolve(run(sql, values)),
+  });
+  const run = (
+    sql: string,
+    values: unknown[],
+  ): { results: unknown[]; meta?: { changes: number } } => {
+    const insert = /^\s*insert into keyring_verifier .*X'([0-9a-f]{64})'/is.exec(sql);
+    if (insert !== null) {
+      const version = values[0] as number;
+      const only = /where not exists/i.test(sql);
+      if ((only && verifier.size > 0) || verifier.has(version)) {
+        return { results: [], meta: { changes: 0 } };
+      }
+      verifier.set(version, (insert[1] as string).toUpperCase());
+      return { results: [], meta: { changes: 1 } };
+    }
+    if (/from "keyring_verifier"/i.test(sql)) {
+      return {
+        results: [...verifier]
+          .sort(([left], [right]) => right - left)
+          .map(([key_version, mac_hex]) => ({ key_version, mac_hex })),
+      };
+    }
+    return { results: [] };
   };
   return {
-    prepare: () => statement,
-    batch: (statements) => Promise.resolve(statements.map(() => ({ results: [] }))),
+    prepare: (sql) => make(sql, []),
+    batch: (statements) =>
+      Promise.resolve(
+        (statements as Recorded[]).map((statement) => run(statement.sql, statement.values)),
+      ),
   };
 }
 
@@ -570,10 +600,12 @@ async function migratedDatabase(): Promise<{ db: D1DatabaseLike; orgId: string }
   const sources: MigrationSource[] = await Promise.all(
     [
       '0001_init.sql',
+      '0002_local_login.sql',
       '0003_access_model.sql',
       '0004_cache_epoch.sql',
       '0005_admin_permission_topup.sql',
       '0006_ports.sql',
+      '0015_keyring_verifier.sql',
     ].map(async (name) =>
       loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),

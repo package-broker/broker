@@ -64,6 +64,7 @@ import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
 import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
+import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
 import {
   AUDIT_EVENTS,
   KERNEL_EVENTS,
@@ -232,24 +233,15 @@ const PUBLIC_URL_VARIABLE = 'PB_PUBLIC_URL';
 const IDENTITY_FETCH_TIMEOUT_MS = 5000;
 
 export function publicOriginOf(raw: string | undefined): string {
-  if (raw === undefined || raw === '') throw new SecretsConfigError('missing', PUBLIC_URL_VARIABLE);
-  let url: URL;
   try {
-    url = new URL(raw);
-  } catch {
-    throw new SecretsConfigError('malformed', PUBLIC_URL_VARIABLE);
+    return parsePublicOrigin(raw);
+  } catch (error) {
+    if (!(error instanceof PublicOriginError)) throw error;
+    throw new SecretsConfigError(
+      error.problem === 'missing' ? 'missing' : 'malformed',
+      PUBLIC_URL_VARIABLE,
+    );
   }
-  if (
-    url.protocol !== 'https:' ||
-    url.pathname !== '/' ||
-    url.search !== '' ||
-    url.hash !== '' ||
-    url.username !== '' ||
-    url.password !== ''
-  ) {
-    throw new SecretsConfigError('malformed', PUBLIC_URL_VARIABLE);
-  }
-  return url.origin;
 }
 
 function wired<T>(name: string, value: T | undefined): T {

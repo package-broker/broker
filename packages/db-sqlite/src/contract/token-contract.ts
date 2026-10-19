@@ -502,7 +502,12 @@ const projectGrantDeleted: Case = (open, wrap) =>
           mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
             [projectGrantKey('project-grant')]: 1,
           }),
-          { id: 'project-grant', projectId: 'alpha', providerAnchors: anchors },
+          {
+            audit: mutationAudit('project_grant.revoke', 'project-grant', 'alpha'),
+            id: 'project-grant',
+            projectId: 'alpha',
+            providerAnchors: anchors,
+          },
         ),
       ).toEqual({ status: 'deleted', offboardedUserId: null });
       const found = await lookup(executor, ctx, 'alpha');
@@ -780,7 +785,7 @@ export function describeTokenContract(label: string, open: Open) {
   });
 }
 
-function mutationAudit(action: AuditAction, targetId: string | null) {
+function mutationAudit(action: AuditAction, targetId: string | null, projectId?: string) {
   const id = ulid();
   const result = auditEvent({
     id,
@@ -788,6 +793,7 @@ function mutationAudit(action: AuditAction, targetId: string | null) {
     action,
     actor: { type: 'system', id: null },
     context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    ...(projectId === undefined ? {} : { projectId }),
     target: { type: action.split('.')[0]!, id: targetId },
   });
   if (!result.ok) throw new Error('Invalid test audit event');

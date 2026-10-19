@@ -52,16 +52,21 @@ export function describePackagist(
   name: string,
   options: PackagistDescribeOptions,
 ): Promise<ComposerV2Result> {
-  return describeComposerV2(fetch, { root: PACKAGIST_ROOT, allowedOrigins: [] }, name, {
-    dev: true,
-    redirect: 'error',
-    path: options.path,
-    probe: NO_PROBE,
-    clock: options.clock,
-    ...(options.validators === undefined ? {} : { validators: options.validators }),
-    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  });
+  return describeComposerV2(
+    fetch,
+    { root: PACKAGIST_ROOT, allowedOrigins: [], sourceType: 'packagist_proxy' },
+    name,
+    {
+      dev: true,
+      redirect: 'error',
+      path: options.path,
+      probe: NO_PROBE,
+      clock: options.clock,
+      ...(options.validators === undefined ? {} : { validators: options.validators }),
+      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    },
+  );
 }
 
 export class PackagistBusyError extends UpstreamError {

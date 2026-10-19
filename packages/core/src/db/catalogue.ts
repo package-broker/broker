@@ -336,6 +336,12 @@ export type ListingScope =
   | { readonly kind: 'source'; readonly sourceId: string }
   | { readonly kind: 'package'; readonly packageId: string };
 
+export interface FinalizeEvidence {
+  readonly attemptedCandidates: number;
+  readonly successfulCandidates: number;
+  readonly definitiveAbsent: number;
+}
+
 export interface FinalizeResult {
   readonly removed: number;
   readonly restored: number;
@@ -384,6 +390,7 @@ export interface CatalogueWriter {
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
     listing: CompleteSourceListing | CompleteVersionListing,
+    evidence: FinalizeEvidence,
   ): Promise<FinalizeResult>;
   quarantine(
     ctx: OrgContext,

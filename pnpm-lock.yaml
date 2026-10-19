@@ -393,6 +393,9 @@ importers:
 
   packages/ui:
     devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
       '@tailwindcss/cli':
         specifier: 'catalog:'
         version: 4.3.3

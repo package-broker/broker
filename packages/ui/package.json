@@ -9,6 +9,7 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./assets/manifest.json": "./dist/assets/manifest.json",
     "./package.json": "./package.json"
   },
   "files": [
@@ -17,10 +18,14 @@
     "!dist/**/*.test.*"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "tsc -b ../core && node scripts/build.mjs",
     "gen:api": "openapi-typescript ${PB_API_SPEC:-openapi.json} -o ${PB_API_TYPES:-src/api-types.ts}"
   },
+  "peerDependencies": {
+    "@package-broker/core": "workspace:^"
+  },
   "devDependencies": {
+    "@package-broker/core": "workspace:^",
     "@tailwindcss/cli": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",

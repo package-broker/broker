@@ -1703,6 +1703,7 @@ async function serviceAuditInput(): Promise<IssueServiceTokenInput> {
     scope: 'read',
     readOnly: true,
     expiresAt: iso(86_400_000),
+    maxLifetimeDays: 365,
     now: iso(0),
     authority: {
       permission: 'org:service-principals:write',

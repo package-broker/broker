@@ -473,7 +473,7 @@ describe('PAT issuance: refuse, never narrow', () => {
       ctx,
       session(),
       fence(),
-      patInput({ expiresAt: inDays(91) }),
+      patInput({ expiresAt: inDays(366) }),
       {
         audit: {
           opId: '01K00000000000000000000001',

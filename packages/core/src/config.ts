@@ -1,3 +1,4 @@
+import type { TokenLifetimeInput } from './authz/token-lifetime.js';
 import type { PlatformPortConfig } from './platform/port-config.js';
 import type { RegistryConfigInput } from './registry/registry-config.js';
 import type { Platform, PluginDefinition } from './plugin.js';
@@ -7,6 +8,7 @@ export interface BrokerConfig {
   readonly plugins: readonly PluginDefinition[];
   readonly platformPorts?: Partial<Record<Platform, PlatformPortConfig>>;
   readonly registry?: RegistryConfigInput;
+  readonly tokens?: TokenLifetimeInput;
   readonly observability?: BrokerObservabilityConfig;
   /** Read-only MCP endpoint for `read` tokens; requires the Rate Limiting binding on Workers. */
   readonly mcp?: { readonly enabled?: boolean };

@@ -130,8 +130,14 @@ describe('import credential external references', () => {
 
   it.each([
     ['UUID', uuid],
-    ['opaque credential reference', `op://${uuid}/${uuid}/token`],
-    ['named credential reference', 'op://My Vault/My Item/token'],
+    ['environment credential reference', 'env:REGISTRY_TOKEN'],
+    ['UUID file credential reference', `file:./${uuid}/${uuid}/token`],
+    ['UUID at start of file path', `file:${uuid}/token`],
+    ['UUID as entire file path', `file:${uuid}`],
+    ['UUID Windows relative file path', `file:${uuid}\\token`],
+    ['UUID Windows absolute file path', `file:C:\\${uuid}\\${uuid}\\token`],
+    ['UUID Windows UNC file path', `file:\\\\server\\${uuid}\\token`],
+    ['file credential reference', 'file:./My Vault/My Item/token'],
   ])('preserves a %s', (_name, externalRef) => {
     const result = build(
       'import_run.credential_set',
@@ -153,12 +159,15 @@ describe('import credential external references', () => {
     ['JWT', FAKE.JWT_1],
     ['private key', FAKE.PEM_1],
     ['credential URL', 'https://deploy:password@example.test/repo'],
-    ['credential query', 'op://vault/item/token?secret=private'],
-    ['embedded provider token', `op://vault/${FAKE.GITHUB_CLASSIC_A20}/token`],
-    ['embedded random material', `op://vault/${FAKE.RUN_1}/token`],
-    ['UUID with credential material', `op://${uuid}/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['credential query', 'file:./vault/item/token?secret=private'],
+    ['embedded provider token', `file:./vault/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['embedded random material', `file:./vault/${FAKE.RUN_1}/token`],
+    ['UUID with credential material', `file:./${uuid}/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['initial UUID with credential material', `file:${uuid}/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['Windows UUID with credential material', `file:C:\\${uuid}\\${FAKE.GITHUB_CLASSIC_A20}`],
+    ['UUID embedded in Windows path', `file:C:\\prefix-${uuid}\\token`],
     ['UUID embedded in text', `prefix-${uuid}`],
-    ['UUID outside an op reference', `https://example.test/${uuid}`],
+    ['UUID in a URL', `https://example.test/${uuid}`],
   ])('refuses %s without echoing it', (_name, value) => {
     for (const key of ['old', 'new']) {
       const result = build(
@@ -172,7 +181,7 @@ describe('import credential external references', () => {
   });
 
   it('keeps UUID credential references refused in ordinary text fields', () => {
-    expect(build('role.rename', { name: { new: `op://${uuid}/token` } })).toEqual({
+    expect(build('role.rename', { name: { new: `file:./${uuid}/token` } })).toEqual({
       ok: false,
       reason: 'credential_value',
     });

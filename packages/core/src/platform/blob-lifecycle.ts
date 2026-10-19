@@ -8,6 +8,7 @@ import {
   type PurgeGeneration,
   type Sha256,
 } from './blob.js';
+import type { Jobs } from './jobs.js';
 import type { Observability } from './observability.js';
 
 export interface BlobLifecycleMetadataPort {
@@ -25,6 +26,7 @@ export interface BlobLifecycleMetadataPort {
 }
 
 export interface BlobLifecycleOptions {
+  readonly jobs?: Jobs;
   readonly metadata: BlobLifecycleMetadataPort;
   readonly store: ByteStore;
   readonly deleteTimeoutMs: number;
@@ -39,12 +41,20 @@ function validateGeneration(generation: PurgeGeneration): void {
 }
 
 export function createBlobLifecycle({
+  jobs,
   metadata,
   store,
   deleteTimeoutMs,
   leaseMs,
   observability,
-}: BlobLifecycleOptions): BlobLifecycle & Pick<BlobLifecycleMetadataPort, 'unschedule'> {
+}: BlobLifecycleOptions): BlobLifecycle &
+  Pick<BlobLifecycleMetadataPort, 'unschedule'> & {
+    removeBytes(
+      ctx: OrgContext,
+      key: Sha256,
+      generation: PurgeGeneration,
+    ): Promise<'queued' | 'removed' | 'refused'>;
+  } {
   if (!Number.isInteger(leaseMs) || leaseMs <= 0) throw new TypeError('invalid leaseMs');
   if (
     !Number.isInteger(deleteTimeoutMs) ||
@@ -55,6 +65,28 @@ export function createBlobLifecycle({
   }
 
   return {
+    async removeBytes(ctx, key, generation) {
+      parseSha256(key);
+      validateGeneration(generation);
+      if (jobs) {
+        if (!(await metadata.canStartRemove(ctx, key, generation, 2 * deleteTimeoutMs)))
+          return 'refused';
+        await jobs.enqueue(
+          ctx,
+          'blob-remove',
+          { sha256: key, generation },
+          {
+            idempotencyKey: `blob-remove:${key}:${generation}`,
+            resourceKey: key,
+          },
+        );
+        return 'queued';
+      }
+      return (await this.recheckAndRemove(ctx, key, generation)) &&
+        (await this.markDeleted(ctx, key, generation))
+        ? 'removed'
+        : 'refused';
+    },
     async softDelete(ctx, key, input) {
       parseSha256(key);
       return metadata.softDelete(ctx, key, input);

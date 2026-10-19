@@ -93,6 +93,7 @@ describe('createNodeServer', () => {
         '0005_admin_permission_topup.sql',
         '0006_ports.sql',
         '0015_keyring_verifier.sql',
+        '0016_keyring_version_indexes.sql',
       ].map(async (name) =>
         loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
       ),

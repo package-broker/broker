@@ -1,3 +1,6 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createProjectAdministration } from '@package-broker/core/authz/project-administration';
 import { fixedClock } from '@package-broker/core/ids';
@@ -329,6 +332,7 @@ function createInput(overrides: Partial<Parameters<ProjectGrantRepository['creat
     roleId: VIEWER,
     now: NOW,
     providerAnchors: ANCHORS,
+    audit: mutationAudit('project_grant.create', overrides.id ?? G_NEW, overrides.projectId ?? P1),
     ...overrides,
   };
 }
@@ -681,6 +685,7 @@ describe('project grant create', () => {
     });
     expect(
       await raced.changeRole(a, fence, {
+        audit: mutationAudit('project_grant.role_change', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         roleId: OWNER,
@@ -725,6 +730,11 @@ describe('project grant change role', () => {
     roleId: OWNER,
     now: LATER,
     providerAnchors: ANCHORS,
+    audit: mutationAudit(
+      'project_grant.role_change',
+      overrides.id ?? G_TARGET,
+      overrides.projectId ?? P1,
+    ),
     ...overrides,
   });
   const roleRevisions = Object.fromEntries(
@@ -917,6 +927,7 @@ describe('project grant delete', () => {
     ]);
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -933,6 +944,7 @@ describe('project grant delete', () => {
     ]);
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -953,6 +965,7 @@ describe('project grant delete', () => {
     };
     expect(
       await createProjectGrantRepository(missingRow).delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -975,6 +988,7 @@ describe('project grant delete', () => {
       },
     };
     const result = await createProjectGrantRepository(checked).delete(a, fence(), {
+      audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
       id: G_TARGET,
       projectId: P1,
       providerAnchors: ANCHORS,
@@ -992,6 +1006,7 @@ describe('project grant delete', () => {
     ]);
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1003,6 +1018,7 @@ describe('project grant delete', () => {
     await executor.batch([groupGrant(G_NEW, 'oidc', 'team'), member(OTHER, 'oidc', 'team')]);
     expect(
       await repository.delete(a, fence(1, G_NEW), {
+        audit: mutationAudit('project_grant.revoke', G_NEW, P1),
         id: G_NEW,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1042,6 +1058,7 @@ describe('project grant delete', () => {
 
     const revoke = (anchors = ANCHORS) =>
       repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: anchors,
@@ -1146,6 +1163,7 @@ describe('project grant delete', () => {
         },
       };
       const result = await createProjectGrantRepository(recording).delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: [...ANCHORS, ...many],
@@ -1232,6 +1250,7 @@ describe('project grant delete', () => {
           providers: entry.anchors,
         });
         const result = await repository.delete(a, fence(), {
+          audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
           id: G_TARGET,
           projectId: P1,
           providerAnchors: entry.anchors,
@@ -1255,6 +1274,7 @@ describe('project grant delete', () => {
     await executor.batch([user(b, OTHER + 'target', 'target@example.test')]);
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1265,6 +1285,7 @@ describe('project grant delete', () => {
   it('deletes the grant', async () => {
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1279,6 +1300,7 @@ describe('project grant delete', () => {
     const before = await snapshot();
     expect(
       await repository.delete(a, fence(3), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1292,6 +1314,7 @@ describe('project grant delete', () => {
     const before = await snapshot();
     expect(
       await repository.delete(a, foreign, {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1302,6 +1325,7 @@ describe('project grant delete', () => {
     const after = await snapshot();
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1315,6 +1339,7 @@ describe('project grant delete', () => {
     const wide = actorFence({ [projectGrantKey(G_ARCH_TARGET)]: 1 });
     expect(
       await repository.delete(a, wide, {
+        audit: mutationAudit('project_grant.revoke', G_ARCH_TARGET, P_ARCHIVED),
         id: G_ARCH_TARGET,
         projectId: P_ARCHIVED,
         providerAnchors: ANCHORS,
@@ -1325,6 +1350,7 @@ describe('project grant delete', () => {
   it('answers not_found for a missing grant, an organization grant and another project', async () => {
     expect(
       await repository.delete(a, fence(1, 'missing'), {
+        audit: mutationAudit('project_grant.revoke', 'missing', P1),
         id: 'missing',
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1332,6 +1358,7 @@ describe('project grant delete', () => {
     ).toBe('not_found');
     expect(
       await repository.delete(a, fence(1, G_ORG), {
+        audit: mutationAudit('project_grant.revoke', G_ORG, P1),
         id: G_ORG,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1339,6 +1366,7 @@ describe('project grant delete', () => {
     ).toBe('not_found');
     expect(
       await repository.delete(a, fence(1, G_P2_TARGET), {
+        audit: mutationAudit('project_grant.revoke', G_P2_TARGET, P1),
         id: G_P2_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1350,6 +1378,7 @@ describe('project grant delete', () => {
   it('refuses a project of another organization', async () => {
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P_B),
         id: G_TARGET,
         projectId: P_B,
         providerAnchors: ANCHORS,
@@ -1361,6 +1390,7 @@ describe('project grant delete', () => {
   it('requires the fence to carry the target revision', async () => {
     await expect(
       repository.delete(a, actorFence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
@@ -1372,11 +1402,207 @@ describe('project grant delete', () => {
     await executor.batch([stmt('DELETE FROM access_grant WHERE id = ?', G_ACTOR)]);
     expect(
       await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
         id: G_TARGET,
         projectId: P1,
         providerAnchors: ANCHORS,
       }),
     ).toBe('forbidden');
     expect((await grantRow(G_TARGET))?.last_op_id).toBeNull();
+  });
+});
+
+function mutationAudit(action: AuditAction, targetId: string, projectId = P1) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: NOW,
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+    projectId,
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+
+function record(): IdempotencyRecord {
+  return {
+    principalKey: 'user:actor',
+    key: 'project-request',
+    route: '/projects',
+    requestHash: 'a'.repeat(64),
+    status: 200,
+    responseJson: '{"ok":true}',
+    createdAt: NOW,
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+}
+
+describe('project grant mutation audit and idempotency', () => {
+  const cases = [
+    ['create', 'project_grant.create', 'created'],
+    ['changeRole', 'project_grant.role_change', 'updated'],
+    ['delete', 'project_grant.revoke', { status: 'deleted', offboardedUserId: null }],
+  ] as const;
+  type Method = (typeof cases)[number][0];
+
+  function invoke(
+    method: Method,
+    action: AuditAction,
+    idempotency?: IdempotencyRecord,
+    revision = 1,
+  ) {
+    const id = method === 'create' ? G_NEW : G_TARGET;
+    const input = {
+      id,
+      projectId: P1,
+      now: LATER,
+      roleId: VIEWER,
+      providerAnchors: ANCHORS,
+      audit: mutationAudit(action, id),
+      ...(idempotency === undefined ? {} : { idempotency }),
+    };
+    if (method === 'create') return repository.create(a, actorFence(), createInput(input));
+    const f = actorFence({ [projectGrantKey(id)]: revision, [projectGrantRoleKey(VIEWER)]: 1 });
+    return repository[method](a, f, input);
+  }
+
+  for (const withIdempotency of [false, true]) {
+    it.each(cases)(
+      `%s persists one audit row (idempotency: ${withIdempotency})`,
+      async (method, action, answer) => {
+        expect(await invoke(method, action, withIdempotency ? record() : undefined)).toEqual(
+          answer,
+        );
+        expect(
+          await rows(
+            'SELECT org_id, action, target_type, target_id, project_id FROM audit_pending',
+          ),
+        ).toEqual([
+          {
+            org_id: a.orgId,
+            action,
+            target_type: 'project_grant',
+            target_id: method === 'create' ? G_NEW : G_TARGET,
+            project_id: P1,
+          },
+        ]);
+        expect(
+          await rows(
+            'SELECT principal_key AS principalKey, key, route, request_hash AS requestHash, status, response_json AS responseJson, created_at AS createdAt, expires_at AS expiresAt FROM api_idempotency',
+          ),
+        ).toEqual(withIdempotency ? [record()] : []);
+      },
+    );
+  }
+
+  it.each(cases)('%s rolls back a repeated idempotency key', async (method, action, answer) => {
+    expect(await invoke(method, action, record())).toEqual(answer);
+    const before = await grantRow(G_TARGET);
+    if (method === 'create') {
+      expect(
+        await repository.create(
+          a,
+          actorFence(),
+          createInput({
+            id: 'another-grant',
+            subject: { type: 'group', provider: 'oidc', value: 'another-group' },
+            audit: mutationAudit(action, 'another-grant'),
+            idempotency: record(),
+          }),
+        ),
+      ).toBe('conflict');
+      expect(await grantRow('another-grant')).toBeUndefined();
+    } else {
+      if (method === 'delete')
+        await executor.batch([grant(a, G_TARGET, 'target@example.test', VIEWER, P1)]);
+      expect(await invoke(method, action, record(), method === 'delete' ? 1 : 2)).toBe('conflict');
+      if (method === 'changeRole') expect(await grantRow(G_TARGET)).toEqual(before);
+      else expect(await grantRow(G_TARGET)).toBeDefined();
+    }
+    expect(await rows('SELECT action FROM audit_pending')).toEqual([{ action }]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([{ key: record().key }]);
+  });
+
+  it('a role-change retry preserves the idempotency conflict after revocation', async () => {
+    const action = 'project_grant.role_change';
+    expect(await invoke('changeRole', action, record())).toBe('updated');
+    expect(await invoke('delete', 'project_grant.revoke', undefined, 2)).toEqual({
+      status: 'deleted',
+      offboardedUserId: null,
+    });
+    expect(await grantRow(G_TARGET)).toBeUndefined();
+    const before = await snapshot();
+
+    expect(await invoke('changeRole', action, record())).toBe('conflict');
+
+    expect(await grantRow(G_TARGET)).toBeUndefined();
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT action FROM audit_pending ORDER BY action')).toEqual([
+      { action: 'project_grant.revoke' },
+      { action },
+    ]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([{ key: record().key }]);
+  });
+
+  it('a role-change retry preserves the idempotency conflict after role removal', async () => {
+    const action = 'project_grant.role_change';
+    expect(await invoke('changeRole', action, record())).toBe('updated');
+    await executor.batch([
+      stmt(
+        'UPDATE access_grant SET role_id = ? WHERE org_id = ? AND role_id = ?',
+        OWNER,
+        a.orgId,
+        VIEWER,
+      ),
+      stmt('DELETE FROM role WHERE org_id = ? AND id = ?', a.orgId, VIEWER),
+    ]);
+    expect(await rows('SELECT id FROM role WHERE org_id = ? AND id = ?', a.orgId, VIEWER)).toEqual(
+      [],
+    );
+    const before = await snapshot();
+    const beforeGrant = await grantRow(G_TARGET);
+
+    expect(await invoke('changeRole', action, record(), 2)).toBe('conflict');
+
+    expect(await grantRow(G_TARGET)).toEqual(beforeGrant);
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT action FROM audit_pending')).toEqual([{ action }]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([{ key: record().key }]);
+  });
+
+  it('a direct deletion retry preserves the idempotency conflict after the grant is gone', async () => {
+    const action = 'project_grant.revoke';
+    expect(await invoke('delete', action, record())).toEqual({
+      status: 'deleted',
+      offboardedUserId: null,
+    });
+    expect(await grantRow(G_TARGET)).toBeUndefined();
+    const before = await snapshot();
+
+    expect(await invoke('delete', action, record())).toBe('conflict');
+
+    expect(await grantRow(G_TARGET)).toBeUndefined();
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT action FROM audit_pending')).toEqual([{ action }]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([{ key: record().key }]);
+  });
+
+  it('a duplicate grant remains duplicate with an unused idempotency key', async () => {
+    expect(
+      await repository.create(
+        a,
+        actorFence(),
+        createInput({
+          id: G_TARGET,
+          audit: mutationAudit('project_grant.create', G_TARGET),
+          idempotency: record(),
+        }),
+      ),
+    ).toBe('duplicate');
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
   });
 });

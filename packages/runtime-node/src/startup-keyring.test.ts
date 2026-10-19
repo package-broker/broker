@@ -3,8 +3,10 @@ import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
+import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
+import * as verifier from '@package-broker/core/secrets/keyring-verifier';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import {
   KeyringMismatchError,
@@ -22,6 +24,25 @@ import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositori
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import type { NodeBroker } from './index.js';
 import { startNode } from './startup.js';
+
+const handlers = vi.hoisted(() => ({
+  captured: [] as Array<(request: Request) => Response | Promise<Response>>,
+}));
+vi.mock('@hono/node-server', async (original) => {
+  const actual = await original<typeof import('@hono/node-server')>();
+  return {
+    ...actual,
+    getRequestListener: (...args: Parameters<typeof actual.getRequestListener>) => {
+      handlers.captured.push(args[0] as (request: Request) => Response | Promise<Response>);
+      return actual.getRequestListener(...args);
+    },
+  };
+});
+async function request(url: string): Promise<Response> {
+  const handler = handlers.captured.at(-1);
+  if (handler === undefined) throw new Error('No request handler captured');
+  return handler(new Request(url));
+}
 
 const KEY_V1 = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const KEY_V1_OTHER = 'pbmk_v1_YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8';
@@ -60,6 +81,7 @@ describe('startNode keyring verification', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     for (const broker of running.splice(0)) await broker.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -161,9 +183,16 @@ describe('startNode keyring verification', () => {
   }
 
   const ORG = "INSERT INTO organization (id, slug, name) VALUES ('01ORG', 'acme', 'Acme')";
-  const credential = (version: number): { sql: string } => ({
-    sql: `INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES ('01C${version}', '01ORG', 'k', X'00', X'000000000000000000000000', ${version}, 'a')`,
-  });
+  const credential = async (version: number): Promise<{ sql: string }> => {
+    const aad = credentialAad({ id: `01C${version}`, orgId: '01ORG', kind: 'k' });
+    const sealed = await createSecretCipher(
+      createKeyring(readMasterKeys({ current: version === 1 ? KEY_V1 : KEY_V2 })),
+      'credential-encryption',
+    ).seal(new Uint8Array([7]), aad);
+    return {
+      sql: `INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES ('01C${version}', '01ORG', 'k', X'${Buffer.from(sealed.ciphertext).toString('hex')}', X'${Buffer.from(sealed.nonce).toString('hex')}', ${version}, '${aad}')`,
+    };
+  };
 
   async function failureOf(
     env: Readonly<Record<string, string>>,
@@ -178,7 +207,7 @@ describe('startNode keyring verification', () => {
   it('4: deleting every verifier row on a deployment with credentials fails closed', async () => {
     await (await start({ PB_MASTER_KEY: KEY_V1 })).close();
     running.length = 0;
-    await sql([{ sql: ORG }, credential(1), { sql: 'DELETE FROM keyring_verifier' }]);
+    await sql([{ sql: ORG }, await credential(1), { sql: 'DELETE FROM keyring_verifier' }]);
 
     const failure = await failureOf({ PB_MASTER_KEY: KEY_V1_OTHER });
 
@@ -191,7 +220,7 @@ describe('startNode keyring verification', () => {
   it('5: PB_KEYRING_RESEED=1 records the current key once and logs only the key version', async () => {
     await (await start({ PB_MASTER_KEY: KEY_V1 })).close();
     running.length = 0;
-    await sql([{ sql: ORG }, credential(1), { sql: 'DELETE FROM keyring_verifier' }]);
+    await sql([{ sql: ORG }, await credential(1), { sql: 'DELETE FROM keyring_verifier' }]);
     const logs: Array<Readonly<Record<string, unknown>>> = [];
 
     await (await start({ PB_MASTER_KEY: KEY_V1, PB_KEYRING_RESEED: '1' }, logs)).close();
@@ -205,6 +234,9 @@ describe('startNode keyring verification', () => {
     await (await start({ PB_MASTER_KEY: KEY_V1, PB_KEYRING_RESEED: '1' }, logs)).close();
     running.length = 0;
     expect(logs.filter((entry) => entry['event'] === 'keyring.reseeded')).toHaveLength(1);
+    expect(logs).toContainEqual(
+      expect.objectContaining({ level: 'warn', event: 'keyring.reseed_ignored', key_version: 1 }),
+    );
   });
 
   it('6: two first boots with disjoint key versions enroll exactly one and fail the other closed', async () => {
@@ -228,7 +260,7 @@ describe('startNode keyring verification', () => {
   it('7: dropping a version that a credential row still uses fails closed', async () => {
     await (await start({ PB_MASTER_KEY: KEY_V1 })).close();
     running.length = 0;
-    await sql([{ sql: ORG }, credential(1)]);
+    await sql([{ sql: ORG }, await credential(1)]);
     await (await start({ PB_MASTER_KEY: KEY_V2, PB_MASTER_KEY_PREVIOUS: KEY_V1 })).close();
     running.length = 0;
 
@@ -265,6 +297,7 @@ describe('startNode keyring verification', () => {
     ]);
     await prepared.close();
 
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000);
     expect((await fetch(`${base}/health/ready`)).status).toBe(200);
     expect(await verifierVersions()).toEqual([1]);
     expect(JSON.stringify(logs)).not.toContain(KEY_V1.slice(8));
@@ -292,7 +325,72 @@ describe('startNode keyring verification', () => {
     );
     await prepared.close();
 
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000);
     expect((await fetch(`http://127.0.0.1:${port}/health/ready`)).status).toBe(503);
     expect((await fetch(`http://127.0.0.1:${port}/_pb/auth/providers`)).status).toBe(503);
+  });
+  it('re-seed refuses a wrong key when a credential authenticates it', async () => {
+    await start({ PB_MASTER_KEY: KEY_V1 });
+    await stop();
+    await sql([{ sql: ORG }, await credential(1), { sql: 'DELETE FROM keyring_verifier' }]);
+    await expect(
+      start({ PB_MASTER_KEY: KEY_V1_OTHER, PB_KEYRING_RESEED: '1' }),
+    ).rejects.toMatchObject({ name: 'KeyringMismatchError', keyVersion: 1 });
+    expect(await verifierVersions()).toEqual([]);
+  });
+
+  it('organization bootstrap requires migrations and a verified keyring', async () => {
+    await expect(
+      start({ PB_MASTER_KEY: KEY_V1, PB_MIGRATE: 'off', PB_ORG_SLUG: 'acme', PB_ORG_NAME: 'Acme' }),
+    ).rejects.toMatchObject({
+      name: 'StartupConfigError',
+      message: expect.stringContaining('verified keyring'),
+    });
+  });
+
+  it('deferred verification shares one attempt and throttles failures for one second, logging the known version', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let rejectAttempt: (error: Error) => void = () => undefined;
+    const attempt = vi
+      .spyOn(verifier, 'verifyKeyring')
+      .mockRejectedValueOnce(new verifier.KeyringStoreUnavailableError())
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectAttempt = reject;
+          }),
+      )
+      .mockRejectedValue(new verifier.KeyringMismatchError(2));
+    const logs: Array<Readonly<Record<string, unknown>>> = [];
+    const broker = await start({ PB_MASTER_KEY: KEY_V1, PB_MIGRATE: 'off' }, logs);
+    await broker.ready();
+    const url = 'http://127.0.0.1/health/ready';
+    expect((await request(url)).status).toBe(503);
+    expect(attempt).toHaveBeenCalledTimes(1);
+    now += 1000;
+    const requests = Array.from({ length: 8 }, () => request(url));
+    await vi.waitFor(() => expect(attempt).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(attempt).toHaveBeenCalledTimes(2);
+    now += 1000;
+    requests.push(request(url));
+    await Promise.resolve();
+    expect(attempt).toHaveBeenCalledTimes(2);
+    rejectAttempt(new verifier.KeyringMismatchError(2));
+    expect((await Promise.all(requests)).every((response) => response.status === 503)).toBe(true);
+    await request(url);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    now += 999;
+    await request(url);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    now += 1;
+    await request(url);
+    expect(attempt).toHaveBeenCalledTimes(4);
+    expect(logs.filter((entry) => entry['event'] === 'keyring.unverified')).toEqual([
+      expect.objectContaining({ key_version: 2 }),
+      expect.objectContaining({ key_version: 2 }),
+      expect.objectContaining({ key_version: 2 }),
+    ]);
   });
 });

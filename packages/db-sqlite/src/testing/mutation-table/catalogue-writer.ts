@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../visibility-audit.js';
 import { expect } from 'vitest';
 import { entries as reconcileEntries } from './catalogue-reconcile.js';
 import type { SqlExecutor } from '@package-broker/core/db/port';
@@ -440,11 +441,20 @@ const derivationScopes = {
 
 const storeCalls = {
   attachSource: (store, ctx, fence, suffix) =>
-    store.attachSource(ctx, fence, { projectId: `P-${suffix}`, sourceId: `S-${suffix}` }),
+    store.attachSource(ctx, fence, {
+      audit: visibilityAudit(),
+      projectId: `P-${suffix}`,
+      sourceId: `S-${suffix}`,
+    }),
   detachSource: (store, ctx, fence, suffix) =>
-    store.detachSource(ctx, fence, { projectId: `P-${suffix}`, sourceId: `S-${suffix}` }),
+    store.detachSource(ctx, fence, {
+      audit: visibilityAudit(),
+      projectId: `P-${suffix}`,
+      sourceId: `S-${suffix}`,
+    }),
   setPrecedence: (store, ctx, fence, suffix) =>
     store.setPrecedence(ctx, fence, {
+      audit: visibilityAudit(),
       projectId: `P-${suffix}`,
       sourceId: `S-${suffix}`,
       precedence: 42,
@@ -453,6 +463,7 @@ const storeCalls = {
     store.setPackageFlag(ctx, fence, { packageId: `K-${suffix}`, visibleToNewProjects: false }),
   addPattern: (store, ctx, fence, suffix) =>
     store.addPattern(ctx, fence, {
+      audit: visibilityAudit(),
       projectId: `P-${suffix}`,
       sourceId: `S-${suffix}`,
       pattern: 'widget*',
@@ -460,6 +471,7 @@ const storeCalls = {
     }),
   removePattern: (store, ctx, fence, suffix) =>
     store.removePattern(ctx, fence, {
+      audit: visibilityAudit(),
       projectId: `P-${suffix}`,
       sourceId: `S-${suffix}`,
       pattern: 'widget*',
@@ -780,14 +792,18 @@ export const entries: readonly MutationEntry[] = [
       ),
       ...(Object.keys(storeCalls) as (keyof typeof storeCalls)[]).map((method) => ({
         name: `${method} delegates an organization-scoped epoch bump`,
-        locate:
-          /(?<=update "cache_epoch" set "version" = hex\(randomblob\(16\)\) where )"org_id" = \?/,
+        locate: /(?<=update "cache_epoch" [\s\S]+ where )"org_id" = \?/,
         neutral: NOT_NULL,
         copies: 1,
         caseName: storeCase(method).name,
       })),
     ],
     waivers: [
+      {
+        locate: /(?<=from project_source where )org_id = \?/,
+        reason:
+          'The no-op epoch condition repeats the scoped attachment mutation target and affects only the context epoch. Attachment authority and target guards independently require the same organization.',
+      },
       derivationScopes,
       {
         locate:

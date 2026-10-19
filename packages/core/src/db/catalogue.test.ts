@@ -301,13 +301,20 @@ describe('normalized metadata writer boundary', () => {
   });
 });
 
-it('requires audit on the ordering port and ApiCall only on its service method', () => {
+it('requires audit and ApiCall on attachment, ordering and pattern mutations', () => {
   type Order = Parameters<VisibilityStore['setOrder']>[2];
   expectTypeOf<Order['audit']>().toEqualTypeOf<AuditEvent>();
   expectTypeOf<Order['idempotency']>().toEqualTypeOf<IdempotencyRecord | undefined>();
   expectTypeOf<Order['sourceIds']>().toEqualTypeOf<readonly string[]>();
   expectTypeOf<Parameters<VisibilityService['setOrder']>[3]>().toEqualTypeOf<ApiCall>();
   expectTypeOf<Parameters<VisibilityService['setOrder']>['length']>().toEqualTypeOf<4>();
-  type Other = Exclude<keyof VisibilityService, 'setOrder'>;
+  type Audited =
+    'attachSource' | 'detachSource' | 'setPrecedence' | 'setOrder' | 'addPattern' | 'removePattern';
+  expectTypeOf<Parameters<VisibilityService[Audited]>[3]>().toEqualTypeOf<ApiCall>();
+  expectTypeOf<Parameters<VisibilityStore[Audited]>[2]['audit']>().toEqualTypeOf<AuditEvent>();
+  expectTypeOf<Parameters<VisibilityStore[Audited]>[2]['idempotency']>().toEqualTypeOf<
+    IdempotencyRecord | undefined
+  >();
+  type Other = Exclude<keyof VisibilityService, Audited>;
   expectTypeOf<Parameters<VisibilityService[Other]>['length']>().toEqualTypeOf<3>();
 });

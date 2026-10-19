@@ -1,4 +1,6 @@
 import { sql, type SqlBool } from 'kysely';
+import type { VisibilityAudit } from '@package-broker/core/db/catalogue';
+import { visibilityAuditStatements } from './visibility-audit.js';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import { isValidPattern, MAX_PATTERNS_PER_RULE } from '@package-broker/core/catalogue/patterns';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -22,7 +24,7 @@ const GUARD_STATEMENTS = 3;
 export type PatternEffect = 'include' | 'exclude';
 export type SubsetFailure = 'forbidden' | 'indeterminate' | 'failed';
 
-export interface PatternInput {
+export interface PatternInput extends VisibilityAudit {
   readonly projectId: string;
   readonly sourceId: string;
   readonly pattern: string;
@@ -30,7 +32,7 @@ export interface PatternInput {
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
-export interface PatternTarget {
+export interface PatternTarget extends VisibilityAudit {
   readonly projectId: string;
   readonly sourceId: string;
   readonly pattern: string;
@@ -273,11 +275,16 @@ export function createVisibilitySubsetRepository(
         executor,
         ctx,
         fence,
-        assertGuard(held, ctx),
+        assertGuard(
+          held,
+          ctx,
+          sql<SqlBool>`not ${patternRow(ctx, input, sql`vs_pattern.pattern = ${input.pattern}`)}`,
+        ),
         [
           ...assertCheck(attached),
           ...assertCheck(sql<SqlBool>`not ${clash}`),
           insert,
+          ...visibilityAuditStatements(ctx, input),
           ...assertCheck(withinLimit),
           ...rederiveStatements(ctx, {
             kind: 'projectSource',
@@ -322,10 +329,11 @@ export function createVisibilitySubsetRepository(
         executor,
         ctx,
         fence,
-        assertGuard(held, ctx),
+        assertGuard(held, ctx, patternRow(ctx, input, sql`vs_pattern.pattern = ${input.pattern}`)),
         [
           ...assertCheck(narrowing),
           remove,
+          ...visibilityAuditStatements(ctx, input, true),
           ...rederiveStatements(ctx, {
             kind: 'projectSource',
             projectId: input.projectId,

@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { ulid } from '@package-broker/core/ids';
@@ -341,7 +342,11 @@ afterEach(async () => {
 describe('attachSource', () => {
   it('1: a project owner without org:sources:write cannot attach an organization source', async () => {
     const before = await epoch();
-    const outcome = await repository().attachSource(a, owner(), { projectId: PA, sourceId: SO });
+    const outcome = await repository().attachSource(a, owner(), {
+      audit: visibilityAudit(),
+      projectId: PA,
+      sourceId: SO,
+    });
     expect(outcome).toEqual({ ok: false, reason: 'not_found' });
     expect(await attachment(PA, SO)).toBeUndefined();
     expect(await rows()).toEqual(oracle());
@@ -351,9 +356,21 @@ describe('attachSource', () => {
   it('1: an org admin attaches organization sources with default precedence; rows equal the oracle', async () => {
     const before = await epoch();
     const repo = repository();
-    const first = await repo.attachSource(a, admin(), { projectId: PA, sourceId: SO });
+    const first = await repo.attachSource(a, admin(), {
+      audit: visibilityAudit(),
+      projectId: PA,
+      sourceId: SO,
+    });
     expect(first.ok).toBe(true);
-    expect((await repo.attachSource(a, admin(), { projectId: PA, sourceId: SP })).ok).toBe(true);
+    expect(
+      (
+        await repo.attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SP,
+        })
+      ).ok,
+    ).toBe(true);
     config.attachments.push(
       { orgId: ORG_A, projectId: PA, sourceId: SO, precedence: 100 },
       { orgId: ORG_A, projectId: PA, sourceId: SP, precedence: 1000 },
@@ -370,19 +387,45 @@ describe('attachSource', () => {
   it('re-attaching with a precedence updates it; without one keeps it', async () => {
     const repo = repository();
     expect(
-      (await repo.attachSource(a, admin(), { projectId: PA, sourceId: SO, precedence: 7 })).ok,
+      (
+        await repo.attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+          precedence: 7,
+        })
+      ).ok,
     ).toBe(true);
     expect(await attachment(PA, SO)).toBe(7);
     expect(
-      (await repo.attachSource(a, admin(), { projectId: PA, sourceId: SO, precedence: 40 })).ok,
+      (
+        await repo.attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+          precedence: 40,
+        })
+      ).ok,
     ).toBe(true);
     expect(await attachment(PA, SO)).toBe(40);
-    expect((await repo.attachSource(a, admin(), { projectId: PA, sourceId: SO })).ok).toBe(true);
+    expect(
+      (
+        await repo.attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     expect(await attachment(PA, SO)).toBe(40);
   });
 
   it('the owner attaches its own project-level source with project:sources:write', async () => {
-    const outcome = await repository().attachSource(a, owner(), { projectId: PB, sourceId: SB });
+    const outcome = await repository().attachSource(a, owner(), {
+      audit: visibilityAudit(),
+      projectId: PB,
+      sourceId: SB,
+    });
     expect(outcome.ok).toBe(true);
     config.attachments.push({ orgId: ORG_A, projectId: PB, sourceId: SB, precedence: 100 });
     expect(await rows()).toEqual(oracle());
@@ -391,7 +434,11 @@ describe('attachSource', () => {
   it('a foreign project-level source is refused before the batch, even for an org admin', async () => {
     const before = await epoch();
     for (const actor of [owner(), admin()]) {
-      const outcome = await repository().attachSource(a, actor, { projectId: PA, sourceId: SB });
+      const outcome = await repository().attachSource(a, actor, {
+        audit: visibilityAudit(),
+        projectId: PA,
+        sourceId: SB,
+      });
       expect(outcome).toEqual({ ok: false, reason: 'not_found' });
     }
     expect(await attachment(PA, SB)).toBeUndefined();
@@ -409,6 +456,7 @@ describe('attachSource', () => {
       },
     };
     const outcome = await repository(racing).attachSource(a, admin(), {
+      audit: visibilityAudit(),
       projectId: PA,
       sourceId: SO,
     });
@@ -419,15 +467,33 @@ describe('attachSource', () => {
 
   it('another organization cannot attach by id in either direction', async () => {
     const repo = repository();
-    expect(await repo.attachSource(a, admin(), { projectId: PA, sourceId: S_FOREIGN })).toEqual({
+    expect(
+      await repo.attachSource(a, admin(), {
+        audit: visibilityAudit(),
+        projectId: PA,
+        sourceId: S_FOREIGN,
+      }),
+    ).toEqual({
       ok: false,
       reason: 'not_found',
     });
-    expect(await repo.attachSource(a, admin(), { projectId: P_FOREIGN, sourceId: SO })).toEqual({
+    expect(
+      await repo.attachSource(a, admin(), {
+        audit: visibilityAudit(),
+        projectId: P_FOREIGN,
+        sourceId: SO,
+      }),
+    ).toEqual({
       ok: false,
       reason: 'not_found',
     });
-    expect(await repo.attachSource(b, admin(), { projectId: PA, sourceId: SO })).toEqual({
+    expect(
+      await repo.attachSource(b, admin(), {
+        audit: visibilityAudit(),
+        projectId: PA,
+        sourceId: SO,
+      }),
+    ).toEqual({
       ok: false,
       reason: 'not_found',
     });
@@ -437,7 +503,11 @@ describe('attachSource', () => {
 
   it('3: attach to an archived project is refused', async () => {
     const before = await epoch();
-    const outcome = await repository().attachSource(a, admin(), { projectId: PX, sourceId: SO });
+    const outcome = await repository().attachSource(a, admin(), {
+      audit: visibilityAudit(),
+      projectId: PX,
+      sourceId: SO,
+    });
     expect(outcome).toEqual({ ok: false, reason: 'not_found' });
     expect(await attachment(PX, SO)).toBeUndefined();
     expect(await epoch()).toBe(before);
@@ -452,7 +522,11 @@ describe('attachSource', () => {
       ),
     ]);
     const before = await epoch();
-    const outcome = await repository().attachSource(a, admin(), { projectId: PA, sourceId: SO });
+    const outcome = await repository().attachSource(a, admin(), {
+      audit: visibilityAudit(),
+      projectId: PA,
+      sourceId: SO,
+    });
     expect(outcome).toEqual({ ok: false, reason: 'not_found' });
     expect(await attachment(PA, SO)).toBeUndefined();
     expect(await rows()).toEqual(oracle());
@@ -462,7 +536,12 @@ describe('attachSource', () => {
   it('refuses a precedence that is not a non-negative safe integer', async () => {
     for (const precedence of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
       await expect(
-        repository().attachSource(a, admin(), { projectId: PA, sourceId: SO, precedence }),
+        repository().attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+          precedence,
+        }),
       ).rejects.toThrow(RangeError);
     }
   });
@@ -470,9 +549,15 @@ describe('attachSource', () => {
 
 describe('detachSource', () => {
   async function narrowedPa(): Promise<void> {
-    expect((await repository().attachSource(a, admin(), { projectId: PA, sourceId: SO })).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await repository().attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     config.attachments.push({ orgId: ORG_A, projectId: PA, sourceId: SO, precedence: 100 });
     config.patterns.push({
       id: '01J0PATTERN00000000000000I1',
@@ -511,9 +596,15 @@ describe('detachSource', () => {
   it('2: detach removes explicit and pattern rows of the source; re-attach starts clean', async () => {
     await narrowedPa();
     const before = await epoch();
-    expect((await repository().detachSource(a, owner(), { projectId: PA, sourceId: SO })).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await repository().detachSource(a, owner(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     expect(await epoch()).not.toBe(before);
     config.attachments = config.attachments.filter((x) => x.projectId !== PA);
     config.patterns = [];
@@ -523,9 +614,15 @@ describe('detachSource', () => {
     expect((await rows()).filter((r) => r.projectId === PA)).toEqual([]);
     expect(await rows()).toEqual(oracle());
 
-    expect((await repository().attachSource(a, admin(), { projectId: PA, sourceId: SO })).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await repository().attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     config.attachments.push({ orgId: ORG_A, projectId: PA, sourceId: SO, precedence: 100 });
     const pa = (await rows()).filter((r) => r.projectId === PA);
     expect(pa.map((r) => [r.packageId, r.origin])).toEqual([
@@ -537,13 +634,25 @@ describe('detachSource', () => {
 
   it('leaves other projects and other sources of the project untouched', async () => {
     await narrowedPa();
-    expect((await repository().attachSource(a, admin(), { projectId: PA, sourceId: SP })).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await repository().attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SP,
+        })
+      ).ok,
+    ).toBe(true);
     config.attachments.push({ orgId: ORG_A, projectId: PA, sourceId: SP, precedence: 1000 });
-    expect((await repository().detachSource(a, owner(), { projectId: PA, sourceId: SO })).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await repository().detachSource(a, owner(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     config.attachments = config.attachments.filter(
       (x) => !(x.projectId === PA && x.sourceId === SO),
     );
@@ -563,7 +672,11 @@ describe('detachSource', () => {
         SO,
       ),
     ]);
-    const outcome = await repository().detachSource(a, owner(), { projectId: PX, sourceId: SO });
+    const outcome = await repository().detachSource(a, owner(), {
+      audit: visibilityAudit(),
+      projectId: PX,
+      sourceId: SO,
+    });
     expect(outcome.ok).toBe(true);
     expect(await attachment(PX, SO)).toBeUndefined();
   });
@@ -574,7 +687,11 @@ describe('detachSource', () => {
       OWNER_GRANTS.map((id) => stmt('DELETE FROM access_grant WHERE id = ?', id)),
     );
     const before = await epoch();
-    const outcome = await repository().detachSource(a, owner(), { projectId: PA, sourceId: SO });
+    const outcome = await repository().detachSource(a, owner(), {
+      audit: visibilityAudit(),
+      projectId: PA,
+      sourceId: SO,
+    });
     expect(outcome).toEqual({ ok: false, reason: 'authority' });
     expect(await attachment(PA, SO)).toBe(100);
     expect(await patternCount(PA, SO)).toBe(1);
@@ -596,6 +713,7 @@ describe('detachSource', () => {
     };
     const before = await epoch();
     const outcome = await repository(racing).detachSource(a, owner(), {
+      audit: visibilityAudit(),
       projectId: PA,
       sourceId: SO,
     });
@@ -605,7 +723,13 @@ describe('detachSource', () => {
   });
 
   it('a source that is not attached is not_found', async () => {
-    expect(await repository().detachSource(a, owner(), { projectId: PA, sourceId: SP })).toEqual({
+    expect(
+      await repository().detachSource(a, owner(), {
+        audit: visibilityAudit(),
+        projectId: PA,
+        sourceId: SP,
+      }),
+    ).toEqual({
       ok: false,
       reason: 'not_found',
     });
@@ -615,13 +739,24 @@ describe('detachSource', () => {
 describe('setPrecedence', () => {
   it('requires project:sources:write and changes only the precedence', async () => {
     expect(
-      (await repository().setPrecedence(a, owner(), { projectId: PB, sourceId: SO, precedence: 5 }))
-        .ok,
+      (
+        await repository().setPrecedence(a, owner(), {
+          audit: visibilityAudit(),
+          projectId: PB,
+          sourceId: SO,
+          precedence: 5,
+        })
+      ).ok,
     ).toBe(true);
     expect(await attachment(PB, SO)).toBe(5);
     expect(await rows()).toEqual(oracle());
     expect(
-      await repository().setPrecedence(a, admin(), { projectId: PB, sourceId: SO, precedence: 6 }),
+      await repository().setPrecedence(a, admin(), {
+        audit: visibilityAudit(),
+        projectId: PB,
+        sourceId: SO,
+        precedence: 6,
+      }),
     ).toEqual({
       ok: false,
       reason: 'authority',
@@ -639,14 +774,24 @@ describe('setPrecedence', () => {
       ),
     ]);
     expect(
-      await repository().setPrecedence(a, owner(), { projectId: PX, sourceId: SO, precedence: 5 }),
+      await repository().setPrecedence(a, owner(), {
+        audit: visibilityAudit(),
+        projectId: PX,
+        sourceId: SO,
+        precedence: 5,
+      }),
     ).toEqual({
       ok: false,
       reason: 'authority',
     });
     expect(await attachment(PX, SO)).toBe(100);
     expect(
-      await repository().setPrecedence(a, owner(), { projectId: PA, sourceId: SO, precedence: 5 }),
+      await repository().setPrecedence(a, owner(), {
+        audit: visibilityAudit(),
+        projectId: PA,
+        sourceId: SO,
+        precedence: 5,
+      }),
     ).toEqual({
       ok: false,
       reason: 'not_found',
@@ -679,9 +824,15 @@ describe('setPackageFlag', () => {
   });
 
   it('2: flag 1->0 removes subscription and pattern rows but not explicit ones; 0->1 restores', async () => {
-    expect((await repository().attachSource(a, admin(), { projectId: PA, sourceId: SO })).ok).toBe(
-      true,
-    );
+    expect(
+      (
+        await repository().attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     config.attachments.push({ orgId: ORG_A, projectId: PA, sourceId: SO, precedence: 100 });
     await executor.batch([
       stmt(
@@ -864,14 +1015,37 @@ describe('D1 limits', () => {
       },
     };
     const repo = createVisibilityAttachRepository(counting, { providerAnchors: anchors });
-    expect((await repo.attachSource(a, admin(), { projectId: PA, sourceId: SO })).ok).toBe(true);
     expect(
-      (await repo.setPrecedence(a, owner(), { projectId: PA, sourceId: SO, precedence: 3 })).ok,
+      (
+        await repo.attachSource(a, admin(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await repo.setPrecedence(a, owner(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+          precedence: 3,
+        })
+      ).ok,
     ).toBe(true);
     expect(
       (await repo.setPackageFlag(a, admin(), { packageId: K1, visibleToNewProjects: false })).ok,
     ).toBe(true);
-    expect((await repo.detachSource(a, owner(), { projectId: PA, sourceId: SO })).ok).toBe(true);
+    expect(
+      (
+        await repo.detachSource(a, owner(), {
+          audit: visibilityAudit(),
+          projectId: PA,
+          sourceId: SO,
+        })
+      ).ok,
+    ).toBe(true);
     expect(largest).toBeGreaterThan(0);
     expect(largest).toBeLessThanOrEqual(100);
   });
@@ -1045,8 +1219,10 @@ describe('setOrder', () => {
       stmt(`CREATE TRIGGER reject_order_rewrite BEFORE UPDATE ON project_source
         WHEN OLD.project_id = '${PB}' BEGIN SELECT RAISE(ABORT, 'unexpected rewrite'); END`),
     ]);
+    const before = await readState();
     expect((await repository().setOrder(a, orderFence(), input())).ok).toBe(true);
     expect((await readState()).project).toEqual([{ revision: 1 }]);
+    expect(await readState()).toEqual(before);
   });
   it('rejects a stale revision without any writes', async () => {
     const before = await readState();

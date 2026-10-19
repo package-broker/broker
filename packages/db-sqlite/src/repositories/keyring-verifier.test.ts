@@ -1,3 +1,5 @@
+import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
 import { KeyringStoreUnavailableError } from '@package-broker/core/secrets/keyring-verifier';
@@ -38,7 +40,12 @@ async function migrated(): Promise<void> {
     '0015_keyring_verifier.sql',
     read('0015_keyring_verifier.sql'),
   );
-  await migrate(opened.executor, [init, login, verifier], { holder: 't707' });
+  const indexes = await loadMigrationSource(
+    'core',
+    '0016_keyring_version_indexes.sql',
+    read('0016_keyring_version_indexes.sql'),
+  );
+  await migrate(opened.executor, [init, login, verifier, indexes], { holder: 't707' });
 }
 
 const mac = (fill: number): Uint8Array => new Uint8Array(32).fill(fill);
@@ -59,8 +66,8 @@ describe('keyring verifier store', () => {
   it('keeps the first row for a version and ignores a second write', async () => {
     await migrated();
     const store = createKeyringVerifierStore(opened.executor);
-    await store.add({ version: 1, mac: mac(1) });
-    await store.add({ version: 1, mac: mac(2) });
+    expect(await store.add({ version: 1, mac: mac(1) })).toBe(true);
+    expect(await store.add({ version: 1, mac: mac(2) })).toBe(false);
     expect(await store.list()).toEqual([{ version: 1, mac: mac(1) }]);
   });
 
@@ -74,6 +81,14 @@ describe('keyring verifier store', () => {
   it('reports a missing table as an unavailable store', async () => {
     const store = createKeyringVerifierStore(opened.executor);
     await expect(store.list()).rejects.toBeInstanceOf(KeyringStoreUnavailableError);
+  });
+
+  it('reports a missing version index as an unavailable store', async () => {
+    await migrated();
+    await run('DROP INDEX token_pepper_version', []);
+    await expect(
+      createKeyringVerifierStore(opened.executor).checkUsedVersions([1]),
+    ).rejects.toBeInstanceOf(KeyringStoreUnavailableError);
   });
 
   it('writes and reads the mac without unhex() or bound BLOB parameters', async () => {
@@ -101,8 +116,8 @@ describe('keyring verifier store', () => {
     await store.enroll({ version: 1, mac: mac(1) });
     await store.add({ version: 2, mac: mac(2) });
     await store.list();
-    await store.usedVersions();
-    expect(seen.length).toBe(4);
+    await store.checkUsedVersions([1]);
+    expect(seen.length).toBe(8);
     expect(seen.join('\n')).not.toMatch(/unhex/i);
   });
 
@@ -163,7 +178,7 @@ describe('keyring verifier store', () => {
     );
   });
 
-  describe('usedVersions', () => {
+  describe('checkUsedVersions', () => {
     async function organization(): Promise<void> {
       await run("INSERT INTO organization (id, slug, name) VALUES ('01ORG', 'acme', 'Acme')", []);
       await run(
@@ -174,7 +189,7 @@ describe('keyring verifier store', () => {
 
     it('is empty without key-dependent rows', async () => {
       await migrated();
-      expect(await createKeyringVerifierStore(opened.executor).usedVersions()).toEqual([]);
+      expect(await createKeyringVerifierStore(opened.executor).checkUsedVersions([1])).toBe(false);
     });
 
     it('reports credential key versions', async () => {
@@ -184,7 +199,12 @@ describe('keyring verifier store', () => {
         "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES ('01C', '01ORG', 'k', X'00', X'000000000000000000000000', 3, 'a')",
         [],
       );
-      expect(await createKeyringVerifierStore(opened.executor).usedVersions()).toEqual([3]);
+      const store = createKeyringVerifierStore(opened.executor);
+      await expect(store.checkUsedVersions([1])).rejects.toMatchObject({
+        keyVersion: 3,
+        message: expect.stringContaining('credential'),
+      });
+      expect(await store.checkUsedVersions([3])).toBe(true);
     });
 
     it('reports token pepper versions', async () => {
@@ -194,23 +214,43 @@ describe('keyring verifier store', () => {
         `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, user_id, expires_at) VALUES ('01T', '01ORG', 'pat', 'abcdefghijkl', '${'a'.repeat(64)}', 2, 'n', '[]', '01USER', '2099-01-01T00:00:00.000Z')`,
         [],
       );
-      expect(await createKeyringVerifierStore(opened.executor).usedVersions()).toEqual([2]);
+      const store = createKeyringVerifierStore(opened.executor);
+      await expect(store.checkUsedVersions([1])).rejects.toMatchObject({
+        keyVersion: 2,
+        message: expect.stringContaining('token'),
+      });
+      expect(await store.checkUsedVersions([2])).toBe(true);
     });
 
-    it('reports password hash pepper versions and treats an unreadable one as version 0', async () => {
+    it('names local_login for a missing password version and reports unreadable hashes separately', async () => {
       await migrated();
       await organization();
       await run(
-        `INSERT INTO local_login (user_id, org_id, password_hash) VALUES ('01USER', '01ORG', 'pbkdf2-sha256$i=100000$v=12$${'A'.repeat(22)}$${'B'.repeat(43)}')`,
+        `INSERT INTO local_login (user_id, org_id, password_hash) VALUES ('01USER', '01ORG', 'pbkdf2-sha256$i=100000$v=12$${'A'.repeat(22)}$${'A'.repeat(43)}')`,
         [],
       );
       const store = createKeyringVerifierStore(opened.executor);
-      expect(await store.usedVersions()).toEqual([12]);
+      await expect(store.checkUsedVersions([1])).rejects.toMatchObject({
+        name: 'KeyringVersionInUseError',
+        keyVersion: 12,
+        message: expect.stringContaining('local_login'),
+      });
+      expect(await store.checkUsedVersions([12])).toBe(true);
+      await run(
+        `UPDATE local_login SET password_hash = 'pbkdf2-sha256$i=100000$v=12$${'A'.repeat(22)}$${'B'.repeat(43)}'`,
+        [],
+      );
+      await expect(store.checkUsedVersions([12])).rejects.toMatchObject({
+        name: 'KeyringPasswordHashUnreadableError',
+      });
       await run("UPDATE local_login SET password_hash = 'pbkdf2-sha256$garbage'", []);
-      expect(await store.usedVersions()).toEqual([0]);
+      await expect(store.checkUsedVersions([12])).rejects.toMatchObject({
+        name: 'KeyringPasswordHashUnreadableError',
+        message: expect.stringContaining('local_login'),
+      });
     });
 
-    it('ignores a null password hash and returns each version once', async () => {
+    it('ignores a null password hash and accepts repeated uses of a configured version', async () => {
       await migrated();
       await organization();
       await run("INSERT INTO local_login (user_id, org_id) VALUES ('01USER', '01ORG')", []);
@@ -220,7 +260,76 @@ describe('keyring verifier store', () => {
           [],
         );
       }
-      expect(await createKeyringVerifierStore(opened.executor).usedVersions()).toEqual([3]);
+      const store = createKeyringVerifierStore(opened.executor);
+      await expect(store.checkUsedVersions([1])).rejects.toMatchObject({
+        keyVersion: 3,
+        message: expect.stringContaining('credential'),
+      });
+      expect(await store.checkUsedVersions([3])).toBe(true);
     });
+  });
+  it('samples one authentic credential per loaded version and refuses mismatched AAD', async () => {
+    await migrated();
+    await run("INSERT INTO organization (id, slug, name) VALUES ('01ORG', 'acme', 'Acme')", []);
+    const keyring = createKeyring(
+      [2, 1].map((version) => ({ version, bytes: new Uint8Array(32).fill(version) })),
+    );
+    for (const [id, version] of [
+      ['01C1', 1],
+      ['01C2', 1],
+      ['01C3', 2],
+    ] as const) {
+      const aad = credentialAad({ id, orgId: '01ORG', kind: 'k' });
+      const cipher = createSecretCipher(
+        createKeyring([{ version, bytes: new Uint8Array(32).fill(version) }]),
+        'credential-encryption',
+      );
+      const sealed = await cipher.seal(new Uint8Array([7]), aad);
+      await run(
+        `INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, '01ORG', 'k', X'${Buffer.from(sealed.ciphertext).toString('hex')}', X'${Buffer.from(sealed.nonce).toString('hex')}', ?, ?)`,
+        [id, version, aad],
+      );
+    }
+    const store = createKeyringVerifierStore(opened.executor);
+    const samples = await store.credentialSamples([2, 1]);
+    expect(samples.map((sample) => sample.sealed.keyVersion)).toEqual([2, 1]);
+    for (const sample of samples) {
+      const plaintext = await createSecretCipher(keyring, 'credential-encryption').open(
+        sample.sealed,
+        sample.aad,
+      );
+      expect(plaintext).toEqual(new Uint8Array([7]));
+      plaintext.fill(0);
+    }
+    await run("UPDATE credential SET aad = 'wrong' WHERE key_version = 1", []);
+    await expect(store.credentialSamples([1])).rejects.toMatchObject({
+      name: 'KeyringMismatchError',
+      keyVersion: 1,
+    });
+  });
+
+  it('EXPLAIN QUERY PLAN uses the new version indexes for both bounded in-use checks', async () => {
+    await migrated();
+    const checks: import('@package-broker/core/db/port').ScalarStatement[] = [];
+    const store = createKeyringVerifierStore({
+      ...opened.executor,
+      all: (statement) => {
+        if (statement.sql.includes('NOT IN')) checks.push(statement);
+        return opened.executor.all(statement);
+      },
+    });
+    await store.checkUsedVersions([1, 2, 3, 4]);
+    expect(checks).toHaveLength(2);
+    for (const [index, statement] of checks.entries()) {
+      expect(statement.sql).toMatch(/SELECT 1, .* NOT IN \(\?, \?, \?, \?\).*LIMIT 1/);
+      const plan = await opened.executor.all<{ detail: string }>({
+        ...statement,
+        sql: `EXPLAIN QUERY PLAN ${statement.sql}`,
+      });
+      expect(plan.map((row) => row.detail).join(' ')).toContain(
+        index === 0 ? 'credential_version_in_use' : 'token_pepper_version',
+      );
+    }
+    await expect(store.checkUsedVersions([1, 2, 3, 4, 5])).rejects.toThrow(RangeError);
   });
 });

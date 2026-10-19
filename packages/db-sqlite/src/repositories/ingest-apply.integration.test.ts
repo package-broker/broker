@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
 import type { VersionInput } from '@package-broker/core/db/catalogue';
@@ -7,6 +8,10 @@ import {
   type ApplyDeps,
   type ApplyOutcome,
 } from '@package-broker/core/ingest/apply-description';
+import { extractMembers } from '@package-broker/core/ingest/json-stream';
+import { openStagedSnapshot } from '@package-broker/core/ingest/snapshot';
+import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
+import type { Codecs, DigestAlgorithm } from '@package-broker/core/platform/codec';
 import { INVOCATION_BUDGET } from '@package-broker/core/ingest/plan-chunk';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import type { JobGuard } from '@package-broker/core/platform/job-repository';
@@ -94,8 +99,101 @@ function describeUpstream(snapshot = SNAPSHOT) {
   });
 }
 
+const codecs: Pick<Codecs, 'digestTap'> = {
+  digestTap<A extends DigestAlgorithm>(algorithms: readonly A[]) {
+    const hashes = algorithms.map((algorithm) => [algorithm, createHash(algorithm)] as const);
+    let resolve!: (value: Record<A, Uint8Array>) => void;
+    let reject!: (reason: unknown) => void;
+    const digests = new Promise<Record<A, Uint8Array>>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    digests.catch(() => undefined);
+    return {
+      digests,
+      transform: new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          for (const [, hash] of hashes) hash.update(chunk);
+          controller.enqueue(chunk);
+        },
+        flush() {
+          resolve(
+            Object.fromEntries(
+              hashes.map(([algorithm, hash]) => [algorithm, new Uint8Array(hash.digest())]),
+            ) as Record<A, Uint8Array>,
+          );
+        },
+        cancel(reason) {
+          reject(reason);
+        },
+      }),
+    };
+  },
+};
+
+function describeStaged(valid: boolean) {
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({
+      versions: Object.fromEntries(
+        upstream
+          .slice(0, 1002)
+          .map((version) => [version, { name: KEY, version, description: 'changed' }]),
+      ),
+    }),
+  );
+  const digest = parseSha256(
+    valid ? createHash('sha256').update(bytes).digest('hex') : '0'.repeat(64),
+  );
+  const store: BlobStore = {
+    put: () => Promise.reject(new Error('unused')),
+    head: () => Promise.reject(new Error('unused')),
+    get: async () => {
+      let offset = 0;
+      return {
+        info: {
+          generation: '',
+          sha256: digest,
+          size: bytes.length,
+          mediaType: 'application/json',
+          purgeAfter: null,
+        },
+        body: new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (offset === bytes.length) controller.close();
+            else {
+              controller.enqueue(bytes.subarray(offset, offset + 1024));
+              offset = Math.min(offset + 1024, bytes.length);
+            }
+          },
+        }),
+      };
+    },
+  };
+  const snapshot = snapshotRef(SNAPSHOT, digest);
+  return createPackageDescription({
+    name: KEY,
+    snapshot,
+    validators: {},
+    documentsComplete: true,
+    members: (async function* () {
+      const opened = await openStagedSnapshot(org, store, snapshot, { codecs });
+      if (opened.kind !== 'open') throw new Error('snapshot missing');
+      let ordinal = 0;
+      for await (const member of extractMembers(opened.body, [['versions', '*']])) {
+        yield {
+          ordinal: ordinal++,
+          version: member.path[1]!,
+          form: 'composer-p2',
+          raw: member.raw,
+        } satisfies VersionCandidate;
+      }
+    })(),
+  });
+}
+
 interface SyncOptions {
   readonly snapshots?: (invocation: number) => string;
+  readonly staged?: boolean;
   readonly after?: (invocation: number, outcome: ApplyOutcome) => Promise<void>;
   /** Runs the apply under this job's lease, as a package-sync job does. */
   readonly job?: JobGuard;
@@ -141,7 +239,9 @@ async function syncToCompletion(
         ecosystem: 'composer',
         covered: true,
       },
-      description: describeUpstream(options.snapshots?.(invocation)),
+      description: options.staged
+        ? describeStaged(true)
+        : describeUpstream(options.snapshots?.(invocation)),
       packageDescription: 'big package',
       toVersion,
       validatorTtlSeconds: 300,
@@ -178,6 +278,74 @@ afterEach(async () => {
 });
 
 describe('applyChunk against the SQLite catalogue writer', () => {
+  it.each([false, true])(
+    'refuses a corrupt 1,002-member staged snapshot before any catalogue writes (complete package: %s)',
+    async (complete) => {
+      if (complete) await syncToCompletion(database.executor);
+      const catalogue = async () => ({
+        packages: await database.executor.all({
+          sql: 'SELECT * FROM package WHERE org_id = ?',
+          params: [org.orgId],
+        }),
+        versions: await database.executor.all({
+          sql: 'SELECT * FROM version WHERE org_id = ? ORDER BY id',
+          params: [org.orgId],
+        }),
+      });
+      const before = await catalogue();
+      const sessions = createIngestSessions(database.executor);
+      const session = await sessions.acquire(
+        org,
+        { scope: 'package', sourceId: SOURCE, packageKey: KEY },
+        OWNER,
+        600,
+      );
+      if (session === 'held') throw new Error('session held');
+      const counter = counting(database.executor);
+      const outcome = await applyChunk(
+        org,
+        {
+          writer: createCatalogueWriter(counter.executor),
+          sessions: createIngestSessions(counter.executor),
+          existing: createExistingVersionsReader(counter.executor),
+          finalizer: createIngestFinalizer(counter.executor),
+        },
+        {
+          session,
+          guard: createIngestSessionWriteGuard(org, session),
+          source: {
+            id: SOURCE,
+            key: KEY,
+            type: 'composer_repository',
+            ecosystem: 'composer',
+            covered: true,
+          },
+          description: describeStaged(false),
+          packageDescription: 'changed package',
+          toVersion,
+          validatorTtlSeconds: 300,
+        },
+      );
+      expect(outcome).toMatchObject({
+        done: true,
+        status: 'refused',
+        refusal: 'incomplete',
+        planned: 1,
+      });
+      expect(counter.take()).toBe(1);
+      expect(await catalogue()).toEqual(before);
+      expect(
+        await database.executor.all({
+          sql: 'SELECT state, seen_count, pages_so_far, cursor, stamp FROM ingest_session WHERE org_id = ? AND id = ?',
+          params: [org.orgId, session.id],
+        }),
+      ).toEqual([
+        { state: 'abandoned', seen_count: 0, pages_so_far: 0, cursor: null, stamp: null },
+      ]);
+    },
+    120_000,
+  );
+
   it('applies 1,200 versions over several invocations of at most 450 statements', async () => {
     const { counts, last } = await syncToCompletion(database.executor);
 
@@ -225,6 +393,14 @@ describe('applyChunk against the SQLite catalogue writer', () => {
       params: [],
     });
     expect(session).toEqual({ state: 'complete', seen_count: VERSIONS });
+  }, 120_000);
+
+  it('applies a valid staged snapshot across bounded invocations', async () => {
+    const { counts, last } = await syncToCompletion(database.executor, { staged: true });
+    expect(last.status).toBe('complete');
+    expect(counts.length).toBeGreaterThan(1);
+    expect(Math.max(...counts)).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    expect(await activeRows(database.executor)).toHaveLength(1002);
   }, 120_000);
 
   it('removes a version upstream no longer lists only through the finalize', async () => {

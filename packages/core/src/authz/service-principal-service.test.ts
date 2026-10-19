@@ -2,6 +2,7 @@ import type {
   ServicePrincipalService,
   ServicePrincipalStore,
 } from './service-principal-service.js';
+import { createSessionService, type AuthenticatedSession } from '../auth/session.js';
 import type { ApiCall } from '../api/idempotency.js';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
@@ -18,6 +19,23 @@ import {
 const ctx = orgContext('org-a');
 const NOW = '2026-10-15T08:00:00.000Z';
 const PROJECT = 'project-1';
+
+function authenticated(reauthAt: string | null = NOW): AuthenticatedSession {
+  return {
+    session: {
+      id: 'session-1',
+      userId: 'actor-1',
+      identityId: null,
+      csrfHash: 'x',
+      createdAt: NOW,
+      expiresAt: '2026-10-16T08:00:00.000Z',
+      lastSeenAt: NOW,
+      reauthAt,
+      user: { id: 'actor-1', email: 'actor@example.test', displayName: null },
+    },
+    principal: { kind: 'user', id: 'actor-1' },
+  };
+}
 
 const actor: ActorContext = {
   kind: 'organization',
@@ -97,6 +115,11 @@ function setup(
     principals: principals as unknown as ServicePrincipalDeps['principals'],
     authority: authority as unknown as ServicePrincipalDeps['authority'],
     directory: { createdBy },
+    sessions: createSessionService({
+      sessions: {} as never,
+      clock: fixedClock(NOW),
+      publicOrigin: 'https://broker.example.test',
+    }),
     clock: fixedClock(NOW),
     ids: { ulid: () => `ID${String(next++).padStart(2, '0')}` },
     log,
@@ -108,11 +131,76 @@ const events = (log: ReturnType<typeof vi.fn>, name: string) =>
   log.mock.calls.map(([entry]) => entry).filter((entry) => entry.event === name);
 
 describe('create', () => {
+  it.each([
+    ['stale', '2026-10-15T07:49:59.000Z'],
+    ['null', null],
+    ['future', '2026-10-15T08:00:01.000Z'],
+  ])(
+    'refuses %s reauth before any repository or authority call and stages no event',
+    async (_name, reauthAt) => {
+      const { service, principals, authority, createdBy, log } = setup();
+      expect(
+        await service.create(
+          ctx,
+          authenticated(reauthAt),
+          actor,
+          fenceOf({}),
+          { name: 'ci', projectId: PROJECT },
+          apiCall,
+        ),
+      ).toEqual({ ok: false, error: 'reauth_required' });
+      for (const method of Object.values(principals)) expect(method).not.toHaveBeenCalled();
+      expect(authority.livePermissions).not.toHaveBeenCalled();
+      expect(authority.guard).not.toHaveBeenCalled();
+      expect(createdBy).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires the fence to belong to the authenticated session', async () => {
+    const { service, principals, authority } = setup();
+    const auth = authenticated();
+    await expect(
+      service.create(
+        ctx,
+        { ...auth, session: { ...auth.session, id: 'other-session' } },
+        actor,
+        fenceOf({}),
+        { name: 'ci', projectId: PROJECT },
+        apiCall,
+      ),
+    ).rejects.toThrow(TypeError);
+    for (const method of Object.values(principals)) expect(method).not.toHaveBeenCalled();
+    expect(authority.livePermissions).not.toHaveBeenCalled();
+    expect(authority.guard).not.toHaveBeenCalled();
+  });
+
+  it.each(['service', 'customer'] as const)(
+    'refuses a %s principal before any repository or authority call',
+    async (kind) => {
+      const { service, principals, authority } = setup();
+      expect(
+        await service.create(
+          ctx,
+          { ...authenticated(), principal: { kind, id: 'actor-1' } },
+          actor,
+          fenceOf({}),
+          { name: 'ci', projectId: PROJECT },
+          apiCall,
+        ),
+      ).toEqual({ ok: false, error: 'forbidden' });
+      for (const method of Object.values(principals)) expect(method).not.toHaveBeenCalled();
+      expect(authority.livePermissions).not.toHaveBeenCalled();
+      expect(authority.guard).not.toHaveBeenCalled();
+    },
+  );
+
   it('snapshots exactly the creator non-sessionOnly permissions inside the project boundary', async () => {
     const { service, principals, authority, guard } = setup();
     const fence = fenceOf({});
     const result = await service.create(
       ctx,
+      authenticated(),
       actor,
       fence,
       { name: 'ci', projectId: PROJECT },
@@ -140,12 +228,20 @@ describe('create', () => {
       projectId: PROJECT,
       organizationAdmin: false,
       covers: ['project:packages:read', 'project:packages:write', 'project:read'],
+      freshReauth: true,
     });
   });
 
   it('never snapshots session-only permissions such as the management and token-issue grants', async () => {
     const { service, principals } = setup();
-    await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall);
+    await service.create(
+      ctx,
+      authenticated(),
+      actor,
+      fenceOf({}),
+      { name: 'ci', projectId: PROJECT },
+      apiCall,
+    );
     const stored = (principals.create.mock.calls[0] as unknown[])[3] as { permissions: string[] };
     expect(stored.permissions).not.toContain('project:service-principals:write');
     expect(stored.permissions).not.toContain('project:tokens:create');
@@ -155,7 +251,14 @@ describe('create', () => {
   it('refuses when the creator lacks project:service-principals:write, even with project:tokens:create', async () => {
     const { service, principals, log } = setup({ live: ['project:read', 'project:tokens:create'] });
     expect(
-      await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall),
+      await service.create(
+        ctx,
+        authenticated(),
+        actor,
+        fenceOf({}),
+        { name: 'ci', projectId: PROJECT },
+        apiCall,
+      ),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -169,6 +272,7 @@ describe('create', () => {
     const fence = fenceOf({});
     const result = await service.create(
       ctx,
+      authenticated(),
       admin,
       fence,
       { name: 'ci', projectId: null },
@@ -184,6 +288,7 @@ describe('create', () => {
       projectId: null,
       organizationAdmin: true,
       covers: ['org:read', 'org:users:read', 'project:read'],
+      freshReauth: true,
     });
   });
 
@@ -191,7 +296,14 @@ describe('create', () => {
     const { service, principals } = setup();
     const notAdmin = { ...admin, isOrganizationAdmin: false };
     expect(
-      await service.create(ctx, notAdmin, fenceOf({}), { name: 'ci', projectId: null }, apiCall),
+      await service.create(
+        ctx,
+        authenticated(),
+        notAdmin,
+        fenceOf({}),
+        { name: 'ci', projectId: null },
+        apiCall,
+      ),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -202,7 +314,14 @@ describe('create', () => {
   it('refuses an organization-wide principal for an admin missing org:service-principals:write', async () => {
     const { service, principals } = setup({ live: ['org:read'] });
     expect(
-      await service.create(ctx, admin, fenceOf({}), { name: 'ci', projectId: null }, apiCall),
+      await service.create(
+        ctx,
+        authenticated(),
+        admin,
+        fenceOf({}),
+        { name: 'ci', projectId: null },
+        apiCall,
+      ),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -221,7 +340,14 @@ describe('create', () => {
       const { service, principals, log } = setup();
       principals.create.mockResolvedValue(outcome);
       expect(
-        await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall),
+        await service.create(
+          ctx,
+          authenticated(),
+          actor,
+          fenceOf({}),
+          { name: 'ci', projectId: PROJECT },
+          apiCall,
+        ),
       ).toEqual(expected);
       expect(events(log, 'service_principal.changed')).toHaveLength(0);
     }
@@ -233,6 +359,7 @@ describe('create', () => {
       expect(
         await service.create(
           ctx,
+          authenticated(),
           actor,
           fenceOf({}),
           {
@@ -250,7 +377,14 @@ describe('create', () => {
     const { service, authority } = setup();
     for (const name of ['', 'a\u0000b', 'x'.repeat(101), 7 as unknown as string]) {
       expect(
-        await service.create(ctx, actor, fenceOf({}), { name, projectId: PROJECT }, apiCall),
+        await service.create(
+          ctx,
+          authenticated(),
+          actor,
+          fenceOf({}),
+          { name, projectId: PROJECT },
+          apiCall,
+        ),
       ).toEqual({
         ok: false,
         error: 'invalid_name',
@@ -264,6 +398,7 @@ describe('create', () => {
     await expect(
       service.create(
         ctx,
+        authenticated(),
         actor,
         fenceOf({}, 'someone-else'),
         { name: 'ci', projectId: PROJECT },
@@ -275,7 +410,14 @@ describe('create', () => {
 
   it('emits one change event on success', async () => {
     const { service, log } = setup();
-    await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall);
+    await service.create(
+      ctx,
+      authenticated(),
+      actor,
+      fenceOf({}),
+      { name: 'ci', projectId: PROJECT },
+      apiCall,
+    );
     expect(events(log, 'service_principal.changed')).toEqual([
       expect.objectContaining({
         action: 'created',
@@ -713,7 +855,14 @@ describe('the actor must be organization-kind', () => {
     const { service, principals, authority, log } = setup();
     const fence = fenceOf();
     const results = [
-      await service.create(ctx, bad, fence, { name: 'ci', projectId: null }, apiCall),
+      await service.create(
+        ctx,
+        authenticated(),
+        bad,
+        fence,
+        { name: 'ci', projectId: null },
+        apiCall,
+      ),
       await service.setPermissions(ctx, bad, fence, 'sp-1', [], apiCall),
       await service.suspend(ctx, bad, fence, 'sp-1', apiCall),
       await service.restore(ctx, bad, fence, 'sp-1', apiCall),
@@ -839,7 +988,14 @@ describe('lifecycle audit and idempotency', () => {
       const call = { ...apiCall, idempotency: principalRecord };
       const result =
         method === 'create'
-          ? await r.service.create(ctx, actor, held, { name: 'ci', projectId: PROJECT }, call)
+          ? await r.service.create(
+              ctx,
+              authenticated(),
+              actor,
+              held,
+              { name: 'ci', projectId: PROJECT },
+              call,
+            )
           : method === 'setPermissions'
             ? await r.service.setPermissions(ctx, actor, held, 'sp-1', ['project:read'], call)
             : await r.service[method](ctx, actor, held, 'sp-1', call);
@@ -886,7 +1042,14 @@ describe('lifecycle audit and idempotency', () => {
       const r = setup();
       const held = fenceOf();
       if (method === 'create')
-        await r.service.create(ctx, actor, held, { name: 'ci', projectId: PROJECT }, apiCall);
+        await r.service.create(
+          ctx,
+          authenticated(),
+          actor,
+          held,
+          { name: 'ci', projectId: PROJECT },
+          apiCall,
+        );
       else if (method === 'setPermissions')
         await r.service.setPermissions(ctx, actor, held, 'sp-1', ['project:read'], apiCall);
       else await r.service[method](ctx, actor, held, 'sp-1', apiCall);
@@ -897,7 +1060,7 @@ describe('lifecycle audit and idempotency', () => {
   );
 
   it('requires a call for every user mutation', () => {
-    expectTypeOf<Parameters<ServicePrincipalService['create']>['length']>().toEqualTypeOf<5>();
+    expectTypeOf<Parameters<ServicePrincipalService['create']>['length']>().toEqualTypeOf<6>();
     expectTypeOf<
       Parameters<ServicePrincipalService['setPermissions']>['length']
     >().toEqualTypeOf<6>();

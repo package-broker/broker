@@ -44,7 +44,7 @@ const sourceItem = {
   source_type: 'composer_repository',
   project: { existing: 'project' },
   url: 'https://packages.example.test/',
-  credential_ref: 'op://vault/item/token',
+  credential_ref: 'env:REGISTRY_TOKEN',
   config: {
     selection: { packages: [], patterns: [], expandPatterns: false },
     distHosts: [],
@@ -130,6 +130,20 @@ function setup(overrides: Partial<CredentialTarget> = {}, runtime: 'node' | 'clo
 }
 
 describe('import credential window', () => {
+  it('accepts a file credential reference', async () => {
+    const h = setup({
+      manifest: manifest([{ ...sourceItem, credential_ref: 'file:./registry-token' }]),
+    });
+    expect(await h.call()).toEqual({ ok: true, value: null });
+    expect(h.sealedPlaintexts).toEqual([material]);
+  });
+  it('refuses the retired credential reference scheme before preparing or writing', async () => {
+    await setup({
+      manifest: manifest([
+        { ...sourceItem, credential_ref: ['op', '//vault/item/token'].join(':') },
+      ]),
+    }).refused('unavailable');
+  });
   it('accepts one second before expiry and requests exactly one audit in the fenced write', async () => {
     const h = setup();
     expect(await h.call()).toEqual({ ok: true, value: null });

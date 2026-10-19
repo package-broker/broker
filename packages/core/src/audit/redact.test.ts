@@ -139,6 +139,43 @@ describe('isCredentialValue', () => {
   });
 });
 
+describe('credential reference redaction', () => {
+  const uuid = '550e8400-e29b-41d4-a716-446655440000';
+  const path = `./${uuid}/${uuid}/token`;
+
+  it.each([
+    'env:REGISTRY_TOKEN',
+    `file:${path}`,
+    `file:${uuid}/token`,
+    `file:${uuid}`,
+    `file:${uuid}\\token`,
+    `file:C:\\${uuid}\\${uuid}\\token`,
+    `file:\\\\server\\${uuid}\\token`,
+    `file:./My Vault/${uuid}/token`,
+    `file:./${uuid}/${'é'.repeat(490)}/keys`,
+  ])('preserves reference %s exactly', (value) => {
+    expect(redactValue(value, 2048, 'external_ref')).toEqual({ ok: true, value });
+  });
+
+  it.each([
+    ['retired scheme', ['op', `//${uuid}/token`].join(':')],
+    ['unknown scheme', `other:${path}`],
+    ['control character', `file:${path}\u0000`],
+    ['C1 control character', `file:${path}\u0085`],
+    ['oversized UTF-8 path', `file:./${uuid}/${'é'.repeat(491)}/keys`],
+    ['UUID within a path segment', `file:./prefix-${uuid}/token`],
+    ['provider token with UUID', `file:./${uuid}/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['provider token after initial UUID', `file:${uuid}/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['provider token in Windows path', `file:C:\\${uuid}\\${FAKE.GITHUB_CLASSIC_A20}`],
+    ['UUID within a Windows path segment', `file:C:\\prefix-${uuid}\\token`],
+  ])('refuses %s without echoing it', (_name, value) => {
+    expect(redactValue(value, 2048, 'external_ref')).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+  });
+});
+
 describe('redactUrl', () => {
   it('drops userinfo, query and fragment', () => {
     expect(redactUrl('https://user:pw@git.example.test/a/b?token=x#f')).toBe(

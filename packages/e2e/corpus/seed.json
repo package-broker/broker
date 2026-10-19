@@ -1,0 +1,5 @@
+{
+  "composer": { "name": "fx/lib", "version": "1.0.0" },
+  "npm": { "name": "fixture-lib", "version": "1.0.0" },
+  "escapePayload": "fixture escape\n"
+}

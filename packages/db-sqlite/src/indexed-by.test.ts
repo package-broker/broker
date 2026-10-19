@@ -17,6 +17,16 @@ interface Coverage {
 
 const COVERAGE: readonly Coverage[] = [
   {
+    file: 'repositories/keyring-verifier.ts',
+    index: 'credential_version_in_use',
+    d1Cases: ['keyring credential versions (credential_version_in_use)'],
+  },
+  {
+    file: 'repositories/keyring-verifier.ts',
+    index: 'token_pepper_version',
+    d1Cases: ['keyring token versions (token_pepper_version)'],
+  },
+  {
     file: 'repositories/blob-references.ts',
     index: 'import_ref_run_external',
     d1Cases: [

@@ -57,6 +57,36 @@ describe('job claim query plans (node:sqlite)', () => {
     );
   });
 
+  it('bounds the corrupt-payload update by organization and due time', async () => {
+    await createJobRepository(executor).claim(orgContext('plan-org'), OWNER, input);
+    const update = statements.find((statement) =>
+      statement.sql.includes("last_error = 'invalid_payload'"),
+    );
+    if (update === undefined) throw new Error('corrupt-payload update missing');
+    const plan = await database.executor.all<{ detail: string }>({
+      sql: `EXPLAIN QUERY PLAN ${update.sql}`,
+      params: update.params,
+    });
+    const details = plan.map((step) => step.detail).join('\n');
+    expect(details).toMatch(
+      /SEARCH job USING (?:COVERING )?INDEX job_claim_org \(org_id=\? AND run_at<\?\)/,
+    );
+    expect(details).toMatch(/SEARCH c USING INDEX job_claim_org \(org_id=\? AND run_at<\?\)/);
+    expect(details).not.toContain('TEMP B-TREE');
+  });
+
+  it.each([
+    ['job_claim', 'queued'],
+    ['job_lease', 'running'],
+  ])('rejects an explicit dependency on legacy index %s after migration', async (name, state) => {
+    await expect(
+      database.executor.all({
+        sql: `EXPLAIN QUERY PLAN SELECT id FROM job INDEXED BY ${name} WHERE org_id = ? AND state = '${state}'`,
+        params: ['plan-org'],
+      }),
+    ).rejects.toThrow();
+  });
+
   it('issues eight statements in one batch even when no job can be claimed', async () => {
     const repo = createJobRepository(executor);
     expect(await repo.claim(orgContext('plan-org'), OWNER, input)).toBeNull();

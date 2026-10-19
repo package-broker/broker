@@ -44,6 +44,7 @@ async function fixture(kind: 'session' | 'pat' | 'svc' = 'session') {
       lookupSession: async () => ({
         session: { id: 'session-1', csrfHash: '' },
         user: { id: 'user-1' },
+        identity: null,
         protectedHolder: false,
         project: { id: 'proj-1' },
         organizationPermissions: ['org:read'],

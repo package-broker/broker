@@ -406,6 +406,7 @@ export function createNodeServer(
       platform: 'node',
       ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
       plugins,
+      publicOrigin: auth?.publicOrigin,
       registration,
       ports,
       resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),

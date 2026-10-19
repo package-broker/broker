@@ -10,6 +10,7 @@ import type { SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
+import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
 import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import {
@@ -86,7 +87,6 @@ export class StartupConfigError extends Error {
 
 const DEFAULT_DATABASE_PATH = './data/broker.sqlite';
 const IDENTITY_ENV_PREFIX = 'PB_IDP_';
-const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -177,33 +177,18 @@ async function readKeyring(env: Env): Promise<Keyring> {
 }
 
 function publicOrigin(raw: string | undefined): string {
-  if (!present(raw)) throw new StartupConfigError('PB_PUBLIC_URL', 'is missing');
-  let url: URL;
   try {
-    url = new URL(raw);
-  } catch {
-    throw new StartupConfigError('PB_PUBLIC_URL', 'is not an absolute URL');
+    return parsePublicOrigin(raw, { http: 'loopback' });
+  } catch (error) {
+    if (!(error instanceof PublicOriginError)) throw error;
+    const problems = {
+      missing: 'is missing',
+      'absolute-url': 'is not an absolute URL',
+      scheme: 'must be https, or http on a loopback host',
+      origin: 'must be an origin without path, query or credentials',
+    };
+    throw new StartupConfigError('PB_PUBLIC_URL', problems[error.problem]);
   }
-  const schemeAllowed =
-    url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname));
-  if (!schemeAllowed) {
-    throw new StartupConfigError('PB_PUBLIC_URL', 'must be https, or http on a loopback host');
-  }
-  const bare =
-    url.pathname === '/' &&
-    url.search === '' &&
-    url.hash === '' &&
-    url.username === '' &&
-    url.password === '' &&
-    !raw.includes('?') &&
-    !raw.includes('#');
-  if (!bare) {
-    throw new StartupConfigError(
-      'PB_PUBLIC_URL',
-      'must be an origin without path, query or credentials',
-    );
-  }
-  return url.origin;
 }
 
 function identityEnv(env: Env): Env {

@@ -1,7 +1,9 @@
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
 import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
+import { entries as attachedProxyEntries } from './mutation-table/source-attached-proxy.js';
 import { entries as projectReadableEntries } from './mutation-table/project-readable.js';
 import { entries as catalogueStatusEntries } from './mutation-table/catalogue-status-statements.js';
+import { entries as catalogueStatusRepositoryEntries } from './mutation-table/catalogue-status.js';
 import { entries as visibilityDeriveEntries } from './mutation-table/visibility-derive.js';
 import { entries as visibilityAttachEntries } from './mutation-table/visibility-attach.js';
 import { entries as roleEntries } from './mutation-table/role.js';
@@ -48,6 +50,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueReconcileEntries,
   ...projectReadableEntries,
   ...catalogueStatusEntries,
+  ...catalogueStatusRepositoryEntries,
   ...visibilityDeriveEntries,
   ...visibilityAttachEntries,
   ...roleEntries,
@@ -70,6 +73,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...cacheEpochEntries,
   ...catalogueEpochEntries,
   ...sourceEntries,
+  ...attachedProxyEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,
   ...auditQueryEntries,

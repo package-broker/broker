@@ -3,6 +3,7 @@ import { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors
 import type { OrgContext } from '@package-broker/core/db/port';
 import type { Sha256 } from '@package-broker/core/platform/blob';
 import { createCatalogueWriteGuard } from '../../repositories/catalogue-write-package.js';
+import { createBlobReplacer } from '../../repositories/blob-replacer.js';
 import { replaceBlobStatements } from '../../repositories/catalogue-reblob.js';
 import {
   orgOf,
@@ -186,4 +187,83 @@ const reblobEntry: MutationEntry = {
   ],
 };
 
-export const entries: readonly MutationEntry[] = [reblobEntry];
+function replacerCase(foreignJob: boolean): ContractCase {
+  return {
+    name: `blob replacer ${foreignJob ? 'refuses a foreign job without writes' : 'replaces only the requested version'}`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedTagFixture(context, { packageOrg: own.orgId, versionOrg: own.orgId });
+      for (const [id, ctx, hash] of [
+        ['B-OLD', own, HASH],
+        ['B-NEW', own, OTHER_HASH],
+        ['B-FOREIGN', foreign, OTHER_HASH],
+      ] as const)
+        await seedBlobRow(seed, id, ctx.orgId, hash);
+      await seed("UPDATE version SET blob_id = 'B-OLD' WHERE id IN ('V1', 'V2')");
+      if (foreignJob) await seed('UPDATE job SET org_id = ? WHERE id = ?', foreign.orgId, A_JOB);
+      const snapshot = async () =>
+        Promise.all(
+          ['version', 'version_revision', 'package', 'blob', 'job', 'cache_epoch'].map((table) =>
+            context.executor.all({ sql: `SELECT * FROM ${table} ORDER BY rowid`, params: [] }),
+          ),
+        );
+      const before = await snapshot();
+      const replacer = createBlobReplacer({
+        driver: context.executor.driver,
+        all: () => {
+          throw new Error('replacement must use a batch');
+        },
+        batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
+      });
+      const operation = replacer.replaceBlob(own, createCatalogueWriteGuard(own, WRITE_GUARD), {
+        versionId: 'V1',
+        expectedRevision: 1,
+        oldBlobId: 'B-OLD',
+        newSha256: OTHER_HASH as Sha256,
+        reason: 'refetch_changed',
+      });
+      if (foreignJob) {
+        await expect(operation).rejects.toThrow(ACCESS_MUTATION_GUARD_CONSTRAINT);
+        expect(await snapshot()).toEqual(before);
+      } else {
+        await expect(operation).resolves.toEqual({ changed: true, statements: 6 });
+        expect(
+          await context.executor.all({
+            sql: 'SELECT id, blob_id, revision FROM version ORDER BY id',
+            params: [],
+          }),
+        ).toEqual([
+          { id: 'V1', blob_id: 'B-NEW', revision: 2 },
+          { id: 'V2', blob_id: 'B-OLD', revision: 1 },
+        ]);
+        expect((await snapshot())[3]).toEqual(before[3]);
+      }
+    },
+  };
+}
+
+export const entries: readonly MutationEntry[] = [
+  reblobEntry,
+  {
+    builder: 'createBlobReplacer',
+    file: 'repositories/blob-replacer.ts',
+    cases: [replacerCase(false), replacerCase(true)],
+    predicates: [
+      {
+        name: 'replacement delegates the organization scoped job fence',
+        locate: ref('job', 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: replacerCase(true).name,
+      },
+    ],
+    waivers: [
+      {
+        locate: /"?(?:version|package|blob|before)"?\."?org_id"? = \?/,
+        reason:
+          'The factory forwards replaceBlobStatements unchanged in one atomic batch. Its precheck, before-image, replacement, postcondition and package predicates are independently mutated by the replaceBlobStatements registration above; earlier checks mask individual downstream mutations in a complete batch.',
+      },
+    ],
+  },
+];

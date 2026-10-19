@@ -217,6 +217,29 @@ const SOURCE_COLUMNS = [
   'poll_last_modified',
 ] as const;
 
+export function findByRepositoryStatement(
+  ctx: OrgContext,
+  input: { provider: string; repository: string },
+): Statement {
+  const config = sql`case when json_valid(config_json) then
+    case when json_type(config_json) = 'object' then config_json end end`;
+  return compile(
+    db
+      .selectFrom('source')
+      .select([...SOURCE_COLUMNS])
+      .where('org_id', '=', ctx.orgId)
+      .where('type', '=', sql.lit('vcs'))
+      .where(sql`json_extract(${config}, '$.provider')`, '=', input.provider)
+      .where(
+        sql`lower(json_extract(${config}, '$.repository'))`,
+        '=',
+        input.repository.toLowerCase(),
+      )
+      .orderBy('id')
+      .limit(1),
+  );
+}
+
 export function dueStatement(ctx: OrgContext, limit: number): Statement {
   return compile(
     db
@@ -228,6 +251,28 @@ export function dueStatement(ctx: OrgContext, limit: number): Statement {
       .orderBy('next_poll_at')
       .orderBy('id')
       .limit(limit),
+  );
+}
+
+export function attachedProxyStatement(
+  ctx: OrgContext,
+  projectId: string,
+  ecosystem: SourceEcosystem,
+): Statement {
+  return compile(
+    db
+      .selectFrom('project_source')
+      .innerJoin('source', (join) =>
+        join
+          .onRef('source.id', '=', 'project_source.source_id')
+          .onRef('source.org_id', '=', 'project_source.org_id'),
+      )
+      .select('source.id')
+      .where('project_source.org_id', '=', ctx.orgId)
+      .where('project_source.project_id', '=', projectId)
+      .where('source.ecosystem', '=', ecosystem)
+      .where('source.type', '=', ecosystem === 'npm' ? 'npmjs_proxy' : 'packagist_proxy')
+      .limit(1),
   );
 }
 
@@ -281,6 +326,9 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async hasAttachedProxy(ctx, projectId, ecosystem) {
+      return (await executor.all(attachedProxyStatement(ctx, projectId, ecosystem))).length > 0;
+    },
     async create(ctx, fence, input) {
       const jsonConfig = jsonText(input.configJson);
       const interval =
@@ -532,6 +580,11 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     },
 
     get: read,
+
+    async findByRepository(ctx, input) {
+      const [row] = await executor.all<SourceRow>(findByRepositoryStatement(ctx, input));
+      return row === undefined ? null : toRecord(row);
+    },
 
     async listDue(ctx, limit) {
       if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DUE) {

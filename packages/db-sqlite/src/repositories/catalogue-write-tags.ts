@@ -129,6 +129,11 @@ export function distTagStatements(
               ])
               .where('version.id', '=', targetOf(target))
               .where(
+                sql<boolean>`NOT EXISTS (SELECT 1 FROM dist_tag AS collision
+                  WHERE collision.package_id = version.package_id AND collision.tag = ${tag}
+                    AND collision.org_id <> ${ctx.orgId})`,
+              )
+              .where(
                 sql<boolean>`NOT EXISTS (SELECT 1 FROM dist_tag
                   WHERE dist_tag.package_id = version.package_id AND dist_tag.org_id = ${ctx.orgId}
                     AND dist_tag.tag = ${tag} AND dist_tag.version_id = version.id)`,
@@ -162,7 +167,6 @@ export function distTagStatements(
     );
   }
 
-  // One statement removes many rows, so only the ULID time prefix is shared; the random part is per row.
   const keep = JSON.stringify(entries.map(([tag]) => tag));
   const absent = sql<boolean>`dist_tag.package_id = ${packageId} AND dist_tag.org_id = ${ctx.orgId}
     AND dist_tag.tag NOT IN (SELECT value FROM json_each(${keep}))`;
@@ -185,6 +189,7 @@ export function distTagStatements(
         db
           .selectFrom('dist_tag')
           .select([
+            // One statement removes many rows: share the ULID time prefix, generate 64 random bits per row.
             sql<string>`${newOpId().slice(0, 10)} || upper(hex(randomblob(8)))`.as('id'),
             'dist_tag.org_id',
             'dist_tag.package_id',

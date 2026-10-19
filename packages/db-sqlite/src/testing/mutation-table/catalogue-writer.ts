@@ -37,7 +37,6 @@ import {
 } from './fixtures.js';
 
 const OLD = '2020-01-01T00:00:00.000Z';
-const STAMP = '2024-01-01T00:00:00.000Z';
 
 function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
   return {
@@ -63,6 +62,13 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         for (const key of ['present', 'missing', 'returned']) {
           if (kind === 'source') {
             await seedPackage(seed, `${prefix}-${key}`, org.orgId, 'OS', key);
+            await seedVersion(
+              seed,
+              `V-${prefix}-${key}`,
+              org.orgId,
+              `O-${key}`,
+              `${prefix}-${key}`,
+            );
           } else {
             await seedVersion(
               seed,
@@ -80,8 +86,6 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         `UPDATE ${table} SET status = 'removed_upstream', removed_upstream_at = ? WHERE id IN ('O-returned', 'F-returned')`,
         OLD,
       );
-      // A foreign row already marked in this run also exposes a widened mark-count assertion.
-      await seed(`UPDATE ${table} SET updated_at = ? WHERE id = 'F-returned'`, STAMP);
       const snapshot = async () => {
         const rows = [];
         for (const name of ['package', 'version', 'version_revision', 'cache_epoch']) {
@@ -94,7 +98,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         }
         return rows;
       };
-      const before = await snapshot();
+      let before = await snapshot();
       const mutating: SqlExecutor = {
         driver: executor.driver,
         all: (statement) => executor.all(context.mutate(statement)),
@@ -119,19 +123,25 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
           kind === 'source'
             ? { kind: 'source' as const, sourceId: 'OS' }
             : { kind: 'package' as const, packageId: 'OK' };
-        await expect(reconciler.openListing(own, guard, scope)).resolves.toHaveProperty('stamp');
+        const { stamp } = await reconciler.openListing(own, guard, scope);
+        await seed(
+          `UPDATE ${table} SET updated_at = ?, listing_seen_stamp = ? WHERE id = 'F-returned'`,
+          stamp,
+          stamp,
+        );
+        before = await snapshot();
         await expect(
           reconciler.markListing(own, guard, {
             scope,
-            stamp: STAMP,
+            stamp,
             present: ['present', 'returned'],
           }),
         ).resolves.toMatchObject({ changed: true });
         expect(await snapshot()).toEqual(before);
         const listing =
           kind === 'source'
-            ? completeSourceListing({ sourceId: 'OS', stamp: STAMP, count: 2 })
-            : completeVersionListing({ packageId: 'OK', stamp: STAMP, count: 2 });
+            ? completeSourceListing({ sourceId: 'OS', stamp, count: 2 })
+            : completeVersionListing({ packageId: 'OK', stamp, count: 2 });
         await expect(reconciler.finalizeListing(own, guard, listing)).resolves.toMatchObject({
           removed: 1,
           restored: 1,
@@ -247,6 +257,38 @@ const syncCase: ContractCase = {
       conflicts: [],
       refused: [],
     });
+    expect(await foreignSnapshot(context)).toEqual(before);
+  },
+};
+
+const syncTagCollisionCase: ContractCase = {
+  name: 'sync suppresses tag history when a foreign row occupies the requested tag',
+  async run(context) {
+    await seedWriter(context);
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seedVersion(seed, 'V-NEXT', own.orgId, 'K-O', '1.0.1');
+    await seed(
+      "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K-O', 'latest', 'V-O')",
+      foreign.orgId,
+    );
+    const before = await foreignSnapshot(context);
+    await expect(
+      createCatalogueWriter(executorOf(context)).syncPackage(own, writerGuard(context), {
+        sourceId: 'S-O',
+        ecosystem: 'npm',
+        key: 'widget',
+        description: null,
+        versions: [],
+        tags: { latest: '1.0.1' },
+      }),
+    ).resolves.toMatchObject({ packageId: 'K-O', inserted: 0, updated: 0 });
+    expect(
+      await context.executor.all({
+        sql: "SELECT * FROM dist_tag_history WHERE org_id = ? AND package_id = 'K-O'",
+        params: [own.orgId],
+      }),
+    ).toEqual([]);
     expect(await foreignSnapshot(context)).toEqual(before);
   },
 };
@@ -575,6 +617,7 @@ export const entries: readonly MutationEntry[] = [
     cases: [
       ...(['source', 'package', 'absent'] as const).map(reconcileCase),
       syncCase,
+      syncTagCollisionCase,
       lookupCase,
       tombstoneCase,
       foreignSourceCase,
@@ -586,6 +629,13 @@ export const entries: readonly MutationEntry[] = [
     ],
     predicates: [
       ...reconcileEntry.predicates,
+      {
+        name: 'sync tag collisions suppress history through the writer',
+        locate: /collision\.org_id <> \?/,
+        neutral: 'NULL IS ?',
+        copies: 1,
+        caseName: syncTagCollisionCase.name,
+      },
       {
         name: 'sync source guard is organization scoped',
         locate: /source.org_id = \?(?=\s+AND source.ecosystem)/,

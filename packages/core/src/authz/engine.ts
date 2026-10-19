@@ -1,3 +1,4 @@
+import { clearPackageActor, setPackageActor } from '../internal/package-actor.js';
 import type { ActorAccessSnapshot } from './actor.js';
 import { catalogueTokenEligible } from './catalogue.js';
 import { assertCsrfToken, assertSameOrigin, UNSAFE_METHODS } from '../auth/csrf.js';
@@ -26,7 +27,6 @@ export interface EngineGrant {
 }
 
 const grants = new WeakMap<AuthorizationRequest, EngineGrant>();
-
 export function engineGrantOf(request: AuthorizationRequest): EngineGrant | null {
   return grants.get(request) ?? null;
 }
@@ -250,11 +250,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         return FORBIDDEN;
       }
     }
+    const effective = sessionEffective(found, input.boundary);
     const decision = decideFrom(
       {
         principal: { kind: 'user', id: found.user.id },
         project: found.project,
-        effective: sessionEffective(found, input.boundary),
+        effective,
         projectVisible: false,
       },
       permission,
@@ -271,6 +272,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       });
     }
     if (decision.allow) {
+      setPackageActor(request, decision, effective, false);
       grants.set(
         request,
         Object.freeze({
@@ -331,11 +333,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     }
     const principal = principalOf(found);
     if (principal === undefined) return UNAUTHORIZED;
+    const effective = tokenEffective(found, input.boundary);
     const decision = decideFrom(
       {
         principal,
         project: found.project,
-        effective: tokenEffective(found, input.boundary),
+        effective,
         projectVisible: found.projectVisible === true,
       },
       permission,
@@ -345,6 +348,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     if (!decision.allow) return decision;
     if (permission !== null && !catalogueTokenEligible(permission)) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
+    setPackageActor(request, decision, effective, true);
     grants.set(
       request,
       Object.freeze({
@@ -361,6 +365,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
   return Object.freeze({
     async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
       grants.delete(request);
+      clearPackageActor(request);
       const { boundary: routeBoundary } = request.route;
       if (
         routeBoundary !== 'organization' &&

@@ -1,6 +1,8 @@
+import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
 import { engineGrantOf } from '../authz/engine.js';
+import { packageKey } from '../catalogue/names.js';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { OrgContext } from '../db/port.js';
@@ -54,13 +56,18 @@ import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './regist
 import type { RegisteredJob, Registration } from './registry.js';
 import { bindPluginPorts } from './plugin-ports.js';
 import type { PlatformServices } from './plugin-ports.js';
-import type { PackageVisibilityResolver } from './routes.js';
+import { setResolvedPackage } from '../internal/package-context.js';
+import { packageActorOf } from '../internal/package-actor.js';
+import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
 import {
+  compareRoutePrecedence,
+  ownedRoutesConflict,
   routeApiProblems,
   routeBoundaryProblems,
   routePathProblem,
-  routesConflict,
 } from './routes.js';
+import { finaliseSecurityHeaders } from './security-headers.js';
+import { uiRootRedirect } from './ui-routes.js';
 
 export interface KernelObservability {
   readonly sink: ObsRecordSink;
@@ -71,6 +78,8 @@ export interface KernelObservability {
 
 export interface KernelOptions {
   readonly platform: Platform;
+  /** Configured public origin; HSTS is disabled when absent. */
+  readonly publicOrigin?: string | undefined;
   readonly plugins: readonly PluginDefinition[];
   readonly registration?: Registration;
   readonly ports: PluginPorts;
@@ -79,8 +88,10 @@ export interface KernelOptions {
   readonly health: () => Promise<boolean>;
   /** Routes under `/_pb/`, registered before plugin routes and served through the same pipeline. */
   readonly coreRoutes?: readonly RouteDefinition[];
+  /** Core ecosystem routes under /:project/, served through the plugin boundary pipeline. */
+  readonly ecosystemRoutes?: readonly RouteDefinition[];
   /** Package-visibility resolver bound by the package-visibility feature; required by project:packages:* routes. */
-  readonly packageResolver?: PackageVisibilityResolver;
+  readonly packageResolver?: PackageVisibilityPort;
   /** Default denyAllEngine. */
   readonly authorization?: AuthorizationEngine;
   /** Default defaultLog. Ignored when `observability` is set. */
@@ -113,6 +124,7 @@ export interface Kernel {
 
 type KernelEnv = {
   Bindings: {
+    readonly responsePolicy: { noStore: boolean };
     readonly requestId: string;
     readonly markLogged: () => void;
     readonly scope: RequestScope;
@@ -131,6 +143,15 @@ const RESERVED_ROOTS = ['/health', '/_pb'] as const;
 const REQUEST_ID_HEADER = 'x-request-id';
 const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
 const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
+
+function authOrSessionPath(path: string): boolean {
+  return (
+    path === '/_pb/auth' ||
+    path.startsWith('/_pb/auth/') ||
+    path === '/_pb/session' ||
+    path.startsWith('/_pb/session/')
+  );
+}
 
 function portAccepts(field: 'route' | 'deployment_id', value: string): boolean {
   return safeRecord({ level: 'debug', event: 'probe', [field]: value })?.[field] === value;
@@ -216,28 +237,30 @@ function withRequestId(response: Response, requestId: string): Response {
 
 function validateCoreRoutes(
   routes: readonly RouteDefinition[],
-  packageResolver: PackageVisibilityResolver | undefined,
+  packageResolver: PackageVisibilityPort | undefined,
+  ecosystem = false,
 ): readonly string[] {
   const problems: string[] = [];
   const eligible: RouteDefinition[] = [];
+  const prefix = ecosystem ? '/:project/' : CORE_PREFIX;
   for (const route of routes) {
-    const label = `core route ${String(route.method)} ${String(route.path)}`;
+    const label = `${ecosystem ? 'ecosystem' : 'core'} route ${String(route.method)} ${String(route.path)}`;
     let placeable = true;
     if (typeof route.path !== 'string') {
       problems.push(`${label}: path must be a string`);
       placeable = false;
-    } else if (!route.path.startsWith(CORE_PREFIX)) {
-      problems.push(
-        `${label}: path ${JSON.stringify(route.path)} must start with "${CORE_PREFIX}"`,
-      );
+    } else if (!route.path.startsWith(prefix)) {
+      problems.push(`${label}: path ${JSON.stringify(route.path)} must start with "${prefix}"`);
       placeable = false;
-    } else if (route.path === CORE_PREFIX) {
+    } else if (route.path === prefix) {
       problems.push(
-        `${label}: path ${JSON.stringify(route.path)} must name a path below "${CORE_PREFIX}"`,
+        `${label}: path ${JSON.stringify(route.path)} must name a path below "${prefix}"`,
       );
       placeable = false;
     } else {
-      const pathProblem = routePathProblem(`/${route.path.slice(CORE_PREFIX.length)}`);
+      const pathProblem = routePathProblem(
+        ecosystem ? route.path : `/${route.path.slice(CORE_PREFIX.length)}`,
+      );
       if (pathProblem !== null) {
         problems.push(`${label}: path ${JSON.stringify(route.path)}: ${pathProblem}`);
         placeable = false;
@@ -249,8 +272,7 @@ function validateCoreRoutes(
     }
     problems.push(
       ...routeBoundaryProblems(route, label, {
-        allowSelf: true,
-        allowAuthenticated: true,
+        ...(ecosystem ? { apiVersion: 3 } : { allowSelf: true, allowAuthenticated: true }),
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
     );
@@ -261,7 +283,8 @@ function validateCoreRoutes(
     for (let j = i + 1; j < eligible.length; j++) {
       const a = eligible[i]!;
       const b = eligible[j]!;
-      if (routesConflict(a, b)) {
+      const owner = ecosystem ? 'ecosystem' : 'core';
+      if (ownedRoutesConflict({ ...a, owner }, { ...b, owner })) {
         problems.push(`core route ${a.method} ${a.path} conflicts with ${b.method} ${b.path}`);
       }
     }
@@ -273,7 +296,18 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const coreRoutes = Object.freeze(
     (options.coreRoutes ?? []).map((route) => Object.freeze({ ...route })),
   );
-  const coreProblems = validateCoreRoutes(coreRoutes, options.packageResolver);
+  const ecosystemRoutes = Object.freeze(
+    (options.ecosystemRoutes ?? []).map((route) =>
+      Object.freeze({
+        ...route,
+        ...(route.package === undefined ? {} : { package: Object.freeze({ ...route.package }) }),
+      }),
+    ),
+  );
+  const coreProblems = [
+    ...validateCoreRoutes(coreRoutes, options.packageResolver),
+    ...validateCoreRoutes(ecosystemRoutes, options.packageResolver, true),
+  ];
   let registration: Registration;
   try {
     registration =
@@ -287,6 +321,21 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       throw new KernelConfigError([...error.problems, ...coreProblems]);
     }
     throw error;
+  }
+  for (const route of registration.routes) {
+    if (route.path === '/') {
+      coreProblems.push('plugin root route is reserved for core');
+    }
+    for (const ecosystem of ecosystemRoutes) {
+      if (typeof ecosystem.path !== 'string' || !ROUTE_METHODS.has(ecosystem.method)) continue;
+      if (
+        ownedRoutesConflict({ ...ecosystem, owner: 'ecosystem' }, { ...route, owner: 'plugin' })
+      ) {
+        coreProblems.push(
+          `ecosystem route ${ecosystem.method} ${ecosystem.path} conflicts with ${route.method} ${route.path} of plugin "${route.plugin}"`,
+        );
+      }
+    }
   }
   if (coreProblems.length > 0) throw new KernelConfigError(coreProblems);
   const { ports, resolveOrg, health } = options;
@@ -318,8 +367,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   const routeTemplates = frozenSet(
     [
+      '/',
       ...registration.routes.map((route) => route.path),
       ...coreRoutes.map((route) => route.path),
+      ...ecosystemRoutes.map((route) => route.path),
       ...HEALTH_ROUTES,
     ].filter((path) => portAccepts('route', path)),
   );
@@ -391,6 +442,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     principal: Principal | null,
     projectId: string | null,
     snapshot: AccessContextSnapshot | null,
+    resolved: Exclude<PackageVisibility, { kind: 'absent' }> | null = null,
   ): Promise<Response> {
     const context: RequestContext = Object.freeze({
       request: c.req.raw,
@@ -408,6 +460,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     if (snapshot !== null) {
       try {
         setAccessContext(context, snapshot);
+        if (resolved !== null) setResolvedPackage(context, resolved);
       } catch (error) {
         c.env.guard.reason(hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN));
         c.env.scope.obs({ plugin: hookPlugin(ENGINE_PLUGIN) }).log({
@@ -435,6 +488,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
   async function serve(route: RegisteredRoute, c: Context<KernelEnv>): Promise<Response> {
     const { requestId, scope, guard } = c.env;
+    if (route.boundary === 'self' || authOrSessionPath(route.path)) {
+      c.env.responsePolicy.noStore = true;
+    }
     scope.set({ route: route.path });
     const permission =
       route.permission ?? (route.boundary === 'authenticated' ? AUTHENTICATED_PLACEHOLDER : null);
@@ -508,7 +564,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         method: route.method,
         path: route.path,
         permission,
-        ...(route.boundary === undefined ? {} : { boundary: route.boundary }),
+        ...(route.boundary === undefined
+          ? {}
+          : { boundary: route.boundary === 'package' ? 'project' : route.boundary }),
       },
       params: Object.freeze({ ...c.req.param() }),
     };
@@ -531,39 +589,93 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
     scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
     const grant = engineGrantOf(authorizationRequest);
-    if (grant === null) return invoke(route, c, org, decision.principal, decision.projectId, null);
-    if (route.boundary === 'package') {
-      onHookError({
-        plugin: ENGINE_PLUGIN,
-        error: new TypeError('package route holds an engine grant'),
-      });
-      return denialResponse(c.req.raw, requestId);
+    const packageActor = route.boundary === 'package' ? packageActorOf(authorizationRequest) : null;
+    if (grant === null && route.boundary !== 'package') {
+      return invoke(route, c, org, decision.principal, decision.projectId, null);
     }
     if (
+      grant === null ||
       grant.principal.kind !== decision.principal.kind ||
       grant.principal.id !== decision.principal.id ||
-      grant.projectId !== decision.projectId
+      grant.projectId !== decision.projectId ||
+      (route.boundary === 'package' &&
+        (packageActor === null ||
+          packageActor.userId !== decision.principal.id ||
+          packageActor.projectId !== decision.projectId ||
+          packageActor.orgId !== org.orgId))
     ) {
       onHookError({ plugin: ENGINE_PLUGIN, error: new TypeError('inconsistent engine grant') });
       return authorizationUnavailable(requestId);
     }
+    let resolved: Exclude<PackageVisibility, { kind: 'absent' }> | null = null;
+    if (route.boundary === 'package') {
+      const binding = route.package;
+      if (binding === undefined || packageActor === null || options.packageResolver === undefined) {
+        throw new TypeError('package resolution is not configured');
+      }
+      const name = binding.name(authorizationRequest.params);
+      const absent = (): Response => {
+        guard.reason(engineStatusReason(404));
+        return routeNotFound(requestId);
+      };
+      if (typeof name !== 'string' || name.length === 0) return absent();
+      const outcome = await options.packageResolver.resolve(packageActor, binding.ecosystem, name);
+      if (outcome.kind === 'absent') return absent();
+      const key = packageKey(name, {
+        ecosystem: binding.ecosystem,
+        legacyCase: binding.ecosystem === 'npm',
+      });
+      if (outcome.kind === 'visible') {
+        if (
+          outcome.pkg.projectId !== packageActor.projectId ||
+          outcome.pkg.ecosystem !== binding.ecosystem ||
+          outcome.pkg.key !== key
+        ) {
+          throw new TypeError('inconsistent resolved package');
+        }
+        resolved = Object.freeze({ ...outcome, pkg: Object.freeze({ ...outcome.pkg }) });
+      } else if (outcome.kind === 'proxy_admissible') {
+        if (
+          outcome.projectId !== packageActor.projectId ||
+          outcome.ecosystem !== binding.ecosystem ||
+          outcome.key !== key ||
+          outcome.sourceIds.length === 0
+        ) {
+          throw new TypeError('inconsistent proxy admission');
+        }
+        if (binding.fetchOnAdmission !== true || c.req.method === 'HEAD') return absent();
+        resolved = Object.freeze({ ...outcome, sourceIds: Object.freeze([...outcome.sourceIds]) });
+      } else {
+        throw new TypeError('unknown package resolution');
+      }
+    }
+    const boundary = route.boundary === 'package' ? 'project' : (route.boundary ?? 'none');
     const snapshot: AccessContextSnapshot = {
       principal: grant.principal,
       projectId: grant.projectId,
-      boundary: route.boundary ?? 'none',
+      boundary,
       sessionId: grant.sessionId,
       actor: grant.actor,
       rateKey: {
         stage: 'authenticated',
         tokenSelector: grant.tokenSelector,
         principalId: grant.principal.id,
-        routeClass: route.boundary ?? 'none',
+        routeClass: boundary,
       },
     };
-    return invoke(route, c, org, decision.principal, decision.projectId, snapshot);
+    return invoke(route, c, org, decision.principal, decision.projectId, snapshot, resolved);
   }
 
   const app = new Hono<KernelEnv>();
+  app.get('/', (c) => {
+    c.env.scope.set({ route: '/' });
+    const redirect = uiRootRedirect(c.req.raw);
+    if (redirect !== null) return redirect;
+    c.env.guard.reason('route.not_found');
+    const response = routeNotFound(c.env.requestId);
+    response.headers.set('vary', 'Accept');
+    return response;
+  });
   app.get('/health/live', (c) => {
     c.env.scope.set({ route: '/health/live' });
     return liveResponse(c.env.requestId);
@@ -589,6 +701,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     app.all(root, reservedNotFound);
     app.all(`${root}/*`, reservedNotFound);
   }
+  for (const route of [...ecosystemRoutes].sort(compareRoutePrecedence)) {
+    const registered: RegisteredRoute = { ...route, plugin: CORE_PLUGIN };
+    app.on(route.method, route.path, (c) => serve(registered, c));
+  }
   for (const route of registration.routes) {
     app.on(route.method, route.path, (c) => serve(route, c));
   }
@@ -599,7 +715,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     return response;
   });
 
+  const https =
+    options.publicOrigin !== undefined &&
+    parsePublicOrigin(options.publicOrigin, { http: 'allow' }).startsWith('https:');
+
   async function fetch(request: Request): Promise<Response> {
+    const responsePolicy = { noStore: false };
     const scope = createRequestScope(obsContext, request);
     const guard = createCompletionGuard(scope, httpMetrics, request.signal);
     const { requestId } = scope;
@@ -609,7 +730,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     let response: Response | undefined;
     try {
       try {
+        const path = app.getPath(request);
+        responsePolicy.noStore = authOrSessionPath(path);
         response = await app.fetch(request, {
+          responsePolicy,
           requestId,
           markLogged: () => {
             logged = true;
@@ -629,6 +753,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         const failure = await failed(error, requestId, logged ? silent : log, guard);
         response = isHead ? new Response(null, failure) : failure;
       }
+      response = finaliseSecurityHeaders(response, https, responsePolicy.noStore);
       return response;
     } finally {
       guard.complete(response?.status ?? 500);

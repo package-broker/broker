@@ -93,7 +93,17 @@ function scopeExists(ctx: OrgContext, scope: ListingScope): RawBuilder<boolean> 
     : sql<boolean>`EXISTS (SELECT 1 FROM package WHERE package.id = ${id} AND package.org_id = ${ctx.orgId})`;
 }
 
-const stampNotFuture = (stamp: string) => checkOf(sql<boolean>`${stamp} <= ${NOW}`);
+function openMatches(ctx: OrgContext, scope: ListingScope, stamp: string): RawBuilder<boolean> {
+  const table = scope.kind === 'source' ? sql`source` : sql`package`;
+  return sql<boolean>`EXISTS (SELECT 1 FROM ${table}
+    WHERE id = ${scopeId(scope)} AND org_id = ${ctx.orgId} AND listing_open_stamp = ${stamp})`;
+}
+
+function sweepBoundary(ctx: OrgContext, scope: ListingScope): RawBuilder<string> {
+  const table = scope.kind === 'source' ? sql`source` : sql`package`;
+  return sql<string>`(SELECT listing_opened_at FROM ${table}
+    WHERE id = ${scopeId(scope)} AND org_id = ${ctx.orgId})`;
+}
 
 function presentKeys(present: readonly string[]): string[] {
   if (!Array.isArray(present) || present.length === 0 || present.length > CATALOGUE_KEY_LIST_MAX) {
@@ -119,10 +129,12 @@ function seenRows(
   return scope.kind === 'source'
     ? sql<number>`(SELECT count(*) FROM package
         WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${id}
-          AND package.updated_at >= ${stamp}${keyFilter(sql`package.name`)})`
+          ${keyFilter(sql`package.name`)}
+          AND package.listing_seen_stamp = ${stamp})`
     : sql<number>`(SELECT count(*) FROM version
         WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${id}
-          AND version.updated_at >= ${stamp}${keyFilter(sql`version.version_normalized`)})`;
+          ${keyFilter(sql`version.version_normalized`)}
+          AND version.listing_seen_stamp = ${stamp})`;
 }
 
 function conditionalEpochBump(ctx: OrgContext, condition: RawBuilder<boolean>): Statement[] {
@@ -137,7 +149,7 @@ function conditionalEpochBump(ctx: OrgContext, condition: RawBuilder<boolean>): 
 
 function transitionStatements(
   ctx: OrgContext,
-  packageId: string,
+  packageId: string | undefined,
   opId: string,
   from: 'active' | 'removed_upstream',
   to: 'active' | 'removed_upstream',
@@ -145,7 +157,9 @@ function transitionStatements(
   predicate: RawBuilder<boolean>,
 ): { revision: Statement; update: Statement } {
   const revisionReason = statusRevisionReason(from, to, reason);
-  const rows = sql`version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}
+  const packageFilter =
+    packageId === undefined ? sql`1 = 1` : sql`version.package_id = ${packageId}`;
+  const rows = sql`${packageFilter} AND version.org_id = ${ctx.orgId}
     AND version.status = ${from} AND ${predicate}`;
   return {
     revision: statementOf(
@@ -165,22 +179,159 @@ function transitionStatements(
   };
 }
 
-const clockAdvance = (ctx: OrgContext, packageId: string, opId: string) =>
-  statementOf(
-    sql`UPDATE package SET rev = rev + 1, modified_at = ${CLOCK}
-      WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}
-        AND (EXISTS (SELECT 1 FROM version
-          WHERE version.package_id = package.id AND version.last_op_id = ${opId}))`,
+export interface FinalizeStatements {
+  readonly statements: readonly Statement[];
+  readonly removalIndex: number;
+  readonly restorationIndex: number;
+}
+
+export function finalizeListingStatements(
+  ctx: OrgContext,
+  guard: CatalogueWriteGuard,
+  listing: CompleteSourceListing | CompleteVersionListing,
+): FinalizeStatements {
+  assertCatalogueWriteGuard(ctx, guard);
+  if (!isCompleteListing(listing)) {
+    throw new TypeError('finalize needs a complete listing minted by the ingest session');
+  }
+  const { stamp, count } = listing;
+  const scope: ListingScope =
+    'sourceId' in listing
+      ? { kind: 'source', sourceId: listing.sourceId }
+      : { kind: 'package', packageId: listing.packageId };
+  const id = scopeId(scope);
+  const opId = newOpId();
+  const boundary = sweepBoundary(ctx, scope);
+  const preconditions = [
+    ...guard,
+    ...checkOf(scopeExists(ctx, scope)),
+    ...checkOf(openMatches(ctx, scope, stamp)),
+    ...checkOf(sql<boolean>`${seenRows(ctx, scope, stamp)} = ${count}`),
+  ];
+
+  if (scope.kind === 'source') {
+    const unseen = sql<boolean>`package.updated_at < ${boundary}
+      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing'
+        OR EXISTS (SELECT 1 FROM version WHERE version.package_id = package.id
+          AND version.org_id = ${ctx.orgId} AND version.status = 'active'))`;
+    const returned = sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'`;
+    const rows = (predicate: RawBuilder<boolean>) =>
+      sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}`;
+    const statements = [...preconditions];
+    const removal = statements.length;
+    statements.push(
+      statementOf(
+        sql`UPDATE package SET status = 'removed_upstream', removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),
+          removal_cause = 'source_listing', last_op_id = ${opId},
+          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}`,
+      ),
+    );
+    const restoration = statements.length;
+    statements.push(
+      statementOf(
+        sql`UPDATE package SET status = 'active', removed_upstream_at = NULL,
+          removal_cause = NULL, last_op_id = ${opId},
+          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(returned)}`,
+      ),
+    );
+    const cascade = transitionStatements(
+      ctx,
+      undefined,
+      opId,
+      'active',
+      'removed_upstream',
+      'listing_absent',
+      sql<boolean>`EXISTS (SELECT 1 FROM package
+        WHERE package.id = version.package_id AND package.org_id = ${ctx.orgId}
+          AND package.source_id = ${id} AND package.last_op_id = ${opId}
+          AND package.status = 'removed_upstream')`,
+    );
+    statements.push(
+      cascade.revision,
+      cascade.update,
+      ...conditionalEpochBump(
+        ctx,
+        sql<boolean>`EXISTS (SELECT 1 FROM package
+        JOIN source ON source.id = package.source_id AND source.org_id = package.org_id
+        WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${id}
+          AND package.last_op_id = ${opId} AND source.removal_policy = 'exclude')`,
+      ),
+    );
+    return { statements, removalIndex: removal, restorationIndex: restoration };
+  }
+
+  const unseen = sql<boolean>`version.updated_at < ${boundary}`;
+  const returned = sql<boolean>`version.updated_at >= ${boundary}`;
+  const packageRevival = sql<boolean>`package.status = 'removed_upstream'
+    AND package.removal_cause = 'document_absent'`;
+  const removal = transitionStatements(
+    ctx,
+    id,
+    opId,
+    'active',
+    'removed_upstream',
+    'listing_absent',
+    unseen,
   );
+  const revival = transitionStatements(
+    ctx,
+    id,
+    opId,
+    'removed_upstream',
+    'active',
+    'listing_present',
+    returned,
+  );
+  const statements = [
+    ...preconditions,
+    ...conditionalEpochBump(
+      ctx,
+      sql<boolean>`EXISTS (SELECT 1 FROM package
+        JOIN source ON source.id = package.source_id AND source.org_id = package.org_id
+        WHERE package.id = ${id} AND package.org_id = ${ctx.orgId}
+          AND source.removal_policy = 'exclude'
+          AND ((${packageRevival}) OR EXISTS (SELECT 1 FROM version
+            WHERE version.package_id = package.id AND version.org_id = package.org_id
+              AND ((version.status = 'active' AND ${unseen})
+                OR (version.status = 'removed_upstream' AND ${returned})))))`,
+    ),
+  ];
+  statements.push(removal.revision);
+  const removalIndex = statements.length;
+  statements.push(removal.update, revival.revision);
+  const revivalIndex = statements.length;
+  statements.push(
+    revival.update,
+    statementOf(sql`UPDATE package SET status = 'active', removed_upstream_at = NULL,
+      removal_cause = NULL, last_op_id = ${opId}
+      WHERE package.id = ${id} AND package.org_id = ${ctx.orgId} AND ${packageRevival}`),
+    statementOf(sql`UPDATE package SET rev = rev + 1, modified_at = ${CLOCK}
+      WHERE package.id = ${id} AND package.org_id = ${ctx.orgId}
+        AND (package.last_op_id = ${opId} OR EXISTS (SELECT 1 FROM version
+          WHERE version.package_id = package.id AND version.org_id = ${ctx.orgId}
+            AND version.last_op_id = ${opId}))`),
+    statementOf(
+      sql`UPDATE package SET last_synced_at = ${NOW}
+        WHERE id = ${id} AND org_id = ${ctx.orgId}`,
+    ),
+  );
+  return { statements, removalIndex, restorationIndex: revivalIndex };
+}
 
 export function createCatalogueReconciler(executor: SqlExecutor): CatalogueReconciler {
   return {
     async openListing(ctx, guard, scope) {
       assertCatalogueWriteGuard(ctx, guard);
+      const table = scope.kind === 'source' ? sql`source` : sql`package`;
       const results = await executor.batch([
         ...guard,
         ...checkOf(scopeExists(ctx, scope)),
-        statementOf(sql`SELECT ${NOW} AS stamp`),
+        // The canonical stamp is a monotonic identity; only opened_at is a sweep clock.
+        statementOf(sql`UPDATE ${table} SET listing_opened_at = ${NOW}, listing_open_stamp =
+          strftime('%Y-%m-%dT%H:%M:%fZ', max(unixepoch('now', 'subsec'),
+            coalesce(unixepoch(listing_open_stamp, 'subsec') + 0.001, 0)), 'unixepoch')
+          WHERE id = ${scopeId(scope)} AND org_id = ${ctx.orgId}
+          RETURNING listing_open_stamp AS stamp`),
       ]);
       const stamp = results[results.length - 1]?.rows[0]?.['stamp'];
       if (typeof stamp !== 'string') throw new TypeError('the database returned no listing stamp');
@@ -193,15 +344,20 @@ export function createCatalogueReconciler(executor: SqlExecutor): CatalogueRecon
       const keys = presentKeys(present);
       const json = JSON.stringify(keys);
       const id = scopeId(scope);
+      const boundary = sweepBoundary(ctx, scope);
       const update =
         scope.kind === 'source'
-          ? sql`UPDATE package SET updated_at = max(updated_at, ${stamp})
-              WHERE org_id = ${ctx.orgId} AND source_id = ${id} AND updated_at < ${stamp}
+          ? sql`UPDATE package SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}
+              WHERE org_id = ${ctx.orgId} AND source_id = ${id} AND listing_seen_stamp IS NOT ${stamp}
                 AND name IN (SELECT value FROM json_each(${json}))`
-          : sql`UPDATE version SET updated_at = max(updated_at, ${stamp})
-              WHERE org_id = ${ctx.orgId} AND package_id = ${id} AND updated_at < ${stamp}
+          : sql`UPDATE version SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}
+              WHERE org_id = ${ctx.orgId} AND package_id = ${id} AND listing_seen_stamp IS NOT ${stamp}
                 AND version_normalized IN (SELECT value FROM json_each(${json}))`;
-      const statements = [...guard, ...checkOf(scopeExists(ctx, scope)), ...stampNotFuture(stamp)];
+      const statements = [
+        ...guard,
+        ...checkOf(scopeExists(ctx, scope)),
+        ...checkOf(openMatches(ctx, scope, stamp)),
+      ];
       const updateIndex = statements.length;
       statements.push(
         statementOf(update),
@@ -213,112 +369,15 @@ export function createCatalogueReconciler(executor: SqlExecutor): CatalogueRecon
     },
 
     async finalizeListing(ctx, guard, listing) {
-      assertCatalogueWriteGuard(ctx, guard);
-      if (!isCompleteListing(listing)) {
-        throw new TypeError('finalize needs a complete listing minted by the ingest session');
-      }
-      const { stamp, count } = listing;
-      const scope: ListingScope =
-        'sourceId' in listing
-          ? { kind: 'source', sourceId: listing.sourceId }
-          : { kind: 'package', packageId: listing.packageId };
-      const id = scopeId(scope);
-      const opId = newOpId();
-      const preconditions = [
-        ...guard,
-        ...checkOf(scopeExists(ctx, scope)),
-        ...stampNotFuture(stamp),
-        ...checkOf(sql<boolean>`${seenRows(ctx, scope, stamp)} >= ${count}`),
-      ];
-
-      if (scope.kind === 'source') {
-        const unseen = sql<boolean>`package.updated_at < ${stamp} AND package.status = 'active'`;
-        const returned = sql<boolean>`package.updated_at >= ${stamp} AND package.status = 'removed_upstream'`;
-        const rows = (predicate: RawBuilder<boolean>) =>
-          sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}`;
-        const statements = [
-          ...preconditions,
-          ...conditionalEpochBump(
-            ctx,
-            sql<boolean>`EXISTS (SELECT 1 FROM source
-              WHERE source.id = ${id} AND source.org_id = ${ctx.orgId}
-                AND source.removal_policy = 'exclude'
-                AND EXISTS (SELECT 1 FROM package
-                  WHERE ${rows(sql<boolean>`(${unseen}) OR (${returned})`)}))`,
-          ),
-        ];
-        const removal = statements.length;
-        statements.push(
-          statementOf(
-            sql`UPDATE package SET status = 'removed_upstream', removed_upstream_at = ${NOW},
-              rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}`,
-          ),
-        );
-        const restoration = statements.length;
-        statements.push(
-          statementOf(
-            sql`UPDATE package SET status = 'active', removed_upstream_at = NULL,
-              rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(returned)}`,
-          ),
-        );
-        const results = await executor.batch(statements);
-        return {
-          removed: results[removal]?.changes ?? 0,
-          restored: results[restoration]?.changes ?? 0,
-          statements: statements.length,
-        };
-      }
-
-      const unseen = sql<boolean>`version.updated_at < ${stamp}`;
-      const returned = sql<boolean>`version.updated_at >= ${stamp}`;
-      const removal = transitionStatements(
+      const { statements, removalIndex, restorationIndex } = finalizeListingStatements(
         ctx,
-        id,
-        opId,
-        'active',
-        'removed_upstream',
-        'listing_absent',
-        unseen,
-      );
-      const revival = transitionStatements(
-        ctx,
-        id,
-        opId,
-        'removed_upstream',
-        'active',
-        'listing_present',
-        returned,
-      );
-      const statements = [
-        ...preconditions,
-        ...conditionalEpochBump(
-          ctx,
-          sql<boolean>`EXISTS (SELECT 1 FROM package
-            JOIN source ON source.id = package.source_id AND source.org_id = package.org_id
-            WHERE package.id = ${id} AND package.org_id = ${ctx.orgId}
-              AND source.removal_policy = 'exclude'
-              AND EXISTS (SELECT 1 FROM version
-                WHERE version.package_id = package.id AND version.org_id = package.org_id
-                  AND ((version.status = 'active' AND ${unseen})
-                    OR (version.status = 'removed_upstream' AND ${returned}))))`,
-        ),
-      ];
-      statements.push(removal.revision);
-      const removalIndex = statements.length;
-      statements.push(removal.update, revival.revision);
-      const revivalIndex = statements.length;
-      statements.push(
-        revival.update,
-        clockAdvance(ctx, id, opId),
-        statementOf(
-          sql`UPDATE package SET last_synced_at = ${NOW}
-            WHERE id = ${id} AND org_id = ${ctx.orgId}`,
-        ),
+        guard,
+        listing,
       );
       const results = await executor.batch(statements);
       return {
         removed: results[removalIndex]?.changes ?? 0,
-        restored: results[revivalIndex]?.changes ?? 0,
+        restored: results[restorationIndex]?.changes ?? 0,
         statements: statements.length,
       };
     },
@@ -327,6 +386,7 @@ export function createCatalogueReconciler(executor: SqlExecutor): CatalogueRecon
       assertCatalogueWriteGuard(ctx, guard);
       requireId('packageId', packageId);
       const opId = newOpId();
+      const decisionId = newOpId();
       const sinceSeconds = Math.ceil(ABSENCE_MIN_SPAN_MS / 1000);
       const absent = sql<boolean>`(EXISTS (SELECT 1 FROM upstream_state
           WHERE upstream_state.package_id = ${packageId} AND upstream_state.org_id = ${ctx.orgId})
@@ -343,33 +403,39 @@ export function createCatalogueReconciler(executor: SqlExecutor): CatalogueRecon
         'active',
         'removed_upstream',
         'upstream_absent',
-        absent,
+        sql<boolean>`EXISTS (SELECT 1 FROM package WHERE package.id = ${packageId}
+          AND package.org_id = ${ctx.orgId} AND package.last_op_id = ${opId})`,
       );
-      const statements = [
-        ...guard,
-        ...checkOf(scopeExists(ctx, { kind: 'package', packageId })),
-        ...conditionalEpochBump(
-          ctx,
-          sql<boolean>`EXISTS (SELECT 1 FROM package
-            JOIN source ON source.id = package.source_id AND source.org_id = package.org_id
-            WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}
-              AND source.removal_policy = 'exclude' AND ${absent}
-              AND (package.status = 'active' OR EXISTS (SELECT 1 FROM version
-                WHERE version.package_id = package.id AND version.status = 'active')))`,
-        ),
-        transition.revision,
-        transition.update,
-      ];
+      const statements = [...guard, ...checkOf(scopeExists(ctx, { kind: 'package', packageId }))];
+      statements.push(
+        statementOf(sql`UPDATE package SET last_op_id = ${decisionId},
+          listing_open_stamp = strftime('%Y-%m-%dT%H:%M:%fZ', listing_open_stamp, '+0.001 seconds')
+          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId} AND ${absent}`),
+      );
       const flip = statements.length;
       statements.push(
         statementOf(
           sql`UPDATE package SET status = 'removed_upstream',
             removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),
+            removal_cause = CASE WHEN status = 'active' THEN 'document_absent' ELSE removal_cause END,
+            last_op_id = ${opId},
             rev = rev + 1, modified_at = ${CLOCK}
             WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}
-              AND ${absent}
+              AND package.last_op_id = ${decisionId}
               AND (package.status = 'active' OR EXISTS (SELECT 1 FROM version
-                WHERE version.package_id = package.id AND version.last_op_id = ${opId}))`,
+                WHERE version.package_id = package.id AND version.org_id = ${ctx.orgId}
+                  AND version.status = 'active'))`,
+        ),
+      );
+      statements.push(
+        transition.revision,
+        transition.update,
+        ...conditionalEpochBump(
+          ctx,
+          sql<boolean>`EXISTS (SELECT 1 FROM package
+          JOIN source ON source.id = package.source_id AND source.org_id = package.org_id
+          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}
+            AND package.last_op_id = ${opId} AND source.removal_policy = 'exclude')`,
         ),
       );
       const results = await executor.batch(statements);

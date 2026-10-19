@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_PACKAGES = ['core', 'cli', 'db-sqlite', 'runtime-cloudflare', 'runtime-node', 'ui'];
@@ -18,6 +19,12 @@ const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc']);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const STATIC_REQUIRED_FILES = {
+  core: [
+    'dist/api/openapi.js',
+    'dist/api/openapi.d.ts',
+    'dist/api/openapi-route.js',
+    'dist/api/openapi-route.d.ts',
+  ],
   'db-sqlite': ['migrations/0010_job_claim_index.sql'],
 };
 const MIGRATION_PACKAGES = ['db-sqlite'];
@@ -156,6 +163,13 @@ function checkExports(pkg, pkgJson, files) {
   }
 
   const forbidden = FORBIDDEN_EXPORTS[pkg] ?? [];
+  if (pkg === 'core') {
+    const api = exportsField['./api/*'];
+    if (api?.types !== './dist/api/*.d.ts' || api?.default !== './dist/api/*.js')
+      problems.push(
+        'export "./api/*" must map types and default to dist/api/*.d.ts and dist/api/*.js',
+      );
+  }
   for (const key of forbidden) {
     if (Object.hasOwn(exportsField, key))
       problems.push(`export "${key}" is advertised but must be gone`);
@@ -234,6 +248,67 @@ function checkEntryFields(pkgJson, files) {
     }
   }
   return { problems, count: entries.filter(([, value]) => value !== undefined).length };
+}
+
+function checkCorePackageContext(dir, pkgJson, files) {
+  const entries = [];
+  for (const [key, value] of Object.entries(normalizeExports(pkgJson.exports) ?? {})) {
+    for (const target of collectTargets(value)) {
+      const values = target.includes('*') ? wildcardValues(target, files) : [''];
+      for (const match of values) {
+        const file = target.split('*').join(match);
+        if (/\.(?:[cm]?js|[cm]?ts)$/.test(file))
+          entries.push({ subpath: key.split('*').join(match), file: join(dir, file) });
+      }
+    }
+  }
+
+  const program = ts.createProgram([...new Set(entries.map(({ file }) => file))], {
+    allowJs: true,
+    noEmit: true,
+    noLib: true,
+    types: [],
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  });
+  const checker = program.getTypeChecker();
+  const forbidden = new Set([
+    'setResolvedPackage',
+    'packageActorOf',
+    'setPackageActor',
+    'clearPackageActor',
+  ]);
+  const problems = new Set();
+  const inspectSymbol = (symbol, subpath, visited = new Set()) => {
+    const original =
+      symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+    if (visited.has(original)) return;
+    visited.add(original);
+    if (forbidden.has(symbol.name) || forbidden.has(original.name))
+      problems.add(`core export "${subpath}" exposes kernel-only "${original.name}"`);
+    if (original.flags & ts.SymbolFlags.Module)
+      for (const member of checker.getExportsOfModule(original))
+        inspectSymbol(member, subpath, visited);
+  };
+  let readers = 0;
+  for (const { subpath, file } of entries) {
+    const source = program.getSourceFile(file);
+    const module = source && checker.getSymbolAtLocation(source);
+    if (!module) {
+      problems.add(`core export "${subpath}" could not be inspected for private package context`);
+      continue;
+    }
+    const symbols = checker.getExportsOfModule(module);
+    for (const symbol of symbols) inspectSymbol(symbol, subpath);
+    if (subpath === './kernel/package-context') {
+      readers += 1;
+      if (!symbols.some((symbol) => symbol.name === 'resolvedPackageOf'))
+        problems.add(`core export "${subpath}" must expose resolvedPackageOf`);
+    }
+  }
+  if (readers === 0)
+    problems.add('core must export ./kernel/package-context with resolvedPackageOf');
+  return [...problems];
 }
 
 function parseVersion(text) {
@@ -372,7 +447,9 @@ function inspect(pkg) {
     const dir = join(extract, 'package');
     const files = listFiles(dir);
     const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    return { ...checkPackedPackage(pkg, pkgJson, files), pkgJson };
+    const result = checkPackedPackage(pkg, pkgJson, files);
+    if (pkg === 'core') result.problems.push(...checkCorePackageContext(dir, pkgJson, files));
+    return { ...result, pkgJson };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -406,6 +483,33 @@ for (const { pkg, result } of outcomes)
   if (result.pkgJson)
     result.problems.push(...checkCorePeer(pkg, result.pkgJson, packedCoreVersion));
 
+const coreOutcome = outcomes.find(({ pkg }) => pkg === 'core');
+if (coreOutcome && coreOutcome.result.problems.length === 0) {
+  try {
+    const output = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { generateOpenApi } from '@package-broker/core/api/openapi';
+         import { openApiRoute } from '@package-broker/core/api/openapi-route';
+         const document = generateOpenApi([], { title: 'Package Broker', version: '2.0.0' });
+         console.log(JSON.stringify({ version: document.openapi, path: openApiRoute(document).path }));`,
+      ],
+      { cwd: join(ROOT, 'packages', 'cli'), encoding: 'utf8' },
+    );
+    const resolved = JSON.parse(output);
+    if (resolved.version !== '3.1.0' || resolved.path !== '/_pb/openapi.json')
+      coreOutcome.result.problems.push(
+        `./api/* imported from the cli package returned ${output.trim()}`,
+      );
+  } catch (error) {
+    coreOutcome.result.problems.push(
+      `./api/* is not importable from the cli package: ${error.message}`,
+    );
+  }
+}
+
 for (const { pkg, result } of outcomes) {
   if (result.problems.length > 0) {
     process.exitCode = 1;
@@ -415,5 +519,7 @@ for (const { pkg, result } of outcomes) {
     console.log(
       `${pkg}: ok (${result.files} packed files, ${result.targets} entry targets resolved)`,
     );
+    if (pkg === 'core')
+      console.log('  ./api/*: ./api/openapi, ./api/openapi-route (types and default resolved)');
   }
 }

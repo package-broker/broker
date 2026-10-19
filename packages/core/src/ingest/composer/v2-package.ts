@@ -30,6 +30,7 @@ import {
   type VersionCandidate,
 } from '../../sources/provider.js';
 import { ARRAY_ELEMENTS, extractMembers } from '../json-stream.js';
+import { retryAfterOf } from './retry-after.js';
 import type { ComposerRoot } from './root.js';
 
 export type ComposerV2ErrorCode =
@@ -81,12 +82,13 @@ const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_VERSION_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_EXPANSION: ExpansionLimits = { maxVersions: 20_000 };
-const MAX_RETRY_AFTER_SECONDS = 60;
+const MAX_RETRY_WAIT_SECONDS = 60;
 const RECHECK_MS = 1500;
 const MAX_UPSTREAM_PATTERNS = 1000;
 const MAX_UPSTREAM_PATTERN_LENGTH = 255;
 const STRONG_ETAG = /^"[^"]+"$/;
 const ABSENT_SNAPSHOT = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const COMPOSER_V2_NOT_FOUND_SHAPES: readonly string[] = ['{"packages":[]}'];
 const CHUNK = 64 * 1024;
 const encoder = new TextEncoder();
 
@@ -118,14 +120,6 @@ function listing(root: ComposerRoot, key: string): boolean | null {
   return false;
 }
 
-function retryAfterOf(value: string | null, now: number): number | null {
-  if (value === null) return null;
-  const text = value.trim();
-  if (/^\d+$/.test(text)) return Number(text);
-  const at = Date.parse(text);
-  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - now) / 1000));
-}
-
 async function readAll(response: UpstreamResponse): Promise<Uint8Array> {
   return response.body === null
     ? new Uint8Array(0)
@@ -145,10 +139,10 @@ async function digest(scheme: string, parts: readonly Uint8Array[]): Promise<str
   return `sha256:${Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-function isJson(bytes: Uint8Array): boolean {
+function isNotFoundShape(bytes: Uint8Array): boolean {
   try {
-    JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    return true;
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return COMPOSER_V2_NOT_FOUND_SHAPES.includes(JSON.stringify(parsed));
   } catch {
     return false;
   }
@@ -254,12 +248,12 @@ export async function describeComposerV2(
             response.headers.get('retry-after'),
             options.clock.now().getTime(),
           );
-          if (job && !retried && seconds !== null && seconds <= MAX_RETRY_AFTER_SECONDS) {
+          if (job && !retried && seconds !== undefined && seconds <= MAX_RETRY_WAIT_SECONDS) {
             retried = true;
             await pause(seconds * 1000);
             continue;
           }
-          return { kind: 'busy', retryAfterSeconds: seconds };
+          return { kind: 'busy', retryAfterSeconds: seconds ?? null };
         }
         if (response.status === 304) {
           if (sent) return { kind: 'not_modified' };
@@ -309,12 +303,17 @@ export async function describeComposerV2(
   if (p2.kind === 'busy') return p2;
   if (dev?.kind === 'busy') return dev;
   if (p2.kind === 'failed') throw p2.error;
-  if (p2.kind === 'missing') return { kind: 'not_found', definitive: isJson(p2.bytes) };
+  const definitiveAbsence = (bytes: Uint8Array): boolean =>
+    source.credential === undefined && isNotFoundShape(bytes);
+  if (p2.kind === 'missing') {
+    return { kind: 'not_found', definitive: definitiveAbsence(p2.bytes) };
+  }
 
   const devChanged =
     dev !== null &&
     (dev.kind === 'body' ||
-      (dev.kind === 'missing' && hasValidator(options.validators?.['composer-p2-dev'])));
+      (dev.kind === 'missing' &&
+        (hasValidator(options.validators?.['composer-p2-dev']) || !definitiveAbsence(dev.bytes))));
   if (p2.kind === 'not_modified') {
     if (dev?.kind === 'failed') throw dev.error;
     if (!devChanged) return { kind: 'not_modified' };
@@ -335,6 +334,7 @@ export async function describeComposerV2(
   let strong = true;
   const record = async (form: ComposerForm, fetched: Fetched | null): Promise<boolean> => {
     if (fetched?.kind === 'missing') {
+      if (!definitiveAbsence(fetched.bytes)) return false;
       forms.push({
         form,
         status: 'absent',
@@ -362,6 +362,7 @@ export async function describeComposerV2(
   };
   await record('composer-p2', p2);
   const devRecorded = await record('composer-p2-dev', dev);
+  if (options.dev === true && !devRecorded) delete validators['composer-p2'];
   const snapshot = await digest(strong ? 'composer-v2-etag' : 'composer-v2-body', parts);
 
   const expansion = source.expansion ?? DEFAULT_EXPANSION;

@@ -1305,7 +1305,19 @@ const issuanceBoundaries: Case = (open, wrap) =>
     open,
     async (world) => {
       await world.executor.batch([orgWide(world)]);
-      const tokens = createTokenRepository(world.executor);
+      const now = Date.now();
+      const iso = (offset: number) => new Date(now + offset).toISOString();
+      // Pin SQL and fixture timestamps together: a pause can cross the one-second boundaries.
+      const atDatabaseTime = (statement: Statement): Statement => ({
+        ...statement,
+        sql: statement.sql.replaceAll("'now'", `'${iso(0)}'`),
+      });
+      const clock: SqlExecutor = {
+        driver: world.executor.driver,
+        all: (statement) => world.executor.all(atDatabaseTime(statement)),
+        batch: (statements) => world.executor.batch(statements.map(atDatabaseTime)),
+      };
+      const tokens = createTokenRepository(clock);
       let next = 0;
       const attempt = async (reauthOffset: number, expiresOffset: number) => {
         next += 1;
@@ -1747,3 +1759,5 @@ export function describeAccessContract(label: string, open: Open): void {
     }
   });
 }
+
+export { describeAccessRace, type OpenedRaceDatabase } from './access-race.js';

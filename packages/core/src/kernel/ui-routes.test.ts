@@ -67,6 +67,7 @@ async function app(
   const clock: Clock = { now: () => new Date('2026-10-15T12:00:00.000Z') };
   return createKernel({
     platform: 'node',
+    publicOrigin,
     plugins: [],
     ports: {
       organizations: { get: () => Promise.resolve(null) },
@@ -120,7 +121,9 @@ describe('UI response headers', () => {
 
   it('sends HSTS for an https public origin', async () => {
     const response = await (await app(fakeAssets(), HTTPS)).fetch(get('/_pb/ui'));
-    expect(response.headers.get('strict-transport-security')).toBe('max-age=31536000');
+    expect(response.headers.get('strict-transport-security')).toBe(
+      'max-age=31536000; includeSubDomains',
+    );
   });
 
   it('omits HSTS for an http public origin', async () => {
@@ -307,6 +310,76 @@ describe('UI asset metadata', () => {
 });
 
 describe('GET /', () => {
+  it.each(['GET', 'HEAD'])('mounts %s / through the kernel', async (method) => {
+    const response = await (
+      await app()
+    ).fetch(
+      new Request(`${HTTPS}/`, {
+        method,
+        headers: { accept: 'text/html', origin: 'https://other.test' },
+      }),
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe('/_pb/ui');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('vary')).toBe('Accept');
+    expect(response.headers.has('access-control-allow-origin')).toBe(false);
+    expect(response.body).toBeNull();
+    expect(await response.text()).toBe('');
+  });
+
+  it('redirects to the route that serves the manifest entry', async () => {
+    const assets: StaticAssets = {
+      manifest: () =>
+        Promise.resolve({
+          version: 1,
+          entry: 'custom.html',
+          files: { 'custom.html': { contentType: 'text/html', bytes: 6 } },
+        }),
+      read: (name) =>
+        Promise.resolve(
+          name === 'custom.html'
+            ? { body: new TextEncoder().encode('custom'), contentType: 'text/html', bytes: 6 }
+            : null,
+        ),
+    };
+    const kernel = await app(assets);
+    const redirect = await kernel.fetch(get('/', 'text/html'));
+    expect(redirect.status).toBe(303);
+    const entry = await kernel.fetch(get(redirect.headers.get('location')!));
+    expect(await entry.text()).toBe('custom');
+  });
+
+  it.each([
+    undefined,
+    'application/json',
+    '*/*',
+    'text/html;q=0',
+    'text/html;q=0.5,application/json',
+  ])('preserves the kernel 404 for Accept %s', async (accept) => {
+    const response = await (await app()).fetch(get('/', accept));
+    expect(response.status).toBe(404);
+    expect(response.headers.get('vary')).toBe('Accept');
+    expect(response.headers.has('location')).toBe(false);
+  });
+
+  it.each([
+    ['POST', '/'],
+    ['GET', '/x'],
+    ['GET', '/nested/path'],
+  ])('does not redirect %s %s', async (method, path) => {
+    const response = await (
+      await app()
+    ).fetch(
+      new Request(`${HTTPS}${path}`, {
+        method,
+        headers: { accept: 'text/html' },
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.has('location')).toBe(false);
+  });
+
   it('redirects a browser to the UI with 303', () => {
     const response = uiRootRedirect(get('/', 'text/html,application/xhtml+xml'));
     expect(response?.status).toBe(303);

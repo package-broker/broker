@@ -3,6 +3,9 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import type { PurgeGeneration, Sha256 } from '@package-broker/core/platform/blob';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
+import * as leaseGuard from './blob-lease-guard.js';
+import { distAttachStatements } from './catalogue-write-dist.js';
+import { createCatalogueWriteGuard } from './catalogue-write-package.js';
 import { createBlobRepository } from './blob.js';
 
 let database: MigratedDatabase;
@@ -182,5 +185,60 @@ describe('blobLeaseNotLive', () => {
     expect(claimable).toBe(true);
     expect(guarded).toBe(!removable);
     expect(guarded).toBe(claimable);
+  });
+});
+
+describe('dist writer shared purge lease boundary', () => {
+  it.each([
+    ['one tick before', '2026-10-17T11:59:59.999Z', true],
+    ['equal to now', '2026-10-17T12:00:00.000Z', true],
+    ['one tick after', '2026-10-17T12:00:00.001Z', false],
+  ] as const)('attach handles a lease %s', async (_label, lease, available) => {
+    const shared = vi.spyOn(leaseGuard, 'leaseLive');
+    try {
+      const freeze = (statement: Statement): Statement => ({
+        ...statement,
+        sql: statement.sql.replaceAll("'now'", "'2026-10-17T12:00:00.000Z'"),
+      });
+      const realExecutor = executor;
+      executor = {
+        driver: realExecutor.driver,
+        all: (statement) => realExecutor.all(freeze(statement)),
+        batch: (statements) => realExecutor.batch(statements.map(freeze)),
+      };
+      await seedParents(a);
+      const id = await blob(a, 30, null);
+      const versionId = await version(a, null);
+      await run('UPDATE blob SET purge_lease_until = ? WHERE org_id = ? AND id = ?', [
+        lease,
+        a.orgId,
+        id,
+      ]);
+      await run(
+        `INSERT INTO job (id, org_id, type, idempotency_key, state, lease_owner, lease_until, fence)
+        VALUES ('boundary-job', ?, 'catalogue:sync:v1', 'boundary', 'running', 'owner', '2099-01-01T00:00:00.000Z', 3)`,
+        [a.orgId],
+      );
+      const guard = createCatalogueWriteGuard(a, { id: 'boundary-job', owner: 'owner', fence: 3 });
+      const plan = distAttachStatements(a, guard, {
+        versionId,
+        revision: 1,
+        sha256: digest(30) as Sha256,
+      });
+      if (available) {
+        const results = await executor.batch(plan.statements);
+        expect(plan.result(results).changed).toBe(true);
+      } else {
+        await expect(executor.batch(plan.statements)).rejects.toThrow();
+      }
+      expect(shared).toHaveBeenCalledWith('blob.purge_lease_until');
+      const stored = await executor.all<{ blob_id: string | null }>({
+        sql: 'SELECT blob_id FROM version WHERE org_id = ? AND id = ?',
+        params: [a.orgId, versionId],
+      });
+      expect(stored[0]?.blob_id).toBe(available ? id : null);
+    } finally {
+      shared.mockRestore();
+    }
   });
 });

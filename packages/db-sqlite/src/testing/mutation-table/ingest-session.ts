@@ -5,6 +5,7 @@ import {
   type ContractCase,
   type MutationEntry,
 } from './harness.js';
+import { entries as finalizeEntries } from './ingest-finalize.js';
 import { expect } from 'vitest';
 import { ingestSessionGuard, sweepStatements } from '../../repositories/ingest-session.js';
 import {
@@ -132,4 +133,4 @@ const sweepEntry: MutationEntry = {
   ],
 };
 
-export const entries: readonly MutationEntry[] = [ingestGuardEntry, sweepEntry];
+export const entries: readonly MutationEntry[] = [ingestGuardEntry, sweepEntry, ...finalizeEntries];

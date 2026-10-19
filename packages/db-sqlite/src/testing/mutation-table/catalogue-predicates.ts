@@ -1,7 +1,7 @@
 import type { MutationEntry } from './harness.js';
 import { orgOf, seeder, type CaseContext, type ContractCase } from './harness.js';
 import { expect } from 'vitest';
-import { sql } from 'kysely';
+import { sql, type SqlBool } from 'kysely';
 import { compile, db } from '../../kysely.js';
 import {
   admissionCondition,
@@ -9,6 +9,7 @@ import {
   col,
   proxyEligibleCondition,
   readTimeCondition,
+  visibleRowsCondition,
 } from '../../repositories/catalogue-predicates.js';
 import { seedSource, seedPackage, seedProject, ref, ALWAYS, NOT_NULL } from './fixtures.js';
 
@@ -201,6 +202,54 @@ const readTimeForeignProject: ContractCase = {
   },
 };
 
+function visibleRowsCase(mismatched: 'pp' | 'pkg' | 'src' | 'ps'): ContractCase {
+  return {
+    name: `visible rows reject a foreign ${mismatched} row`,
+    async run(context) {
+      const seed = seeder(context.executor);
+      const { own, foreign } = orgOf(context);
+      await seedProject(seed, 'P1', own.orgId);
+      await seedSource(seed, 'S-GUARD', own.orgId, 'vcs');
+      await seedSource(seed, 'S-OUTER', mismatched === 'src' ? foreign.orgId : own.orgId, 'vcs');
+      await seedPackage(
+        seed,
+        'K1',
+        mismatched === 'pkg' ? foreign.orgId : own.orgId,
+        'S-GUARD',
+        'acme/a',
+      );
+      await seed(
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        own.orgId,
+        'P1',
+        'S-GUARD',
+      );
+      await seed(
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        mismatched === 'ps' ? foreign.orgId : own.orgId,
+        'P1',
+        'S-OUTER',
+      );
+      await seed(
+        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+        mismatched === 'pp' ? foreign.orgId : own.orgId,
+        'P1',
+        'K1',
+      );
+      const rows = db
+        .selectFrom('project_package as pp')
+        .innerJoin('package as pkg', 'pkg.id', 'pp.package_id')
+        .innerJoin('source as src', (join) => join.on('src.id', '=', 'S-OUTER'))
+        .innerJoin('project_source as ps', (join) => join.onRef('ps.source_id', '=', 'src.id'))
+        .select('pkg.id')
+        .where(
+          sql<SqlBool>`${visibleRowsCondition(own, { pp: 'pp', pkg: 'pkg', src: 'src', ps: 'ps' })}`,
+        );
+      expect(await ids(context, rows)).toEqual([]);
+    },
+  };
+}
+
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'proxyEligibleCondition',
@@ -281,6 +330,59 @@ export const entries: readonly MutationEntry[] = [
         locate: ref('guard_p', 'org_id', '\\?'),
         neutral: NOT_NULL,
         caseName: readTimeForeignProject.name,
+      },
+    ],
+  },
+  {
+    builder: 'visibleRowsCondition',
+    file: 'repositories/catalogue-predicates.ts',
+    cases: [
+      ...(['pp', 'pkg', 'src', 'ps'] as const).map(visibleRowsCase),
+      attachedCase('attachment'),
+      attachedCase('source'),
+      attachedCase('project'),
+      readTimeForeignProject,
+      proxyShadowedByForeignPackage,
+      proxyShadowedByForeignSource,
+      proxyBlockedByForeignName,
+    ],
+    predicates: [
+      ...(['pp', 'pkg', 'src', 'ps'] as const).map((alias) => ({
+        name: `${alias} row is scoped to the organization`,
+        locate: ref(alias, 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: visibleRowsCase(alias).name,
+      })),
+      ...(['attachment', 'source', 'project'] as const).map((kind, index) => ({
+        name: `attached ${kind} row is scoped to the organization`,
+        locate: ref(['guard_ps', 'guard_s', 'guard_p'][index]!, 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: attachedCase(kind).name,
+      })),
+      {
+        name: 'read-time project row is scoped to the organization',
+        locate: ref('guard_p', 'org_id', '\\?'),
+        neutral: NOT_NULL,
+        caseName: readTimeForeignProject.name,
+      },
+      {
+        name: 'proxy shadow check is scoped to the package organization',
+        locate: ref('guard_q', 'org_id', '"pkg"\\."org_id"'),
+        neutral: ALWAYS,
+        caseName: proxyShadowedByForeignPackage.name,
+      },
+      {
+        name: 'competing source is scoped to the package organization',
+        locate: ref('guard_qs', 'org_id', '"pkg"\\."org_id"'),
+        neutral: ALWAYS,
+        copies: 1,
+        caseName: proxyShadowedByForeignSource.name,
+      },
+      {
+        name: 'registered name check is scoped to the package organization',
+        locate: ref('guard_r', 'org_id', '"pkg"\\."org_id"'),
+        neutral: ALWAYS,
+        caseName: proxyBlockedByForeignName.name,
       },
     ],
   },

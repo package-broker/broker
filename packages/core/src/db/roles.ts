@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '../api/idempotency.js';
+import type { AuditEvent } from '../audit/actions.js';
 import type { MutationFence } from '../authz/fence.js';
 import type { OrgContext } from './port.js';
 
@@ -18,6 +20,8 @@ export interface Role {
   readonly revision: number;
   readonly permissions: readonly string[];
 }
+
+type MutationInput = { readonly audit?: AuditEvent; readonly idempotency?: IdempotencyRecord };
 
 export interface RoleRepository {
   list(ctx: OrgContext): Promise<Role[]>;
@@ -40,7 +44,7 @@ export interface RoleRepository {
   create(
     ctx: OrgContext,
     fence: MutationFence,
-    input: {
+    input: MutationInput & {
       readonly id: string;
       readonly key: string;
       readonly name: string;
@@ -58,10 +62,12 @@ export interface RoleRepository {
   rename(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    name: string,
-    now: string,
-    opId: string,
+    input: MutationInput & {
+      readonly id: string;
+      readonly name: string;
+      readonly now: string;
+      readonly opId: string;
+    },
   ): Promise<'renamed' | 'not_found' | 'locked' | FencedRoleFailure>;
   /**
    * Replaces the permission set in one batch; `locked` for a role that protects the last holder.
@@ -71,15 +77,19 @@ export interface RoleRepository {
   setPermissions(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    permissions: readonly string[],
-    now: string,
-    opId: string,
+    input: MutationInput & {
+      readonly id: string;
+      readonly permissions: readonly string[];
+      readonly now: string;
+      readonly opId: string;
+    },
   ): Promise<'updated' | 'not_found' | 'locked' | 'invalid_permissions' | FencedRoleFailure>;
   delete(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    opId: string,
+    input: MutationInput & {
+      readonly id: string;
+      readonly opId: string;
+    },
   ): Promise<'deleted' | 'not_found' | 'system' | 'in_use' | FencedRoleFailure>;
 }

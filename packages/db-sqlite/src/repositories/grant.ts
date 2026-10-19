@@ -567,7 +567,7 @@ export function createGrantRepository(
       throw new Error('grant create inserted no row after its guards held');
     },
 
-    async deleteOrganization(ctx, fence, id, opId) {
+    async deleteOrganization(ctx, fence, { id, opId }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
@@ -645,7 +645,7 @@ export function createGrantRepository(
       return remaining.length > 0 ? 'last_holder' : 'not_found';
     },
 
-    async changeRole(ctx, fence, id, roleId, now, opId) {
+    async changeRole(ctx, fence, { id, roleId, now, opId }) {
       const stamp = timestamp(now);
       requireNonEmpty(id, 'id');
       requireNonEmpty(roleId, 'roleId');
@@ -712,7 +712,7 @@ export function createGrantRepository(
       return row.role_ok === 1 ? 'last_holder' : 'role_scope_mismatch';
     },
 
-    async suspendUser(ctx, fence, userId, now) {
+    async suspendUser(ctx, fence, { userId, now }) {
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
@@ -767,7 +767,7 @@ export function createGrantRepository(
       return current === 'suspended' ? 'unchanged' : 'last_holder';
     },
 
-    async reactivateUser(ctx, fence, userId, now) {
+    async reactivateUser(ctx, fence, { userId, now }) {
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);

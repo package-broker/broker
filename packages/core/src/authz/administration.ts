@@ -1,3 +1,11 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import {
+  auditEvent,
+  type AuditAction,
+  type AuditEvent,
+  type AuditEventInput,
+} from '../audit/actions.js';
+import { redactValue } from '../audit/redact.js';
 import type { GrantRepository, GrantSubject, OrganizationGrant } from '../db/grants.js';
 import type { OrgContext } from '../db/port.js';
 import { ROLE_KEY_PATTERN, ROLE_NAME_MAX_LENGTH } from '../db/roles.js';
@@ -59,6 +67,7 @@ export interface Administration {
       readonly scope: 'organization' | 'project';
       readonly permissions: readonly string[];
     },
+    call: ApiCall,
   ): Promise<AdminResult<Role>>;
   renameRole(
     ctx: OrgContext,
@@ -66,6 +75,7 @@ export interface Administration {
     fence: MutationFence,
     id: string,
     name: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   setRolePermissions(
     ctx: OrgContext,
@@ -73,24 +83,28 @@ export interface Administration {
     fence: MutationFence,
     id: string,
     permissions: readonly string[],
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   deleteRole(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     id: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   grantOrganization(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     input: { readonly subject: GrantSubject; readonly roleId: string },
+    call: ApiCall,
   ): Promise<AdminResult<OrganizationGrant>>;
   revokeOrganizationGrant(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     id: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   changeGrantRole(
     ctx: OrgContext,
@@ -98,18 +112,21 @@ export interface Administration {
     fence: MutationFence,
     id: string,
     roleId: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   suspendUser(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     userId: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   reactivateUser(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     userId: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
 }
 
@@ -149,6 +166,12 @@ function codePointLength(value: string): number {
 
 function isId(value: unknown): value is string {
   return typeof value === 'string' && value !== '';
+}
+
+function isAuditTargetId(value: unknown): value is string {
+  if (!isId(value)) return false;
+  const cleaned = redactValue(value, 200, 'id');
+  return cleaned.ok && cleaned.value === value;
 }
 
 function isValidName(name: unknown): name is string {
@@ -208,6 +231,39 @@ export function createAdministration(deps: AdministrationDeps): Administration {
   const { roles, grants, users, providers, clock, ids } = deps;
 
   const now = (): string => isoTimestamp(clock.now());
+
+  function tryMutationAudit(
+    call: ApiCall,
+    actor: Actor,
+    action: AuditAction,
+    targetType: string,
+    targetId: string,
+    stamp: string,
+    changes?: AuditEventInput['changes'],
+  ): { audit: AuditEvent; idempotency?: IdempotencyRecord } | null {
+    const result = auditEvent({
+      id: ids.ulid(),
+      now: stamp,
+      action,
+      actor: { type: 'user', id: actor.userId },
+      context: call.audit,
+      target: { type: targetType, id: targetId },
+      ...(changes === undefined ? {} : { changes }),
+    });
+    if (!result.ok) return null;
+    return {
+      audit: result.event,
+      ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+    };
+  }
+
+  function mutationAudit(
+    ...args: Parameters<typeof tryMutationAudit>
+  ): NonNullable<ReturnType<typeof tryMutationAudit>> {
+    const result = tryMutationAudit(...args);
+    if (result === null) throw new TypeError('Invalid administration audit event');
+    return result;
+  }
 
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
@@ -349,7 +405,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
     const actor = authorize(ctx, rawActor, action, 'org:users:write');
     if (actor === null) return fail('forbidden');
     const held = requireFence(actor, fence);
-    if (!isId(userId)) return fail('not_found');
+    if (!isAuditTargetId(userId)) return fail('not_found');
     const user = await users.get(ctx, userId);
     if (user === null) return fail('not_found');
     if (!actor.isAdmin && (await grants.isProtectedHolder(ctx, userId))) {
@@ -361,7 +417,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
   return {
     listRoles: (ctx) => roles.list(ctx),
 
-    async createRole(ctx, rawActor, fence, input) {
+    async createRole(ctx, rawActor, fence, input, call) {
       const actor = authorize(ctx, rawActor, 'created', 'org:roles:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
@@ -371,14 +427,24 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if (problems.length > 0) return fail('invalid_permission', problems);
       if (!withinActor(actor, input.permissions)) return deny(ctx, actor, 'created');
       const id = ids.ulid();
+      const stamp = now();
+      const opId = ids.ulid();
+      const audit = tryMutationAudit(call, actor, 'role.create', 'role', id, stamp, {
+        key: { new: input.key },
+        name: { new: input.name },
+        scope: { new: input.scope },
+        permissions: { new: [...input.permissions] },
+      });
+      if (audit === null) return fail('invalid_name');
       const result = await roles.create(ctx, held, {
         id,
         key: input.key,
         name: input.name,
         scope: input.scope,
         permissions: [...input.permissions],
-        now: now(),
-        opId: ids.ulid(),
+        now: stamp,
+        opId,
+        ...audit,
       });
       if (result === 'authority' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'created', result);
@@ -403,20 +469,32 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       };
     },
 
-    async renameRole(ctx, rawActor, fence, id, name) {
+    async renameRole(ctx, rawActor, fence, id, name, call) {
       const actor = authorize(ctx, rawActor, 'renamed', 'org:roles:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
       if (!expectsRevision(held)) return fail('invalid_revision');
-      if (!isId(id)) return fail('not_found');
+      if (!isAuditTargetId(id)) return fail('not_found');
       if (!isValidName(name)) return fail('invalid_name');
+      const stamp = now();
+      const opId = ids.ulid();
+      const audit = tryMutationAudit(call, actor, 'role.rename', 'role', id, stamp, {
+        name: { new: name },
+      });
+      if (audit === null) return fail('invalid_name');
       if (!actor.isAdmin) {
         const role = await roles.get(ctx, id);
         if (role === null) return fail('not_found');
         if (!withinActor(actor, role.permissions.filter(isPermission)))
           return deny(ctx, actor, 'renamed');
       }
-      const result = await roles.rename(ctx, held, id, name, now(), ids.ulid());
+      const result = await roles.rename(ctx, held, {
+        id,
+        name,
+        now: stamp,
+        opId,
+        ...audit,
+      });
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'renamed', result);
       }
@@ -425,12 +503,12 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    async setRolePermissions(ctx, rawActor, fence, id, permissions) {
+    async setRolePermissions(ctx, rawActor, fence, id, permissions, call) {
       const actor = authorize(ctx, rawActor, 'permissions_set', 'org:roles:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
       if (!expectsRevision(held)) return fail('invalid_revision');
-      if (!isId(id)) return fail('not_found');
+      if (!isAuditTargetId(id)) return fail('not_found');
       const role = await roles.get(ctx, id);
       if (role === null) return fail('not_found');
       if (role.protectsLastHolder) return fail('locked');
@@ -439,7 +517,16 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       const problems = permissionProblems(role.scope, permissions);
       if (problems.length > 0) return fail('invalid_permission', problems);
       if (!withinActor(actor, permissions)) return deny(ctx, actor, 'permissions_set');
-      const result = await roles.setPermissions(ctx, held, id, [...permissions], now(), ids.ulid());
+      const stamp = now();
+      const result = await roles.setPermissions(ctx, held, {
+        id,
+        permissions: [...permissions],
+        now: stamp,
+        opId: ids.ulid(),
+        ...mutationAudit(call, actor, 'role.permissions_set', 'role', id, stamp, {
+          permissions: { new: [...permissions] },
+        }),
+      });
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'permissions_set', result);
       }
@@ -451,19 +538,24 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    async deleteRole(ctx, rawActor, fence, id) {
+    async deleteRole(ctx, rawActor, fence, id, call) {
       const actor = authorize(ctx, rawActor, 'deleted', 'org:roles:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
       if (!expectsRevision(held)) return fail('invalid_revision');
-      if (!isId(id)) return fail('not_found');
+      if (!isAuditTargetId(id)) return fail('not_found');
       if (!actor.isAdmin) {
         const role = await roles.get(ctx, id);
         if (role === null) return fail('not_found');
         if (!withinActor(actor, role.permissions.filter(isPermission)))
           return deny(ctx, actor, 'deleted');
       }
-      const result = await roles.delete(ctx, held, id, ids.ulid());
+      const stamp = now();
+      const result = await roles.delete(ctx, held, {
+        id,
+        opId: ids.ulid(),
+        ...mutationAudit(call, actor, 'role.delete', 'role', id, stamp),
+      });
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'deleted', result);
       }
@@ -473,7 +565,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    async grantOrganization(ctx, rawActor, fence, input) {
+    async grantOrganization(ctx, rawActor, fence, input, call) {
       const actor = authorize(ctx, rawActor, 'granted', 'org:grants:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
@@ -494,6 +586,10 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         createdBy: actor.userId,
         now: createdAt,
         opId: ids.ulid(),
+        ...mutationAudit(call, actor, 'grant.create', 'grant', id, createdAt, {
+          subject_kind: { new: normalized.subject.type },
+          role_id: { new: role.id },
+        }),
       });
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'granted', result);
@@ -513,19 +609,24 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       };
     },
 
-    async revokeOrganizationGrant(ctx, rawActor, fence, id) {
+    async revokeOrganizationGrant(ctx, rawActor, fence, id, call) {
       const actor = authorize(ctx, rawActor, 'revoked', 'org:grants:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
       if (!expectsRevision(held, 'grant')) return fail('invalid_revision');
-      if (!isId(id)) return fail('not_found');
+      if (!isAuditTargetId(id)) return fail('not_found');
       const grant = await findGrant(ctx, id);
       if (grant === null) return fail('not_found');
       if (!actor.isAdmin) {
         const role = await roles.get(ctx, grant.roleId);
         if (role === null || role.protectsLastHolder) return deny(ctx, actor, 'revoked');
       }
-      const result = await grants.deleteOrganization(ctx, held, id, ids.ulid());
+      const stamp = now();
+      const result = await grants.deleteOrganization(ctx, held, {
+        id,
+        opId: ids.ulid(),
+        ...mutationAudit(call, actor, 'grant.revoke', 'grant', id, stamp),
+      });
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'revoked', result);
       }
@@ -537,12 +638,12 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    async changeGrantRole(ctx, rawActor, fence, id, roleId) {
+    async changeGrantRole(ctx, rawActor, fence, id, roleId, call) {
       const actor = authorize(ctx, rawActor, 'role_changed', 'org:grants:write');
       if (actor === null) return fail('forbidden');
       const held = requireFence(actor, fence);
       if (!expectsRevision(held, 'grant')) return fail('invalid_revision');
-      if (!isId(id)) return fail('not_found');
+      if (!isAuditTargetId(id)) return fail('not_found');
       const grant = await findGrant(ctx, id);
       if (grant === null) return fail('not_found');
       if (!isId(roleId)) return fail('role_scope_mismatch');
@@ -560,7 +661,16 @@ export function createAdministration(deps: AdministrationDeps): Administration {
           return deny(ctx, actor, 'role_changed');
         }
       }
-      const result = await grants.changeRole(ctx, held, id, roleId, now(), ids.ulid());
+      const stamp = now();
+      const result = await grants.changeRole(ctx, held, {
+        id,
+        roleId,
+        now: stamp,
+        opId: ids.ulid(),
+        ...mutationAudit(call, actor, 'grant.role_change', 'grant', id, stamp, {
+          role_id: { new: roleId },
+        }),
+      });
       if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'role_changed', result);
       }
@@ -569,9 +679,14 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       return OK;
     },
 
-    suspendUser: (ctx, rawActor, fence, userId) =>
+    suspendUser: (ctx, rawActor, fence, userId, call) =>
       changeStatus(ctx, rawActor, fence, 'suspended', userId, async (actor, held) => {
-        const result = await grants.suspendUser(ctx, held, userId, now());
+        const stamp = now();
+        const result = await grants.suspendUser(ctx, held, {
+          userId,
+          now: stamp,
+          ...mutationAudit(call, actor, 'user.suspend', 'user', userId, stamp),
+        });
         if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
           return fencedFailure(ctx, actor, 'suspended', result);
         }
@@ -582,9 +697,14 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         return OK;
       }),
 
-    reactivateUser: (ctx, rawActor, fence, userId) =>
+    reactivateUser: (ctx, rawActor, fence, userId, call) =>
       changeStatus(ctx, rawActor, fence, 'reactivated', userId, async (actor, held) => {
-        const result = await grants.reactivateUser(ctx, held, userId, now());
+        const stamp = now();
+        const result = await grants.reactivateUser(ctx, held, {
+          userId,
+          now: stamp,
+          ...mutationAudit(call, actor, 'user.reactivate', 'user', userId, stamp),
+        });
         if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
           return fencedFailure(ctx, actor, 'reactivated', result);
         }

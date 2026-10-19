@@ -64,16 +64,22 @@ type Call = (admin: ReturnType<typeof setup>['admin'], fence: MutationFence) => 
 
 const CALLS: Record<string, Call> = {
   createRole: (admin, fence) =>
-    admin.createRole(ctx, actor, fence, {
-      key: 'ops2',
-      name: 'Ops 2',
-      scope: 'organization',
-      permissions: ['org:read'],
-    }),
-  renameRole: (admin, fence) => admin.renameRole(ctx, actor, fence, 'role-1', 'Operators'),
+    admin.createRole(
+      ctx,
+      actor,
+      fence,
+      {
+        key: 'ops2',
+        name: 'Ops 2',
+        scope: 'organization',
+        permissions: ['org:read'],
+      },
+      apiCall,
+    ),
+  renameRole: (admin, fence) => admin.renameRole(ctx, actor, fence, 'role-1', 'Operators', apiCall),
   setRolePermissions: (admin, fence) =>
-    admin.setRolePermissions(ctx, actor, fence, 'role-1', ['org:read']),
-  deleteRole: (admin, fence) => admin.deleteRole(ctx, actor, fence, 'role-1'),
+    admin.setRolePermissions(ctx, actor, fence, 'role-1', ['org:read'], apiCall),
+  deleteRole: (admin, fence) => admin.deleteRole(ctx, actor, fence, 'role-1', apiCall),
 };
 
 const REPOSITORY_METHOD: Record<string, 'create' | 'rename' | 'setPermissions' | 'delete'> = {
@@ -94,10 +100,7 @@ describe('role mutators carry the fence', () => {
       const args = (roles[method] as ReturnType<typeof vi.fn>).mock.calls[0] as unknown[];
       expect(args[0]).toBe(ctx);
       expect(args[1]).toBe(fence);
-      const opId =
-        method === 'create'
-          ? (args[2] as { opId?: string }).opId
-          : args.find((value) => typeof value === 'string' && /^ID\d+$/.test(value));
+      const opId = (args[2] as { opId?: string }).opId;
       expect(opId).toBeDefined();
     });
 
@@ -143,7 +146,16 @@ describe('role mutators carry the fence', () => {
   it('the expected role revision reaches the repository only through the fence', async () => {
     const { admin, roles } = setup();
     const fence = fenceOf('actor-1', { role: 7 });
-    await admin.renameRole(ctx, actor, fence, 'role-1', 'Operators');
+    await admin.renameRole(ctx, actor, fence, 'role-1', 'Operators', apiCall);
     expect((roles.rename.mock.calls[0] as unknown[])[1]).toMatchObject({ expected: { role: 7 } });
   });
 });
+
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

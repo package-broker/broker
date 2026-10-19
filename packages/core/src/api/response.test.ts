@@ -32,6 +32,8 @@ const statuses = {
   precondition_required: 428,
   payload_too_large: 413,
   unsupported_media_type: 415,
+  not_acceptable: 406,
+  bad_gateway: 502,
   unavailable: 503,
 } as const;
 

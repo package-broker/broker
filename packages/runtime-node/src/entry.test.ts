@@ -139,6 +139,31 @@ describe('createShutdown', () => {
 });
 
 describe('runEntry', () => {
+  it.each([true, false, undefined])('forwards observability flag %s', async (trusted) => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    const observability = trusted === undefined ? undefined : { trustInboundTraceparent: trusted };
+    const input = {
+      plugins: [],
+      migrations: [],
+      ...(observability === undefined ? {} : { observability }),
+    };
+    await runEntry(Promise.resolve(input), {}, test.runtime);
+    expect(test.runtime.start).toHaveBeenCalledExactlyOnceWith({
+      plugins: [],
+      migrations: [],
+      env: {},
+      ...(observability === undefined ? {} : { observability }),
+    });
+    const options = vi.mocked(test.runtime.start).mock.calls[0]?.[0];
+    if (observability === undefined) {
+      expect(options).not.toHaveProperty('observability');
+    } else {
+      expect(options?.observability).toBe(observability);
+    }
+    expect(test.exit).not.toHaveBeenCalled();
+  });
+
   it('listens on the default port and registers both signals', async () => {
     const { broker, listen } = fakeBroker();
     const test = harness(() => Promise.resolve(broker));

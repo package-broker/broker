@@ -239,7 +239,8 @@ interface ProtectedHolderCommon {
 export type ProtectedHolderInput =
   | (ProtectedHolderCommon & {
       readonly kind: 'fresh';
-      readonly now: string;
+      /** Legacy timestamp, validated when supplied but never used for freshness. */
+      readonly now?: string;
       readonly providers: readonly ProtectedHolderProvider[];
     })
   | (ProtectedHolderCommon & { readonly kind: 'local_recovery' });
@@ -527,6 +528,10 @@ export function requireProtectedHolderInput(input: ProtectedHolderInput): void {
   if (input.kind !== 'fresh' || !Array.isArray(input.providers)) {
     throw new TypeError('protected holder input must be a freshness descriptor or LocalRecovery');
   }
+  if (input.now === undefined) {
+    requireProviders(input.providers);
+    return;
+  }
   const parsed = typeof input.now === 'string' ? new Date(input.now) : new Date(Number.NaN);
   if (
     !HOLDER_TIMESTAMP.test(input.now) ||
@@ -554,7 +559,7 @@ export function protectedHolder(
   ctx: OrgContext,
   userIdColumn: Expression<string>,
   input: ProtectedHolderInput,
-  options: { readonly includeSuspended?: boolean; readonly now?: DatabaseTime } = {},
+  options: { readonly includeSuspended?: boolean } = {},
 ): Guard {
   requireProtectedHolderInput(input);
   const outer = referencedTable(userIdColumn);
@@ -575,12 +580,7 @@ export function protectedHolder(
   );
   const exclude = input.exclude;
   const fresh = input.kind === 'fresh';
-  const nowMs = fresh ? Date.parse(input.now) : 0;
   const values: Record<string, string | number> = { org_id: ctx.orgId };
-  if (fresh && options.now === undefined) {
-    values.lower_ms = nowMs - EVIDENCE_MAX_AGE_MS;
-    values.upper_ms = nowMs + EVIDENCE_FUTURE_SKEW_MS;
-  }
   if (exclude?.grantId !== undefined) values.excluded_grant = exclude.grantId;
   if (exclude?.userId !== undefined) values.excluded_user = exclude.userId;
   if (exclude?.identityId !== undefined) values.excluded_identity = exclude.identityId;
@@ -673,8 +673,6 @@ export function protectedHolder(
       .where(
         freshGroupMembership(bindings, alias, {
           excludeIdentity: exclude?.identityId !== undefined,
-          boundWindow: true,
-          ...(options.now === undefined ? {} : { now: options.now }),
         }),
       );
     if (exclude?.grantId !== undefined) {

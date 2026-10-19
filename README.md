@@ -44,7 +44,7 @@ Plugin code may import only the `@package-broker/core` root and `@package-broker
 
 ## Versioning
 
-Releases are cut by Release Please with the prerelease strategy: the product packages (`core`, `cli`, `runtime-cloudflare`, `runtime-node`, `ui`) share one version through a `linked-versions` group and ship as `2.0.0-rc.X`, while each `plugin-*` package versions independently as `0.1.0-rc.X` until GA, with tags in the form `<component>-v<version>`. The Docker image is published to GHCR only and compiles in all first-party plugins.
+Releases are cut by Release Please with the prerelease strategy: the product packages (`core`, `cli`, `runtime-cloudflare`, `runtime-node`, `ui`) share one version through a `linked-versions` group and ship as `2.0.0-rc.X`, while each `plugin-*` package versions independently as `0.1.0-rc.X` until GA, with tags in the form `<component>-v<version>`. A Docker image published to GHCR with all first-party plugins is planned (T835).
 
 ## Licence
 

@@ -16,13 +16,19 @@ import type { MigrationSource } from '@package-broker/db-sqlite/migrations/sourc
 export function validatePluginShape(
   plugins: readonly PluginDefinition[],
   target: Platform,
+  onProblem?: (
+    key: 'plugins.id' | 'plugins.apiVersion' | 'plugins.platforms' | 'plugins.dependsOn',
+  ) => void,
 ): string[] {
   const errors: string[] = [];
   const ids = new Set<string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 
   for (const plugin of plugins) {
-    if (ids.has(plugin.id)) errors.push(`duplicate plugin id "${plugin.id}"`);
+    if (ids.has(plugin.id)) {
+      errors.push(`duplicate plugin id "${plugin.id}"`);
+      onProblem?.('plugins.id');
+    }
     ids.add(plugin.id);
     if (
       !Number.isInteger(plugin.apiVersion) ||
@@ -32,15 +38,18 @@ export function validatePluginShape(
       errors.push(
         `plugin "${plugin.id}" has apiVersion ${plugin.apiVersion}, core supports ${minApi} to ${maxApi}`,
       );
+      onProblem?.('plugins.apiVersion');
     }
     if (!plugin.platforms.includes(target)) {
       errors.push(`plugin "${plugin.id}" does not support target "${target}"`);
+      onProblem?.('plugins.platforms');
     }
   }
   for (const plugin of plugins) {
     for (const dependency of plugin.dependsOn ?? []) {
       if (!ids.has(dependency)) {
         errors.push(`plugin "${plugin.id}" depends on missing plugin "${dependency}"`);
+        onProblem?.('plugins.dependsOn');
       }
     }
   }

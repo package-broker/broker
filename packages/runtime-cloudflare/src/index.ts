@@ -311,7 +311,6 @@ async function buildAuth(
         createUnlinkRepository(executor, {
           holderInput: () => ({
             kind: 'fresh',
-            now: systemClock.now().toISOString(),
             providers: anchorList,
           }),
         }),

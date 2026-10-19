@@ -354,6 +354,12 @@ export type CatalogueWriteMethod =
 export interface CatalogueWriter {
   /** Worst-case statements per call; for syncPackage, a call with CATALOGUE_SYNC_VERSIONS_PER_CALL versions. */
   readonly statementBudget: Readonly<Record<CatalogueWriteMethod, number>>;
+  /** Worst-case executed statements, including guards repeated after batch splits. */
+  syncPackageCost(shape: {
+    readonly versions: number;
+    readonly tags: number;
+    readonly guardStatements: number;
+  }): number;
   syncPackage(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,

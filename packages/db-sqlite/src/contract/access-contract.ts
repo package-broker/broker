@@ -11,7 +11,12 @@ import { mutationFence, type AuthenticatedActor } from '@package-broker/core/aut
 import type { ActorContext } from '@package-broker/core/authz/actor';
 import type { ProjectActor } from '@package-broker/core/authz/project-actor';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
-import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import type {
+  OrgContext,
+  SqlExecutor,
+  Statement,
+  StatementResult,
+} from '@package-broker/core/db/port';
 import {
   authorizeRoute,
   denyAllEngine,
@@ -38,7 +43,8 @@ export interface OpenedAccessDatabase {
 }
 
 type Open = () => Promise<OpenedAccessDatabase>;
-type Wrap = (executor: SqlExecutor) => SqlExecutor;
+export type AccessContractWrap = (executor: SqlExecutor) => SqlExecutor;
+type Wrap = AccessContractWrap;
 type Case = (open: Open, wrap?: Wrap) => Promise<void>;
 
 const NOT_FOUND = { allow: false, status: 404 } as const;
@@ -1718,6 +1724,54 @@ const doubleRevoke: Case = (open, wrap) =>
     },
     wrap,
   );
+
+const TOKEN_REVOKE_UPDATE = /update\s+"token"\s+set\s+"revoked_at"/i;
+
+export interface RevokeLatch {
+  readonly wrap: AccessContractWrap;
+  readonly released: () => readonly number[];
+}
+
+export function revokeLatch(order: 'arrival' | 'reverse'): RevokeLatch {
+  interface Waiting {
+    readonly index: number;
+    readonly run: () => Promise<StatementResult[]>;
+    readonly settle: (result: Promise<StatementResult[]>) => void;
+  }
+  const waiting: Waiting[] = [];
+  const releasedOrder: number[] = [];
+  let open = false;
+
+  async function release(): Promise<void> {
+    open = true;
+    const sequence = order === 'arrival' ? [...waiting] : [...waiting].reverse();
+    for (const entry of sequence) {
+      releasedOrder.push(entry.index);
+      const result = entry.run();
+      entry.settle(result);
+      await result.catch(() => undefined);
+    }
+  }
+
+  return {
+    wrap: (executor) => ({
+      ...executor,
+      batch(statements) {
+        const revokes = statements.some((statement) => TOKEN_REVOKE_UPDATE.test(statement.sql));
+        if (!revokes || open) return executor.batch(statements);
+        return new Promise<StatementResult[]>((resolve, reject) => {
+          waiting.push({
+            index: waiting.length,
+            run: () => executor.batch(statements),
+            settle: (result) => result.then(resolve, reject),
+          });
+          if (waiting.length === 2) void release();
+        });
+      },
+    }),
+    released: () => releasedOrder,
+  };
+}
 
 export const accessContractCases = {
   crossOrganization,

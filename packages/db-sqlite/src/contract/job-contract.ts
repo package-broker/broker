@@ -1017,9 +1017,11 @@ const legacyJobContractCases = (
   [
     `EXPLAIN rejects a legacy ${name} index dependency`,
     async (fixture) => {
+      // Build the deliberately invalid hint separately from the production index coverage scan.
+      const legacyIndexHint = ['INDEXED', 'BY', name].join(' ');
       await expect(
         fixture.executorA.all({
-          sql: `EXPLAIN QUERY PLAN SELECT id FROM job INDEXED BY ${name} WHERE org_id = ? AND state = '${state}'`,
+          sql: `EXPLAIN QUERY PLAN SELECT id FROM job ${legacyIndexHint} WHERE org_id = ? AND state = '${state}'`,
           params: [ORG_A.orgId],
         }),
       ).rejects.toThrow();

@@ -106,6 +106,7 @@ import { createJobScheduleRepository } from '@package-broker/db-sqlite/repositor
 import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
 import {
   KeyringMismatchError,
+  KeyringPasswordHashUnreadableError,
   KeyringStoreUnavailableError,
   KeyringVerifierMissingError,
   KeyringVersionInUseError,
@@ -278,6 +279,8 @@ async function verifyMasterKey(
   try {
     const result = await verifyKeyring(keyring, createKeyringVerifierStore(executor), {
       reseed: env.PB_KEYRING_RESEED === '1',
+      onReseedIgnored: (keyVersion) =>
+        log({ level: 'warn', event: 'keyring.reseed_ignored', key_version: keyVersion }),
     });
     if (result.reseeded) {
       log({ level: 'warn', event: 'keyring.reseeded', key_version: result.keyVersion });
@@ -285,13 +288,14 @@ async function verifyMasterKey(
   } catch (error) {
     if (error instanceof KeyringStoreUnavailableError) {
       throw new KernelConfigError([
-        'keyring_verifier: table is missing, migrations are not applied',
+        'keyring_verifier: store is unavailable, migrations are not applied',
       ]);
     }
     if (
       error instanceof KeyringMismatchError ||
       error instanceof KeyringVerifierMissingError ||
-      error instanceof KeyringVersionInUseError
+      error instanceof KeyringVersionInUseError ||
+      error instanceof KeyringPasswordHashUnreadableError
     ) {
       throw new KernelConfigError([`PB_MASTER_KEY: ${error.message}`]);
     }
@@ -750,7 +754,7 @@ export function createWorker(
     options.cacheStorage === undefined
       ? (globalThis as { caches?: CacheStorageLike }).caches
       : options.cacheStorage;
-  const applications = new Map<string, Promise<Application>>();
+  const applications = new Map<string, { pending: Promise<Application>; failedUntil?: number }>();
   const scopes = createRequestScopes();
   const identities = new WeakMap<object, number>();
   let nextIdentity = 0;
@@ -1178,12 +1182,18 @@ export function createWorker(
     const cached = applications.get(key);
     if (cached !== undefined) {
       applications.delete(key);
-      applications.set(key, cached);
-      return cached;
+      if (cached.failedUntil === undefined || Date.now() < cached.failedUntil) {
+        applications.set(key, cached);
+        return cached.pending;
+      }
     }
 
     const pending = build(env).catch((error: unknown) => {
-      if (applications.get(key) === pending) applications.delete(key);
+      const entry = applications.get(key);
+      if (entry?.pending === pending) {
+        if (error instanceof KernelConfigError) entry.failedUntil = Date.now() + 30_000;
+        else applications.delete(key);
+      }
       logBuildFailure(log, error);
       throw error;
     });
@@ -1191,7 +1201,7 @@ export function createWorker(
       const oldest = applications.keys().next();
       if (oldest.done !== true) applications.delete(oldest.value);
     }
-    applications.set(key, pending);
+    applications.set(key, { pending });
     return pending;
   }
 

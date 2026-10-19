@@ -16,6 +16,7 @@ import { createCatalogueList } from '@package-broker/db-sqlite/repositories/cata
 import { createClosureEdges } from '@package-broker/db-sqlite/repositories/closure-edges';
 import { createCatalogueLookup } from '@package-broker/db-sqlite/repositories/catalogue-lookup';
 import { proxyEligibleCondition } from '@package-broker/db-sqlite/repositories/catalogue-predicates';
+import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
@@ -104,6 +105,33 @@ beforeAll(async () => {
 });
 
 describe('INDEXED BY statements on D1', () => {
+  async function keyringPlan(index: string): Promise<void> {
+    const statements: ScalarStatement[] = [];
+    const store = createKeyringVerifierStore({
+      driver: executor.driver,
+      all: (statement) => {
+        statements.push(statement);
+        return executor.all(statement);
+      },
+      batch: (queries) => executor.batch(queries),
+    });
+    expect(await store.checkUsedVersions([1, 2, 3, 4])).toBe(false);
+    const statement = statements.find((query) => query.sql.includes(`INDEXED BY ${index}`));
+    expect(statement).toBeDefined();
+    if (statement === undefined) throw new Error('Missing keyring check');
+    const plan = await executor.all<{ detail: string }>({
+      ...statement,
+      sql: `EXPLAIN QUERY PLAN ${statement.sql}`,
+    });
+    expect(plan.map((row) => row.detail).join(' ')).toContain(index);
+  }
+  it('keyring credential versions (credential_version_in_use)', async () => {
+    await keyringPlan('credential_version_in_use');
+  });
+  it('keyring token versions (token_pepper_version)', async () => {
+    await keyringPlan('token_pepper_version');
+  });
+
   it('catalogue visible listing (package_by_name)', async () => {
     const result = await createCatalogueList(executor).listVisible(a, { ...PACKAGE, ...PAGE });
     expect(result.items.map((item) => item.packageId)).toEqual(['K1']);

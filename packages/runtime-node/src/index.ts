@@ -51,6 +51,9 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
+import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
+import { fileURLToPath } from 'node:url';
+import { createNodeAssets } from './assets.js';
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
@@ -327,6 +330,28 @@ export function createNodeServer(
         ? undefined
         : await assembleAccess(registration, plugins, auth, executor, log);
     const authorization = options.authorization ?? access?.module.authorization;
+    const assets = await createNodeAssets(
+      fileURLToPath(new URL('./assets/', import.meta.url)),
+    ).catch(() => null);
+    const ui = createUiRoutes(
+      {
+        manifest: async () => assets?.manifest() ?? null,
+        read: async (name) => assets?.read(name) ?? null,
+      },
+      { publicOrigin: auth?.publicOrigin ?? 'http://localhost', log },
+    );
+    const uiRoutes = ui.map((route) => ({
+      ...route,
+      path: route.path.replace('/assets/:file', '/:file'),
+      handler: async (context: Parameters<typeof route.handler>[0]) =>
+        context.params['file'] === 'manifest.json'
+          ? Response.json(await assets?.manifest(), {
+              headers: { 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
+            })
+          : route.handler(context),
+      boundary: 'authenticated' as const,
+      needsOrg: true,
+    }));
     const kernel = await createKernel({
       platform: 'node',
       plugins,
@@ -339,7 +364,7 @@ export function createNodeServer(
       ...(options.platformServices === undefined
         ? {}
         : { platformServices: options.platformServices }),
-      ...(access === undefined ? {} : { coreRoutes: access.module.coreRoutes }),
+      coreRoutes: [...(access?.module.coreRoutes ?? []), ...(assets === null ? [] : uiRoutes)],
       ...(authorization === undefined ? {} : { authorization }),
     });
     const services: NodeServices = Object.freeze({
@@ -358,7 +383,21 @@ export function createNodeServer(
   const server = createServer(
     getRequestListener((request) =>
       kernel.then(
-        (ready) => ready.fetch(request),
+        async (ready) => {
+          const url = new URL(request.url);
+          if (url.pathname === '/_pb/ui') {
+            const response = await ready.fetch(request);
+            if (response.status !== 200) return response;
+            url.pathname = '/_pb/ui/';
+            return new Response(null, {
+              status: 303,
+              headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
+            });
+          }
+          if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
+          url.pathname = '/_pb/ui';
+          return ready.fetch(new Request(url, request));
+        },
         (error: unknown) => {
           const response = errorResponse(error, crypto.randomUUID(), log);
           return request.method === 'HEAD' ? new Response(null, response) : response;

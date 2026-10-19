@@ -230,6 +230,13 @@ async function run() {
         compatibilityDate: '2026-10-01',
         compatibilityFlags: ['nodejs_compat'],
         d1Databases: ['DB'],
+        assets: {
+          directory: join(repoRoot, 'packages/ui/dist/assets'),
+          binding: 'ASSETS',
+          run_worker_first: true,
+          routerConfig: { has_user_worker: true },
+          assetConfig: { html_handling: 'none' },
+        },
         r2Buckets: ['STORAGE'],
         queueProducers: { JOBS: 'pb-smoke-jobs' },
         analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
@@ -322,6 +329,23 @@ async function run() {
     const afterSetup = await send('/_pb/session', limitMs, { cookie: cookiesOf(finished) });
     await expectStatus('/_pb/session after setup', afterSetup, 200);
     console.log('smoke:cloudflare workerd: session after setup ok');
+
+    step = 'checking the authenticated UI mount';
+    const uiManifest = JSON.parse(
+      await readFile(join(repoRoot, 'packages/ui/dist/assets/manifest.json'), 'utf8'),
+    );
+    for (const path of ['/_pb/ui/', '/_pb/ui/manifest.json']) {
+      await expectStatus(`${path} without credentials`, await dispatch(path, limitMs), 401);
+      const response = await send(path, limitMs, { cookie: cookiesOf(finished) });
+      await expectStatus(`${path} with a session`, response, 200);
+      if (path.endsWith('.json')) assert.deepEqual(await response.json(), uiManifest);
+      else
+        assert.equal(
+          await response.text(),
+          await readFile(join(repoRoot, 'packages/ui/dist/assets', uiManifest.entry), 'utf8'),
+        );
+    }
+    console.log('smoke:cloudflare UI document and manifest require a session');
 
     step = 'storing the section 2.6 password vector';
     await executor.all({

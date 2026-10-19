@@ -368,6 +368,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
           );
           const principal = await services.servicePrincipals.create(
             ctx.org,
+            session,
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId: project },

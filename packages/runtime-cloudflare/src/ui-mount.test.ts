@@ -62,7 +62,7 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
           .map(([key_version, mac_hex]) => ({ key_version, mac_hex })),
       };
     }
-    if (/from local_login/i.test(sql)) return { results: [] };
+    if (/from (?:local_login|credential|token)\b/i.test(sql)) return { results: [] };
     throw new Error('unexpected SQL');
   };
   const make = (sql: string, values: unknown[]): Recorded => ({

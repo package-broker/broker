@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
 import { build } from 'esbuild';
-import { checkBudget, findInlineCode } from '../src/manifest.ts';
+import { checkBudget, findInlineCode, parseUiManifest } from '../src/manifest.ts';
 
 const run = promisify(execFile);
 const here = (target) => fileURLToPath(new URL(target, import.meta.url));
@@ -25,14 +25,16 @@ function flag(name, fallback) {
 const outDir = flag('--out', path.join(packageRoot, 'dist/assets'));
 const entryPath = flag('--entry', path.join(packageRoot, 'src/main.tsx'));
 const budgetPath = flag('--budget', path.join(packageRoot, 'bundle-budget.json'));
+const metafilePath = flag('--metafile', undefined);
 
 const hashOf = (bytes) => createHash('sha256').update(bytes).digest('hex').slice(0, 12);
 
 async function bundleScript() {
-  const { outputFiles } = await build({
+  const { outputFiles, metafile } = await build({
     entryPoints: [entryPath],
     bundle: true,
     write: false,
+    metafile: true,
     outdir: outDir,
     format: 'esm',
     target: 'es2022',
@@ -45,7 +47,7 @@ async function bundleScript() {
   });
   const file = outputFiles?.find((output) => output.path.endsWith('.js'));
   if (!file) throw new Error('esbuild produced no JavaScript output');
-  return Buffer.from(file.contents);
+  return { script: Buffer.from(file.contents), metafile };
 }
 
 async function compileStyles() {
@@ -83,7 +85,7 @@ function renderIndex(scriptName, styleName) {
 `;
 }
 
-const script = await bundleScript();
+const { script, metafile } = await bundleScript();
 const styles = await compileStyles();
 const scriptName = `app.${hashOf(script)}.js`;
 const styleName = `app.${hashOf(styles)}.css`;
@@ -128,14 +130,14 @@ const files = {
   [scriptName]: { contentType: 'text/javascript', bytes: script.length },
   [styleName]: { contentType: 'text/css', bytes: styles.length },
 };
+const manifestText = `${JSON.stringify({ version: 1, entry: 'index.html', files }, null, 2)}\n`;
+parseUiManifest(manifestText);
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 await Promise.all([
   writeFile(`${outDir}/index.html`, html),
   writeFile(`${outDir}/${scriptName}`, script),
   writeFile(`${outDir}/${styleName}`, styles),
-  writeFile(
-    `${outDir}/manifest.json`,
-    `${JSON.stringify({ version: 1, entry: 'index.html', files }, null, 2)}\n`,
-  ),
+  writeFile(`${outDir}/manifest.json`, manifestText),
 ]);
+if (metafilePath) await writeFile(metafilePath, `${JSON.stringify(metafile, null, 2)}\n`);

@@ -41,6 +41,9 @@ import type { PluginDefinition } from '@package-broker/core/plugin';
 import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
 import {
   KeyringStoreUnavailableError,
+  KeyringMismatchError,
+  KeyringVerifierMissingError,
+  KeyringVersionInUseError,
   RESEED_VARIABLE,
   verifyKeyring,
 } from '@package-broker/core/secrets/keyring-verifier';
@@ -90,6 +93,29 @@ export class StartupConfigError extends Error {
     this.name = 'StartupConfigError';
     this.variable = variable;
   }
+}
+
+export const BLOB_PURGE_LEASE_SECONDS = 900;
+export const BLOB_DELETE_TIMEOUT_MS = 30_000;
+
+export function blobPurgeTiming(
+  deleteTimeoutMs: number,
+  purgeLeaseSeconds: number,
+): { deleteTimeoutMs: number; leaseMs: number } {
+  const leaseMs = purgeLeaseSeconds * 1000;
+  if (
+    !Number.isInteger(leaseMs) ||
+    leaseMs <= 0 ||
+    !Number.isInteger(deleteTimeoutMs) ||
+    deleteTimeoutMs < 1000 ||
+    deleteTimeoutMs > leaseMs / 10
+  ) {
+    throw new StartupConfigError(
+      'blob.deleteTimeoutMs',
+      'must be at least 1000 ms and at most a tenth of the purge lease',
+    );
+  }
+  return { deleteTimeoutMs, leaseMs };
 }
 
 const DEFAULT_DATABASE_PATH = './data/broker.sqlite';
@@ -467,13 +493,18 @@ async function buildServices(
   options: StartOptions,
   executor: SqlExecutor,
 ): Promise<PlatformServices> {
+  blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
   const byteStore = await openByteStore(ports.blob, options.env, options.fetch);
   let blob;
   try {
-    blob = createBlobStore(byteStore, createBlobRepository(executor), {
-      admission: createBlobUploadAdmission(),
-      maxBytes: ports.blob.maxBytes,
-    });
+    blob = createBlobStore(
+      byteStore,
+      createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+      {
+        admission: createBlobUploadAdmission(),
+        maxBytes: ports.blob.maxBytes,
+      },
+    );
   } catch (error) {
     if (!(error instanceof BlobValidationError)) throw error;
     throw new StartupConfigError('blob.maxBytes', 'is not usable with the upload budget');
@@ -521,7 +552,11 @@ async function keyringGate(
   const store = createKeyringVerifierStore(executor);
   const reseed = options.env[RESEED_VARIABLE] === '1';
   const attempt = async (): Promise<void> => {
-    const result = await verifyKeyring(keyring, store, { reseed });
+    const result = await verifyKeyring(keyring, store, {
+      reseed,
+      onReseedIgnored: (keyVersion) =>
+        options.log?.({ level: 'warn', event: 'keyring.reseed_ignored', key_version: keyVersion }),
+    });
     if (result.reseeded) {
       options.log?.({ level: 'warn', event: 'keyring.reseeded', key_version: result.keyVersion });
     }
@@ -535,8 +570,9 @@ async function keyringGate(
     if (!deferred) throw error;
   }
   let verified = false;
-  return async () => {
-    if (verified) return true;
+  let inFlight: Promise<boolean> | undefined;
+  let nextAttempt = Date.now() + 1000;
+  const retry = async (): Promise<boolean> => {
     try {
       await attempt();
       verified = true;
@@ -545,9 +581,24 @@ async function keyringGate(
         level: 'error',
         event: 'keyring.unverified',
         error_name: error instanceof Error ? error.name : 'Error',
+        ...(error instanceof KeyringMismatchError ||
+        error instanceof KeyringVerifierMissingError ||
+        error instanceof KeyringVersionInUseError
+          ? { key_version: error.keyVersion }
+          : {}),
       });
     }
     return verified;
+  };
+  return async () => {
+    if (verified) return true;
+    if (inFlight !== undefined) return inFlight;
+    if (Date.now() < nextAttempt) return false;
+    nextAttempt = Date.now() + 1000;
+    inFlight = retry().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }
 
@@ -622,6 +673,12 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     const slug = options.env['PB_ORG_SLUG'];
     const name = options.env['PB_ORG_NAME'];
     if (slug !== undefined && name !== undefined) {
+      if (servingGate !== undefined) {
+        throw new StartupConfigError(
+          'PB_ORG_SLUG',
+          'organization bootstrap requires applied migrations and a verified keyring',
+        );
+      }
       await bootstrapOrganization(opened.executor, slug, name);
     } else if (slug !== undefined || name !== undefined) {
       throw new Error('PB_ORG_SLUG and PB_ORG_NAME must be set together');

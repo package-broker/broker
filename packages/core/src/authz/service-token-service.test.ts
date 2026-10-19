@@ -26,6 +26,7 @@ import {
   type ServiceTokenIssueOutcome,
   type ServiceTokenServiceDeps,
 } from './service-token-service.js';
+import { resolveTokenLifetimePolicy } from './token-lifetime.js';
 
 const ctx = orgContext('org-a');
 const NOW = '2026-10-16T12:00:00.000Z';
@@ -124,6 +125,7 @@ function rig(
   const minted: MintedServiceToken[] = [];
   const liveCalls: (string | null)[] = [];
   const deps: ServiceTokenServiceDeps = {
+    lifetime: resolveTokenLifetimePolicy(undefined),
     tokens: {
       async issueService(callCtx, callFence, input, mint) {
         calls.push({ ctx: callCtx, fence: callFence, input, mint });
@@ -408,26 +410,40 @@ describe('service token issuance', () => {
       });
     });
 
-    it('applies a configured CI maximum below 365 days', async () => {
+    it('applies an operator maximum below 365 days', async () => {
       const r = rig({ ciDays: 30 });
-      expect(await issue(r, request({ expiresAt: inDays(30, 1) }))).toEqual({
+      const configured = {
+        ...r,
+        deps: {
+          ...r.deps,
+          lifetime: resolveTokenLifetimePolicy({ maxLifetimeDays: { service: 30 } }),
+        },
+      };
+      expect(await issue(configured, request({ expiresAt: inDays(30, 1) }))).toEqual({
         ok: false,
         error: 'invalid_expiry',
       });
-      expect((await issue(r, request({ expiresAt: inDays(30) }))).ok).toBe(true);
+      expect((await issue(configured, request({ expiresAt: inDays(30) }))).ok).toBe(true);
     });
 
-    it.each(['write', 'full'] as const)('caps a %s token at 90 days', async (scope) => {
+    it.each(['write', 'full'] as const)('caps a %s token at 365 days', async (scope) => {
       const r = rig({ days: 365 });
-      expect((await issue(r, request({ scope, expiresAt: inDays(90) }))).ok).toBe(true);
-      expect(await issue(r, request({ scope, expiresAt: inDays(90, 1) }))).toEqual({
+      expect((await issue(r, request({ scope, expiresAt: inDays(365) }))).ok).toBe(true);
+      expect(await issue(r, request({ scope, expiresAt: inDays(365, 1) }))).toEqual({
         ok: false,
         error: 'invalid_expiry',
       });
     });
 
-    it('never grants a non-read-only token the CI maximum', async () => {
-      const r = rig({ days: 30, ciDays: 365 });
+    it('applies the operator maximum to non-read-only tokens', async () => {
+      const original = rig({ days: 30, ciDays: 365 });
+      const r = {
+        ...original,
+        deps: {
+          ...original.deps,
+          lifetime: resolveTokenLifetimePolicy({ maxLifetimeDays: { service: 30 } }),
+        },
+      };
       expect(await issue(r, request({ scope: 'write', expiresAt: inDays(31) }))).toEqual({
         ok: false,
         error: 'invalid_expiry',
@@ -453,7 +469,11 @@ describe('service token issuance', () => {
 
     it('refuses when the organization settings are unusable', async () => {
       expect(await issue(rig({ organization: null }))).toEqual({ ok: false, error: 'forbidden' });
-      expect(await issue(rig({ ciDays: 0 }))).toEqual({ ok: false, error: 'forbidden' });
+      expect(await issue(rig({ days: 0 }))).toEqual({ ok: false, error: 'forbidden' });
+    });
+
+    it('issues when the obsolete CI expiry setting is zero', async () => {
+      expect((await issue(rig({ ciDays: 0 }))).ok).toBe(true);
     });
   });
 
@@ -546,6 +566,7 @@ describe('service token issuance', () => {
     } as unknown as ActorContext;
     const logs: Record<string, unknown>[] = [];
     const principals = createServicePrincipalService({
+      sessions: { isReauthFresh: () => true },
       principals: {
         get: async () => principal(),
         create: async () => 'created',

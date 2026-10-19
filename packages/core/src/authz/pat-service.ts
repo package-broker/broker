@@ -11,6 +11,12 @@ import { hashToken } from '../secrets/token-hash.js';
 import type { AdminLog } from './administration.js';
 import type { MutationFence } from './fence.js';
 import { parseScopeLevel, type ScopeLevel } from './scope.js';
+import {
+  defaultExpiry,
+  lifetimeExpiry,
+  resolveTokenLifetimePolicy,
+  type TokenLifetimePolicy,
+} from './token-lifetime.js';
 
 export interface MintedPersonalToken {
   readonly selector: string;
@@ -33,6 +39,7 @@ export interface PersonalTokenStoreInput {
   readonly name: string;
   readonly scope: ScopeLevel;
   readonly expiresAt: string;
+  readonly maxLifetimeDays: number;
   readonly now: string;
   readonly validation: PersonalTokenValidation;
   readonly projectMode: 'all' | 'selected';
@@ -72,7 +79,8 @@ export interface PersonalTokenIssueInput {
   readonly scope: ScopeLevel;
   /** A stored or submitted read-only flag must agree with the scope. */
   readonly readOnly?: boolean;
-  readonly expiresAt: string;
+  readonly expiresAt?: string;
+  readonly lifetimeDays?: number;
   readonly projectMode: 'all' | 'selected';
   /** Empty for `all`; 1 to 200 distinct ids for `selected`. */
   readonly projectIds: readonly string[];
@@ -94,6 +102,7 @@ export type PersonalTokenResult =
   | { readonly ok: false; readonly error: PersonalTokenError };
 
 export interface PersonalTokenServiceDeps {
+  readonly lifetime?: TokenLifetimePolicy;
   readonly tokens: PersonalTokenStore;
   readonly sessions: Pick<SessionService, 'isReauthFresh'>;
   readonly organizations: { get(ctx: OrgContext): Promise<Organization | null> };
@@ -121,7 +130,6 @@ export interface PersonalTokenService {
 }
 
 export const MAX_PERSONAL_TOKEN_PROJECTS = 200;
-export const MAX_PERSONAL_TOKEN_DAYS = 90;
 
 const DAY_MS = 86_400_000;
 const NAME_MAX_LENGTH = 100;
@@ -168,6 +176,8 @@ function randomSelector(): string {
 export function createPersonalTokenService(deps: PersonalTokenServiceDeps): PersonalTokenService {
   const { tokens, sessions, organizations, providers, keyring, clock, ids } = deps;
 
+  const maxDays = (deps.lifetime ?? resolveTokenLifetimePolicy(undefined)).personal.maxDays;
+
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
       deps.log({ level: 'info', ...entry });
@@ -200,6 +210,9 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
         scope: request.scope,
         readOnly: request.readOnly,
         expiresAt: request.expiresAt,
+        lifetimeDays: request.lifetimeDays,
+        expiryProvided: Object.hasOwn(request, 'expiresAt'),
+        lifetimeProvided: Object.hasOwn(request, 'lifetimeDays'),
         projectMode: request.projectMode,
         projectIds: Array.isArray(request.projectIds)
           ? [...request.projectIds]
@@ -222,14 +235,26 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
       if (!validProjects(input.projectMode, input.projectIds)) return fail('invalid_projects');
 
       const nowMs = clock.now().getTime();
-      const expiresMs = canonicalTimestampMs(input.expiresAt);
-      if (expiresMs === null || expiresMs <= nowMs) return fail('invalid_expiry');
+      if (input.expiryProvided && input.lifetimeProvided) return fail('invalid_expiry');
+      const defaulted = !input.expiryProvided && !input.lifetimeProvided;
+      let expiresMs = input.expiryProvided
+        ? canonicalTimestampMs(input.expiresAt)
+        : input.lifetimeProvided
+          ? lifetimeExpiry(nowMs, maxDays, input.lifetimeDays as number)
+          : null;
+      if (
+        !defaulted &&
+        (expiresMs === null || expiresMs <= nowMs || expiresMs > nowMs + maxDays * DAY_MS)
+      ) {
+        return fail('invalid_expiry');
+      }
       const organization = await organizations.get(ctx);
       if (organization === null) return fail('forbidden');
       const configured = organization.settings.tokenDefaultExpiryDays;
-      if (!Number.isInteger(configured) || configured <= 0) return fail('forbidden');
-      const days = Math.min(configured, MAX_PERSONAL_TOKEN_DAYS);
-      if (expiresMs > nowMs + days * DAY_MS) return fail('invalid_expiry');
+      if (!Number.isSafeInteger(configured) || configured <= 0) return fail('forbidden');
+      if (defaulted) expiresMs = defaultExpiry(nowMs, maxDays, configured);
+      if (expiresMs === null) return fail('forbidden');
+      const expiresAt = new Date(expiresMs).toISOString();
 
       const providerAnchors = await providers.anchors(ctx);
       const storeNow = clock.now();
@@ -248,7 +273,7 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
           kind: { new: 'pat' },
           name: { new: input.name },
           scope: { new: scope.level },
-          expires_at: { new: input.expiresAt },
+          expires_at: { new: expiresAt },
           project_mode: { new: input.projectMode },
           project_count: { new: input.projectIds.length },
         },
@@ -261,7 +286,8 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
           id,
           name: input.name,
           scope: scope.level,
-          expiresAt: input.expiresAt,
+          expiresAt,
+          maxLifetimeDays: maxDays,
           now: isoTimestamp(storeNow),
           validation:
             session.identityId === null
@@ -286,6 +312,8 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
       if (outcome.status === 'issued') {
         emit({
           event: 'token.issued',
+          expiresAt,
+          defaulted,
           kind: 'pat',
           orgId: ctx.orgId,
           tokenId: outcome.id,

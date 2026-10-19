@@ -41,11 +41,12 @@ export interface ProjectStore {
     input: ProjectCreateInput & {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
     },
   ): Promise<
     | 'created'
+    | 'conflict'
     | 'duplicate'
     | 'invalid_slug'
     | 'reserved_slug'
@@ -60,7 +61,7 @@ export interface ProjectStore {
       readonly id: string;
       readonly changes: ProjectChanges;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
     },
   ): Promise<
@@ -72,7 +73,7 @@ export interface ProjectStore {
     input: {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
     },
   ): Promise<'archived' | 'not_active' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
@@ -82,7 +83,7 @@ export interface ProjectStore {
     input: {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
     },
   ): Promise<

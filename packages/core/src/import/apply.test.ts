@@ -211,7 +211,7 @@ describe('runImportApply', () => {
   });
 
   it('pauses sources and omits credential references from every store argument', async () => {
-    const sentinel = 'op://Vault/CREDENTIAL_SENTINEL/password';
+    const sentinel = 'env:CREDENTIAL_SENTINEL';
     const s = await setup([
       {
         type: 'source',

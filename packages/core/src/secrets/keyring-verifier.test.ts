@@ -1,5 +1,6 @@
 import { createHmac, hkdfSync } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createSecretCipher } from './cipher.js';
 import { createKeyring } from './keyring.js';
 import {
   KeyringMismatchError,
@@ -40,8 +41,13 @@ function memoryStore(
     async list() {
       return [...rows].sort((left, right) => right.version - left.version);
     },
-    async usedVersions() {
-      return used;
+    async checkUsedVersions(configured) {
+      for (const version of used)
+        if (!configured.includes(version)) throw new KeyringVersionInUseError(version);
+      return used.length > 0;
+    },
+    async credentialSamples() {
+      return [];
     },
     async enroll(row) {
       if (rows.length > 0) return false;
@@ -49,7 +55,9 @@ function memoryStore(
       return true;
     },
     async add(row) {
-      if (!rows.some((existing) => existing.version === row.version)) rows.push(row);
+      if (rows.some((existing) => existing.version === row.version)) return false;
+      rows.push(row);
+      return true;
     },
   };
 }
@@ -139,13 +147,18 @@ describe('verifyKeyring', () => {
         listed += 1;
         return listed === 1 ? [] : [rival];
       },
-      async usedVersions() {
+      async checkUsedVersions() {
+        return false;
+      },
+      async credentialSamples() {
         return [];
       },
       async enroll() {
         return false;
       },
-      async add() {},
+      async add() {
+        return false;
+      },
     };
     expect(await reject(verifyKeyring(createKeyring([V1()]), store))).toBeInstanceOf(
       KeyringMismatchError,
@@ -160,13 +173,18 @@ describe('verifyKeyring', () => {
         listed += 1;
         return listed === 1 ? [] : [rival];
       },
-      async usedVersions() {
+      async checkUsedVersions() {
+        return false;
+      },
+      async credentialSamples() {
         return [];
       },
       async enroll() {
         return false;
       },
-      async add() {},
+      async add() {
+        return false;
+      },
     };
     expect(await reject(verifyKeyring(createKeyring([V1()]), store))).toBeInstanceOf(
       KeyringMismatchError,
@@ -181,13 +199,18 @@ describe('verifyKeyring', () => {
         listed += 1;
         return listed === 1 ? [] : [winner];
       },
-      async usedVersions() {
+      async checkUsedVersions() {
+        return false;
+      },
+      async credentialSamples() {
         return [];
       },
       async enroll() {
         return false;
       },
-      async add() {},
+      async add() {
+        return false;
+      },
     };
     await verifyKeyring(createKeyring([V1()]), store);
   });
@@ -290,14 +313,68 @@ describe('verifyKeyring', () => {
       async list() {
         throw failure;
       },
-      async usedVersions() {
+      async checkUsedVersions() {
+        return false;
+      },
+      async credentialSamples() {
         return [];
       },
       async enroll() {
         return false;
       },
-      async add() {},
+      async add() {
+        return false;
+      },
     };
     expect(await reject(verifyKeyring(createKeyring([V1()]), store))).toBe(failure);
+  });
+  it('authenticates one credential per used version before re-seeding and writes nothing for a wrong previous key', async () => {
+    const aad = 'credential/c/org/k';
+    const samples = await Promise.all(
+      [V2(), V1()].map(async (key) => ({
+        sealed: await createSecretCipher(createKeyring([key]), 'credential-encryption').seal(
+          new Uint8Array([7]),
+          aad,
+        ),
+        aad,
+      })),
+    );
+    const store = memoryStore([], [1, 2]);
+    store.credentialSamples = async () => samples;
+    await expect(
+      verifyKeyring(createKeyring([V2(), V1_OTHER()]), store, { reseed: true }),
+    ).rejects.toMatchObject({ name: 'KeyringMismatchError', keyVersion: 1 });
+    expect(store.rows).toEqual([]);
+    await expect(
+      verifyKeyring(createKeyring([V2(), V1()]), store, { reseed: true }),
+    ).resolves.toMatchObject({ reseeded: true });
+  });
+
+  it('concurrent re-seeds report only the caller that inserted', async () => {
+    const store = memoryStore([], [1]);
+    const ignored = vi.fn();
+    const results = await Promise.all(
+      [1, 2].map(() =>
+        verifyKeyring(createKeyring([V1()]), store, {
+          reseed: true,
+          onReseedIgnored: ignored,
+        }),
+      ),
+    );
+    expect(results.filter((result) => result.reseeded)).toHaveLength(1);
+    expect(ignored).toHaveBeenCalledExactlyOnceWith(1);
+    expect(store.rows).toHaveLength(1);
+  });
+
+  it('reports an ignored re-seed switch even when the stored verifier fails verification', async () => {
+    const ignored = vi.fn();
+    await expect(
+      verifyKeyring(
+        createKeyring([V1_OTHER()]),
+        memoryStore([{ version: 1, mac: expectedMac(V1()) }]),
+        { reseed: true, onReseedIgnored: ignored },
+      ),
+    ).rejects.toBeInstanceOf(KeyringMismatchError);
+    expect(ignored).toHaveBeenCalledExactlyOnceWith(1);
   });
 });

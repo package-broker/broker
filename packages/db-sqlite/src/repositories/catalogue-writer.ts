@@ -110,6 +110,43 @@ export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
       quarantine: 5,
       markPackageAbsent: 8,
     },
+    syncPackageCost({ versions, tags, guardStatements: guard }) {
+      if (
+        !Number.isSafeInteger(versions) ||
+        versions < 0 ||
+        versions > CATALOGUE_SYNC_VERSIONS_PER_CALL ||
+        !Number.isSafeInteger(tags) ||
+        tags < 0 ||
+        tags > MAX_TAGS_PER_CALL ||
+        !Number.isSafeInteger(guard) ||
+        guard < 1
+      )
+        throw new RangeError('invalid catalogue sync cost shape');
+
+      // Match the writer's indivisible groups. Composer has the larger update term.
+      // Include an explicit empty tag map when tags is zero: it still removes old tags.
+      const groups = [
+        guard + 6, // package guard, source check, create, describe, three derivations
+        1, // tombstone probe
+        ...(versions === 0 ? [] : [guard + 2 + 3 * versions, guard + 3 + versions]),
+        1, // package lookup
+      ];
+      // The 200-statement split and the 4 MiB split can cut at any group boundary.
+      // Reserve a guard at every boundary and a clock for every tag-writing group;
+      // this also bounds payload-driven splits that statement counts alone cannot predict.
+      const tagHeadAndProbes = guard + 1 + tags;
+      const tagWrites = tags + 1;
+      const groupCount = groups.length + tagHeadAndProbes + tagWrites + 1;
+      const statements =
+        groups.reduce((sum, size) => sum + size, 0) +
+        tagHeadAndProbes +
+        2 * tagWrites +
+        1 +
+        (groupCount - 1) * guard +
+        tagWrites;
+      // Calls above the hard cap are rejected before execution.
+      return Math.min(MAX_STATEMENTS, statements);
+    },
     async syncPackage(ctx, guard, input) {
       if (input.versions.length > CATALOGUE_SYNC_VERSIONS_PER_CALL)
         throw new RangeError('catalogue call exceeds 50 versions');

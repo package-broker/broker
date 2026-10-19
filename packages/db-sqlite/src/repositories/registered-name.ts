@@ -1,5 +1,4 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
-import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import {
   MAX_PATTERN_BYTES,
@@ -32,31 +31,9 @@ const NPM_SCOPED_PATTERN = /^@[a-z0-9._~!*-]+\/[a-z0-9._~!*-]+$/;
 type SourceRef = string | Expression<string>;
 type Ecosystem = 'composer' | 'npm';
 
-export interface NewRegisteredName extends CoreNewRegisteredName {
-  readonly audit: AuditEvent;
-}
-
-export interface RegisteredNameTarget extends CoreRegisteredNameTarget {
-  readonly audit: AuditEvent;
-}
-
-export interface RegisteredNameRepository {
-  add(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: NewRegisteredName,
-  ): ReturnType<CoreRegisteredNameRepository['add']>;
-  remove(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: RegisteredNameTarget & { readonly pauseAudit: AuditEvent },
-  ): ReturnType<CoreRegisteredNameRepository['remove']>;
-  enable(
-    ctx: OrgContext,
-    fence: MutationFence,
-    input: RegisteredNameTarget,
-  ): ReturnType<CoreRegisteredNameRepository['enable']>;
-}
+export type NewRegisteredName = CoreNewRegisteredName;
+export type RegisteredNameTarget = CoreRegisteredNameTarget;
+export type RegisteredNameRepository = CoreRegisteredNameRepository;
 
 export function isRegistrablePattern(pattern: string, ecosystem: Ecosystem): boolean {
   if (!isValidPattern(pattern)) return false;
@@ -163,6 +140,25 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
   }
 
   return {
+    async owner(ctx, id) {
+      const [row] = await executor.all<{ sourceId: string; projectId: string | null }>(
+        compile(
+          db
+            .selectFrom('registered_name')
+            .innerJoin('source', (join) =>
+              join
+                .onRef('source.id', '=', 'registered_name.source_id')
+                .onRef('source.org_id', '=', 'registered_name.org_id'),
+            )
+            .select(['source.id as sourceId', 'source.project_id as projectId'])
+            .where('registered_name.org_id', '=', ctx.orgId)
+            .where('source.org_id', '=', ctx.orgId)
+            .where('registered_name.id', '=', id),
+        ),
+      );
+      return row ?? null;
+    },
+
     async add(ctx, fence, input) {
       const held = authority(ctx, fence, null, input.providerAnchors);
       if (!(await holds(held))) return 'forbidden';
@@ -216,6 +212,8 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (!(await holds(held))) return 'forbidden';
       const sourceId = await readName(ctx, input.id);
       if (sourceId === null) return 'not_found';
+      if (input.pauseAudit.target.type !== 'source' || input.pauseAudit.target.id !== sourceId)
+        return 'conflict';
       const owned = sql<SqlBool>`exists (select 1 from registered_name as target
         where target.id = ${input.id} and target.org_id = ${ctx.orgId}
           and target.source_id = ${sourceId})`;

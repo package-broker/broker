@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import type { ApiCall } from '../api/idempotency.js';
 import type { ActorContext } from '../authz/administration.js';
 import { mutationFence, type AuthenticatedActor } from '../authz/fence.js';
 import { DbError } from '../db/errors.js';
@@ -25,6 +26,10 @@ const reader: ActorContext = {
   isOrganizationAdmin: false,
   permissions: new Set(['org:sources:read']),
 } as ActorContext;
+
+const call: ApiCall = {
+  audit: { opId: 'op-bulk', requestId: 'req-bulk', sourceIp: null, tokenSelector: null },
+};
 
 const ok = <T>(value: T): SourceServiceResult<T> => ({ ok: true, value });
 
@@ -132,10 +137,16 @@ describe('bulk discovery', () => {
   it('links every created source to the resolved App credential', async () => {
     const { bulk, sources, resolve, service } = setup();
     expect(
-      await bulk.apply(ctx, admin, fence, {
-        credentialId: 'requested-credential',
-        repositories: ['acme/one', 'acme/two'],
-      }),
+      await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'requested-credential',
+          repositories: ['acme/one', 'acme/two'],
+        },
+        call,
+      ),
     ).toMatchObject({ ok: true, value: { created: 2, failed: 0 } });
     expect(resolve).toHaveBeenCalledWith(ctx, 'requested-credential');
     expect([...sources.values()].map((source) => source.credentialId)).toEqual([
@@ -151,10 +162,16 @@ describe('bulk discovery', () => {
     const { bulk, resolve, plan, service, sources } = setup();
     resolve.mockResolvedValueOnce(null);
     expect(
-      await bulk.apply(ctx, admin, fence, {
-        credentialId: 'missing',
-        repositories: ['acme/one', 'acme/two'],
-      }),
+      await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'missing',
+          repositories: ['acme/one', 'acme/two'],
+        },
+        call,
+      ),
     ).toEqual({ ok: false, error: 'credential_not_found' });
     expect(plan).not.toHaveBeenCalled();
     expect(service.create).not.toHaveBeenCalled();
@@ -167,7 +184,7 @@ describe('bulk discovery', () => {
       await bulk.dryRun(ctx, reader, { credentialId: 'c', pattern: 'acme-*', cursor: null }),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(
-      await bulk.apply(ctx, reader, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, reader, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(resolve).not.toHaveBeenCalled();
     expect(discover).not.toHaveBeenCalled();
@@ -176,7 +193,7 @@ describe('bulk discovery', () => {
 
   it('dry run marks repositories that already back a source as existing', async () => {
     const { bulk } = setup();
-    await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] });
+    await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call);
     const result = await bulk.dryRun(ctx, admin, { credentialId: 'c', pattern: '*', cursor: null });
     expect(result).toMatchObject({
       ok: true,
@@ -193,8 +210,8 @@ describe('bulk discovery', () => {
   it('creates each source once when the same set is applied twice', async () => {
     const { bulk, sources } = setup();
     const input = { credentialId: 'c', repositories: ['acme/one', 'acme/two'] };
-    const first = await bulk.apply(ctx, admin, fence, input);
-    const second = await bulk.apply(ctx, admin, fence, input);
+    const first = await bulk.apply(ctx, admin, fence, input, call);
+    const second = await bulk.apply(ctx, admin, fence, input, call);
     expect(first).toMatchObject({
       ok: true,
       value: { created: 2, existing: 0, skipped: 0, failed: 0 },
@@ -209,16 +226,58 @@ describe('bulk discovery', () => {
 
   it('registers the exact package name between create and enable', async () => {
     const { bulk, calls } = setup();
-    await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] });
+    await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call);
     expect(calls).toEqual(['create:acme/one', 'name:acme/one', 'enable:src-1']);
+  });
+
+  it('passes each name and enable the audit context without the idempotency record', async () => {
+    const { bulk, service } = setup();
+    const keyed: ApiCall = {
+      ...call,
+      idempotency: {
+        principalKey: 'user:user',
+        key: 'bulk-key',
+        route: 'POST /_pb/sources/discovery/apply',
+        requestHash: '0'.repeat(64),
+        status: 200,
+        responseJson: '{}',
+        createdAt: '2026-10-19T00:00:00.000Z',
+        expiresAt: '2026-10-20T00:00:00.000Z',
+      },
+    };
+    await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      { credentialId: 'c', repositories: ['acme/one', 'acme/two'] },
+      keyed,
+    );
+    const item = { audit: call.audit };
+    expect(vi.mocked(service.addRegisteredName).mock.calls.map((args) => args[4])).toEqual([
+      item,
+      item,
+    ]);
+    expect(vi.mocked(service.enable).mock.calls.map((args) => args[4])).toEqual([item, item]);
+  });
+
+  it('requires the trailing call on apply', () => {
+    const { bulk } = setup();
+    // @ts-expect-error the call argument is required
+    void bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: [] });
   });
 
   it('treats a package name collision as existing and removes the paused source', async () => {
     const { bulk, calls, sources } = setup({ names: ['acme/one'] });
-    const result = await bulk.apply(ctx, admin, fence, {
-      credentialId: 'c',
-      repositories: ['acme/one'],
-    });
+    const result = await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      {
+        credentialId: 'c',
+        repositories: ['acme/one'],
+      },
+      call,
+    );
     expect(result).toMatchObject({ ok: true, value: { created: 0, existing: 1, failed: 0 } });
     expect(calls).not.toContain('enable:src-1');
     expect(calls).toContain('delete:src-1');
@@ -227,10 +286,16 @@ describe('bulk discovery', () => {
 
   it('counts a failed enable and leaves the source paused', async () => {
     const { bulk, sources } = setup({ failEnable: true });
-    const result = await bulk.apply(ctx, admin, fence, {
-      credentialId: 'c',
-      repositories: ['acme/one'],
-    });
+    const result = await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      {
+        credentialId: 'c',
+        repositories: ['acme/one'],
+      },
+      call,
+    );
     expect(result).toMatchObject({
       ok: true,
       value: {
@@ -251,10 +316,16 @@ describe('bulk discovery', () => {
       action: 'skipped',
       reason: 'npm_from_vcs_unsupported',
     });
-    const result = await bulk.apply(ctx, admin, fence, {
-      credentialId: 'c',
-      repositories: ['acme/one'],
-    });
+    const result = await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      {
+        credentialId: 'c',
+        repositories: ['acme/one'],
+      },
+      call,
+    );
     expect(result).toMatchObject({ ok: true, value: { created: 0, skipped: 1 } });
     expect(calls).toEqual([]);
   });
@@ -269,7 +340,7 @@ describe('bulk discovery', () => {
       reason: 'npm_from_vcs_unsupported',
     });
     expect(
-      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({
       ok: true,
       value: {
@@ -287,7 +358,7 @@ describe('bulk discovery', () => {
     const { bulk, service, sources } = setup({ names: ['acme/one'] });
     vi.mocked(service.delete).mockResolvedValueOnce({ ok: false, error: 'conflict' });
     expect(
-      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({
       ok: true,
       value: {
@@ -306,7 +377,13 @@ describe('bulk discovery', () => {
       const { bulk, service } = setup();
       vi.mocked(service.create).mockResolvedValueOnce({ ok: false, error });
       expect(
-        await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+        await bulk.apply(
+          ctx,
+          admin,
+          fence,
+          { credentialId: 'c', repositories: ['acme/one'] },
+          call,
+        ),
       ).toMatchObject({
         ok: true,
         value: { created: 0, existing: 0, failed: 1, results: [{ outcome: 'failed', error }] },
@@ -323,10 +400,16 @@ describe('bulk discovery', () => {
         sourceNames: collision ? ['acme/one'] : [],
       });
       vi.mocked(service.create).mockResolvedValueOnce({ ok: false, error: 'duplicate' });
-      const result = await bulk.apply(ctx, admin, fence, {
-        credentialId: 'c',
-        repositories: ['acme/one'],
-      });
+      const result = await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'c',
+          repositories: ['acme/one'],
+        },
+        call,
+      );
       expect(result).toMatchObject({
         ok: true,
         value: {
@@ -379,10 +462,16 @@ describe('bulk discovery', () => {
         await bulk.dryRun(ctx, admin, { credentialId: 'c', pattern: '*', cursor: null }),
       ).toEqual({ ok: false, error: error.code });
       plan.mockRejectedValueOnce(error);
-      const result = await bulk.apply(ctx, admin, fence, {
-        credentialId: 'c',
-        repositories: ['acme/one', 'acme/two'],
-      });
+      const result = await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'c',
+          repositories: ['acme/one', 'acme/two'],
+        },
+        call,
+      );
       expect(result).toMatchObject({
         ok: true,
         value: {
@@ -407,11 +496,17 @@ describe('bulk discovery', () => {
         code: 'rate_limited',
       }),
     );
-    const first = await bulk.apply(ctx, admin, fence, {
-      credentialId: 'c',
-      repositories: ['acme/one', 'acme/two', 'acme/three'],
-      nextCursor: 'next',
-    });
+    const first = await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      {
+        credentialId: 'c',
+        repositories: ['acme/one', 'acme/two', 'acme/three'],
+        nextCursor: 'next',
+      },
+      call,
+    );
     expect(first).toMatchObject({
       ok: true,
       value: {
@@ -422,11 +517,17 @@ describe('bulk discovery', () => {
       },
     });
     if (!first.ok) throw new Error('apply failed');
-    const second = await bulk.apply(ctx, admin, fence, {
-      credentialId: 'c',
-      repositories: first.value.remainingRepositories,
-      nextCursor: first.value.nextCursor,
-    });
+    const second = await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      {
+        credentialId: 'c',
+        repositories: first.value.remainingRepositories,
+        nextCursor: first.value.nextCursor,
+      },
+      call,
+    );
     expect(second).toMatchObject({
       ok: true,
       value: {
@@ -451,7 +552,7 @@ describe('bulk discovery', () => {
     const { bulk, service, sources } = setup();
     vi.mocked(service.addRegisteredName).mockResolvedValueOnce({ ok: false, error: 'forbidden' });
     expect(
-      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({
       ok: true,
       value: { existing: 0, failed: 1, results: [{ error: 'forbidden' }] },
@@ -471,7 +572,7 @@ describe('bulk discovery', () => {
       reason: null,
     });
     expect(
-      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({
       ok: true,
       value: {
@@ -493,7 +594,7 @@ describe('bulk discovery', () => {
       reason: null,
     });
     expect(
-      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({ ok: true, value: { created: 1, results: [{ repository: 'acme/one' }] } });
     expect(
       JSON.parse(vi.mocked(service.create).mock.calls[0]?.[3].configJson ?? '{}'),
@@ -514,10 +615,16 @@ describe('bulk discovery', () => {
     if (error instanceof DbError) vi.mocked(service.create).mockRejectedValueOnce(error);
     else plan.mockRejectedValueOnce(error);
     expect(
-      await bulk.apply(ctx, admin, fence, {
-        credentialId: 'c',
-        repositories: ['acme/one', 'acme/two'],
-      }),
+      await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'c',
+          repositories: ['acme/one', 'acme/two'],
+        },
+        call,
+      ),
     ).toMatchObject({
       ok: true,
       value: {
@@ -548,11 +655,17 @@ describe('bulk discovery', () => {
       }),
     );
     expect(
-      await bulk.apply(ctx, admin, fence, {
-        credentialId: 'c',
-        repositories: ['acme/one', 'acme/two', 'acme/three'],
-        nextCursor: 'next',
-      }),
+      await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'c',
+          repositories: ['acme/one', 'acme/two', 'acme/three'],
+          nextCursor: 'next',
+        },
+        call,
+      ),
     ).toEqual({
       ok: true,
       value: {
@@ -586,7 +699,9 @@ describe('bulk discovery', () => {
 
   it('returns zero counters for an empty repositories list', async () => {
     const { bulk, plan, service } = setup();
-    expect(await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: [] })).toEqual({
+    expect(
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: [] }, call),
+    ).toEqual({
       ok: true,
       value: {
         created: 0,
@@ -605,20 +720,28 @@ describe('bulk discovery', () => {
   it('refuses more than 20 repositories, duplicates and an unknown credential', async () => {
     const { bulk, resolve, plan } = setup();
     const many = Array.from({ length: 21 }, (_, index) => `acme/r${index}`);
-    expect(await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: many })).toEqual({
+    expect(
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: many }, call),
+    ).toEqual({
       ok: false,
       error: 'too_many_repositories',
     });
     expect(
-      await bulk.apply(ctx, admin, fence, {
-        credentialId: 'c',
-        repositories: ['acme/one', 'acme/one'],
-      }),
+      await bulk.apply(
+        ctx,
+        admin,
+        fence,
+        {
+          credentialId: 'c',
+          repositories: ['acme/one', 'acme/one'],
+        },
+        call,
+      ),
     ).toEqual({ ok: false, error: 'invalid_repositories' });
     expect(resolve).not.toHaveBeenCalled();
     resolve.mockResolvedValueOnce(null as never);
     expect(
-      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }),
+      await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toEqual({ ok: false, error: 'credential_not_found' });
     expect(plan).not.toHaveBeenCalled();
   });
@@ -627,13 +750,13 @@ describe('bulk discovery', () => {
     const { bulk } = setup();
     const other = mutationFence({ userId: 'someone', sessionId: 's' } as AuthenticatedActor, {});
     await expect(
-      bulk.apply(ctx, admin, other, { credentialId: 'c', repositories: ['acme/one'] }),
+      bulk.apply(ctx, admin, other, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).rejects.toThrow(TypeError);
   });
 
   it('writes the vcs source for the discovered repository with the installation id', async () => {
     const { bulk, service } = setup();
-    await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] });
+    await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call);
     expect(service.create).toHaveBeenCalledWith(
       ctx,
       { kind: 'org', actor: admin },

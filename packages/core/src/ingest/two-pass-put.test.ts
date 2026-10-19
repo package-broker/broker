@@ -84,7 +84,13 @@ function fakeStore(): { store: BlobStore; stored: Map<string, Uint8Array>; puts:
       if (hex('sha256', bytes) !== key)
         throw new BlobDigestMismatchError(key, hex('sha256', bytes));
       stored.set(key, bytes);
-      return { sha256: key, size: bytes.length, mediaType: input.mediaType, purgeAfter: null };
+      return {
+        generation: '1',
+        sha256: key,
+        size: bytes.length,
+        mediaType: input.mediaType,
+        purgeAfter: null,
+      };
     },
     async get() {
       return null;
@@ -207,7 +213,13 @@ describe('twoPassPut', () => {
       put: async (_c, key, body, input) => {
         seen = key;
         await drain(body);
-        return { sha256: key, size: input.size, mediaType: input.mediaType, purgeAfter: null };
+        return {
+          generation: '1',
+          sha256: key,
+          size: input.size,
+          mediaType: input.mediaType,
+          purgeAfter: null,
+        };
       },
       get: async () => null,
       head: async () => null,
@@ -437,7 +449,13 @@ describe('twoPassPut', () => {
       const metadata: BlobMetadataPort = {
         reserve: async () => '1' as never,
         publish: async (_c, i) => {
-          const info = { sha256: i.sha256, size: i.size, mediaType: i.mediaType, purgeAfter: null };
+          const info = {
+            generation: i.generation,
+            sha256: i.sha256,
+            size: i.size,
+            mediaType: i.mediaType,
+            purgeAfter: null,
+          };
           rows.set(i.sha256, info);
           return info;
         },

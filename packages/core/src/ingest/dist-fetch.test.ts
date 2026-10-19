@@ -112,7 +112,13 @@ function rig(
       const actual = digest('sha256', got);
       if (actual !== key) throw new BlobDigestMismatchError(key, actual);
       stored.set(key, got);
-      return { sha256: key, size: got.length, mediaType: input.mediaType, purgeAfter: null };
+      return {
+        generation: 'test-generation',
+        sha256: key,
+        size: got.length,
+        mediaType: input.mediaType,
+        purgeAfter: null,
+      };
     },
     async get() {
       return null;

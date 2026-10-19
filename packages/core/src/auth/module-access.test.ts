@@ -21,6 +21,7 @@ function fixture(wired = true) {
         session: { id: 'session-1', csrfHash: 'unused' },
         user: { id: 'user-1' },
         project: null,
+        identity: null,
         organizationPermissions: ['org:read'],
         projectPermissions: [],
         protectedHolder: false,

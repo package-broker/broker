@@ -191,10 +191,33 @@ describe('reserve', () => {
 });
 
 describe('publish', () => {
+  it('preserves legacy reads without inventing a reusable generation', async () => {
+    const repo = createBlobRepository(executor);
+    await exec(
+      'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, media_type) VALUES (?, ?, ?, 10, ?, ?)',
+      'legacy',
+      a.orgId,
+      D1,
+      'legacy',
+      'application/zip',
+    );
+    expect((await repo.find(a, D1))?.generation).toBe('');
+    const { info, generation } = await publish(repo);
+    expect(generation).toMatch(GEN);
+    expect(info?.generation).toBe(generation);
+    expect((await repo.inspect(a, D1))?.info.generation).toBe(generation);
+  });
+
   it('inserts the row and reads it back through find and inspect', async () => {
     const repo = createBlobRepository(executor);
-    const { info } = await publish(repo);
-    expect(info).toEqual({ sha256: D1, size: 10, mediaType: 'application/zip', purgeAfter: null });
+    const { info, generation } = await publish(repo);
+    expect(info).toEqual({
+      generation,
+      sha256: D1,
+      size: 10,
+      mediaType: 'application/zip',
+      purgeAfter: null,
+    });
     expect(await repo.find(a, D1)).toEqual(info);
     expect(await repo.inspect(a, D1)).toEqual({ info, purging: false });
     const stored = await rows<{ storage_key: string }>('SELECT storage_key FROM blob');
@@ -456,6 +479,7 @@ describe('narrowRefetchable', () => {
     const { generation } = await publish(repo);
     const narrowed = await repo.narrowRefetchable(a, args);
     expect(narrowed).toEqual({
+      generation,
       sha256: D1,
       size: 10,
       mediaType: 'application/zip',

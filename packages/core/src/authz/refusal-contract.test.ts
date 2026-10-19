@@ -143,6 +143,7 @@ function engine(state: State) {
         const found: EngineSessionAccess = {
           session: { id: 'sess-1', csrfHash: await sha256Hex(CSRF) },
           user: { id: 'user-1' },
+          identity: null,
           project: project === null ? null : { id: project.id },
           organizationPermissions: [],
           projectPermissions: granted,

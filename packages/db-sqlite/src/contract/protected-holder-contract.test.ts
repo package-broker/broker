@@ -387,7 +387,12 @@ describe('project roles never protect a last holder', () => {
     const removed = await createProjectGrantRepository(executor).delete(
       a,
       fence({ [projectGrantKey(G_PROJECT)]: await revisionOf(G_PROJECT) }),
-      { id: G_PROJECT, projectId: P1, providerAnchors: [OIDC] },
+      {
+        audit: mutationAudit('project_grant.revoke', G_PROJECT, P1),
+        id: G_PROJECT,
+        projectId: P1,
+        providerAnchors: [OIDC],
+      },
     );
     const refused = await repository().deleteOrganization(
       a,
@@ -553,7 +558,7 @@ describe('concurrent last-admin operations', () => {
   }
 });
 
-function mutationAudit(action: AuditAction, targetId: string | null) {
+function mutationAudit(action: AuditAction, targetId: string | null, projectId?: string) {
   const id = ulid();
   const result = auditEvent({
     id,
@@ -561,6 +566,7 @@ function mutationAudit(action: AuditAction, targetId: string | null) {
     action,
     actor: { type: 'system', id: null },
     context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    ...(projectId === undefined ? {} : { projectId }),
     target: { type: action.split('.')[0]!, id: targetId },
   });
   if (!result.ok) throw new Error('Invalid test audit event');

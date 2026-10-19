@@ -16,6 +16,12 @@ import type {
   ServicePrincipalAuthority,
   ServicePrincipalRecord,
 } from './service-principal-service.js';
+import {
+  defaultExpiry,
+  lifetimeExpiry,
+  resolveTokenLifetimePolicy,
+  type TokenLifetimePolicy,
+} from './token-lifetime.js';
 
 export interface MintedServiceToken {
   readonly selector: string;
@@ -43,6 +49,7 @@ export interface ServiceTokenStoreInput {
   readonly scope: ScopeLevel;
   readonly readOnly: boolean;
   readonly expiresAt: string;
+  readonly maxLifetimeDays: number;
   readonly now: string;
   readonly authority: ServiceTokenAuthority;
   /** Provider anchors of the organization, for the issuer's group and e-mail evidence. */
@@ -87,7 +94,8 @@ export interface ServiceTokenIssueInput {
   readonly scope: ScopeLevel;
   /** A submitted read-only flag must agree with the scope. */
   readonly readOnly?: boolean;
-  readonly expiresAt: string;
+  readonly expiresAt?: string;
+  readonly lifetimeDays?: number;
 }
 
 export type ServiceTokenError =
@@ -106,6 +114,7 @@ export type ServiceTokenResult =
   | { readonly ok: false; readonly error: ServiceTokenError };
 
 export interface ServiceTokenServiceDeps {
+  readonly lifetime?: TokenLifetimePolicy;
   readonly tokens: ServiceTokenStore;
   readonly principals: { get(ctx: OrgContext, id: string): Promise<ServicePrincipalRecord | null> };
   readonly authority: Pick<ServicePrincipalAuthority, 'livePermissions'>;
@@ -132,9 +141,6 @@ export interface ServiceTokenService {
     call: ApiCall,
   ): Promise<ServiceTokenResult>;
 }
-
-export const MAX_SERVICE_TOKEN_DAYS = 90;
-export const MAX_CI_READ_ONLY_TOKEN_DAYS = 365;
 
 const DAY_MS = 86_400_000;
 const NAME_MAX_LENGTH = 100;
@@ -201,6 +207,8 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
   const { tokens, principals, authority, sessions, organizations, providers, keyring, clock, ids } =
     deps;
 
+  const maxDays = (deps.lifetime ?? resolveTokenLifetimePolicy(undefined)).service.maxDays;
+
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
       deps.log({ level: 'info', ...entry });
@@ -239,6 +247,9 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
         scope: request.scope,
         readOnly: request.readOnly,
         expiresAt: request.expiresAt,
+        lifetimeDays: request.lifetimeDays,
+        expiryProvided: Object.hasOwn(request, 'expiresAt'),
+        lifetimeProvided: Object.hasOwn(request, 'lifetimeDays'),
       };
       const { session, principal } = authenticated;
       if (typeof fence !== 'object' || fence === null) {
@@ -271,19 +282,26 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
       }
 
       const nowMs = clock.now().getTime();
-      const expiresMs = canonicalTimestampMs(input.expiresAt);
-      if (expiresMs === null || expiresMs <= nowMs) return fail('invalid_expiry');
+      if (input.expiryProvided && input.lifetimeProvided) return fail('invalid_expiry');
+      const defaulted = !input.expiryProvided && !input.lifetimeProvided;
+      let expiresMs = input.expiryProvided
+        ? canonicalTimestampMs(input.expiresAt)
+        : input.lifetimeProvided
+          ? lifetimeExpiry(nowMs, maxDays, input.lifetimeDays as number)
+          : null;
+      if (
+        !defaulted &&
+        (expiresMs === null || expiresMs <= nowMs || expiresMs > nowMs + maxDays * DAY_MS)
+      ) {
+        return fail('invalid_expiry');
+      }
       const organization = await organizations.get(ctx);
       if (organization === null) return deny(ctx, session.userId);
-      const configured = readOnly
-        ? organization.settings.tokenCiReadonlyExpiryDays
-        : organization.settings.tokenDefaultExpiryDays;
-      if (!Number.isInteger(configured) || configured <= 0) return deny(ctx, session.userId);
-      const days = Math.min(
-        configured,
-        readOnly ? MAX_CI_READ_ONLY_TOKEN_DAYS : MAX_SERVICE_TOKEN_DAYS,
-      );
-      if (expiresMs > nowMs + days * DAY_MS) return fail('invalid_expiry');
+      const configured = organization.settings.tokenDefaultExpiryDays;
+      if (!Number.isSafeInteger(configured) || configured <= 0) return deny(ctx, session.userId);
+      if (defaulted) expiresMs = defaultExpiry(nowMs, maxDays, configured);
+      if (expiresMs === null) return deny(ctx, session.userId);
+      const expiresAt = new Date(expiresMs).toISOString();
 
       const principalId = input.servicePrincipalId;
       const target =
@@ -325,7 +343,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
           kind: { new: 'svc' },
           name: { new: input.name },
           scope: { new: scope.level },
-          expires_at: { new: input.expiresAt },
+          expires_at: { new: expiresAt },
           project_mode: { new: target.projectId === null ? 'all' : 'selected' },
           project_count: { new: target.projectId === null ? 0 : 1 },
         },
@@ -342,7 +360,8 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
           principalRevision: target.revision,
           scope: scope.level,
           readOnly,
-          expiresAt: input.expiresAt,
+          expiresAt,
+          maxLifetimeDays: maxDays,
           now: isoTimestamp(storeNow),
           authority: { ...requirement, covers },
           providerAnchors,
@@ -362,6 +381,8 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
       if (outcome.status === 'issued') {
         emit({
           event: 'token.issued',
+          expiresAt,
+          defaulted,
           kind: 'svc',
           orgId: ctx.orgId,
           tokenId: outcome.id,

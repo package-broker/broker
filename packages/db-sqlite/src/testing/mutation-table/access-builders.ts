@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { expect } from 'vitest';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import { createAccessRepository } from '../../repositories/access.js';
@@ -219,6 +221,7 @@ const grant: ContractCase = {
     );
     expect(
       await createProjectGrantRepository(executing(context)).create(own, fenceOf(subject), {
+        audit: mutationAudit('project_grant.create', 'G-NEW', 'P'),
         id: 'G-NEW',
         projectId: 'P',
         roleId: 'R-F',
@@ -424,3 +427,18 @@ export const entries: readonly MutationEntry[] = [
     },
   ]),
 ];
+
+function mutationAudit(action: AuditAction, targetId: string, projectId: string) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: new Date().toISOString(),
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+    projectId,
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

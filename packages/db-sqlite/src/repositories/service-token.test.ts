@@ -97,6 +97,7 @@ function input(overrides: Partial<IssueServiceTokenInput> = {}): IssueServiceTok
     scope: 'read',
     readOnly: true,
     expiresAt: iso(30 * DAY),
+    maxLifetimeDays: 365,
     now: iso(0),
     authority: {
       permission: 'project:tokens:create',

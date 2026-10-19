@@ -11,9 +11,9 @@ afterEach(async () => {
   await opened?.close();
 });
 
-describe('migration 0016 legacy job indexes', () => {
+describe('migration 0017 legacy job indexes', () => {
   it('declares the destructive migration as contract phase', async () => {
-    const migration = (await discoveredMigrations()).find((source) => source.sequence === 16);
+    const migration = (await discoveredMigrations()).find((source) => source.sequence === 17);
     expect(migration?.phase).toBe('contract');
   });
 
@@ -26,10 +26,10 @@ describe('migration 0016 legacy job indexes', () => {
       if (laterMigration) {
         discovered.push(await loadMigrationSource('core', '9999_future.sql', 'SELECT 1;'));
       }
-      const sources = discovered.filter((source) => source.sequence <= 16);
+      const sources = discovered.filter((source) => source.sequence <= 17);
       await migrate(
         executor,
-        sources.filter((source) => source.sequence < 16),
+        sources.filter((source) => source.sequence < 17),
         {
           holder: 'job-index-contract',
         },
@@ -75,7 +75,7 @@ describe('migration 0016 legacy job indexes', () => {
       opened = openNodeSqliteExecutor();
       await migrate(
         opened.executor,
-        (await discoveredMigrations()).filter((source) => source.sequence < 16),
+        (await discoveredMigrations()).filter((source) => source.sequence < 17),
         { holder: 'job-index-contract' },
       );
       const entry = [...jobContractCases].find(

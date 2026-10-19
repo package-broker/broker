@@ -1,10 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z } from 'zod';
 import { generateOpenApi } from './openapi.js';
 import { IF_MATCH, defineApi, type ApiRouteSpec } from './route.js';
 import { toJsonSchema, type JsonValue } from './json-schema.js';
 
-import { API_ERROR_CODES } from './response.js';
+import { API_ERROR_CODES, SERVICE_ERROR_TABLE } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 
 const info = { title: 'Package Broker', version: '2.0.0' };
@@ -61,6 +61,78 @@ const specs: readonly ApiRouteSpec[] = [
 const document = () => generateOpenApi(specs, info);
 
 describe('generateOpenApi', () => {
+  it('constrains service links to the service error table', () => {
+    expectTypeOf<ApiRouteSpec['service']>().toEqualTypeOf<
+      keyof typeof SERVICE_ERROR_TABLE | undefined
+    >();
+  });
+
+  it.each(['PersonalTokenError', 'ServiceTokenError'] as const)(
+    'derives reauthentication and unavailability from %s without declarations',
+    (service) => {
+      const linked = defineApi({ ...specs[0]!, service });
+      expect(linked.api.responses).toEqual({ 200: result });
+      const responses = generateOpenApi([linked], info).paths['/_pb/status']!.get!.responses;
+      expect(responses).toMatchObject({
+        403: {
+          description: 'Reauthentication required',
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+          },
+        },
+        503: {
+          description: 'Service unavailable',
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+          },
+        },
+      });
+      expect(Object.keys(responses!)).toEqual(['200', '400', '403', '503']);
+    },
+  );
+
+  it('keeps unlinked routes free of service-derived errors', () => {
+    expect(document().paths['/_pb/status']!.get!.responses).toEqual({
+      200: {
+        description: 'Response',
+        content: { 'application/json': { schema: toJsonSchema(result, 'output') } },
+      },
+      400: {
+        description: 'Invalid request',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
+      },
+    });
+  });
+
+  it('derives only errors present in the linked service', () => {
+    const responses = generateOpenApi([{ ...specs[0]!, service: 'ProjectListError' }], info).paths[
+      '/_pb/status'
+    ]!.get!.responses;
+    expect(responses).toHaveProperty('503.description', 'Service unavailable');
+    expect(responses).not.toHaveProperty('403');
+  });
+
+  it('preserves access denial alongside service reauthentication', () => {
+    const responses = generateOpenApi([{ ...specs[1]!, service: 'PersonalTokenError' }], info)
+      .paths['/_pb/settings']!.post!.responses;
+    expect(responses).toHaveProperty('403.description', 'Access denied; Reauthentication required');
+  });
+
+  it('does not repeat service errors already declared by the route', () => {
+    const responses = generateOpenApi(
+      [
+        {
+          ...specs[0]!,
+          service: 'PersonalTokenError',
+          api: { ...specs[0]!.api, responses: { 200: result, 403: null, 503: null } },
+        },
+      ],
+      info,
+    ).paths['/_pb/status']!.get!.responses;
+    expect(responses).toHaveProperty('403.description', 'Access denied; Reauthentication required');
+    expect(responses).toHaveProperty('503.description', 'Service unavailable');
+  });
+
   it('emits identical bytes on repeated calls and reversed specs', () => {
     const bytes = JSON.stringify(document());
     expect(JSON.stringify(document())).toBe(bytes);

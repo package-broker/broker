@@ -1,4 +1,5 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
+import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import {
   MAX_PATTERN_BYTES,
@@ -6,7 +7,11 @@ import {
   isValidPattern,
 } from '@package-broker/core/catalogue/patterns';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
-import type { RegisteredNameRepository } from '@package-broker/core/db/source';
+import type {
+  NewRegisteredName as CoreNewRegisteredName,
+  RegisteredNameRepository as CoreRegisteredNameRepository,
+  RegisteredNameTarget as CoreRegisteredNameTarget,
+} from '@package-broker/core/db/source';
 import {
   assertCheck,
   assertGuard,
@@ -17,8 +22,7 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
-
-export type { RegisteredNameRepository } from '@package-broker/core/db/source';
+import { auditPendingStatement } from './audit-pending.js';
 
 const PROXY_TYPES = ['packagist_proxy', 'npmjs_proxy'] as const;
 const COMPOSER_PATTERN = /^[a-z0-9._*-]+\/[a-z0-9._*-]+$/;
@@ -27,6 +31,32 @@ const NPM_SCOPED_PATTERN = /^@[a-z0-9._~!*-]+\/[a-z0-9._~!*-]+$/;
 
 type SourceRef = string | Expression<string>;
 type Ecosystem = 'composer' | 'npm';
+
+export interface NewRegisteredName extends CoreNewRegisteredName {
+  readonly audit: AuditEvent;
+}
+
+export interface RegisteredNameTarget extends CoreRegisteredNameTarget {
+  readonly audit: AuditEvent;
+}
+
+export interface RegisteredNameRepository {
+  add(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: NewRegisteredName,
+  ): ReturnType<CoreRegisteredNameRepository['add']>;
+  remove(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: RegisteredNameTarget & { readonly pauseAudit: AuditEvent },
+  ): ReturnType<CoreRegisteredNameRepository['remove']>;
+  enable(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: RegisteredNameTarget,
+  ): ReturnType<CoreRegisteredNameRepository['enable']>;
+}
 
 export function isRegistrablePattern(pattern: string, ecosystem: Ecosystem): boolean {
   if (!isValidPattern(pattern)) return false;
@@ -166,7 +196,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         ctx,
         fence,
         assertGuard(allOf([held, sourceUnchanged]), ctx),
-        [insert],
+        [insert, auditPendingStatement(ctx, input.audit)],
         {
           authority: probe(held, true),
           conflict: probe(otherSource, false),
@@ -211,11 +241,13 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               .where('org_id', '=', ctx.orgId),
           ),
           pause,
+          auditPendingStatement(ctx, input.pauseAudit, { sql: 'changes() = 1', params: [] }),
+          auditPendingStatement(ctx, input.audit),
         ],
         { authority: probe(held, true) },
       );
       if (outcome.ok) {
-        return outcome.results[outcome.results.length - 1]?.changes === 1
+        return outcome.results[outcome.results.length - 3]?.changes === 1
           ? 'removed_and_paused'
           : 'removed';
       }
@@ -259,6 +291,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               .where('org_id', '=', ctx.orgId)
               .where('status', '=', 'paused'),
           ),
+          auditPendingStatement(ctx, input.audit),
         ],
         {
           authority: probe(held, true),

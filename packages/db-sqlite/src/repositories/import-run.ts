@@ -7,12 +7,14 @@ import {
   type TokenMutationFence,
 } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
-import type {
-  ImportRun,
-  ImportRunOperation,
-  ImportRunStore,
-  ImportRunWrite,
-  ImportRunWriteOutcome,
+import {
+  IMPORT_RUN_JOB,
+  validImportApprovalTimestamp,
+  type ImportRun,
+  type ImportRunOperation,
+  type ImportRunStore,
+  type ImportRunWrite,
+  type ImportRunWriteOutcome,
 } from '@package-broker/core/import/run-service';
 import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
 import { ulid } from '@package-broker/core/ids';
@@ -178,12 +180,13 @@ export function createImportRunStore(options: {
     if (access.allowed !== 1) return { ok: false, reason: 'authority' };
     if (access.fresh !== 1) return { ok: false, reason: 'reauth_required' };
     const e = input.expected;
+    const approvalTime = validImportApprovalTimestamp(input.now, Date.now());
     let valid: Guard = sql<SqlBool>`0`;
     let update: Record<string, string> = {};
     const mutations: Statement[] = [];
     switch (operation) {
       case 'approveRun':
-        valid = sql<SqlBool>`${e.state === 'planned' && e.approvedAt === null && input.approvedByUserId === fence.userId && input.approvedAt === input.now && input.credentialWindowUntil === new Date(Date.parse(input.now) + 3600000).toISOString() ? 1 : 0} = 1`;
+        valid = sql<SqlBool>`${approvalTime && e.state === 'planned' && e.approvedAt === null && input.approvedByUserId === fence.userId && input.approvedAt === input.now && input.credentialWindowUntil === new Date(Date.parse(input.now) + 3600000).toISOString() ? 1 : 0} = 1 and unixepoch(${input.now}, 'subsec') <= ${CLOCK} + 60`;
         update = {
           approved_by_user_id: fence.userId,
           approved_at: input.now,
@@ -191,7 +194,7 @@ export function createImportRunStore(options: {
         };
         break;
       case 'requestApply':
-        valid = sql<SqlBool>`${e.state === 'planned' && e.approvedAt !== null ? 1 : 0} = 1`;
+        valid = sql<SqlBool>`${e.state === 'planned' && validImportApprovalTimestamp(e.approvedAt, Date.parse(input.now)) ? 1 : 0} = 1 and unixepoch(${e.approvedAt}, 'subsec') <= ${CLOCK} + 60`;
         update = { state: 'applying' };
         break;
       case 'cancelRun':
@@ -211,12 +214,11 @@ export function createImportRunStore(options: {
       ...assertCheck(visible),
       ...assertCheck(reauth),
       ...assertCheck(expected(ctx, input)),
-      ...assertCheck(valid),
+      ...assertCheck(sql<SqlBool>`(${valid})`),
     );
     if (operation === 'requestApply' || operation === 'requestRollback') {
-      const type =
-        operation === 'requestApply' ? 'core:import-apply:v1' : 'core:import-rollback:v1';
-      const resource = `import:${input.runId}`;
+      const type = operation === 'requestApply' ? IMPORT_RUN_JOB.apply : IMPORT_RUN_JOB.rollback;
+      const resource = IMPORT_RUN_JOB.resourceKey(input.runId);
       mutations.push(
         ...assertCheck(
           sql<SqlBool>`not exists (select 1 from job irj where irj.org_id = ${ctx.orgId} and irj.resource_key = ${resource} and irj.state in ('queued', 'running'))`,
@@ -229,7 +231,7 @@ export function createImportRunStore(options: {
             org_id: ctx.orgId,
             type,
             resource_key: resource,
-            payload_json: JSON.stringify({ runId: input.runId }),
+            payload_json: JSON.stringify(IMPORT_RUN_JOB.payload(input.runId)),
             created_at: input.now,
             updated_at: input.now,
           }),

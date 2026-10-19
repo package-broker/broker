@@ -6,10 +6,12 @@ import {
   type AuthenticatedTokenActor,
   type MutationFence,
 } from '@package-broker/core/authz/fence';
-import type {
-  ImportRunCreateWrite,
-  ImportRunStore,
-  ImportRunWrite,
+import {
+  IMPORT_RUN_JOB,
+  type ImportRunState,
+  type ImportRunCreateWrite,
+  type ImportRunStore,
+  type ImportRunWrite,
 } from '@package-broker/core/import/run-service';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { BlobStore } from '@package-broker/core/platform/blob';
@@ -40,6 +42,7 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
   let now: string;
   let input: ImportRunCreateWrite;
   let statements: Statement[];
+  let batches: Statement[][];
   let beforeBatch: (() => Promise<void>) | undefined;
   let publish: boolean;
   let uploads: number;
@@ -78,6 +81,7 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
     ({ a: ctx, b: foreign } = database.orgs);
     now = new Date().toISOString();
     statements = [];
+    batches = [];
     beforeBatch = undefined;
     uploads = 0;
     publish = true;
@@ -128,6 +132,7 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
       },
       async batch(batch) {
         statements.push(...batch);
+        batches.push([...batch]);
         const hook = beforeBatch;
         beforeBatch = undefined;
         await hook?.();
@@ -431,6 +436,318 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
     for (const read of reads) {
       expect(read.sql).not.toMatch(/before_image_json|select\s+\*/i);
       expect(read.params.length).toBeLessThanOrEqual(100);
+    }
+  });
+
+  const operations = [
+    'approveRun',
+    'requestApply',
+    'cancelRun',
+    'acceptRun',
+    'requestRollback',
+  ] as const;
+  const states: readonly ImportRunState[] = [
+    'planned',
+    'applying',
+    'failed',
+    'applied',
+    'verifying',
+    'verified',
+    'rolled_back',
+    'cancelled',
+  ];
+  const allowedStates = {
+    approveRun: ['planned'],
+    requestApply: ['planned'],
+    cancelRun: ['planned'],
+    acceptRun: ['verified'],
+    requestRollback: ['failed', 'applied', 'verified'],
+  };
+  async function seedLifecycle(state: ImportRunState, approvedAt: string | null = null) {
+    await executor.batch([
+      stmt('DELETE FROM job WHERE org_id = ?', ctx.orgId),
+      stmt('DELETE FROM import_run WHERE org_id = ? AND id = ?', ctx.orgId, 'run'),
+      stmt(
+        'INSERT INTO import_run (id, org_id, source_system, state, approved_at) VALUES (?, ?, ?, ?, ?)',
+        'run',
+        ctx.orgId,
+        'test',
+        state,
+        approvedAt,
+      ),
+    ]);
+  }
+  const lifecycleRow = () =>
+    executor.all(
+      stmt(
+        'SELECT state, approved_at, accepted_at, source_system FROM import_run WHERE org_id = ? AND id = ?',
+        ctx.orgId,
+        'run',
+      ),
+    );
+  const jobs = () =>
+    executor.all(
+      stmt('SELECT type, resource_key, payload_json FROM job WHERE org_id = ?', ctx.orgId),
+    );
+  const audited = (value: ImportRunWrite): ImportRunWrite => ({
+    ...value,
+    audit: stmt(
+      'UPDATE import_run SET source_system = ? WHERE org_id = ? AND id = ?',
+      'audited',
+      ctx.orgId,
+      value.runId,
+    ),
+  });
+
+  it('checks every allowed and refused lifecycle operation in every schema state', async () => {
+    for (const operation of operations) {
+      for (const state of states) {
+        await seedLifecycle(state, operation === 'requestApply' ? now : null);
+        const before = await lifecycleRow();
+        const value = audited(await write());
+        const allowed = allowedStates[operation].includes(state);
+        const result = await store[operation](ctx, fence, value);
+        if (!allowed) {
+          expect(result, `${operation} from ${state}`).toMatchObject({
+            ok: false,
+            reason: 'conflict',
+          });
+          expect(await lifecycleRow()).toEqual(before);
+          expect(await jobs()).toEqual([]);
+          continue;
+        }
+        expect(result, `${operation} from ${state}`).toMatchObject({ ok: true });
+        expect(await lifecycleRow()).toEqual([
+          {
+            state:
+              operation === 'requestApply'
+                ? 'applying'
+                : operation === 'cancelRun'
+                  ? 'cancelled'
+                  : state,
+            approved_at: operation === 'approveRun' || operation === 'requestApply' ? now : null,
+            accepted_at: operation === 'acceptRun' ? now : null,
+            source_system: 'audited',
+          },
+        ]);
+        const queued = operation === 'requestApply' || operation === 'requestRollback';
+        expect(await jobs()).toEqual(
+          queued
+            ? [
+                {
+                  type:
+                    operation === 'requestApply' ? IMPORT_RUN_JOB.apply : IMPORT_RUN_JOB.rollback,
+                  resource_key: IMPORT_RUN_JOB.resourceKey('run'),
+                  payload_json: JSON.stringify(IMPORT_RUN_JOB.payload('run')),
+                },
+              ]
+            : [],
+        );
+        if (queued) {
+          const batch = batches.at(-1);
+          expect(batch?.some((item) => /insert into "job"/i.test(item.sql))).toBe(true);
+          if (operation === 'requestApply')
+            expect(batch?.some((item) => /update "import_run"/i.test(item.sql))).toBe(true);
+          expect(batch).toContainEqual(value.audit);
+        }
+      }
+    }
+  });
+
+  it('gives exactly one concurrent approval or claim a win and the other a typed conflict', async () => {
+    for (const operation of [
+      'approveRun',
+      'requestApply',
+      'acceptRun',
+      'requestRollback',
+    ] as const) {
+      await seedLifecycle(
+        operation === 'acceptRun' || operation === 'requestRollback' ? 'verified' : 'planned',
+        operation === 'requestApply' ? now : null,
+      );
+      const value = audited(await write());
+      const results = await Promise.all([
+        store[operation](ctx, fence, value),
+        store[operation](ctx, fence, value),
+      ]);
+      expect(
+        results.filter((result) => result.ok),
+        operation,
+      ).toHaveLength(1);
+      expect(
+        results.filter((result) => !result.ok),
+        operation,
+      ).toEqual([{ ok: false, reason: 'conflict' }]);
+      expect(await jobs()).toHaveLength(
+        operation === 'requestApply' || operation === 'requestRollback' ? 1 : 0,
+      );
+    }
+  });
+
+  it('never writes with a stale expected state, including a race immediately before the batch', async () => {
+    for (const operation of operations) {
+      await seedLifecycle(
+        operation === 'acceptRun' || operation === 'requestRollback' ? 'verified' : 'planned',
+        operation === 'requestApply' ? now : null,
+      );
+      const value = audited(await write());
+      beforeBatch = async () => {
+        await executor.batch([
+          stmt(
+            'UPDATE import_run SET state = ? WHERE org_id = ? AND id = ?',
+            'cancelled',
+            ctx.orgId,
+            'run',
+          ),
+        ]);
+      };
+      expect(await store[operation](ctx, fence, value), operation).toMatchObject({
+        ok: false,
+        reason: 'conflict',
+      });
+      expect(await lifecycleRow()).toEqual([
+        {
+          state: 'cancelled',
+          approved_at: operation === 'requestApply' ? now : null,
+          accepted_at: null,
+          source_system: 'test',
+        },
+      ]);
+      expect(await jobs()).toEqual([]);
+    }
+  });
+
+  it('rolls back job enqueue, state, audit and idempotency together on a later batch failure', async () => {
+    for (const operation of ['requestApply', 'requestRollback'] as const) {
+      await seedLifecycle(operation === 'requestApply' ? 'planned' : 'applied', now);
+      const before = await lifecycleRow();
+      const value = audited(await write());
+      const result = await store[operation](ctx, fence, {
+        ...value,
+        idempotency: stmt(
+          "INSERT INTO access_mutation_guard (key) VALUES ('failure'), ('failure')",
+        ),
+      });
+      expect(result.ok).toBe(false);
+      expect(await lifecycleRow()).toEqual(before);
+      expect(await jobs()).toEqual([]);
+    }
+  });
+
+  it('rejects malformed approvals at the store boundary and refuses them as apply evidence', async () => {
+    const malformed = [
+      '',
+      'not-a-time',
+      now.slice(0, 10),
+      now.replace(/\.\d{3}Z$/, 'Z'),
+      '2026-02-30T10:00:00.000Z',
+      new Date(Date.parse(now) + 120_000).toISOString(),
+    ];
+    for (const value of malformed) {
+      await seedLifecycle('planned');
+      const approval = await write();
+      expect(
+        await store.approveRun(ctx, fence, {
+          ...approval,
+          now: value,
+          approvedAt: value,
+          credentialWindowUntil: Number.isFinite(Date.parse(value))
+            ? new Date(Date.parse(value) + 3_600_000).toISOString()
+            : '',
+        }),
+      ).toMatchObject({ ok: false, reason: 'conflict' });
+      expect(await lifecycleRow()).toEqual([
+        { state: 'planned', approved_at: null, accepted_at: null, source_system: 'test' },
+      ]);
+      await seedLifecycle('planned', value);
+      expect(await store.requestApply(ctx, fence, await write())).toMatchObject({
+        ok: false,
+        reason: 'conflict',
+      });
+      expect(await jobs()).toEqual([]);
+    }
+  });
+
+  it('compares every observed approval and acceptance field inside the batch', async () => {
+    for (const column of [
+      'plan_hash',
+      'approved_at',
+      'approved_by_user_id',
+      'accepted_at',
+      'before_image_expires_at',
+    ]) {
+      await seedLifecycle('planned');
+      const value = audited(await write());
+      beforeBatch = async () => {
+        await executor.batch([
+          stmt(
+            `UPDATE import_run SET ${column} = ? WHERE org_id = ? AND id = ?`,
+            column === 'approved_by_user_id' ? 'actor' : now,
+            ctx.orgId,
+            'run',
+          ),
+        ]);
+      };
+      expect(await store.cancelRun(ctx, fence, value), column).toMatchObject({
+        ok: false,
+        reason: 'conflict',
+      });
+      expect(
+        await executor.all(
+          stmt(
+            'SELECT state, source_system FROM import_run WHERE org_id = ? AND id = ?',
+            ctx.orgId,
+            'run',
+          ),
+        ),
+      ).toEqual([{ state: 'planned', source_system: 'test' }]);
+    }
+  });
+
+  it('refuses a second queued or running job without writing audit or state', async () => {
+    for (const operation of ['requestApply', 'requestRollback'] as const) {
+      for (const jobState of ['queued', 'running']) {
+        await seedLifecycle(operation === 'requestApply' ? 'planned' : 'applied', now);
+        await executor.batch([
+          stmt(
+            'INSERT INTO job (id, org_id, type, resource_key, payload_json, state, lease_owner, lease_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            'existing',
+            ctx.orgId,
+            IMPORT_RUN_JOB.apply,
+            IMPORT_RUN_JOB.resourceKey('run'),
+            JSON.stringify(IMPORT_RUN_JOB.payload('run')),
+            jobState,
+            'worker',
+            new Date(Date.parse(now) + 60_000).toISOString(),
+          ),
+        ]);
+        const before = await lifecycleRow();
+        expect(await store[operation](ctx, fence, audited(await write()))).toMatchObject({
+          ok: false,
+          reason: 'conflict',
+        });
+        expect(await lifecycleRow()).toEqual(before);
+        expect(await jobs()).toHaveLength(1);
+      }
+    }
+  });
+
+  it('refuses rollback with expired or malformed before-image evidence', async () => {
+    for (const expiry of ['', 'not-a-time', new Date(Date.parse(now) - 60_000).toISOString()]) {
+      await seedLifecycle('applied', now);
+      await executor.batch([
+        stmt(
+          'UPDATE import_run SET before_image_expires_at = ? WHERE org_id = ? AND id = ?',
+          expiry,
+          ctx.orgId,
+          'run',
+        ),
+      ]);
+      expect(await store.requestRollback(ctx, fence, audited(await write()))).toMatchObject({
+        ok: false,
+        reason: 'conflict',
+      });
+      expect(await jobs()).toEqual([]);
     }
   });
 });

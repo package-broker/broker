@@ -1,4 +1,5 @@
 import { sql } from 'kysely';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { JobGuard } from '@package-broker/core/platform/job-repository';
@@ -12,7 +13,10 @@ import type {
   IngestSessions,
 } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
-import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import {
+  assertCatalogueWriteGuard,
+  registerCatalogueWriteGuard,
+} from '../internal/catalogue-write-guard.js';
 import { leaseKey } from './fetch-lease.js';
 import { FORMAT, NOW, seconds, until } from '../internal/lease-time.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
@@ -318,7 +322,8 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions {
       );
     },
 
-    async advance(ctx, guard, input) {
+    async advance(ctx, guard, input, writeGuard) {
+      if (writeGuard !== undefined) assertCatalogueWriteGuard(ctx, writeGuard);
       const cursor = cursorOf(input.cursor);
       if (
         typeof input.addSeen !== 'number' ||
@@ -327,22 +332,30 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions {
       ) {
         throw new RangeError('addSeen must be a non-negative integer');
       }
-      const [result] = await executor.batch([
-        compile(
-          db
-            .updateTable('ingest_session')
-            .set({
-              cursor,
-              seen_count: sql<number>`ingest_session.seen_count + ${input.addSeen}`,
-              pages_so_far: sql<number>`ingest_session.pages_so_far + 1`,
-              lease_until: until(seconds(guard.leaseSeconds)),
-              updated_at: NOW as never,
-            })
-            .where(holds(ctx, guard))
-            .returning(['seen_count', 'pages_so_far']),
-        ),
-      ]);
-      const row = result?.rows[0] as { seen_count: number; pages_so_far: number } | undefined;
+      const update = compile(
+        db
+          .updateTable('ingest_session')
+          .set({
+            cursor,
+            seen_count: sql<number>`ingest_session.seen_count + ${input.addSeen}`,
+            pages_so_far: sql<number>`ingest_session.pages_so_far + 1`,
+            lease_until: until(seconds(guard.leaseSeconds)),
+            updated_at: NOW as never,
+          })
+          .where(holds(ctx, guard))
+          .returning(['seen_count', 'pages_so_far']),
+      );
+      let results;
+      try {
+        results = await executor.batch([...(writeGuard ?? []), update]);
+      } catch (error) {
+        if (error instanceof DbError && error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT) {
+          return null;
+        }
+        throw error;
+      }
+      const row = results.at(-1)?.rows[0] as
+        { seen_count: number; pages_so_far: number } | undefined;
       return row === undefined ? null : { seenCount: row.seen_count, pagesSoFar: row.pages_so_far };
     },
 

@@ -439,3 +439,38 @@ describe('per-version sync costs', () => {
     expect(largest).toBe(447);
   });
 });
+
+describe('planChunk writer payload bound', () => {
+  const payloadBudget = (bytes: (v: VersionInput) => number, limit = 1000): ChunkBudget => ({
+    ...withA6(),
+    syncCost: (versions) => 10 + versions,
+    syncPayload: { limit, bytes },
+  });
+
+  it('starts a new syncPackage call before the bound parameter bytes would exceed the limit', () => {
+    const plan = planChunk(
+      npmMembers(5),
+      [],
+      npmSource,
+      payloadBudget(() => 400),
+    );
+    expect(
+      plan.writerCalls.map((c) => (c.method === 'syncPackage' ? c.versions.length : 0)),
+    ).toEqual([2, 2, 1]);
+    expect(plan.inserts).toHaveLength(5);
+    expect(plan.statements).toBe(3 + 2 + (10 + 2) + (10 + 2) + (10 + 1));
+  });
+
+  it('refuses a member whose own bound bytes exceed the limit and keeps planning', () => {
+    const members = npmMembers(3);
+    const plan = planChunk(
+      members,
+      [],
+      npmSource,
+      payloadBudget((v) => (v.versionNormalized === '1.0.1' ? 1001 : 10)),
+    );
+    expect(plan.refused).toEqual([{ version: '1.0.1', reason: 'payload_too_large' }]);
+    expect(plan.inserts.map((v) => v.versionNormalized)).toEqual(['1.0.0', '1.0.2']);
+    expect(plan.cursorAfter).toBe(2);
+  });
+});

@@ -10,6 +10,9 @@ import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
 import { accessContextOf } from './access-context.js';
+import type { AccessContextSnapshot } from './access-context.js';
+import type { AccessCheckInput } from '../plugin.js';
+import type { ScopeLevel } from './scope.js';
 import { createAuthorizationEngine, engineGrantOf, patValidationGate } from './engine.js';
 import type { AuthorizationEngineDeps, EngineSessionAccess, EngineTokenAccess } from './engine.js';
 
@@ -44,7 +47,7 @@ interface State {
     hashOf: string;
     bindingOk: boolean;
     projectMode: 'all' | 'selected' | null;
-    scope: { level: string; readOnly: boolean } | null;
+    scope: { level: ScopeLevel; readOnly: boolean } | null;
     lastUsedAt: string | null;
   };
   lookups: number;
@@ -843,6 +846,94 @@ describe('with the kernel', () => {
 });
 
 describe('engine grants', () => {
+  it.each([
+    { name: 'read PAT', kind: 'pat', scope: 'read', readOnly: true },
+    { name: 'write service token', kind: 'svc', scope: 'write', readOnly: false },
+    { name: 'session', kind: null, scope: null, readOnly: false },
+  ] as const)(
+    'carries $name metadata through the kernel only to the core snapshot',
+    async ({ kind, scope, readOnly }) => {
+      const state = freshState();
+      if (kind !== null && scope !== null) {
+        state.token.kind = kind;
+        state.token.hashOf = kind === 'pat' ? PAT : SVC;
+        state.token.scope = { level: scope, readOnly };
+      }
+      const snapshots: (AccessContextSnapshot | null)[] = [];
+      const hookInputs: AccessCheckInput[] = [];
+      let grantToken: unknown;
+      const baseEngine = createAuthorizationEngine(deps(state));
+      const kernel = await createKernel({
+        platform: 'node',
+        plugins: [
+          {
+            id: 'observer',
+            package: '@test/observer',
+            apiVersion: 3,
+            platforms: ['node'],
+            register(registry) {
+              registry.hook('access.check', (input) => {
+                hookInputs.push(input);
+              });
+            },
+          },
+        ],
+        ports: {
+          organizations: { get: () => Promise.resolve(null) },
+          clock: fixedClock('2026-10-16T12:00:00.000Z'),
+          ids: { ulid: () => '01JA0000000000000000000000' },
+        },
+        resolveOrg: () => Promise.resolve(org),
+        health: () => Promise.resolve(true),
+        log: () => undefined,
+        authorization: {
+          async authorize(request) {
+            const decision = await baseEngine.authorize(request);
+            grantToken = engineGrantOf(request)?.token;
+            return decision;
+          },
+        },
+        coreRoutes: [
+          {
+            method: 'GET',
+            path: '/_pb/projects/:project',
+            permission: 'project:read',
+            boundary: 'project',
+            handler(context) {
+              snapshots.push(accessContextOf(context));
+              expect(context).not.toHaveProperty('token');
+              return Response.json({ ok: true });
+            },
+          },
+        ],
+      });
+      const response = await kernel.fetch(
+        new Request(`${ORIGIN}/_pb/projects/demo`, {
+          headers: kind === null ? cookie : bearer(state.token.hashOf),
+        }),
+      );
+      expect(response.status).toBe(200);
+      const expected = kind === null ? null : { kind, scope, readOnly };
+      expect(grantToken).toEqual(expected);
+      expect(Object.isFrozen(grantToken)).toBe(true);
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]?.token).toEqual(expected);
+      if (state.token.scope !== null) state.token.scope.readOnly = !readOnly;
+      expect(snapshots[0]?.token).toEqual(expected);
+      expect(hookInputs).toEqual([
+        {
+          org,
+          principal:
+            kind === 'svc' ? { kind: 'service', id: 'svc-1' } : { kind: 'user', id: 'user-1' },
+          permission: 'project:read',
+          projectId: 'proj-1',
+        },
+      ]);
+      expect(hookInputs[0]).not.toHaveProperty('scope');
+      expect(hookInputs[0]).not.toHaveProperty('token');
+    },
+  );
+
   it.each([true, false])(
     'copies and freezes the session snapshot (protected=%s)',
     async (protectedHolder) => {
@@ -910,6 +1001,7 @@ describe('engine grants', () => {
         sessionId: null,
         actor: null,
         tokenSelector: kind === 'pat' ? SELECTOR : 'mnopqrstuvwx',
+        token: { kind, scope: 'full', readOnly: false },
       });
     },
   );

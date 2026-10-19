@@ -14,6 +14,7 @@ import type {
 import type { Principal } from '../plugin.js';
 import { decidePatValidation } from './pat-validation.js';
 import type { PatValidationDecision, PatValidationView } from './pat-validation.js';
+import type { ScopeLevel } from './scope.js';
 import { isValidProjectSlug } from './project-path.js';
 import { authenticateToken } from './token-use.js';
 import type { TokenAccessView, TokenUseDeps } from './token-use.js';
@@ -23,6 +24,11 @@ export interface EngineGrant {
   readonly projectId: string | null;
   readonly sessionId: string | null;
   readonly tokenSelector: string | null;
+  readonly token: {
+    readonly kind: 'pat' | 'svc';
+    readonly scope: ScopeLevel | null;
+    readonly readOnly: boolean;
+  } | null;
   readonly actor: ActorAccessSnapshot | null;
 }
 
@@ -60,7 +66,7 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
     readonly servicePrincipalId: string | null;
     readonly bindingOk: boolean;
     readonly projectMode: 'all' | 'selected' | null;
-    readonly scope: { readonly level: string; readonly readOnly: boolean } | null;
+    readonly scope: { readonly level: ScopeLevel; readonly readOnly: boolean } | null;
   };
 }
 
@@ -292,6 +298,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
           projectId: decision.projectId,
           sessionId: found.session.id,
           tokenSelector: null,
+          token: null,
           actor: Object.freeze({
             session: Object.freeze({ id: found.session.id, userId: found.user.id }),
             user: Object.freeze({ id: found.user.id }),
@@ -368,6 +375,11 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         projectId: decision.projectId,
         sessionId: null,
         tokenSelector: token.selector,
+        token: Object.freeze({
+          kind: found.token.kind,
+          scope: found.token.scope?.level ?? null,
+          readOnly: found.token.scope?.readOnly ?? false,
+        }),
         actor: null,
       }),
     );

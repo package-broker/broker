@@ -504,6 +504,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         projectId: null,
         boundary: 'none',
         sessionId: null,
+        token: null,
         actor: null,
         rateKey: { stage: 'anonymous', ip: null, routeClass: 'none' },
       });
@@ -654,6 +655,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       projectId: grant.projectId,
       boundary,
       sessionId: grant.sessionId,
+      token: grant.token,
       actor: grant.actor,
       rateKey: {
         stage: 'authenticated',

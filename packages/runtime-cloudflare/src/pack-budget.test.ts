@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
 import { deflateSync } from 'node:zlib';
+import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
@@ -14,9 +14,10 @@ const CLOUDFLARE_LIMITS = {
 } as const;
 
 const read = (relative: string): string =>
-  stripTypeScriptTypes(readFileSync(new URL(relative, import.meta.url), 'utf8'), {
-    mode: 'transform',
-  });
+  transpileModule(readFileSync(new URL(relative, import.meta.url), 'utf8'), {
+    compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ESNext },
+    fileName: relative,
+  }).outputText;
 
 const codecAdapter = read('./codec/workers-codec.ts').replaceAll(
   "'@package-broker/core/platform/codec'",

@@ -1,5 +1,9 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
-import { MAX_PATTERN_BYTES } from '@package-broker/core/catalogue/patterns';
+import {
+  MAX_PATTERN_BYTES,
+  MAX_PATTERN_WILDCARDS,
+  MAX_PATTERNS_PER_RULE,
+} from '@package-broker/core/catalogue/patterns';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { guardAliases } from '../kysely.js';
 
@@ -20,9 +24,6 @@ export interface WinnerRefs {
 }
 
 const PROXY_TYPES = sql`('packagist_proxy', 'npmjs_proxy')`;
-
-const MAX_PATTERN_WILDCARDS = 4;
-const MAX_PATTERNS_PER_RULE = 64;
 
 // Mirrors isValidPattern in core/catalogue/patterns.ts; length() and glob stop at NUL, so a byte-length mismatch (NUL, non-ASCII) is invalid.
 function invalidPattern(pattern: Expression<unknown>): Expression<SqlBool> {
@@ -208,4 +209,18 @@ export function winnerOrder(refs: WinnerRefs): readonly Expression<unknown>[] {
     sql.ref(`${refs.attachment}.precedence`),
     source('id'),
   ];
+}
+
+export function visibleRowsCondition(
+  ctx: OrgContext,
+  alias: { pp: string; pkg: string; src: string; ps: string },
+) {
+  const { pp, pkg, src, ps } = alias;
+  return sql`${sql.ref(`${pp}.org_id`)} = ${ctx.orgId}
+    and ${sql.ref(`${pkg}.org_id`)} = ${ctx.orgId}
+    and ${sql.ref(`${src}.org_id`)} = ${ctx.orgId}
+    and ${sql.ref(`${ps}.org_id`)} = ${ctx.orgId}
+    and ${attachedSourceCondition(ctx, col(`${pp}.project_id`), col(`${pkg}.source_id`), col(`${pkg}.ecosystem`))}
+    and ${readTimeCondition(ctx, col(`${pp}.project_id`), { package: pkg, source: src })}
+    and ${proxyEligibleCondition({ package: pkg, source: src })}`;
 }

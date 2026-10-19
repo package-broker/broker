@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import type { PendingValidators } from '@package-broker/core/ingest/validators';
+import { createUpstreamStateRepository } from './upstream-state.js';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { describeComposerV2 } from '@package-broker/core/ingest/composer/v2-package';
 import { fixedClock } from '@package-broker/core/ids';
@@ -291,13 +293,41 @@ describe('ingest session finalize', () => {
     });
   });
 
-  it('7: an unknown validator form fails before any write', async () => {
+  it('publishes exactly the normalised validators stored at write', async () => {
+    const { session } = await begin('package');
+    const value = { 'composer-p2': { etag: '"normalised"' } };
+    await createIngestSessions(database.executor).setPendingValidators(
+      org,
+      session,
+      value as PendingValidators,
+    );
+    const [stored] = await all<{ pending_validators: string }>(
+      'SELECT pending_validators FROM ingest_session WHERE org_id = ? AND id = ?',
+      org.orgId,
+      session.id,
+    );
+    const normalised = { etag: '"normalised"', lastModified: null, contentSha256: null };
+    expect(stored?.pending_validators).toBe(JSON.stringify({ 'composer-p2': normalised }));
+    expect(await createIngestFinalizer(database.executor).finalize(org, session, input(0))).toEqual(
+      { status: 'complete', empty: true, validatorsPublished: 1 },
+    );
+    expect(
+      await createUpstreamStateRepository(database.executor).get(org, PACKAGE, 'composer-p2'),
+    ).toMatchObject(normalised);
+  });
+
+  it('7: an unknown validator form stored by an older build fails before any write', async () => {
     await seedVersions('1.0.0', '2.0.0');
     const { session, mark } = await begin('package');
     await mark(['1.0.0']);
-    await createIngestSessions(database.executor).setPendingValidators(org, session, {
-      bogus: { etag: '"x"', lastModified: null, contentSha256: null },
-    });
+    await run(
+      stmt(
+        'UPDATE ingest_session SET pending_validators = ? WHERE org_id = ? AND id = ?',
+        JSON.stringify({ bogus: { etag: '"x"', lastModified: null, contentSha256: null } }),
+        org.orgId,
+        session.id,
+      ),
+    );
     await expect(
       createIngestFinalizer(database.executor).finalize(org, session, input(1)),
     ).rejects.toThrow(RangeError);

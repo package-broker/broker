@@ -1,3 +1,4 @@
+import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.js';
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
 import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
 import { entries as attachedProxyEntries } from './mutation-table/source-attached-proxy.js';
@@ -46,6 +47,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...removedBlobsEntries,
   ...catalogueWriterEntries,
   ...catalogueReconcileEntries,
   ...projectReadableEntries,

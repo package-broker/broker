@@ -1,3 +1,4 @@
+import type { PendingValidators } from './validators.js';
 import type { OrgContext } from '../db/port.js';
 
 export type IngestScopeRef =
@@ -60,7 +61,7 @@ export interface IngestSessions {
   setPendingValidators(
     ctx: OrgContext,
     guard: IngestSessionHandle,
-    validators: Readonly<Record<string, unknown>> | null,
+    validators: PendingValidators | null,
   ): Promise<boolean>;
   /** An expired holder must re-acquire (fence + 1), then abandon with the new handle. */
   abandon(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;

@@ -2,6 +2,7 @@ import { sql } from 'kysely';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { JobGuard } from '@package-broker/core/platform/job-repository';
+import { parsePendingValidators } from '@package-broker/core/ingest/validators';
 import { ulid } from '@package-broker/core/ids';
 import type {
   IngestScopeRef,
@@ -160,10 +161,7 @@ function cursorOf(value: unknown): string | null {
 
 function validatorsOf(value: unknown): string | null {
   if (value === null) return null;
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new RangeError('pending validators must be a plain object or null');
-  }
-  const json = JSON.stringify(value);
+  const json = JSON.stringify(parsePendingValidators(value));
   if (new TextEncoder().encode(json).length > MAX_VALIDATORS_BYTES) {
     throw new RangeError(
       `pending validators must be at most ${String(MAX_VALIDATORS_BYTES)} bytes`,

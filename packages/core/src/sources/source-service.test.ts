@@ -1,13 +1,27 @@
+import type { ApiCall } from '../api/idempotency.js';
 import { Buffer } from 'node:buffer';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { ActorContext } from '../authz/administration.js';
 import { mutationFence, type AuthenticatedActor } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { orgContext } from '../db/port.js';
 import type { SourceRecord } from '../db/source.js';
-import { createSourceService, type SourceServiceDeps } from './source-service.js';
+import {
+  createSourceService,
+  type SourceService,
+  type SourceServiceDeps,
+} from './source-service.js';
 import type { CredentialKind } from './credentials.js';
 import * as urlPolicy from './url-policy.js';
+
+const call: ApiCall = {
+  audit: {
+    opId: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+    requestId: '01ARZ3NDEKTSV4RRFFQ69G5FAW',
+    sourceIp: '192.0.2.1',
+    tokenSelector: null,
+  },
+};
 
 const ctx = orgContext('org-a');
 const org = {
@@ -52,6 +66,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     delete: vi.fn().mockResolvedValue('deleted'),
   };
   const registeredNames = {
+    owner: vi.fn().mockResolvedValue({ sourceId: 'source', projectId: 'project-a' }),
     add: vi.fn().mockResolvedValue('added'),
     remove: vi.fn().mockResolvedValue('removed_and_paused'),
     enable: vi.fn().mockResolvedValue('enabled'),
@@ -312,12 +327,18 @@ describe('source administration', () => {
       await service.create(ctx, project, fence, { ...input, projectId: 'project-b' }),
     ).toMatchObject({ error: 'forbidden' });
     expect(
-      await service.addRegisteredName(ctx, project, fence, {
-        sourceId: 'source',
-        pattern: 'vendor/*',
-      }),
+      await service.addRegisteredName(
+        ctx,
+        project,
+        fence,
+        {
+          sourceId: 'source',
+          pattern: 'vendor/*',
+        },
+        call,
+      ),
     ).toMatchObject({ error: 'forbidden' });
-    expect(await service.removeRegisteredName(ctx, project, fence, 'name')).toMatchObject({
+    expect(await service.removeRegisteredName(ctx, project, fence, 'name', call)).toMatchObject({
       error: 'forbidden',
     });
     expect(registeredNames.add).not.toHaveBeenCalled();
@@ -555,7 +576,11 @@ describe('source administration regressions', () => {
       await service.update(ctx, org, fence, 'source', { pollIntervalSeconds: 600 }),
     ).toMatchObject({ error: 'not_found' });
     for (const operation of ['delete', 'resume', 'enable'] as const) {
-      expect(await service[operation](ctx, org, fence, 'source')).toMatchObject({
+      expect(
+        await (operation === 'enable'
+          ? service.enable(ctx, org, fence, 'source', call)
+          : service[operation](ctx, org, fence, 'source')),
+      ).toMatchObject({
         error: 'not_found',
       });
     }
@@ -566,13 +591,19 @@ describe('source administration regressions', () => {
     expect(registeredNames.enable).not.toHaveBeenCalled();
     expect(
       (
-        await service.addRegisteredName(ctx, org, fence, {
-          sourceId: 'source',
-          pattern: 'vendor/*',
-        })
+        await service.addRegisteredName(
+          ctx,
+          org,
+          fence,
+          {
+            sourceId: 'source',
+            pattern: 'vendor/*',
+          },
+          call,
+        )
       ).ok,
     ).toBe(true);
-    expect((await service.removeRegisteredName(ctx, org, fence, 'name')).ok).toBe(true);
+    expect((await service.removeRegisteredName(ctx, org, fence, 'name', call)).ok).toBe(true);
   });
 
   it('prepares replacement credentials for the fenced update and clears the temporary buffer', async () => {
@@ -793,4 +824,212 @@ it('refuses supplied retention overrides when the organization is missing', asyn
     error: 'not_found',
   });
   expect(sources.create).not.toHaveBeenCalled();
+});
+
+describe('registered-name mutation audit', () => {
+  const idempotency: NonNullable<ApiCall['idempotency']> = {
+    principalKey: 'user:user',
+    key: 'operation',
+    route: 'test',
+    requestHash: 'hash',
+    status: 200,
+    responseJson: '{}',
+    createdAt: '2026-10-19T00:00:00.000Z',
+    expiresAt: '2026-10-20T00:00:00.000Z',
+  };
+
+  it('requires a trailing ApiCall on all three methods', () => {
+    expectTypeOf<Parameters<SourceService['addRegisteredName']>['length']>().toEqualTypeOf<5>();
+    expectTypeOf<Parameters<SourceService['removeRegisteredName']>['length']>().toEqualTypeOf<5>();
+    expectTypeOf<Parameters<SourceService['enable']>['length']>().toEqualTypeOf<5>();
+    expectTypeOf<Parameters<SourceService['addRegisteredName']>[4]>().toEqualTypeOf<ApiCall>();
+    expectTypeOf<Parameters<SourceService['removeRegisteredName']>[4]>().toEqualTypeOf<ApiCall>();
+    expectTypeOf<Parameters<SourceService['enable']>[4]>().toEqualTypeOf<ApiCall>();
+  });
+
+  it.each(['add', 'remove', 'enable'] as const)(
+    'passes the %s event and preserves idempotency',
+    async (operation) => {
+      for (const record of [undefined, idempotency]) {
+        const { service, registeredNames } = setup();
+        const invocation = { ...call, ...(record === undefined ? {} : { idempotency: record }) };
+        if (operation === 'add') {
+          await service.addRegisteredName(
+            ctx,
+            org,
+            fence,
+            { sourceId: 'source', pattern: 'vendor/*' },
+            invocation,
+          );
+        } else if (operation === 'remove') {
+          await service.removeRegisteredName(ctx, org, fence, 'name', invocation);
+        } else {
+          await service.enable(ctx, org, fence, 'source', invocation);
+        }
+        const store = registeredNames[operation];
+        expect(store).toHaveBeenCalledOnce();
+        const [organization, guard, payload] = store.mock.calls[0]!;
+        expect(organization).toBe(ctx);
+        expect(guard).toBe(fence);
+        expect(payload.audit).toMatchObject({
+          action:
+            operation === 'add'
+              ? 'registered_name.add'
+              : operation === 'remove'
+                ? 'registered_name.remove'
+                : 'source.resume',
+          actor: { type: 'user', id: 'user' },
+          target: {
+            type: operation === 'enable' ? 'source' : 'registered_name',
+            id: operation === 'remove' ? 'name' : 'source',
+          },
+          projectId: null,
+          sourceIp: call.audit.sourceIp,
+        });
+        expect(JSON.parse(payload.audit.payloadJson)).toEqual({
+          op_id: call.audit.opId,
+          request_id: call.audit.requestId,
+        });
+        if (record === undefined) expect(Object.hasOwn(payload, 'idempotency')).toBe(false);
+        else expect(payload.idempotency).toBe(record);
+        expect(Object.values(payload).filter((value) => value === payload.audit)).toHaveLength(1);
+        if (operation === 'remove') {
+          expect(registeredNames.owner).toHaveBeenCalledExactlyOnceWith(ctx, 'name');
+          expect(payload.pauseAudit).toMatchObject({
+            action: 'source.pause',
+            actor: { type: 'user', id: 'user' },
+            target: { type: 'source', id: 'source' },
+            projectId: 'project-a',
+            sourceIp: call.audit.sourceIp,
+          });
+          expect(JSON.parse(payload.pauseAudit.payloadJson)).toEqual({
+            op_id: call.audit.opId,
+            request_id: call.audit.requestId,
+          });
+        } else expect(Object.hasOwn(payload, 'pauseAudit')).toBe(false);
+      }
+    },
+  );
+
+  it.each(['add', 'remove', 'enable'] as const)(
+    'refuses forbidden %s before the store',
+    async (operation) => {
+      const { service, registeredNames } = setup();
+      const denied = { ...org, actor: { ...org.actor, permissions: new Set<string>() } };
+      const result =
+        operation === 'add'
+          ? await service.addRegisteredName(
+              ctx,
+              denied,
+              fence,
+              { sourceId: 'source', pattern: 'vendor/*' },
+              call,
+            )
+          : operation === 'remove'
+            ? await service.removeRegisteredName(ctx, denied, fence, 'name', call)
+            : await service.enable(ctx, denied, fence, 'source', call);
+      expect(result).toEqual({ ok: false, error: 'forbidden' });
+      expect(registeredNames[operation]).not.toHaveBeenCalled();
+      expect(registeredNames.owner).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses a project remove before looking up the owner', async () => {
+    const { service, registeredNames } = setup();
+    expect(await service.removeRegisteredName(ctx, project, fence, 'name', call)).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(registeredNames.owner).not.toHaveBeenCalled();
+    expect(registeredNames.remove).not.toHaveBeenCalled();
+  });
+
+  it('refuses an owner miss before remove reaches the store', async () => {
+    const { service, registeredNames } = setup();
+    registeredNames.owner.mockResolvedValue(null);
+    expect(await service.removeRegisteredName(ctx, org, fence, 'missing', call)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(registeredNames.owner).toHaveBeenCalledExactlyOnceWith(ctx, 'missing');
+    expect(registeredNames.remove).not.toHaveBeenCalled();
+  });
+
+  it('refuses an invalid pattern before the store', async () => {
+    const { service, registeredNames } = setup();
+    expect(
+      await service.addRegisteredName(ctx, org, fence, { sourceId: 'source', pattern: '' }, call),
+    ).toEqual({ ok: false, error: 'invalid_pattern' });
+    expect(registeredNames.add).not.toHaveBeenCalled();
+  });
+
+  it('preserves the source project in a project actor enable audit event', async () => {
+    const { service, sources, registeredNames } = setup();
+    sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      credentialId: null,
+      projectId: 'project-a',
+    } as SourceRecord);
+
+    expect(await service.enable(ctx, project, fence, 'source', call)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(registeredNames.enable).toHaveBeenCalledExactlyOnceWith(ctx, fence, {
+      id: 'source',
+      providerAnchors: [],
+      audit: expect.objectContaining({
+        action: 'source.resume',
+        actor: { type: 'user', id: 'user' },
+        target: { type: 'source', id: 'source' },
+        projectId: 'project-a',
+      }),
+    });
+  });
+
+  it('refuses an absent source before enable reaches the store', async () => {
+    const { service, sources, registeredNames } = setup();
+    sources.get.mockResolvedValue(null);
+    expect(await service.enable(ctx, org, fence, 'missing', call)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(registeredNames.enable).not.toHaveBeenCalled();
+  });
+
+  it.each(['add', 'remove', 'enable'] as const)(
+    'rejects invalid audit input before %s reaches the store',
+    async (operation) => {
+      const { service, registeredNames } = setup();
+      const invalid = { audit: { ...call.audit, requestId: 'invalid' } };
+      const result =
+        operation === 'add'
+          ? service.addRegisteredName(
+              ctx,
+              org,
+              fence,
+              { sourceId: 'source', pattern: 'vendor/*' },
+              invalid,
+            )
+          : operation === 'remove'
+            ? service.removeRegisteredName(ctx, org, fence, 'name', invalid)
+            : service.enable(ctx, org, fence, 'source', invalid);
+      await expect(result).rejects.toThrow(new TypeError('Invalid source audit event'));
+      expect(registeredNames[operation]).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it.each([
+  ['removed', false],
+  ['removed_and_paused', true],
+] as const)('preserves the %s outcome as paused: %s', async (answer, paused) => {
+  const { service, registeredNames } = setup();
+  registeredNames.remove.mockResolvedValue(answer);
+  expect(await service.removeRegisteredName(ctx, org, fence, 'name', call)).toEqual({
+    ok: true,
+    value: { paused },
+  });
+  expect(registeredNames.remove).toHaveBeenCalledOnce();
 });

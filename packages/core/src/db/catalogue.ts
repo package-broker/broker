@@ -314,6 +314,8 @@ export interface SyncPackageInput {
   readonly description: string | null;
   readonly versions: readonly VersionInput[];
   readonly tags?: Readonly<Record<string, string>>;
+  /** Full snapshot tag names to retain while applying a slice of tags. */
+  readonly tagNames?: readonly string[];
 }
 
 export type SyncRefusal = 'invalid' | 'too_large' | 'tombstoned';

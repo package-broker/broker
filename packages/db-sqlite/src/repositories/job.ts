@@ -426,6 +426,7 @@ export function createJobRepository(
         statement(sql`UPDATE job SET state = 'dead', last_error = 'invalid_payload',
           finished_at = ${NOW}, updated_at = ${NOW}
           WHERE org_id = ${ctx.orgId} AND state = 'queued' AND ${unused}
+          AND run_at <= ${NOW}
           AND id IN (${corrupt})`),
         statement(sql`UPDATE job SET
           state = 'running',

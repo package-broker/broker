@@ -474,3 +474,43 @@ describe('planChunk writer payload bound', () => {
     expect(plan.cursorAfter).toBe(2);
   });
 });
+
+it.each([null, 'Use version 2'])(
+  'budgets an npm deprecation refresh from %s',
+  (deprecatedMessage) => {
+    const old = versionInput('npm', '1.0.0', npmManifest('1.0.0'));
+    const incoming = {
+      ...old,
+      metadata: {
+        ...old.metadata,
+        deprecatedMessage: deprecatedMessage === null ? 'Use version 2' : null,
+      },
+    };
+    const plan = planChunk(
+      [member(0, incoming)],
+      [{ ...existingFrom(old), deprecatedMessage }],
+      npmSource,
+      withA6(),
+    );
+    expect(plan.writerCalls).toEqual([{ method: 'syncPackage', versions: [incoming] }]);
+    expect(plan.npmConflicts).toEqual([]);
+    expect(plan.statements).toBeLessThanOrEqual(INVOCATION_BUDGET);
+  },
+);
+
+it.each(['tombstoned', 'quarantined'])(
+  'marks a %s npm digest conflict without changing its status',
+  (status) => {
+    const old = versionInput('npm', '1.0.0', npmManifest('1.0.0'));
+    const incoming = { ...old, metadata: { ...old.metadata, npmIntegrity: INTEGRITY_B } };
+    const plan = planChunk(
+      [member(0, incoming)],
+      [{ ...existingFrom(old, false), status }],
+      npmSource,
+      withA6(),
+    );
+    expect(plan.writerCalls).toEqual([]);
+    expect(plan.unchanged).toEqual(['1.0.0']);
+    expect(plan.metadataRequired).toEqual([]);
+  },
+);

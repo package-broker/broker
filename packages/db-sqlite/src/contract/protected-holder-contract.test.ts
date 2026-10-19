@@ -390,8 +390,7 @@ describe('project roles never protect a last holder', () => {
     const refused = await repository().deleteOrganization(
       a,
       fence({ grant: await revisionOf(G1) }),
-      G1,
-      'OP-ORG-LAST',
+      { id: G1, opId: 'OP-ORG-LAST' },
     );
 
     expect(removed).toMatchObject({ status: 'deleted' });
@@ -430,16 +429,17 @@ describe('removing a contribution counts holders after exclusion', () => {
 
   it('lets the writer remove one contribution and refuses the last one', async () => {
     expect(
-      await repository().deleteOrganization(a, fence({ grant: await revisionOf(G1) }), G1, 'OP-1'),
+      await repository().deleteOrganization(a, fence({ grant: await revisionOf(G1) }), {
+        id: G1,
+        opId: 'OP-1',
+      }),
     ).toMatchObject({ outcome: 'deleted' });
     expect(await holders()).toBe(1);
     expect(
-      await repository().deleteOrganization(
-        a,
-        fence({ grant: await revisionOf(G_ADMINS) }),
-        G_ADMINS,
-        'OP-2',
-      ),
+      await repository().deleteOrganization(a, fence({ grant: await revisionOf(G_ADMINS) }), {
+        id: G_ADMINS,
+        opId: 'OP-2',
+      }),
     ).toBe('last_holder');
     expect(await holders()).toBe(1);
   });
@@ -496,14 +496,13 @@ describe('concurrent last-admin operations', () => {
     const result = await repository(connection).deleteOrganization(
       a,
       fence({ grant: await revisionOf(grantId) }),
-      grantId,
-      `OP-${counter}`,
+      { id: grantId, opId: `OP-${counter}` },
     );
     return typeof result === 'string' ? result : result.outcome;
   }
 
   const suspendOf = (userId: string) => (connection: SqlExecutor) =>
-    repository(connection).suspendUser(a, fence({ grant: 1 }), userId, now());
+    repository(connection).suspendUser(a, fence({ grant: 1 }), { userId: userId, now: now() });
 
   async function unlinkU1(connection: SqlExecutor): Promise<string> {
     const found = await connection.all<{ subject: string }>(

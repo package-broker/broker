@@ -903,14 +903,17 @@ const blobState = () => database.executor.all(stmt('SELECT * FROM blob ORDER BY 
 it.each(['package', 'source', 'absent'] as const)(
   '%s removal retains bytes while respecting purge ownership and organization boundaries',
   async (kind) => {
-    reconciler = createCatalogueReconciler({
-      ...database.executor,
-      batch: (statements) => {
-        expect(statements.length).toBeLessThanOrEqual(100);
-        expect(statements.every((statement) => statement.params.length <= 100)).toBe(true);
-        return database.executor.batch(statements);
+    reconciler = createCatalogueReconciler(
+      {
+        ...database.executor,
+        batch: (statements) => {
+          expect(statements.length).toBeLessThanOrEqual(100);
+          expect(statements.every((statement) => statement.params.length <= 100)).toBe(true);
+          return database.executor.batch(statements);
+        },
       },
-    });
+      { maxAbsenceShare: kind === 'package' ? 7 / 8 : 0.5 },
+    );
     const names = [
       'removed',
       'scheduled',
@@ -976,7 +979,11 @@ it.each(['package', 'source', 'absent'] as const)(
     } else {
       const listing =
         kind === 'source' ? await sourceListing(['acme/two']) : await packageListing(['stays']);
-      const effect = await reconciler.finalizeListing(org, guard, listing);
+      const effect = await reconciler.finalizeListing(org, guard, listing, {
+        attemptedCandidates: kind === 'source' ? 2 : names.length,
+        successfulCandidates: 1,
+        definitiveAbsent: kind === 'source' ? 1 : names.length - 1,
+      });
       expect(effect.removed).toBe(kind === 'source' ? 1 : 6);
       expect(effect.restored).toBe(0);
       statements = effect.statements;
@@ -1004,6 +1011,11 @@ it.each(['package', 'source', 'absent'] as const)(
         org,
         guard,
         kind === 'source' ? await sourceListing(['acme/two']) : await packageListing(['stays']),
+        {
+          attemptedCandidates: kind === 'source' ? 2 : names.length,
+          successfulCandidates: 1,
+          definitiveAbsent: kind === 'source' ? 1 : names.length - 1,
+        },
       );
     }
     expect(await blobState()).toEqual(after);
@@ -1012,22 +1024,36 @@ it.each(['package', 'source', 'absent'] as const)(
 );
 
 it('restoration preserves non-refetchability and a later removal narrows re-fetched bytes again', async () => {
+  reconciler = createCatalogueReconciler(database.executor, { maxAbsenceShare: 0.5 });
   await seedVersions(PACKAGE, '1.0.0', '2.0.0');
   await attachBlob('1.0.0');
   await attachBlob('2.0.0');
-  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0']));
-  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0', '2.0.0']));
+  const removalEvidence = {
+    attemptedCandidates: 2,
+    successfulCandidates: 1,
+    definitiveAbsent: 1,
+  };
+  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0']), removalEvidence);
+  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0', '2.0.0']), {
+    attemptedCandidates: 2,
+    successfulCandidates: 2,
+    definitiveAbsent: 0,
+  });
   expect(await scalar('SELECT refetchable AS v FROM blob WHERE id = ?', `B-${PACKAGE}-2.0.0`)).toBe(
     0,
   );
   await run(stmt('UPDATE blob SET refetchable = 1 WHERE id = ?', `B-${PACKAGE}-2.0.0`));
   await run(stmt('UPDATE version SET updated_at = ? WHERE id = ?', OLD, `V-${PACKAGE}-2.0.0`));
   const listing = await packageListing(['1.0.0']);
-  expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 1 });
+  expect(await reconciler.finalizeListing(org, guard, listing, removalEvidence)).toMatchObject({
+    removed: 1,
+  });
   expect(await scalar('SELECT refetchable AS v FROM blob WHERE id = ?', `B-${PACKAGE}-2.0.0`)).toBe(
     0,
   );
   const before = await blobState();
-  expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 0 });
+  expect(await reconciler.finalizeListing(org, guard, listing, removalEvidence)).toMatchObject({
+    removed: 0,
+  });
   expect(await blobState()).toEqual(before);
 });

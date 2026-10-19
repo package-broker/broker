@@ -98,6 +98,7 @@ async function fixture(
   const ids = { ulid: () => `01JA${String(++sequence).padStart(22, '0')}` };
   const servicePrincipals = createServicePrincipalService({
     principals: store,
+    sessions: { isReauthFresh: () => true },
     authority,
     directory: { createdBy: async () => [] },
     clock,

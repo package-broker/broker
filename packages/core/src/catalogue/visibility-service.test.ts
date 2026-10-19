@@ -31,6 +31,13 @@ const inputs = {
   releaseQuarantine: { versionId },
   tombstoneVersion: { versionId, reason: 'admin_tombstone' },
 } as const;
+const auditedActions = {
+  attachSource: 'source.attach',
+  detachSource: 'source.detach',
+  setPrecedence: 'source.reorder',
+  addPattern: 'source.update',
+  removePattern: 'source.update',
+} as const;
 type Operation = Exclude<keyof VisibilityStore, 'setOrder'>;
 const operations = Object.keys(inputs) as Operation[];
 
@@ -48,6 +55,7 @@ function setup(answer: VisibilityWriteResult = { ok: true, opId: 'operation-id' 
       ctx,
       (rawFence.length === 0 ? fence : rawFence[0]) as MutationFence,
       input as never,
+      apiCall,
     );
   return { store, log, call, service };
 }
@@ -58,7 +66,25 @@ describe('visibility administration', () => {
     async (op) => {
       const { store, log, call } = setup();
       expect(await call(op)).toEqual({ ok: true, opId: 'operation-id' });
-      expect(store[op]).toHaveBeenCalledExactlyOnceWith(ctx, fence, inputs[op]);
+      expect(store[op]).toHaveBeenCalledExactlyOnceWith(ctx, fence, {
+        ...inputs[op],
+        ...(op in auditedActions
+          ? {
+              audit: {
+                id: expect.stringMatching(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/),
+                occurredAt: expect.stringMatching(/^\d{4}-.*Z$/),
+                action: auditedActions[op as keyof typeof auditedActions],
+                actor: { type: 'user', id: fence.userId },
+                tokenSelector: null,
+                sourceIp: null,
+                target: { type: 'source', id: sourceId },
+                projectId,
+                payloadJson: JSON.stringify({ op_id: packageId, request_id: versionId }),
+              },
+              idempotency: apiCall.idempotency,
+            }
+          : {}),
+      });
       expect(log).toHaveBeenCalledExactlyOnceWith({
         level: 'info',
         event: 'catalogue.visibility.changed',
@@ -292,6 +318,41 @@ describe('setOrder', () => {
         },
         ...(withIdempotency ? { idempotency: apiCall.idempotency } : {}),
       });
+    },
+  );
+});
+
+describe('visibility mutation audit context', () => {
+  it.each(Object.keys(auditedActions) as (keyof typeof auditedActions)[])(
+    '%s only takes audit and idempotency from ApiCall',
+    async (operation) => {
+      const { service, store } = setup();
+      await service[operation](
+        ctx,
+        fence,
+        {
+          ...inputs[operation],
+          audit: { action: 'forged' },
+          idempotency: apiCall.idempotency,
+        } as never,
+        { audit: apiCall.audit },
+      );
+      const forwarded = store[operation].mock.calls[0]![2];
+      expect(forwarded).not.toHaveProperty('idempotency');
+      expect(forwarded.audit.action).toBe(auditedActions[operation]);
+      expect(forwarded.audit.actor).toEqual({ type: 'user', id: fence.userId });
+    },
+  );
+  it.each(Object.keys(auditedActions) as (keyof typeof auditedActions)[])(
+    '%s requires a valid audit context before writing',
+    async (operation) => {
+      const { service, store } = setup();
+      for (const call of [undefined, { audit: { ...apiCall.audit, requestId: 'invalid' } }]) {
+        await expect(
+          service[operation](ctx, fence, inputs[operation] as never, call as never),
+        ).rejects.toThrow(TypeError);
+      }
+      expect(store[operation]).not.toHaveBeenCalled();
     },
   );
 });

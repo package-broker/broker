@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import { catalogueCacheKey, createCatalogueCache } from '@package-broker/core/catalogue/cache-keys';
@@ -202,7 +203,11 @@ beforeEach(async () => {
   };
   await sync();
   for (const projectId of ['project', 'project2'])
-    await store.attachSource(org, fence(), { projectId, sourceId: 'source' });
+    await store.attachSource(org, fence(), {
+      audit: visibilityAudit(),
+      projectId,
+      sourceId: 'source',
+    });
 });
 
 afterEach(async () => {
@@ -227,13 +232,19 @@ describe('catalogue cache isolation', () => {
     const before = await resolve();
     expect((await fill(before, 'npm-full')).result).toBe('stored');
     await sync('source2');
-    await store.attachSource(org, fence(), { projectId: 'project', sourceId: 'source2' });
+    await store.attachSource(org, fence(), {
+      audit: visibilityAudit(),
+      projectId: 'project',
+      sourceId: 'source2',
+    });
     await store.setPrecedence(org, fence(), {
+      audit: visibilityAudit(),
       projectId: 'project',
       sourceId: 'source2',
       precedence: 1,
     });
     await store.setPrecedence(org, fence(), {
+      audit: visibilityAudit(),
       projectId: 'project',
       sourceId: 'source',
       precedence: 1000,
@@ -321,12 +332,18 @@ describe('catalogue cache invalidation', () => {
   const narrowing: [string, () => Promise<unknown>][] = [
     [
       'detach',
-      () => store.detachSource(org, fence(), { projectId: 'project', sourceId: 'source' }),
+      () =>
+        store.detachSource(org, fence(), {
+          audit: visibilityAudit(),
+          projectId: 'project',
+          sourceId: 'source',
+        }),
     ],
     [
       'exclude',
       () =>
         store.addPattern(org, fence(), {
+          audit: visibilityAudit(),
           projectId: 'project',
           sourceId: 'source',
           pattern: '*',

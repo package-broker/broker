@@ -236,6 +236,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             mutationFence(authenticated, {}),
             {
               servicePrincipalId: principal.value.id,
+              routeProjectId: projectId,
               name: 'ci',
               scope: 'read',
               expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
@@ -265,6 +266,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'organization',
             },
             auditCall(ctx.requestId),
           );

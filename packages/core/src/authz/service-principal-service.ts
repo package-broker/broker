@@ -70,7 +70,7 @@ export interface ServicePrincipalStore {
       readonly createdByUserId: string;
       readonly permissions: readonly string[];
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -90,7 +90,7 @@ export interface ServicePrincipalStore {
       readonly id: string;
       readonly permissions: readonly string[];
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -104,7 +104,7 @@ export interface ServicePrincipalStore {
     input: {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -116,7 +116,7 @@ export interface ServicePrincipalStore {
     input: {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },

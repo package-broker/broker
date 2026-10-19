@@ -236,6 +236,7 @@ export interface FinalizeStatements {
   readonly statements: readonly Statement[];
   readonly removalIndex: number;
   readonly restorationIndex: number;
+  readonly leaseHeldBackIndex?: number;
 }
 
 export function finalizeListingStatements(
@@ -371,7 +372,13 @@ export function finalizeListingStatements(
         WHERE id = ${id} AND org_id = ${ctx.orgId}`,
     ),
   );
-  return { statements, removalIndex, restorationIndex: revivalIndex };
+  const leaseHeldBackIndex = statements.length;
+  statements.push(
+    statementOf(sql`SELECT count(*) AS held FROM version
+      WHERE version.package_id = ${id} AND version.org_id = ${ctx.orgId}
+        AND version.status = 'removed_upstream' AND ${returned}`),
+  );
+  return { statements, removalIndex, restorationIndex: revivalIndex, leaseHeldBackIndex };
 }
 
 export function createCatalogueReconciler(
@@ -428,26 +435,13 @@ export function createCatalogueReconciler(
     },
 
     async finalizeListing(ctx, guard, listing, evidence) {
-      const { statements, removalIndex, restorationIndex } = finalizeListingStatements(
-        ctx,
-        guard,
-        listing,
-        evidence,
-        options,
-      );
+      const { statements, removalIndex, restorationIndex, leaseHeldBackIndex } =
+        finalizeListingStatements(ctx, guard, listing, evidence, options);
       const results = await executor.batch(statements);
-      let leaseHeldBack = 0;
-      if ('packageId' in listing) {
-        const [held] = await executor.all<{ held: number }>(
-          statementOf(
-            sql`SELECT count(*) AS held FROM version
-              WHERE version.package_id = ${listing.packageId} AND version.org_id = ${ctx.orgId}
-                AND version.status = 'removed_upstream'
-                AND version.updated_at >= ${sweepBoundary(ctx, { kind: 'package', packageId: listing.packageId })}`,
-          ),
-        );
-        leaseHeldBack = Number(held?.held ?? 0);
-      }
+      const leaseHeldBack =
+        leaseHeldBackIndex === undefined
+          ? 0
+          : Number(results[leaseHeldBackIndex]?.rows[0]?.['held'] ?? 0);
       return {
         removed: results[removalIndex]?.changes ?? 0,
         restored: results[restorationIndex]?.changes ?? 0,

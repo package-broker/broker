@@ -1,4 +1,5 @@
 import { envelopeResponse } from './errors.js';
+import type { ErrorFormat } from './errors.js';
 
 export const DENIAL_MESSAGE =
   'You do not have access. Ask an organization administrator to assign you to a project.';
@@ -48,9 +49,13 @@ function prefersHtml(request: Request): boolean {
 }
 
 /** Generic 403 for an authenticated caller: static page for browsers, the envelope otherwise. */
-export function denialResponse(request: Request, requestId: string): Response {
-  if (!prefersHtml(request)) {
-    const response = envelopeResponse(403, 'forbidden', 'Forbidden', requestId);
+export function denialResponse(
+  request: Request,
+  requestId: string,
+  format: ErrorFormat = 'nested',
+): Response {
+  if (format === 'npm' || !prefersHtml(request)) {
+    const response = envelopeResponse(403, 'forbidden', 'Forbidden', requestId, undefined, format);
     response.headers.set('vary', 'Accept');
     return response;
   }

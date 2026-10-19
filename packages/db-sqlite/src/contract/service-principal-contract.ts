@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
@@ -87,6 +89,7 @@ const replay = async (open: Open): Promise<void> => {
           a,
         ),
         {
+          audit: mutationAudit('service_principal.create', null),
           id: PRINCIPAL,
           name: 'ci',
           projectId: PROJECT,
@@ -123,4 +126,18 @@ export function describeServicePrincipalContract(name: string, open: Open): void
       60_000,
     );
   });
+}
+
+function mutationAudit(action: AuditAction = 'token.issue', targetId: string | null = null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
 }

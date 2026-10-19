@@ -42,9 +42,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 50 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(50);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(50);
+  it('has 51 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(51);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(51);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -65,6 +65,25 @@ describe('AUDIT_ACTIONS', () => {
 });
 
 describe('auditEvent action and fields', () => {
+  it('builds version.published_at_set with its four fields', () => {
+    const changes = {
+      package_name: { new: 'acme/widgets' },
+      version: { new: '1.0.0' },
+      published_at: { new: '2026-10-19T09:00:00.000Z' },
+      published_at_basis: { new: 'source_release' },
+    };
+    const result = build('version.published_at_set', changes);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result)).changes).toEqual(changes);
+  });
+
+  it('refuses an extra version.published_at_set field', () => {
+    expect(build('version.published_at_set', { extra: { new: 'value' } })).toEqual({
+      ok: false,
+      reason: 'unknown_field',
+    });
+  });
+
   it('refuses an action outside the list', () => {
     expect(build('role.explode')).toEqual({ ok: false, reason: 'unknown_action' });
   });
@@ -1090,5 +1109,63 @@ describe('auditEvent envelope hardening', () => {
         target: { type: '3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b', id: 'x' },
       }),
     ).toEqual({ ok: false, reason: 'credential_value' });
+  });
+});
+
+describe('manifest audit string bounds', () => {
+  const packages = ['a/'.padEnd(201, 'a'), 'a/'.padEnd(428, 'a'), '@a/'.padEnd(214, 'a')];
+
+  it.each(packages.map((value) => [value.length, value] as const))(
+    'preserves the complete %i-character package name',
+    (_length, value) => {
+      const result = build('version.published_at_set', {
+        package_name: { old: value, new: value },
+      });
+      expect(result.ok).toBe(true);
+      expect(JSON.parse(payloadOf(result)).changes.package_name).toEqual({
+        old: value,
+        new: value,
+      });
+    },
+  );
+
+  it('preserves a maximum manifest version', () => {
+    const value = 'dev-'.padEnd(256, 'a');
+    expect(
+      JSON.parse(payloadOf(build('version.published_at_set', { version: { new: value } }))).changes
+        .version.new,
+    ).toBe(value);
+  });
+
+  it.each(['project_id', 'role_id'])('preserves a maximum external ref in %s', (field) => {
+    const value = 'legacy:projects/'.padEnd(200, 'a');
+    const action = field === 'project_id' ? 'source.attach' : 'grant.create';
+    expect(
+      JSON.parse(payloadOf(build(action, { [field]: { new: value } }))).changes[field].new,
+    ).toBe(value);
+  });
+
+  it.each([
+    ['package_name', 'a/'.padEnd(429, 'a')],
+    ['package_name', 'a '.repeat(110)],
+    ['version', 'dev-'.padEnd(257, 'a')],
+    ['version', 'a '.repeat(110)],
+  ])('refuses an invalid extended %s', (field, value) => {
+    expect(build('version.published_at_set', { [field]: { new: value } }).ok).toBe(false);
+  });
+
+  it('keeps the generic text limit', () => {
+    expect(build('role.rename', { name: { new: 'a'.repeat(201) } })).toEqual({
+      ok: false,
+      reason: 'bad_value',
+    });
+  });
+
+  it.each(['package_name', 'version'])('refuses provider credentials in extended %s', (field) => {
+    const value = 'a/'.padEnd(201, 'a') + FAKE.GITHUB_PAT_CLASSIC_4.toLowerCase();
+    expect(build('version.published_at_set', { [field]: { new: value } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
   });
 });

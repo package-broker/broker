@@ -84,6 +84,7 @@ describe('backup scope manifest', () => {
       identity_block: 'include',
       local_login: 'include',
       identity_provider_binding: 'include',
+      keyring_verifier: 'include',
       blob: 'include-rows-only',
       cache_epoch: 'regenerate',
       session: 'exclude',

@@ -186,7 +186,7 @@ export const entries: readonly MutationEntry[] = [
         name: `${kind} transitions select only own versions`,
         locate: /version.org_id = \?(?=\s+AND version.status = \? AND)/,
         neutral: NOT_NULL,
-        copies: kind === 'package' ? 4 : 2,
+        copies: kind === 'package' ? 3 : 2,
         caseName: reconcileCase(kind).name,
       })),
       {
@@ -198,6 +198,12 @@ export const entries: readonly MutationEntry[] = [
       },
     ],
     waivers: [
+      {
+        locate:
+          /version.org_id = \?(?=\s+AND version.last_op_id = \? AND version.status = 'active')/,
+        reason:
+          'Revival revisions select the rows stamped with this operation id, and only the organization scoped revival update stamps it.',
+      },
       {
         locate: /blob.org_id = \?/,
         reason: 'The composed removedBlobs builder has its own organization mutation registration.',

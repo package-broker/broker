@@ -4,7 +4,6 @@ import { join, relative, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition } from '@package-broker/core/plugin';
-import ssoOidc from '@package-broker/plugin-sso-oidc';
 import { renderManifestJson } from '../../manifest.js';
 import { installIdentity, type Inventory, type ResourceKind } from './inventory.js';
 import {
@@ -267,17 +266,14 @@ it.each([false, true])(
   'accepts generated identity and source bindings with platform ports: %s',
   async (enabled) => {
     const plugins: PluginDefinition[] = [
-      ssoOidc({
-        providers: [
-          {
-            id: 'corp',
-            kind: 'oidc',
-            issuer: 'https://idp.example.com',
-            clientId: 'broker',
-            policy: { verifiedDomains: ['example.com'], autoJoin: false },
-          },
-        ],
-      }),
+      {
+        id: 'sso-oidc',
+        package: '@test/sso-oidc',
+        apiVersion: 3,
+        platforms: ['cloudflare'],
+        binds: ['identity'],
+        identityProviders: () => [],
+      },
       {
         id: 'source',
         package: '@test/source',

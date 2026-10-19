@@ -7,10 +7,16 @@ import type {
 import type { OrgContext, Statement, StatementResult } from '@package-broker/core/db/port';
 import type { Sha256 } from '@package-broker/core/platform/blob';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
-import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
-import { leaseLive } from './blob-lease-guard.js';
+import {
+  assertCatalogueWriteGuard,
+  monotonicNow,
+  blobReferenceFence,
+} from '../internal/catalogue-write-guard.js';
 
-export type DistAttachRequest = DistIdentity & { readonly sha256: Sha256 };
+export type DistAttachRequest = DistIdentity & {
+  readonly sha256: Sha256;
+  readonly expectedGeneration?: string;
+};
 
 export interface DistAttachPlan {
   readonly opId: string;
@@ -38,11 +44,12 @@ export function distAttachStatements(
   if (typeof sha256 !== 'string' || !SHA256.test(sha256)) {
     throw new RangeError('sha256 must be 64 lower-case hexadecimal characters');
   }
+  const fence = blobReferenceFence(request.expectedGeneration);
   const opId = newOpId();
 
   const liveBlob = sql<string>`(SELECT blob.id FROM blob
     WHERE blob.org_id = ${ctx.orgId} AND blob.sha256 = ${sha256} AND blob.deleted_at IS NULL
-      AND NOT ${leaseLive('blob.purge_lease_until')})`;
+      AND ${fence})`;
 
   const attach = db
     .updateTable('version')
@@ -65,10 +72,7 @@ export function distAttachStatements(
     .updateTable('package')
     .set({
       rev: sql<number>`package.rev + 1`,
-      modified_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', max(
-        unixepoch('now', 'subsec'),
-        unixepoch(package.modified_at, 'subsec') + 0.001
-      ), 'unixepoch')`,
+      modified_at: monotonicNow,
     })
     .where('package.org_id', '=', ctx.orgId)
     .where(

@@ -8,6 +8,7 @@ import {
   type VersionStatus,
 } from '@package-broker/core/catalogue/version-rules';
 import { compile, db, newOpId } from '../kysely.js';
+import { monotonicNow } from './catalogue-write-guard.js';
 
 const STATUSES: readonly VersionStatus[] = [
   'active',
@@ -105,10 +106,7 @@ export function versionStatusStatements(
     .updateTable('package')
     .set({
       rev: sql<number>`package.rev + 1`,
-      modified_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', max(
-        unixepoch('now', 'subsec'),
-        unixepoch(package.modified_at, 'subsec') + 0.001
-      ), 'unixepoch')`,
+      modified_at: monotonicNow,
     })
     .where('package.org_id', '=', ctx.orgId)
     .where(

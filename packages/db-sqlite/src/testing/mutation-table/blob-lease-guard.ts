@@ -71,13 +71,39 @@ export const entries: readonly MutationEntry[] = [
     file: 'repositories/blob-lease-guard.ts',
     cases: leaseCases,
     predicates: [],
-    sqlDecisions: leaseCases.map((boundaryCase, index) => ({
-      name: boundaryCase.name,
-      pattern: index === 0 ? /is not null/ : /> strftime/,
-      replacement: index === 0 ? 'is null' : index === 2 ? '>= strftime' : '<= strftime',
-      expected: 1,
-      case: boundaryCase,
-    })),
+    sqlDecisions: [
+      ...leaseCases.map((boundaryCase, index) => ({
+        name: boundaryCase.name,
+        pattern: index === 0 ? /is not null/ : /> strftime/,
+        replacement: index === 0 ? 'is null' : index === 2 ? '>= strftime' : '<= strftime',
+        expected: 1,
+        case: boundaryCase,
+      })),
+      {
+        name: 'a lease equal to database time is expired',
+        pattern: /> strftime/,
+        replacement: '>= strftime',
+        expected: 1,
+        case: {
+          name: 'lease equality is not live',
+          async run(context) {
+            const now = '2026-10-17T12:00:00.000Z';
+            const statement = compile(
+              db
+                .selectFrom(sql`(SELECT ${now} AS purge_lease_until)`.as('lease'))
+                .select(leaseLive('lease.purge_lease_until').as('live')),
+            );
+            const rows = await context.executor.all(
+              context.mutate({
+                ...statement,
+                sql: statement.sql.replaceAll("'now'", `'${now}'`),
+              }),
+            );
+            expect(rows).toEqual([{ live: 0 }]);
+          },
+        },
+      },
+    ],
   },
   {
     builder: 'blobLeaseNotLive',

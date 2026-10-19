@@ -38,7 +38,27 @@ import {
   type TokenRevokeService,
 } from '@package-broker/core/authz/token-revoke';
 import { deferredDispatch } from '@package-broker/core/authz/token-use';
-import type { CatalogueReader } from '@package-broker/core/db/catalogue';
+import type {
+  CatalogueReader,
+  CatalogueWriter,
+  PackageVisibilityPort,
+} from '@package-broker/core/db/catalogue';
+import {
+  createPackageAccess,
+  type PackageAccess,
+} from '@package-broker/core/catalogue/package-access';
+import {
+  createVisibilityService,
+  type VisibilityService,
+} from '@package-broker/core/catalogue/visibility-service';
+import {
+  buildClosureReport,
+  type DependencyClosureReport,
+} from '@package-broker/core/catalogue/closure-report';
+import type { NameEcosystem } from '@package-broker/core/catalogue/names';
+import type { ActorContext } from '@package-broker/core/authz/administration';
+import type { ProjectActor } from '@package-broker/core/authz/project-actor';
+import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import {
   providerAnchorsOf,
@@ -60,7 +80,12 @@ import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin'
 import type { Keyring } from '@package-broker/core/secrets/keyring';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
-import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
+import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue';
+import {
+  createCatalogueWriter,
+  createVisibilityStore,
+} from '@package-broker/db-sqlite/repositories/catalogue-writer';
+import { createScopedAdmission } from '@package-broker/db-sqlite/repositories/scoped-admission';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
@@ -104,12 +129,26 @@ export interface NodeAccessServices {
   readonly tokenList: TokenReader;
 }
 
+export interface NodeCatalogueServices {
+  readonly reader: CatalogueReader;
+  readonly writer: CatalogueWriter;
+  readonly packageAccess: PackageAccess;
+  readonly visibility: VisibilityService;
+  readonly closureReport: (
+    actor: ProjectActor,
+    organizationPermissions: ActorContext['permissions'],
+    ecosystem: NameEcosystem,
+  ) => Promise<DependencyClosureReport>;
+}
+
 export interface NodeServices {
   readonly providerAnchors: ProviderAnchorReader;
   readonly dispatch: (run: () => Promise<void>) => void;
   readonly catalogue: Pick<CatalogueReader, 'resolveVersions'>;
   /** Null when the runtime has no auth options. */
   readonly access: NodeAccessServices | null;
+  /** Null without a database or auth options. */
+  readonly packages: NodeCatalogueServices | null;
 }
 
 export interface NodeBroker {
@@ -143,6 +182,7 @@ function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchor
 }
 
 interface AccessAssembly {
+  readonly anchors: readonly ConfiguredProviderAnchor[];
   readonly module: AuthModule;
   readonly providerAnchors: ProviderAnchorReader;
   readonly services: NodeAccessServices;
@@ -263,7 +303,36 @@ async function assembleAccess(
     }),
     tokenList: wired('token reader', createTokenReader(executor)),
   });
-  return { module, providerAnchors, services };
+  return { module, providerAnchors, services, anchors: anchorList };
+}
+
+function buildPackageReads(executor: SqlExecutor) {
+  const reader = createCatalogueReader(executor);
+  const packageAccess = createPackageAccess(reader);
+  const resolver: PackageVisibilityPort = createScopedAdmittingAccess(
+    packageAccess,
+    createScopedAdmission(executor),
+  );
+  return { reader, packageAccess, resolver };
+}
+
+function buildCatalogue(
+  executor: SqlExecutor,
+  reads: ReturnType<typeof buildPackageReads>,
+  anchors: readonly ConfiguredProviderAnchor[],
+  log: KernelLog,
+): NodeCatalogueServices {
+  return Object.freeze<NodeCatalogueServices>({
+    reader: reads.reader,
+    writer: createCatalogueWriter(executor),
+    packageAccess: reads.packageAccess,
+    visibility: createVisibilityService({
+      store: createVisibilityStore(executor, { providerAnchors: anchors }),
+      log,
+    }),
+    closureReport: (actor, organizationPermissions, ecosystem) =>
+      buildClosureReport(reads.reader, actor, organizationPermissions, ecosystem, systemClock),
+  });
 }
 
 export function createNodeServer(
@@ -313,7 +382,9 @@ export function createNodeServer(
           }),
       });
     }
+    const reads = options.executor === undefined ? undefined : buildPackageReads(executor);
     const registration = collectRegistrations(plugins, {
+      ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
       coreJobs:
         options.platformServices === undefined
           ? []
@@ -326,9 +397,14 @@ export function createNodeServer(
       auth === undefined
         ? undefined
         : await assembleAccess(registration, plugins, auth, executor, log);
+    const packages =
+      access === undefined || reads === undefined
+        ? null
+        : buildCatalogue(executor, reads, access.anchors, log);
     const authorization = options.authorization ?? access?.module.authorization;
     const kernel = await createKernel({
       platform: 'node',
+      ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
       plugins,
       publicOrigin: auth?.publicOrigin,
       registration,
@@ -347,6 +423,7 @@ export function createNodeServer(
       providerAnchors: access?.providerAnchors ?? NO_ANCHORS,
       dispatch: deferredDispatch,
       catalogue: createCatalogueReader(executor),
+      packages,
       access: access?.services ?? null,
     });
     return { kernel, services };

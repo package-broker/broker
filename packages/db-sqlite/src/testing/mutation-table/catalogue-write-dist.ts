@@ -145,9 +145,9 @@ const distAttachEntry: MutationEntry = {
   ],
   decisions: [
     {
-      name: 'dist attach makes five clock reads including the job guard',
+      name: 'dist attach makes two clock reads including the job guard',
       pattern: /(?:strftime\('[^']*',\s*'now'(?:, '[^']*')?\)|unixepoch\('now'(?:, '[^']*')?\))/,
-      expected: 5,
+      expected: 2,
       build: () =>
         distAttachStatements(WRITE_ORG, writeGuard(), {
           versionId: 'V-DIST',

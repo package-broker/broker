@@ -23,6 +23,7 @@ import {
 import type { IngestFinalizeRefusal, IngestFinalizer } from './finalize.js';
 import { INVOCATION_BUDGET, planChunk, type ChunkMember } from './plan-chunk.js';
 import type { IngestSessionHandle, IngestSessions } from './session.js';
+import { SnapshotCorruptError } from './snapshot.js';
 import { UPSTREAM_FORMS } from './validators.js';
 
 export const APPLY_MEMBER_WINDOW = CATALOGUE_KEY_LIST_MAX;
@@ -184,9 +185,14 @@ async function readWindow(
   const keys = new Set<string>();
   let retained = 0;
   let admitted = 0;
+  let exhausted = true;
   for await (const candidate of ordered(description)) {
+    if (!exhausted) continue;
     const prior = after !== null && candidate.ordinal <= after;
-    if (!prior && entries.length >= limit) return { entries, exhausted: false };
+    if (!prior && entries.length >= limit) {
+      exhausted = false;
+      continue;
+    }
     const version = toVersion(candidate);
     const key = version?.versionNormalized;
     const duplicate = key !== undefined && keys.has(key);
@@ -198,14 +204,15 @@ async function readWindow(
     } else {
       const bytes = 2 * version.metadata.json.length;
       if (admitted > 0 && retained + bytes > APPLY_WINDOW_BYTES) {
-        return { entries, exhausted: false };
+        exhausted = false;
+        continue;
       }
       retained += bytes;
       admitted += 1;
       entries.push({ ordinal, version });
     }
   }
-  return { entries, exhausted: true };
+  return { entries, exhausted };
 }
 
 async function readExisting(
@@ -281,6 +288,26 @@ export async function applyChunk(
     return abandon('refused', { refusal: 'name_not_registered' });
   }
 
+  const resumed =
+    session.stamp === null || session.cursor === null ? null : parseCursor(session.cursor);
+  let window: Awaited<ReturnType<typeof readWindow>> = { entries: [], exhausted: true };
+  try {
+    // Drain to EOF before writing: staged snapshots verify their digest only at EOF.
+    if (resumed?.tail == null) {
+      window = await readWindow(
+        description,
+        resumed?.ordinal ?? null,
+        input.toVersion,
+        APPLY_MEMBER_WINDOW,
+      );
+    } else {
+      for await (const candidate of ordered(description)) void candidate.ordinal;
+    }
+  } catch (error) {
+    if (!(error instanceof SnapshotCorruptError)) throw error;
+    return abandon('refused', { refusal: 'incomplete' });
+  }
+
   const syncInput = {
     sourceId: source.id,
     ecosystem: source.ecosystem,
@@ -288,7 +315,7 @@ export async function applyChunk(
     description: input.packageDescription,
   };
   let cursor: ApplyCursor;
-  if (session.stamp === null || session.cursor === null) {
+  if (resumed === null) {
     const upsert = await writer.syncPackage(ctx, guard, { ...syncInput, versions: [] });
     used += upsert.statements;
     let stamp = session.stamp;
@@ -316,7 +343,7 @@ export async function applyChunk(
     }
     cursor = { packageId: upsert.packageId, ordinal: null, attempted: 0, tail: null };
   } else {
-    cursor = parseCursor(session.cursor);
+    cursor = resumed;
   }
   const stamp = session.stamp as string;
   const finalizeCost = budget.finalizeListing + FINALIZE_SESSION_STATEMENTS;
@@ -325,7 +352,6 @@ export async function applyChunk(
   let tail = cursor.tail;
   let { ordinal, attempted } = cursor;
   if (tail === null) {
-    const window = await readWindow(description, ordinal, input.toVersion, APPLY_MEMBER_WINDOW);
     const members: ChunkMember[] = window.entries.flatMap((e) =>
       e.version === null ? [] : [{ ordinal: e.ordinal, version: e.version }],
     );
@@ -416,8 +442,6 @@ export async function applyChunk(
     attempted += consumed - duplicates.length;
     ordinal = consumedThrough;
     if (window.exhausted && tookAll) tail = 'tags';
-  } else {
-    for await (const candidate of ordered(description)) void candidate.ordinal;
   }
 
   const skipped: readonly SkippedMember[] = tail === null ? [] : description.skippedMembers;

@@ -13,6 +13,7 @@ const alias = [
 ];
 
 const packages = [
+  'e2e',
   'core',
   'db-sqlite',
   'runtime-cloudflare',

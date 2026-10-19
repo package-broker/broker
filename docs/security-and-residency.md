@@ -4,4 +4,4 @@ sidebar_position: 8
 description: Security model and data residency of Package Broker.
 ---
 
-Coming in 2.0: security and data residency.
+Planned for 2.0: where data is stored, who can reach it, how secrets are kept and how tokens are revoked.

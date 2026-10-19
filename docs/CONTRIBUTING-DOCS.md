@@ -6,6 +6,7 @@ This folder is the source of the 2.0 documentation site at package.broker. The v
 
 - Getting started
   - [Quickstart: Cloudflare](getting-started/quickstart-cloudflare.md)
+  - [Quickstart: Node](getting-started/quickstart-node.md)
   - [Quickstart: Docker](getting-started/quickstart-docker.md)
 - Clients
   - [Composer](clients/composer.md)
@@ -20,11 +21,14 @@ This folder is the source of the 2.0 documentation site at package.broker. The v
   - [Migrate from Satis](migration/from-satis.md)
   - [Migrate from Packeton](migration/from-packeton.md)
 - Operations
-  - [Backup and upgrades](operations/backup-and-upgrades.md)
+  - [Upgrades and operations](operations/backup-and-upgrades.md)
 - Reference
   - [Access model](reference/access-model.md)
   - [Plugin authoring](reference/plugin-authoring.md)
   - [API reference](reference/api.md)
+  - [Authentication and sessions](reference/authentication.md)
+  - [Configuration](reference/configuration.md)
+  - [pb CLI](reference/cli.md)
 - [Security and data residency](security-and-residency.md)
 - [Architecture](architecture.md)
 - [Decisions](decisions/)
@@ -34,6 +38,7 @@ This folder is the source of the 2.0 documentation site at package.broker. The v
 - One line per paragraph; do not hard-wrap.
 - Name no client or customer.
 - Every command must run as written.
+- Document only what the current `main` does. A page for a feature that is not merged says "Planned for 2.0" and gives no instructions.
 
 ## Maintained separately
 

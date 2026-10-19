@@ -4,4 +4,4 @@ sidebar_position: 2
 description: Move from Satis to Package Broker.
 ---
 
-Coming in 2.0: migrating from Satis.
+Planned for 2.0: moving from Satis.

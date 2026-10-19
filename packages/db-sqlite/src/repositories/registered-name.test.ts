@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'kysely';
+import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -181,8 +182,32 @@ async function snapshot(): Promise<string> {
   ]);
 }
 
+let auditSequence = 0;
+
+function audit(action: AuditEvent['action'], targetId: string, pattern?: string): AuditEvent {
+  return {
+    id: `01ARZ3NDEKTSV4RRFFQ6${String(++auditSequence).padStart(6, '0')}`,
+    occurredAt: NOW,
+    action,
+    actor: { type: 'user', id: ORG_ADMIN },
+    tokenSelector: null,
+    sourceIp: null,
+    target: { type: action.startsWith('source.') ? 'source' : 'registered_name', id: targetId },
+    projectId: null,
+    payloadJson: JSON.stringify(
+      pattern === undefined ? {} : { changes: { pattern: { new: pattern } } },
+    ),
+  };
+}
+
 const add = (fence: MutationFence, id: string, sourceId: string, pattern: string) =>
-  names.add(a, fence, { id, sourceId, pattern, providerAnchors: ANCHORS });
+  names.add(a, fence, {
+    id,
+    sourceId,
+    pattern,
+    providerAnchors: ANCHORS,
+    audit: audit('registered_name.add', id, pattern),
+  });
 
 beforeEach(async () => {
   database = await openMigratedDatabase({ twoOrganizations: true });
@@ -236,61 +261,142 @@ afterEach(async () => {
   await database.close();
 });
 
+describe('registered-name ownership', () => {
+  it.each([
+    [SRC_ORG, null],
+    [SRC_P1, P1],
+  ] as const)('reads the owner of %s', async (sourceId, projectId) => {
+    expect(await add(orgFence(), NAME_1, sourceId, 'acme/*')).toBe('added');
+    expect(await names.owner(a, NAME_1)).toEqual({ sourceId, projectId });
+  });
+
+  it('answers null for a foreign organization name', async () => {
+    expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
+    expect(await names.owner(b, NAME_1)).toBeNull();
+  });
+
+  it('answers null for an absent name', async () => {
+    expect(await names.owner(a, NAME_1)).toBeNull();
+  });
+
+  it.each([
+    ['source', SRC_P1],
+    ['registered_name', SRC_ORG],
+  ])('refuses a mismatched pause target %s:%s without writes', async (type, id) => {
+    expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
+    await rows("UPDATE source SET status = 'active' WHERE org_id = ? AND id = ?", a.orgId, SRC_ORG);
+    const before = await snapshot();
+    const pending = await rows('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', a.orgId);
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: { ...audit('source.pause', SRC_ORG), target: { type, id } },
+      }),
+    ).toBe('conflict');
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', a.orgId)).toEqual(
+      pending,
+    );
+  });
+});
+
 describe('enable', () => {
   it('refuses a composer_repository source without a registered name and enables it with one', async () => {
     const before = await snapshot();
-    expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'activation_requires_registered_names',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      }),
+    ).toBe('activation_requires_registered_names');
     expect(await snapshot()).toBe(before);
 
     expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
     const epochBefore = await epoch();
-    expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      }),
+    ).toBe('enabled');
     expect(await status(SRC_ORG)).toBe('active');
     expect(await epoch()).not.toBe(epochBefore);
   });
 
   it('enables an npm_registry source only when every configured scope is registered', async () => {
     expect(await add(orgFence(), NAME_1, SRC_NPM, '@acme/*')).toBe('added');
-    expect(await names.enable(a, orgFence(), { id: SRC_NPM, providerAnchors: ANCHORS })).toBe(
-      'activation_requires_registered_names',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_NPM,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_NPM),
+      }),
+    ).toBe('activation_requires_registered_names');
     expect(await add(orgFence(), NAME_2, SRC_NPM, '@tools/cli')).toBe('added');
-    expect(await names.enable(a, orgFence(), { id: SRC_NPM, providerAnchors: ANCHORS })).toBe(
-      'activation_requires_registered_names',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_NPM,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_NPM),
+      }),
+    ).toBe('activation_requires_registered_names');
     expect(await add(orgFence(), NAME_3, SRC_NPM, '@tools/*')).toBe('added');
-    expect(await names.enable(a, orgFence(), { id: SRC_NPM, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_NPM,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_NPM),
+      }),
+    ).toBe('enabled');
     expect(await status(SRC_NPM)).toBe('active');
   });
 
   it('enables a proxy without registered names', async () => {
-    expect(await names.enable(a, orgFence(), { id: SRC_PROXY, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_PROXY,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_PROXY),
+      }),
+    ).toBe('enabled');
     expect(await status(SRC_PROXY)).toBe('active');
   });
 
   it('lets a project administrator enable its own covered source but not another project source', async () => {
     expect(await add(orgFence(), NAME_1, SRC_P1, 'one/*')).toBe('added');
     expect(await add(orgFence(), NAME_2, SRC_P2, 'two/*')).toBe('added');
-    expect(await names.enable(a, p1Fence(), { id: SRC_P1, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
-    expect(await names.enable(a, p1Fence(), { id: SRC_P2, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
-    expect(await names.enable(a, p1Fence(), { id: SRC_MISSING, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
-    expect(await names.enable(a, orgFence(), { id: SRC_MISSING, providerAnchors: ANCHORS })).toBe(
-      'not_found',
-    );
+    expect(
+      await names.enable(a, p1Fence(), {
+        id: SRC_P1,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_P1),
+      }),
+    ).toBe('enabled');
+    expect(
+      await names.enable(a, p1Fence(), {
+        id: SRC_P2,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_P2),
+      }),
+    ).toBe('forbidden');
+    expect(
+      await names.enable(a, p1Fence(), {
+        id: SRC_MISSING,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_MISSING),
+      }),
+    ).toBe('forbidden');
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_MISSING,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_MISSING),
+      }),
+    ).toBe('not_found');
     expect(await status(SRC_P2)).toBe('paused');
   });
 });
@@ -362,13 +468,22 @@ describe('remove', () => {
   it('pauses an active npm_registry source when one of two scope patterns is removed', async () => {
     expect(await add(orgFence(), NAME_1, SRC_NPM, '@acme/*')).toBe('added');
     expect(await add(orgFence(), NAME_2, SRC_NPM, '@tools/*')).toBe('added');
-    expect(await names.enable(a, orgFence(), { id: SRC_NPM, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_NPM,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_NPM),
+      }),
+    ).toBe('enabled');
     const before = await epoch();
-    expect(await names.remove(a, orgFence(), { id: NAME_2, providerAnchors: ANCHORS })).toBe(
-      'removed_and_paused',
-    );
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_2,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_2),
+        pauseAudit: audit('source.pause', SRC_NPM),
+      }),
+    ).toBe('removed_and_paused');
     expect(await status(SRC_NPM)).toBe('paused');
     expect(await epoch()).not.toBe(before);
     expect(await rows('SELECT id FROM registered_name')).toEqual([{ id: NAME_1 }]);
@@ -377,32 +492,61 @@ describe('remove', () => {
   it('keeps an active source that still satisfies the invariant', async () => {
     expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
     expect(await add(orgFence(), NAME_2, SRC_ORG, 'tools/*')).toBe('added');
-    expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
-    expect(await names.remove(a, orgFence(), { id: NAME_2, providerAnchors: ANCHORS })).toBe(
-      'removed',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      }),
+    ).toBe('enabled');
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_2,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_2),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      }),
+    ).toBe('removed');
     expect(await status(SRC_ORG)).toBe('active');
-    expect(await names.remove(a, orgFence(), { id: NAME_1, providerAnchors: ANCHORS })).toBe(
-      'removed_and_paused',
-    );
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      }),
+    ).toBe('removed_and_paused');
     expect(await status(SRC_ORG)).toBe('paused');
   });
 
   it('refuses a project-only administrator and answers not_found for an unknown name', async () => {
     expect(await add(orgFence(), NAME_1, SRC_P1, 'one/*')).toBe('added');
     const before = await snapshot();
-    expect(await names.remove(a, p1Fence(), { id: NAME_1, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
-    expect(await names.remove(a, p1Fence(), { id: NAME_3, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
+    expect(
+      await names.remove(a, p1Fence(), {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      }),
+    ).toBe('forbidden');
+    expect(
+      await names.remove(a, p1Fence(), {
+        id: NAME_3,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_3),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      }),
+    ).toBe('forbidden');
     expect(await snapshot()).toBe(before);
-    expect(await names.remove(a, orgFence(), { id: NAME_3, providerAnchors: ANCHORS })).toBe(
-      'not_found',
-    );
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_3,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_3),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      }),
+    ).toBe('not_found');
   });
 });
 
@@ -551,6 +695,7 @@ describe('round 2', () => {
           sourceId: SRC_B,
           pattern: 'acme/*',
           providerAnchors: ANCHORS,
+          audit: audit('registered_name.add', NAME_B, 'acme/*'),
         }),
       ).toBe('added');
     });
@@ -558,9 +703,24 @@ describe('round 2', () => {
     it('answers forbidden or not_found to organization b on organization a rows', async () => {
       expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
       const before = await snapshot();
-      const target = { id: SRC_ORG, providerAnchors: ANCHORS };
-      const nameTarget = { id: NAME_1, providerAnchors: ANCHORS };
-      const input = { id: NAME_B, sourceId: SRC_ORG, pattern: 'tools/*', providerAnchors: ANCHORS };
+      const target = {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      };
+      const nameTarget = {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1, 'acme/*'),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      };
+      const input = {
+        id: NAME_B,
+        sourceId: SRC_ORG,
+        pattern: 'tools/*',
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.add', NAME_B, 'tools/*'),
+      };
       expect(await names.add(b, bFence(), input)).toBe('not_found');
       expect(await names.remove(b, bFence(), nameTarget)).toBe('not_found');
       expect(await names.enable(b, bFence(), target)).toBe('not_found');
@@ -588,9 +748,13 @@ describe('round 2', () => {
       expect(await held(coveredByRegisteredNames(a, SRC_ORG, 'composer', 'acme/lib'))).toBe(0);
       expect(await held(sourceActivatable(a, SRC_ORG))).toBe(0);
       expect(await held(sourceActivatable(b, SRC_ORG))).toBe(0);
-      expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-        'activation_requires_registered_names',
-      );
+      expect(
+        await names.enable(a, orgFence(), {
+          id: SRC_ORG,
+          providerAnchors: ANCHORS,
+          audit: audit('source.resume', SRC_ORG),
+        }),
+      ).toBe('activation_requires_registered_names');
     });
   });
 
@@ -613,9 +777,13 @@ describe('round 2', () => {
     const racer = createRegisteredNameRepository(
       racing(stmt('DELETE FROM source WHERE id = ?', SRC_ORG)),
     );
-    expect(await racer.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'not_found',
-    );
+    expect(
+      await racer.enable(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      }),
+    ).toBe('not_found');
   });
 
   it('answers not_found when the source moves to another project during enable', async () => {
@@ -623,9 +791,13 @@ describe('round 2', () => {
     const racer = createRegisteredNameRepository(
       racing(stmt('UPDATE source SET project_id = ? WHERE id = ?', P2, SRC_P1)),
     );
-    expect(await racer.enable(a, p1Fence(), { id: SRC_P1, providerAnchors: ANCHORS })).toBe(
-      'not_found',
-    );
+    expect(
+      await racer.enable(a, p1Fence(), {
+        id: SRC_P1,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_P1),
+      }),
+    ).toBe('not_found');
     expect(await status(SRC_P1)).toBe('paused');
   });
 
@@ -635,9 +807,13 @@ describe('round 2', () => {
       expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
       await executor.batch([stmt('UPDATE source SET status = ? WHERE id = ?', current, SRC_ORG)]);
       const before = await snapshot();
-      expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-        'already_enabled',
-      );
+      expect(
+        await names.enable(a, orgFence(), {
+          id: SRC_ORG,
+          providerAnchors: ANCHORS,
+          audit: audit('source.resume', SRC_ORG),
+        }),
+      ).toBe('already_enabled');
       expect(await snapshot()).toBe(before);
     },
   );
@@ -647,9 +823,14 @@ describe('round 2', () => {
     async (s) => {
       expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
       await executor.batch([stmt('UPDATE source SET status = ? WHERE id = ?', s, SRC_ORG)]);
-      expect(await names.remove(a, orgFence(), { id: NAME_1, providerAnchors: ANCHORS })).toBe(
-        'removed_and_paused',
-      );
+      expect(
+        await names.remove(a, orgFence(), {
+          id: NAME_1,
+          providerAnchors: ANCHORS,
+          audit: audit('registered_name.remove', NAME_1),
+          pauseAudit: audit('source.pause', SRC_ORG),
+        }),
+      ).toBe('removed_and_paused');
       expect(await status(SRC_ORG)).toBe('paused');
     },
   );
@@ -664,9 +845,14 @@ describe('round 2', () => {
         SRC_PROXY,
       ),
     ]);
-    expect(await names.remove(a, orgFence(), { id: NAME_1, providerAnchors: ANCHORS })).toBe(
-      'removed',
-    );
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: audit('source.pause', SRC_PROXY),
+      }),
+    ).toBe('removed');
     expect(await status(SRC_PROXY)).toBe('active');
   });
 
@@ -684,23 +870,40 @@ describe('round 2', () => {
       seedSource(SRC_ARCHIVED, 'old-src', { project_id: P_ARCHIVED }),
     ]);
     expect(await add(orgFence(), NAME_1, SRC_ARCHIVED, 'old/*')).toBe('added');
-    expect(await names.enable(a, p1Fence(), { id: SRC_ARCHIVED, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
+    expect(
+      await names.enable(a, p1Fence(), {
+        id: SRC_ARCHIVED,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ARCHIVED),
+      }),
+    ).toBe('forbidden');
     expect(await status(SRC_ARCHIVED)).toBe('paused');
   });
 
   it('refuses the second enable after the last name is removed between them', async () => {
     expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
-    expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'enabled',
-    );
-    expect(await names.remove(a, orgFence(), { id: NAME_1, providerAnchors: ANCHORS })).toBe(
-      'removed_and_paused',
-    );
-    expect(await names.enable(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'activation_requires_registered_names',
-    );
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      }),
+    ).toBe('enabled');
+    expect(
+      await names.remove(a, orgFence(), {
+        id: NAME_1,
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      }),
+    ).toBe('removed_and_paused');
+    expect(
+      await names.enable(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: audit('source.resume', SRC_ORG),
+      }),
+    ).toBe('activation_requires_registered_names');
     expect(await status(SRC_ORG)).toBe('paused');
   });
 
@@ -742,4 +945,244 @@ it('refuses a 51-byte registered name without writing a row', async () => {
   expect(await add(orgFence(), NAME_1, SRC_ORG, `acme/${'a'.repeat(45)}*`)).toBe('invalid_pattern');
   expect(await rows('SELECT id FROM registered_name')).toEqual([]);
   expect(await snapshot()).toBe(before);
+});
+
+describe('registered-name audit', () => {
+  const pattern = 'acme/*';
+  const target = () => ({
+    id: NAME_1,
+    providerAnchors: ANCHORS,
+    audit: audit('registered_name.remove', NAME_1, pattern),
+    pauseAudit: audit('source.pause', SRC_ORG),
+  });
+  const resume = () => ({
+    id: SRC_ORG,
+    providerAnchors: ANCHORS,
+    audit: audit('source.resume', SRC_ORG),
+  });
+  const auditRows = () => rows('SELECT * FROM audit_pending ORDER BY id');
+
+  beforeEach(async () => {
+    await executor.batch([
+      stmt(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', ?)",
+        NAME_1,
+        a.orgId,
+        SRC_ORG,
+        pattern,
+      ),
+      stmt('UPDATE source SET status = ? WHERE org_id = ? AND id = ?', 'active', a.orgId, SRC_ORG),
+    ]);
+  });
+
+  it('stages one add event with the name target and pattern', async () => {
+    const event = audit('registered_name.add', NAME_2, 'tools/*');
+    expect(
+      await names.add(a, orgFence(), {
+        id: NAME_2,
+        sourceId: SRC_ORG,
+        pattern: 'tools/*',
+        providerAnchors: ANCHORS,
+        audit: event,
+      }),
+    ).toBe('added');
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({
+        id: event.id,
+        org_id: a.orgId,
+        action: 'registered_name.add',
+        target_type: 'registered_name',
+        target_id: NAME_2,
+        payload_json: event.payloadJson,
+      }),
+    ]);
+  });
+
+  it('stages exactly one remove event while the source remains covered, without a pause event', async () => {
+    await executor.batch([
+      stmt(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'tools/*')",
+        NAME_2,
+        a.orgId,
+        SRC_ORG,
+      ),
+    ]);
+    const input = target();
+    expect(await names.remove(a, orgFence(), input)).toBe('removed');
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({
+        id: input.audit.id,
+        action: 'registered_name.remove',
+        target_id: NAME_1,
+        payload_json: input.audit.payloadJson,
+        org_id: a.orgId,
+      }),
+    ]);
+    expect(await status(SRC_ORG)).toBe('active');
+  });
+
+  it('stages exactly the remove and pause events when removal pauses the source', async () => {
+    const input = target();
+    expect(await names.remove(a, orgFence(), input)).toBe('removed_and_paused');
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({
+        id: input.audit.id,
+        action: 'registered_name.remove',
+        target_id: NAME_1,
+        org_id: a.orgId,
+      }),
+      expect.objectContaining({
+        id: input.pauseAudit.id,
+        action: 'source.pause',
+        target_type: 'source',
+        target_id: SRC_ORG,
+        org_id: a.orgId,
+      }),
+    ]);
+    expect(await status(SRC_ORG)).toBe('paused');
+  });
+
+  it('does not stage a pause event for a source that was already paused', async () => {
+    await executor.batch([
+      stmt('UPDATE source SET status = ? WHERE org_id = ? AND id = ?', 'paused', a.orgId, SRC_ORG),
+    ]);
+    expect(await names.remove(a, orgFence(), target())).toBe('removed');
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({ action: 'registered_name.remove' }),
+    ]);
+  });
+
+  it('stages one resume event when enabling a source', async () => {
+    await executor.batch([
+      stmt('UPDATE source SET status = ? WHERE org_id = ? AND id = ?', 'paused', a.orgId, SRC_ORG),
+    ]);
+    const input = resume();
+    expect(await names.enable(a, orgFence(), input)).toBe('enabled');
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({
+        id: input.audit.id,
+        action: 'source.resume',
+        target_type: 'source',
+        target_id: SRC_ORG,
+        org_id: a.orgId,
+      }),
+    ]);
+  });
+
+  it('does not stage an event for already_enabled', async () => {
+    expect(await names.enable(a, orgFence(), resume())).toBe('already_enabled');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it.each(['add', 'remove', 'enable'] as const)(
+    'does not stage events for forbidden %s before existence',
+    async (operation) => {
+      const traced: SqlExecutor = {
+        driver: executor.driver,
+        all: (statement) => {
+          expect(statement.sql).not.toMatch(/from "(?:source|registered_name)"/);
+          return executor.all(statement);
+        },
+        batch: () => {
+          throw new Error('forbidden mutation reached a batch');
+        },
+      };
+      const repository = createRegisteredNameRepository(traced);
+      if (operation === 'add') {
+        expect(
+          await repository.add(a, p1Fence(), {
+            id: NAME_2,
+            sourceId: SRC_MISSING,
+            pattern,
+            providerAnchors: ANCHORS,
+            audit: audit('registered_name.add', NAME_2, pattern),
+          }),
+        ).toBe('forbidden');
+      } else if (operation === 'remove') {
+        expect(await repository.remove(a, p1Fence(), { ...target(), id: NAME_3 })).toBe(
+          'forbidden',
+        );
+      } else {
+        // Enable reads the source to determine the scope of its authority check.
+        expect(await names.enable(a, p1Fence(), { ...resume(), id: SRC_MISSING })).toBe(
+          'forbidden',
+        );
+      }
+      expect(await auditRows()).toEqual([]);
+    },
+  );
+
+  it('does not stage events for pattern_taken', async () => {
+    expect(await add(orgFence(), NAME_2, SRC_P1, pattern)).toBe('pattern_taken');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('does not stage events for invalid_pattern', async () => {
+    expect(await add(orgFence(), NAME_2, SRC_ORG, '*')).toBe('invalid_pattern');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it.each(['add', 'remove', 'enable'] as const)(
+    'does not stage events for not_found %s',
+    async (operation) => {
+      if (operation === 'add')
+        expect(await add(orgFence(), NAME_2, SRC_MISSING, pattern)).toBe('not_found');
+      if (operation === 'remove')
+        expect(await names.remove(a, orgFence(), { ...target(), id: NAME_3 })).toBe('not_found');
+      if (operation === 'enable')
+        expect(await names.enable(a, orgFence(), { ...resume(), id: SRC_MISSING })).toBe(
+          'not_found',
+        );
+      expect(await auditRows()).toEqual([]);
+    },
+  );
+
+  it('does not stage events for a conflict in the fenced add', async () => {
+    const racer = createRegisteredNameRepository({
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: async (statements) => {
+        await executor.batch([
+          stmt(
+            'UPDATE source SET ecosystem = ? WHERE org_id = ? AND id = ?',
+            'npm',
+            a.orgId,
+            SRC_ORG,
+          ),
+        ]);
+        return executor.batch(statements);
+      },
+    });
+    expect(
+      await racer.add(a, orgFence(), {
+        id: NAME_2,
+        sourceId: SRC_ORG,
+        pattern: 'tools/*',
+        providerAnchors: ANCHORS,
+        audit: audit('registered_name.add', NAME_2, 'tools/*'),
+      }),
+    ).toBe('conflict');
+    expect(await auditRows()).toEqual([]);
+    expect(await rows('SELECT id FROM registered_name WHERE id = ?', NAME_2)).toEqual([]);
+  });
+
+  it('does not stage events in either organization for a foreign source', async () => {
+    seedOrg = b;
+    await executor.batch([seedSource(SRC_B, 'foreign')]);
+    seedOrg = a;
+    expect(await add(orgFence(), NAME_2, SRC_B, 'tools/*')).toBe('not_found');
+    expect(await rows('SELECT id FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([]);
+    expect(await rows('SELECT id FROM audit_pending WHERE org_id = ?', b.orgId)).toEqual([]);
+  });
+
+  it('rolls back removal, pause and both events when the audit insert fails', async () => {
+    const input = target();
+    input.pauseAudit.id = input.audit.id;
+    expect(await names.remove(a, orgFence(), input)).toBe('conflict');
+    expect(await auditRows()).toEqual([]);
+    expect(await status(SRC_ORG)).toBe('active');
+    expect(await rows('SELECT id FROM registered_name WHERE id = ?', NAME_1)).toEqual([
+      { id: NAME_1 },
+    ]);
+  });
 });

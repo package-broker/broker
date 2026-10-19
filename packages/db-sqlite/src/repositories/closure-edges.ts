@@ -18,7 +18,9 @@ import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-br
 import { compile, db } from '../kysely.js';
 import { admittedProxySources } from './proxy-admission.js';
 import {
+  admissionCondition,
   attachedSourceCondition,
+  visibleRowsCondition,
   col,
   proxyEligibleCondition,
   readTimeCondition,
@@ -60,14 +62,13 @@ function rankedWinners(
     row_number() over (partition by pkg.name order by ${sql.join(winnerOrder({ source: 'src', attachment: 'ps' }))}) as rn
   ${visibleFrom()}
   where pp.project_id = ${projectId} and pkg.ecosystem = ${ecosystem} and ${filter}
-    and ${orgScope(ctx)}
-    and ${readTimeCondition(ctx, col('pp.project_id'), { package: 'pkg', source: 'src' })}
-    and ${proxyEligibleCondition({ package: 'pkg', source: 'src' })}`;
+    and ${visibleRowsCondition(ctx, { pp: 'pp', pkg: 'pkg', src: 'src', ps: 'ps' })}`;
 }
 
 function depsExpression(ecosystem: NameEcosystem): RawBuilder<unknown> {
   if (ecosystem === 'composer') {
-    return sql`json_extract(v.metadata_json, '$.require')`;
+    return sql`case when json_type(v.metadata_json, '$.require') in ('object', 'array')
+      then json_extract(v.metadata_json, '$.require') else null end`;
   }
   const extract = (field: string) => sql`json_extract(v.metadata_json, ${`$.${field}`})`;
   const absent = sql.join(
@@ -111,7 +112,7 @@ function requireRows<T>(rows: readonly T[], count: number): void {
   }
 }
 
-const PROJECT_ACTIVE = (ctx: OrgContext) => sql`exists (
+const projectActiveCondition = (ctx: OrgContext) => sql`exists (
   select 1 from project as pj
   where pj.id = pp.project_id and pj.org_id = ${ctx.orgId} and pj.status = 'active'
 )`;
@@ -134,8 +135,6 @@ export function createClosureEdges(
         after === undefined
           ? sql`1 = 1`
           : sql`(${sql.ref(key)}, ${sql.ref(version)}) > (${after.requirerKey}, ${after.versionId})`;
-      // The ordered name index stops enumeration at the key-page boundary, including
-      // winners with no remaining versions only as existence probes, never edge rows.
       const raw = sql`with key_page as materialized (
   select kp.name
   from package as kp indexed by package_by_name
@@ -198,6 +197,7 @@ select k.idx,
     where hp.org_id = ${ctx.orgId} and hp.ecosystem = ${query.ecosystem} and hp.name = k.name
       and hs.org_id = ${ctx.orgId} and hs.ecosystem = ${query.ecosystem}
       and hs.project_id is null and hs.type not in ('packagist_proxy', 'npmjs_proxy')
+      and ${admissionCondition(ctx, sql`${query.projectId}`, col('hp.source_id'), col('hp.name'), col('hp.visible_to_new_projects'))}
       and (hp.status = 'active' or (hp.status = 'removed_upstream' and hs.removal_policy = 'flag'))
       and exists (select 1 from project as pj
         where pj.id = ${query.projectId} and pj.org_id = ${ctx.orgId} and pj.status = 'active')
@@ -250,7 +250,7 @@ order by k.idx`;
     and ${proxyEligibleCondition({ package: 'pkg', source: 'src' })}) as eligible
 ${visibleFrom()}
 where pp.project_id = ${query.projectId} and pkg.ecosystem = ${query.ecosystem}
-  and pkg.name = ${query.key} and ${orgScope(ctx)} and ${PROJECT_ACTIVE(ctx)}
+  and pkg.name = ${query.key} and ${orgScope(ctx)} and ${projectActiveCondition(ctx)}
 order by ${sql.join(winnerOrder({ source: 'src', attachment: 'ps' }))}`;
       const rows = await executor.all<{
         package_id: string;

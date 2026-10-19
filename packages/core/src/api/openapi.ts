@@ -4,7 +4,7 @@ import { PERMISSIONS } from '../authz/permissions.js';
 import { toJsonSchema, type JsonObject, type JsonValue } from './json-schema.js';
 import { routeApiProblems } from '../kernel/routes.js';
 import { IF_MATCH, type ApiRouteSpec } from './route.js';
-import { API_ERROR_CODES } from './response.js';
+import { API_ERROR_CODES, SERVICE_ERROR_TABLE, type ApiErrorCode } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 
 export interface OpenApiDocument extends JsonObject {
@@ -168,6 +168,20 @@ export function generateOpenApi(
     if (protectedRoute) error(401, 'Authentication required');
     if (spec.permission !== null) error(403, 'Access denied');
     if (names.length > 0) error(404, 'Not found');
+    if (spec.service !== undefined) {
+      for (const { code, status } of Object.values<{ code: ApiErrorCode; status: number }>(
+        SERVICE_ERROR_TABLE[spec.service],
+      )) {
+        if (code !== 'reauth_required' && code !== 'unavailable') continue;
+        const existing = responses[String(status)] as JsonObject | undefined;
+        const message = API_ERROR_CODES[code].message;
+        const descriptions = new Set([
+          ...(typeof existing?.description === 'string' ? existing.description.split('; ') : []),
+          message,
+        ]);
+        error(status, [...descriptions].join('; '));
+      }
+    }
     if (spec.concurrency !== undefined) {
       params.push({
         name: 'If-Match',

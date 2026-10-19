@@ -226,6 +226,9 @@ function findViolations(
       }
       return;
     }
+    if (pkg.startsWith('plugin-') && specifier.startsWith(`${CORE_SPECIFIER}/runtime/`)) {
+      return report(`${pkg} must not import the core runtime subpath`);
+    }
     const dependency = classify(specifier);
     if (dependency === `${WORKSPACE_PREFIX}${pkg}`) return;
     if (
@@ -267,6 +270,10 @@ function walk(directory: string, extensions: readonly string[], found: string[])
 function sourceFiles(pkg: string): string[] {
   const root = path.join(REPO_ROOT, 'packages', pkg);
   const files: string[] = [];
+  if (pkg.startsWith('plugin-')) {
+    walk(root, ['.ts', '.tsx', '.js', '.mjs', '.cjs'], files);
+    return files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/')).sort();
+  }
   walk(path.join(root, 'src'), ['.ts', '.tsx'], files);
   walk(path.join(root, 'scripts'), ['.mjs'], files);
   if (pkg === 'ui') {
@@ -338,6 +345,28 @@ describe('classifier', () => {
     expect(findViolations('packages/cli/src/a.ts', "import '@package-broker/core/ids';")).toEqual(
       [],
     );
+  });
+
+  it.each([
+    'packages/plugin-github/src/a.ts',
+    'packages/plugin-github/src/a.test.ts',
+    'packages/plugin-github/fixtures/a.test.ts',
+  ])('rejects runtime subpath imports in %s', (file) => {
+    expect(
+      findViolations(
+        file,
+        "import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('rejects relative runtime imports from plugin fixtures', () => {
+    expect(
+      findViolations(
+        'packages/plugin-github/fixtures/a.test.ts',
+        "import { registerCoreJob } from '../../core/src/runtime/core-jobs.js';",
+      ),
+    ).toHaveLength(1);
   });
 
   it('allows relative imports inside the package and imports of the package itself', () => {

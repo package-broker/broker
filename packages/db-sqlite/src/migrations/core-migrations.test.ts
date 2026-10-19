@@ -19,6 +19,23 @@ async function loadCore(only?: (name: string) => boolean): Promise<MigrationSour
   );
 }
 
+function expectContiguousSequences(
+  sources: readonly Pick<MigrationSource, 'owner' | 'sequence'>[],
+): void {
+  const byOwner = new Map<string, number[]>();
+  for (const { owner, sequence } of sources) {
+    const sequences = byOwner.get(owner) ?? [];
+    sequences.push(sequence);
+    byOwner.set(owner, sequences);
+  }
+  for (const [owner, sequences] of byOwner) {
+    expect(
+      sequences.sort((a, b) => a - b),
+      `${owner}: migration sequences must be 1..N`,
+    ).toEqual(Array.from({ length: sequences.length }, (_, index) => index + 1));
+  }
+}
+
 const ORG = '01J0ACME000000000000000000';
 const USER = '01J0USER000000000000000000';
 const OTHER_USER = '01J0USER000000000000000001';
@@ -112,6 +129,50 @@ async function migrateAll(): Promise<void> {
   await migrate(opened.executor, await loadCore(), { holder: 'core-migrations-test' });
 }
 
+describe('migration sequence contiguity', () => {
+  it('checks every core migration from the directory', async () => {
+    expectContiguousSequences(await loadCore());
+  });
+
+  it('checks each owner independently, regardless of input order', () => {
+    expectContiguousSequences([
+      { owner: 'plugin-a', sequence: 2 },
+      { owner: 'core', sequence: 1 },
+      { owner: 'plugin-b', sequence: 1 },
+      { owner: 'plugin-a', sequence: 1 },
+      { owner: 'core', sequence: 2 },
+    ]);
+  });
+
+  it.each(['core', 'plugin-a'])('rejects a gap for %s', (owner) => {
+    expect(() =>
+      expectContiguousSequences([
+        { owner, sequence: 1 },
+        { owner, sequence: 3 },
+      ]),
+    ).toThrow(owner);
+  });
+
+  it.each(['core', 'plugin-a'])('rejects a duplicate for %s', (owner) => {
+    expect(() =>
+      expectContiguousSequences([
+        { owner, sequence: 1 },
+        { owner, sequence: 2 },
+        { owner, sequence: 2 },
+      ]),
+    ).toThrow(owner);
+  });
+
+  it('requires every owner to start at one', () => {
+    expect(() =>
+      expectContiguousSequences([
+        { owner: 'core', sequence: 1 },
+        { owner: 'plugin-a', sequence: 2 },
+      ]),
+    ).toThrow('plugin-a');
+  });
+});
+
 describe('core migrations', () => {
   it('1: a fresh database gets every core migration: 49 tables, expand phase for 0002', async () => {
     const sources = await loadCore();
@@ -120,7 +181,11 @@ describe('core migrations', () => {
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
     expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
-    expect(ids.at(-1)).toBe('core:0014_catalogue_reconciliation');
+    const migrationFiles = readdirSync(migrationsUrl)
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    expect(migrationFiles.length).toBeGreaterThan(0);
+    expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
     // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none, 0007: 4; 0008, 0009 and 0010 add none; 0011 adds 2; 0012 and 0013 add none
     expect(await countTables()).toBe(49);

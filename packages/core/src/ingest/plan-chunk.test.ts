@@ -382,3 +382,60 @@ describe('planChunk budget', () => {
     expect(plan.writerCalls).toEqual([]);
   });
 });
+
+describe('per-version sync costs', () => {
+  it('requires the remaining writer costs before planning conflicting npm versions', () => {
+    const members = npmMembers(100);
+    const existing = members.map((m) => ({
+      ...existingFrom(m.version),
+      npmIntegrity: INTEGRITY_B,
+    }));
+    const syncCost = (versions: number) => 78 + 4 * versions;
+    expect(() =>
+      planChunk(members, existing, npmSource, { sessionStatements: 6, syncCost }),
+    ).toThrow(new TypeError('invalid chunk budget'));
+
+    const plan = planChunk(members, existing, npmSource, {
+      ...withA6({ quarantine: 10, markListing: 5 }),
+      sessionStatements: 6,
+      syncCost,
+    });
+    expect(plan.npmConflicts).toHaveLength(43);
+    expect(plan.writerCalls).toHaveLength(43);
+    expect(plan.writerCalls.every((call) => call.method === 'quarantine')).toBe(true);
+    expect(plan.cursorAfter).toBe(42);
+    expect(plan.statements).toBe(6 + 5 + 43 * 10);
+    expect(plan.statements).toBeLessThanOrEqual(INVOCATION_BUDGET);
+  });
+
+  it('covers 1,200 new versions within the invocation budget', () => {
+    // Composer is the more expensive ecosystem: three update statements and one insert.
+    const syncCost = (versions: number) => 78 + 4 * versions;
+    const budget: ChunkBudget = {
+      ...withA6({ syncPackage: 500, markListing: 5 }),
+      sessionStatements: 6,
+      syncCost,
+    };
+    let remaining = npmMembers(1200);
+    const covered: number[] = [];
+    let largest = 0;
+    while (remaining.length > 0) {
+      const plan = planChunk(remaining, [], npmSource, budget);
+      largest = Math.max(largest, plan.statements!);
+      expect(plan.inserts.length).toBeGreaterThan(0);
+      expect(plan.statements).toBeLessThanOrEqual(INVOCATION_BUDGET);
+      const writes = plan.writerCalls.reduce((sum, call) => {
+        expect(call.method).toBe('syncPackage');
+        if (call.method !== 'syncPackage') return sum;
+        expect(call.versions.length).toBeLessThanOrEqual(50);
+        return sum + syncCost(call.versions.length);
+      }, 0);
+      expect(plan.statements).toBe(6 + 5 + writes);
+      const taken = remaining.filter((m) => m.ordinal <= plan.cursorAfter!);
+      covered.push(...taken.map((m) => m.ordinal));
+      remaining = remaining.slice(taken.length);
+    }
+    expect(covered).toEqual(Array.from({ length: 1200 }, (_, n) => n));
+    expect(largest).toBe(447);
+  });
+});

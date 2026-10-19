@@ -1,3 +1,4 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
 import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -30,6 +31,8 @@ import {
 } from '../kysely.js';
 import { holdsPermission, permissionRows, type ProtectedHolderProvider } from './access.js';
 import { liveSessionCondition } from './session-liveness.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 
 interface RoleRow {
   readonly id: string;
@@ -185,21 +188,33 @@ function allHold(conditions: readonly Guard[]): Guard {
   return sql<SqlBool>`(${sql.join(conditions, sql` and `)})`;
 }
 
+function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
+  return record === undefined
+    ? sql<SqlBool>`0`
+    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
+        and principal_key = ${record.principalKey} and key = ${record.key})`;
+}
+
 function probesFor(
   ctx: OrgContext,
   authority: Guard,
   conditions: readonly Guard[],
+  idempotency: IdempotencyRecord | undefined,
   revision?: { readonly id: string; readonly expected: number },
 ): FailureProbes {
   const probe = (condition: Guard) =>
     scalar(db.selectNoFrom(sql<number>`${condition}`.as('holds')));
   return {
     authority: probe(sql<SqlBool>`${authority} is not 1`),
-    ...(revision === undefined
+    ...(revision === undefined && idempotency === undefined
       ? {}
       : {
           conflict: probe(
-            sql<SqlBool>`exists (select 1 from role where org_id = ${ctx.orgId} and id = ${revision.id} and revision <> ${revision.expected})`,
+            sql<SqlBool>`(${idempotencyCollision(ctx, idempotency)} or ${
+              revision === undefined
+                ? sql<SqlBool>`0`
+                : sql<SqlBool>`exists (select 1 from role where org_id = ${ctx.orgId} and id = ${revision.id} and revision <> ${revision.expected})`
+            })`,
           ),
         }),
     collision: probe(sql<SqlBool>`${allHold(conditions)} is not 1`),
@@ -457,13 +472,13 @@ export function createRoleRepository(
 
       const unused = sql<SqlBool>`(not exists (
           select 1 from role where org_id = ${ctx.orgId} and (id = ${input.id} or key = ${input.key}))
-        or exists (
+        or (${input.permissions.length} > 0 and exists (
           select 1 from role r
           where r.org_id = ${ctx.orgId} and r.id = ${input.id} and r.key = ${input.key}
             and r.name = ${input.name} and r.scope = ${input.scope}
             and r.is_system = 0 and r.protects_last_holder = 0
             and r.created_at = ${input.now} and r.updated_at = ${input.now}
-            and not exists (select 1 from role_permission p where p.role_id = r.id)))`;
+            and not exists (select 1 from role_permission p where p.role_id = r.id))))`;
       const authority = actorAuthority(ctx, fence, providers, { requested: input.permissions });
       const outcome = await fenced(
         ctx,
@@ -495,20 +510,23 @@ export function createRoleRepository(
               .where(sql<SqlBool>`(last_op_id is null or last_op_id <> ${input.opId})`)
               .where(sql<SqlBool>`changes() > 0`),
           ),
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
         ],
-        probesFor(ctx, authority, [unused]),
+        probesFor(ctx, authority, [unused], input.idempotency),
       );
       if (!outcome.ok) {
         const reason = refusedBy(outcome, 'role create');
         if (reason === 'collision') return 'duplicate_key';
-        if (reason === 'conflict') throw new Error('role create has no revision to conflict with');
         return reason;
       }
       const inserted = outcome.results[0];
       return inserted !== undefined && inserted.rows.length > 0 ? 'created' : 'duplicate_key';
     },
 
-    async rename(ctx, fence, { id, name, now, opId }) {
+    async rename(ctx, fence, { id, name, now, opId, audit, idempotency }) {
       requireName(name);
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
@@ -522,8 +540,12 @@ export function createRoleRepository(
         fence,
         authority,
         conditions.flatMap((condition) => assertCheck(condition)),
-        [scalar(roleBump(ctx, id, now, opId).set({ name }))],
-        probesFor(ctx, authority, [open], { id, expected }),
+        [
+          scalar(roleBump(ctx, id, now, opId).set({ name })),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
+        ],
+        probesFor(ctx, authority, [open], idempotency, { id, expected }),
       );
       if (outcome.ok) return 'renamed';
       const reason = refusedBy(outcome, 'role rename');
@@ -534,7 +556,7 @@ export function createRoleRepository(
       throw new Error('role rename refused for an unknown reason');
     },
 
-    async setPermissions(ctx, fence, { id, permissions, now, opId }) {
+    async setPermissions(ctx, fence, { id, permissions, now, opId, audit, idempotency }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
@@ -580,8 +602,10 @@ export function createRoleRepository(
             organizationScopeOnly: hasOrganizationPermission,
           }),
           scalar(roleBump(ctx, id, now, opId)),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
-        probesFor(ctx, authority, [open], { id, expected }),
+        probesFor(ctx, authority, [open], idempotency, { id, expected }),
       );
       if (outcome.ok) return 'updated';
       const reason = refusedBy(outcome, 'role permission change');
@@ -591,7 +615,7 @@ export function createRoleRepository(
       return found.protects_last_holder === 1 ? 'locked' : 'invalid_permissions';
     },
 
-    async delete(ctx, fence, { id, opId }) {
+    async delete(ctx, fence, { id, opId, audit, idempotency }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
@@ -617,8 +641,10 @@ export function createRoleRepository(
               .where('id', '=', id)
               .where('is_system', '=', 0),
           ),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
-        probesFor(ctx, authority, [removable], { id, expected }),
+        probesFor(ctx, authority, [removable], idempotency, { id, expected }),
       );
       if (outcome.ok) return 'deleted';
       const reason = refusedBy(outcome, 'role delete');

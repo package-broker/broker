@@ -305,6 +305,7 @@ describe('node access wiring', () => {
           );
           const principal = await services.servicePrincipals.create(
             ctx.org,
+            session,
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId },

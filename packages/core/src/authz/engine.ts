@@ -14,6 +14,7 @@ import type {
 import type { Principal } from '../plugin.js';
 import { decidePatValidation } from './pat-validation.js';
 import type { PatValidationDecision, PatValidationView } from './pat-validation.js';
+import type { ScopeLevel } from './scope.js';
 import { isValidProjectSlug } from './project-path.js';
 import { authenticateToken } from './token-use.js';
 import type { TokenAccessView, TokenUseDeps } from './token-use.js';
@@ -23,6 +24,11 @@ export interface EngineGrant {
   readonly projectId: string | null;
   readonly sessionId: string | null;
   readonly tokenSelector: string | null;
+  readonly token: {
+    readonly kind: 'pat' | 'svc';
+    readonly scope: ScopeLevel | null;
+    readonly readOnly: boolean;
+  } | null;
   readonly actor: ActorAccessSnapshot | null;
 }
 
@@ -60,7 +66,7 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
     readonly servicePrincipalId: string | null;
     readonly bindingOk: boolean;
     readonly projectMode: 'all' | 'selected' | null;
-    readonly scope: { readonly level: string; readonly readOnly: boolean } | null;
+    readonly scope: { readonly level: ScopeLevel; readonly readOnly: boolean } | null;
   };
 }
 
@@ -248,7 +254,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     });
     if (found === null) return UNAUTHORIZED;
     if (
-      request.route.boundary === 'authenticated' &&
+      (request.route.boundary === 'authenticated' || request.route.boundary === 'self') &&
       found.identity !== null &&
       !found.identity.fresh
     ) {
@@ -292,6 +298,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
           projectId: decision.projectId,
           sessionId: found.session.id,
           tokenSelector: null,
+          token: null,
           actor: Object.freeze({
             session: Object.freeze({ id: found.session.id, userId: found.user.id }),
             user: Object.freeze({ id: found.user.id }),
@@ -368,10 +375,39 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         projectId: decision.projectId,
         sessionId: null,
         tokenSelector: token.selector,
+        token: Object.freeze({
+          kind: found.token.kind,
+          scope: found.token.scope?.level ?? null,
+          readOnly: found.token.scope?.readOnly ?? false,
+        }),
         actor: null,
       }),
     );
     return { ...decision, tokenId: found.token.id };
+  }
+
+  async function selfBearerDecision(
+    request: AuthorizationRequest,
+    token: { readonly canonical: string },
+    input: EngineLookupInput,
+  ): Promise<AuthorizationDecision> {
+    const gate: TokenUseDeps = {
+      ...tokenUse,
+      touch: () => Promise.resolve(true),
+      log: logTouchFailure,
+      dispatch: () => undefined,
+    };
+    const result = await authenticateToken(
+      gate,
+      token.canonical,
+      (selector) => access.lookupToken(request.org, { ...input, selector }),
+      (found) => patValidation.decide(found).allowed,
+    );
+    if (!result.ok) return UNAUTHORIZED;
+    const { token: held } = result.access;
+    if (!held.bindingOk || held.scope === null || held.projectMode === null) return UNAUTHORIZED;
+    if (principalOf(result.access) === undefined) return UNAUTHORIZED;
+    return FORBIDDEN;
   }
 
   return Object.freeze({
@@ -382,16 +418,26 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       if (
         routeBoundary !== 'organization' &&
         routeBoundary !== 'project' &&
-        routeBoundary !== 'authenticated'
+        routeBoundary !== 'authenticated' &&
+        routeBoundary !== 'self'
       ) {
         return FORBIDDEN;
       }
-      const permission = routeBoundary === 'authenticated' ? null : request.route.permission;
+      const permissionFree = routeBoundary === 'authenticated' || routeBoundary === 'self';
+      const permission = permissionFree ? null : request.route.permission;
       const boundary: EngineBoundary = routeBoundary === 'project' ? 'project' : 'organization';
       const slug = boundary === 'project' ? request.params['project'] : undefined;
       const slugValid = boundary === 'organization' || isValidProjectSlug(slug);
       const credential = parseAuthorization(request.request.headers.get('authorization'));
       if (credential.outcome === 'invalid') return UNAUTHORIZED;
+      if (routeBoundary === 'self' && credential.outcome === 'token') {
+        if (credential.scheme !== 'bearer') return UNAUTHORIZED;
+        return selfBearerDecision(request, credential.token, {
+          boundary: 'organization',
+          projectSlug: null,
+          providerAnchors: await deps.providerAnchors(request.org),
+        });
+      }
       const secret =
         credential.outcome === 'none' ? readCookie(request.request, SESSION_COOKIE) : null;
       if (

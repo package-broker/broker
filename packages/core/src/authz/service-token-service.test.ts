@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import type { ServiceTokenService } from './service-token-service.js';
+import type { ApiCall } from '../api/idempotency.js';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   REAUTH_WINDOW_MS,
   createSessionService,
@@ -185,7 +187,7 @@ async function issue(
   held = fence(),
   issuer = actor(),
 ) {
-  return createServiceTokenService(r.deps).issue(ctx, auth, issuer, held, input);
+  return createServiceTokenService(r.deps).issue(ctx, auth, issuer, held, input, apiCall);
 }
 
 describe('service token issuance', () => {
@@ -477,6 +479,7 @@ describe('service token issuance', () => {
         actor(),
         fence(),
         request(),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'reauth_required' });
       expect(r.calls).toHaveLength(0);
@@ -559,13 +562,163 @@ describe('service token issuance', () => {
       log: (entry) => logs.push({ ...entry }),
     });
     const held = fence('sp-1');
-    expect(await principals.setPermissions(ctx, serviceActor, held, 'sp-1', [])).toEqual({
+    expect(await principals.setPermissions(ctx, serviceActor, held, 'sp-1', [], apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await principals.restore(ctx, serviceActor, held, 'sp-1')).toEqual({
+    expect(await principals.restore(ctx, serviceActor, held, 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
+
+describe('lifecycle audit and idempotency', () => {
+  it.each(['project-1', null] as const)('passes one issue event for %s', async (mode) => {
+    const input = request();
+    const projectId = mode;
+    const r = rig({
+      principal: principal({ projectId, permissions: ['project:packages:read'] }),
+      live: ['project:packages:read', 'project:tokens:create', 'org:service-principals:write'],
+    });
+    const generated = ['tok-audit', 'event-audit'];
+    r.deps.ids.ulid = () => generated.shift()!;
+    const call = { ...apiCall, idempotency: issueRecord };
+    const result = await createServiceTokenService(r.deps).issue(
+      ctx,
+      session(),
+      actor({ isOrganizationAdmin: true }),
+      fence(),
+      input,
+      call,
+    );
+    expect(result.ok).toBe(true);
+    expect(r.calls).toHaveLength(1);
+    const stored = r.calls[0]!.input;
+    expect(stored.audit).toEqual({
+      id: 'event-audit',
+      occurredAt: NOW,
+      action: 'token.issue',
+      actor: { type: 'user', id: 'user-1' },
+      target: { type: 'token', id: 'tok-audit' },
+      projectId,
+      sourceIp: null,
+      tokenSelector: null,
+      payloadJson: expect.any(String),
+    });
+    expect(JSON.parse(stored.audit!.payloadJson)).toEqual({
+      op_id: apiCall.audit.opId,
+      request_id: apiCall.audit.requestId,
+      changes: {
+        kind: { new: 'svc' },
+        name: { new: input.name },
+        scope: { new: input.scope },
+        expires_at: { new: input.expiresAt },
+        project_mode: { new: projectId === null ? 'all' : 'selected' },
+        project_count: { new: projectId === null ? 0 : 1 },
+      },
+    });
+    expect(stored.idempotency).toEqual({
+      ...issueRecord,
+      responseJson: JSON.stringify({ code: 'already_issued', id: stored.id }),
+    });
+    expect(issueRecord.responseJson).toBe('{}');
+  });
+
+  it('excludes a sentinel minted plaintext from audit and idempotency', async () => {
+    const r = rig();
+    const plaintext = 'pb_svc_abcdefghijkl_' + 'Q'.repeat(43);
+    r.deps.tokens.issueService = async (ctx, fence, input, mint) => {
+      r.calls.push({ ctx, fence, input, mint });
+      r.minted.push(await mint());
+      return { status: 'issued', id: input.id, plaintext };
+    };
+    const input = request();
+    const call = {
+      ...apiCall,
+      idempotency: { ...issueRecord, responseJson: JSON.stringify({ plaintext }) },
+    };
+    expect(
+      await createServiceTokenService(r.deps).issue(
+        ctx,
+        session(),
+        actor({ isOrganizationAdmin: true }),
+        fence(),
+        input,
+        call,
+      ),
+    ).toMatchObject({ ok: true, value: { plaintext } });
+    const stored = r.calls[0]!.input;
+    const serialized = JSON.stringify([stored.audit, stored.idempotency]);
+    expect(stored.audit).toBeDefined();
+    expect(stored.idempotency).toBeDefined();
+    expect(serialized).not.toContain(plaintext);
+    expect(serialized).not.toContain('Q'.repeat(43));
+    const minted = parseToken(r.minted[0]!.plaintext);
+    expect(minted.ok).toBe(true);
+    if (!minted.ok) throw new Error('Expected minted token');
+    expect(serialized).not.toContain(minted.canonical);
+    expect(serialized).not.toContain(minted.secret);
+  });
+
+  it('omits absent issue idempotency', async () => {
+    const r = rig();
+    const input = request();
+    const call = apiCall;
+    await createServiceTokenService(r.deps).issue(
+      ctx,
+      session(),
+      actor({ isOrganizationAdmin: true }),
+      fence(),
+      input,
+      call,
+    );
+    expect(r.calls[0]!.input).not.toHaveProperty('idempotency');
+  });
+
+  it.each(['reauth_required', 'forbidden', 'scope_conflict'] as const)(
+    'refuses %s without a store event',
+    async (error) => {
+      const r = rig(
+        error === 'reauth_required' ? { fresh: false } : error === 'forbidden' ? { live: [] } : {},
+      );
+      const input = request(error === 'scope_conflict' ? { scope: 'write', readOnly: true } : {});
+      const call = apiCall;
+      expect(
+        await createServiceTokenService(r.deps).issue(
+          ctx,
+          session(),
+          actor({ isOrganizationAdmin: true }),
+          fence(),
+          input,
+          call,
+        ),
+      ).toEqual({ ok: false, error });
+      expect(r.calls).toHaveLength(0);
+    },
+  );
+
+  it('requires the issue call argument', () => {
+    expectTypeOf<Parameters<ServiceTokenService['issue']>['length']>().toEqualTypeOf<6>();
+  });
+});
+
+const issueRecord = {
+  principalKey: 'user:user-1',
+  key: 'issue',
+  route: '/tokens',
+  requestHash: 'hash',
+  status: 201,
+  responseJson: '{}',
+  createdAt: NOW,
+  expiresAt: inDays(1),
+};

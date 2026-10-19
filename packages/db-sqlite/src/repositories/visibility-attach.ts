@@ -2,6 +2,7 @@ import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type { VisibilityStore, VisibilityWriteResult } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { isUlid } from '@package-broker/core/ids';
 import {
   assertGuard,
   compile,
@@ -11,6 +12,8 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 import { actorHolds } from './actor-authority.js';
 import { rederiveStatements } from './visibility-derive.js';
 
@@ -19,7 +22,7 @@ const DEFAULT_PRECEDENCE = sql<number>`case when type in ${PROXY_TYPES} then 100
 
 export type VisibilityAttachRepository = Pick<
   VisibilityStore,
-  'attachSource' | 'detachSource' | 'setPrecedence' | 'setPackageFlag'
+  'attachSource' | 'detachSource' | 'setPrecedence' | 'setOrder' | 'setPackageFlag'
 >;
 
 export interface VisibilityAttachOptions {
@@ -298,6 +301,99 @@ export function createVisibilityAttachRepository(
         ),
         [compile(update)],
       );
+    },
+
+    async setOrder(ctx, fence, input) {
+      const expected = fence.expected['project'];
+      if (expected === undefined)
+        throw new TypeError('fence must carry an expected project revision');
+      const { projectId, sourceIds } = input;
+      if (
+        !Array.isArray(sourceIds) ||
+        sourceIds.length === 0 ||
+        sourceIds.some((id: unknown) => typeof id !== 'string' || !isUlid(id)) ||
+        new Set(sourceIds).size !== sourceIds.length
+      )
+        throw new TypeError('invalid visibility order');
+      const projects = await executor.all(
+        compile(
+          db
+            .selectFrom('project')
+            .select('id')
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', projectId)
+            .where('status', '=', 'active'),
+        ),
+      );
+      if (projects.length === 0) return notFound;
+      const attachments = await executor.all<{ source_id: string; project_id: string | null }>(
+        compile(
+          db
+            .selectFrom('project_source as ps')
+            .innerJoin('source as s', 's.id', 'ps.source_id')
+            .select(['ps.source_id', 's.project_id'])
+            .where('ps.org_id', '=', ctx.orgId)
+            .where('s.org_id', '=', ctx.orgId)
+            .where('ps.project_id', '=', projectId),
+        ),
+      );
+      if (sourceIds.length > attachments.length)
+        throw new TypeError('invalid visibility order size');
+      const owners = new Map(attachments.map((row) => [row.source_id, row.project_id]));
+      if (sourceIds.some((id) => !owners.has(id))) return { ok: false, reason: 'not_attached' };
+      const order = JSON.stringify(sourceIds);
+      const snapshot = JSON.stringify(sourceIds.map((id) => ({ id, owner: owners.get(id) })));
+      // Allow archived here so a concurrent archive is classified by the state guard.
+      // With a target project, holds checks the same permission for every source owner.
+      const authority = holds(ctx, fence, null, projectId, true);
+      const state = allOf(
+        sql<SqlBool>`exists (select 1 from project where org_id = ${ctx.orgId}
+          and id = ${projectId} and status = 'active' and revision = ${expected})`,
+        sql<SqlBool>`(select count(*) from project_source where org_id = ${ctx.orgId}
+          and project_id = ${projectId}) = ${sourceIds.length}`,
+        sql<SqlBool>`(select count(*) from project_source as ps
+          join source as s on s.id = ps.source_id
+          join json_each(${snapshot}) as wanted on json_extract(wanted.value, '$.id') = ps.source_id
+          where ps.org_id = ${ctx.orgId} and s.org_id = ${ctx.orgId}
+            and ps.project_id = ${projectId}
+            and s.project_id is json_extract(wanted.value, '$.owner')
+            and (s.project_id is null or s.project_id = ${projectId})) = ${sourceIds.length}`,
+        input.idempotency === undefined
+          ? sql<SqlBool>`1`
+          : sql<SqlBool>`not exists (
+          select 1 from api_idempotency where org_id = ${ctx.orgId}
+          and principal_key = ${input.idempotency.principalKey} and key = ${input.idempotency.key})`,
+      );
+      const changed = sql<SqlBool>`exists (select 1 from project_source as ps
+        join json_each(${order}) as wanted on wanted.value = ps.source_id
+        where ps.org_id = ${ctx.orgId} and ps.project_id = ${projectId}
+          and ps.precedence is not cast(wanted.key as integer))`;
+      const revision = compile(
+        db
+          .updateTable('project')
+          .set({ revision: sql<number>`revision + 1` })
+          .where('org_id', '=', ctx.orgId)
+          .where('id', '=', projectId)
+          .where(changed),
+      );
+      const precedence = sql<number>`(select cast(wanted.key as integer)
+        from json_each(${order}) as wanted where wanted.value = project_source.source_id)`;
+      const update = compile(
+        db
+          .updateTable('project_source')
+          .set({ precedence })
+          .where('org_id', '=', ctx.orgId)
+          .where('project_id', '=', projectId)
+          .where('precedence', 'is not', precedence),
+      );
+      return run(ctx, fence, authority, state, [
+        revision,
+        update,
+        auditPendingStatement(ctx, input.audit),
+        ...(input.idempotency === undefined
+          ? []
+          : [idempotencyInsertStatement(ctx, input.idempotency)]),
+      ]);
     },
 
     async setPackageFlag(ctx, fence, input) {

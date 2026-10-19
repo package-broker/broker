@@ -17,7 +17,8 @@
     "!dist/**/*.test.*"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "gen:api": "openapi-typescript ${PB_API_SPEC:-openapi.json} -o ${PB_API_TYPES:-src/api-types.ts}"
   },
   "devDependencies": {
     "@tailwindcss/cli": "catalog:",
@@ -26,6 +27,7 @@
     "class-variance-authority": "catalog:",
     "clsx": "catalog:",
     "esbuild": "catalog:",
+    "openapi-typescript": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
     "tailwind-merge": "catalog:",

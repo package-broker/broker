@@ -1,3 +1,5 @@
+import { isRegisteredCoreJob, type RegisteredCoreJob } from '../runtime/core-jobs.js';
+export type { RegisteredCoreJob } from '../runtime/core-jobs.js';
 import {
   PLUGIN_BINDABLE_PORTS,
   SUPPORTED_PLUGIN_API,
@@ -35,14 +37,6 @@ export interface RegisteredJob {
   readonly qualifiedName: string;
   readonly definition: JobDefinition;
 }
-
-declare const coreJobBrand: unique symbol;
-
-export interface RegisteredCoreJob extends RegisteredJob {
-  readonly [coreJobBrand]: true;
-}
-
-const issuedCoreJobs = new WeakSet<RegisteredCoreJob>();
 
 export interface Registration {
   readonly routes: readonly RegisteredRoute[];
@@ -124,19 +118,6 @@ function jobProblemCode(error: unknown): string {
   return error instanceof JobError ? error.code : reportableErrorName(error);
 }
 
-/** Kernel-internal: `core` is rejected as a plugin id, so core job types are qualified here. */
-export function registerCoreJob(definition: JobDefinition): RegisteredCoreJob {
-  const frozen = defineJob(definition);
-  const qualifiedName = `core:${frozen.name}:v${frozen.version}`;
-  const job = Object.freeze({
-    plugin: 'core',
-    qualifiedName,
-    definition: frozen,
-  }) as RegisteredCoreJob;
-  issuedCoreJobs.add(job);
-  return job;
-}
-
 function isThenable(value: unknown): value is PromiseLike<unknown> {
   return (
     (typeof value === 'object' || typeof value === 'function') &&
@@ -165,7 +146,7 @@ export function collectRegistrations(
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 
   for (const [index, core] of (options.coreJobs ?? []).entries()) {
-    if (!issuedCoreJobs.has(core)) {
+    if (!isRegisteredCoreJob(core)) {
       problems.push(`core job was not issued by registerCoreJob (coreJobs entry ${index})`);
       continue;
     }

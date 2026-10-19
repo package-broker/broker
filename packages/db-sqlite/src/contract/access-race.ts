@@ -1,3 +1,4 @@
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
@@ -330,8 +331,7 @@ export function describeAccessRace(label: string, open: Open): void {
       world.a,
       fence(),
       authority.guard(world.a, fence(), orgRevoke),
-      tokenId,
-      now,
+      { tokenId: tokenId, now: now },
     );
   }
 
@@ -617,8 +617,7 @@ export function describeAccessRace(label: string, open: Open): void {
                 ? null
                 : { id, kind: 'svc', userId: null, projectId: null, projectMode: null };
             },
-            revoke: (ctx, actorFence, guard, id, now) =>
-              tokens.revoke(ctx, actorFence, guard, id, now),
+            revoke: (ctx, actorFence, guard, input) => tokens.revoke(ctx, actorFence, guard, input),
           },
           authority: createServicePrincipalAuthority({ executor, providerAnchors: anchors }),
           ownership: {
@@ -626,6 +625,7 @@ export function describeAccessRace(label: string, open: Open): void {
               throw new Error('a service token is never revoked through ownership');
             },
           },
+          ids: { ulid: () => 'audit-revoke' },
           clock: { now: () => new Date() },
           log: (entry) => events.push(entry as Record<string, unknown>),
         });
@@ -636,15 +636,27 @@ export function describeAccessRace(label: string, open: Open): void {
       } as unknown as AuthenticatedSession;
 
       const gate = gateBefore(world.executor, 'batch');
-      const parked = serviceFor(gate.executor).revoke(world.a, authenticated, fence(), {
-        tokenId: 'victim',
-        routeProjectId: null,
-      });
+      const parked = serviceFor(gate.executor).revoke(
+        world.a,
+        authenticated,
+        fence(),
+        {
+          tokenId: 'victim',
+          routeProjectId: null,
+        },
+        apiCall,
+      );
       await gate.parked;
-      const free = await serviceFor(world.other).revoke(world.a, authenticated, fence(), {
-        tokenId: 'victim',
-        routeProjectId: null,
-      });
+      const free = await serviceFor(world.other).revoke(
+        world.a,
+        authenticated,
+        fence(),
+        {
+          tokenId: 'victim',
+          routeProjectId: null,
+        },
+        apiCall,
+      );
       gate.release();
       const late = await parked;
 
@@ -914,3 +926,12 @@ export function describeAccessRace(label: string, open: Open): void {
     });
   });
 }
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

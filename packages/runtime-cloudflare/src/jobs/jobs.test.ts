@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
-import { registerCoreJob } from '@package-broker/core/kernel/registry';
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { RegisteredJob } from '@package-broker/core/kernel/registry';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import {

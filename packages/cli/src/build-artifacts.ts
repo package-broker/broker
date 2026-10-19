@@ -164,5 +164,6 @@ export function renderBuildManifest(
     lines.push(`export const migrations = ${JSON.stringify(migrations, null, 2)};`);
   }
   lines.push(`export const platformPorts = ${JSON.stringify(platformPorts ?? null, null, 2)};`);
+  lines.push('export const observability = config.observability;');
   return `${lines.join('\n')}\n`;
 }

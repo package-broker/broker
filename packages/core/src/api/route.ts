@@ -2,7 +2,7 @@ import { type $ZodType, type output } from 'zod/v4/core';
 import { routeApiProblems } from '../kernel/routes.js';
 import type { ApiSlot, RequestContext, RouteBoundary, RouteDefinition } from '../plugin.js';
 import { assertRepresentable } from './json-schema.js';
-import { apiError, jsonResponse, type ApiErrorCode } from './response.js';
+import { apiError, jsonResponse, type ApiErrorCode, type SERVICE_ERROR_TABLE } from './response.js';
 import {
   readJsonBody,
   VALIDATION_CODES,
@@ -21,6 +21,7 @@ export interface ApiRouteSpec {
   readonly permission: string | null;
   readonly boundary?: RouteBoundary;
   readonly concurrency?: 'if-match';
+  readonly service?: keyof typeof SERVICE_ERROR_TABLE;
   readonly api: ApiSlot;
 }
 

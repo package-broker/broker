@@ -78,6 +78,7 @@ export async function describeNpm(
       signal: ctx.signal,
     },
     {
+      sourceType: source.type,
       name: target.name,
       url: target.url,
       destinations: target.destinations,

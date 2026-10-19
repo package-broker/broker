@@ -1,3 +1,4 @@
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -240,6 +241,7 @@ describe('node access wiring', () => {
               projectMode: 'all',
               projectIds: [],
             },
+            apiCall,
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           const own = await services.tokenList.listOwn(ctx.org, authenticated.userId, {
@@ -291,6 +293,7 @@ describe('node access wiring', () => {
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId },
+            apiCall,
           );
           const issued = principal.ok
             ? await services.serviceTokens.issue(
@@ -304,6 +307,7 @@ describe('node access wiring', () => {
                   scope: 'read',
                   expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
                 },
+                apiCall,
               )
             : null;
           return Response.json({ granted, principal, issued });
@@ -329,6 +333,7 @@ describe('node access wiring', () => {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
             },
+            apiCall,
           );
           return Response.json(revoked);
         },
@@ -808,3 +813,12 @@ describe('node access wiring', () => {
     }
   }, 60_000);
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

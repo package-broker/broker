@@ -30,10 +30,10 @@ const VECTOR_PASSWORD_HASH =
   'pbkdf2-sha256$i=100000$v=1$oKGio6SlpqeoqaqrrK2urw$K7MuJuKUZ7oO7dy0yZlMHaJS4zt5QunqAXSi_Zf584U';
 
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-const outDir = join(repoRoot, '.pb', 'cloudflare');
+const defaultOutDir = join(repoRoot, '.pb', 'cloudflare');
 const workerScript =
   process.env.SMOKE_WORKER_SCRIPT === undefined
-    ? join(outDir, 'worker.js')
+    ? join(defaultOutDir, 'worker.js')
     : resolve(repoRoot, process.env.SMOKE_WORKER_SCRIPT);
 
 function positiveInteger(name, raw, fallback) {
@@ -118,7 +118,7 @@ for (const [signal, code] of [
   });
 }
 
-async function readMigrations() {
+async function readMigrations(outDir = defaultOutDir) {
   const manifest = JSON.parse(await readFile(join(outDir, 'generated', 'manifest.json'), 'utf8'));
   const owners = [];
   const sources = [];
@@ -197,6 +197,28 @@ async function expectStatus(label, response, status) {
   }
 }
 
+function createMiniflare(script) {
+  return new Miniflare(
+    convertV4MiniflareOptions({
+      rootPath: dirname(script),
+      handleStructuredLogs: (record) => workerLogs.push(record.message),
+      modules: true,
+      scriptPath: basename(script),
+      compatibilityDate: '2026-10-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+      r2Buckets: ['STORAGE'],
+      queueProducers: { JOBS: 'pb-smoke-jobs' },
+      analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
+      bindings: {
+        PB_MASTER_KEY: MASTER_KEY,
+        PB_PUBLIC_URL: PUBLIC_ORIGIN,
+        DEPLOYMENT_ID: 'smoke',
+      },
+    }),
+  );
+}
+
 async function run() {
   const limitMs = positiveInteger(
     'SMOKE_TIMEOUT_MS',
@@ -221,25 +243,7 @@ async function run() {
     const migrations = await readMigrations();
 
     step = 'constructing Miniflare';
-    mf = new Miniflare(
-      convertV4MiniflareOptions({
-        rootPath: dirname(workerScript),
-        handleStructuredLogs: (record) => workerLogs.push(record.message),
-        modules: true,
-        scriptPath: basename(workerScript),
-        compatibilityDate: '2026-10-01',
-        compatibilityFlags: ['nodejs_compat'],
-        d1Databases: ['DB'],
-        r2Buckets: ['STORAGE'],
-        queueProducers: { JOBS: 'pb-smoke-jobs' },
-        analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
-        bindings: {
-          PB_MASTER_KEY: MASTER_KEY,
-          PB_PUBLIC_URL: PUBLIC_ORIGIN,
-          DEPLOYMENT_ID: 'smoke',
-        },
-      }),
-    );
+    mf = createMiniflare(workerScript);
 
     step = 'opening the D1 database';
     const executor = createD1Executor(await mf.getD1Database('DB'));
@@ -475,6 +479,127 @@ async function run() {
     );
     console.log(
       'smoke:cloudflare registered audit schedules, sealed, verified and detected tampering',
+    );
+
+    step = 'building the package-route Worker';
+    const routeOut = join(repoRoot, '.pb', 'package-route-cloudflare');
+    execFileSync(
+      process.execPath,
+      [
+        join(repoRoot, 'packages', 'cli', 'dist', 'bin.js'),
+        'build',
+        '--config',
+        join(repoRoot, 'fixtures', 'package-route.config.ts'),
+        '--target',
+        'cloudflare',
+        '--out',
+        routeOut,
+      ],
+      { cwd: repoRoot, stdio: 'pipe' },
+    );
+    await disposeMiniflare();
+    disposed = false;
+    mf = createMiniflare(join(routeOut, 'worker.js'));
+    const routeExecutor = createD1Executor(await mf.getD1Database('DB'));
+    await migrate(routeExecutor, await readMigrations(routeOut), { holder: 'smoke' });
+    const routeOrgId = ulid();
+    const routeNow = new Date();
+    await createOrganizationBootstrap(routeExecutor).bootstrap({
+      id: routeOrgId,
+      slug: 'smoke',
+      name: 'Smoke',
+      now: routeNow.toISOString(),
+    });
+    const routeAdminId = ulid();
+    const routeToken = randomBytes(32).toString('base64url');
+    const routeBootstrapped = await bootstrapAdmin(routeExecutor, orgContext(routeOrgId), {
+      email: ADMIN_EMAIL,
+      userId: routeAdminId,
+      setupHash: createHash('sha256').update(routeToken).digest('hex'),
+      setupExpiresAt: new Date(routeNow.getTime() + 3_600_000).toISOString(),
+      grantId: ulid(),
+      roleIds: Object.fromEntries(DEFAULT_ROLES.map(({ key }) => [key, ulid()])),
+      opId: ulid(),
+      now: routeNow.toISOString(),
+    });
+    if (routeBootstrapped !== 'created') {
+      throw new Error(
+        `package-route admin bootstrap: expected "created", got ${routeBootstrapped}`,
+      );
+    }
+    const routeStarted = await send('/_pb/auth/local/setup/start', limitMs, {
+      method: 'POST',
+      json: { token: routeToken },
+    });
+    await expectStatus('package-route setup start', routeStarted, 200);
+    const routeSecret = base32Decode((await routeStarted.json()).secret);
+    const routeFinished = await send('/_pb/auth/local/setup/finish', limitMs, {
+      method: 'POST',
+      json: {
+        token: routeToken,
+        password: VECTOR_PASSWORD,
+        code: await totpCode(routeSecret, totpStep()),
+      },
+    });
+    await expectStatus('package-route setup finish', routeFinished, 204);
+    const routeCookie = cookiesOf(routeFinished);
+
+    step = 'seeding the package catalogue';
+    const projectId = ulid();
+    const sourceId = ulid();
+    const visibleId = ulid();
+    const hiddenId = ulid();
+    const seed = [
+      [
+        "INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'alpha', 'Alpha')",
+        [projectId, routeOrgId],
+      ],
+      [
+        "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'fixture', 'npm', 'npm_registry')",
+        [sourceId, routeOrgId],
+      ],
+      [
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        [routeOrgId, projectId, sourceId],
+      ],
+    ];
+    for (const [id, name] of [
+      [visibleId, 'visible'],
+      [hiddenId, 'hidden'],
+    ]) {
+      seed.push([
+        "INSERT INTO package (id, org_id, source_id, ecosystem, name, visible_to_new_projects) VALUES (?, ?, ?, 'npm', ?, 1)",
+        [id, routeOrgId, sourceId, name],
+      ]);
+      seed.push([
+        "INSERT INTO version (id, org_id, package_id, version, version_normalized, stability, published_at, published_at_basis, metadata_json) VALUES (?, ?, ?, '1.0.0', '1.0.0', 'stable', ?, 'import_time', '{}')",
+        [ulid(), routeOrgId, id, new Date().toISOString()],
+      ]);
+    }
+    seed.push([
+      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      [routeOrgId, projectId, visibleId],
+    ]);
+    await routeExecutor.batch(seed.map(([sql, params]) => ({ sql, params })));
+
+    step = 'checking the package-boundary route';
+    const routePath = (name) => `/fixture/alpha/pkg/${name}`;
+    await expectStatus(
+      'package route without credentials',
+      await dispatch(routePath('visible'), limitMs),
+      401,
+    );
+    const visible = await send(routePath('visible'), limitMs, { cookie: routeCookie });
+    await expectStatus('package route for a visible package', visible, 200);
+    const resolved = await visible.json();
+    assert.equal(resolved.kind, 'visible');
+    assert.equal(resolved.pkg.packageId, visibleId);
+    const hiddenResponse = await send(routePath('hidden'), limitMs, { cookie: routeCookie });
+    const missingResponse = await send(routePath('missing'), limitMs, { cookie: routeCookie });
+    await expectStatus('package route for an invisible package', hiddenResponse, 404);
+    assert.deepEqual(await envelopeOf(hiddenResponse), await envelopeOf(missingResponse));
+    console.log(
+      'smoke:cloudflare package route: 401 without credentials, 200 visible, uniform 404 invisible',
     );
 
     step = 'done';

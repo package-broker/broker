@@ -634,7 +634,10 @@ describe('revoke', () => {
   it('revokes a live token once and reports the operation marker', async () => {
     await issue();
     const stamp = '2026-10-16T10:00:00.000Z';
-    const result = await repository.revoke(a, fence(), liveSession(), TOKEN, stamp);
+    const result = await repository.revoke(a, fence(), liveSession(), {
+      tokenId: TOKEN,
+      now: stamp,
+    });
 
     expect(result.status).toBe('revoked');
     if (result.status !== 'revoked') throw new Error('unreachable');
@@ -647,21 +650,15 @@ describe('revoke', () => {
 
   it('is idempotent: the second revoke changes nothing and carries no marker', async () => {
     await issue();
-    const first = await repository.revoke(
-      a,
-      fence(),
-      liveSession(),
-      TOKEN,
-      '2026-10-16T10:00:00.000Z',
-    );
+    const first = await repository.revoke(a, fence(), liveSession(), {
+      tokenId: TOKEN,
+      now: '2026-10-16T10:00:00.000Z',
+    });
     const before = await one('SELECT revoked_at, last_op_id FROM token WHERE id = ?', TOKEN);
-    const second = await repository.revoke(
-      a,
-      fence(),
-      liveSession(),
-      TOKEN,
-      '2026-10-16T11:00:00.000Z',
-    );
+    const second = await repository.revoke(a, fence(), liveSession(), {
+      tokenId: TOKEN,
+      now: '2026-10-16T11:00:00.000Z',
+    });
 
     expect(first.status).toBe('revoked');
     expect(second).toEqual({ status: 'already_revoked' });
@@ -674,7 +671,10 @@ describe('revoke', () => {
     await issue();
 
     expect(
-      await repository.revoke(a, fence(), liveSession(), '01J0TOKENMISSING00000000000', iso(0)),
+      await repository.revoke(a, fence(), liveSession(), {
+        tokenId: '01J0TOKENMISSING00000000000',
+        now: iso(0),
+      }),
     ).toEqual({
       status: 'not_found',
     });
@@ -700,12 +700,14 @@ describe('revoke', () => {
         b,
         fence('01J0USER00000000000000000B', '01J0SESSION000000000000000B'),
         assertGuard(sql<boolean>`1`, b),
-        TOKEN,
-        iso(0),
+        { tokenId: TOKEN, now: iso(0) },
       ),
     ).toEqual({ status: 'not_found' });
     expect(
-      await repository.revoke(b, fence(), assertGuard(sql<boolean>`1`, b), TOKEN, iso(0)),
+      await repository.revoke(b, fence(), assertGuard(sql<boolean>`1`, b), {
+        tokenId: TOKEN,
+        now: iso(0),
+      }),
     ).toEqual({ status: 'refused', reason: 'authority' });
     expect(
       (await one<{ revoked_at: string | null }>('SELECT revoked_at FROM token WHERE id = ?', TOKEN))
@@ -715,9 +717,9 @@ describe('revoke', () => {
 
   it('refuses a malformed timestamp before SQL', async () => {
     await issue();
-    await expect(repository.revoke(a, fence(), liveSession(), TOKEN, 'now')).rejects.toThrow(
-      TypeError,
-    );
+    await expect(
+      repository.revoke(a, fence(), liveSession(), { tokenId: TOKEN, now: 'now' }),
+    ).rejects.toThrow(TypeError);
   });
 });
 
@@ -1026,7 +1028,10 @@ describe('fenced revoke', () => {
       sql: "UPDATE session SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
       params: [SESSION],
     });
-    const result = await repository.revoke(a, fence(), liveSession(), TOKEN, iso(0));
+    const result = await repository.revoke(a, fence(), liveSession(), {
+      tokenId: TOKEN,
+      now: iso(0),
+    });
 
     expect(result.status).toBe('refused');
     expect(
@@ -1036,9 +1041,9 @@ describe('fenced revoke', () => {
   });
 
   it('refuses an empty token id', async () => {
-    await expect(repository.revoke(a, fence(), liveSession(), '', iso(0))).rejects.toThrow(
-      TypeError,
-    );
+    await expect(
+      repository.revoke(a, fence(), liveSession(), { tokenId: '', now: iso(0) }),
+    ).rejects.toThrow(TypeError);
   });
 
   it('lets one of two concurrent revokes win', async () => {
@@ -1079,7 +1084,10 @@ describe('fenced revoke', () => {
       ]);
       const results = await Promise.all(
         [first, second].map((e) =>
-          createTokenRepository(e).revoke(org, fence(), liveSession(org), TOKEN, iso(0)),
+          createTokenRepository(e).revoke(org, fence(), liveSession(org), {
+            tokenId: TOKEN,
+            now: iso(0),
+          }),
         ),
       );
 
@@ -1276,13 +1284,16 @@ describe('cache epoch', () => {
   it('bumps once per successful revoke and not when the guard refuses', async () => {
     await repository.issuePersonal(a, fence(), baseInput(), minter('abcdefghijkl').mint);
     const before = await epoch();
-    await repository.revoke(a, fence(), liveSession(), TOKEN, iso(0));
+    await repository.revoke(a, fence(), liveSession(), { tokenId: TOKEN, now: iso(0) });
     const after = await epoch();
     await executor.all({
       sql: "UPDATE session SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
       params: [SESSION],
     });
-    const refused = await repository.revoke(a, fence(), liveSession(), TOKEN, iso(0));
+    const refused = await repository.revoke(a, fence(), liveSession(), {
+      tokenId: TOKEN,
+      now: iso(0),
+    });
 
     expect(after).not.toBe(before);
     expect(refused.status).toBe('refused');
@@ -1482,7 +1493,10 @@ describe('round 6 hardening', () => {
       sql: "UPDATE session SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
       params: [SESSION],
     });
-    const result = await repository.revoke(a, fence(), alwaysTrue(), TOKEN, iso(0));
+    const result = await repository.revoke(a, fence(), alwaysTrue(), {
+      tokenId: TOKEN,
+      now: iso(0),
+    });
 
     expect(result).toEqual({ status: 'refused', reason: 'authority' });
     expect(
@@ -1493,16 +1507,21 @@ describe('round 6 hardening', () => {
 
   it('does not bump the cache epoch for an already revoked or an unknown token', async () => {
     await repository.issuePersonal(a, fence(), baseInput(), minter('abcdefghijkl').mint);
-    expect((await repository.revoke(a, fence(), alwaysTrue(), TOKEN, iso(0))).status).toBe(
-      'revoked',
-    );
+    expect(
+      (await repository.revoke(a, fence(), alwaysTrue(), { tokenId: TOKEN, now: iso(0) })).status,
+    ).toBe('revoked');
     const before = await epoch();
 
-    expect(await repository.revoke(a, fence(), alwaysTrue(), TOKEN, iso(0))).toEqual({
+    expect(
+      await repository.revoke(a, fence(), alwaysTrue(), { tokenId: TOKEN, now: iso(0) }),
+    ).toEqual({
       status: 'already_revoked',
     });
     expect(
-      await repository.revoke(a, fence(), alwaysTrue(), '01J0TOKENMISSING00000000000', iso(0)),
+      await repository.revoke(a, fence(), alwaysTrue(), {
+        tokenId: '01J0TOKENMISSING00000000000',
+        now: iso(0),
+      }),
     ).toEqual({ status: 'not_found' });
     expect(await epoch()).toBe(before);
   });
@@ -1572,13 +1591,10 @@ describe('bound parameter budget', () => {
   it('keeps the revoke batch at 100 or fewer', async () => {
     await repository.issuePersonal(a, fence(), baseInput(), minter('abcdefghijkl').mint);
     const { spy, seen } = recorder();
-    await createTokenRepository(spy).revoke(
-      a,
-      fence(),
-      assertGuard(sql<boolean>`1`, a),
-      TOKEN,
-      iso(0),
-    );
+    await createTokenRepository(spy).revoke(a, fence(), assertGuard(sql<boolean>`1`, a), {
+      tokenId: TOKEN,
+      now: iso(0),
+    });
 
     expect(seen.length).toBeGreaterThan(0);
     for (const statement of seen) expect(statement.params.length).toBeLessThanOrEqual(100);

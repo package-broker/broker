@@ -95,6 +95,7 @@ function engine(rig: Rig, logs: unknown[][], dispatched: (() => Promise<void>)[]
           organizationPermissions: [],
           projectPermissions: ['project:read'],
           protectedHolder: false,
+          identity: null,
         };
         return found;
       },

@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/e2e" },
     { "path": "packages/core" },
     { "path": "packages/db-sqlite" },
     { "path": "packages/runtime-cloudflare" },

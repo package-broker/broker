@@ -68,6 +68,7 @@ async function coreMigrations(): Promise<MigrationSource[]> {
       '0004_cache_epoch.sql',
       '0005_admin_permission_topup.sql',
       '0006_ports.sql',
+      '0015_keyring_verifier.sql',
     ].map(async (name) =>
       loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),
@@ -204,13 +205,7 @@ describe('auth wiring on Miniflare D1', () => {
         register,
       }),
     ]);
-    const db: D1DatabaseLike = {
-      prepare: vi.fn(() => {
-        throw new Error('unexpected database query');
-      }),
-      batch: vi.fn(() => Promise.resolve([])),
-    };
-    const environment = env(db);
+    const environment = env(await sharedDatabase());
 
     expect((await worker.fetch(get('/registered'), environment)).status).toBe(200);
     expect(register).toHaveBeenCalledTimes(1);

@@ -38,7 +38,7 @@ export interface PersonalTokenStoreInput {
   readonly projectMode: 'all' | 'selected';
   readonly projectIds: readonly string[];
   readonly providerAnchors: readonly ProviderAnchor[];
-  readonly audit?: AuditEvent;
+  readonly audit: AuditEvent;
   readonly idempotency?: IdempotencyRecord;
 }
 

@@ -368,6 +368,19 @@ export interface CatalogueWriter {
     readonly tags: number;
     readonly guardStatements: number;
   }): number;
+  /** Bound parameter bytes one syncPackage version group may carry. */
+  readonly syncPayloadLimit: number;
+  /**
+   * Upper bound of the bound parameter bytes one version adds to a syncPackage call; above
+   * `syncPayloadLimit` the version cannot be written in any call.
+   */
+  syncPayloadBytes(
+    ctx: OrgContext,
+    guard: CatalogueWriteGuard,
+    input: Pick<SyncPackageInput, 'sourceId' | 'ecosystem' | 'key'> & {
+      readonly version: VersionInput;
+    },
+  ): number;
   syncPackage(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,

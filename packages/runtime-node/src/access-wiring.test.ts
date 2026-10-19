@@ -1,3 +1,11 @@
+const call = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
@@ -206,10 +214,16 @@ describe('node access wiring', () => {
             return new Response(null, { status: 500 });
           }
           const fence = mutationFence(authenticated, {});
-          const created = await services.projects.createProject(ctx.org, actor, fence, {
-            slug: 'alpha',
-            name: 'Alpha',
-          });
+          const created = await services.projects.createProject(
+            ctx.org,
+            actor,
+            fence,
+            {
+              slug: 'alpha',
+              name: 'Alpha',
+            },
+            call,
+          );
           if (!created.ok) return Response.json({ error: created.error }, { status: 409 });
           const listed = await services.projectList.list(ctx.org, actor, { limit: 10 });
           return Response.json({
@@ -287,6 +301,7 @@ describe('node access wiring', () => {
               subject: { type: 'email', value: 'member@example.test' },
               roleId: query.get('role') ?? '',
             },
+            call,
           );
           const principal = await services.servicePrincipals.create(
             ctx.org,
@@ -303,6 +318,7 @@ describe('node access wiring', () => {
                 mutationFence(authenticated, {}),
                 {
                   servicePrincipalId: principal.value.id,
+                  routeProjectId: projectId,
                   name: 'ci',
                   scope: 'read',
                   expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
@@ -332,6 +348,7 @@ describe('node access wiring', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'own',
             },
             apiCall,
           );

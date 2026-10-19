@@ -319,6 +319,7 @@ async function startBundle(source) {
   step = 'copying the bundle';
   copy = await realpath(await mkdtemp(join(tmpdir(), 'pb-node-smoke-')));
   await cp(join(source, '.'), copy, { recursive: true });
+  await cp(join(REPO_ROOT, 'packages/ui/dist/assets'), join(copy, 'assets'), { recursive: true });
   console.log(`smoke:node copied ${source} to ${copy}`);
 
   if (process.env['SMOKE_OFFLINE'] === '1') {
@@ -507,6 +508,28 @@ async function run() {
   });
   await expectStatus(signedIn, 200, 'GET /_pb/session with the minted session');
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
+
+  step = 'checking the authenticated UI mount';
+  const uiManifest = JSON.parse(await readFile(join(copy, 'assets/manifest.json'), 'utf8'));
+  for (const path of ['/_pb/ui/', '/_pb/ui/manifest.json']) {
+    const anonymousUi = await fetch(`${base}${path}`, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(anonymousUi, 401, `GET ${path} without credentials`);
+    const authenticatedUi = await fetch(`${base}${path}`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(authenticatedUi, 200, `GET ${path} with a session`);
+    if (path.endsWith('.json')) assert.deepEqual(await authenticatedUi.json(), uiManifest);
+    else
+      assert.equal(
+        await authenticatedUi.text(),
+        await readFile(join(copy, 'assets', uiManifest.entry), 'utf8'),
+      );
+  }
+  console.log('smoke:node UI document and manifest require a session');
 
   step = 'checking audit jobs';
   await checkAuditJobs(env['PB_SQLITE_PATH']);

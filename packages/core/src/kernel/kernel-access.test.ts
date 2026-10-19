@@ -377,6 +377,7 @@ describe('kernel access snapshots', () => {
       projectId: null,
       boundary: 'none',
       sessionId: null,
+      token: null,
       actor: null,
       rateKey: { stage: 'anonymous', ip: null, routeClass: 'none' },
     });
@@ -437,6 +438,7 @@ describe('kernel access snapshots', () => {
       projectId: 'proj-1',
       sessionId: 'sess-1',
       tokenSelector: null,
+      token: null,
       actor: null,
     });
     try {

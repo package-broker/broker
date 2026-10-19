@@ -12,7 +12,6 @@ import type {
   Platform,
   Principal,
   RequestContext,
-  RouteDefinition,
 } from '../plugin.js';
 import { createRepositoryJobs } from '../platform/jobs-port.js';
 import type { JobsFactory } from '../platform/jobs-port.js';
@@ -59,6 +58,7 @@ import type { PlatformServices } from './plugin-ports.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { packageActorOf } from '../internal/package-actor.js';
 import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
+import type { RouteDefinition } from './routes.js';
 import {
   compareRoutePrecedence,
   ownedRoutesConflict,
@@ -568,6 +568,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ...(route.boundary === undefined
           ? {}
           : { boundary: route.boundary === 'package' ? 'project' : route.boundary }),
+        ...('bearerOnly' in route && route.bearerOnly === true
+          ? { bearerOnly: true as const }
+          : {}),
       },
       params: Object.freeze({ ...c.req.param() }),
     };

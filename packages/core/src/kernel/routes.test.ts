@@ -259,3 +259,60 @@ describe('authenticated boundary registration', () => {
     expect(descriptor?.sessionOnly).toBe(false);
   });
 });
+
+describe('bearer-only route registration', () => {
+  const route = {
+    method: 'POST',
+    path: '/_pb/mcp',
+    permission: null,
+    boundary: 'authenticated',
+    bearerOnly: true,
+  };
+  const core = { allowAuthenticated: true };
+  const problems = (patch: Record<string, unknown> = {}) =>
+    routeBoundaryProblems({ ...route, ...patch }, 'route', core);
+
+  it('accepts the core authenticated MCP POST', () => {
+    expect(problems()).toEqual([]);
+  });
+
+  it('refuses another path', () => {
+    expect(problems({ path: '/_pb/other' }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses another boundary', () => {
+    expect(problems({ boundary: 'none' }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses another method', () => {
+    expect(problems({ method: 'GET' }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses a permission', () => {
+    expect(problems({ permission: 'org:read' }).length).toBeGreaterThan(0);
+  });
+
+  it('refuses a non-true flag', () => {
+    expect(problems({ bearerOnly: false }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses bearerOnly on a real plugin route independently of its boundary', () => {
+    const plugin: PluginDefinition = {
+      id: 'demo',
+      package: '@test/demo',
+      apiVersion: SUPPORTED_PLUGIN_API[1],
+      platforms: ['node'],
+      register(registry) {
+        const definition = {
+          method: 'GET' as const,
+          path: '/items',
+          permission: null,
+          bearerOnly: true as const,
+          handler: () => new Response('ok'),
+        };
+        registry.route(definition);
+      },
+    };
+    expect(() => collectRegistrations([plugin])).toThrow(/bearerOnly/);
+  });
+});

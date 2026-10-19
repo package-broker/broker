@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { sha256Hex } from '../auth/primitives.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
@@ -1558,5 +1558,130 @@ describe('SSO freshness outside the authenticated boundary', () => {
       ).allow,
     ).toBe(true);
     expect((await engine.authorize(req({ headers: cookie }))).allow).toBe(true);
+  });
+});
+
+describe('bearer-only authenticated MCP POST', () => {
+  const ask = (headers: Record<string, string>): AuthorizationRequest => {
+    const request = req({
+      headers,
+      method: 'POST',
+      boundary: 'authenticated',
+      permission: 'authenticated',
+      params: {},
+    });
+    return { ...request, route: { ...request.route, path: '/_pb/mcp', bearerOnly: true } };
+  };
+
+  it('allows a bearer token and retains the T680 grant', async () => {
+    const state = freshState();
+    state.token.organizationPermissions = [];
+    const engine = createAuthorizationEngine(deps(state));
+    const request = ask(bearer(PAT));
+    expect(await engine.authorize(request)).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+      tokenId: 'tok-1',
+    });
+    expect(engineGrantOf(request)).toMatchObject({
+      principal: { kind: 'user', id: 'user-1' },
+      sessionId: null,
+      tokenSelector: SELECTOR,
+      token: { kind: 'pat', scope: 'full', readOnly: false },
+    });
+  });
+
+  it('ignores a valid session cookie without reading the session repository', async () => {
+    const dependencies = deps(freshState());
+    const lookup = vi.spyOn(dependencies.access, 'lookupSession');
+    const engine = createAuthorizationEngine(dependencies);
+    expect(await engine.authorize(ask(cookie))).toEqual(await engine.authorize(ask({})));
+    expect(await engine.authorize(ask(cookie))).toEqual({ allow: false, status: 401 });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('refuses Basic credentials with the missing-credential 401', async () => {
+    const dependencies = deps(freshState());
+    const lookup = vi.spyOn(dependencies.access, 'lookupToken');
+    const engine = createAuthorizationEngine(dependencies);
+    const decision = await engine.authorize(ask({ authorization: `Basic ${btoa(`${PAT}:x`)}` }));
+    expect(decision).toEqual(await engine.authorize(ask({})));
+    expect(decision).toEqual({ allow: false, status: 401 });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  async function kernelWith(state: State) {
+    const dependencies = deps(state);
+    const lookup = vi.spyOn(dependencies.access, 'lookupSession');
+    const kernel = await createKernel({
+      platform: 'node',
+      plugins: [],
+      coreRoutes: [
+        {
+          method: 'POST',
+          path: '/_pb/mcp',
+          permission: null,
+          boundary: 'authenticated',
+          bearerOnly: true,
+          handler: (context) =>
+            Response.json({
+              principal: context.principal,
+              token: accessContextOf(context)?.token,
+            }),
+        },
+      ],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock: fixedClock('2026-10-16T12:00:00.000Z'),
+        ids: { ulid: () => '01JA0000000000000000000000' },
+      },
+      resolveOrg: () => Promise.resolve(org),
+      health: () => Promise.resolve(true),
+      log: () => undefined,
+      authorization: createAuthorizationEngine(dependencies),
+    });
+    return { kernel, lookup };
+  }
+
+  it('carries the flag through the kernel and allows Bearer with a cookie present', async () => {
+    const { kernel, lookup } = await kernelWith(freshState());
+    const response = await kernel.fetch(
+      new Request(`${ORIGIN}/_pb/mcp`, {
+        method: 'POST',
+        headers: { ...cookie, ...bearer(PAT) },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      principal: { kind: 'user', id: 'user-1' },
+      token: { kind: 'pat' },
+    });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  async function refusal(headers: Record<string, string>) {
+    const { kernel, lookup } = await kernelWith(freshState());
+    const response = await kernel.fetch(
+      new Request(`${ORIGIN}/_pb/mcp`, { method: 'POST', headers }),
+    );
+    const body = (await response.json()) as { error: { requestId?: string } };
+    delete body.error.requestId;
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.delete('x-request-id');
+    expect(lookup).not.toHaveBeenCalled();
+    return { status: response.status, body, headers: [...responseHeaders] };
+  }
+
+  it('returns the missing-credential envelope for a cookie-only POST', async () => {
+    const anonymous = await refusal({});
+    expect(anonymous.status).toBe(401);
+    expect(await refusal(cookie)).toEqual(anonymous);
+  });
+
+  it('returns the missing-credential envelope for a Basic POST', async () => {
+    expect(await refusal({ authorization: `Basic ${btoa(`${PAT}:x`)}` })).toEqual(
+      await refusal({}),
+    );
   });
 });

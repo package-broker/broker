@@ -314,6 +314,8 @@ export interface SyncPackageInput {
   readonly description: string | null;
   readonly versions: readonly VersionInput[];
   readonly tags?: Readonly<Record<string, string>>;
+  /** Full snapshot tag names to retain while applying a slice of tags. */
+  readonly tagNames?: readonly string[];
 }
 
 export type SyncRefusal = 'invalid' | 'too_large' | 'tombstoned';
@@ -368,6 +370,19 @@ export interface CatalogueWriter {
     readonly tags: number;
     readonly guardStatements: number;
   }): number;
+  /** Bound parameter bytes one syncPackage version group may carry. */
+  readonly syncPayloadLimit: number;
+  /**
+   * Upper bound of the bound parameter bytes one version adds to a syncPackage call; above
+   * `syncPayloadLimit` the version cannot be written in any call.
+   */
+  syncPayloadBytes(
+    ctx: OrgContext,
+    guard: CatalogueWriteGuard,
+    input: Pick<SyncPackageInput, 'sourceId' | 'ecosystem' | 'key'> & {
+      readonly version: VersionInput;
+    },
+  ): number;
   syncPackage(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,

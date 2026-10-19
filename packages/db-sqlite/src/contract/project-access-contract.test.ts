@@ -1,3 +1,11 @@
+const call = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
 import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -286,9 +294,16 @@ describe('project access with real persistence', () => {
     });
     const before = await snapshot();
     expect(
-      await projects.updateSettings(org, actor(), fence({ project: 1 }), B, { name: 'Changed' }),
+      await projects.updateSettings(
+        org,
+        actor(),
+        fence({ project: 1 }),
+        B,
+        { name: 'Changed' },
+        call,
+      ),
     ).toEqual({ ok: false, error: 'forbidden' });
-    expect(await admin().grant(org, actor(), fence(), B, input())).toEqual({
+    expect(await admin().grant(org, actor(), fence(), B, input(), call)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -343,11 +358,11 @@ describe('project access with real persistence', () => {
     });
     await rows('UPDATE session SET reauth_at = NULL WHERE id = ?', SESSION);
     expect(
-      await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED),
+      await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED, call),
     ).toEqual({ ok: false, error: 'forbidden' });
     await rows('UPDATE session SET reauth_at = ? WHERE id = ?', new Date().toISOString(), SESSION);
     expect(
-      await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED),
+      await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED, call),
     ).toEqual({ ok: true, value: null });
     expect(await engine().authorize(request('archived'))).toMatchObject({
       allow: true,
@@ -380,23 +395,25 @@ describe('project access with real persistence', () => {
 
   it('enforces the live permission subset behind project administration', async () => {
     const before = await snapshot();
-    expect(await admin().grant(org, actor(), fence(), A, input(BROAD))).toEqual({
+    expect(await admin().grant(org, actor(), fence(), A, input(BROAD), call)).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(await snapshot()).toBe(before);
-    expect(await admin().grant(org, actor(), fence(), A, input())).toMatchObject({ ok: true });
+    expect(await admin().grant(org, actor(), fence(), A, input(), call)).toMatchObject({
+      ok: true,
+    });
   });
 
   it('denies archived grants but permits archived revocation with the repository fence key', async () => {
     const service = admin();
     const before = await snapshot();
-    expect(await service.grant(org, actor(ARCHIVED), fence(), ARCHIVED, input())).toEqual({
+    expect(await service.grant(org, actor(ARCHIVED), fence(), ARCHIVED, input(), call)).toEqual({
       ok: false,
       error: 'forbidden',
     });
     expect(
-      await service.revoke(org, actor(ARCHIVED), fence({ grant: 1 }), ARCHIVED, TARGET),
+      await service.revoke(org, actor(ARCHIVED), fence({ grant: 1 }), ARCHIVED, TARGET, call),
     ).toEqual({ ok: false, error: 'invalid_revision' });
     expect(await snapshot()).toBe(before);
     expect(projectGrantKey(TARGET)).toBe(`access_grant:${TARGET}`);
@@ -407,6 +424,7 @@ describe('project access with real persistence', () => {
         fence({ [projectGrantKey(TARGET)]: 1 }),
         ARCHIVED,
         TARGET,
+        call,
       ),
     ).toEqual({ ok: true, value: null });
     expect(await rows('SELECT id FROM access_grant WHERE id = ?', TARGET)).toEqual([]);
@@ -414,7 +432,7 @@ describe('project access with real persistence', () => {
 
   it('uses access_grant and role fence keys for role changes and rejects stale revisions', async () => {
     const service = admin();
-    const created = await service.grant(org, actor(), fence(), A, input());
+    const created = await service.grant(org, actor(), fence(), A, input(), call);
     if (!created.ok) throw new Error('grant required');
     const grantId = created.value.id;
     expect(projectGrantRoleKey(VIEWER)).toBe(`role:${VIEWER}`);
@@ -427,12 +445,21 @@ describe('project access with real persistence', () => {
         A,
         grantId,
         BROAD,
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(await snapshot()).toBe(beforeSubset);
     const before = await snapshot();
     expect(
-      await service.changeRole(org, actor(), fence({ grant: 1, role: 1 }), A, grantId, VIEWER),
+      await service.changeRole(
+        org,
+        actor(),
+        fence({ grant: 1, role: 1 }),
+        A,
+        grantId,
+        VIEWER,
+        call,
+      ),
     ).toEqual({ ok: false, error: 'invalid_revision' });
     expect(
       await service.changeRole(
@@ -442,6 +469,7 @@ describe('project access with real persistence', () => {
         A,
         grantId,
         VIEWER,
+        call,
       ),
     ).toEqual({ ok: false, error: 'conflict' });
     expect(await snapshot()).toBe(before);
@@ -453,6 +481,7 @@ describe('project access with real persistence', () => {
         A,
         grantId,
         VIEWER,
+        call,
       ),
     ).toEqual({ ok: true, value: null });
   });
@@ -481,7 +510,7 @@ describe('project access with real persistence', () => {
     await database.executor.batch([grant(id(24), VIEWER, A, 'target')]);
     const service = admin(configured);
     const before = await snapshot();
-    const created = await service.grant(org, actor(), fence(), A, input());
+    const created = await service.grant(org, actor(), fence(), A, input(), call);
     expect(created).toEqual({
       ok: false,
       error: failure === 'missing' ? 'unknown_provider' : 'forbidden',
@@ -494,6 +523,7 @@ describe('project access with real persistence', () => {
         A,
         id(24),
         VIEWER,
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(
@@ -503,6 +533,7 @@ describe('project access with real persistence', () => {
         fence({ [projectGrantKey(TARGET)]: 1 }),
         ARCHIVED,
         TARGET,
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(await snapshot()).toBe(before);

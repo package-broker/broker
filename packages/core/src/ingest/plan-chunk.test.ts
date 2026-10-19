@@ -439,3 +439,78 @@ describe('per-version sync costs', () => {
     expect(largest).toBe(447);
   });
 });
+
+describe('planChunk writer payload bound', () => {
+  const payloadBudget = (bytes: (v: VersionInput) => number, limit = 1000): ChunkBudget => ({
+    ...withA6(),
+    syncCost: (versions) => 10 + versions,
+    syncPayload: { limit, bytes },
+  });
+
+  it('starts a new syncPackage call before the bound parameter bytes would exceed the limit', () => {
+    const plan = planChunk(
+      npmMembers(5),
+      [],
+      npmSource,
+      payloadBudget(() => 400),
+    );
+    expect(
+      plan.writerCalls.map((c) => (c.method === 'syncPackage' ? c.versions.length : 0)),
+    ).toEqual([2, 2, 1]);
+    expect(plan.inserts).toHaveLength(5);
+    expect(plan.statements).toBe(3 + 2 + (10 + 2) + (10 + 2) + (10 + 1));
+  });
+
+  it('refuses a member whose own bound bytes exceed the limit and keeps planning', () => {
+    const members = npmMembers(3);
+    const plan = planChunk(
+      members,
+      [],
+      npmSource,
+      payloadBudget((v) => (v.versionNormalized === '1.0.1' ? 1001 : 10)),
+    );
+    expect(plan.refused).toEqual([{ version: '1.0.1', reason: 'payload_too_large' }]);
+    expect(plan.inserts.map((v) => v.versionNormalized)).toEqual(['1.0.0', '1.0.2']);
+    expect(plan.cursorAfter).toBe(2);
+  });
+});
+
+it.each([null, 'Use version 2'])(
+  'budgets an npm deprecation refresh from %s',
+  (deprecatedMessage) => {
+    const old = versionInput('npm', '1.0.0', npmManifest('1.0.0'));
+    const incoming = {
+      ...old,
+      metadata: {
+        ...old.metadata,
+        deprecatedMessage: deprecatedMessage === null ? 'Use version 2' : null,
+      },
+    };
+    const plan = planChunk(
+      [member(0, incoming)],
+      [{ ...existingFrom(old), deprecatedMessage }],
+      npmSource,
+      withA6(),
+    );
+    expect(plan.writerCalls).toEqual([{ method: 'syncPackage', versions: [incoming] }]);
+    expect(plan.npmConflicts).toEqual([]);
+    expect(plan.statements).toBeLessThanOrEqual(INVOCATION_BUDGET);
+  },
+);
+
+it.each(['tombstoned', 'quarantined'])(
+  'marks a %s npm digest conflict without changing its status',
+  (status) => {
+    const old = versionInput('npm', '1.0.0', npmManifest('1.0.0'));
+    const incoming = { ...old, metadata: { ...old.metadata, npmIntegrity: INTEGRITY_B } };
+    const plan = planChunk(
+      [member(0, incoming)],
+      [{ ...existingFrom(old, false), status }],
+      npmSource,
+      withA6(),
+    );
+    expect(plan.writerCalls).toEqual([]);
+    expect(plan.unchanged).toEqual(['1.0.0']);
+    expect(plan.metadataRequired).toEqual([]);
+  },
+);

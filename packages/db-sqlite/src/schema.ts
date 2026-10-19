@@ -251,6 +251,13 @@ export interface CacheEpochTable {
   version: string;
 }
 
+/** Mirrors `keyring_verifier` in `migrations/0015_keyring_verifier.sql`. */
+export interface KeyringVerifierTable {
+  key_version: number;
+  mac: Uint8Array;
+  created_at: Generated<string>;
+}
+
 /** Mirrors `job` in `migrations/0001_init.sql` and `migrations/0006_ports.sql`. */
 export interface JobTable {
   id: string;
@@ -663,6 +670,7 @@ export interface Database {
   identity_block: IdentityBlockTable;
   access_mutation_guard: AccessMutationGuardTable;
   cache_epoch: CacheEpochTable;
+  keyring_verifier: KeyringVerifierTable;
   job: JobTable;
   job_attempt: JobAttemptTable;
   job_schedule: JobScheduleTable;

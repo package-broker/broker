@@ -1,0 +1,12 @@
+{
+  "name": "@package-broker/e2e",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "release": "node src/runner.ts"
+  },
+  "dependencies": {
+    "hono": "catalog:"
+  }
+}

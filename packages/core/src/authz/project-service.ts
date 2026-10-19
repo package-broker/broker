@@ -1,3 +1,6 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent, type AuditEventInput } from '../audit/actions.js';
+import { redactValue } from '../audit/redact.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp, isUlid } from '../ids.js';
@@ -5,6 +8,7 @@ import { isPermissionView, type PermissionView } from './actor.js';
 import type { ActorContext, AdminLog } from './administration.js';
 import type { MutationFence } from './fence.js';
 import type { ProjectActor } from './project-actor.js';
+import { isValidProjectSlug } from './project-path.js';
 
 export const PROJECT_NAME_MAX_LENGTH = 100;
 export const TOKEN_MAX_SCOPES = ['read', 'write', 'full'] as const;
@@ -34,9 +38,15 @@ export interface ProjectStore {
   create(
     ctx: OrgContext,
     fence: MutationFence,
-    input: ProjectCreateInput & { readonly id: string; readonly now: string },
+    input: ProjectCreateInput & {
+      readonly id: string;
+      readonly now: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<
     | 'created'
+    | 'conflict'
     | 'duplicate'
     | 'invalid_slug'
     | 'reserved_slug'
@@ -47,23 +57,35 @@ export interface ProjectStore {
   update(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    changes: ProjectChanges,
-    now: string,
+    input: {
+      readonly id: string;
+      readonly changes: ProjectChanges;
+      readonly now: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<
     'updated' | 'unchanged' | 'archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
   archive(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    now: string,
+    input: {
+      readonly id: string;
+      readonly now: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<'archived' | 'not_active' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
   restore(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    now: string,
+    input: {
+      readonly id: string;
+      readonly now: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<
     'restored' | 'not_archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -95,6 +117,7 @@ export interface ProjectService {
     actor: ActorContext,
     fence: MutationFence,
     input: ProjectCreateInput,
+    call: ApiCall,
   ): Promise<ProjectResult<{ readonly id: string; readonly slug: string }>>;
   /** The fence must carry the expected `project` revision. */
   updateSettings(
@@ -103,6 +126,7 @@ export interface ProjectService {
     fence: MutationFence,
     id: string,
     changes: ProjectChanges,
+    call: ApiCall,
   ): Promise<ProjectResult<null>>;
   /** The fence must carry the expected `project` revision. */
   archiveProject(
@@ -110,6 +134,7 @@ export interface ProjectService {
     actor: ActorContext,
     fence: MutationFence,
     id: string,
+    call: ApiCall,
   ): Promise<ProjectResult<null>>;
   /** The fence must carry the expected `project` revision; the store requires a fresh reauth. */
   restoreProject(
@@ -117,6 +142,7 @@ export interface ProjectService {
     actor: ActorContext,
     fence: MutationFence,
     id: string,
+    call: ApiCall,
   ): Promise<ProjectResult<null>>;
 }
 
@@ -168,7 +194,7 @@ function fail(error: ProjectError): ProjectResult<never> {
 function isValidName(name: unknown): name is string {
   if (typeof name !== 'string' || UNSAFE_NAME_CHARACTER.test(name)) return false;
   const length = Array.from(name).length;
-  return length >= 1 && length <= PROJECT_NAME_MAX_LENGTH;
+  return length >= 1 && length <= PROJECT_NAME_MAX_LENGTH && redactValue(name, 200, 'name').ok;
 }
 
 function isScope(scope: unknown): scope is TokenMaxScope {
@@ -179,6 +205,31 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
   const { projects, clock, ids } = deps;
 
   const now = (): string => isoTimestamp(clock.now());
+
+  function mutationAudit(
+    call: ApiCall,
+    actor: OrgActor,
+    action: AuditEventInput['action'],
+    targetId: string,
+    stamp: string,
+    changes: AuditEventInput['changes'] = {},
+  ): { audit: AuditEvent; idempotency?: IdempotencyRecord } {
+    const result = auditEvent({
+      id: ids.ulid(),
+      now: stamp,
+      action,
+      actor: { type: 'user', id: actor.userId },
+      context: call.audit,
+      target: { type: 'project', id: targetId },
+      projectId: targetId,
+      changes,
+    });
+    if (!result.ok) throw new TypeError('Invalid project audit event');
+    return {
+      audit: result.event,
+      ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+    };
+  }
 
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
@@ -228,6 +279,7 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
     rawFence: MutationFence,
     id: string,
     action: 'archive' | 'restore',
+    call: ApiCall,
   ): Promise<ProjectResult<null>> {
     const actor = normalize(rawActor, 'organization');
     if (actor === null || !actor.permissions.has('org:projects:archive')) {
@@ -236,10 +288,12 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
     const fence = requireFence(actor, rawFence);
     if (!hasRevision(fence)) return fail('invalid_revision');
     if (!isUlid(id)) return fail('not_found');
+    const stamp = now();
+    const input = { id, now: stamp, ...mutationAudit(call, actor, `project.${action}`, id, stamp) };
     const answer =
       action === 'archive'
-        ? await projects.archive(ctx, fence, id, now())
-        : await projects.restore(ctx, fence, id, now());
+        ? await projects.archive(ctx, fence, input)
+        : await projects.restore(ctx, fence, input);
     switch (answer) {
       case 'archived':
       case 'restored':
@@ -256,12 +310,15 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
   }
 
   return {
-    async createProject(ctx, rawActor, rawFence, input) {
+    async createProject(ctx, rawActor, rawFence, input, call) {
       const actor = normalize(rawActor, 'organization');
       if (actor === null || !actor.permissions.has('org:projects:create')) {
         return deny(ctx, actor, 'project.create');
       }
       const fence = requireFence(actor, rawFence);
+      if (!isValidProjectSlug(input.slug) || !redactValue(input.slug, 200, 'slug').ok) {
+        return fail('invalid_slug');
+      }
       if (!isValidName(input.name)) return fail('invalid_name');
       if (input.tokenMaxScope !== undefined && !isScope(input.tokenMaxScope)) {
         return fail('invalid_scope');
@@ -276,7 +333,18 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
         return fail('initial_role_not_allowed');
       }
       const id = ids.ulid();
-      const answer = await projects.create(ctx, fence, { ...input, id, now: now() });
+      const stamp = now();
+      const answer = await projects.create(ctx, fence, {
+        ...input,
+        id,
+        now: stamp,
+        ...mutationAudit(call, actor, 'project.create', id, stamp, {
+          slug: { new: input.slug },
+          name: { new: input.name },
+          token_max_scope: { new: input.tokenMaxScope ?? 'full' },
+          require_publish_approval: { new: input.requirePublishApproval ?? false },
+        }),
+      });
       if (answer === 'created') {
         changed(ctx, actor, 'create', id);
         return { ok: true, value: { id, slug: input.slug } };
@@ -284,7 +352,7 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
       return answer === 'authority' ? deny(ctx, actor, 'project.create') : fail(answer);
     },
 
-    async updateSettings(ctx, rawActor, rawFence, id, changes) {
+    async updateSettings(ctx, rawActor, rawFence, id, changes, call) {
       const actor = normalize(rawActor, 'project');
       if (
         actor === null ||
@@ -315,7 +383,21 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
       if (changes.tokenMaxScope !== undefined && !isScope(changes.tokenMaxScope)) {
         return fail('invalid_scope');
       }
-      const answer = await projects.update(ctx, fence, id, changes, now());
+      const stamp = now();
+      const answer = await projects.update(ctx, fence, {
+        id,
+        changes,
+        now: stamp,
+        ...mutationAudit(call, actor, 'project.update', id, stamp, {
+          ...(changes.name === undefined ? {} : { name: { new: changes.name } }),
+          ...(changes.tokenMaxScope === undefined
+            ? {}
+            : { token_max_scope: { new: changes.tokenMaxScope } }),
+          ...(changes.requirePublishApproval === undefined
+            ? {}
+            : { require_publish_approval: { new: changes.requirePublishApproval } }),
+        }),
+      });
       switch (answer) {
         case 'updated':
           changed(ctx, actor, 'update', id);
@@ -329,8 +411,10 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
       }
     },
 
-    archiveProject: (ctx, actor, fence, id) => transition(ctx, actor, fence, id, 'archive'),
+    archiveProject: (ctx, actor, fence, id, call) =>
+      transition(ctx, actor, fence, id, 'archive', call),
 
-    restoreProject: (ctx, actor, fence, id) => transition(ctx, actor, fence, id, 'restore'),
+    restoreProject: (ctx, actor, fence, id, call) =>
+      transition(ctx, actor, fence, id, 'restore', call),
   };
 }

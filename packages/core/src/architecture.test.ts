@@ -46,6 +46,7 @@ const ws = (...names: string[]): string[] => names.map((name) => `${WORKSPACE_PR
 
 const RULES: Readonly<Record<string, Rule>> = {
   core: { allow: ['hono', 'zod'], testOnly: ['eslint', 'node', 'typescript', 'vitest'] },
+  e2e: { allow: ['hono', 'node'], testOnly: ['vitest'] },
   'db-sqlite': {
     allow: [...ws('core'), 'kysely'],
     testOnly: [],
@@ -77,8 +78,9 @@ const RULES: Readonly<Record<string, Rule>> = {
   plugin: { allow: ws('core'), testOnly: ['vitest'] },
   ui: {
     allow: ['react', 'react-dom', 'class-variance-authority', 'clsx', 'tailwind-merge'],
-    testOnly: ['vitest'],
+    testOnly: ['vitest', '@package-broker/core'],
     testsAndScripts: ['node', 'esbuild'],
+    onlyIn: { '@package-broker/core': ['packages/ui/src/manifest.ts'] },
   },
 };
 
@@ -439,13 +441,31 @@ describe('classifier', () => {
     expect(findViolations('packages/ui/scripts/build.mjs', "import 'lodash';")).toHaveLength(1);
   });
 
+  it('allows the shared core manifest parser in the ui manifest module', () => {
+    expect(
+      findViolations(
+        'packages/ui/src/manifest.ts',
+        "export { parseUiManifest } from '@package-broker/core/platform/ui-manifest';",
+      ),
+    ).toEqual([]);
+  });
+
+  it('rejects the shared core manifest parser in the ui browser entry', () => {
+    expect(
+      findViolations(
+        'packages/ui/src/main.tsx',
+        "export { parseUiManifest } from '@package-broker/core/platform/ui-manifest';",
+      ),
+    ).toHaveLength(1);
+  });
+
   it('discovers ui root config files and the configured build entry', () => {
     const files = sourceFiles('ui');
     expect(files).toContain('packages/ui/tailwind.config.js');
     const manifest = JSON.parse(
       readFileSync(path.join(REPO_ROOT, 'packages/ui/package.json'), 'utf8'),
     ) as { scripts: { build: string } };
-    const entry = manifest.scripts.build.split(' ')[1];
+    const entry = /(?:^|&&\s*)node\s+(\S+)/.exec(manifest.scripts.build)?.[1];
     expect(entry).toBeTruthy();
     expect(files).toContain(`packages/ui/${entry}`);
   });

@@ -1,3 +1,14 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
+const call = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mutationFence,
@@ -85,6 +96,7 @@ function create(
     slug: 'alpha',
     name: 'Alpha',
     now: NOW,
+    audit: mutationAudit('project.create', overrides.id || P1, overrides.id || P1),
     ...overrides,
   });
 }
@@ -362,7 +374,11 @@ describe('reads', () => {
   });
 
   it('getBySlug returns archived projects unless activeOnly is set', async () => {
-    await projects.archive(a, fence({ project: 1 }), P1, LATER);
+    await projects.archive(a, fence({ project: 1 }), {
+      audit: mutationAudit('project.archive', P1),
+      id: P1,
+      now: LATER,
+    });
     expect(await projects.getBySlug(a, 'alpha')).toMatchObject({ status: 'archived' });
     expect(await projects.getBySlug(a, 'alpha', { activeOnly: true })).toBeNull();
     expect(await projects.getBySlug(a, 'gamma', { activeOnly: true })).toMatchObject({ id: P2 });
@@ -371,7 +387,11 @@ describe('reads', () => {
   it('lists by id with a bounded page and status filter', async () => {
     expect((await projects.list(a, { limit: 1 })).map((p) => p.id)).toEqual([P1]);
     expect((await projects.list(a, { afterId: P1, limit: 10 })).map((p) => p.id)).toEqual([P2]);
-    await projects.archive(a, fence({ project: 1 }), P1, LATER);
+    await projects.archive(a, fence({ project: 1 }), {
+      audit: mutationAudit('project.archive', P1),
+      id: P1,
+      now: LATER,
+    });
     expect((await projects.list(a, { limit: 10, status: 'active' })).map((p) => p.id)).toEqual([
       P2,
     ]);
@@ -387,17 +407,16 @@ describe('update', () => {
 
   const update = (
     expected: number | null,
-    changes: Parameters<ProjectRepository['update']>[3],
+    changes: Parameters<ProjectRepository['update']>[2]['changes'],
     f?: MutationFence,
     id = P1,
   ) =>
-    projects.update(
-      a,
-      f ?? fence(expected === null ? {} : { project: expected }),
-      id,
-      changes,
-      LATER,
-    );
+    projects.update(a, f ?? fence(expected === null ? {} : { project: expected }), {
+      audit: mutationAudit('project.update', id),
+      id: id,
+      changes: changes,
+      now: LATER,
+    });
 
   it('increments the revision exactly once and records a fresh opId', async () => {
     expect(
@@ -452,7 +471,11 @@ describe('update', () => {
   });
 
   it('refuses an archived project and rolls the batch back', async () => {
-    await projects.archive(a, fence({ project: 1 }), P1, LATER);
+    await projects.archive(a, fence({ project: 1 }), {
+      audit: mutationAudit('project.archive', P1),
+      id: P1,
+      now: LATER,
+    });
     const before = await snapshot();
     expect(await update(2, { name: 'x' })).toBe('archived');
     expect(await snapshot()).toBe(before);
@@ -477,9 +500,13 @@ describe('archive and restore', () => {
   });
 
   const archive = (expected: number, f = fence({ project: expected }), id = P1) =>
-    projects.archive(a, f, id, LATER);
+    projects.archive(a, f, { audit: mutationAudit('project.archive', id), id: id, now: LATER });
   const restore = (expected: number, session = S_FRESH, id = P1, user = U1) =>
-    projects.restore(a, fence({ project: expected }, user, session), id, LATER);
+    projects.restore(a, fence({ project: expected }, user, session), {
+      audit: mutationAudit('project.restore', id),
+      id: id,
+      now: LATER,
+    });
 
   it('keeps the row and its slug, bumps the revision once', async () => {
     expect(await archive(1)).toBe('archived');
@@ -705,27 +732,52 @@ describe('construction and setup faults', () => {
 describe('update shortcuts', () => {
   beforeEach(async () => {
     await create();
-    await projects.update(a, fence({ project: 1 }), P1, { name: 'Two' }, LATER);
+    await projects.update(a, fence({ project: 1 }), {
+      audit: mutationAudit('project.update', P1),
+      id: P1,
+      changes: { name: 'Two' },
+      now: LATER,
+    });
   });
 
   it('answers conflict for a stale revision even when the values are identical', async () => {
     const before = await snapshot();
-    expect(await projects.update(a, fence({ project: 1 }), P1, { name: 'Two' }, LATER)).toBe(
-      'conflict',
-    );
+    expect(
+      await projects.update(a, fence({ project: 1 }), {
+        audit: mutationAudit('project.update', P1),
+        id: P1,
+        changes: { name: 'Two' },
+        now: LATER,
+      }),
+    ).toBe('conflict');
     expect(await snapshot()).toBe(before);
   });
 
   it('does not leak unchanged to an actor without the permission', async () => {
     expect(
-      await projects.update(a, fence({ project: 2 }, U2, S_OTHER), P1, { name: 'Two' }, LATER),
+      await projects.update(a, fence({ project: 2 }, U2, S_OTHER), {
+        audit: mutationAudit('project.update', P1),
+        id: P1,
+        changes: { name: 'Two' },
+        now: LATER,
+      }),
     ).toBe('authority');
     expect(
-      await projects.update(a, fence({ project: 2 }, U1, S_REVOKED), P1, { name: 'Two' }, LATER),
+      await projects.update(a, fence({ project: 2 }, U1, S_REVOKED), {
+        audit: mutationAudit('project.update', P1),
+        id: P1,
+        changes: { name: 'Two' },
+        now: LATER,
+      }),
     ).toBe('authority');
-    expect(await projects.update(a, fence({ project: 2 }), P1, { name: 'Two' }, LATER)).toBe(
-      'unchanged',
-    );
+    expect(
+      await projects.update(a, fence({ project: 2 }), {
+        audit: mutationAudit('project.update', P1),
+        id: P1,
+        changes: { name: 'Two' },
+        now: LATER,
+      }),
+    ).toBe('unchanged');
   });
 });
 
@@ -778,8 +830,18 @@ describe('concurrency', () => {
       expect(await create()).toBe('created');
       const other = createProjectRepository(await database.second());
       const results = await Promise.all([
-        projects.update(a, fence({ project: 1 }), P1, { name: 'One' }, LATER),
-        other.update(a, fence({ project: 1 }), P1, { name: 'Two' }, LATER),
+        projects.update(a, fence({ project: 1 }), {
+          audit: mutationAudit('project.update', P1),
+          id: P1,
+          changes: { name: 'One' },
+          now: LATER,
+        }),
+        other.update(a, fence({ project: 1 }), {
+          audit: mutationAudit('project.update', P1),
+          id: P1,
+          changes: { name: 'Two' },
+          now: LATER,
+        }),
       ]);
       expect([...results].sort()).toEqual(['conflict', 'updated']);
       expect(await projects.get(a, P1)).toMatchObject({ revision: 2 });
@@ -798,9 +860,17 @@ describe('authority before existence', () => {
       project,
     });
   const methods = {
-    update: (f: MutationFence, id: string) => projects.update(a, f, id, { name: 'Renamed' }, LATER),
-    archive: (f: MutationFence, id: string) => projects.archive(a, f, id, LATER),
-    restore: (f: MutationFence, id: string) => projects.restore(a, f, id, LATER),
+    update: (f: MutationFence, id: string) =>
+      projects.update(a, f, {
+        audit: mutationAudit('project.update', id),
+        id: id,
+        changes: { name: 'Renamed' },
+        now: LATER,
+      }),
+    archive: (f: MutationFence, id: string) =>
+      projects.archive(a, f, { audit: mutationAudit('project.archive', id), id: id, now: LATER }),
+    restore: (f: MutationFence, id: string) =>
+      projects.restore(a, f, { audit: mutationAudit('project.restore', id), id: id, now: LATER }),
   } as const;
   const current = { update: 1, archive: 1, restore: 2 } as const;
   const permitted = { update: fence(), archive: fence(), restore: fence({}, U1, S_FRESH) };
@@ -811,7 +881,13 @@ describe('authority before existence', () => {
 
   async function prepare(method: keyof typeof methods): Promise<void> {
     if (method === 'restore') {
-      expect(await projects.archive(a, fence({ project: 1 }), P1, LATER)).toBe('archived');
+      expect(
+        await projects.archive(a, fence({ project: 1 }), {
+          audit: mutationAudit('project.archive', P1),
+          id: P1,
+          now: LATER,
+        }),
+      ).toBe('archived');
     }
   }
 
@@ -878,9 +954,25 @@ describe('authority before existence', () => {
       const repository = createProjectRepository(counted.executor);
       const f = withRevision(permitted[method], revision);
       const call = {
-        update: () => repository.update(a, f, id(), { name: 'Renamed' }, LATER),
-        archive: () => repository.archive(a, f, id(), LATER),
-        restore: () => repository.restore(a, f, id(), LATER),
+        update: () =>
+          repository.update(a, f, {
+            audit: mutationAudit('project.update', id()),
+            id: id(),
+            changes: { name: 'Renamed' },
+            now: LATER,
+          }),
+        archive: () =>
+          repository.archive(a, f, {
+            audit: mutationAudit('project.archive', id()),
+            id: id(),
+            now: LATER,
+          }),
+        restore: () =>
+          repository.restore(a, f, {
+            audit: mutationAudit('project.restore', id()),
+            id: id(),
+            now: LATER,
+          }),
       }[method];
       expect(await call()).toBe(result);
       expect(counted.counts()).toEqual({ all, batch });
@@ -890,18 +982,27 @@ describe('authority before existence', () => {
   it('answers a refused actor without a batch', async () => {
     const counted = countCalls(executor);
     const repository = createProjectRepository(counted.executor);
-    expect(await repository.archive(a, withRevision(refused(), 1), MISSING, LATER)).toBe(
-      'authority',
-    );
+    expect(
+      await repository.archive(a, withRevision(refused(), 1), {
+        audit: mutationAudit('project.archive', MISSING),
+        id: MISSING,
+        now: LATER,
+      }),
+    ).toBe('authority');
     expect(counted.counts()).toEqual({ all: 1, batch: 0 });
   });
 
   it('answers unchanged with a single read', async () => {
     const counted = countCalls(executor);
     const repository = createProjectRepository(counted.executor);
-    expect(await repository.update(a, fence({ project: 1 }), P1, { name: 'Alpha' }, LATER)).toBe(
-      'unchanged',
-    );
+    expect(
+      await repository.update(a, fence({ project: 1 }), {
+        audit: mutationAudit('project.update', P1),
+        id: P1,
+        changes: { name: 'Alpha' },
+        now: LATER,
+      }),
+    ).toBe('unchanged');
     expect(counted.counts()).toEqual({ all: 1, batch: 0 });
   });
 });
@@ -938,11 +1039,24 @@ describe('refusal through the project service', () => {
         {
           name: 'Renamed',
         },
+        call,
       ),
     archive: (id: string, revision: number) =>
-      service().archiveProject(a, staleContext, fence({ project: revision }, U2, S_OTHER), id),
+      service().archiveProject(
+        a,
+        staleContext,
+        fence({ project: revision }, U2, S_OTHER),
+        id,
+        call,
+      ),
     restore: (id: string, revision: number) =>
-      service().restoreProject(a, staleContext, fence({ project: revision }, U2, S_OTHER), id),
+      service().restoreProject(
+        a,
+        staleContext,
+        fence({ project: revision }, U2, S_OTHER),
+        id,
+        call,
+      ),
   } as const;
   const current = { update: 1, archive: 1, restore: 2 } as const;
 
@@ -954,7 +1068,13 @@ describe('refusal through the project service', () => {
     '%s refuses identically for an existing id, a missing id and a stale revision',
     async (method) => {
       if (method === 'restore') {
-        expect(await projects.archive(a, fence({ project: 1 }), P1, LATER)).toBe('archived');
+        expect(
+          await projects.archive(a, fence({ project: 1 }), {
+            audit: mutationAudit('project.archive', P1),
+            id: P1,
+            now: LATER,
+          }),
+        ).toBe('archived');
       }
       const before = await snapshot();
       const results = [
@@ -995,9 +1115,25 @@ describe('authority read parameter budget', () => {
       const repository = createProjectRepository(recording, { providerAnchors });
       const f = fence({ project: 1 }, U2, S_OTHER);
       const answer = {
-        update: () => repository.update(a, f, uid('ZZ'), { name: 'Renamed' }, LATER),
-        archive: () => repository.archive(a, f, uid('ZZ'), LATER),
-        restore: () => repository.restore(a, f, uid('ZZ'), LATER),
+        update: () =>
+          repository.update(a, f, {
+            audit: mutationAudit('project.update', uid('ZZ')),
+            id: uid('ZZ'),
+            changes: { name: 'Renamed' },
+            now: LATER,
+          }),
+        archive: () =>
+          repository.archive(a, f, {
+            audit: mutationAudit('project.archive', uid('ZZ')),
+            id: uid('ZZ'),
+            now: LATER,
+          }),
+        restore: () =>
+          repository.restore(a, f, {
+            audit: mutationAudit('project.restore', uid('ZZ')),
+            id: uid('ZZ'),
+            now: LATER,
+          }),
       }[method];
       expect(await answer()).toBe('authority');
       expect(statements).toHaveLength(1);
@@ -1007,4 +1143,196 @@ describe('authority read parameter budget', () => {
       expect(JSON.stringify(read?.params)).toContain('idp-7.example.test');
     },
   );
+});
+
+function mutationAudit(action: AuditAction, targetId: string, projectId = P1) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: NOW,
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+    projectId,
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+
+function record(): IdempotencyRecord {
+  return {
+    principalKey: 'user:actor',
+    key: 'project-request',
+    route: '/projects',
+    requestHash: 'a'.repeat(64),
+    status: 200,
+    responseJson: '{"ok":true}',
+    createdAt: NOW,
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+}
+
+describe('project mutation audit and idempotency', () => {
+  const cases = [
+    ['create', 'project.create', 'created'],
+    ['update', 'project.update', 'updated'],
+    ['archive', 'project.archive', 'archived'],
+    ['restore', 'project.restore', 'restored'],
+  ] as const;
+  type Method = (typeof cases)[number][0];
+
+  async function prepare(method: Method) {
+    if (method !== 'create') await create();
+    if (method === 'restore') {
+      await rows("UPDATE project SET status = 'archived' WHERE org_id = ? AND id = ?", a.orgId, P1);
+    }
+    await rows('DELETE FROM audit_pending WHERE org_id = ?', a.orgId);
+  }
+
+  function invoke(method: Method, action: AuditAction, idempotency?: IdempotencyRecord) {
+    const input = {
+      id: P1,
+      now: LATER,
+      audit: mutationAudit(action, P1),
+      ...(idempotency === undefined ? {} : { idempotency }),
+    };
+    if (method === 'create') return create({ ...input });
+    if (method === 'update')
+      return projects.update(a, fence({ project: 1 }), { ...input, changes: { name: 'Renamed' } });
+    return projects[method](a, fence({ project: 1 }, U1, S_FRESH), input);
+  }
+
+  for (const withIdempotency of [false, true]) {
+    it.each(cases)(
+      `%s persists one audit row (idempotency: ${withIdempotency})`,
+      async (method, action, answer) => {
+        await prepare(method);
+        const audit = mutationAudit(action, P1);
+        expect(await invoke(method, action, withIdempotency ? record() : undefined)).toBe(answer);
+        expect(
+          await rows(
+            'SELECT org_id, action, target_type, target_id, project_id FROM audit_pending',
+          ),
+        ).toEqual([
+          {
+            org_id: a.orgId,
+            action: audit.action,
+            target_type: audit.target.type,
+            target_id: P1,
+            project_id: P1,
+          },
+        ]);
+        expect(
+          await rows(
+            'SELECT principal_key AS principalKey, key, route, request_hash AS requestHash, status, response_json AS responseJson, created_at AS createdAt, expires_at AS expiresAt FROM api_idempotency',
+          ),
+        ).toEqual(withIdempotency ? [record()] : []);
+      },
+    );
+  }
+
+  it.each(cases)('%s rolls back a repeated idempotency key', async (method, action) => {
+    await prepare(method);
+    expect(await invoke(method, action, record())).not.toBe('conflict');
+    if (method === 'create') {
+      expect(
+        await create({
+          id: P2,
+          slug: 'second',
+          audit: mutationAudit(action, P2),
+          idempotency: record(),
+        }),
+      ).toBe('conflict');
+      expect(await projects.get(a, P2)).toBeNull();
+    } else {
+      const current = await projects.get(a, P1);
+      const input = { id: P1, now: LATER, audit: mutationAudit(action, P1), idempotency: record() };
+      const f = fence({ project: current!.revision }, U1, S_FRESH);
+      if (method === 'update') {
+        expect(await projects.update(a, f, { ...input, changes: { name: 'Again' } })).toBe(
+          'conflict',
+        );
+      } else {
+        await rows(
+          'UPDATE project SET status = ? WHERE org_id = ? AND id = ?',
+          method === 'archive' ? 'active' : 'archived',
+          a.orgId,
+          P1,
+        );
+        expect(await projects[method](a, f, input)).toBe('conflict');
+      }
+      expect((await projects.get(a, P1))?.revision).toBe(current!.revision);
+    }
+    expect(await rows('SELECT action FROM audit_pending')).toEqual([{ action }]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([{ key: record().key }]);
+  });
+
+  it('authority refusal stores neither audit nor idempotency', async () => {
+    expect(
+      await create(
+        {
+          initialRoleId: uid('RN'),
+          audit: mutationAudit('project.create', P1),
+          idempotency: record(),
+        },
+        fence({}, U2, S_OTHER),
+      ),
+    ).toBe('authority');
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
+  });
+
+  it('a stale revision stores neither audit nor idempotency', async () => {
+    await prepare('update');
+    expect(
+      await projects.update(a, fence({ project: 2 }), {
+        id: P1,
+        changes: { name: 'Renamed' },
+        now: LATER,
+        audit: mutationAudit('project.update', P1),
+        idempotency: record(),
+      }),
+    ).toBe('conflict');
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
+  });
+
+  it('a duplicate slug stores neither audit nor idempotency', async () => {
+    await prepare('update');
+    expect(
+      await create({ id: P2, audit: mutationAudit('project.create', P2), idempotency: record() }),
+    ).toBe('duplicate');
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
+  });
+
+  it('an unchanged update writes nothing', async () => {
+    await prepare('update');
+    const before = await snapshot();
+    expect(
+      await projects.update(a, fence({ project: 1 }), {
+        id: P1,
+        changes: { name: 'Alpha' },
+        now: LATER,
+        audit: mutationAudit('project.update', P1),
+        idempotency: record(),
+      }),
+    ).toBe('unchanged');
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
+  });
+
+  it('a failing creator grant insert rolls back the project and audit', async () => {
+    await rows(
+      "CREATE TRIGGER refuse_creator_grant BEFORE INSERT ON access_grant WHEN NEW.scope = 'project' BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    );
+    expect(
+      await create({ audit: mutationAudit('project.create', P1), idempotency: record() }),
+    ).toBe('indeterminate');
+    expect(await projects.get(a, P1)).toBeNull();
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
+  });
 });

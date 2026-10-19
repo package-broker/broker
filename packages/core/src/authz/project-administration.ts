@@ -1,3 +1,5 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent, type AuditEventInput } from '../audit/actions.js';
 import type { GrantSubject } from '../db/grants.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
@@ -28,6 +30,8 @@ export interface ProjectGrantStore {
       readonly subject: GrantSubject;
       readonly roleId: string;
       readonly now: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
       readonly providerAnchors: readonly ProviderAnchor[];
     },
   ): Promise<
@@ -45,6 +49,8 @@ export interface ProjectGrantStore {
       readonly projectId: string;
       readonly roleId: string;
       readonly now: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
       readonly providerAnchors: readonly ProviderAnchor[];
     },
   ): Promise<
@@ -57,6 +63,8 @@ export interface ProjectGrantStore {
     input: {
       readonly id: string;
       readonly projectId: string;
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
       readonly providerAnchors: readonly ProviderAnchor[];
     },
   ): Promise<
@@ -92,6 +100,7 @@ export interface ProjectAdministration {
     fence: MutationFence,
     projectId: string,
     input: ProjectGrantInput,
+    call: ApiCall,
   ): Promise<AdminResult<ProjectGrantCreated>>;
   /** The fence must carry the expected grant revision and the new role's revision. */
   changeRole(
@@ -101,6 +110,7 @@ export interface ProjectAdministration {
     projectId: string,
     grantId: string,
     roleId: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
   /** The fence must carry the expected grant revision. Narrow-only: allowed on an archived project. */
   revoke(
@@ -109,6 +119,7 @@ export interface ProjectAdministration {
     fence: MutationFence,
     projectId: string,
     grantId: string,
+    call: ApiCall,
   ): Promise<AdminResult<null>>;
 }
 
@@ -138,6 +149,31 @@ export function createProjectAdministration(
   const { grants, providers, providerAnchors, clock, ids } = deps;
 
   const now = (): string => isoTimestamp(clock.now());
+
+  function mutationAudit(
+    call: ApiCall,
+    actor: ProjectActor,
+    action: AuditEventInput['action'],
+    targetId: string,
+    stamp: string,
+    changes: AuditEventInput['changes'] = {},
+  ): { audit: AuditEvent; idempotency?: IdempotencyRecord } {
+    const result = auditEvent({
+      id: ids.ulid(),
+      now: stamp,
+      action,
+      actor: { type: 'user', id: actor.userId },
+      context: call.audit,
+      target: { type: 'project_grant', id: targetId },
+      projectId: actor.projectId,
+      changes,
+    });
+    if (!result.ok) throw new TypeError('Invalid project audit event');
+    return {
+      audit: result.event,
+      ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+    };
+  }
 
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
@@ -265,7 +301,7 @@ export function createProjectAdministration(
   }
 
   return {
-    async grant(ctx, rawActor, rawFence, projectId, input) {
+    async grant(ctx, rawActor, rawFence, projectId, input, call) {
       const action = 'project.grant.create';
       const actor = authorize(ctx, rawActor, projectId, action);
       if (actor === null) return fail('forbidden');
@@ -274,12 +310,17 @@ export function createProjectAdministration(
       if (typeof subject === 'string') return fail(subject);
       if (!isUlid(input.roleId)) return fail('role_scope_mismatch');
       const id = ids.ulid();
+      const stamp = now();
       const answer = await grants.create(ctx, fence, {
+        ...mutationAudit(call, actor, 'project_grant.create', id, stamp, {
+          subject_kind: { new: subject.type },
+          role_id: { new: input.roleId },
+        }),
         id,
         projectId,
         subject,
         roleId: input.roleId,
-        now: now(),
+        now: stamp,
         providerAnchors,
       });
       if (answer !== 'created') return refused(ctx, actor, action, answer);
@@ -287,7 +328,7 @@ export function createProjectAdministration(
       return { ok: true, value: { id, projectId, subject, roleId: input.roleId } };
     },
 
-    async changeRole(ctx, rawActor, rawFence, projectId, grantId, roleId) {
+    async changeRole(ctx, rawActor, rawFence, projectId, grantId, roleId, call) {
       const action = 'project.grant.change_role';
       const actor = authorize(ctx, rawActor, projectId, action);
       if (actor === null) return fail('forbidden');
@@ -297,11 +338,15 @@ export function createProjectAdministration(
       if (!expects(fence, `access_grant:${grantId}`, `role:${roleId}`)) {
         return fail('invalid_revision');
       }
+      const stamp = now();
       const answer = await grants.changeRole(ctx, fence, {
+        ...mutationAudit(call, actor, 'project_grant.role_change', grantId, stamp, {
+          role_id: { new: roleId },
+        }),
         id: grantId,
         projectId,
         roleId,
-        now: now(),
+        now: stamp,
         providerAnchors,
       });
       if (answer !== 'updated') return refused(ctx, actor, action, answer);
@@ -309,14 +354,16 @@ export function createProjectAdministration(
       return OK_NULL;
     },
 
-    async revoke(ctx, rawActor, rawFence, projectId, grantId) {
+    async revoke(ctx, rawActor, rawFence, projectId, grantId, call) {
       const action = 'project.grant.revoke';
       const actor = authorize(ctx, rawActor, projectId, action);
       if (actor === null) return fail('forbidden');
       const fence = requireFence(actor, rawFence);
       if (!isUlid(grantId)) return fail('not_found');
       if (!expects(fence, `access_grant:${grantId}`)) return fail('invalid_revision');
+      const stamp = now();
       const answer = await grants.delete(ctx, fence, {
+        ...mutationAudit(call, actor, 'project_grant.revoke', grantId, stamp),
         id: grantId,
         projectId,
         providerAnchors,

@@ -12,7 +12,7 @@ import {
   type Registration,
 } from '@package-broker/core/kernel/registry';
 import type { PackageVisibilityPort } from '@package-broker/core/db/catalogue';
-import type { Platform } from '@package-broker/core/plugin';
+import type { Platform, PluginDefinition } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
 import {
   credentialProblems,
@@ -65,6 +65,15 @@ export class BuildDiagnosticsError extends Error {
   }
 }
 
+export class BuildConfigError extends Error {
+  readonly configKeys: readonly string[];
+
+  constructor(keys: readonly string[], message = `invalid broker config: ${keys.join(', ')}`) {
+    super(message);
+    this.configKeys = [...new Set(keys)];
+  }
+}
+
 async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig> {
   const scratch = path.join(cwd, '.pb', 'config');
   const outfile = path.join(
@@ -82,7 +91,7 @@ async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig
   });
   try {
     const loaded = (await import(`${pathToFileURL(outfile).href}`)) as { default?: BrokerConfig };
-    if (!loaded.default) throw new Error(`${configPath} has no default export`);
+    if (!loaded.default) throw new BuildConfigError(['default']);
     return loaded.default;
   } finally {
     await rm(outfile, { force: true });
@@ -119,7 +128,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
   const observabilityProblems = brokerObservabilityProblems(config);
   if (observabilityProblems.length > 0) throw new BuildDiagnosticsError(observabilityProblems);
-  const errors = validatePluginShape(config.plugins, target);
+  const pluginKeys: string[] = [];
+  validatePluginShape(config.plugins, target, (key) => pluginKeys.push(key));
+  if (pluginKeys.length > 0) throw new BuildConfigError(pluginKeys);
+  const errors: string[] = [];
   errors.push(...validatePlatformPorts(config.platformPorts, target));
   const stanza =
     typeof config.platformPorts === 'object' &&
@@ -129,8 +141,16 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       : undefined;
   const platformPorts = describePlatformPorts(stanza);
   errors.push(...credentialProblems(platformPorts, target));
-  if (errors.length > 0) throw new Error(`invalid broker config:\n${errors.join('\n')}`);
-  const plugins = orderPlugins(config.plugins);
+  if (errors.length > 0) throw new BuildConfigError(errors);
+  let plugins: PluginDefinition[];
+  try {
+    plugins = orderPlugins(config.plugins);
+  } catch (error) {
+    throw new BuildConfigError(
+      ['plugins.dependsOn'],
+      error instanceof Error ? error.message : 'invalid plugin dependency order',
+    );
+  }
   let registration: Registration;
   try {
     registration = collectRegistrations(plugins, {
@@ -139,14 +159,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   } catch (error) {
     if (!(error instanceof KernelConfigError)) throw error;
     if (error.problems.every(isRouteProblem)) throw new BuildDiagnosticsError(error.problems);
-    throw new Error(`invalid broker config:\n${error.problems.join('\n')}`, { cause: error });
+    throw new BuildConfigError(['plugins'], `invalid broker config:\n${error.problems.join('\n')}`);
   }
   const routeProblems = diagnoseRoutes(registration.routes);
   if (routeProblems.length > 0) throw new BuildDiagnosticsError(routeProblems);
   if (registration.jobs.length > 0 && platformPorts === null) {
-    throw new Error(
-      `invalid broker config:\njobs: registered but platformPorts.${target} is not configured`,
-    );
+    throw new BuildConfigError([`jobs: registered but platformPorts.${target} is not configured`]);
   }
   if (platformPorts === null) {
     console.warn(

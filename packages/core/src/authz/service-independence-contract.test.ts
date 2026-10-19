@@ -172,6 +172,7 @@ function world() {
 
   const principalService = createServicePrincipalService({
     principals: principalStore,
+    sessions: { isReauthFresh: () => true },
     authority,
     directory: {
       createdBy: async (_ctx, userId) =>
@@ -267,6 +268,7 @@ function world() {
   async function createPrincipal(userId: string, projectId: string | null): Promise<string> {
     const created = await principalService.create(
       ctx,
+      authenticated(userId),
       actorOf(userId),
       fenceOf(userId),
       {
@@ -287,6 +289,7 @@ function world() {
       fenceOf(userId),
       {
         servicePrincipalId: principalId,
+        routeProjectId: principals.get(principalId)!.projectId,
         name: 'deploy',
         scope,
         expiresAt: new Date(NOW_MS + 30 * DAY).toISOString(),

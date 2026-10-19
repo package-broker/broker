@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { sql, type Expression, type SqlBool } from 'kysely';
 import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -18,6 +20,8 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
@@ -27,6 +31,8 @@ const UNSAFE_GROUP_CHARACTER = /[\p{Cc}\p{Cf}]/u;
 const WRITE_PERMISSION = 'project:grants:write';
 
 export interface NewProjectGrant {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly projectId: string;
   readonly subject: GrantSubject;
@@ -36,6 +42,8 @@ export interface NewProjectGrant {
 }
 
 export interface ProjectGrantRoleChange {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly projectId: string;
   readonly roleId: string;
@@ -49,6 +57,8 @@ interface GrantRef {
 }
 
 export interface ProjectGrantTarget {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly projectId: string;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
@@ -265,6 +275,13 @@ function probe(condition: Guard, negate: boolean): Statement {
   return compile(db.selectNoFrom(expression.as('held')));
 }
 
+function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
+  return record === undefined
+    ? sql<SqlBool>`0`
+    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
+        and principal_key = ${record.principalKey} and key = ${record.key})`;
+}
+
 function failed(reason: string): never {
   throw new Error(`project grant write failed without a classification: ${reason}`);
 }
@@ -327,10 +344,10 @@ export function createProjectGrantRepository(
       const valid = projectRole(ctx, input.roleId);
       const duplicate = sql<SqlBool>`exists (
         select 1 from access_grant as existing
-        where existing.id = ${input.id}
+        where existing.org_id = ${ctx.orgId} and (existing.id = ${input.id}
           or (existing.project_id = ${input.projectId} and existing.scope = 'project'
             and existing.subject_type = ${subject.type} and existing.subject_value = ${subject.value}
-            and existing.subject_provider is ${provider})
+            and existing.subject_provider is ${provider}))
       )`;
       const insert = compile(
         db.insertInto('access_grant').values({
@@ -349,7 +366,10 @@ export function createProjectGrantRepository(
       );
       const probes: FailureProbes = {
         authority: probe(allowed, true),
-        conflict: probe(valid, true),
+        conflict: probe(
+          sql<SqlBool>`(${valid} is not 1 or ${idempotencyCollision(ctx, input.idempotency)})`,
+          false,
+        ),
         collision: probe(duplicate, false),
       };
       const outcome = await runOrgFenced(
@@ -357,12 +377,24 @@ export function createProjectGrantRepository(
         ctx,
         fence,
         assertGuard(allowed, ctx),
-        [...assertCheck(valid), insert],
+        [
+          ...assertCheck(valid),
+          insert,
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
         probes,
       );
       if (outcome.ok) return 'created';
       if (outcome.reason === 'authority') return 'forbidden';
-      if (outcome.reason === 'conflict') return 'role_scope_mismatch';
+      if (outcome.reason === 'conflict') {
+        const [collision] = await executor.all<{ held: number }>(
+          probe(idempotencyCollision(ctx, input.idempotency), false),
+        );
+        return collision?.held === 1 ? 'conflict' : 'role_scope_mismatch';
+      }
       if (outcome.reason === 'collision') return 'duplicate';
       return outcome.reason === 'indeterminate' ? 'indeterminate' : 'conflict';
     },
@@ -398,23 +430,40 @@ export function createProjectGrantRepository(
           .where('access_grant.revision', '=', revision)
           .returning('id'),
       );
+      const guard = assertGuard(allowed, ctx);
+      const checks = assertCheck(valid);
+      const changedAt = guard.length + checks.length;
       const outcome = await runOrgFenced(
         executor,
         ctx,
         fence,
-        assertGuard(allowed, ctx),
-        [...assertCheck(valid), update],
+        guard,
+        [
+          ...checks,
+          update,
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
         {
           authority: probe(allowed, true),
-          conflict: probe(valid, true),
+          conflict: probe(
+            sql<SqlBool>`(${valid} is not 1 or ${idempotencyCollision(ctx, input.idempotency)})`,
+            false,
+          ),
         },
       );
       if (outcome.ok) {
-        if ((outcome.results.at(-1)?.rows.length ?? 0) !== 1) failed('update changed no row');
+        if ((outcome.results[changedAt]?.rows.length ?? 0) !== 1) failed('update changed no row');
         return 'updated';
       }
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') {
+        const [collision] = await executor.all<{ held: number }>(
+          probe(idempotencyCollision(ctx, input.idempotency), false),
+        );
+        if (collision?.held === 1) return 'conflict';
         return diagnose(ctx, target, { id: input.roleId, revision: roleRevision }, revision);
       }
       return outcome.reason === 'indeterminate' ? 'indeterminate' : 'conflict';
@@ -498,22 +547,44 @@ export function createProjectGrantRepository(
           .where('access_grant.last_op_id', '=', opId)
           .returning('id'),
       );
+      const guard = assertGuard(allowed, ctx);
+      const checks = [...assertCheck(valid), tombstone, ...assertCheck(owned)];
+      const offboardedAt = guard.length + checks.length;
+      const changedAt = offboardedAt + 1;
       const outcome = await runOrgFenced(
         executor,
         ctx,
         fence,
-        assertGuard(allowed, ctx),
-        [...assertCheck(valid), tombstone, ...assertCheck(owned), offboarded, remove],
-        { authority: probe(allowed, true), conflict: probe(valid, true) },
+        guard,
+        [
+          ...checks,
+          offboarded,
+          remove,
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
+        {
+          authority: probe(allowed, true),
+          conflict: probe(
+            sql<SqlBool>`(${valid} is not 1 or ${idempotencyCollision(ctx, input.idempotency)})`,
+            false,
+          ),
+        },
       );
       if (outcome.ok) {
-        if ((outcome.results.at(-1)?.rows.length ?? 0) !== 1) failed('delete removed no row');
-        const row = outcome.results.at(-2)?.rows[0] as
+        if ((outcome.results[changedAt]?.rows.length ?? 0) !== 1) failed('delete removed no row');
+        const row = outcome.results[offboardedAt]?.rows[0] as
           { offboarded_user_id: string | null } | undefined;
         return { status: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };
       }
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') {
+        const [collision] = await executor.all<{ held: number }>(
+          probe(idempotencyCollision(ctx, input.idempotency), false),
+        );
+        if (collision?.held === 1) return 'conflict';
         return (await diagnose(ctx, input, null, revision)) === 'not_found'
           ? 'not_found'
           : 'conflict';

@@ -1,3 +1,7 @@
+import { BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS, blobPurgeTiming } from './index.js';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import type { ByteStore } from '@package-broker/core/platform/blob';
+import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -208,13 +212,43 @@ const STANZA: PlatformPortConfig = {
 };
 
 function fakeD1(): D1DatabaseLike {
-  const statement: D1PreparedStatementLike = {
-    bind: () => statement,
-    all: () => Promise.resolve({ results: [] }),
+  const verifier = new Map<number, string>();
+  type Recorded = D1PreparedStatementLike & { sql: string; values: unknown[] };
+  const make = (sql: string, values: unknown[]): Recorded => ({
+    sql,
+    values,
+    bind: (...next) => make(sql, next),
+    all: () => Promise.resolve(run(sql, values)),
+  });
+  const run = (
+    sql: string,
+    values: unknown[],
+  ): { results: unknown[]; meta?: { changes: number } } => {
+    const insert = /^\s*insert into keyring_verifier .*X'([0-9a-f]{64})'/is.exec(sql);
+    if (insert !== null) {
+      const version = values[0] as number;
+      const only = /where not exists/i.test(sql);
+      if ((only && verifier.size > 0) || verifier.has(version)) {
+        return { results: [], meta: { changes: 0 } };
+      }
+      verifier.set(version, (insert[1] as string).toUpperCase());
+      return { results: [], meta: { changes: 1 } };
+    }
+    if (/from "keyring_verifier"/i.test(sql)) {
+      return {
+        results: [...verifier]
+          .sort(([left], [right]) => right - left)
+          .map(([key_version, mac_hex]) => ({ key_version, mac_hex })),
+      };
+    }
+    return { results: [] };
   };
   return {
-    prepare: () => statement,
-    batch: (statements) => Promise.resolve(statements.map(() => ({ results: [] }))),
+    prepare: (sql) => make(sql, []),
+    batch: (statements) =>
+      Promise.resolve(
+        (statements as Recorded[]).map((statement) => run(statement.sql, statement.values)),
+      ),
   };
 }
 
@@ -570,10 +604,13 @@ async function migratedDatabase(): Promise<{ db: D1DatabaseLike; orgId: string }
   const sources: MigrationSource[] = await Promise.all(
     [
       '0001_init.sql',
+      '0002_local_login.sql',
       '0003_access_model.sql',
       '0004_cache_epoch.sql',
       '0005_admin_permission_topup.sql',
       '0006_ports.sql',
+      '0015_keyring_verifier.sql',
+      '0016_keyring_version_indexes.sql',
     ].map(async (name) =>
       loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),
@@ -1420,4 +1457,49 @@ describe('runtime-cloudflare request scope', () => {
     expect(await within(Promise.all(ctx.promises))).toBe('settled');
     expect(out.lines.some((line) => line.includes('deferred.untracked'))).toBe(false);
   });
+});
+
+describe('blob purge timing', () => {
+  const invalidTimeouts = [900_000, 90_001, 999, 1500.5];
+  it.each(invalidTimeouts)('refuses delete timeout %s as misconfigured', (timeout) => {
+    expect(() => blobPurgeTiming(timeout, 900)).toThrow(KernelConfigError);
+    expect(() => blobPurgeTiming(timeout, 900)).toThrow('blob.deleteTimeoutMs');
+  });
+
+  it('accepts the shipped purge timing', () => {
+    expect(blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS)).toEqual({
+      deleteTimeoutMs: 30_000,
+      leaseMs: 900_000,
+    });
+  });
+
+  it.each([...invalidTimeouts, BLOB_DELETE_TIMEOUT_MS, 1000, 90_000])(
+    'agrees with lifecycle validation for delete timeout %s',
+    (deleteTimeoutMs) => {
+      const metadata = {
+        softDelete: async () => false,
+        claimPurge: async () => null,
+        canStartRemove: async () => false,
+        markDeleted: async () => false,
+        cancelPurge: async () => false,
+        unschedule: async () => false,
+      };
+      const lifecycle = () =>
+        createBlobLifecycle({
+          metadata,
+          store: {} as ByteStore,
+          observability: { counter() {}, histogram() {}, log() {} },
+          deleteTimeoutMs,
+          leaseMs: BLOB_PURGE_LEASE_SECONDS * 1000,
+        });
+      const timing = () => blobPurgeTiming(deleteTimeoutMs, BLOB_PURGE_LEASE_SECONDS);
+      if (invalidTimeouts.includes(deleteTimeoutMs)) {
+        expect(lifecycle).toThrow(TypeError);
+        expect(timing).toThrow(KernelConfigError);
+      } else {
+        expect(lifecycle).not.toThrow();
+        expect(timing).not.toThrow();
+      }
+    },
+  );
 });

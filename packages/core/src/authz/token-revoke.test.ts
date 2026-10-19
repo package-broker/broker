@@ -49,11 +49,11 @@ function fence(userId = 'user-1', sessionId = 'session-1') {
 }
 
 function own(tokenId: string) {
-  return { tokenId, routeProjectId: null };
+  return { tokenId, routeProjectId: null, via: 'organization' as const };
 }
 
 function onProject(tokenId: string, routeProjectId = PROJECT_A) {
-  return { tokenId, routeProjectId };
+  return { tokenId, routeProjectId, via: 'project' as const };
 }
 
 type Stored = RevocableToken & { orgId: string; revokedAt: string | null; lastOpId: string | null };
@@ -420,7 +420,13 @@ describe('sessions only', () => {
   it('rejects an empty route project id', async () => {
     const { service } = setup();
     await expect(
-      service.revoke(ctx, session(), fence(), { tokenId: 'svc-a', routeProjectId: '' }, apiCall),
+      service.revoke(
+        ctx,
+        session(),
+        fence(),
+        { tokenId: 'svc-a', routeProjectId: '', via: 'project' },
+        apiCall,
+      ),
     ).rejects.toThrow(TypeError);
   });
 
@@ -643,3 +649,99 @@ const revokeRecord = {
   createdAt: NOW,
   expiresAt: '2026-10-17T12:00:00.000Z',
 };
+
+describe('explicit own route', () => {
+  it.each(['pat-other-all', 'svc-a', 'svc-org', 'missing'])(
+    'hides %s even from an organization revoker',
+    async (tokenId) => {
+      const r = setup({ organization: ['org:tokens:revoke'] });
+      expect(
+        await r.service.revoke(
+          ctx,
+          session(),
+          fence(),
+          {
+            tokenId,
+            routeProjectId: null,
+            via: 'own',
+          },
+          apiCall,
+        ),
+      ).toEqual({ ok: false, error: 'not_found' });
+      expect(r.tokens.revoke).not.toHaveBeenCalled();
+      expect(r.authority.livePermissions).not.toHaveBeenCalled();
+      expect(r.authority.guard).not.toHaveBeenCalled();
+      expect(r.ownership.ownPersonalToken).not.toHaveBeenCalled();
+      expect(r.rows.get(tokenId)?.revokedAt ?? null).toBeNull();
+      expect(r.log).not.toHaveBeenCalled();
+    },
+  );
+
+  it('revokes its own PAT and reports a repeat as unchanged', async () => {
+    const r = setup();
+    const input = { tokenId: 'pat-own-all', routeProjectId: null, via: 'own' as const };
+    expect(await r.service.revoke(ctx, session(), fence(), input, apiCall)).toEqual({
+      ok: true,
+      value: { revoked: true },
+    });
+    expect(r.rows.get(input.tokenId)?.revokedAt).toBe(NOW);
+    expect(await r.service.revoke(ctx, session(), fence(), input, apiCall)).toEqual({
+      ok: true,
+      value: { revoked: false },
+    });
+    expect(r.authority.livePermissions).not.toHaveBeenCalled();
+    expect(r.events()).toHaveLength(1);
+  });
+});
+
+describe('route consistency', () => {
+  it.each(['bogus' as never, undefined as never])(
+    'rejects unknown via %s before store, authority or ownership calls',
+    async (via) => {
+      const r = setup({ organization: ['org:tokens:revoke'] });
+      await expect(
+        r.service.revoke(
+          ctx,
+          session(),
+          fence(),
+          { tokenId: 'svc-org', routeProjectId: null, via },
+          apiCall,
+        ),
+      ).rejects.toThrow(TypeError);
+      expect(r.tokens.get).not.toHaveBeenCalled();
+      expect(r.tokens.revoke).not.toHaveBeenCalled();
+      expect(r.authority.livePermissions).not.toHaveBeenCalled();
+      expect(r.authority.guard).not.toHaveBeenCalled();
+      expect(r.ownership.ownPersonalToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['own', PROJECT_A],
+    ['organization', PROJECT_A],
+    ['project', null],
+  ] as const)(
+    'rejects %s with routeProjectId %s before store or authority calls',
+    async (via, routeProjectId) => {
+      const r = setup({ organization: ['org:tokens:revoke'] });
+      await expect(
+        r.service.revoke(
+          ctx,
+          session(),
+          fence(),
+          {
+            tokenId: 'svc-a',
+            routeProjectId,
+            via,
+          },
+          apiCall,
+        ),
+      ).rejects.toThrow(TypeError);
+      expect(r.tokens.get).not.toHaveBeenCalled();
+      expect(r.tokens.revoke).not.toHaveBeenCalled();
+      expect(r.authority.livePermissions).not.toHaveBeenCalled();
+      expect(r.authority.guard).not.toHaveBeenCalled();
+      expect(r.ownership.ownPersonalToken).not.toHaveBeenCalled();
+    },
+  );
+});

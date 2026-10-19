@@ -1,5 +1,6 @@
 import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
 import { auditEvent, type AuditEvent, type AuditEventInput } from '../audit/actions.js';
+import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp } from '../ids.js';
@@ -10,6 +11,7 @@ import { isPermission } from './permissions.js';
 
 export type ServicePrincipalError =
   | 'forbidden'
+  | 'reauth_required'
   | 'invalid_name'
   | 'invalid_permission'
   | 'invalid_revision'
@@ -44,6 +46,7 @@ export interface GuardRequirement {
   readonly coversStoredOf?: string;
   /** Narrowing and status changes stay possible on an archived project. */
   readonly allowArchived?: boolean;
+  readonly freshReauth?: boolean;
 }
 
 export interface ServicePrincipalAuthority {
@@ -70,7 +73,7 @@ export interface ServicePrincipalStore {
       readonly createdByUserId: string;
       readonly permissions: readonly string[];
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -90,7 +93,7 @@ export interface ServicePrincipalStore {
       readonly id: string;
       readonly permissions: readonly string[];
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -104,7 +107,7 @@ export interface ServicePrincipalStore {
     input: {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -116,7 +119,7 @@ export interface ServicePrincipalStore {
     input: {
       readonly id: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
@@ -127,6 +130,7 @@ export interface ServicePrincipalStore {
 
 export interface ServicePrincipalDeps {
   readonly principals: ServicePrincipalStore;
+  readonly sessions: Pick<SessionService, 'isReauthFresh'>;
   readonly authority: ServicePrincipalAuthority;
   readonly directory: {
     createdBy(
@@ -144,6 +148,7 @@ export type CreatorOffboardingCause = 'membership_removed' | 'suspended';
 export interface ServicePrincipalService {
   create(
     ctx: OrgContext,
+    authenticated: AuthenticatedSession,
     actor: ActorContext,
     fence: MutationFence,
     input: { readonly name: string; readonly projectId: string | null },
@@ -213,7 +218,7 @@ function requirementFor(projectId: string | null): {
 }
 
 export function createServicePrincipalService(deps: ServicePrincipalDeps): ServicePrincipalService {
-  const { principals, authority, directory, clock, ids } = deps;
+  const { principals, sessions, authority, directory, clock, ids } = deps;
 
   const now = (): string => isoTimestamp(clock.now());
 
@@ -413,10 +418,18 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
   }
 
   return {
-    async create(ctx, actor, fence, input, call) {
+    async create(ctx, authenticated, actor, fence, input, call) {
       const refused = untagged(ctx, actor, 'created');
       if (refused !== null) return refused;
       const held = requireFence(actor, fence);
+      const { session, principal } = authenticated;
+      if (held.userId !== session.userId || held.sessionId !== session.id) {
+        throw new TypeError('the mutation fence must belong to the creating session');
+      }
+      if (principal.kind !== 'user' || principal.id !== session.userId) {
+        return deny(ctx, actor, 'created');
+      }
+      if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
       if (!isValidName(input.name)) return fail('invalid_name');
       const { projectId } = input;
       if (projectId !== null && (typeof projectId !== 'string' || projectId === '')) {
@@ -429,6 +442,7 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
         ...requirementFor(projectId),
         projectId,
         covers: snapshot,
+        freshReauth: true,
       });
       const id = ids.ulid();
       const stamp = now();

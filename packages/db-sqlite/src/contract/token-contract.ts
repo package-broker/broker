@@ -334,6 +334,7 @@ function ssoAnchors(count: number): Case {
           ctx,
           mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {}),
           {
+            audit: mutationAudit('token.issue', null),
             id: 'issued-token',
             name: 'Contract',
             scope: 'full',
@@ -501,7 +502,12 @@ const projectGrantDeleted: Case = (open, wrap) =>
           mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
             [projectGrantKey('project-grant')]: 1,
           }),
-          { id: 'project-grant', projectId: 'alpha', providerAnchors: anchors },
+          {
+            audit: mutationAudit('project_grant.revoke', 'project-grant', 'alpha'),
+            id: 'project-grant',
+            projectId: 'alpha',
+            providerAnchors: anchors,
+          },
         ),
       ).toEqual({ status: 'deleted', offboardedUserId: null });
       const found = await lookup(executor, ctx, 'alpha');
@@ -681,6 +687,7 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
 
       const revoke = (tokenId: string) =>
         tokens.revoke(ctx, fence(), tokens.ownPersonalToken(ctx, fence(), tokenId), {
+          audit: mutationAudit('token.revoke', null),
           tokenId: tokenId,
           now: iso(0),
         });
@@ -694,8 +701,12 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
       ).toEqual([{ id: 'revoked-pat' }]);
       expect((await revoke('own-pat')).status).toBe('revoked');
       for (const statement of statements) {
-        expect(statement.sql).not.toMatch(SECRET_COLUMNS);
+        const sql = statement.sql.startsWith('INSERT INTO audit_pending')
+          ? statement.sql.replace(/\btoken_selector\b/g, '')
+          : statement.sql;
+        expect(sql).not.toMatch(SECRET_COLUMNS);
       }
+      expect(statements.flatMap((statement) => statement.params)).not.toContain('aaaaaaaaaaaa');
     },
     wrap,
   );
@@ -774,7 +785,7 @@ export function describeTokenContract(label: string, open: Open) {
   });
 }
 
-function mutationAudit(action: AuditAction, targetId: string | null) {
+function mutationAudit(action: AuditAction, targetId: string | null, projectId?: string) {
   const id = ulid();
   const result = auditEvent({
     id,
@@ -782,6 +793,7 @@ function mutationAudit(action: AuditAction, targetId: string | null) {
     action,
     actor: { type: 'system', id: null },
     context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    ...(projectId === undefined ? {} : { projectId }),
     target: { type: action.split('.')[0]!, id: targetId },
   });
   if (!result.ok) throw new Error('Invalid test audit event');

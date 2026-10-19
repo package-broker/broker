@@ -24,6 +24,7 @@ export interface ExistingChunkVersion {
   readonly npmIntegrity: string | null;
   readonly composerShasum: string | null;
   readonly metadataJson?: string;
+  readonly deprecatedMessage?: string | null;
 }
 
 export interface ChunkSource {
@@ -38,7 +39,14 @@ export interface ChunkBudget {
   /** Requires statementBudget for quarantine and listing mark costs. */
   readonly syncCost?: (versions: number) => number;
   readonly statementBudget?: Readonly<Record<CatalogueWriteMethod, number>>;
+  /** Bound parameter bytes per syncPackage call; a version above the limit is refused. */
+  readonly syncPayload?: {
+    readonly limit: number;
+    readonly bytes: (version: VersionInput) => number;
+  };
 }
+
+export type PlanRefusal = 'name_not_registered' | 'payload_too_large';
 
 export interface NpmConflict {
   readonly versionNormalized: string;
@@ -53,9 +61,10 @@ export type PlannedWriterCall =
 export interface ChunkPlan {
   readonly inserts: readonly VersionInput[];
   readonly composerUpdates: readonly VersionInput[];
+  readonly npmUpdates: readonly VersionInput[];
   readonly npmConflicts: readonly NpmConflict[];
   readonly unchanged: readonly string[];
-  readonly refused: readonly { readonly version: string; readonly reason: 'name_not_registered' }[];
+  readonly refused: readonly { readonly version: string; readonly reason: PlanRefusal }[];
   /**
    * npm versions held as key-only rows whose integrity matches: re-read them with metadata and
    * plan again. The plan stops before the first of them.
@@ -68,7 +77,9 @@ export interface ChunkPlan {
 }
 
 type Decision =
-  | { readonly kind: 'insert' | 'update' | 'unchanged' | 'refused' | 'needs_metadata' }
+  | {
+      readonly kind: 'insert' | 'update' | 'unchanged' | 'refused' | 'too_large' | 'needs_metadata';
+    }
   | { readonly kind: 'conflict'; readonly existing: ExistingChunkVersion };
 
 interface NpmDigests {
@@ -96,8 +107,11 @@ function decideNpm(incoming: VersionInput, existing: ExistingChunkVersion): Deci
   if (existing.metadataJson === undefined) return { kind: 'needs_metadata' };
   const next = npmDigests(incoming.metadata.json);
   const prior = npmDigests(existing.metadataJson);
-  return next.shasum !== prior.shasum || next.tarballName !== prior.tarballName
-    ? { kind: 'conflict', existing }
+  if (next.shasum !== prior.shasum || next.tarballName !== prior.tarballName) {
+    return { kind: 'conflict', existing };
+  }
+  return incoming.metadata.deprecatedMessage !== (existing.deprecatedMessage ?? null)
+    ? { kind: 'update' }
     : { kind: 'unchanged' };
 }
 
@@ -107,6 +121,9 @@ function decide(
   existing: ExistingChunkVersion | undefined,
 ): Decision {
   if (existing === undefined) return { kind: 'insert' };
+  if (existing.status === 'tombstoned' || existing.status === 'quarantined') {
+    return { kind: 'unchanged' };
+  }
   if (npm) return decideNpm(incoming, existing);
   return existing.metadataJson === incoming.metadata.json
     ? { kind: 'unchanged' }
@@ -155,7 +172,9 @@ export function planChunk(
   const updates: VersionInput[] = [];
   const conflicts: NpmConflict[] = [];
   const unchanged: string[] = [];
-  const refused: { version: string; reason: 'name_not_registered' }[] = [];
+  const refused: { version: string; reason: PlanRefusal }[] = [];
+  const payload = budget.syncPayload;
+  let openBytes = 0;
   const calls: PlannedWriterCall[] = [];
   let open: VersionInput[] | null = null;
   let writeStatements = 0;
@@ -163,8 +182,12 @@ export function planChunk(
   let taken = 0;
 
   for (const [index, m] of members.entries()) {
-    const decision = decisions[index];
-    if (decision === undefined || decision.kind === 'needs_metadata') break;
+    const planned = decisions[index];
+    if (planned === undefined || planned.kind === 'needs_metadata') break;
+    const writes = planned.kind === 'insert' || planned.kind === 'update';
+    const bytes = writes && payload !== undefined ? payload.bytes(m.version) : 0;
+    const decision: Decision =
+      writes && payload !== undefined && bytes > payload.limit ? { kind: 'too_large' } : planned;
     const marks = Math.ceil((taken + 1) / MARK_KEYS_PER_STATEMENT) * markCost;
     let extraCalls = 0;
     let extraStatements = 0;
@@ -172,7 +195,11 @@ export function planChunk(
       extraCalls = 1;
       extraStatements = costs?.quarantine ?? 0;
     } else if (decision.kind === 'insert' || decision.kind === 'update') {
-      if (open === null || open.length >= CATALOGUE_SYNC_VERSIONS_PER_CALL) {
+      if (
+        open === null ||
+        open.length >= CATALOGUE_SYNC_VERSIONS_PER_CALL ||
+        (payload !== undefined && openBytes + bytes > payload.limit)
+      ) {
         extraCalls = 1;
         extraStatements = syncCost(1);
       } else if (budget.syncCost !== undefined) {
@@ -198,12 +225,16 @@ export function planChunk(
       unchanged.push(version);
     } else if (decision.kind === 'refused') {
       refused.push({ version, reason: 'name_not_registered' });
+    } else if (decision.kind === 'too_large') {
+      refused.push({ version, reason: 'payload_too_large' });
     } else {
       if (extraCalls === 1) {
         open = [];
+        openBytes = 0;
         calls.push({ method: 'syncPackage', versions: open });
       }
       open?.push(m.version);
+      openBytes += bytes;
       (decision.kind === 'insert' ? inserts : updates).push(m.version);
     }
     taken += 1;
@@ -212,7 +243,8 @@ export function planChunk(
 
   return {
     inserts,
-    composerUpdates: updates,
+    composerUpdates: npm ? [] : updates,
+    npmUpdates: npm ? updates : [],
     npmConflicts: conflicts,
     unchanged,
     refused,

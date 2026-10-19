@@ -301,7 +301,13 @@ function routes(rig: Rig): RouteDefinition[] {
           authenticated(),
           actor,
           fence(),
-          { servicePrincipalId: 'sp-1', name: 'ci', scope: 'read', expiresAt: inDays(30) },
+          {
+            servicePrincipalId: 'sp-1',
+            routeProjectId: 'proj-1',
+            name: 'ci',
+            scope: 'read',
+            expiresAt: inDays(30),
+          },
           {
             audit: {
               opId: '01K00000000000000000000001',

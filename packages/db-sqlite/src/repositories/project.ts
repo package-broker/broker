@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { expressionBuilder, sql, type Compilable, type SqlBool } from 'kysely';
 import { type FailureProbes, type MutationFence } from '@package-broker/core/authz/fence';
 import {
@@ -9,8 +11,6 @@ import { PROJECT_LIST_MAX_LIMIT } from '@package-broker/core/authz/project-list'
 import {
   PROJECT_NAME_MAX_LENGTH,
   TOKEN_MAX_SCOPES,
-  type ProjectChanges,
-  type ProjectCreateInput,
   type ProjectStatus,
   type ProjectStore,
   type TokenMaxScope,
@@ -30,6 +30,8 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 import { attachSourceStatements } from './visibility-attach.js';
 import {
   DEFAULT_IDLE_SECONDS,
@@ -85,9 +87,10 @@ export interface ProjectRepository extends ProjectStore {
   create(
     ctx: OrgContext,
     fence: MutationFence,
-    input: ProjectCreateInput & { readonly id: string; readonly now: string },
+    input: Parameters<ProjectStore['create']>[2],
   ): Promise<
     | 'created'
+    | 'conflict'
     | 'duplicate'
     | 'invalid_slug'
     | 'reserved_slug'
@@ -103,9 +106,7 @@ export interface ProjectRepository extends ProjectStore {
   update(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    changes: ProjectChanges,
-    now: string,
+    input: Parameters<ProjectStore['update']>[2],
   ): Promise<
     'updated' | 'unchanged' | 'archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -113,15 +114,13 @@ export interface ProjectRepository extends ProjectStore {
   archive(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    now: string,
+    input: Parameters<ProjectStore['archive']>[2],
   ): Promise<'archived' | 'not_active' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
   /** Requires org:projects:archive and a session reauthenticated within the last ten minutes. */
   restore(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    now: string,
+    input: Parameters<ProjectStore['restore']>[2],
   ): Promise<
     'restored' | 'not_archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -226,6 +225,13 @@ function failure(reason: string): Failure {
     return reason;
   }
   throw new Error(`project mutation failed unclassified (${reason})`);
+}
+
+function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
+  return record === undefined
+    ? sql<SqlBool>`0`
+    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
+        and principal_key = ${record.principalKey} and key = ${record.key})`;
 }
 
 export function createProjectRepository(
@@ -354,6 +360,7 @@ export function createProjectRepository(
     expected: number,
     status: ProjectStatus,
     authority: Guard,
+    idempotency: IdempotencyRecord | undefined,
   ): FailureProbes {
     const target = (column: 'revision' | 'status', comparison: '<>', value: number | string) =>
       scalar(
@@ -365,7 +372,13 @@ export function createProjectRepository(
       );
     return {
       authority: authorityProbe(authority),
-      conflict: target('revision', '<>', expected),
+      conflict: scalar(
+        db.selectNoFrom(
+          sql<number>`(${idempotencyCollision(ctx, idempotency)} or exists (select 1 from project where org_id = ${ctx.orgId} and id = ${id} and revision <> ${expected}))`.as(
+            'holds',
+          ),
+        ),
+      ),
       collision: target('status', '<>', status),
     };
   }
@@ -380,6 +393,8 @@ export function createProjectRepository(
     done: Done,
     noop: Noop,
     reauth: boolean,
+    audit: AuditEvent,
+    idempotency: IdempotencyRecord | undefined,
   ): Promise<Done | Noop | 'not_found' | 'conflict' | 'authority' | 'indeterminate'> {
     const stamp = timestamp(now);
     const expected = expectedRevision(fence);
@@ -388,13 +403,16 @@ export function createProjectRepository(
     if (!held) return 'authority';
     if (project === null) return 'not_found';
 
+    const guard = assertGuard(authority, ctx);
+    const checks = revisionCheck(ctx, id, expected, from);
+    const changedAt = guard.length + checks.length;
     const outcome = await runOrgFenced(
       executor,
       ctx,
       fence,
-      assertGuard(authority, ctx),
+      guard,
       [
-        ...revisionCheck(ctx, id, expected, from),
+        ...checks,
         scalar(
           db
             .updateTable('project')
@@ -410,14 +428,16 @@ export function createProjectRepository(
             .where('status', '=', from)
             .returning('id'),
         ),
+        auditPendingStatement(ctx, audit),
+        ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
       ],
-      targetProbes(ctx, id, expected, from, authority),
+      targetProbes(ctx, id, expected, from, authority, idempotency),
     );
     if (!outcome.ok) {
       const reason = failure(outcome.reason);
       return reason === 'collision' ? noop : reason;
     }
-    const changed = outcome.results[outcome.results.length - 1];
+    const changed = outcome.results[changedAt];
     if (changed === undefined || changed.rows.length === 0) {
       throw new Error('project transition committed without a changed row');
     }
@@ -559,26 +579,35 @@ export function createProjectRepository(
               ),
           ),
           ...attachSourceStatements(ctx, input.id),
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
         ],
         {
           authority: authorityProbe(authority),
-          conflict: authorityProbe(roleAllowed),
+          conflict: scalar(
+            db.selectNoFrom(
+              sql<number>`${idempotencyCollision(ctx, input.idempotency)}`.as('holds'),
+            ),
+          ),
           collision: scalar(
-            db
-              .selectFrom('project')
-              .select(sql<number>`1`.as('exists'))
-              .where('org_id', '=', ctx.orgId)
-              .where((w) => w.or([w('slug', '=', input.slug), w('id', '=', input.id)])),
+            db.selectNoFrom(
+              sql<number>`(${roleAllowed} is not 1 or exists (
+            select 1 from project where org_id = ${ctx.orgId} and (slug = ${input.slug} or id = ${input.id})
+          ))`.as('holds'),
+            ),
           ),
         },
       );
       if (outcome.ok) return 'created';
       const reason = failure(outcome.reason);
-      if (reason === 'collision') return 'duplicate';
-      return reason === 'conflict' ? 'initial_role_not_allowed' : reason;
+      if (reason !== 'collision') return reason;
+      const [role] = await executor.all<{ refused: number }>(authorityProbe(roleAllowed));
+      return role?.refused === 0 ? 'duplicate' : 'initial_role_not_allowed';
     },
 
-    async update(ctx, fence, id, changes, now) {
+    async update(ctx, fence, { id, changes, now, audit, idempotency }) {
       const stamp = timestamp(now);
       const expected = expectedRevision(fence);
       if (changes.name !== undefined) requireName(changes.name);
@@ -603,13 +632,16 @@ export function createProjectRepository(
       ];
       if (differences.length === 0 && current.status === 'active') return 'unchanged';
 
+      const guard = assertGuard(authority, ctx);
+      const checks = revisionCheck(ctx, id, expected, 'active');
+      const changedAt = guard.length + checks.length;
       const outcome = await runOrgFenced(
         executor,
         ctx,
         fence,
-        assertGuard(authority, ctx),
+        guard,
         [
-          ...revisionCheck(ctx, id, expected, 'active'),
+          ...checks,
           scalar(
             db
               .updateTable('project')
@@ -632,22 +664,36 @@ export function createProjectRepository(
               .where((w) => w.or(differences.map((difference) => w.parens(difference))))
               .returning('id'),
           ),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
-        targetProbes(ctx, id, expected, 'active', authority),
+        targetProbes(ctx, id, expected, 'active', authority, idempotency),
       );
       if (!outcome.ok) {
         const reason = failure(outcome.reason);
         return reason === 'collision' ? 'archived' : reason;
       }
-      const changed = outcome.results[outcome.results.length - 1];
+      const changed = outcome.results[changedAt];
       return changed !== undefined && changed.rows.length > 0 ? 'updated' : 'unchanged';
     },
 
-    archive(ctx, fence, id, now) {
-      return transition(ctx, fence, id, now, 'active', 'archived', 'archived', 'not_active', false);
+    archive(ctx, fence, { id, now, audit, idempotency }) {
+      return transition(
+        ctx,
+        fence,
+        id,
+        now,
+        'active',
+        'archived',
+        'archived',
+        'not_active',
+        false,
+        audit,
+        idempotency,
+      );
     },
 
-    restore(ctx, fence, id, now) {
+    restore(ctx, fence, { id, now, audit, idempotency }) {
       return transition(
         ctx,
         fence,
@@ -658,6 +704,8 @@ export function createProjectRepository(
         'restored',
         'not_archived',
         true,
+        audit,
+        idempotency,
       );
     },
   } satisfies ProjectStore & ProjectRepository;

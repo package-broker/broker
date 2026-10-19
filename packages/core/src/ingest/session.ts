@@ -1,3 +1,4 @@
+import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import type { PendingValidators } from './validators.js';
 import type { OrgContext } from '../db/port.js';
 
@@ -52,11 +53,15 @@ export interface IngestSessions {
       readonly stamp: string;
     },
   ): Promise<boolean>;
-  /** Extends the lease by the acquired duration; null when the handle is expired or superseded. */
+  /**
+   * Extends the lease by the acquired duration; null when the handle is expired or superseded, or
+   * when `writeGuard` (run in the same batch) fails.
+   */
   advance(
     ctx: OrgContext,
     guard: IngestSessionHandle,
     input: { readonly cursor: string | null; readonly addSeen: number },
+    writeGuard?: CatalogueWriteGuard,
   ): Promise<IngestSessionProgress | null>;
   setPendingValidators(
     ctx: OrgContext,
@@ -67,6 +72,11 @@ export interface IngestSessions {
   abandon(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;
   /** Newest generation of the scope in this org, or null; read-only, only `complete` means filled. */
   latest(ctx: OrgContext, scope: IngestScopeRef): Promise<IngestSessionLatest | null>;
+}
+
+export interface IngestSessionRelease {
+  /** Ends this holder's lease, preserving the running generation and resume state; false when not held. */
+  release(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;
 }
 
 export interface IngestSessionSweep {

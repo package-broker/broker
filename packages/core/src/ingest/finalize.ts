@@ -1,4 +1,4 @@
-import type { FinalizeEvidence } from '../db/catalogue.js';
+import type { CatalogueWriteGuard, FinalizeEvidence } from '../db/catalogue.js';
 import type { OrgContext } from '../db/port.js';
 import type { IngestSessionHandle } from './session.js';
 
@@ -32,5 +32,7 @@ export interface IngestFinalizer {
     ctx: OrgContext,
     session: IngestSessionHandle,
     input: IngestFinalizeInput,
+    /** The caller's write guard (session plus job lease); it runs inside the finalize batch. */
+    guard?: CatalogueWriteGuard,
   ): Promise<IngestFinalizeResult>;
 }

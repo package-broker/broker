@@ -124,7 +124,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         ).resolves.toMatchObject({
           removed: 1,
           restored: 1,
-          statements: kind === 'source' ? 11 : 14,
+          statements: kind === 'source' ? 11 : 15,
         });
       }
       expect(await snapshot()).toEqual(before);

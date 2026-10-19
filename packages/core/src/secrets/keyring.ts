@@ -1,7 +1,7 @@
 import type { MasterKey } from './master-key.js';
 
 export type KeyPurpose =
-  'credential-encryption' | 'login-state' | 'token-pepper' | 'password-pepper';
+  'credential-encryption' | 'login-state' | 'token-pepper' | 'password-pepper' | 'keyring-verifier';
 
 type Subtle = typeof crypto.subtle;
 export type CryptoKey = Awaited<ReturnType<Subtle['importKey']>>;
@@ -9,7 +9,7 @@ type DerivedAlgorithm = Parameters<Subtle['deriveKey']>[2];
 type DerivedUsages = Parameters<Subtle['deriveKey']>[4];
 
 type AesPurpose = 'credential-encryption' | 'login-state';
-type HmacPurpose = 'token-pepper' | 'password-pepper';
+type HmacPurpose = 'token-pepper' | 'password-pepper' | 'keyring-verifier';
 
 export interface Keyring {
   readonly currentVersion: number;
@@ -32,7 +32,11 @@ const MAX_KEYS = 4;
 const KEY_BYTES = 32;
 const MAX_VERSION = 999_999;
 const AES_PURPOSES: ReadonlySet<string> = new Set(['credential-encryption', 'login-state']);
-const HMAC_PURPOSES: ReadonlySet<string> = new Set(['token-pepper', 'password-pepper']);
+const HMAC_PURPOSES: ReadonlySet<string> = new Set([
+  'token-pepper',
+  'password-pepper',
+  'keyring-verifier',
+]);
 const NO_SALT = new Uint8Array(0);
 const encoder = new TextEncoder();
 

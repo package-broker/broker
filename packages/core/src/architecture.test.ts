@@ -46,6 +46,7 @@ const ws = (...names: string[]): string[] => names.map((name) => `${WORKSPACE_PR
 
 const RULES: Readonly<Record<string, Rule>> = {
   core: { allow: ['hono', 'zod'], testOnly: ['eslint', 'node', 'typescript', 'vitest'] },
+  e2e: { allow: ['node'], testOnly: ['vitest'] },
   'db-sqlite': {
     allow: [...ws('core'), 'kysely'],
     testOnly: [],

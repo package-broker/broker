@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
@@ -87,6 +89,7 @@ function minter(...selectors: string[]): { mint: () => MintedToken; calls: () =>
 function input(overrides: Partial<IssueServiceTokenInput> = {}): IssueServiceTokenInput {
   return {
     id: TOKEN,
+    audit: mutationAudit(),
     name: 'deploy',
     servicePrincipalId: SP,
     projectId: PROJECT,
@@ -94,6 +97,7 @@ function input(overrides: Partial<IssueServiceTokenInput> = {}): IssueServiceTok
     scope: 'read',
     readOnly: true,
     expiresAt: iso(30 * DAY),
+    maxLifetimeDays: 365,
     now: iso(0),
     authority: {
       permission: 'project:tokens:create',
@@ -775,13 +779,17 @@ describe('core service over the real repository', () => {
       providers: { anchors: async () => ANCHORS },
       keyring,
       clock: fixedClock(iso(0)),
-      ids: { ulid: () => TOKEN },
+      ids: (() => {
+        let first = true;
+        return { ulid: () => (first ? ((first = false), TOKEN) : ulid()) };
+      })(),
       log: () => undefined,
     });
   }
 
   const request = {
     servicePrincipalId: SP,
+    routeProjectId: PROJECT,
     name: 'deploy',
     scope: 'write' as const,
     expiresAt: iso(7 * DAY),
@@ -869,3 +877,17 @@ describe('core service over the real repository', () => {
     expect(await count('token')).toBe(0);
   });
 });
+
+function mutationAudit(action: AuditAction = 'token.issue', targetId: string | null = null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

@@ -94,6 +94,7 @@ async function migrationSources(): Promise<MigrationSource[]> {
     '0004_cache_epoch.sql',
     '0005_admin_permission_topup.sql',
     '0006_ports.sql',
+    '0015_keyring_verifier.sql',
   ];
   return Promise.all(
     names.map(async (name) =>

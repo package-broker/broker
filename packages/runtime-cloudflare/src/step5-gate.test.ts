@@ -170,6 +170,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             { ...viewed, permissions: new Set(viewed.permissions) },
             mutationFence(authenticated, {}),
             { slug, name: slug },
+            auditCall(ctx.requestId),
           );
           return Response.json(created.ok ? { id: created.value.id } : { error: created.error }, {
             status: created.ok ? 200 : 409,
@@ -223,6 +224,7 @@ describe('step 5 release gate on Miniflare D1', () => {
           const actor = { ...viewed, permissions: new Set(viewed.permissions) };
           const principal = await services.servicePrincipals.create(
             ctx.org,
+            session,
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId },
@@ -236,6 +238,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             mutationFence(authenticated, {}),
             {
               servicePrincipalId: principal.value.id,
+              routeProjectId: projectId,
               name: 'ci',
               scope: 'read',
               expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
@@ -265,6 +268,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'organization',
             },
             auditCall(ctx.requestId),
           );

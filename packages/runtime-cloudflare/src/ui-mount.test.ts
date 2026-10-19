@@ -39,18 +39,50 @@ const engine: AuthorizationEngine = {
 
 import { createWorker, type Env } from './index.js';
 
+function keyringOnlyD1(): NonNullable<Env['DB']> {
+  const verifier = new Map<number, string>();
+  type Recorded = {
+    sql: string;
+    values: unknown[];
+    bind: (...next: unknown[]) => Recorded;
+    all: () => Promise<unknown>;
+  };
+  const run = (sql: string, values: unknown[]) => {
+    const insert = /^\s*insert into keyring_verifier .*X'([0-9a-f]{64})'/is.exec(sql);
+    if (insert !== null) {
+      const version = values[0] as number;
+      if (verifier.has(version)) return { results: [], meta: { changes: 0 } };
+      verifier.set(version, (insert[1] as string).toUpperCase());
+      return { results: [], meta: { changes: 1 } };
+    }
+    if (/from "keyring_verifier"/i.test(sql)) {
+      return {
+        results: [...verifier]
+          .sort(([left], [right]) => right - left)
+          .map(([key_version, mac_hex]) => ({ key_version, mac_hex })),
+      };
+    }
+    if (/from local_login/i.test(sql)) return { results: [] };
+    throw new Error('unexpected SQL');
+  };
+  const make = (sql: string, values: unknown[]): Recorded => ({
+    sql,
+    values,
+    bind: (...next) => make(sql, next),
+    all: () => Promise.resolve(run(sql, values)),
+  });
+  return {
+    prepare: (sql: string) => make(sql, []),
+    batch: (statements: Recorded[]) =>
+      Promise.resolve(statements.map((statement) => run(statement.sql, statement.values))),
+  } as unknown as NonNullable<Env['DB']>;
+}
+
 describe('Worker UI mount', () => {
   it('adds only UI routes and requires the engine authenticated boundary', async () => {
     const worker = createWorker([], { authorization: engine, log: () => undefined });
     const authEnv: Env = {
-      DB: {
-        prepare: () => {
-          throw new Error('unexpected SQL');
-        },
-        batch: async () => {
-          throw new Error('unexpected SQL');
-        },
-      },
+      DB: keyringOnlyD1(),
       PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
       PB_PUBLIC_URL: 'https://broker.test',
     };

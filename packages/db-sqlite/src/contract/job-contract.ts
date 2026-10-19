@@ -971,7 +971,67 @@ const sqliteOnlyPayloadAtClaim: Case = async ({ a, executorA }) => {
   expect(await brokenRunningJobs(executorA)).toBe(0);
 };
 
+async function legacyJobIndexRemoved(fixture: JobContractFixture, name: string): Promise<void> {
+  expect(
+    await fixture.executorA.all({
+      sql: 'SELECT name FROM sqlite_master WHERE name = ?',
+      params: [name],
+    }),
+  ).toEqual([]);
+}
+
+async function claimPlansAfterContract(fixture: JobContractFixture): Promise<void> {
+  const statements: Statement[] = [];
+  const executor: SqlExecutor = {
+    driver: fixture.executorA.driver,
+    all: (statement) => fixture.executorA.all(statement),
+    batch: (batch) => {
+      statements.push(...batch);
+      return fixture.executorA.batch(batch);
+    },
+  };
+  await claimOf(createJobRepository(executor), 900);
+  expect(statements).toHaveLength(8);
+  for (const statement of statements) {
+    const plan = await fixture.executorA.all<{ detail: string }>({
+      sql: `EXPLAIN QUERY PLAN ${statement.sql}`,
+      params: statement.params,
+    });
+    const details = plan.map((step) => step.detail).join('\n');
+    expect(details).not.toMatch(/USING (?:COVERING )?INDEX job_(?:claim|lease)\b/);
+    if (statement.sql.includes("last_error = 'invalid_payload'")) {
+      expect(details).toMatch(
+        /SEARCH job USING (?:COVERING )?INDEX job_claim_org \(org_id=\? AND run_at<\?\)/,
+      );
+    }
+  }
+}
+
+const legacyJobContractCases = (
+  [
+    ['job_claim', 'queued'],
+    ['job_lease', 'running'],
+  ] as const
+).flatMap<[string, Case]>(([name, state]) => [
+  [`migration removes legacy ${name}`, (fixture) => legacyJobIndexRemoved(fixture, name)],
+  [
+    `EXPLAIN rejects a legacy ${name} index dependency`,
+    async (fixture) => {
+      // Build the deliberately invalid hint separately from the production index coverage scan.
+      const legacyIndexHint = ['INDEXED', 'BY', name].join(' ');
+      await expect(
+        fixture.executorA.all({
+          sql: `EXPLAIN QUERY PLAN SELECT id FROM job ${legacyIndexHint} WHERE org_id = ? AND state = '${state}'`,
+          params: [ORG_A.orgId],
+        }),
+      ).rejects.toThrow();
+    },
+  ],
+]);
+
 export const jobContractCases: ReadonlyMap<string, Case> = new Map<string, Case>([
+  ...legacyJobContractCases,
+  ['claim statements prepare after the contract migration', claimPlansAfterContract],
   ['concurrent claims', concurrentClaims],
   ['same-resource exclusivity', sameResourceExclusivity],
   ['independent resources up to the cap', independentResourcesUpToCap],

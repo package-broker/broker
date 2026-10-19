@@ -73,6 +73,7 @@ function kernelActor(organizationPermissions: readonly string[]) {
     projectId: null,
     boundary: 'organization',
     sessionId: 'session',
+    token: null,
     actor: {
       session: { id: 'session', userId: 'actor' },
       user: { id: 'actor' },
@@ -129,14 +130,14 @@ describe('kernel permission views across services', () => {
       permissions: [],
     } as const;
     const allowed = kernelActor(['org:roles:write']);
-    expect(await admin.createRole(ctx, allowed, fenceFor(allowed), input)).toMatchObject({
+    expect(await admin.createRole(ctx, allowed, fenceFor(allowed), input, apiCall)).toMatchObject({
       ok: true,
       value: { id: PROJECT_ID, key: 'custom' },
     });
     expect(write).toHaveBeenCalledOnce();
     write.mockClear();
     const denied = kernelActor(['org:read']);
-    expect(await admin.createRole(ctx, denied, fenceFor(denied), input)).toEqual({
+    expect(await admin.createRole(ctx, denied, fenceFor(denied), input, apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -258,23 +259,35 @@ describe('project authority contract', () => {
       { role: 1, grant: 1 },
     );
     const outcomes = await Promise.all([
-      admin.createRole(ctx, actor, fence, {
-        key: 'custom',
-        name: 'Custom',
-        scope: 'organization',
-        permissions: [],
-      }),
-      admin.renameRole(ctx, actor, fence, 'role', 'Renamed'),
-      admin.setRolePermissions(ctx, actor, fence, 'role', []),
-      admin.deleteRole(ctx, actor, fence, 'role'),
-      admin.grantOrganization(ctx, actor, fence, {
-        subject: { type: 'group', provider: 'oidc', value: 'ops' },
-        roleId: 'role',
-      }),
-      admin.revokeOrganizationGrant(ctx, actor, fence, 'grant'),
-      admin.changeGrantRole(ctx, actor, fence, 'grant', 'role'),
-      admin.suspendUser(ctx, actor, fence, 'target'),
-      admin.reactivateUser(ctx, actor, fence, 'target'),
+      admin.createRole(
+        ctx,
+        actor,
+        fence,
+        {
+          key: 'custom',
+          name: 'Custom',
+          scope: 'organization',
+          permissions: [],
+        },
+        apiCall,
+      ),
+      admin.renameRole(ctx, actor, fence, 'role', 'Renamed', apiCall),
+      admin.setRolePermissions(ctx, actor, fence, 'role', [], apiCall),
+      admin.deleteRole(ctx, actor, fence, 'role', apiCall),
+      admin.grantOrganization(
+        ctx,
+        actor,
+        fence,
+        {
+          subject: { type: 'group', provider: 'oidc', value: 'ops' },
+          roleId: 'role',
+        },
+        apiCall,
+      ),
+      admin.revokeOrganizationGrant(ctx, actor, fence, 'grant', apiCall),
+      admin.changeGrantRole(ctx, actor, fence, 'grant', 'role', apiCall),
+      admin.suspendUser(ctx, actor, fence, 'target', apiCall),
+      admin.reactivateUser(ctx, actor, fence, 'target', apiCall),
     ]);
     for (const outcome of outcomes) expect(outcome).toEqual({ ok: false, error: 'forbidden' });
     expect(write).not.toHaveBeenCalled();
@@ -295,3 +308,12 @@ describe('project authority contract', () => {
     },
   );
 });
+
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

@@ -62,6 +62,10 @@
       "types": "./dist/contract/catalogue-contract.d.ts",
       "default": "./dist/contract/catalogue-contract.js"
     },
+    "./contract/catalogue-race-contract": {
+      "types": "./dist/contract/catalogue-race-contract.d.ts",
+      "default": "./dist/contract/catalogue-race-contract.js"
+    },
     "./contract/catalogue-read-contract": {
       "types": "./dist/contract/catalogue-read-contract.d.ts",
       "default": "./dist/contract/catalogue-read-contract.js"

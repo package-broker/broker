@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '../api/idempotency.js';
+import type { AuditEvent } from '../audit/actions.js';
 import type { MutationFence } from '../authz/fence.js';
 import type { OrgContext } from './port.js';
 
@@ -22,6 +24,8 @@ export interface OrganizationGrantDeleted {
   readonly offboardedUserId: string | null;
 }
 
+type MutationInput = { readonly audit?: AuditEvent; readonly idempotency?: IdempotencyRecord };
+
 export interface GrantRepository {
   /** Organization-scope grants only, oldest first. */
   listOrganization(ctx: OrgContext): Promise<OrganizationGrant[]>;
@@ -42,7 +46,7 @@ export interface GrantRepository {
   createOrganization(
     ctx: OrgContext,
     fence: MutationFence,
-    input: {
+    input: MutationInput & {
       readonly id: string;
       readonly subject: GrantSubject;
       readonly roleId: string;
@@ -62,8 +66,10 @@ export interface GrantRepository {
   deleteOrganization(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    opId: string,
+    input: MutationInput & {
+      readonly id: string;
+      readonly opId: string;
+    },
   ): Promise<OrganizationGrantDeleted | 'not_found' | 'last_holder' | FencedRefusal>;
   /**
    * One fenced batch with the revision comparison of `deleteOrganization`; a non-admin needs the
@@ -74,10 +80,12 @@ export interface GrantRepository {
   changeRole(
     ctx: OrgContext,
     fence: MutationFence,
-    id: string,
-    roleId: string,
-    now: string,
-    opId: string,
+    input: MutationInput & {
+      readonly id: string;
+      readonly roleId: string;
+      readonly now: string;
+      readonly opId: string;
+    },
   ): Promise<'updated' | 'not_found' | 'last_holder' | 'role_scope_mismatch' | FencedRefusal>;
   /**
    * One fenced batch: the acting session and `org:users:write`, admin-only reach over a protected
@@ -88,8 +96,10 @@ export interface GrantRepository {
   suspendUser(
     ctx: OrgContext,
     fence: MutationFence,
-    userId: string,
-    now: string,
+    input: MutationInput & {
+      readonly userId: string;
+      readonly now: string;
+    },
   ): Promise<'suspended' | 'unchanged' | 'not_found' | 'last_holder' | FencedRefusal>;
   /**
    * Fenced like suspendUser, and admin-only for a user who would hold a protected role once
@@ -99,8 +109,10 @@ export interface GrantRepository {
   reactivateUser(
     ctx: OrgContext,
     fence: MutationFence,
-    userId: string,
-    now: string,
+    input: MutationInput & {
+      readonly userId: string;
+      readonly now: string;
+    },
   ): Promise<'reactivated' | 'unchanged' | 'not_found' | FencedRefusal>;
   isProtectedHolder(ctx: OrgContext, userId: string): Promise<boolean>;
   countProtectedHolders(ctx: OrgContext): Promise<number>;

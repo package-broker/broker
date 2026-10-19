@@ -50,8 +50,8 @@ function setup(options: { answer?: unknown; status?: 'active' | 'suspended' } = 
 type Call = (admin: ReturnType<typeof setup>['admin'], fence: MutationFence) => Promise<unknown>;
 
 const CALLS: Record<'suspendUser' | 'reactivateUser', Call> = {
-  suspendUser: (admin, fence) => admin.suspendUser(ctx, actor, fence, 'u1'),
-  reactivateUser: (admin, fence) => admin.reactivateUser(ctx, actor, fence, 'u1'),
+  suspendUser: (admin, fence) => admin.suspendUser(ctx, actor, fence, 'u1', apiCall),
+  reactivateUser: (admin, fence) => admin.reactivateUser(ctx, actor, fence, 'u1', apiCall),
 };
 
 const changes = (log: ReturnType<typeof vi.fn>) =>
@@ -66,8 +66,7 @@ describe('user status mutators carry the fence', () => {
       const args = (grants[name] as ReturnType<typeof vi.fn>).mock.calls[0] as unknown[];
       expect(args[0]).toBe(ctx);
       expect(args[1]).toBe(fence);
-      expect(args[2]).toBe('u1');
-      expect(args[3]).toBe(NOW);
+      expect(args[2]).toEqual({ userId: 'u1', now: NOW, audit: expect.any(Object) });
     });
 
     it(`${name} refuses a fence of another user with TypeError and touches nothing`, async () => {
@@ -107,10 +106,12 @@ describe('user status mutators carry the fence', () => {
 describe('status changes are idempotent', () => {
   it('a suspension the repository applied logs one event, an unchanged one logs none', async () => {
     const applied = setup({ status: 'active' });
-    await applied.admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1');
+    await applied.admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1', apiCall);
     expect(changes(applied.log)).toHaveLength(1);
     const unchanged = setup({ answer: 'unchanged', status: 'active' });
-    expect(await unchanged.admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1')).toEqual({
+    expect(
+      await unchanged.admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1', apiCall),
+    ).toEqual({
       ok: true,
       value: null,
     });
@@ -119,19 +120,21 @@ describe('status changes are idempotent', () => {
 
   it('the event follows the repository result, not the status read before the batch', async () => {
     const stale = setup({ answer: 'suspended', status: 'suspended' });
-    await stale.admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1');
+    await stale.admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1', apiCall);
     expect(changes(stale.log)).toHaveLength(1);
   });
 
   it('reactivating an active user is ok and records nothing; an unknown one is not_found', async () => {
     const same = setup({ answer: 'unchanged', status: 'active' });
-    expect(await same.admin.reactivateUser(ctx, actor, fenceOf('actor-1'), 'u1')).toEqual({
+    expect(await same.admin.reactivateUser(ctx, actor, fenceOf('actor-1'), 'u1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
     expect(changes(same.log)).toHaveLength(0);
     const unknown = setup({ answer: 'not_found', status: 'active' });
-    expect(await unknown.admin.reactivateUser(ctx, actor, fenceOf('actor-1'), 'u1')).toEqual({
+    expect(
+      await unknown.admin.reactivateUser(ctx, actor, fenceOf('actor-1'), 'u1', apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -140,10 +143,19 @@ describe('status changes are idempotent', () => {
 
   it('last_holder from the batch is surfaced and nothing is recorded', async () => {
     const { admin, log } = setup({ answer: 'last_holder' });
-    expect(await admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1')).toEqual({
+    expect(await admin.suspendUser(ctx, actor, fenceOf('actor-1'), 'u1', apiCall)).toEqual({
       ok: false,
       error: 'last_holder',
     });
     expect(changes(log)).toHaveLength(0);
   });
 });
+
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

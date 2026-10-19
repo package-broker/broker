@@ -63,6 +63,8 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
+import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
+import { createWorkersAssets } from './assets.js';
 import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
 import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
 import {
@@ -145,6 +147,7 @@ import type { RequestScope } from './request-scope.js';
 import type { AnalyticsEngineLike } from './observability/workers.js';
 
 export type Env = {
+  readonly ASSETS?: { fetch(input: Request | string): Promise<Response> };
   readonly DB?: D1DatabaseLike;
   readonly STORAGE?: R2BucketLike;
   readonly JOBS?: QueueLike;
@@ -432,7 +435,7 @@ const STARTUP_EVENTS = [
   'deferred.untracked',
 ] as const;
 const MAX_CACHED_APPLICATIONS = 8;
-const FINGERPRINT_BINDINGS = ['DB', 'STORAGE', 'JOBS', 'ANALYTICS'] as const;
+const FINGERPRINT_BINDINGS = ['ASSETS', 'DB', 'STORAGE', 'JOBS', 'ANALYTICS'] as const;
 const HISTOGRAM_BOUNDS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 
 type Handler = (input: unknown) => Promise<void>;
@@ -1032,6 +1035,30 @@ export function createWorker(
     });
     const authorization = options.authorization ?? auth?.authorization;
 
+    let assets: ReturnType<typeof createWorkersAssets> | undefined;
+    const uiAssets = () =>
+      (assets ??= createWorkersAssets(
+        env?.ASSETS ?? { fetch: async () => new Response(null, { status: 404 }) },
+      ));
+    const ui = createUiRoutes(
+      {
+        manifest: async () => (await uiAssets()).manifest(),
+        read: async (name) => (await uiAssets()).read(name),
+      },
+      { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
+    );
+    const uiRoutes = [
+      ...ui,
+      {
+        method: 'GET' as const,
+        path: '/_pb/ui/manifest.json',
+        permission: null,
+        handler: async () =>
+          Response.json(await (await uiAssets()).manifest(), {
+            headers: { 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
+          }),
+      },
+    ].map((route) => ({ ...route, boundary: 'authenticated' as const, needsOrg: true }));
     try {
       const kernel = await createKernel({
         platform: 'cloudflare',
@@ -1044,7 +1071,7 @@ export function createWorker(
         ...(services === undefined ? {} : { platformServices: services.platformServices }),
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
-        ...(auth === undefined ? {} : { coreRoutes: auth.coreRoutes }),
+        coreRoutes: [...(auth?.coreRoutes ?? []), ...(env?.ASSETS === undefined ? [] : uiRoutes)],
         ...(authorization === undefined ? {} : { authorization }),
         ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
         ...(services === undefined
@@ -1177,7 +1204,10 @@ export function createWorker(
       }
       return inScope(application, ctx, async () => {
         try {
-          return await application.kernel.fetch(request);
+          const url = new URL(request.url);
+          if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request);
+          url.pathname = '/_pb/ui';
+          return await application.kernel.fetch(new Request(url, request));
         } catch (error) {
           return withoutBodyForHead(request, errorResponse(error, requestId, log));
         }

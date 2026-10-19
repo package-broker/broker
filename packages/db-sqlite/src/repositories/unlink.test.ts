@@ -647,7 +647,10 @@ describe('unlinkIdentity against concurrent holder changes', () => {
           },
         ],
         holderInput: async () => holders(),
-      }).suspendUser(org, fenceOf(SECOND_ADMIN, SECOND_SESSION), ACTOR, '2026-10-15T13:00:00.000Z');
+      }).suspendUser(org, fenceOf(SECOND_ADMIN, SECOND_SESSION), {
+        userId: ACTOR,
+        now: '2026-10-15T13:00:00.000Z',
+      });
       const unlinking = unlinkSecond(unlinkGate.executor);
       await Promise.all([suspendGate.reached, unlinkGate.reached]);
       const suspendFirst = order === 'suspend first';

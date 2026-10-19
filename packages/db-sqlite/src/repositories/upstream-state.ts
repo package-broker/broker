@@ -2,50 +2,21 @@ import { sql, type RawBuilder } from 'kysely';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { assertHeaderValue } from '@package-broker/core/ingest/validators';
 import { compile, db } from '../kysely.js';
-import type { UpstreamForm } from '../schema.js';
+import type {
+  PublishedValidators,
+  UpstreamForm,
+  UpstreamStateRepository,
+} from '@package-broker/core/db/upstream-state';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_TTL_SECONDS = 366 * 24 * 60 * 60;
 
-export interface UpstreamState {
-  readonly etag: string | null;
-  readonly lastModified: string | null;
-  readonly contentSha256: string | null;
-  readonly checkedAt: string;
-  readonly freshUntil: string;
-  readonly notFoundCount: number;
-  readonly firstNotFoundAt: string | null;
-}
-
-export interface PublishedValidators {
-  readonly etag: string | null;
-  readonly lastModified: string | null;
-  readonly contentSha256: string | null;
-}
-
-export interface UpstreamStateRepository {
-  get(ctx: OrgContext, packageId: string, form: UpstreamForm): Promise<UpstreamState | null>;
-  publishStatements(
-    ctx: OrgContext,
-    packageId: string,
-    form: UpstreamForm,
-    validators: PublishedValidators,
-    ttlSeconds: number,
-  ): ScalarStatement[];
-  touchStatements(
-    ctx: OrgContext,
-    packageId: string,
-    form: UpstreamForm,
-    ttlSeconds: number,
-  ): ScalarStatement[];
-  notFoundStatements(
-    ctx: OrgContext,
-    packageId: string,
-    form: UpstreamForm,
-    ttlSeconds: number,
-  ): ScalarStatement[];
-}
+export type {
+  PublishedValidators,
+  UpstreamState,
+  UpstreamStateRepository,
+} from '@package-broker/core/db/upstream-state';
 
 interface StateRow {
   readonly etag: string | null;

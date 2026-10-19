@@ -1,3 +1,4 @@
+import { entries as idempotencyEntries } from './mutation-table/idempotency.js';
 import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.js';
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
 import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
@@ -33,6 +34,7 @@ import { entries as catalogueWriteVersionUpdateEntries } from './mutation-table/
 import { entries as catalogueEpochEntries } from './mutation-table/catalogue-epoch.js';
 import { entries as cacheEpochEntries } from './mutation-table/cache-epoch.js';
 import { entries as sourceEntries } from './mutation-table/source.js';
+import { entries as auditPendingEntries } from './mutation-table/audit-pending.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
 import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
@@ -47,6 +49,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...idempotencyEntries,
   ...removedBlobsEntries,
   ...catalogueWriterEntries,
   ...catalogueReconcileEntries,
@@ -76,6 +79,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueEpochEntries,
   ...sourceEntries,
   ...attachedProxyEntries,
+  ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,
   ...auditQueryEntries,

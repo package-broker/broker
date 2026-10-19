@@ -4,7 +4,7 @@ import type { PlatformPortConfig } from '@package-broker/core/platform/port-conf
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EntryRuntime } from './entry.js';
 import { createShutdown, describeError, isMainEntry, parsePort, runEntry } from './entry.js';
 import type { NodeBroker } from './index.js';
@@ -394,5 +394,84 @@ describe('entry platform ports and failure handling', () => {
     gate.resolve();
     await flush();
     expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+});
+
+describe('shutdown deadline', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each([undefined, '1000', '120000'])(
+    'forces exit at timeout %s after either signal',
+    async (raw) => {
+      vi.useFakeTimers();
+      const gate = deferred();
+      const { broker, close } = fakeBroker(() => gate.promise);
+      const test = harness(() => Promise.resolve(broker));
+      const timeout = raw === undefined ? 8000 : Number(raw);
+      await runEntry(manifest, { PB_SHUTDOWN_TIMEOUT_MS: raw }, test.runtime);
+      signalHandler(test.signals, 'SIGINT')();
+      await vi.advanceTimersByTimeAsync(timeout - 1);
+      signalHandler(test.signals, 'SIGTERM')();
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(test.exit).not.toHaveBeenCalled();
+      expect(test.error).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(test.error).toHaveBeenCalledExactlyOnceWith(
+        JSON.stringify({ level: 'error', event: 'shutdown.forced', timeout_ms: timeout }),
+      );
+      expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+      expect(test.error.mock.invocationCallOrder[0]).toBeLessThan(
+        test.exit.mock.invocationCallOrder[0]!,
+      );
+      gate.resolve();
+      await vi.advanceTimersByTimeAsync(timeout);
+      expect(test.exit).toHaveBeenCalledTimes(1);
+      expect(test.error).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['resolve', 'reject', 'throw'] as const)(
+    'clears the deadline when close finishes: %s',
+    async (result) => {
+      vi.useFakeTimers();
+      const error = vi.fn();
+      const exit = vi.fn();
+      const close = vi.fn(() => {
+        if (result === 'throw') throw new Error('close failed');
+        return result === 'resolve' ? Promise.resolve() : Promise.reject(new Error('close failed'));
+      });
+      createShutdown(close, exit, 0, { error })();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(exit).toHaveBeenCalledExactlyOnceWith(result === 'resolve' ? 0 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(error).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    '',
+    '999',
+    '120001',
+    '1000.5',
+    '-1000',
+    ' 1000',
+    '1000 ',
+    '+1000',
+    '1e3',
+    '0x3e8',
+    'secret-value',
+  ])('rejects invalid timeout %o before startup without echoing it', async (raw) => {
+    const { broker, listen } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    await runEntry(manifest, { PB_SHUTDOWN_TIMEOUT_MS: raw }, test.runtime);
+    expect(test.runtime.start).not.toHaveBeenCalled();
+    expect(listen).not.toHaveBeenCalled();
+    expect(test.signals.size).toBe(0);
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(test.error).toHaveBeenCalledExactlyOnceWith(
+      'Error: PB_SHUTDOWN_TIMEOUT_MS must be an integer between 1000 and 120000',
+    );
   });
 });

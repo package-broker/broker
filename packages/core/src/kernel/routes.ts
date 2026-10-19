@@ -1,7 +1,11 @@
 import { PACKAGE_BOUNDARY_PERMISSIONS } from '../authz/project-actor.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
 import { PERMISSIONS } from '../authz/permissions.js';
-import type { PackageEcosystem } from '../plugin.js';
+import type { PackageEcosystem, RouteDefinition as PluginRouteDefinition } from '../plugin.js';
+
+export interface RouteDefinition extends PluginRouteDefinition {
+  readonly bearerOnly?: true;
+}
 
 export const RESERVED_PATH_PREFIXES = ['/health/', '/_pb/'] as const;
 
@@ -111,6 +115,7 @@ interface BoundaryInput {
   readonly path: unknown;
   readonly permission: unknown;
   readonly boundary?: unknown;
+  readonly bearerOnly?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;
 }
@@ -200,11 +205,26 @@ export function routeBoundaryProblems(
     fail('the self boundary is not available to plugin routes');
   }
 
+  if (route.bearerOnly !== undefined) {
+    if (route.bearerOnly !== true) fail('bearerOnly must be true when set');
+    if (options.apiVersion !== undefined || options.allowAuthenticated !== true) {
+      fail('bearerOnly is not available to plugin routes');
+    }
+    if (boundary !== 'authenticated' || permission !== null) {
+      fail('bearerOnly requires the authenticated boundary and permission null');
+    }
+    if (route.method !== 'POST' || path !== '/_pb/mcp') {
+      fail('bearerOnly requires POST /_pb/mcp');
+    }
+  }
+
   if (boundary === 'authenticated') {
     if (options.allowAuthenticated !== true) {
       fail('the authenticated boundary is not available to plugin routes');
     }
-    if (route.method !== 'GET') fail('an authenticated route must be a GET route');
+    if (route.method !== 'GET' && route.bearerOnly !== true) {
+      fail('an authenticated route must be a GET route');
+    }
     if (hasProject) fail('an authenticated route must not have :project in its path');
     if (route.needsOrg === false) fail('an authenticated route needs organization context');
   }

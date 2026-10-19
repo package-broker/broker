@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
+import { SecretsConfigError } from '@package-broker/core/secrets/master-key';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -8,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EntryRuntime } from './entry.js';
 import { createShutdown, describeError, isMainEntry, parsePort, runEntry } from './entry.js';
 import type { NodeBroker } from './index.js';
+import { StartupConfigError } from './startup.js';
 
 const manifest: Promise<{ plugins: []; migrations: [] }> = Promise.resolve({
   plugins: [],
@@ -139,6 +141,69 @@ describe('createShutdown', () => {
 });
 
 describe('runEntry', () => {
+  it('never prints a hostile PORT value to stderr', async () => {
+    const sentinel = 'PORT-SENTINEL\npostgres://user:password@host/db\naccount@example.test';
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { broker } = fakeBroker();
+      const test = harness(() => Promise.resolve(broker));
+      await runEntry(manifest, { PORT: sentinel }, { ...test.runtime, error: console.error });
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(
+        'Error: PORT must be an integer between 1 and 65535',
+      );
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain('PORT-SENTINEL');
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain('password');
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain('account@example.test');
+      expect(test.runtime.start).not.toHaveBeenCalled();
+      expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it.each([
+    new StartupConfigError('PB_PUBLIC_URL', 'private request data'),
+    new StartupConfigError('PB_BLOB_ROOT', 'postgres://user:password@host/db'),
+    new StartupConfigError('platformPorts', 'private config value'),
+    new SecretsConfigError('malformed', 'PB_MASTER_KEY'),
+    new SecretsConfigError('missing', 'PB_MASTER_KEY_FILE'),
+  ])('names the failed startup config key without printing the message: %s', async (failure) => {
+    const test = harness(() => Promise.reject(failure));
+    await runEntry(manifest, {}, test.runtime);
+    expect(test.error).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({
+        level: 'error',
+        event: 'startup.failed',
+        service: 'package-broker',
+        runtime: 'node',
+        error_name:
+          failure instanceof StartupConfigError ? 'StartupConfigError' : 'SecretsConfigError',
+        config_key: failure.variable,
+      }),
+    );
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it.each([
+    'postgres://user:password@host/db',
+    'account@example.test',
+    'bad\nkey',
+    'AKIA1234567890ABCDEF',
+  ])('omits an unsafe config key %s', async (key) => {
+    const test = harness(() => Promise.reject(new StartupConfigError(key, 'private data')));
+    await runEntry(manifest, {}, test.runtime);
+    expect(test.error).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({
+        level: 'error',
+        event: 'startup.failed',
+        service: 'package-broker',
+        runtime: 'node',
+        error_name: 'StartupConfigError',
+      }),
+    );
+    expect(test.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
   it.each([true, false, undefined])('forwards observability flag %s', async (trusted) => {
     const { broker } = fakeBroker();
     const test = harness(() => Promise.resolve(broker));

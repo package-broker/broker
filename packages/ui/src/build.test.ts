@@ -1,5 +1,6 @@
 import { execFile, type ExecFileOptions } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,8 +93,12 @@ const cssName = (files: Map<string, Buffer>): string =>
   [...files.keys()].find((name) => name.endsWith('.css')) ?? '';
 
 beforeAll(async () => {
+  const tsc = createRequire(import.meta.url).resolve('typescript/bin/tsc');
+  await run(process.execPath, [tsc, '-b', fileURLToPath(new URL('../../core', import.meta.url))], {
+    timeout: BUILD_TIMEOUT_MS,
+  });
   scratch = await mkdtemp(path.join(tmpdir(), 'pb-ui-build-test-'));
-});
+}, BUILD_TIMEOUT_MS);
 
 afterAll(async () => {
   await cleanupScratch(scratch);

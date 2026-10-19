@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   mutationFence,
@@ -7,8 +9,15 @@ import {
   type MutationFence,
 } from '../authz/fence.js';
 import { orgContext } from '../db/port.js';
+import { fixedClock } from '../ids.js';
 import { parseManifest, planHash } from './manifest.js';
-import { createImportRunService, type ImportRun, type ImportRunStore } from './run-service.js';
+import {
+  IMPORT_RUN_JOB,
+  validImportApprovalTimestamp,
+  createImportRunService,
+  type ImportRun,
+  type ImportRunStore,
+} from './run-service.js';
 
 const ctx = orgContext('org');
 const now = '2026-10-18T10:00:00.000Z';
@@ -25,7 +34,7 @@ const token = tokenMutationFence(
   {},
 );
 const input = { runId: 'run', planHash: 'hash', now, audit, idempotency };
-function setup(overrides: Partial<ImportRun> = {}) {
+function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
   const run: ImportRun = {
     id: 'run',
     orgId: ctx.orgId,
@@ -49,7 +58,7 @@ function setup(overrides: Partial<ImportRun> = {}) {
     acceptRun: write(),
     requestRollback: write(),
   };
-  const service = createImportRunService({ store, ids: { ulid: () => 'new-run' } });
+  const service = createImportRunService({ store, ids: { ulid: () => 'new-run' }, clock });
   return { service, store, access, run };
 }
 const methods = [
@@ -247,5 +256,102 @@ describe('import run service', () => {
     const { service, store } = setup({ state: 'verified', approvedAt: now, acceptedAt: now });
     expect(await service.acceptRun(ctx, fence, input)).toEqual({ ok: false, error: 'conflict' });
     expect(store.acceptRun).not.toHaveBeenCalled();
+  });
+});
+
+describe('import approval timestamps', () => {
+  const malformed = [
+    '',
+    'not-a-time',
+    '2026-10-18',
+    '2026-10-18T10:00:00Z',
+    '2026-02-30T10:00:00.000Z',
+    '2026-10-18T12:00:00.000+02:00',
+    '2026-10-18T10:02:00.000Z',
+  ];
+  it.each(malformed)('treats stored approval %j as unapproved', async (approvedAt) => {
+    const { service, store } = setup({ approvedAt });
+    expect(await service.requestApply(ctx, fence, input)).toEqual({
+      ok: false,
+      error: 'not_approved',
+    });
+    expect(store.requestApply).not.toHaveBeenCalled();
+  });
+  it('checks stored approval skew against the injected clock when input time is ahead', async () => {
+    const future = '2026-10-18T10:02:00.000Z';
+    const { service, store } = setup({ approvedAt: future }, fixedClock(now));
+    expect(await service.requestApply(ctx, fence, { ...input, now: future })).toEqual({
+      ok: false,
+      error: 'not_approved',
+    });
+    expect(store.requestApply).not.toHaveBeenCalled();
+  });
+  it.each(malformed)('rejects approval timestamp %j before writing', async (value) => {
+    const { service, store } = setup();
+    expect(await service.approveRun(ctx, fence, { ...input, now: value })).toEqual({
+      ok: false,
+      error: 'invalid_time',
+    });
+    expect(store.approveRun).not.toHaveBeenCalled();
+  });
+  it('approves using the injected clock when the machine clock is before the fixture', async () => {
+    const { service, store } = setup();
+    const machineClock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(now) - 120_000);
+    try {
+      expect(await service.approveRun(ctx, fence, input)).toEqual({ ok: true, value: null });
+      expect(store.approveRun).toHaveBeenCalledTimes(1);
+    } finally {
+      machineClock.mockRestore();
+    }
+  });
+  it.each([
+    ['2026-10-18T09:59:00.000Z', true],
+    ['2026-10-18T09:58:59.999Z', false],
+  ] as const)('checks approval skew against injected time %s', async (clockTime, allowed) => {
+    const { service, store } = setup({}, fixedClock(clockTime));
+    expect(await service.approveRun(ctx, fence, input)).toEqual(
+      allowed ? { ok: true, value: null } : { ok: false, error: 'invalid_time' },
+    );
+    expect(store.approveRun).toHaveBeenCalledTimes(allowed ? 1 : 0);
+  });
+  it('permits exactly sixty seconds of future skew', () => {
+    const time = Date.parse(now);
+    expect(validImportApprovalTimestamp(new Date(time + 60_000).toISOString(), time)).toBe(true);
+    expect(validImportApprovalTimestamp(new Date(time + 60_001).toISOString(), time)).toBe(false);
+    expect(validImportApprovalTimestamp(now, time)).toBe(true);
+  });
+});
+
+describe('import job definition', () => {
+  it('keeps job type and resource literals only in the shared definition', () => {
+    const definition = fileURLToPath(new URL('./run-service.ts', import.meta.url));
+    const roots = [
+      new URL('../', import.meta.url),
+      new URL('../../../db-sqlite/src/', import.meta.url),
+    ];
+    const files = (root: URL): string[] =>
+      readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+        const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), root);
+        return entry.isDirectory()
+          ? files(url)
+          : entry.name.endsWith('.ts')
+            ? [fileURLToPath(url)]
+            : [];
+      });
+    const literals = [
+      IMPORT_RUN_JOB.apply,
+      IMPORT_RUN_JOB.rollback,
+      '`' + IMPORT_RUN_JOB.resourceKey('') + '${',
+    ];
+    for (const file of roots.flatMap(files)) {
+      const source = readFileSync(file, 'utf8');
+      for (const literal of literals) {
+        expect(source.split(literal).length - 1, `${file}: ${literal}`).toBe(
+          file === definition ? 1 : 0,
+        );
+      }
+    }
+    expect(IMPORT_RUN_JOB.payload('run')).toEqual({ runId: 'run' });
+    expect(IMPORT_RUN_JOB.resourceKey('run')).toBe(IMPORT_RUN_JOB.resourceKey('') + 'run');
   });
 });

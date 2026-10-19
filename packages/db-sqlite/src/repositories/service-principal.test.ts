@@ -304,9 +304,9 @@ it('is assignable to the service port', () => {
 
 describe('suspend and restore', () => {
   const stop = (ctx: OrgContext = a, guard: FenceGuard = actorGuard(), now = LATER) =>
-    principals.suspend(ctx, NO_REVISION(), guard, SP1, now, 'op-stop');
+    principals.suspend(ctx, NO_REVISION(), guard, { id: SP1, now: now, opId: 'op-stop' });
   const resume = (ctx: OrgContext = a, guard: FenceGuard = actorGuard()) =>
-    principals.restore(ctx, NO_REVISION(), guard, SP1, LATER, 'op-resume');
+    principals.restore(ctx, NO_REVISION(), guard, { id: SP1, now: LATER, opId: 'op-resume' });
 
   it('suspends without touching permissions, stamps the op, and restores', async () => {
     await create();
@@ -356,7 +356,7 @@ describe('suspend and restore', () => {
   it('rejects an empty opId', async () => {
     await create();
     await expect(
-      principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, ''),
+      principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: '' }),
     ).rejects.toThrow(TypeError);
   });
 
@@ -383,15 +383,12 @@ describe('setPermissions', () => {
     await create();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        a,
-        fence,
-        setGuard(SP1, 1),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('updated');
     const found = await principals.get(a, SP1);
     expect(found?.permissions).toEqual(['project:packages:read']);
@@ -403,52 +400,43 @@ describe('setPermissions', () => {
 
   it('answers conflict and changes nothing when the guard refuses on a stale revision', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-s');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-s' });
     const before = await snapshot();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        a,
-        fence,
-        setGuard(SP1, 1),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('conflict');
     expect(await snapshot()).toBe(before);
   });
 
   it('answers conflict when the expected revision is stale, and succeeds on the fresh one', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-s');
-    await principals.restore(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-r');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-s' });
+    await principals.restore(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-r' });
     const before = await snapshot();
     const stale = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        a,
-        stale,
-        setGuard(SP1, 1),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, stale, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('conflict');
     expect(await snapshot()).toBe(before);
     const fresh = mutationFence(actor(), { service_principal: 3 });
     expect(
-      await principals.setPermissions(
-        a,
-        fresh,
-        setGuard(SP1, 3),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-2',
-      ),
+      await principals.setPermissions(a, fresh, setGuard(SP1, 3), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-2',
+      }),
     ).toBe('updated');
     expect((await principals.get(a, SP1))?.revision).toBe(4);
   });
@@ -458,20 +446,22 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     const guard = setGuard(SP1, 1);
     expect(
-      await principals.setPermissions(
-        a,
-        fence,
-        guard,
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, fence, guard, {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('updated');
     const before = await snapshot();
-    expect(await principals.setPermissions(a, fence, guard, SP1, [], LATER, 'op-2')).toBe(
-      'conflict',
-    );
+    expect(
+      await principals.setPermissions(a, fence, guard, {
+        id: SP1,
+        permissions: [],
+        now: LATER,
+        opId: 'op-2',
+      }),
+    ).toBe('conflict');
     expect(await snapshot()).toBe(before);
   });
 
@@ -481,15 +471,12 @@ describe('setPermissions', () => {
     const before = await snapshot();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        a,
-        fence,
-        setGuard(SP1, 1),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
@@ -499,15 +486,12 @@ describe('setPermissions', () => {
     const before = await snapshot();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        a,
-        fence,
-        setGuard(SP1, 1, UB),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, fence, setGuard(SP1, 1, UB), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
@@ -516,15 +500,12 @@ describe('setPermissions', () => {
     await create();
     const before = await snapshot();
     await expect(
-      principals.setPermissions(
-        a,
-        NO_REVISION(),
-        actorGuard(),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      principals.setPermissions(a, NO_REVISION(), actorGuard(), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).rejects.toThrow(TypeError);
     expect(await snapshot()).toBe(before);
   });
@@ -532,17 +513,14 @@ describe('setPermissions', () => {
   it('enforces its own revision check when the caller guard is for another principal', async () => {
     await create();
     await create({ id: SP2, name: 'other' });
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-s');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-s' });
     const before = await snapshot();
     expect(
       await principals.setPermissions(
         a,
         mutationFence(actor(), { service_principal: 1 }),
         setGuard(SP2, 1),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
+        { id: SP1, permissions: ['project:packages:read'], now: LATER, opId: 'op-1' },
       ),
     ).toBe('conflict');
     expect(await snapshot()).toBe(before);
@@ -556,10 +534,7 @@ describe('setPermissions', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         actorGuard('01J0USER0000000000000000ZZ'),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
+        { id: SP1, permissions: ['project:packages:read'], now: LATER, opId: 'op-1' },
       ),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
@@ -571,7 +546,12 @@ describe('setPermissions', () => {
     const fence = mutationFence(actor(), { service_principal: 1 });
     for (const name of ['project:tokens:create', 'project:packages:manage']) {
       expect(
-        await principals.setPermissions(a, fence, setGuard(SP1, 1), SP1, [name], LATER, 'op-1'),
+        await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+          id: SP1,
+          permissions: [name],
+          now: LATER,
+          opId: 'op-1',
+        }),
       ).toBe('invalid_permissions');
     }
     expect(await snapshot()).toBe(before);
@@ -584,10 +564,7 @@ describe('setPermissions', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         setGuard(SP1, 1),
-        SP1,
-        [],
-        LATER,
-        '',
+        { id: SP1, permissions: [], now: LATER, opId: '' },
       ),
     ).rejects.toThrow(TypeError);
   });
@@ -597,15 +574,12 @@ describe('setPermissions', () => {
     const before = await snapshot();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        b,
-        fence,
-        setGuard(SP1, 1),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(b, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['project:packages:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('not_found');
     expect(await snapshot()).toBe(before);
   });
@@ -615,18 +589,20 @@ describe('setPermissions', () => {
     const before = await snapshot();
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await principals.setPermissions(
-        a,
-        fence,
-        setGuard(SP1, 1),
-        SP1,
-        ['packages:fly'],
-        LATER,
-        'op-1',
-      ),
+      await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['packages:fly'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('invalid_permissions');
     expect(
-      await principals.setPermissions(a, fence, setGuard(SP1, 1), SP1, ['org:read'], LATER, 'op-1'),
+      await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: ['org:read'],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('invalid_permissions');
     expect(await snapshot()).toBe(before);
   });
@@ -634,7 +610,12 @@ describe('setPermissions', () => {
   it('never changes the project binding', async () => {
     await create();
     const fence = mutationFence(actor(), { service_principal: 1 });
-    await principals.setPermissions(a, fence, setGuard(SP1, 1), SP1, [], LATER, 'op-1');
+    await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+      id: SP1,
+      permissions: [],
+      now: LATER,
+      opId: 'op-1',
+    });
     expect((await principals.get(a, SP1))?.projectId).toBe(PROJECT);
   });
 });
@@ -663,10 +644,19 @@ describe('cache_epoch', () => {
     await create();
     const created = await epoch(a);
     const fence = mutationFence(actor(), { service_principal: 1 });
-    await principals.setPermissions(a, fence, setGuard(SP1, 1), SP1, [], LATER, 'op-1');
+    await principals.setPermissions(a, fence, setGuard(SP1, 1), {
+      id: SP1,
+      permissions: [],
+      now: LATER,
+      opId: 'op-1',
+    });
     const updated = await epoch(a);
     expect(updated).not.toBe(created);
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      id: SP1,
+      now: LATER,
+      opId: 'op-stop',
+    });
     expect(await epoch(a)).not.toBe(updated);
   });
 
@@ -674,13 +664,18 @@ describe('cache_epoch', () => {
     await create();
     const before = await versions();
     const outsider = actorGuard('01J0USER0000000000000000ZZ');
-    expect(await principals.suspend(a, NO_REVISION(), outsider, SP1, LATER, 'op-x')).toBe(
-      'authority',
-    );
+    expect(
+      await principals.suspend(a, NO_REVISION(), outsider, { id: SP1, now: LATER, opId: 'op-x' }),
+    ).toBe('authority');
     const stale = mutationFence(actor(), { service_principal: 9 });
-    expect(await principals.setPermissions(a, stale, actorGuard(), SP1, [], LATER, 'op-y')).toBe(
-      'conflict',
-    );
+    expect(
+      await principals.setPermissions(a, stale, actorGuard(), {
+        id: SP1,
+        permissions: [],
+        now: LATER,
+        opId: 'op-y',
+      }),
+    ).toBe('conflict');
     expect(await versions()).toEqual(before);
   });
 
@@ -702,7 +697,12 @@ describe('cache_epoch', () => {
     const repository = createServicePrincipalRepository(spy);
     const fence = mutationFence(actor(), { service_principal: 1 });
     expect(
-      await repository.setPermissions(a, fence, setGuard(SP1, 1), SP1, [], LATER, 'op-1'),
+      await repository.setPermissions(a, fence, setGuard(SP1, 1), {
+        id: SP1,
+        permissions: [],
+        now: LATER,
+        opId: 'op-1',
+      }),
     ).toBe('updated');
     const bumps = (batches[0] ?? []).filter((s) => s.sql.startsWith('update "cache_epoch"'));
     expect(bumps).toHaveLength(1);
@@ -912,19 +912,16 @@ describe('constraint failures', () => {
     await create();
     for (const run of [
       (r: ServicePrincipalRepository) =>
-        r.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop'),
+        r.suspend(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-stop' }),
       (r: ServicePrincipalRepository) =>
-        r.restore(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-resume'),
+        r.restore(a, NO_REVISION(), actorGuard(), { id: SP1, now: LATER, opId: 'op-resume' }),
       (r: ServicePrincipalRepository) =>
-        r.setPermissions(
-          a,
-          mutationFence(actor(), { service_principal: 1 }),
-          actorGuard(),
-          SP1,
-          ['project:packages:read'],
-          LATER,
-          'op-set',
-        ),
+        r.setPermissions(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+          id: SP1,
+          permissions: ['project:packages:read'],
+          now: LATER,
+          opId: 'op-set',
+        }),
     ]) {
       const { repository, reads } = over({ failBatch: FOREIGN_KEY });
       expect(await run(repository)).toBe('indeterminate');
@@ -936,14 +933,11 @@ describe('constraint failures', () => {
     await create();
     const { repository } = over({});
     expect(
-      await repository.suspend(
-        a,
-        NO_REVISION(),
-        actorGuard('01J0USER0000000000000000ZZ'),
-        SP1,
-        LATER,
-        'op-stop',
-      ),
+      await repository.suspend(a, NO_REVISION(), actorGuard('01J0USER0000000000000000ZZ'), {
+        id: SP1,
+        now: LATER,
+        opId: 'op-stop',
+      }),
     ).toBe('authority');
   });
 });
@@ -961,28 +955,36 @@ describe('a principal deleted between the load and the batch', () => {
 
   it('answers not_found from suspend without a revision', async () => {
     await create();
-    expect(await latched().suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop')).toBe(
-      'not_found',
-    );
+    expect(
+      await latched().suspend(a, NO_REVISION(), actorGuard(), {
+        id: SP1,
+        now: LATER,
+        opId: 'op-stop',
+      }),
+    ).toBe('not_found');
   });
 
   it('answers not_found from restore without a revision', async () => {
     await create();
-    expect(await latched().restore(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-resume')).toBe(
-      'not_found',
-    );
+    expect(
+      await latched().restore(a, NO_REVISION(), actorGuard(), {
+        id: SP1,
+        now: LATER,
+        opId: 'op-resume',
+      }),
+    ).toBe('not_found');
   });
 
   it('answers not_found from suspend and restore with a revision', async () => {
     await create();
     const fence = mutationFence(actor(), { service_principal: 1 });
-    expect(await latched().suspend(a, fence, actorGuard(), SP1, LATER, 'op-stop')).toBe(
-      'not_found',
-    );
+    expect(
+      await latched().suspend(a, fence, actorGuard(), { id: SP1, now: LATER, opId: 'op-stop' }),
+    ).toBe('not_found');
     await create();
-    expect(await latched().restore(a, fence, actorGuard(), SP1, LATER, 'op-resume')).toBe(
-      'not_found',
-    );
+    expect(
+      await latched().restore(a, fence, actorGuard(), { id: SP1, now: LATER, opId: 'op-resume' }),
+    ).toBe('not_found');
   });
 
   it('answers not_found from setPermissions', async () => {
@@ -992,10 +994,7 @@ describe('a principal deleted between the load and the batch', () => {
         a,
         mutationFence(actor(), { service_principal: 1 }),
         actorGuard(),
-        SP1,
-        ['project:packages:read'],
-        LATER,
-        'op-set',
+        { id: SP1, permissions: ['project:packages:read'], now: LATER, opId: 'op-set' },
       ),
     ).toBe('not_found');
   });
@@ -1004,33 +1003,36 @@ describe('a principal deleted between the load and the batch', () => {
 describe('suspending an already suspended principal', () => {
   it('answers unchanged for a stale revision and rewrites nothing', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      id: SP1,
+      now: LATER,
+      opId: 'op-stop',
+    });
     const before = await snapshot();
     expect(
-      await principals.suspend(
-        a,
-        mutationFence(actor(), { service_principal: 1 }),
-        actorGuard(),
-        SP1,
-        '2026-10-15T14:00:00.000Z',
-        'op-again',
-      ),
+      await principals.suspend(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+        id: SP1,
+        now: '2026-10-15T14:00:00.000Z',
+        opId: 'op-again',
+      }),
     ).toBe('unchanged');
     expect(await snapshot()).toBe(before);
   });
 
   it('answers authority, not unchanged, when the guard refuses a stale-revision suspend', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      id: SP1,
+      now: LATER,
+      opId: 'op-stop',
+    });
     const before = await snapshot();
     expect(
       await principals.suspend(
         a,
         mutationFence(actor(), { service_principal: 1 }),
         actorGuard('01J0USER0000000000000000ZZ'),
-        SP1,
-        LATER,
-        'op-again',
+        { id: SP1, now: LATER, opId: 'op-again' },
       ),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
@@ -1038,7 +1040,11 @@ describe('suspending an already suspended principal', () => {
 
   it('answers conflict and writes nothing when a restore commits between the status read and the rerun', async () => {
     await create();
-    await principals.suspend(a, NO_REVISION(), actorGuard(), SP1, LATER, 'op-stop');
+    await principals.suspend(a, NO_REVISION(), actorGuard(), {
+      id: SP1,
+      now: LATER,
+      opId: 'op-stop',
+    });
     let batches = 0;
     const racing = createServicePrincipalRepository({
       driver: executor.driver,
@@ -1051,9 +1057,7 @@ describe('suspending an already suspended principal', () => {
               a,
               mutationFence(actor(), { service_principal: 2 }),
               actorGuard(),
-              SP1,
-              LATER,
-              'op-resume',
+              { id: SP1, now: LATER, opId: 'op-resume' },
             ),
           ).toBe('restored');
         }
@@ -1061,14 +1065,11 @@ describe('suspending an already suspended principal', () => {
       },
     } as SqlExecutor);
     expect(
-      await racing.suspend(
-        a,
-        mutationFence(actor(), { service_principal: 1 }),
-        actorGuard(),
-        SP1,
-        LATER,
-        'op-again',
-      ),
+      await racing.suspend(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+        id: SP1,
+        now: LATER,
+        opId: 'op-again',
+      }),
     ).toBe('conflict');
     expect(batches).toBe(2);
     const found = await principals.get(a, SP1);
@@ -1080,14 +1081,11 @@ describe('suspending an already suspended principal', () => {
     await create();
     await executor.batch([stmt('UPDATE service_principal SET revision = 5 WHERE id = ?', SP1)]);
     expect(
-      await principals.suspend(
-        a,
-        mutationFence(actor(), { service_principal: 1 }),
-        actorGuard(),
-        SP1,
-        LATER,
-        'op-stop',
-      ),
+      await principals.suspend(a, mutationFence(actor(), { service_principal: 1 }), actorGuard(), {
+        id: SP1,
+        now: LATER,
+        opId: 'op-stop',
+      }),
     ).toBe('conflict');
   });
 });

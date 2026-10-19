@@ -11,6 +11,7 @@ import {
   KernelConfigError,
   type Registration,
 } from '@package-broker/core/kernel/registry';
+import type { PackageVisibilityPort } from '@package-broker/core/db/catalogue';
 import type { Platform } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
 import {
@@ -48,6 +49,11 @@ export interface BuildResult {
   buildInfo: string;
   metafile: Metafile;
 }
+
+export const declarationOnlyPackageResolver: PackageVisibilityPort = Object.freeze({
+  resolve: () =>
+    Promise.reject(new Error('the build-time package resolver validates declarations only')),
+});
 
 export class BuildDiagnosticsError extends Error {
   readonly problems: readonly string[];
@@ -127,7 +133,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const plugins = orderPlugins(config.plugins);
   let registration: Registration;
   try {
-    registration = collectRegistrations(plugins);
+    registration = collectRegistrations(plugins, {
+      packageResolver: declarationOnlyPackageResolver,
+    });
   } catch (error) {
     if (!(error instanceof KernelConfigError)) throw error;
     if (error.problems.every(isRouteProblem)) throw new BuildDiagnosticsError(error.problems);

@@ -1,3 +1,4 @@
+import type { ServicePrincipalStore } from '@package-broker/core/authz/service-principal-service';
 import { sql, type Compilable } from 'kysely';
 import { PERMISSIONS, isPermission } from '@package-broker/core/authz/permissions';
 import {
@@ -68,10 +69,7 @@ export interface ServicePrincipalRepository {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    permissions: readonly string[],
-    now: string,
-    opId: string,
+    input: Parameters<ServicePrincipalStore['setPermissions']>[3],
   ): Promise<
     'updated' | 'not_found' | 'invalid_permissions' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -80,17 +78,13 @@ export interface ServicePrincipalRepository {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    now: string,
-    opId: string,
+    input: Parameters<ServicePrincipalStore['suspend']>[3],
   ): Promise<'suspended' | 'unchanged' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
   restore(
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    now: string,
-    opId: string,
+    input: Parameters<ServicePrincipalStore['restore']>[3],
   ): Promise<
     'restored' | 'not_suspended' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -499,7 +493,7 @@ export function createServicePrincipalRepository(
       throw new TypeError('service principal was not stored');
     },
 
-    async setPermissions(ctx, fence, guard, id, permissions, now, opId) {
+    async setPermissions(ctx, fence, guard, { id, permissions, now, opId }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const stamp = timestamp(now);
@@ -565,7 +559,7 @@ export function createServicePrincipalRepository(
       return failed(outcome);
     },
 
-    async suspend(ctx, fence, guard, id, now, opId) {
+    async suspend(ctx, fence, guard, { id, now, opId }) {
       const result = await transition(
         ctx,
         fence,
@@ -596,7 +590,7 @@ export function createServicePrincipalRepository(
       return again === 'not_suspended' ? 'unchanged' : again;
     },
 
-    async restore(ctx, fence, guard, id, now, opId) {
+    async restore(ctx, fence, guard, { id, now, opId }) {
       return transition(ctx, fence, guard, id, now, opId, 'suspended', 'active', 'restored');
     },
   };

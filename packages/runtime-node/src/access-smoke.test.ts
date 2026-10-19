@@ -1,3 +1,4 @@
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -159,6 +160,7 @@ describe('node access smoke over HTTP', () => {
               projectMode: 'all',
               projectIds: [],
             },
+            apiCall,
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           return Response.json({ id: issued.value.id, plaintext: issued.value.plaintext });
@@ -184,6 +186,7 @@ describe('node access smoke over HTTP', () => {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
             },
+            apiCall,
           );
           return Response.json(revoked);
         },
@@ -519,3 +522,12 @@ describe('node access smoke over HTTP', () => {
     }
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

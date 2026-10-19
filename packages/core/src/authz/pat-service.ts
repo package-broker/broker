@@ -1,3 +1,5 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { Organization } from '../db/organization.js';
 import type { OrgContext } from '../db/port.js';
@@ -36,6 +38,8 @@ export interface PersonalTokenStoreInput {
   readonly projectMode: 'all' | 'selected';
   readonly projectIds: readonly string[];
   readonly providerAnchors: readonly ProviderAnchor[];
+  readonly audit?: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
 }
 
 export type PersonalTokenIssueOutcome =
@@ -112,6 +116,7 @@ export interface PersonalTokenService {
     authenticated: AuthenticatedSession,
     fence: MutationFence,
     input: PersonalTokenIssueInput,
+    call: ApiCall,
   ): Promise<PersonalTokenResult>;
 }
 
@@ -188,7 +193,7 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
   }
 
   return {
-    async issue(ctx, authenticated, fence, request) {
+    async issue(ctx, authenticated, fence, request, call) {
       if (authenticated.principal.kind !== 'user') return fail('forbidden');
       const input = {
         name: request.name,
@@ -230,11 +235,30 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
       const storeNow = clock.now();
       if (expiresMs <= storeNow.getTime()) return fail('invalid_expiry');
 
+      const id = ids.ulid();
+      const audit = auditEvent({
+        id: ids.ulid(),
+        now: isoTimestamp(storeNow),
+        action: 'token.issue',
+        actor: { type: 'user', id: session.userId },
+        context: call.audit,
+        target: { type: 'token', id },
+        projectId: null,
+        changes: {
+          kind: { new: 'pat' },
+          name: { new: input.name },
+          scope: { new: scope.level },
+          expires_at: { new: input.expiresAt },
+          project_mode: { new: input.projectMode },
+          project_count: { new: input.projectIds.length },
+        },
+      });
+      if (!audit.ok) throw new TypeError('Invalid token issue audit event');
       const outcome = await tokens.issuePersonal(
         ctx,
         fence,
         {
-          id: ids.ulid(),
+          id,
           name: input.name,
           scope: scope.level,
           expiresAt: input.expiresAt,
@@ -246,6 +270,15 @@ export function createPersonalTokenService(deps: PersonalTokenServiceDeps): Pers
           projectMode: input.projectMode,
           projectIds: input.projectIds,
           providerAnchors,
+          audit: audit.event,
+          ...(call.idempotency === undefined
+            ? {}
+            : {
+                idempotency: {
+                  ...call.idempotency,
+                  responseJson: JSON.stringify({ code: 'already_issued', id }),
+                },
+              }),
         },
         mint,
       );

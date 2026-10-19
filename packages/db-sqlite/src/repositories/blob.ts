@@ -42,6 +42,7 @@ const NOW = sql<string>`strftime(${sql.lit(FORMAT)}, 'now')`;
 const FRESH = sql<string>`lower(hex(randomblob(16)))`;
 
 interface InfoRow {
+  readonly purge_generation: string | null;
   readonly sha256: string;
   readonly size_bytes: number;
   readonly media_type: string;
@@ -50,6 +51,7 @@ interface InfoRow {
 
 function info(row: InfoRow): BlobInfo {
   return {
+    generation: row.purge_generation ?? '',
     sha256: row.sha256 as Sha256,
     size: row.size_bytes,
     mediaType: row.media_type,
@@ -174,7 +176,7 @@ export function createBlobRepository(
               sql<SqlBool>`blob.purge_generation = excluded.purge_generation and not ${leaseLive('blob.purge_lease_until')} and (blob.deleted_at is not null or (blob.size_bytes = excluded.size_bytes and blob.media_type = excluded.media_type))`,
             ),
         )
-        .returning(['sha256', 'size_bytes', 'media_type', 'purge_after']);
+        .returning(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation']);
       const existing = db
         .selectFrom('blob')
         .select(['size_bytes', 'media_type', 'deleted_at'])
@@ -201,7 +203,7 @@ export function createBlobRepository(
         statement(
           db
             .selectFrom('blob')
-            .select(['sha256', 'size_bytes', 'media_type', 'purge_after'])
+            .select(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation'])
             .where('org_id', '=', ctx.orgId)
             .where('sha256', '=', sha256)
             .where('deleted_at', 'is', null)
@@ -233,7 +235,7 @@ export function createBlobRepository(
             .where('media_type', '=', input.mediaType)
             .where('purge_after', 'is', null)
             .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
-            .returning(['sha256', 'size_bytes', 'media_type', 'purge_after']),
+            .returning(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation']),
         ),
       ]);
       const row = result?.rows[0] as InfoRow | undefined;
@@ -246,7 +248,7 @@ export function createBlobRepository(
         statement(
           db
             .selectFrom('blob')
-            .select(['sha256', 'size_bytes', 'media_type', 'purge_after'])
+            .select(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation'])
             .select(leaseLive('purge_lease_until').as('purging'))
             .where('org_id', '=', ctx.orgId)
             .where('sha256', '=', sha256)

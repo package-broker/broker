@@ -9,6 +9,8 @@ export interface ByteRange {
 }
 
 export interface BlobInfo {
+  /** Current purge generation; empty only for legacy rows never reserved by put. */
+  readonly generation: string;
   readonly sha256: Sha256;
   readonly size: number;
   readonly mediaType: string;

@@ -90,6 +90,7 @@ function engine(rig: Rig, logs: unknown[][], dispatched: (() => Promise<void>)[]
         const found: EngineSessionAccess = {
           session: { id: 'sess-1', csrfHash: await sha256Hex('c') },
           user: { id: 'user-1' },
+          identity: null,
           project: input.projectSlug === 'demo' ? { id: 'proj-1' } : null,
           organizationPermissions: [],
           projectPermissions: ['project:read'],

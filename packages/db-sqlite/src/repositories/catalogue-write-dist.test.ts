@@ -246,7 +246,7 @@ describe('distAttachStatements', () => {
     expect(await state()).toEqual(first);
   });
 
-  it('2: an expired purge lease does not block the attach', async () => {
+  it('2: an expired purge lease blocks the attach until put revokes it', async () => {
     await database.executor.batch([
       stmt(
         `UPDATE blob SET purge_generation = 'g',
@@ -254,7 +254,9 @@ describe('distAttachStatements', () => {
         BLOB_A,
       ),
     ]);
-    expect((await attach(SHA_A)).changed).toBe(true);
+    const before = await state();
+    await expect(attach(SHA_A)).rejects.toThrow();
+    expect(await state()).toEqual(before);
   });
 
   it('2: a revision changed since resolve fails without change', async () => {

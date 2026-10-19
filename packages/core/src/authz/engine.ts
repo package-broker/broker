@@ -44,6 +44,11 @@ interface EngineAccessCommon {
 }
 
 export interface EngineSessionAccess extends EngineAccessCommon {
+  readonly identity: {
+    readonly id: string;
+    readonly provider: string;
+    readonly fresh: boolean;
+  } | null;
   readonly protectedHolder: boolean;
   readonly session: { readonly id: string; readonly csrfHash: string };
   readonly user: { readonly id: string };
@@ -242,6 +247,13 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       secretHash: await sha256Hex(secret),
     });
     if (found === null) return UNAUTHORIZED;
+    if (
+      request.route.boundary === 'authenticated' &&
+      found.identity !== null &&
+      !found.identity.fresh
+    ) {
+      return FORBIDDEN;
+    }
     if (UNSAFE_METHODS.has(request.request.method.toUpperCase())) {
       try {
         assertSameOrigin(request.request, publicOrigin);

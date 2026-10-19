@@ -27,6 +27,7 @@ const org = orgContext('org-1');
 
 interface State {
   sessionRevoked: boolean;
+  sessionIdentity: { id: string; provider: string; fresh: boolean } | null;
   sessionProject: { id: string } | null;
   sessionOrg: string[];
   sessionProjectPermissions: string[];
@@ -53,6 +54,7 @@ interface State {
 function freshState(): State {
   return {
     sessionRevoked: false,
+    sessionIdentity: null,
     sessionProject: { id: 'proj-1' },
     sessionOrg: ['org:read'],
     sessionProjectPermissions: ['project:read', 'project:packages:read'],
@@ -122,6 +124,7 @@ function deps(
         const found: EngineSessionAccess = {
           session: { id: 'sess-1', csrfHash: await sha256Hex(CSRF) },
           user: { id: 'user-1' },
+          identity: state.sessionIdentity,
           protectedHolder: false,
           project: input.boundary === 'project' ? state.sessionProject : null,
           organizationPermissions: state.sessionOrg,
@@ -1246,7 +1249,11 @@ describe('authenticated boundary', () => {
 describe('authenticated boundary through the kernel', () => {
   const BASE = 'http://broker.test';
 
-  async function kernelWith(state: State, calls: unknown[]) {
+  async function kernelWith(
+    state: State,
+    calls: unknown[],
+    overrides: Partial<AuthorizationEngineDeps> = {},
+  ) {
     return createKernel({
       platform: 'node',
       plugins: [],
@@ -1258,8 +1265,15 @@ describe('authenticated boundary through the kernel', () => {
       resolveOrg: () => Promise.resolve(org),
       health: () => Promise.resolve(true),
       log: () => undefined,
-      authorization: createAuthorizationEngine(deps(state)),
+      authorization: createAuthorizationEngine(deps(state, overrides)),
       coreRoutes: [
+        {
+          method: 'GET',
+          path: '/_pb/organization',
+          permission: 'org:read',
+          boundary: 'organization',
+          handler: () => Response.json({ ok: true }),
+        },
         {
           method: 'GET',
           path: '/_pb/whoami',
@@ -1326,5 +1340,130 @@ describe('authenticated boundary through the kernel', () => {
     const kernel = await kernelWith(freshState(), []);
     const response = await kernel.fetch(new Request(`${BASE}/_pb/open`));
     expect(response.status).toBe(200);
+  });
+
+  async function ssoResponse(fresh: boolean, bound: boolean, path = '/_pb/whoami') {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: fresh && bound };
+    if (!fresh || !bound) state.sessionOrg = [];
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls, {
+      providerAnchors: () =>
+        Promise.resolve(
+          bound ? [{ provider: 'oidc', anchor: 'anchor-1', emailAuthoritative: true }] : [],
+        ),
+    });
+    const response = await kernel.fetch(new Request(`${BASE}${path}`, { headers: cookie }));
+    return { status: response.status, body: strip((await response.json()) as never), calls, state };
+  }
+
+  it('refuses a stale SSO identity with the organization permission refusal', async () => {
+    const stale = await ssoResponse(false, true);
+    const organization = await ssoResponse(false, true, '/_pb/organization');
+    expect(stale.status).toBe(403);
+    expect(stale.body).toEqual(organization.body);
+    expect(stale.status).toBe(organization.status);
+    expect(stale.calls).toEqual([]);
+    expect(stale.state.touches).toEqual([]);
+  });
+
+  it('refuses an SSO identity with a missing provider binding', async () => {
+    const unbound = await ssoResponse(true, false);
+    expect(unbound.status).toBe(403);
+    expect(unbound.calls).toEqual([]);
+    expect(unbound.state.touches).toEqual([]);
+  });
+
+  it('accepts a fresh SSO identity with a provider binding', async () => {
+    const bound = await ssoResponse(true, true);
+    expect(bound.status).toBe(200);
+    expect(bound.calls).toEqual([{ principal: { kind: 'user', id: 'user-1' }, projectId: null }]);
+  });
+
+  it('refuses an SSO identity lookup exception with the organization refusal', async () => {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: true };
+    const calls: unknown[] = [];
+    const base = deps(state);
+    const kernel = await kernelWith(state, calls, {
+      access: {
+        ...base.access,
+        lookupSession: () => Promise.reject(new Error('lookup unavailable')),
+      },
+    });
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/whoami`, { headers: cookie }));
+    const organization = await kernel.fetch(
+      new Request(`${BASE}/_pb/organization`, { headers: cookie }),
+    );
+    expect(response.status).toBe(503);
+    expect(response.status).toBe(organization.status);
+    expect(strip((await response.json()) as never)).toEqual(
+      strip((await organization.json()) as never),
+    );
+    expect(calls).toEqual([]);
+    expect(state.touches).toEqual([]);
+  });
+
+  it('refuses a provider binding lookup exception', async () => {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: true };
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls, {
+      providerAnchors: () => Promise.reject(new Error('lookup unavailable')),
+    });
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/whoami`, { headers: cookie }));
+    expect(response.status).toBe(503);
+    expect(calls).toEqual([]);
+    expect(state.lookups).toBe(0);
+    expect(state.touches).toEqual([]);
+  });
+
+  it('returns identical stale, unbound and organization refusal bodies', async () => {
+    const stale = await ssoResponse(false, true);
+    const unbound = await ssoResponse(true, false);
+    const organization = await ssoResponse(true, false, '/_pb/organization');
+    expect(stale.status).toBe(403);
+    expect(unbound.status).toBe(stale.status);
+    expect(unbound.body).toEqual(stale.body);
+    expect(stale.body).toEqual(organization.body);
+  });
+
+  it('keeps the local session authenticated without an identity or permissions', async () => {
+    const state = freshState();
+    state.sessionOrg = [];
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls);
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/whoami`, { headers: cookie }));
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('keeps bearer token authentication independent of session identity freshness', async () => {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: false };
+    state.token.organizationPermissions = [];
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls);
+    const response = await kernel.fetch(
+      new Request(`${BASE}/_pb/whoami`, { headers: bearer(PAT) }),
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('SSO freshness outside the authenticated boundary', () => {
+  it('leaves organization and project permission decisions unchanged', async () => {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: false };
+    const engine = createAuthorizationEngine(deps(state));
+    expect(
+      (
+        await engine.authorize(
+          req({ headers: cookie, boundary: 'organization', permission: 'org:read' }),
+        )
+      ).allow,
+    ).toBe(true);
+    expect((await engine.authorize(req({ headers: cookie }))).allow).toBe(true);
   });
 });

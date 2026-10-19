@@ -34,6 +34,7 @@ function authorizationEngine(options: Options = {}) {
       lookupSession: async (_org, input) => ({
         session: { id: SESSION_ID, csrfHash: await sha256Hex(CSRF) },
         user: { id: 'user-sentinel' },
+        identity: null,
         protectedHolder: true,
         project:
           input.boundary === 'project' && options.projectExists !== false

@@ -3,13 +3,18 @@ import type { CatalogueWriteGuard, WriteEffect } from '@package-broker/core/db/c
 import type { OrgContext, Statement, StatementResult } from '@package-broker/core/db/port';
 import type { Sha256 } from '@package-broker/core/platform/blob';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
-import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import {
+  assertCatalogueWriteGuard,
+  monotonicNow,
+  blobReferenceFence,
+} from '../internal/catalogue-write-guard.js';
 
 export interface BlobReplaceRequest {
   readonly versionId: string;
   readonly expectedRevision: number;
   readonly oldBlobId: string;
   readonly newSha256: Sha256;
+  readonly expectedGeneration?: string;
   readonly reason: 'refetch_changed';
 }
 
@@ -21,7 +26,6 @@ export interface BlobReplacePlan {
 }
 
 const SHA256 = /^[0-9a-f]{64}$/;
-const NOW = sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
 
 export function replaceBlobStatements(
   ctx: OrgContext,
@@ -43,6 +47,7 @@ export function replaceBlobStatements(
     throw new RangeError('newSha256 must be 64 lower-case hexadecimal characters');
   }
   if (reason !== 'refetch_changed') throw new RangeError("reason must be 'refetch_changed'");
+  const fence = blobReferenceFence(request.expectedGeneration);
   const opId = newOpId();
 
   const liveBlob = sql<string>`(SELECT blob.id FROM blob
@@ -51,7 +56,7 @@ export function replaceBlobStatements(
   const eligibleBlob = sql<string>`(SELECT blob.id FROM blob
     WHERE blob.org_id = ${ctx.orgId} AND blob.sha256 = ${newSha256} AND blob.deleted_at IS NULL
       AND blob.id <> ${oldBlobId}
-      AND (blob.purge_lease_until IS NULL OR blob.purge_lease_until <= ${NOW}))`;
+      AND ${fence})`;
 
   const eligible = sql<SqlBool>`version.id = ${versionId} AND version.org_id = ${ctx.orgId}
     AND version.blob_id = ${oldBlobId} AND version.revision = ${expectedRevision}
@@ -126,10 +131,7 @@ export function replaceBlobStatements(
     .updateTable('package')
     .set({
       rev: sql<number>`package.rev + 1`,
-      modified_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', max(
-        unixepoch('now', 'subsec'),
-        unixepoch(package.modified_at, 'subsec') + 0.001
-      ), 'unixepoch')`,
+      modified_at: monotonicNow,
     })
     .where('package.org_id', '=', ctx.orgId)
     .where(

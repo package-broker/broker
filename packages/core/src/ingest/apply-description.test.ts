@@ -27,6 +27,9 @@ import {
   continuationOptions,
   type ApplyInput,
 } from './apply-description.js';
+import { JsonStreamError } from './json-tokenizer.js';
+import { JsonExtractError } from './json-stream.js';
+import { NpmPackumentError } from './npm/packument.js';
 import { SnapshotCorruptError } from './snapshot.js';
 import { INVOCATION_BUDGET } from './plan-chunk.js';
 import type { IngestFinalizeInput, IngestFinalizeResult, IngestFinalizer } from './finalize.js';
@@ -68,6 +71,7 @@ function toVersion(candidate: VersionCandidate): VersionInput | null {
 
 interface Fixture {
   readonly calls: string[];
+  readonly syncInputs: SyncPackageInput[];
   readonly marked: string[];
   readonly finalized: IngestFinalizeInput[];
   readonly logs: LogRecord[];
@@ -88,6 +92,7 @@ interface Fixture {
 function fixture(): Fixture {
   const f: Fixture = {
     calls: [],
+    syncInputs: [],
     marked: [],
     finalized: [],
     logs: [],
@@ -119,6 +124,7 @@ function fixture(): Fixture {
     syncPayloadLimit: 4 * 1024 * 1024,
     syncPayloadBytes: () => 1,
     syncPackage: (_ctx, _guard, input: SyncPackageInput): Promise<SyncResult> => {
+      f.syncInputs.push(input);
       f.calls.push(`sync:${input.versions.map((v) => v.versionNormalized).join(',')}`);
       const refused = input.versions
         .filter((v) => f.refuse.has(v.versionNormalized) || f.tombstone.has(v.versionNormalized))
@@ -591,7 +597,7 @@ describe('applyChunk fails closed', () => {
     });
   });
 
-  it('rejects member ordinals that do not strictly increase', async () => {
+  it('abandons the session when member ordinals do not strictly increase', async () => {
     const f = fixture();
     const desc = {
       name: KEY,
@@ -605,9 +611,89 @@ describe('applyChunk fails closed', () => {
         yield { ordinal: 1, version: '1.0.1', form: 'npm-full', raw: manifest('1.0.1') } as const;
       })(),
     } as unknown as PackageDescription;
-    await expect(applyChunk(ctx, f.deps, input(handle(), desc))).rejects.toThrow(
-      'member ordinals must be strictly increasing',
+    await expect(applyChunk(ctx, f.deps, input(handle(), desc))).resolves.toMatchObject({
+      done: true,
+      status: 'refused',
+      refusal: 'snapshot_corrupt',
+    });
+    expect(f.abandoned).toBe(1);
+    expect(f.calls).toEqual([]);
+    expect(f.advanced).toEqual([]);
+    expect(f.finalized).toEqual([]);
+  });
+});
+
+describe('apply failure classes and observability', () => {
+  const failing = (error: Error) =>
+    createPackageDescription({
+      name: KEY,
+      snapshot: snapshotRef(SNAPSHOT),
+      validators: {},
+      documentsComplete: true,
+      members: (async function* () {
+        await Promise.resolve();
+        yield { ordinal: 0, version: '1.0.0', form: 'npm-full', raw: manifest('1.0.0') } as const;
+        throw error;
+      })(),
+    });
+
+  it.each([new Error('blob read failed'), new TypeError('converter bug')])(
+    'rethrows %s without abandoning the generation or logging corruption',
+    async (error) => {
+      const f = fixture();
+      await expect(applyChunk(ctx, f.deps, input(handle(), failing(error)))).rejects.toBe(error);
+      expect(f.abandoned).toBe(0);
+      expect(f.calls).toEqual([]);
+      expect(f.logs.map((l) => l.event)).not.toContain('ingest.snapshot_corrupt');
+    },
+  );
+
+  it('rethrows a converter failure without abandoning', async () => {
+    const f = fixture();
+    const error = new Error('converter bug');
+    await expect(
+      applyChunk(ctx, f.deps, {
+        ...input(handle(), description(['1.0.0'])),
+        toVersion: () => {
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
+    expect(f.abandoned).toBe(0);
+  });
+
+  it('logs budget exhaustion with the package key and ordinal', async () => {
+    const f = fixture();
+    const writer = {
+      ...f.deps.writer,
+      statementBudget: { ...f.deps.writer.statementBudget, markListing: 1000 },
+    };
+    const outcome = await applyChunk(
+      ctx,
+      { ...f.deps, writer },
+      input(handle(), description(['1.0.0'])),
     );
+    expect(outcome).toMatchObject({ done: true, refusal: 'budget_exhausted' });
+    expect(f.logs).toContainEqual(
+      expect.objectContaining({
+        event: 'ingest.budget_exhausted',
+        reason_code: 'budget_exhausted',
+        package_key: KEY,
+        seq: 0,
+      }),
+    );
+  });
+
+  it('restarts tag publication when the cursor offset exceeds the tag count', async () => {
+    const f = fixture();
+    const session = continued(
+      { packageId: 'pkg-1', ordinal: 0, attempted: 1, tail: 'tags', tagOffset: 99 },
+      { seenCount: 1 },
+    );
+    const outcome = await applyChunk(ctx, f.deps, input(session, tagged(['1.0.0'], 3)));
+    expect(outcome).toMatchObject({ done: true, status: 'complete' });
+    expect(f.finalized).toHaveLength(1);
+    expect(f.syncInputs.map((i) => Object.keys(i.tags ?? {}))).toEqual([['tag0', 'tag1', 'tag2']]);
   });
 });
 
@@ -626,11 +712,26 @@ describe('applyChunk tail and recovery', () => {
     expect(resumed).toMatchObject({ status: 'complete', tagsSkipped: false });
   });
 
-  it('skips dist-tags that cannot fit an empty invocation', async () => {
+  it('splits dist-tags that cannot fit an empty invocation', async () => {
     const f = fixture();
     const outcome = await applyChunk(ctx, f.deps, input(tail('tags'), tagged(['1.0.0'], 5)));
-    expect(f.calls).toEqual([]);
-    expect(outcome).toMatchObject({ status: 'complete', tagsSkipped: true });
+    expect(f.calls).toEqual(['sync:']);
+    expect(outcome).toMatchObject({ done: false, status: 'progress', tagsSkipped: false });
+    expect(JSON.parse(outcome.cursor ?? 'null')).toMatchObject({ tail: 'tags', tagOffset: 4 });
+    expect(f.finalized).toEqual([]);
+    expect(outcome.planned).toBeLessThanOrEqual(INVOCATION_BUDGET);
+
+    const next = fixture();
+    const resumed = await applyChunk(ctx, next.deps, input(outcome.session, tagged(['1.0.0'], 5)));
+    expect(next.calls).toEqual(['sync:']);
+    expect(resumed).toMatchObject({ done: true, status: 'complete', tagsSkipped: false });
+    expect(next.finalized).toHaveLength(1);
+    expect(resumed.planned).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    const names = ['tag0', 'tag1', 'tag2', 'tag3', 'tag4'];
+    expect(f.syncInputs.map((i) => Object.keys(i.tags ?? {}))).toEqual([names.slice(0, 4)]);
+    expect(next.syncInputs.map((i) => Object.keys(i.tags ?? {}))).toEqual([['tag4']]);
+    expect(f.syncInputs[0]?.tagNames).toEqual(names);
+    expect(next.syncInputs[0]?.tagNames).toEqual(names);
   });
 
   it('leaves finalize for the next invocation when its cost does not fit', async () => {
@@ -805,7 +906,7 @@ describe('applyChunk bounds and guards', () => {
     expect(await applyChunk(ctx, f.deps, input(session, desc))).toMatchObject({
       done: true,
       status: 'refused',
-      refusal: 'incomplete',
+      refusal: 'snapshot_corrupt',
       planned: 1,
     });
     expect(f.calls).toEqual([]);
@@ -846,7 +947,7 @@ describe('applyChunk bounds and guards', () => {
       },
     });
     expect(converted).toBe(41);
-    expect(outcome).toMatchObject({ status: 'refused', refusal: 'incomplete' });
+    expect(outcome).toMatchObject({ status: 'refused', refusal: 'snapshot_corrupt' });
     expect(f.calls).toEqual([]);
     expect(f.abandoned).toBe(1);
   });
@@ -876,7 +977,7 @@ describe('applyChunk bounds and guards', () => {
     const outcome = await applyChunk(ctx, f.deps, input(handle(), description(versions, { raw })));
     const attempted = (JSON.parse(outcome.cursor ?? 'null') as { attempted: number }).attempted;
     expect(attempted).toBeGreaterThanOrEqual(1);
-    const retainedPerMember = 2 * big.length;
+    const retainedPerMember = 4 * big.length;
     expect(attempted * retainedPerMember).toBeLessThanOrEqual(
       APPLY_WINDOW_BYTES + retainedPerMember,
     );
@@ -937,4 +1038,227 @@ describe('applyChunk writer payload', () => {
       refused: [{ version: '1.0.1', reason: 'payload_too_large' }],
     });
   });
+});
+
+it('makes bounded progress when old manifests require one metadata read per row', async () => {
+  const f = fixture();
+  const versions = Array.from({ length: 1000 }, (_, n) => `1.0.${String(n).padStart(4, '0')}`);
+  const stored = new Map(
+    versions.map((version) => [
+      version,
+      {
+        versionNormalized: version,
+        id: `v-${version}`,
+        revision: 1,
+        status: 'active',
+        npmIntegrity: INTEGRITY_A,
+        composerShasum: null,
+        metadataJson: manifest(version),
+      },
+    ]),
+  );
+  let reads = 0;
+  const existing: ExistingVersionsReader = {
+    existingVersions: async (_ctx, query) => {
+      reads++;
+      const keys = [...(query.keys ?? [])].sort();
+      if (!query.withMetadata)
+        return {
+          rows: keys.map((key) => {
+            const row: ExistingVersion = { ...stored.get(key)! };
+            const keyOnly = {
+              versionNormalized: row.versionNormalized,
+              id: row.id,
+              revision: row.revision,
+              status: row.status,
+              npmIntegrity: row.npmIntegrity,
+              composerShasum: row.composerShasum,
+            };
+            return keyOnly;
+          }),
+          next: null,
+        };
+      return { rows: [stored.get(keys[0]!)!], next: keys.length > 1 ? keys[0]! : null };
+    },
+  };
+  let session = handle();
+  for (let invocation = 0; invocation < 10; invocation++) {
+    reads = 0;
+    const outcome = await applyChunk(
+      ctx,
+      { ...f.deps, existing },
+      input(session, description(versions)),
+    );
+    expect(outcome.planned).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    expect(reads).toBeLessThan(INVOCATION_BUDGET);
+    expect(outcome.session.seenCount).toBeGreaterThan(session.seenCount);
+    if (outcome.done) {
+      expect(outcome.status).toBe('complete');
+      expect(outcome.session.seenCount).toBe(1000);
+      return;
+    }
+    session = outcome.session;
+  }
+  throw new Error('apply did not complete');
+});
+
+it('abandons when even one read and write cannot fit instead of retrying without progress', async () => {
+  const f = fixture();
+  const writer = { ...f.deps.writer, syncPackageCost: () => INVOCATION_BUDGET };
+  const outcome = await applyChunk(ctx, { ...f.deps, writer }, input(handle()));
+  expect(outcome).toMatchObject({ done: true, status: 'refused', refusal: 'budget_exhausted' });
+  expect(outcome.planned).toBeLessThanOrEqual(INVOCATION_BUDGET);
+  expect(f.abandoned).toBe(1);
+  expect(f.marked).toEqual([]);
+});
+
+it('never writes tags when current or earlier refused members prevent finalization', async () => {
+  for (const resumed of [false, true]) {
+    const f = fixture();
+    f.refuse.add('1.0.0');
+    let tagCalls = 0;
+    const writer = {
+      ...f.deps.writer,
+      syncPackage: (...args: Parameters<CatalogueWriter['syncPackage']>) => {
+        if (args[2].tags !== undefined) tagCalls++;
+        return f.deps.writer.syncPackage(...args);
+      },
+    };
+    const session = resumed
+      ? continued({ packageId: 'pkg-1', ordinal: 0, attempted: 1, tail: 'tags' })
+      : handle();
+    const outcome = await applyChunk(
+      ctx,
+      { ...f.deps, writer },
+      input(session, tagged(['1.0.0'], 2)),
+    );
+    expect(tagCalls).toBe(0);
+    expect(f.finalized).toEqual([]);
+    expect(outcome).toMatchObject({ done: true, refusal: 'refused_members' });
+  }
+});
+
+it('does not forget a refusal from an earlier invocation when a later one is clean', async () => {
+  const f = fixture();
+  let tagCalls = 0;
+  const writer = {
+    ...f.deps.writer,
+    syncPackage: (...args: Parameters<CatalogueWriter['syncPackage']>) => {
+      if (args[2].tags !== undefined) tagCalls++;
+      return f.deps.writer.syncPackage(...args);
+    },
+  };
+  const session = continued(
+    { packageId: 'pkg-1', ordinal: 0, attempted: 2, tail: 'tags' },
+    { seenCount: 1 },
+  );
+  const outcome = await applyChunk(
+    ctx,
+    { ...f.deps, writer },
+    input(session, tagged(['1.0.0', '1.0.1'], 2)),
+  );
+  expect(tagCalls).toBe(0);
+  expect(f.finalized).toEqual([]);
+  expect(outcome).toMatchObject({ done: true, refusal: 'refused_members', refusedMembers: 1 });
+});
+
+it('reports superseded when the fenced abandonment of a corrupt pass loses ownership', async () => {
+  const f = fixture();
+  f.abandonResult = false;
+  const desc = createPackageDescription({
+    name: KEY,
+    snapshot: snapshotRef(SNAPSHOT),
+    validators: {},
+    documentsComplete: true,
+    members: (async function* () {
+      await Promise.resolve();
+      yield { ordinal: 0, version: '1.0.0', form: 'npm-full', raw: manifest('1.0.0') } as const;
+      throw new SnapshotCorruptError();
+    })(),
+  });
+  const outcome = await applyChunk(ctx, f.deps, input(handle(), desc));
+  expect(outcome).toMatchObject({ done: true, status: 'superseded' });
+  expect(f.calls).toEqual([]);
+  expect(f.abandoned).toBe(1);
+  expect(f.finalized).toEqual([]);
+});
+
+it('splits an oversized tag set across continuations without dropping tags', async () => {
+  const f = fixture();
+  const written: string[] = [];
+  const writer = {
+    ...f.deps.writer,
+    syncPackage: (...args: Parameters<CatalogueWriter['syncPackage']>) => {
+      if (args[2].tags !== undefined) written.push(...Object.keys(args[2].tags));
+      return f.deps.writer.syncPackage(...args);
+    },
+  };
+  let session = tail('tags');
+  for (let invocation = 0; invocation < 5; invocation++) {
+    const outcome = await applyChunk(
+      ctx,
+      { ...f.deps, writer },
+      input(session, tagged(['1.0.0'], 9)),
+    );
+    expect(outcome.planned).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    expect(outcome.tagsSkipped).toBe(false);
+    if (outcome.done) {
+      expect(outcome.status).toBe('complete');
+      expect(written).toEqual(Array.from({ length: 9 }, (_, n) => `tag${n}`));
+      return;
+    }
+    session = outcome.session;
+  }
+  throw new Error('tag apply did not complete');
+});
+
+it.each([
+  new JsonStreamError('invalid_syntax', 10),
+  new JsonExtractError('invalid_member', 10),
+  new NpmPackumentError('invalid'),
+  new NpmPackumentError('snapshot_gone'),
+  new RangeError('member ordinals must be strictly increasing'),
+])('abandons a staged pass on $name without logging request data', async (error) => {
+  const f = fixture();
+  const desc = createPackageDescription({
+    name: KEY,
+    snapshot: snapshotRef(SNAPSHOT),
+    validators: {},
+    documentsComplete: true,
+    members: (async function* () {
+      yield { ordinal: 0, version: '1.0.0', form: 'npm-full', raw: manifest('1.0.0') } as const;
+      throw error;
+    })(),
+  });
+  const outcome = await applyChunk(ctx, f.deps, input(handle(), desc));
+  expect(outcome).toMatchObject({ done: true, status: 'refused', refusal: 'snapshot_corrupt' });
+  expect(f.calls).toEqual([]);
+  expect(f.abandoned).toBe(1);
+  expect(f.logs).toEqual([
+    { level: 'warn', event: 'ingest.snapshot_corrupt', reason_code: 'snapshot_corrupt' },
+  ]);
+});
+
+it('budgets incoming and stored metadata together when retaining a comparison window', async () => {
+  const f = fixture();
+  const versions = Array.from({ length: 40 }, (_, n) => `1.0.${n}`);
+  const large = 'x'.repeat(200 * 1024);
+  const raw = (version: string) =>
+    JSON.stringify({ ...JSON.parse(manifest(version)), description: large });
+  f.existing = versions.map((version, ordinal) => ({
+    versionNormalized: version,
+    id: `v-${ordinal}`,
+    revision: 1,
+    status: 'active',
+    npmIntegrity: INTEGRITY_A,
+    composerShasum: null,
+    metadataJson: (
+      toVersion({ ordinal, version, form: 'npm-full', raw: raw(version) }) as VersionInput
+    ).metadata.json,
+  }));
+  const perMember = 4 * f.existing[0]!.metadataJson!.length;
+  const outcome = await applyChunk(ctx, f.deps, input(handle(), description(versions, { raw })));
+  const { attempted } = JSON.parse(outcome.cursor!) as { attempted: number };
+  expect(attempted).toBe(Math.floor(APPLY_WINDOW_BYTES / perMember));
+  expect(outcome.status).toBe('progress');
 });

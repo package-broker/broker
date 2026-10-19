@@ -54,3 +54,58 @@ export function callContext(
     call: auditCall(ctx, deps),
   };
 }
+
+const emptyPermissionSet = new Set<string>();
+const EMPTY_PERMISSIONS: ReadonlySet<string> = Object.freeze({
+  size: 0,
+  has: (permission: string) => emptyPermissionSet.has(permission),
+  forEach: () => undefined,
+  entries: () => emptyPermissionSet.entries(),
+  keys: () => emptyPermissionSet.keys(),
+  values: () => emptyPermissionSet.values(),
+  [Symbol.iterator]: () => emptyPermissionSet.values(),
+});
+
+/** The actor carries identity only; authority is the kernel's project decision plus the service's live, fenced check. */
+export function projectSessionCallContext(
+  ctx: RequestContext,
+  deps: ApiRouteDeps,
+  expected: Readonly<Record<string, number>> = {},
+): {
+  readonly org: OrgContext;
+  readonly projectId: string;
+  readonly actor: OrganizationActor;
+  readonly fence: MutationFence;
+  readonly call: ApiCall;
+} {
+  const org = ctx.org;
+  const access = accessContextOf(ctx);
+  const projectId = ctx.projectId;
+  const authenticated = authenticatedActorOf(ctx);
+  if (
+    org === null ||
+    access === null ||
+    access.boundary !== 'project' ||
+    projectId === null ||
+    access.projectId === null ||
+    access.projectId !== projectId ||
+    authenticated === null ||
+    access.actor === null
+  ) {
+    throw new TypeError('route requires a project session context');
+  }
+  const actor: OrganizationActor = Object.freeze({
+    kind: 'organization',
+    userId: authenticated.userId,
+    sessionId: authenticated.sessionId,
+    permissions: EMPTY_PERMISSIONS,
+    isOrganizationAdmin: false,
+  });
+  return {
+    org,
+    projectId,
+    actor,
+    fence: mutationFence(authenticated, expected),
+    call: auditCall(ctx, deps),
+  };
+}

@@ -20,14 +20,18 @@ import {
   type SkippedMember,
   type VersionCandidate,
 } from '../sources/provider.js';
+import { JsonStreamError } from './json-tokenizer.js';
+import { JsonExtractError } from './json-stream.js';
+import { NpmPackumentError } from './npm/packument.js';
+import { SnapshotCorruptError } from './snapshot.js';
 import type { IngestFinalizeRefusal, IngestFinalizer } from './finalize.js';
 import { INVOCATION_BUDGET, planChunk, type ChunkMember } from './plan-chunk.js';
 import type { IngestSessionHandle, IngestSessions } from './session.js';
-import { SnapshotCorruptError } from './snapshot.js';
 import { UPSTREAM_FORMS } from './validators.js';
 
 export const APPLY_MEMBER_WINDOW = CATALOGUE_KEY_LIST_MAX;
 const EXISTING_PAGE_ROWS = 1000;
+const TAGS_PER_CALL = 100;
 const ABANDON_STATEMENTS = 1;
 /** Retained metadata per window, counted as UTF-16 bytes; one member is always admitted. */
 export const APPLY_WINDOW_BYTES = 16 * 1024 * 1024;
@@ -91,7 +95,12 @@ export interface ApplyOutcome {
   readonly done: boolean;
   readonly cursor: string | null;
   readonly status: ApplyStatus;
-  readonly refusal?: IngestFinalizeRefusal | 'name_not_registered' | 'refused_members';
+  readonly refusal?:
+    | IngestFinalizeRefusal
+    | 'name_not_registered'
+    | 'refused_members'
+    | 'snapshot_corrupt'
+    | 'budget_exhausted';
   /** With `refused_members`: members the session attempted but never marked present. */
   readonly refusedMembers?: number;
   /** The handle with this invocation's stamp, snapshot, cursor and seen count. */
@@ -114,6 +123,7 @@ interface ApplyCursor {
   readonly ordinal: number | null;
   readonly attempted: number;
   readonly tail: Tail | null;
+  readonly tagOffset?: number;
 }
 
 type WindowEntry =
@@ -136,20 +146,37 @@ export function continuationOptions(
   };
 }
 
+function isSnapshotFailure(error: unknown): boolean {
+  return (
+    error instanceof SnapshotCorruptError ||
+    error instanceof JsonStreamError ||
+    error instanceof JsonExtractError ||
+    error instanceof NpmPackumentError ||
+    (error instanceof RangeError && error.message === 'member ordinals must be strictly increasing')
+  );
+}
+
 function parseCursor(text: string): ApplyCursor {
   const value = JSON.parse(text) as Partial<ApplyCursor> | null;
-  const { packageId, ordinal, attempted, tail } = value ?? {};
+  const { packageId, ordinal, attempted, tail, tagOffset } = value ?? {};
   if (
     typeof packageId !== 'string' ||
     packageId === '' ||
     (ordinal !== null && !Number.isSafeInteger(ordinal)) ||
     !Number.isSafeInteger(attempted) ||
     (attempted as number) < 0 ||
-    (tail !== null && tail !== 'tags' && tail !== 'finalize')
+    (tail !== null && tail !== 'tags' && tail !== 'finalize') ||
+    (tagOffset !== undefined && (!Number.isSafeInteger(tagOffset) || tagOffset < 0))
   ) {
     throw new TypeError('invalid ingest apply cursor');
   }
-  return { packageId, ordinal: ordinal as number | null, attempted: attempted as number, tail };
+  return {
+    packageId,
+    ordinal: ordinal as number | null,
+    attempted: attempted as number,
+    tail,
+    ...(tagOffset === undefined ? {} : { tagOffset }),
+  };
 }
 
 function guardedBudget(
@@ -219,23 +246,83 @@ async function readExisting(
   ctx: OrgContext,
   reader: ExistingVersionsReader,
   packageId: string,
-  wanted: ReadonlySet<string>,
-): Promise<{ rows: ExistingVersion[]; reads: number }> {
-  const rows: ExistingVersion[] = [];
-  let reads = 0;
-  let after: string | null = null;
-  do {
-    const page = await reader.existingVersions(ctx, {
+  members: readonly ChunkMember[],
+  npm: boolean,
+  maxReads: number,
+  trim: (through: number) => void,
+): Promise<{ rows: ExistingVersion[]; reads: number; through: number | null }> {
+  if (maxReads < 1) return { rows: [], reads: 0, through: null };
+  const keys = members.map((m) => m.version.versionNormalized);
+  const page = await reader.existingVersions(ctx, {
+    packageId,
+    keys,
+    after: null,
+    withMetadata: false,
+    limit: EXISTING_PAGE_ROWS,
+  });
+  const byKey = new Map(page.rows.map((row) => [row.versionNormalized, row]));
+  let reads = 1;
+  let candidates = [...members];
+  const needsMetadata = (m: ChunkMember): boolean => {
+    const row = byKey.get(m.version.versionNormalized);
+    return (
+      row !== undefined &&
+      row.metadataJson === undefined &&
+      row.status !== 'tombstoned' &&
+      row.status !== 'quarantined' &&
+      (!npm || row.npmIntegrity === m.version.metadata.npmIntegrity)
+    );
+  };
+  const bound = (): void => {
+    let bytes = 0;
+    let count = 0;
+    for (const m of candidates) {
+      const old = byKey.get(m.version.versionNormalized)?.metadataJson;
+      const size = 2 * (m.version.metadata.json.length + (old?.length ?? 0));
+      if (count > 0 && bytes + size > APPLY_WINDOW_BYTES) break;
+      bytes += size;
+      count++;
+    }
+    if (count < candidates.length) {
+      candidates = candidates.slice(0, count);
+      trim(candidates.at(-1)!.ordinal);
+    }
+    const retained = new Set(candidates.map((m) => m.version.versionNormalized));
+    for (const key of byKey.keys()) if (!retained.has(key)) byKey.delete(key);
+  };
+  bound();
+  for (;;) {
+    const wanted = candidates.filter(needsMetadata);
+    if (wanted.length === 0) break;
+    if (reads >= maxReads) {
+      candidates = candidates.slice(0, candidates.indexOf(wanted[0]!));
+      break;
+    }
+    const selected = wanted.map((m) => m.version.versionNormalized);
+    const metadata = await reader.existingVersions(ctx, {
       packageId,
-      after,
+      keys: selected,
+      after: null,
       withMetadata: true,
       limit: EXISTING_PAGE_ROWS,
     });
-    reads += 1;
-    for (const row of page.rows) if (wanted.has(row.versionNormalized)) rows.push(row);
-    after = page.next;
-  } while (after !== null);
-  return { rows, reads };
+    reads++;
+    for (const row of metadata.rows) byKey.set(row.versionNormalized, row);
+    // A row deleted between the key and metadata reads is now an insert candidate.
+    if (metadata.next === null) {
+      const found = new Set(metadata.rows.map((row) => row.versionNormalized));
+      for (const key of selected) if (!found.has(key)) byKey.delete(key);
+    }
+    if (metadata.rows.length === 0 && metadata.next !== null) break;
+    bound();
+  }
+  const through = candidates.at(-1)?.ordinal ?? null;
+  const retained = new Set(candidates.map((m) => m.version.versionNormalized));
+  return {
+    rows: [...byKey.values()].filter((r) => retained.has(r.versionNormalized)),
+    reads,
+    through,
+  };
 }
 
 export async function applyChunk(
@@ -249,7 +336,7 @@ export async function applyChunk(
   const guardStatements = guard.length;
   const budget = guardedBudget(writer, guardStatements);
   let used = 0;
-  let tagsSkipped = false;
+  const tagsSkipped = false;
   let skippedTags: readonly string[] = [];
   const advanceStatements = 1 + guardStatements;
   const closeStatements = advanceStatements + ABANDON_STATEMENTS;
@@ -261,6 +348,16 @@ export async function applyChunk(
   ): Promise<ApplyOutcome> => {
     used += ABANDON_STATEMENTS;
     return outcome((await sessions.abandon(ctx, session)) ? status : 'superseded', true, extra);
+  };
+  const exhausted = (): Promise<ApplyOutcome> => {
+    deps.observability?.log({
+      level: 'warn',
+      event: 'ingest.budget_exhausted',
+      reason_code: 'budget_exhausted',
+      package_key: source.key,
+      seq: ordinal ?? 0,
+    });
+    return abandon('refused', { refusal: 'budget_exhausted' });
   };
   const outcome = (
     status: ApplyStatus,
@@ -304,8 +401,13 @@ export async function applyChunk(
       for await (const candidate of ordered(description)) void candidate.ordinal;
     }
   } catch (error) {
-    if (!(error instanceof SnapshotCorruptError)) throw error;
-    return abandon('refused', { refusal: 'incomplete' });
+    if (!isSnapshotFailure(error)) throw error;
+    deps.observability?.log({
+      level: 'warn',
+      event: 'ingest.snapshot_corrupt',
+      reason_code: 'snapshot_corrupt',
+    });
+    return abandon('refused', { refusal: 'snapshot_corrupt' });
   }
 
   const syncInput = {
@@ -350,17 +452,44 @@ export async function applyChunk(
 
   let marked = 0;
   let tail = cursor.tail;
+  let tagOffset = cursor.tagOffset ?? 0;
   let { ordinal, attempted } = cursor;
   if (tail === null) {
-    const members: ChunkMember[] = window.entries.flatMap((e) =>
+    let members: ChunkMember[] = window.entries.flatMap((e) =>
       e.version === null ? [] : [{ ordinal: e.ordinal, version: e.version }],
     );
     let existingRows: ExistingVersion[] = [];
     if (members.length > 0) {
-      const wanted = new Set(members.map((m) => m.version.versionNormalized));
-      const read = await readExisting(ctx, deps.existing, cursor.packageId, wanted);
+      const reserve = Math.max(
+        writer.syncPackageCost({ versions: 1, tags: 0, guardStatements }),
+        budget.quarantine,
+      );
+      const read = await readExisting(
+        ctx,
+        deps.existing,
+        cursor.packageId,
+        members,
+        source.ecosystem === 'npm',
+        INVOCATION_BUDGET - used - closeStatements - budget.markListing - reserve,
+        (through) => {
+          while ((members.at(-1)?.ordinal ?? -1) > through) members.pop();
+          while ((window.entries.at(-1)?.ordinal ?? -1) > through) window.entries.pop();
+          window.exhausted = false;
+        },
+      );
       existingRows = read.rows;
       used += read.reads;
+      if (read.through !== members.at(-1)?.ordinal) {
+        if (read.through === null) return exhausted();
+        members = members.filter((m) => m.ordinal <= read.through!);
+        window = {
+          entries: window.entries.filter((e) => e.ordinal <= read.through!),
+          exhausted: false,
+        };
+      }
+    }
+    if (used + closeStatements + budget.markListing > INVOCATION_BUDGET) {
+      return exhausted();
     }
     const plan = planChunk(
       members,
@@ -412,6 +541,7 @@ export async function applyChunk(
     const present = [
       ...plan.inserts.map((v) => v.versionNormalized),
       ...plan.composerUpdates.map((v) => v.versionNormalized),
+      ...plan.npmUpdates.map((v) => v.versionNormalized),
       ...plan.npmConflicts.map((c) => c.versionNormalized),
       ...plan.unchanged,
     ].filter((key) => !writerRefused.has(key));
@@ -432,7 +562,7 @@ export async function applyChunk(
       (e) => consumedThrough !== null && e.ordinal <= consumedThrough,
     ).length;
     if (consumed === 0 && window.entries.length > 0) {
-      throw new Error('ingest apply made no progress');
+      return exhausted();
     }
     for (const e of window.entries) {
       if (e.version !== null || consumedThrough === null || e.ordinal > consumedThrough) continue;
@@ -447,28 +577,54 @@ export async function applyChunk(
   const skipped: readonly SkippedMember[] = tail === null ? [] : description.skippedMembers;
   if (tail === 'tags') {
     const tags = description.distTags;
-    if (tags === undefined || !description.upstreamComplete) {
+    if (
+      tags === undefined ||
+      !description.upstreamComplete ||
+      attempted > session.seenCount + marked
+    ) {
       tail = 'finalize';
     } else {
-      const tagCost = writer.syncPackageCost({
-        versions: 0,
-        tags: Object.keys(tags).length,
-        guardStatements,
-      });
-      const fresh = used === 0;
-      if (used + tagCost + closeStatements <= INVOCATION_BUDGET) {
-        const written = await writer.syncPackage(ctx, guard, { ...syncInput, versions: [], tags });
+      const entries = Object.entries(tags);
+      if (tagOffset > entries.length) tagOffset = 0;
+      const remaining = entries.length - tagOffset;
+      let size = Math.min(TAGS_PER_CALL, remaining);
+      const cost = (count: number) =>
+        writer.syncPackageCost({
+          versions: 0,
+          tags: count,
+          guardStatements,
+        });
+      const fitsFresh =
+        remaining <= TAGS_PER_CALL && cost(size) + closeStatements <= INVOCATION_BUDGET;
+      if (fitsFresh && used + cost(size) + closeStatements > INVOCATION_BUDGET) size = 0;
+      else while (size > 0 && used + cost(size) + closeStatements > INVOCATION_BUDGET) size--;
+      if (
+        (size > 0 || entries.length === 0) &&
+        used + cost(size) + closeStatements <= INVOCATION_BUDGET
+      ) {
+        const written = await writer.syncPackage(ctx, guard, {
+          ...syncInput,
+          versions: [],
+          tags: Object.fromEntries(entries.slice(tagOffset, tagOffset + size)),
+          tagNames: entries.map(([name]) => name),
+        });
         skippedTags = written.skippedTags;
-        used += tagCost;
-        tail = 'finalize';
-      } else if (fresh) {
-        tagsSkipped = true;
-        tail = 'finalize';
+        used += cost(size);
+        tagOffset += size;
+        if (tagOffset >= entries.length) tail = 'finalize';
+      } else if (used === 0) {
+        return exhausted();
       }
     }
   }
 
-  const next: ApplyCursor = { packageId: cursor.packageId, ordinal, attempted, tail };
+  const next: ApplyCursor = {
+    packageId: cursor.packageId,
+    ordinal,
+    attempted,
+    tail,
+    ...(tail === 'tags' && tagOffset > 0 ? { tagOffset } : {}),
+  };
   const nextText = JSON.stringify(next);
   const progress = await sessions.advance(
     ctx,

@@ -266,3 +266,85 @@ VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00.000Z', 'upstream', '{}')`,
     }
   });
 });
+
+it.each([false, true])(
+  'restricts %s metadata reads to candidate keys within the organization',
+  async (withMetadata) => {
+    await seed(a, PACKAGE_A, 3000);
+    await seed(b, PACKAGE_B, 10);
+    const counted = countCalls(executor);
+    const reader = createExistingVersionsReader(counted.executor);
+    const keys = ['00001', '00005', '01000', '03000'];
+    const page = await reader.existingVersions(a, {
+      packageId: PACKAGE_A,
+      keys,
+      after: null,
+      withMetadata,
+      limit: 1000,
+    });
+    expect(page.rows.map((r) => r.versionNormalized)).toEqual(keys);
+    expect(page.next).toBeNull();
+    expect(counted.counts()).toEqual({ all: 1, batch: 0 });
+    expect(
+      await reader.existingVersions(a, {
+        packageId: PACKAGE_B,
+        keys,
+        after: null,
+        withMetadata,
+        limit: 1000,
+      }),
+    ).toEqual({ rows: [], next: null });
+    expect(
+      await reader.existingVersions(a, {
+        packageId: PACKAGE_A,
+        keys: [],
+        after: null,
+        withMetadata,
+        limit: 1000,
+      }),
+    ).toEqual({ rows: [], next: null });
+    const resumed = await reader.existingVersions(a, {
+      packageId: PACKAGE_A,
+      keys,
+      after: '00005',
+      withMetadata,
+      limit: 1,
+    });
+    expect(resumed.rows.map((r) => r.versionNormalized)).toEqual(['01000']);
+    expect(resumed.next).toBe('01000');
+  },
+);
+
+it('reads the current deprecation independently of the immutable npm manifest', async () => {
+  await seed(a, PACKAGE_A, 1);
+  await executor.batch([
+    {
+      sql: 'UPDATE version SET deprecated_message = ? WHERE org_id = ? AND package_id = ?',
+      params: ['Use version 2', a.orgId, PACKAGE_A],
+    },
+  ]);
+  const reader = createExistingVersionsReader(executor);
+  const page = await reader.existingVersions(a, {
+    packageId: PACKAGE_A,
+    keys: ['00001'],
+    after: null,
+    withMetadata: true,
+    limit: 1000,
+  });
+  expect(page.rows[0]).toMatchObject({ metadataJson: '{}', deprecatedMessage: 'Use version 2' });
+});
+
+it('rejects invalid candidate key lists', async () => {
+  const reader = createExistingVersionsReader(executor);
+  for (const keys of [null, 'key', [null], [''], Array.from({ length: 1001 }, () => 'key')]) {
+    await expect(
+      reader.existingVersions(a, {
+        packageId: PACKAGE_A,
+        after: null,
+        withMetadata: false,
+        limit: 1000,
+        keys: keys as readonly string[],
+      }),
+    ).rejects.toThrow(TypeError);
+  }
+});

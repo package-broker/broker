@@ -140,3 +140,69 @@ it('delivers ingest.version_skipped through the real kernel observability regist
     expect.objectContaining({ name: 'pb.obs.dropped', labels: { signal: 'unregistered' } }),
   );
 });
+
+it('delivers ingest.snapshot_corrupt through the real kernel observability registry', async () => {
+  const records: ObsRecord[] = [];
+  await createKernel({
+    platform: 'node',
+    plugins: [
+      {
+        id: 'ingest-test',
+        package: '@test/ingest-test',
+        apiVersion: 3,
+        platforms: ['node'],
+        register() {},
+        init(ports) {
+          requirePlatformPorts(ports).observability.log({
+            level: 'warn',
+            event: 'ingest.snapshot_corrupt',
+            reason_code: 'snapshot_corrupt',
+          });
+        },
+      },
+    ],
+    ports: {
+      organizations: { get: async () => null },
+      clock: fixedClock('2026-10-19T00:00:00.000Z'),
+      ids: { ulid: () => '01JA0000000000000000000000' },
+    },
+    platformServices: {
+      blob: {} as BlobStore,
+      cache: {} as Cache,
+      jobStore: {
+        enqueue: async () => {
+          throw new Error('unexpected enqueue');
+        },
+        status: async () => null,
+      },
+    },
+    resolveOrg: async () => orgContext('org-1'),
+    health: async () => true,
+    observability: {
+      deploymentId: 'dep-1',
+      sink: {
+        emit: (record) => {
+          records.push(record);
+        },
+      },
+    },
+  });
+  expect(records.filter((record) => record.kind === 'log')).toEqual([
+    {
+      kind: 'log',
+      record: expect.objectContaining({
+        event: 'ingest.snapshot_corrupt',
+        reason_code: 'snapshot_corrupt',
+      }),
+    },
+  ]);
+  expect(records).not.toContainEqual(
+    expect.objectContaining({ name: 'pb.obs.dropped', labels: { signal: 'unregistered' } }),
+  );
+});
+
+it('registers ingest.budget_exhausted with its reason code', async () => {
+  const { INGEST_EVENTS, INGEST_REASON_CODES } = await import('./finalize-guard.js');
+  expect(INGEST_EVENTS.has('ingest.budget_exhausted')).toBe(true);
+  expect(INGEST_REASON_CODES.has('budget_exhausted')).toBe(true);
+});

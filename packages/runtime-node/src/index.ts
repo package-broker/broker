@@ -330,6 +330,7 @@ export function createNodeServer(
     const kernel = await createKernel({
       platform: 'node',
       plugins,
+      publicOrigin: auth?.publicOrigin,
       registration,
       ports,
       resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),

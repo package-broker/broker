@@ -2,33 +2,11 @@ import type { ActorContext } from '../authz/administration.js';
 import type { MutationFence } from '../authz/fence.js';
 import { DbError } from '../db/errors.js';
 import type { OrgContext } from '../db/port.js';
+import type { DiscoveryCandidate, PlanEntry, SkipReason } from './plan.js';
 import { UpstreamError, type UpstreamCredential } from './policy-fetch.js';
 import type { SourceService } from './source-service.js';
 
 export const MAX_APPLY_REPOSITORIES = 20;
-
-export type SkipReason =
-  | 'archived'
-  | 'no_manifest'
-  | 'invalid_name'
-  | 'npm_from_vcs_unsupported'
-  | 'filtered_out'
-  | 'error_451'
-  | 'error_404';
-
-export interface DiscoveryCandidate {
-  readonly repository: string;
-  readonly ecosystem: 'composer' | 'npm';
-  readonly packageName: string;
-}
-
-export interface PlanEntry {
-  readonly repository: string;
-  readonly ecosystem: 'composer' | 'npm' | null;
-  readonly packageName: string | null;
-  readonly action: 'new' | 'existing' | 'skipped';
-  readonly reason: SkipReason | null;
-}
 
 export interface DiscoveryPlanPage {
   readonly entries: readonly PlanEntry[];

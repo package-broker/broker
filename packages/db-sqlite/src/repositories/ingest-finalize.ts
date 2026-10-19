@@ -8,18 +8,11 @@ import {
 } from '@package-broker/core/catalogue/version-rules';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
-import type { UpstreamForm } from '../schema.js';
+import { parsePendingValidators, type UpstreamForm } from '@package-broker/core/ingest/validators';
 import { NOW } from '../internal/lease-time.js';
 import { finalizeListingStatements } from './catalogue-reconcile.js';
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
-
-const FORMS: readonly UpstreamForm[] = [
-  'composer-p2',
-  'composer-p2-dev',
-  'composer-v1-provider',
-  'npm-packument',
-];
 
 export type IngestFinalizeRefusal =
   | 'incomplete'
@@ -57,32 +50,6 @@ interface SessionRow {
   package_key: string | null;
   stamp: string | null;
   pending_validators: string | null;
-}
-
-function nullableText(field: string, value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== 'string') throw new TypeError(`${field} must be a string or null`);
-  return value;
-}
-
-function validatorsOf(raw: string | null): [UpstreamForm, PublishedValidators][] {
-  if (raw === null) return [];
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return Object.entries(parsed).map(([form, value]) => {
-    if (!FORMS.includes(form as UpstreamForm)) throw new RangeError('unknown upstream form');
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new TypeError('pending validators must map each form to an object');
-    }
-    const entry = value as Record<string, unknown>;
-    return [
-      form as UpstreamForm,
-      {
-        etag: nullableText('etag', entry['etag']),
-        lastModified: nullableText('lastModified', entry['lastModified']),
-        contentSha256: nullableText('contentSha256', entry['contentSha256']),
-      },
-    ];
-  });
 }
 
 function markedRows(ctx: OrgContext, scope: ListingScope, stamp: string): RawBuilder<number> {
@@ -187,7 +154,13 @@ export function createIngestFinalizer(executor: SqlExecutor): IngestFinalizer {
         scope = { kind: 'package', packageId: found.id };
       }
 
-      const validators = scope.kind === 'package' ? validatorsOf(row.pending_validators) : [];
+      const validators =
+        scope.kind === 'package'
+          ? (Object.entries(parsePendingValidators(JSON.parse(row.pending_validators ?? '{}'))) as [
+              UpstreamForm,
+              PublishedValidators,
+            ][])
+          : [];
       const [counted] = await executor.all<{ n: number }>(
         compile(db.selectNoFrom(markedRows(ctx, scope, stamp).as('n'))),
       );

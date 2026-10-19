@@ -1,8 +1,9 @@
 import type { Generated } from 'kysely';
+import type { UpstreamForm } from '@package-broker/core/ingest/validators';
 import type { VersionStability } from '@package-broker/core/catalogue/versions';
 import type { VersionStatus } from '@package-broker/core/catalogue/version-rules';
 
-export type { VersionStability, VersionStatus };
+export type { UpstreamForm, VersionStability, VersionStatus };
 
 /** Mirrors `organization` in `migrations/0001_init.sql`. */
 export interface OrganizationTable {
@@ -498,8 +499,6 @@ export interface DistTagHistoryTable {
 
 export type IngestScope = 'source' | 'package';
 export type IngestState = 'running' | 'complete' | 'abandoned';
-export type UpstreamForm =
-  'composer-p2' | 'composer-p2-dev' | 'composer-v1-provider' | 'npm-packument';
 export type RepresentationForm = 'composer-p2' | 'composer-p2-dev';
 
 /** Mirrors `ingest_session` in `migrations/0007_registry.sql`. */

@@ -1,3 +1,4 @@
+import type { ApiCall } from '../api/idempotency.js';
 import type { ActorContext } from '../authz/administration.js';
 import type { MutationFence } from '../authz/fence.js';
 import { DbError } from '../db/errors.js';
@@ -91,6 +92,7 @@ export interface BulkDiscovery {
       readonly repositories: readonly string[];
       readonly nextCursor?: string | null;
     },
+    call: ApiCall,
   ): Promise<BulkDiscoveryResult<ApplySummary>>;
 }
 
@@ -126,6 +128,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
     fence: MutationFence,
     credential: DiscoveryCredential,
     repository: string,
+    call: ApiCall,
   ): Promise<ApplyOutcome> {
     const entry = await deps.discovery.plan(ctx, credential, repository, (candidate) =>
       deps.existingRepository.has(ctx, candidate.repository),
@@ -173,10 +176,14 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
       return { repository, outcome: 'failed', error: created.error };
     }
     const sourceId = created.value.id;
-    const named = await deps.sources.addRegisteredName(ctx, who, fence, {
-      sourceId,
-      pattern: entry.packageName,
-    });
+    const item: ApiCall = { audit: call.audit };
+    const named = await deps.sources.addRegisteredName(
+      ctx,
+      who,
+      fence,
+      { sourceId, pattern: entry.packageName },
+      item,
+    );
     if (!named.ok) {
       const deleted = await deps.sources.delete(ctx, who, fence, sourceId);
       if (!deleted.ok) {
@@ -186,7 +193,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
         ? { repository, outcome: 'existing' }
         : { repository, outcome: 'failed', error: named.error };
     }
-    const enabled = await deps.sources.enable(ctx, who, fence, sourceId);
+    const enabled = await deps.sources.enable(ctx, who, fence, sourceId, item);
     return enabled.ok
       ? { repository, outcome: 'created' }
       : { repository, outcome: 'failed', error: enabled.error };
@@ -210,7 +217,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
         return { ok: false, error: code };
       }
     },
-    async apply(ctx, actor, fence, input) {
+    async apply(ctx, actor, fence, input, call) {
       if (!permitted(actor)) return forbidden;
       if (fence.userId !== actor.userId) {
         throw new TypeError('the mutation fence must belong to the acting user');
@@ -227,7 +234,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
       let remainingRepositories: readonly string[] = [];
       for (const repository of input.repositories) {
         try {
-          results.push(await applyOne(ctx, actor, fence, credential, repository));
+          results.push(await applyOne(ctx, actor, fence, credential, repository, call));
         } catch (error) {
           const code = error instanceof DbError ? error.kind : discoveryErrorCode(error);
           if (code === undefined) throw error;

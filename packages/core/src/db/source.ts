@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '../api/idempotency.js';
+import type { AuditEvent } from '../audit/actions.js';
 import type { MutationFence } from '../authz/fence.js';
 import type { JobGuard } from '../platform/job-repository.js';
 import type { OrgContext, Statement } from './port.js';
@@ -211,6 +213,8 @@ export interface SourceRepository {
 }
 
 export interface NewRegisteredName {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly sourceId: string;
   readonly pattern: string;
@@ -218,6 +222,8 @@ export interface NewRegisteredName {
 }
 
 export interface RegisteredNameTarget {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
@@ -229,6 +235,10 @@ export interface RegisteredNameTarget {
  * `indeterminate`: the response was lost and the write may have committed; re-read.
  */
 export interface RegisteredNameRepository {
+  owner(
+    ctx: OrgContext,
+    id: string,
+  ): Promise<{ readonly sourceId: string; readonly projectId: string | null } | null>;
   add(
     ctx: OrgContext,
     fence: MutationFence,
@@ -248,7 +258,7 @@ export interface RegisteredNameRepository {
   remove(
     ctx: OrgContext,
     fence: MutationFence,
-    input: RegisteredNameTarget,
+    input: RegisteredNameTarget & { readonly pauseAudit: AuditEvent },
   ): Promise<
     'removed' | 'removed_and_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
   >;

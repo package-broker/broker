@@ -19,8 +19,11 @@ export type DeltaErrorCode =
 export class DeltaError extends Error {
   override readonly name = 'DeltaError';
 
-  constructor(readonly code: DeltaErrorCode) {
+  readonly code: DeltaErrorCode;
+
+  constructor(code: DeltaErrorCode) {
     super(`invalid delta: ${code}`);
+    this.code = code;
   }
 }
 

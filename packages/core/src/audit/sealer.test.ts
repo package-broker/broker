@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import { AUDIT_EVENTS, KERNEL_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-codes.js';
-import { registerCoreJob } from '../kernel/registry.js';
+import { registerCoreJob } from '../runtime/core-jobs.js';
 import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
 import { createObservability, type ObsRecord } from '../platform/observability.js';
 import { auditSealJob, requestAuditSeal, type SealOutcome } from './sealer.js';

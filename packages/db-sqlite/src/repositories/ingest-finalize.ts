@@ -1,12 +1,13 @@
 import { sql, type RawBuilder } from 'kysely';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
-import type { FinalizeEvidence, ListingScope } from '@package-broker/core/db/catalogue';
+import type { ListingScope } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
   completeSourceListing,
   completeVersionListing,
 } from '@package-broker/core/catalogue/version-rules';
 import { MassAbsenceError } from '@package-broker/core/ingest/absence-guard';
+import type { IngestFinalizer } from '@package-broker/core/ingest/finalize';
 import {
   assertFinalizeAllowed,
   FinalizeEvidenceError,
@@ -20,38 +21,12 @@ import { finalizeListingStatements, removedBlobs } from './catalogue-reconcile.j
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
 
-export type IngestFinalizeRefusal =
-  | 'mass_absence'
-  | 'no_success'
-  | 'candidate_count_mismatch'
-  | 'incomplete'
-  | 'count_mismatch'
-  | 'session_unavailable'
-  | 'no_stamp'
-  | 'no_package'
-  | 'superseded';
-
-export type IngestFinalizeResult =
-  | {
-      readonly status: 'complete';
-      readonly empty: boolean;
-      readonly validatorsPublished: number;
-    }
-  | { readonly status: 'refused'; readonly reason: IngestFinalizeRefusal };
-
-export interface IngestFinalizeInput extends FinalizeEvidence {
-  readonly expectedCount: number;
-  readonly upstreamComplete: boolean;
-  readonly validatorTtlSeconds: number;
-}
-
-export interface IngestFinalizer {
-  finalize(
-    ctx: OrgContext,
-    session: IngestSessionHandle,
-    input: IngestFinalizeInput,
-  ): Promise<IngestFinalizeResult>;
-}
+export type {
+  IngestFinalizeRefusal,
+  IngestFinalizeResult,
+  IngestFinalizeInput,
+  IngestFinalizer,
+} from '@package-broker/core/ingest/finalize';
 
 interface SessionRow {
   scope: 'source' | 'package';

@@ -1,14 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { ActorContext } from '../authz/administration.js';
 import { mutationFence, type AuthenticatedActor } from '../authz/fence.js';
 import { DbError } from '../db/errors.js';
 import { orgContext, type OrgContext } from '../db/port.js';
+import type { DiscoveryCandidate, PlanEntry, SkipReason } from '../plugin.js';
 import {
   createBulkDiscovery,
   type BulkDiscoveryDeps,
-  type DiscoveryCandidate,
   type DiscoveryCredential,
-  type PlanEntry,
 } from './bulk-discovery.js';
 import { UpstreamError } from './policy-fetch.js';
 import type { SourceService, SourceServiceResult } from './source-service.js';
@@ -656,4 +655,36 @@ describe('bulk discovery', () => {
       refs: { tags: true, branches: [] },
     });
   });
+});
+
+it('pins the public discovery plan contract', () => {
+  expectTypeOf<SkipReason>().toEqualTypeOf<
+    | 'archived'
+    | 'no_manifest'
+    | 'invalid_name'
+    | 'npm_from_vcs_unsupported'
+    | 'filtered_out'
+    | 'error_451'
+    | 'error_404'
+  >();
+  expectTypeOf<PlanEntry>().toEqualTypeOf<{
+    readonly repository: string;
+    readonly ecosystem: 'composer' | 'npm' | null;
+    readonly packageName: string | null;
+    readonly action: 'new' | 'existing' | 'skipped';
+    readonly reason:
+      | 'archived'
+      | 'no_manifest'
+      | 'invalid_name'
+      | 'npm_from_vcs_unsupported'
+      | 'filtered_out'
+      | 'error_451'
+      | 'error_404'
+      | null;
+  }>();
+  expectTypeOf<DiscoveryCandidate>().toEqualTypeOf<{
+    readonly repository: string;
+    readonly ecosystem: 'composer' | 'npm';
+    readonly packageName: string;
+  }>();
 });

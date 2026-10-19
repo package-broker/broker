@@ -491,11 +491,16 @@ describe('catalogue adapter', () => {
       }),
     ).rejects.toThrow();
     await expect(
-      writer.finalizeListing(org, guard, {
-        packageId: 'missing',
-        stamp: new Date().toISOString(),
-        count: 0,
-      } as never),
+      writer.finalizeListing(
+        org,
+        guard,
+        {
+          packageId: 'missing',
+          stamp: new Date().toISOString(),
+          count: 0,
+        } as never,
+        { attemptedCandidates: 0, successfulCandidates: 0, definitiveAbsent: 0 },
+      ),
     ).rejects.toThrow();
     await database.executor.batch([
       stmt("UPDATE job SET lease_until = '2000-01-01T00:00:00.000Z'"),
@@ -688,6 +693,7 @@ it.each(
         source
           ? completeSourceListing({ sourceId: 'source', stamp, count: 1 })
           : completeVersionListing({ packageId, stamp, count: 1 }),
+        { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
       );
   } else if (name.startsWith('upstream absence')) {
     await database.executor.batch([

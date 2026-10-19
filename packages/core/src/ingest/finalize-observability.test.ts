@@ -1,0 +1,82 @@
+import { expect, it } from 'vitest';
+import { orgContext } from '../db/port.js';
+import { fixedClock } from '../ids.js';
+import { createKernel } from '../kernel/kernel.js';
+import type { BlobStore } from '../platform/blob.js';
+import type { Cache } from '../platform/cache.js';
+import type { ObsRecord } from '../platform/observability.js';
+import { requirePlatformPorts } from '../plugin.js';
+import { assertFinalizeAllowed } from './finalize-guard.js';
+
+it('delivers mass absence through the real kernel observability registry without dropping it', async () => {
+  const records: ObsRecord[] = [];
+  await createKernel({
+    platform: 'node',
+    plugins: [
+      {
+        id: 'ingest-test',
+        package: '@test/ingest-test',
+        apiVersion: 3,
+        platforms: ['node'],
+        register() {},
+        init(ports) {
+          expect(() =>
+            assertFinalizeAllowed(
+              1,
+              {
+                attemptedCandidates: 2,
+                successfulCandidates: 1,
+                definitiveAbsent: 1,
+              },
+              { observability: requirePlatformPorts(ports).observability },
+            ),
+          ).toThrow('sync stopped');
+        },
+      },
+    ],
+    ports: {
+      organizations: { get: async () => null },
+      clock: fixedClock('2026-10-19T00:00:00.000Z'),
+      ids: { ulid: () => '01JA0000000000000000000000' },
+    },
+    platformServices: {
+      blob: {} as BlobStore,
+      cache: {} as Cache,
+      jobStore: {
+        enqueue: async () => {
+          throw new Error('unexpected enqueue');
+        },
+        status: async () => null,
+      },
+    },
+    resolveOrg: async () => orgContext('org-1'),
+    health: async () => true,
+    observability: {
+      deploymentId: 'dep-1',
+      sink: {
+        emit: (record) => {
+          records.push(record);
+        },
+      },
+    },
+  });
+  expect(records.filter((record) => record.kind === 'log')).toEqual([
+    {
+      kind: 'log',
+      record: expect.objectContaining({
+        level: 'warn',
+        event: 'ingest.mass_absence',
+        reason_code: 'mass_absence',
+      }),
+    },
+  ]);
+  expect(records).toContainEqual({
+    kind: 'counter',
+    name: 'pb.ingest.mass_absence',
+    labels: {},
+    value: 1,
+  });
+  expect(
+    records.some((record) => record.kind === 'counter' && record.name === 'pb.obs.dropped'),
+  ).toBe(false);
+});

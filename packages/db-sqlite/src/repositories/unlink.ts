@@ -89,7 +89,6 @@ function holdsAfterUnlink(
       ? {
           ...withoutIdentity,
           kind: 'fresh',
-          now: holders.now,
           providers: holders.providers.filter((entry) => entry.provider !== input.provider),
         }
       : withoutIdentity;

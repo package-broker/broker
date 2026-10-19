@@ -228,7 +228,6 @@ async function assembleAccess(
         createUnlinkRepository(executor, {
           holderInput: () => ({
             kind: 'fresh',
-            now: systemClock.now().toISOString(),
             providers: anchorList,
           }),
         }),

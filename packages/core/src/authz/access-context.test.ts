@@ -55,6 +55,7 @@ function snapshot(overrides: Partial<Record<keyof AccessContextSnapshot, unknown
     projectId: 'project-1',
     boundary: 'project',
     sessionId: 'session-1',
+    token: null,
     actor: actor(),
     rateKey: userKey(),
     ...overrides,
@@ -65,6 +66,7 @@ const serviceSnapshot = (overrides: Partial<Record<keyof AccessContextSnapshot, 
   snapshot({
     principal: { ...SERVICE },
     sessionId: null,
+    token: { kind: 'svc', scope: 'write', readOnly: false },
     actor: null,
     rateKey: {
       stage: 'authenticated',
@@ -88,6 +90,70 @@ const organizationSnapshot = (
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe('access context', () => {
+  it('refuses a session id alongside token metadata', () => {
+    const ctx = requestContext();
+    expect(() =>
+      setAccessContext(ctx, snapshot({ token: { kind: 'pat', scope: 'read', readOnly: true } })),
+    ).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+
+  it('refuses an unknown token kind', () => {
+    const ctx = requestContext(SERVICE);
+    expect(() =>
+      setAccessContext(
+        ctx,
+        serviceSnapshot({ token: { kind: 'cst', scope: 'read', readOnly: true } }),
+      ),
+    ).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+
+  it('refuses a token selector without token metadata', () => {
+    const ctx = requestContext(SERVICE);
+    expect(() => setAccessContext(ctx, serviceSnapshot({ token: null }))).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+
+  it('refuses an unknown token scope', () => {
+    const ctx = requestContext(SERVICE);
+    expect(() =>
+      setAccessContext(
+        ctx,
+        serviceSnapshot({ token: { kind: 'svc', scope: 'admin', readOnly: false } }),
+      ),
+    ).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+
+  it('refuses a non-boolean token read-only flag', () => {
+    const ctx = requestContext(SERVICE);
+    expect(() =>
+      setAccessContext(
+        ctx,
+        serviceSnapshot({ token: { kind: 'svc', scope: 'write', readOnly: 0 } }),
+      ),
+    ).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+
+  it.each(['read', 'write', 'full', null] as const)(
+    'copies and freezes token scope %s',
+    (scope) => {
+      const ctx = requestContext(SERVICE);
+      const token = { kind: 'svc', scope, readOnly: scope === 'read' };
+      setAccessContext(ctx, serviceSnapshot({ token }));
+      token.readOnly = !token.readOnly;
+      const stored = accessContextOf(ctx)!.token;
+      expect(stored).toEqual({ kind: 'svc', scope, readOnly: scope === 'read' });
+      expect(stored).not.toBe(token);
+      expect(Object.isFrozen(stored)).toBe(true);
+      expect(() => {
+        (stored as { readOnly: boolean }).readOnly = !stored!.readOnly;
+      }).toThrow(TypeError);
+    },
+  );
+
   it('keeps each snapshot with its own context across interleaved awaits', async () => {
     const a = requestContext();
     const b = requestContext(SERVICE);
@@ -384,7 +450,12 @@ describe('access context', () => {
     const pat = requestContext();
     setAccessContext(
       pat,
-      snapshot({ sessionId: null, actor: null, rateKey: userKey('project', 'abcdefghijkl') }),
+      snapshot({
+        sessionId: null,
+        actor: null,
+        token: { kind: 'pat', scope: 'read', readOnly: true },
+        rateKey: userKey('project', 'abcdefghijkl'),
+      }),
     );
     expect(accessContextOf(pat)?.rateKey).toMatchObject({ tokenSelector: 'abcdefghijkl' });
   });

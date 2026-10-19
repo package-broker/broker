@@ -35,7 +35,27 @@ import {
   createTokenRevokeService,
   type TokenRevokeService,
 } from '@package-broker/core/authz/token-revoke';
-import type { CatalogueReader } from '@package-broker/core/db/catalogue';
+import {
+  buildClosureReport,
+  type DependencyClosureReport,
+} from '@package-broker/core/catalogue/closure-report';
+import type { NameEcosystem } from '@package-broker/core/catalogue/names';
+import {
+  createPackageAccess,
+  type PackageAccess,
+} from '@package-broker/core/catalogue/package-access';
+import {
+  createVisibilityService,
+  type VisibilityService,
+} from '@package-broker/core/catalogue/visibility-service';
+import type { ActorContext } from '@package-broker/core/authz/administration';
+import type { ProjectActor } from '@package-broker/core/authz/project-actor';
+import type {
+  CatalogueReader,
+  CatalogueWriter,
+  PackageVisibilityPort,
+} from '@package-broker/core/db/catalogue';
+import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
@@ -82,7 +102,12 @@ import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
-import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
+import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue';
+import {
+  createCatalogueWriter,
+  createVisibilityStore,
+} from '@package-broker/db-sqlite/repositories/catalogue-writer';
+import { createScopedAdmission } from '@package-broker/db-sqlite/repositories/scoped-admission';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
@@ -148,6 +173,18 @@ export interface WorkerAccessServices {
   readonly tokenList: TokenReader;
 }
 
+export interface WorkerCatalogueServices {
+  readonly reader: CatalogueReader;
+  readonly writer: CatalogueWriter;
+  readonly packageAccess: PackageAccess;
+  readonly visibility: VisibilityService;
+  readonly closureReport: (
+    actor: ProjectActor,
+    organizationPermissions: ActorContext['permissions'],
+    ecosystem: NameEcosystem,
+  ) => Promise<DependencyClosureReport>;
+}
+
 export interface WorkerServices {
   readonly providerAnchors: ProviderAnchorReader;
   /** Starts `run` off the request path; a request in flight keeps it alive through `waitUntil`. */
@@ -155,6 +192,8 @@ export interface WorkerServices {
   readonly catalogue: Pick<CatalogueReader, 'resolveVersions'>;
   /** Null without a DB binding. */
   readonly access: WorkerAccessServices | null;
+  /** Null without a DB binding. */
+  readonly packages: WorkerCatalogueServices | null;
 }
 
 export interface WorkerOptions {
@@ -235,6 +274,7 @@ async function buildAuth(
   auth: AuthModule;
   registration: Registration;
   providerAnchors: ProviderAnchorReader;
+  anchors: readonly ConfiguredProviderAnchor[];
   access: WorkerAccessServices;
 }> {
   const keyring = createKeyring(
@@ -353,7 +393,36 @@ async function buildAuth(
     }),
     tokenList: wired('token reader', createTokenReader(executor)),
   });
-  return { auth, registration, providerAnchors, access };
+  return { auth, registration, providerAnchors, anchors: anchorList, access };
+}
+
+function buildPackageReads(executor: SqlExecutor) {
+  const reader = createCatalogueReader(executor);
+  const packageAccess = createPackageAccess(reader);
+  const resolver: PackageVisibilityPort = createScopedAdmittingAccess(
+    packageAccess,
+    createScopedAdmission(executor),
+  );
+  return { reader, packageAccess, resolver };
+}
+
+function buildCatalogue(
+  executor: SqlExecutor,
+  reads: ReturnType<typeof buildPackageReads>,
+  anchors: readonly ConfiguredProviderAnchor[],
+  log: KernelLog,
+): WorkerCatalogueServices {
+  return Object.freeze<WorkerCatalogueServices>({
+    reader: reads.reader,
+    writer: createCatalogueWriter(executor),
+    packageAccess: reads.packageAccess,
+    visibility: createVisibilityService({
+      store: createVisibilityStore(executor, { providerAnchors: anchors }),
+      log,
+    }),
+    closureReport: (actor, organizationPermissions, ecosystem) =>
+      buildClosureReport(reads.reader, actor, organizationPermissions, ecosystem, systemClock),
+  });
 }
 
 const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
@@ -922,8 +991,10 @@ export function createWorker(
           }),
       });
     }
+    const reads = db === undefined ? undefined : buildPackageReads(executor as SqlExecutor);
     const collectRegistration = (): Registration =>
       collectRegistrations(plugins, {
+        ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
         coreJobs:
           config === null
             ? []
@@ -956,11 +1027,16 @@ export function createWorker(
       ids: { ulid },
     };
 
+    const packages =
+      built === undefined || reads === undefined
+        ? null
+        : buildCatalogue(executor as SqlExecutor, reads, built.anchors, log);
     const applicationServices: WorkerServices = Object.freeze({
       providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
       dispatch,
       catalogue: createCatalogueReader(executor as SqlExecutor),
       access: built?.access ?? null,
+      packages,
     });
     const authorization = options.authorization ?? auth?.authorization;
 
@@ -978,6 +1054,7 @@ export function createWorker(
         health: async () => (await bootstrap.findSingleton()) !== null,
         ...(auth === undefined ? {} : { coreRoutes: auth.coreRoutes }),
         ...(authorization === undefined ? {} : { authorization }),
+        ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
         ...(services === undefined
           ? { log }
           : {

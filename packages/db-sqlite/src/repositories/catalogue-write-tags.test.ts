@@ -447,10 +447,13 @@ describe('distTagStatements org consistency', () => {
       params: [PACKAGE, tag],
     });
 
-  it('does not read a mismatched-org tag row as the previous value', async () => {
+  it('a mismatched-org tag collision writes no history or change and preserves the clock', async () => {
     await seedMismatchedTag('latest', '1.0.0');
-    await apply({ latest: '1.1.0' });
-    expect(await history()).toMatchObject([{ tag: 'latest', version: '1.1.0', previous: null }]);
+    const before = await clock();
+    const result = await apply({ latest: '1.1.0' });
+    expect(await history()).toEqual([]);
+    expect(result).toMatchObject({ updated: 0, unchanged: 1 });
+    expect(await clock()).toEqual(before);
   });
 
   it('does not update a mismatched-org tag row', async () => {
@@ -459,10 +462,13 @@ describe('distTagStatements org consistency', () => {
     expect(await rawTag('latest')).toEqual([{ orgId: database.orgs?.b.orgId, version: '1.0.0' }]);
   });
 
-  it('records history for a target that only a mismatched-org tag row points at', async () => {
+  it('a mismatched-org tag collision at the same target writes no history', async () => {
     await seedMismatchedTag('latest', '1.1.0');
-    await apply({ latest: '1.1.0' });
-    expect(await history()).toMatchObject([{ tag: 'latest', version: '1.1.0', previous: null }]);
+    const before = await clock();
+    const result = await apply({ latest: '1.1.0' });
+    expect(await history()).toEqual([]);
+    expect(result).toMatchObject({ updated: 0, unchanged: 1 });
+    expect(await clock()).toEqual(before);
   });
 
   it('writes every dist_tag_history id from the operation id generator', async () => {

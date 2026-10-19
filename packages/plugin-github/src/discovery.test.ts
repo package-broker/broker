@@ -5,10 +5,13 @@ import {
   DiscoveryError,
   PAGE_SIZE,
   discoverRepositories,
+  planRepository,
+  type PlanRepositoryOptions,
   type DiscoveryOptions,
   type PlanEntry,
 } from './discovery.js';
 import {
+  InstallationTokenError,
   createInstallationTokens,
   type InstallationToken,
   type InstallationTokens,
@@ -37,16 +40,21 @@ function token(value: string, repositories: readonly string[] | null): Installat
 function setup(repos: readonly Repo[], files: Files, total = repos.length) {
   const calls: Call[] = [];
   const minted: (readonly string[] | null)[] = [];
+  const mintIds: string[] = [];
+  const observed: { id: string; headers: Headers }[] = [];
   const tokens: InstallationTokens = {
     forListing: async () => {
       minted.push(null);
       return token(LISTING_TOKEN, null);
     },
-    forRepositories: async (_id, names) => {
+    forRepositories: async (id, names) => {
+      mintIds.push(id);
       minted.push(names);
       return token(CONTENTS_TOKEN, names);
     },
-    observe: () => undefined,
+    observe: (id, headers) => {
+      observed.push({ id, headers });
+    },
     rateLimit: () => undefined,
   };
   const fetch = createPolicyFetch({
@@ -69,17 +77,32 @@ function setup(repos: readonly Repo[], files: Files, total = repos.length) {
           { status: 200 },
         );
       }
+      const repository = /^\/repos\/acme\/([^/]+)$/.exec(parsed.pathname);
+      if (repository) {
+        const reply = files[repository[1]!]?.['$repository'];
+        if (reply instanceof Response) return reply.clone();
+        const repo = repos.find((repo) => repo.name === repository[1]);
+        return new Response(
+          typeof reply === 'string'
+            ? reply
+            : JSON.stringify({
+                archived: repo?.archived ?? false,
+                default_branch: repo?.branch ?? 'main',
+              }),
+          { status: typeof reply === 'number' ? reply : 200 },
+        );
+      }
       const match = /^\/repos\/acme\/([^/]+)\/contents\/(.+)$/.exec(parsed.pathname);
       const reply = match ? files[match[1]!]?.[match[2]!] : undefined;
       if (typeof reply === 'string') return new Response(reply, { status: 200 });
       if (typeof reply === 'number') return new Response('{"message":"x"}', { status: reply });
-      if (reply instanceof Response) return reply;
+      if (reply instanceof Response) return reply.clone();
       return new Response('{"message":"Not Found"}', { status: 404 });
     },
     policy: createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
     userAgent: 'package-broker-test',
   });
-  return { calls, minted, tokens, fetch };
+  return { calls, minted, mintIds, observed, tokens, fetch };
 }
 
 function run(
@@ -459,5 +482,191 @@ describe('discoverRepositories', () => {
     });
     const error = await run(harness, { fetch: broken }).catch((e: unknown) => e);
     expect((error as DiscoveryError).code).toBe('invalid_response');
+  });
+});
+
+function planOne(harness: ReturnType<typeof setup>, extra: Partial<PlanRepositoryOptions> = {}) {
+  return planRepository({
+    tokens: harness.tokens,
+    fetch: harness.fetch,
+    installationId: '42',
+    repository: 'acme/lib',
+    exists: () => false,
+    ...extra,
+  });
+}
+
+describe('planRepository', () => {
+  const cases: { label: string; repo?: Partial<Repo>; files: Files[string]; existing?: boolean }[] =
+    [
+      { label: 'archived', repo: { archived: true }, files: {} },
+      { label: 'no manifest', files: {} },
+      { label: 'invalid name', files: { 'composer.json': composer('Not Valid') } },
+      { label: 'npm', files: { 'package.json': npm('@acme/lib') } },
+      {
+        label: 'missing ref',
+        files: {
+          'composer.json': new Response('{"message":"No commit found for the ref main"}', {
+            status: 404,
+          }),
+        },
+      },
+      { label: '451', files: { 'composer.json': 451 } },
+      { label: 'existing', files: { 'composer.json': composer('acme/lib') }, existing: true },
+      { label: 'new', files: { 'composer.json': composer('acme/lib') } },
+      {
+        label: 'both manifests',
+        files: { 'composer.json': composer('acme/lib'), 'package.json': npm('lib') },
+      },
+      { label: 'malformed manifest', files: { 'composer.json': '{' } },
+      { label: 'non-object manifest', files: { 'composer.json': '[]' } },
+      {
+        label: 'oversized manifest',
+        files: {
+          'composer.json': new Response('{}', {
+            headers: { 'content-length': String(1024 * 1024 + 1) },
+          }),
+        },
+      },
+    ];
+
+  it.each(cases)('matches the page entry for $label', async ({ repo, files, existing }) => {
+    const harness = setup([{ name: 'lib', ...repo }], { lib: files });
+    const exists = () => existing ?? false;
+    const page = await run(harness, { exists });
+    const entry = await planOne(harness, { exists });
+    expect(entry).toEqual(page.entries[0]);
+    expect(entry.reason).not.toBe('filtered_out');
+  });
+
+  it('does not fetch manifests for an archived repository', async () => {
+    const harness = setup([{ name: 'lib', archived: true }], {});
+    expect((await planOne(harness)).reason).toBe('archived');
+    expect(harness.calls.map((call) => call.url)).toEqual([
+      'https://api.github.com/repos/acme/lib',
+    ]);
+  });
+
+  it('uses one narrowed token and observes all three responses when manifests are absent', async () => {
+    const harness = setup([{ name: 'lib', branch: 'release+1' }], {});
+    const installationId = '12345678901234567890';
+    expect((await planOne(harness, { installationId })).reason).toBe('no_manifest');
+    expect(harness.minted).toEqual([['lib']]);
+    expect(harness.mintIds).toEqual([installationId]);
+    expect(harness.calls.map((call) => call.url)).toEqual([
+      'https://api.github.com/repos/acme/lib',
+      'https://api.github.com/repos/acme/lib/contents/composer.json?ref=release%2B1',
+      'https://api.github.com/repos/acme/lib/contents/package.json?ref=release%2B1',
+    ]);
+    expect(
+      harness.calls.every(
+        (call) => call.headers.get('authorization') === `Bearer ${CONTENTS_TOKEN}`,
+      ),
+    ).toBe(true);
+    expect(harness.observed).toHaveLength(3);
+    expect(
+      harness.observed.every(
+        (item) => item.id === installationId && item.headers instanceof Headers,
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    'lib',
+    'acme/lib/extra',
+    '/lib',
+    'acme/',
+    'acme/..',
+    '../lib',
+    'ac me/lib',
+    'acme/li b',
+    'acme/lib\n',
+    'acme\n/lib',
+    'acme/li%62',
+    'acme/é',
+    'a'.repeat(40) + '/lib',
+    'acme/' + 'a'.repeat(101),
+  ])('rejects repository %j before minting or fetching', async (repository) => {
+    const harness = setup([], {});
+    await expect(planOne(harness, { repository })).rejects.toMatchObject({
+      name: 'DiscoveryError',
+      code: 'invalid_request',
+    });
+    expect(harness.calls).toHaveLength(0);
+    expect(harness.minted).toHaveLength(0);
+  });
+
+  it.each(['', '0', '-1', '01', 'abc', '1.5', '42\n', '1'.repeat(21)])(
+    'rejects installation id %j before minting or fetching',
+    async (installationId) => {
+      const harness = setup([], {});
+      await expect(planOne(harness, { installationId })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+      expect(harness.calls).toHaveLength(0);
+      expect(harness.minted).toHaveLength(0);
+    },
+  );
+
+  it.each(['not_found', 'unprocessable'] as const)(
+    'maps token mint failure %s to an unavailable repository',
+    async (code) => {
+      const harness = setup([], {});
+      harness.tokens.forRepositories = async () => {
+        throw new InstallationTokenError(code);
+      };
+      expect(await planOne(harness)).toEqual({
+        repository: 'acme/lib',
+        ecosystem: null,
+        packageName: null,
+        action: 'skipped',
+        reason: 'error_404',
+      });
+      expect(harness.calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    new InstallationTokenError('unauthorized'),
+    new InstallationTokenError('forbidden'),
+    new InstallationTokenError('rate_limited'),
+    new Error('unrelated failure'),
+  ])('propagates unrelated token mint failure %s', async (error) => {
+    const harness = setup([], {});
+    harness.tokens.forRepositories = async () => {
+      throw error;
+    };
+    await expect(planOne(harness)).rejects.toBe(error);
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  it.each([404, 451])('maps repository status %i without manifest requests', async (status) => {
+    const harness = setup([{ name: 'lib' }], { lib: { $repository: status } });
+    expect(await planOne(harness)).toEqual({
+      repository: 'acme/lib',
+      ecosystem: null,
+      packageName: null,
+      action: 'skipped',
+      reason: `error_${status}`,
+    });
+    expect(harness.calls).toHaveLength(1);
+    expect(harness.observed).toHaveLength(1);
+  });
+
+  it.each(['{', '[]', '{}', '{"archived":false,"default_branch":"a b"}'])(
+    'rejects malformed repository metadata %j',
+    async (body) => {
+      const harness = setup([{ name: 'lib' }], { lib: { $repository: body } });
+      await expect(planOne(harness)).rejects.toMatchObject({ code: 'invalid_response' });
+      expect(harness.calls).toHaveLength(1);
+    },
+  );
+
+  it('shares rate-limit handling for repository reads', async () => {
+    const harness = setup([{ name: 'lib' }], {
+      lib: { $repository: new Response('{}', { status: 403, headers: { 'retry-after': '30' } }) },
+    });
+    await expect(planOne(harness)).rejects.toMatchObject({ code: 'rate_limited', retryAfter: 30 });
+    expect(harness.observed).toHaveLength(1);
   });
 });

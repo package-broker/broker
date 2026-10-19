@@ -138,7 +138,7 @@ const tagRemovalSpares: ContractCase = {
 function tagForeignRowCase(sameVersion: boolean): ContractCase {
   return {
     name: sameVersion
-      ? 'a foreign tag at the requested version does not suppress own history'
+      ? 'a foreign tag at the requested version suppresses phantom history'
       : 'a foreign tag is neither the previous value nor updated on conflict',
     async run(context) {
       const { own, foreign } = orgOf(context);
@@ -153,7 +153,7 @@ function tagForeignRowCase(sameVersion: boolean): ContractCase {
         sql: "SELECT previous_version_id FROM dist_tag_history WHERE org_id = ? AND package_id = 'K-NPM' AND tag = 'latest'",
         params: [own.orgId],
       });
-      expect(history).toEqual([{ previous_version_id: null }]);
+      expect(history).toEqual([]);
       const tags = await context.executor.all<{ org_id: string; version_id: string }>({
         sql: "SELECT org_id, version_id FROM dist_tag WHERE org_id = ? AND package_id = 'K-NPM' AND tag = 'latest'",
         params: [foreign.orgId],
@@ -236,6 +236,13 @@ export const entries: readonly MutationEntry[] = [
     decisions: [revisionClockCheck(1), revisionClockCheck(3)],
     predicates: [
       {
+        name: 'foreign tag collisions suppress history and change counts',
+        locate: /collision\.org_id <> \?/,
+        neutral: 'NULL IS ?',
+        copies: 1,
+        caseName: tagForeignRowCase(false).name,
+      },
+      {
         name: 'package rows are scoped to the organization',
         locate: ref('package', 'org_id', '\\?'),
         neutral: NOT_NULL,
@@ -265,6 +272,9 @@ export const entries: readonly MutationEntry[] = [
       },
       {
         name: 'previous tag value is scoped to the organization',
+        waivedCopies: {
+          0: 'foreign tag rows are excluded by the collision guard before history is inserted',
+        },
         locate: /dist_tag\.org_id = \?(?=\s+AND dist_tag.tag = \?\))/,
         neutral: NOT_NULL,
         copies: 1,
@@ -272,6 +282,9 @@ export const entries: readonly MutationEntry[] = [
       },
       {
         name: 'unchanged tag check is scoped to the organization',
+        waivedCopies: {
+          0: 'foreign tag rows are excluded by the collision guard before history is inserted',
+        },
         locate:
           /dist_tag\.org_id = \?(?=\s+AND dist_tag.tag = \? AND dist_tag.version_id = version.id)/,
         neutral: NOT_NULL,

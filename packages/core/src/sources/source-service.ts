@@ -3,6 +3,7 @@ import type { MutationFence } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { PackageNameError, packageKey } from '../catalogue/names.js';
 import type { CatalogueReader, WinnerCandidate } from '../db/catalogue.js';
+import type { CredentialRepository } from '../db/credentials.js';
 import type { OrganizationRepository } from '../db/organization.js';
 import type { OrgContext } from '../db/port.js';
 import type {
@@ -29,6 +30,7 @@ export interface SourceCredentialInput {
 
 export type SourceCreateInput = Omit<NewSource, 'id' | 'credential' | 'providerAnchors'> & {
   readonly credential?: SourceCredentialInput | null;
+  readonly credentialId?: string | null;
 };
 export type SourceUpdateInput = Omit<SourceChanges, 'credentialId'> & {
   readonly credential?: SourceCredentialInput | null;
@@ -78,6 +80,7 @@ export interface SourceServiceDeps {
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly registeredNames: RegisteredNameRepository;
   readonly credentials: Pick<CredentialStore, 'prepare'>;
+  readonly credentialRepository: Pick<CredentialRepository, 'get'>;
   readonly catalogue: Pick<CatalogueReader, 'previewWinners'>;
   readonly policy: OutboundPolicy;
   readonly providerAnchors: NewSource['providerAnchors'];
@@ -171,6 +174,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     input: Pick<NewSource, 'type' | 'ecosystem' | 'url' | 'configJson' | 'projectId'>,
     credential: SourceCredentialInput | null | undefined,
     hasCredential: boolean,
+    linkedKind?: string,
   ) {
     if (input.configJson.length > 65536)
       return invalid('config', 'is longer than 65536 characters');
@@ -197,15 +201,25 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         if (error instanceof CredentialError) return invalid('credential', 'invalid');
         throw error;
       }
-      if (
-        (credential.kind === 'github_app' && input.projectId !== null) ||
-        (credential.kind === 'ssh_key' && deps.policy.runtime !== 'node') ||
-        (credential.kind === 'query' && input.type !== 'composer_repository')
-      ) {
-        return invalid('credential', 'invalid');
-      }
     }
-    if (url !== null && input.type === 'composer_repository' && credential?.kind === 'query') {
+    const kind = linkedKind ?? credential?.kind;
+    const github =
+      input.type === 'vcs' &&
+      typeof config === 'object' &&
+      config !== null &&
+      'provider' in config &&
+      config.provider === 'github';
+    if (
+      (kind === 'github_app' && input.projectId !== null) ||
+      (kind === 'ssh_key' && deps.policy.runtime !== 'node') ||
+      (kind === 'query' && input.type !== 'composer_repository') ||
+      (linkedKind !== undefined && (github ? kind !== 'github_app' : kind === 'github_app'))
+    ) {
+      return linkedKind === undefined
+        ? invalid('credential', 'invalid')
+        : fail('credential_scope_mismatch');
+    }
+    if (url !== null && input.type === 'composer_repository' && kind === 'query') {
       try {
         const parsed = new URL(url);
         parsed.search = '';
@@ -309,11 +323,25 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       if (bounds !== null) return bounds;
       const retention = await validateRetention(ctx, input);
       if (retention !== null) return retention;
-      const validated = validate(input, input.credential, input.credential != null);
+      if (input.credential != null && input.credentialId != null)
+        return invalid('credential', 'give either a credential or a credentialId');
+      const { credentialId, ...rest } = input;
+      const linkedCredential =
+        credentialId != null ? await deps.credentialRepository.get(ctx, credentialId) : null;
+      if (credentialId != null && linkedCredential === null)
+        return fail('credential_scope_mismatch');
+      const validated = validate(
+        input,
+        input.credential,
+        input.credential != null || credentialId != null,
+        linkedCredential?.kind,
+      );
       if (!validated.ok) return validated;
       const id = deps.ids.ulid();
       let credential: NewSource['credential'] = null;
-      if (input.credential != null) {
+      if (credentialId != null) {
+        credential = { id: credentialId };
+      } else if (input.credential != null) {
         const plaintext =
           typeof input.credential.plaintext === 'string'
             ? new TextEncoder().encode(input.credential.plaintext)
@@ -332,7 +360,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         }
       }
       const answer = await deps.sources.create(ctx, fence, {
-        ...input,
+        ...rest,
         ...validated.value,
         id,
         credential,

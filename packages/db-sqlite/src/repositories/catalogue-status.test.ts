@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
+import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import { catalogueWriteGuard, type CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import {
   parseStatusRevisionReason,
@@ -8,7 +9,11 @@ import {
 } from '@package-broker/core/catalogue/version-rules';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
-import { quarantineStatements, QUARANTINE_STATEMENTS } from './catalogue-status.js';
+import {
+  createCatalogueStatusRepository,
+  quarantineStatements,
+  QUARANTINE_STATEMENTS,
+} from './catalogue-status.js';
 import {
   versionStatusStatements,
   type StatusPlan,
@@ -425,5 +430,328 @@ describe('versionStatusStatements', () => {
     ]);
     expect((await revisions()).map((r) => r.revision)).toEqual([1, 2, 3, 4]);
     expect(await state()).toMatchObject({ status: 'tombstoned', revision: 5 });
+  });
+});
+
+describe('releaseQuarantine', () => {
+  const ANCHORS = [
+    {
+      provider: 'oidc',
+      anchor: 'oidc:https://idp.example.test',
+      emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test'],
+    },
+  ];
+  const BLOB = '01J0BLOB0000000000000000B1';
+  let recorded: Statement[];
+
+  async function actor(ctx: OrgContext, tag: string, permitted: boolean) {
+    const userId = `01J0USER00000000000000${tag}`;
+    const sessionId = `01J0SESS00000000000000${tag}`;
+    const roleId = `01J0ROLE00000000000000${tag}`;
+    const email = `${tag.toLowerCase()}@example.test`;
+    const hash = tag
+      .toLowerCase()
+      .padEnd(64, '0')
+      .replace(/[^0-9a-f]/g, 'a');
+    const now = new Date().toISOString();
+    await database.executor.batch([
+      stmt(
+        'INSERT OR IGNORE INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, ?, ?)',
+        ctx.orgId,
+        'oidc',
+        'oidc:https://idp.example.test',
+      ),
+      stmt(
+        'INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES (?, ?, ?, ?, ?, 0)',
+        roleId,
+        ctx.orgId,
+        roleId.toLowerCase(),
+        roleId,
+        'organization',
+      ),
+      stmt(
+        'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+        ctx.orgId,
+        roleId,
+        permitted ? 'org:sources:write' : 'org:sources:read',
+      ),
+      stmt(
+        'INSERT INTO user_account (id, org_id, email, status) VALUES (?, ?, ?, ?)',
+        userId,
+        ctx.orgId,
+        email,
+        'active',
+      ),
+      stmt(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        `01J0IDEN00000000000000${tag}`,
+        ctx.orgId,
+        userId,
+        'oidc',
+        `subject-${tag}`,
+        email,
+        new Date(Date.now() - 60_000).toISOString(),
+      ),
+      stmt(
+        'INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        sessionId,
+        ctx.orgId,
+        userId,
+        hash,
+        hash,
+        now,
+        now,
+        '2999-01-01T00:00:00.000Z',
+      ),
+      stmt(
+        'INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)',
+        `01J0GRNT00000000000000${tag}`,
+        ctx.orgId,
+        'email',
+        email,
+        'organization',
+        roleId,
+        now,
+        now,
+      ),
+    ]);
+    return mutationFence({ userId, sessionId } as unknown as AuthenticatedActor, {});
+  }
+
+  function repository() {
+    return createCatalogueStatusRepository(
+      {
+        driver: database.executor.driver,
+        all: (statement) => database.executor.all(statement),
+        batch: (statements) => {
+          recorded.push(...statements);
+          return database.executor.batch(statements);
+        },
+      },
+      { providerAnchors: ANCHORS },
+    );
+  }
+
+  async function quarantined(lease: string | null, blobbed = true) {
+    if (blobbed) {
+      await database.executor.batch([
+        stmt(
+          'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key) VALUES (?, ?, ?, 1, ?)',
+          BLOB,
+          org.orgId,
+          'b'.repeat(64),
+          'storage-key-1',
+        ),
+        stmt('UPDATE version SET blob_id = ? WHERE id = ?', BLOB, VERSION),
+      ]);
+      if (lease !== null) await setLease(lease);
+    }
+    await database.executor.batch([
+      stmt("UPDATE version SET status = 'quarantined' WHERE id = ?", VERSION),
+    ]);
+  }
+
+  const setLease = (modifier: string | null) =>
+    database.executor.batch([
+      stmt(
+        modifier === null
+          ? 'UPDATE blob SET purge_lease_until = NULL WHERE id = ?'
+          : `UPDATE blob SET purge_lease_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '${modifier}') WHERE id = ?`,
+        BLOB,
+      ),
+    ]);
+
+  async function untouched(run: () => Promise<unknown>) {
+    const before = [await state(), await revisions(), await epoch(), await pkg()];
+    await run();
+    expect([await state(), await revisions(), await epoch(), await pkg()]).toEqual(before);
+  }
+
+  beforeEach(() => {
+    recorded = [];
+  });
+
+  it.each([
+    ['a version without a blob', async () => quarantined(null, false)],
+    ['a blob that was never leased', async () => quarantined(null)],
+  ])('1: releases %s with one revision row and no epoch bump', async (_name, seed) => {
+    await seed();
+    const admin = await actor(org, 'AD0001', true);
+    const before = await epoch();
+    const result = await repository().releaseQuarantine(org, admin, { versionId: VERSION });
+    expect(result).toEqual({ ok: true, opId: expect.any(String) });
+    expect(await state()).toMatchObject({ status: 'active', revision: 2 });
+    expect((await revisions()).map((r) => r.reason)).toEqual([
+      'status:quarantined>active:admin_release',
+    ]);
+    expect(await epoch()).toBe(before);
+    for (const s of recorded) expect(s.params.length).toBeLessThanOrEqual(100);
+  });
+
+  it('1: refuses with blob_busy while the blob lease is live and changes nothing', async () => {
+    await quarantined('+900 seconds');
+    const admin = await actor(org, 'AD0001', true);
+    await untouched(async () => {
+      const result = await repository().releaseQuarantine(org, admin, { versionId: VERSION });
+      expect(result).toEqual({ ok: false, reason: 'blob_busy' });
+    });
+    expect(await state()).toMatchObject({ status: 'quarantined', revision: 1 });
+    expect(await revisions()).toEqual([]);
+  });
+
+  it('2: succeeds once the lease has expired', async () => {
+    await quarantined('+900 seconds');
+    const admin = await actor(org, 'AD0001', true);
+    expect(await repository().releaseQuarantine(org, admin, { versionId: VERSION })).toEqual({
+      ok: false,
+      reason: 'blob_busy',
+    });
+    await setLease('-1 seconds');
+    expect(await repository().releaseQuarantine(org, admin, { versionId: VERSION })).toMatchObject({
+      ok: true,
+    });
+    expect(await state()).toMatchObject({ status: 'active' });
+  });
+
+  it.each(['after the failed batch', 'between the probe and refusal re-read'] as const)(
+    'returns blob_busy when the lease expires %s',
+    async (timing) => {
+      await quarantined('+900 seconds');
+      const admin = await actor(org, 'AD0001', true);
+      let reads = 0;
+      let expired = false;
+      const racing = createCatalogueStatusRepository(
+        {
+          driver: database.executor.driver,
+          async all<R = Record<string, unknown>>(statement: Statement) {
+            const rows = await database.executor.all<R>(statement);
+            reads += 1;
+            if (timing === 'between the probe and refusal re-read' && reads === 2) {
+              await setLease('-1 seconds');
+              expired = true;
+            }
+            return rows;
+          },
+          async batch(statements) {
+            try {
+              return await database.executor.batch(statements);
+            } catch (error) {
+              if (timing === 'after the failed batch') {
+                await setLease('-1 seconds');
+                expired = true;
+              }
+              throw error;
+            }
+          },
+        },
+        { providerAnchors: ANCHORS },
+      );
+      await untouched(async () => {
+        expect(await racing.releaseQuarantine(org, admin, { versionId: VERSION })).toEqual({
+          ok: false,
+          reason: 'blob_busy',
+        });
+      });
+      expect(expired).toBe(true);
+      expect(reads).toBe(3);
+      expect(await state()).toMatchObject({ status: 'quarantined', revision: 1 });
+      expect(await revisions()).toEqual([]);
+    },
+  );
+
+  it('2: a second release of an active version is a conflict, not blob_busy, even with a live lease', async () => {
+    await quarantined(null);
+    const admin = await actor(org, 'AD0001', true);
+    await repository().releaseQuarantine(org, admin, { versionId: VERSION });
+    await setLease('+900 seconds');
+    await untouched(async () => {
+      expect(await repository().releaseQuarantine(org, admin, { versionId: VERSION })).toEqual({
+        ok: false,
+        reason: 'conflict',
+      });
+    });
+  });
+
+  it('2: a tombstoned version is a conflict, not blob_busy', async () => {
+    await quarantined('+900 seconds');
+    await database.executor.batch([
+      stmt(
+        "UPDATE version SET status = 'tombstoned', tombstoned_at = '2021-01-01T00:00:00.000Z' WHERE id = ?",
+        VERSION,
+      ),
+    ]);
+    const admin = await actor(org, 'AD0001', true);
+    expect(await repository().releaseQuarantine(org, admin, { versionId: VERSION })).toEqual({
+      ok: false,
+      reason: 'conflict',
+    });
+  });
+
+  it('3: an actor without org:sources:write is refused as authority, leased or not', async () => {
+    const reader = await actor(org, 'RD0001', false);
+    await quarantined(null);
+    const unleased = await repository().releaseQuarantine(org, reader, { versionId: VERSION });
+    await setLease('+900 seconds');
+    await untouched(async () => {
+      const leased = await repository().releaseQuarantine(org, reader, { versionId: VERSION });
+      expect(leased).toEqual({ ok: false, reason: 'authority' });
+      expect(leased).toEqual(unleased);
+    });
+  });
+
+  it('3: an unauthorized actor gets authority for an absent version too', async () => {
+    const reader = await actor(org, 'RD0001', false);
+    expect(
+      await repository().releaseQuarantine(org, reader, {
+        versionId: '01J0VER0000000000000000X99',
+      }),
+    ).toEqual({ ok: false, reason: 'authority' });
+  });
+
+  it('4: a version of another organization is not_found, identical to an absent id, leased or not', async () => {
+    const foreign = await actor(other, 'FA0001', true);
+    await quarantined(null);
+    const absent = await repository().releaseQuarantine(other, foreign, {
+      versionId: '01J0VER0000000000000000X99',
+    });
+    const unleased = await repository().releaseQuarantine(other, foreign, { versionId: VERSION });
+    await setLease('+900 seconds');
+    await untouched(async () => {
+      const leased = await repository().releaseQuarantine(other, foreign, { versionId: VERSION });
+      expect(leased).toEqual({ ok: false, reason: 'not_found' });
+      expect(leased).toEqual(absent);
+      expect(unleased).toEqual(absent);
+    });
+  });
+
+  it('4: an absent id with authority is not_found', async () => {
+    const admin = await actor(org, 'AD0001', true);
+    expect(
+      await repository().releaseQuarantine(org, admin, { versionId: '01J0VER0000000000000000X99' }),
+    ).toEqual({ ok: false, reason: 'not_found' });
+  });
+
+  it('5: the blob_busy refusal carries nothing but its reason', async () => {
+    await quarantined('+900 seconds');
+    const admin = await actor(org, 'AD0001', true);
+    const result = await repository().releaseQuarantine(org, admin, { versionId: VERSION });
+    expect(Object.keys(result)).toEqual(['ok', 'reason']);
+    expect(JSON.stringify(result)).not.toContain(BLOB);
+  });
+
+  it('a lease on another blob does not hold the release', async () => {
+    await quarantined(null);
+    await database.executor.batch([
+      stmt(
+        "INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, purge_lease_until) VALUES ('01J0BLOB0000000000000000B2', ?, ?, 1, 'storage-key-2', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+900 seconds'))",
+        org.orgId,
+        'c'.repeat(64),
+      ),
+    ]);
+    const admin = await actor(org, 'AD0001', true);
+    expect(await repository().releaseQuarantine(org, admin, { versionId: VERSION })).toMatchObject({
+      ok: true,
+    });
   });
 });

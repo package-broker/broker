@@ -151,6 +151,7 @@ function hiddenPackage(
     join source as vs_owner on vs_owner.id = vs_hidden.source_id
     where vs_hidden.id = ${packageId}
       and vs_hidden.org_id = ${ctx.orgId}
+      and vs_owner.org_id = ${ctx.orgId}
       and vs_hidden.visible_to_new_projects = 0
       and ${ownedBy}
   )`;

@@ -1,4 +1,8 @@
+import { sql, type SqlBool } from 'kysely';
 import type { OrgContext, ScalarSqlValue } from '@package-broker/core/db/port';
+
+export const leaseLive = (column: string) =>
+  sql<SqlBool>`(${sql.ref(column)} is not null and ${sql.ref(column)} > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
 export interface LeaseGuardCondition {
   readonly sql: string;

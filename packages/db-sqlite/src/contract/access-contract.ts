@@ -1747,3 +1747,5 @@ export function describeAccessContract(label: string, open: Open): void {
     }
   });
 }
+
+export { describeAccessRace, type OpenedRaceDatabase } from './access-race.js';

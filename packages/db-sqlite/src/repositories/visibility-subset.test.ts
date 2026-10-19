@@ -430,6 +430,21 @@ describe('visibility subset authority and refusals', () => {
     ]);
   });
 
+  it('a hidden package with a mismatched source grants no owner authority', async () => {
+    await database.executor.batch([
+      stmt('UPDATE package SET source_id = ? WHERE id = ?', S_FOREIGN, K_HIDDEN),
+    ]);
+    const before = await rows(database);
+    expect(
+      await repo.addExplicit(ctx, admin.fence, {
+        projectId: P,
+        packageId: K_HIDDEN,
+        providerAnchors: ANCHORS,
+      }),
+    ).toBe('forbidden');
+    expect(await rows(database)).toEqual(before);
+  });
+
   afterEach(async () => {
     await database.close();
   });

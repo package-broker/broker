@@ -1,3 +1,4 @@
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '../ingest/finalize-guard.js';
 import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
@@ -375,8 +376,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ].filter((path) => portAccepts('route', path)),
   );
   const registry: ObsRegistry = {
-    events: KERNEL_EVENTS,
-    reasonCodes: KERNEL_REASON_CODES,
+    events: new Set([...KERNEL_EVENTS, ...INGEST_EVENTS]),
+    reasonCodes: new Set([...KERNEL_REASON_CODES, ...INGEST_REASON_CODES]),
     routeTemplates,
   };
   const obsContext: KernelObsContext = {

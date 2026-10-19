@@ -1,11 +1,17 @@
 import { sql, type RawBuilder } from 'kysely';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
-import type { ListingScope } from '@package-broker/core/db/catalogue';
+import type { FinalizeEvidence, ListingScope } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
   completeSourceListing,
   completeVersionListing,
 } from '@package-broker/core/catalogue/version-rules';
+import { MassAbsenceError } from '@package-broker/core/ingest/absence-guard';
+import {
+  assertFinalizeAllowed,
+  FinalizeEvidenceError,
+  type FinalizeGuardOptions,
+} from '@package-broker/core/ingest/finalize-guard';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
 import type { UpstreamForm } from '../schema.js';
@@ -22,6 +28,9 @@ const FORMS: readonly UpstreamForm[] = [
 ];
 
 export type IngestFinalizeRefusal =
+  | 'mass_absence'
+  | 'no_success'
+  | 'candidate_count_mismatch'
   | 'incomplete'
   | 'count_mismatch'
   | 'session_unavailable'
@@ -37,7 +46,7 @@ export type IngestFinalizeResult =
     }
   | { readonly status: 'refused'; readonly reason: IngestFinalizeRefusal };
 
-export interface IngestFinalizeInput {
+export interface IngestFinalizeInput extends FinalizeEvidence {
   readonly expectedCount: number;
   readonly upstreamComplete: boolean;
   readonly validatorTtlSeconds: number;
@@ -129,7 +138,10 @@ function completeSession(ctx: OrgContext, session: IngestSessionHandle): Stateme
   ];
 }
 
-export function createIngestFinalizer(executor: SqlExecutor): IngestFinalizer {
+export function createIngestFinalizer(
+  executor: SqlExecutor,
+  options: FinalizeGuardOptions = {},
+): IngestFinalizer {
   const upstream = createUpstreamStateRepository(executor);
 
   return {
@@ -193,6 +205,15 @@ export function createIngestFinalizer(executor: SqlExecutor): IngestFinalizer {
       );
       if (counted?.n !== expectedCount) return { status: 'refused', reason: 'count_mismatch' };
 
+      try {
+        assertFinalizeAllowed(expectedCount, input, options);
+      } catch (error) {
+        if (error instanceof MassAbsenceError) return { status: 'refused', reason: 'mass_absence' };
+        if (error instanceof FinalizeEvidenceError)
+          return { status: 'refused', reason: error.reason };
+        throw error;
+      }
+
       const statements: Statement[] = [...ingestSessionGuard(ctx, session)];
       if (expectedCount >= 1) {
         const guard = createIngestSessionWriteGuard(ctx, session);
@@ -200,7 +221,9 @@ export function createIngestFinalizer(executor: SqlExecutor): IngestFinalizer {
           scope.kind === 'source'
             ? completeSourceListing({ sourceId: scope.sourceId, stamp, count: expectedCount })
             : completeVersionListing({ packageId: scope.packageId, stamp, count: expectedCount });
-        statements.push(...finalizeListingStatements(ctx, guard, listing).statements);
+        statements.push(
+          ...finalizeListingStatements(ctx, guard, listing, input, options).statements,
+        );
       } else {
         const openStamp =
           scope.kind === 'source'

@@ -1,3 +1,4 @@
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
@@ -811,11 +812,16 @@ export function createWorker(
     const registry = (templates: ReadonlySet<string>): ObsRegistry => ({
       events: new Set<string>([
         ...KERNEL_EVENTS,
+        ...INGEST_EVENTS,
         ...AUDIT_EVENTS,
         ...JOB_EVENTS,
         ...STARTUP_EVENTS,
       ]),
-      reasonCodes: new Set<string>([...KERNEL_REASON_CODES, ...JOB_REASON_CODES]),
+      reasonCodes: new Set<string>([
+        ...KERNEL_REASON_CODES,
+        ...JOB_REASON_CODES,
+        ...INGEST_REASON_CODES,
+      ]),
       routeTemplates: templates,
     });
     const scope = {

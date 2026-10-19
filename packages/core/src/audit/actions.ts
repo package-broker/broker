@@ -112,7 +112,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.rollback': IMPORT_RUN_FIELDS,
   'import_run.accept': IMPORT_RUN_FIELDS,
   'import_run.cancel': IMPORT_RUN_FIELDS,
-  'import_run.credential_set': [],
+  'import_run.credential_set': ['external_ref'],
   'purge.batch': ['count', 'kind'],
   'sync_session.finalize': ['source_id', 'added', 'updated', 'removed'],
 };

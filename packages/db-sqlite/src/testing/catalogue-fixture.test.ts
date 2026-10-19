@@ -1,3 +1,6 @@
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@package-broker/core/db/port';
@@ -19,6 +22,7 @@ import {
   toVisibilityInputs,
   type CatalogueConfig,
 } from './catalogue-fixture.js';
+import { openNodeSqliteExecutor } from './node-sqlite-executor.js';
 import { openMigratedDatabase } from './migrated-database.js';
 import { orgContext } from '@package-broker/core/db/port';
 import { createCatalogueReader } from '../repositories/catalogue-read.js';
@@ -424,22 +428,41 @@ describe('catalogue fixture', () => {
   });
 
   it('15: forged configurations seed with their derived rows for seeds 1 to 200', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pb-catalogue-sweep-'));
     let remaining = 0;
-    for (const size of [6, 12]) {
-      for (let seed = 1; seed <= 200; seed += 1) {
-        const config = randomCatalogueConfig(seed, size, { forged: true });
-        const orgOf = new Map(config.projects.map((p) => [p.id, p.orgId]));
-        remaining += config.explicit.filter((e) => orgOf.get(e.projectId) !== e.orgId).length;
-        const database = await openMigratedDatabase();
-        try {
-          await seedCatalogue(database.executor, config);
-          await seedDerivedRows(database.executor, config);
-        } finally {
-          await database.close();
+    try {
+      const templateFile = join(directory, 'template.sqlite');
+      const template = await openMigratedDatabase({ file: templateFile });
+      // Closing checkpoints the WAL so each copy contains the entire migrated schema.
+      await template.close();
+      for (const size of [6, 12]) {
+        for (let seed = 1; seed <= 200; seed += 1) {
+          const config = randomCatalogueConfig(seed, size, { forged: true });
+          const orgOf = new Map(config.projects.map((p) => [p.id, p.orgId]));
+          remaining += config.explicit.filter((e) => orgOf.get(e.projectId) !== e.orgId).length;
+          const file = join(directory, 'seed.sqlite');
+          await copyFile(templateFile, file);
+          const database = openNodeSqliteExecutor(file);
+          try {
+            await seedCatalogue(database.executor, config);
+            await seedDerivedRows(database.executor, config);
+            const rows = await select(
+              database.executor,
+              "SELECT project_id AS projectId, package_id AS packageId, origin FROM project_package WHERE origin <> 'explicit'",
+            );
+            const expected = deriveVisibility(toVisibilityInputs(config)).filter(
+              (r) => r.origin !== 'explicit',
+            );
+            expect(rows.sort(byJson)).toEqual([...expected].sort(byJson));
+          } finally {
+            await database.close();
+          }
         }
       }
+      expect(remaining).toBeGreaterThan(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
-    expect(remaining).toBeGreaterThan(0);
   }, 60_000);
 
   it('16: configurations without forged rows are unchanged', () => {

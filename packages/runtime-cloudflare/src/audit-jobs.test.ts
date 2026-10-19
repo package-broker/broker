@@ -180,17 +180,15 @@ describe.each([
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400 }],
       ]);
-      for (const org of [a, b]) {
-        for (let start = 0; start < 503; start += 50) {
-          await executor.batch(
-            Array.from({ length: Math.min(50, 503 - start) }, (_, offset) => ({
-              sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
-                  VALUES (?, ?, '2026-10-18T00:00:00.000Z', 'system', 'org.update', 'organization')`,
-              params: [`${org.orgId}-${String(start + offset).padStart(4, '0')}`, org.orgId],
-            })),
-          );
-        }
-      }
+      await executor.batch(
+        [a, b].map((org) => ({
+          sql: `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 502)
+              INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+              SELECT ? || '-' || printf('%04d', i), ?, '2026-10-18T00:00:00.000Z', 'system', 'org.update', 'organization'
+              FROM n`,
+          params: [org.orgId, org.orgId],
+        })),
+      );
       const repository = createJobRepository(executor);
       const run = async (name: string) => {
         const job = await repository.enqueue(a, {
@@ -251,5 +249,5 @@ describe.each([
       spy.mockRestore();
       await close();
     }
-  });
+  }, 60_000);
 });

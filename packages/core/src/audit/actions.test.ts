@@ -124,6 +124,61 @@ describe('auditEvent action and fields', () => {
   });
 });
 
+describe('import credential external references', () => {
+  const uuid = '550e8400-e29b-41d4-a716-446655440000';
+  const target = { type: 'import_run', id: '01J0IMPORT0000000000000000' };
+
+  it.each([
+    ['UUID', uuid],
+    ['opaque credential reference', `op://${uuid}/${uuid}/token`],
+    ['named credential reference', 'op://My Vault/My Item/token'],
+  ])('preserves a %s', (_name, externalRef) => {
+    const result = build(
+      'import_run.credential_set',
+      { external_ref: { new: externalRef } },
+      { target },
+    );
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result))).toEqual({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { external_ref: { new: externalRef } },
+    });
+  });
+
+  it.each([
+    ['broker token', formatToken('pat', 'abcdefghijkl', 'A'.repeat(43))],
+    ['provider token', FAKE.GITHUB_CLASSIC_A20],
+    ['random material', FAKE.RUN_1],
+    ['JWT', FAKE.JWT_1],
+    ['private key', FAKE.PEM_1],
+    ['credential URL', 'https://deploy:password@example.test/repo'],
+    ['credential query', 'op://vault/item/token?secret=private'],
+    ['embedded provider token', `op://vault/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['embedded random material', `op://vault/${FAKE.RUN_1}/token`],
+    ['UUID with credential material', `op://${uuid}/${FAKE.GITHUB_CLASSIC_A20}/token`],
+    ['UUID embedded in text', `prefix-${uuid}`],
+    ['UUID outside an op reference', `https://example.test/${uuid}`],
+  ])('refuses %s without echoing it', (_name, value) => {
+    for (const key of ['old', 'new']) {
+      const result = build(
+        'import_run.credential_set',
+        { external_ref: { [key]: value } },
+        { target },
+      );
+      expect(result).toEqual({ ok: false, reason: 'credential_value' });
+      expect(JSON.stringify(result)).not.toContain(value);
+    }
+  });
+
+  it('keeps UUID credential references refused in ordinary text fields', () => {
+    expect(build('role.rename', { name: { new: `op://${uuid}/token` } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+  });
+});
+
 describe('auditEvent event shape', () => {
   it('builds the event and payload', () => {
     const result = build('role.rename', { name: { old: 'A', new: 'B' } }, { projectId: 'p1' });

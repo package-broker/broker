@@ -1584,10 +1584,12 @@ const projectRoleCarriesOrg: Case = (open, wrap) =>
         mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
           role: 1,
         }),
-        ROLE_PROJECT,
-        ['project:read', 'org:read'],
-        iso(0),
-        'op-widen',
+        {
+          id: ROLE_PROJECT,
+          permissions: ['project:read', 'org:read'],
+          now: iso(0),
+          opId: 'op-widen',
+        },
       );
       expect(widened).toBe('invalid_permissions');
       expect(await snapshot()).toBe(before);

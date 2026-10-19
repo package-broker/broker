@@ -207,7 +207,7 @@ describe('the built actor and the administration service', () => {
     );
     if (actor === null) throw new Error('expected an actor');
     expect(actor.sessionId).toBe('session-1');
-    expect(await admin.deleteRole(ctx, actor, testFence(actor.userId), 'r1')).toEqual({
+    expect(await admin.deleteRole(ctx, actor, testFence(actor.userId), 'r1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
@@ -225,7 +225,7 @@ describe('the built actor and the administration service', () => {
     );
     if (actor === null) throw new Error('expected an actor');
     expect(actor.permissions.size).toBe(0);
-    expect(await admin.deleteRole(ctx, actor, testFence(actor.userId), 'r1')).toEqual({
+    expect(await admin.deleteRole(ctx, actor, testFence(actor.userId), 'r1', apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -283,3 +283,12 @@ describe('the built actor and the administration service', () => {
     expect([asContext.kind, typeof probe]).toEqual(['project', 'function']);
   });
 });
+
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

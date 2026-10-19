@@ -270,8 +270,7 @@ const creatorRemoved: Case = (open, wrap) =>
           mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
             grant: grant!.revision,
           }),
-          grant!.id,
-          'contract-remove-creator',
+          { id: grant!.id, opId: 'contract-remove-creator' },
         ),
       ).toEqual({ outcome: 'deleted', offboardedUserId: USER });
       expect(

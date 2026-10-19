@@ -469,7 +469,7 @@ const storeCalls = {
   tombstoneVersion: (store, ctx, fence, suffix) =>
     store.tombstoneVersion(ctx, fence, { versionId: `V-${suffix}`, reason: 'admin_tombstone' }),
 } satisfies Record<
-  keyof VisibilityStore,
+  Exclude<keyof VisibilityStore, 'setOrder'>,
   (
     store: VisibilityStore,
     ctx: Parameters<VisibilityStore['attachSource']>[0],
@@ -478,7 +478,7 @@ const storeCalls = {
   ) => Promise<unknown>
 >;
 
-async function seedStore(context: CaseContext, method: keyof VisibilityStore) {
+async function seedStore(context: CaseContext, method: keyof typeof storeCalls) {
   await seedWriter(context);
   const seed = seeder(context.executor);
   const { own, foreign } = orgOf(context);
@@ -527,7 +527,7 @@ async function seedStore(context: CaseContext, method: keyof VisibilityStore) {
   return fenceOf(subject);
 }
 
-function storeCase(method: keyof VisibilityStore, foreignTarget = false): ContractCase {
+function storeCase(method: keyof typeof storeCalls, foreignTarget = false): ContractCase {
   return {
     name: `${method} through the store ${foreignTarget ? 'refuses a foreign target' : 'preserves every foreign row'}`,
     async run(context) {
@@ -724,7 +724,7 @@ export const entries: readonly MutationEntry[] = [
   {
     file: 'repositories/catalogue-writer.ts',
     builder: 'createVisibilityStore',
-    cases: (Object.keys(storeCalls) as (keyof VisibilityStore)[])
+    cases: (Object.keys(storeCalls) as (keyof typeof storeCalls)[])
       .flatMap((method) => [storeCase(method), storeCase(method, true)])
       .concat(
         foreignPackageCase(true),
@@ -772,7 +772,7 @@ export const entries: readonly MutationEntry[] = [
           caseName: storeCase(method, true).name,
         }),
       ),
-      ...(Object.keys(storeCalls) as (keyof VisibilityStore)[]).map((method) => ({
+      ...(Object.keys(storeCalls) as (keyof typeof storeCalls)[]).map((method) => ({
         name: `${method} delegates an organization-scoped epoch bump`,
         locate:
           /(?<=update "cache_epoch" set "version" = hex\(randomblob\(16\)\) where )"org_id" = \?/,

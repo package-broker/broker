@@ -101,7 +101,14 @@ import type { FetchLike } from '@package-broker/core/platform/tracing';
 import { createBlobRepository } from '@package-broker/db-sqlite/repositories/blob';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { createJobScheduleRepository } from '@package-broker/db-sqlite/repositories/job-schedule';
-import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
+import {
+  KeyringMismatchError,
+  KeyringStoreUnavailableError,
+  KeyringVerifierMissingError,
+  KeyringVersionInUseError,
+  verifyKeyring,
+} from '@package-broker/core/secrets/keyring-verifier';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
@@ -111,6 +118,7 @@ import {
   createVisibilityStore,
 } from '@package-broker/db-sqlite/repositories/catalogue-writer';
 import { createScopedAdmission } from '@package-broker/db-sqlite/repositories/scoped-admission';
+import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import {
   createOrganizationBootstrap,
   createOrganizationRepository,
@@ -155,6 +163,7 @@ export type Env = {
   readonly DEPLOYMENT_ID?: string;
   readonly PB_MASTER_KEY?: string;
   readonly PB_MASTER_KEY_PREVIOUS?: string;
+  readonly PB_KEYRING_RESEED?: string;
   readonly PB_PUBLIC_URL?: string;
   readonly [binding: `PB_IDP_${string}`]: string | undefined;
 };
@@ -258,6 +267,36 @@ function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchor
   return Object.freeze({ anchors: () => Promise.resolve(list) });
 }
 
+async function verifyMasterKey(
+  keyring: Keyring,
+  executor: ScalarSqlExecutor,
+  env: Env,
+  log: KernelLog,
+): Promise<void> {
+  try {
+    const result = await verifyKeyring(keyring, createKeyringVerifierStore(executor), {
+      reseed: env.PB_KEYRING_RESEED === '1',
+    });
+    if (result.reseeded) {
+      log({ level: 'warn', event: 'keyring.reseeded', key_version: result.keyVersion });
+    }
+  } catch (error) {
+    if (error instanceof KeyringStoreUnavailableError) {
+      throw new KernelConfigError([
+        'keyring_verifier: table is missing, migrations are not applied',
+      ]);
+    }
+    if (
+      error instanceof KeyringMismatchError ||
+      error instanceof KeyringVerifierMissingError ||
+      error instanceof KeyringVersionInUseError
+    ) {
+      throw new KernelConfigError([`PB_MASTER_KEY: ${error.message}`]);
+    }
+    throw error;
+  }
+}
+
 async function buildAuth(
   executor: SqlExecutor,
   plugins: readonly PluginDefinition[],
@@ -290,6 +329,7 @@ async function buildAuth(
   const anchorList = providerAnchorsOf(providers);
   const providerAnchors = anchorReader(anchorList);
   const ids = { ulid };
+  await verifyMasterKey(keyring, executor, env, log);
   const auth = createAuthModule({
     repositories: createAuthRepositories(executor),
     keyring,

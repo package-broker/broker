@@ -38,11 +38,17 @@ import {
 } from '@package-broker/core/platform/port-config';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
+import {
+  KeyringStoreUnavailableError,
+  RESEED_VARIABLE,
+  verifyKeyring,
+} from '@package-broker/core/secrets/keyring-verifier';
 import { readMasterKeys, SecretsConfigError } from '@package-broker/core/secrets/master-key';
 import { migrate, type MigrateLogEvent } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createBlobRepository } from '@package-broker/db-sqlite/repositories/blob';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
+import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { FilesystemRootError, openFilesystemByteStore } from './blob/filesystem.js';
 import { createS3ByteStore, S3ConfigError } from './blob/s3.js';
@@ -505,6 +511,44 @@ function startJobs(
   return loop;
 }
 
+async function keyringGate(
+  keyring: Keyring,
+  executor: SqlExecutor,
+  options: StartOptions,
+): Promise<(() => Promise<boolean>) | undefined> {
+  const store = createKeyringVerifierStore(executor);
+  const reseed = options.env[RESEED_VARIABLE] === '1';
+  const attempt = async (): Promise<void> => {
+    const result = await verifyKeyring(keyring, store, { reseed });
+    if (result.reseeded) {
+      options.log?.({ level: 'warn', event: 'keyring.reseeded', key_version: result.keyVersion });
+    }
+  };
+  try {
+    await attempt();
+    return undefined;
+  } catch (error) {
+    const deferred =
+      error instanceof KeyringStoreUnavailableError && options.env['PB_MIGRATE'] === 'off';
+    if (!deferred) throw error;
+  }
+  let verified = false;
+  return async () => {
+    if (verified) return true;
+    try {
+      await attempt();
+      verified = true;
+    } catch (error) {
+      options.log?.({
+        level: 'error',
+        event: 'keyring.unverified',
+        error_name: error instanceof Error ? error.name : 'Error',
+      });
+    }
+    return verified;
+  };
+}
+
 export async function startNode(options: StartOptions): Promise<NodeBroker> {
   const log = options.log;
   const path = options.env['PB_SQLITE_PATH'] ?? DEFAULT_DATABASE_PATH;
@@ -571,6 +615,8 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       });
     }
 
+    const servingGate = await keyringGate(keyring, opened.executor, options);
+
     const slug = options.env['PB_ORG_SLUG'];
     const name = options.env['PB_ORG_NAME'];
     if (slug !== undefined && name !== undefined) {
@@ -583,6 +629,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       executor: opened.executor,
       closeDatabase,
       auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
+      ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined
         ? { log: sinkLog(telemetry.observe) }
         : log === undefined

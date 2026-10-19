@@ -114,6 +114,7 @@ function fixture(): Fixture {
   };
   const leased = (k: string): boolean => (leases.get(k) ?? 0) > f.now;
   const info = (r: Row): BlobInfo => ({
+    generation: r.generation,
     sha256: r.sha256,
     size: r.size,
     mediaType: r.mediaType,
@@ -175,6 +176,7 @@ function fixture(): Fixture {
         if (prev && prev.size !== input.size) throw new BlobConflictError();
         if (prev && prev.mediaType !== input.mediaType) throw new BlobConflictError();
         const row: Row = {
+          generation: input.generation,
           sha256: input.sha256,
           size: input.size,
           mediaType: input.mediaType,
@@ -314,7 +316,13 @@ describe('put and read back', () => {
       size: bytes.length,
       ...input,
     });
-    expect(info).toEqual({ sha256: key, size: 11, mediaType: 'application/zip', purgeAfter: null });
+    expect(info).toEqual({
+      generation: '1',
+      sha256: key,
+      size: 11,
+      mediaType: 'application/zip',
+      purgeAfter: null,
+    });
     expect(await store.head(ctx, key)).toEqual(info);
     const read = await store.get(ctx, key);
     expect(read?.info).toEqual(info);
@@ -456,7 +464,8 @@ describe('put and read back', () => {
     const key = sha(bytes);
     const a = await store.put(ctx, key, streamOf([bytes]), { size: 4, ...input });
     const b = await store.put(ctx, key, streamOf([bytes]), { size: 4, ...input });
-    expect(b).toEqual(a);
+    expect(b).toEqual({ ...a, generation: '2' });
+    expect(b.generation).not.toBe(a.generation);
     expect(f.objects.size).toBe(1);
   });
 
@@ -535,7 +544,13 @@ describe('put and read back', () => {
     const odd: BlobMetadataPort = {
       ...f.metadata,
       async publish(_c, i) {
-        return { sha256: i.sha256, size: i.size, mediaType: 'text/plain', purgeAfter: null };
+        return {
+          generation: i.generation,
+          sha256: i.sha256,
+          size: i.size,
+          mediaType: 'text/plain',
+          purgeAfter: null,
+        };
       },
     };
     const store = createBlobStore(f.byteStore, odd, opts());
@@ -943,6 +958,7 @@ describe('concurrent same-digest puts', () => {
       );
       for (const r of results) expect(r).toEqual(results[0]);
       expect(results[0]).toEqual({
+        generation: expect.any(String),
         sha256: key,
         size: 10,
         mediaType: 'application/zip',

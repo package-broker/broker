@@ -135,7 +135,13 @@ function rig(options: Options = {}) {
       const actual = createHash('sha256').update(got).digest('hex');
       if (actual !== key) throw new BlobDigestMismatchError(key, actual);
       bytes.set(key, got);
-      return { sha256: key, size: got.length, mediaType: input.mediaType, purgeAfter: null };
+      return {
+        generation: 'test-generation',
+        sha256: key,
+        size: got.length,
+        mediaType: input.mediaType,
+        purgeAfter: null,
+      };
     },
     async get(_ctx, key) {
       state.gets += 1;
@@ -146,7 +152,13 @@ function rig(options: Options = {}) {
       const found = bytes.get(key);
       if (found === undefined) return null;
       return {
-        info: { sha256: key, size: found.length, mediaType: 'application/zip', purgeAfter: null },
+        info: {
+          generation: 'test-generation',
+          sha256: key,
+          size: found.length,
+          mediaType: 'application/zip',
+          purgeAfter: null,
+        },
         body: streamOf(found),
       };
     },
@@ -159,7 +171,13 @@ function rig(options: Options = {}) {
       const found = bytes.get(key);
       return found === undefined
         ? null
-        : { sha256: key, size: found.length, mediaType: 'application/zip', purgeAfter: null };
+        : {
+            generation: 'test-generation',
+            sha256: key,
+            size: found.length,
+            mediaType: 'application/zip',
+            purgeAfter: null,
+          };
     },
   };
 

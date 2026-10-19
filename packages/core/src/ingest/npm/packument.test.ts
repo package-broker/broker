@@ -119,7 +119,13 @@ function memoryStore(chunkSize = 65_536) {
   const metadata: BlobMetadataPort = {
     reserve: async () => '1' as never,
     publish: async (c, i) => {
-      const info = { sha256: i.sha256, size: i.size, mediaType: i.mediaType, purgeAfter: null };
+      const info = {
+        generation: i.generation,
+        sha256: i.sha256,
+        size: i.size,
+        mediaType: i.mediaType,
+        purgeAfter: null,
+      };
       rows.set(`${c.orgId}:${i.sha256}`, info);
       return info;
     },

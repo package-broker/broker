@@ -7,6 +7,7 @@ import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import {
   registerCatalogueWriteGuard,
   assertCatalogueWriteGuard,
+  monotonicNow,
 } from '../internal/catalogue-write-guard.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { rederiveStatements } from './visibility-derive.js';
@@ -64,11 +65,6 @@ function validated(input: PackageUpsertInput): PackageUpsertInput {
   }
   return input;
 }
-
-const monotonicNow = sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', max(
-  unixepoch('now', 'subsec'),
-  unixepoch(package.modified_at, 'subsec') + 0.001
-), 'unixepoch')`;
 
 /**
  * Creates the package when absent and re-derives project_package for it in the same batch.

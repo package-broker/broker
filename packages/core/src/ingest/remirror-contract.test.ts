@@ -102,13 +102,20 @@ function rig(
       expect(sha(value)).toBe(key);
       beforePut();
       bytes.set(key, value);
-      return { sha256: key, size: value.length, mediaType: input.mediaType, purgeAfter: null };
+      return {
+        generation: 'test-generation',
+        sha256: key,
+        size: value.length,
+        mediaType: input.mediaType,
+        purgeAfter: null,
+      };
     },
     async head(_ctx, key) {
       const value = bytes.get(key);
       return value === undefined
         ? null
         : {
+            generation: 'test-generation',
             sha256: key,
             size: value.length,
             mediaType: 'application/zip',

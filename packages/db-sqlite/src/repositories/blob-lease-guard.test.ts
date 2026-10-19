@@ -3,7 +3,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import type { PurgeGeneration, Sha256 } from '@package-broker/core/platform/blob';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
-import * as leaseGuard from './blob-lease-guard.js';
+import * as writeGuard from '../internal/catalogue-write-guard.js';
 import { distAttachStatements } from './catalogue-write-dist.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
 import { createBlobRepository } from './blob.js';
@@ -188,13 +188,14 @@ describe('blobLeaseNotLive', () => {
   });
 });
 
-describe('dist writer shared purge lease boundary', () => {
+describe('dist writer shared purge generation fence', () => {
   it.each([
-    ['one tick before', '2026-10-17T11:59:59.999Z', true],
-    ['equal to now', '2026-10-17T12:00:00.000Z', true],
+    ['one tick before', '2026-10-17T11:59:59.999Z', false],
+    ['equal to now', '2026-10-17T12:00:00.000Z', false],
+    ['cleared', null, true],
     ['one tick after', '2026-10-17T12:00:00.001Z', false],
   ] as const)('attach handles a lease %s', async (_label, lease, available) => {
-    const shared = vi.spyOn(leaseGuard, 'leaseLive');
+    const shared = vi.spyOn(writeGuard, 'blobReferenceFence');
     try {
       const freeze = (statement: Statement): Statement => ({
         ...statement,
@@ -231,7 +232,7 @@ describe('dist writer shared purge lease boundary', () => {
       } else {
         await expect(executor.batch(plan.statements)).rejects.toThrow();
       }
-      expect(shared).toHaveBeenCalledWith('blob.purge_lease_until');
+      expect(shared).toHaveBeenCalledWith(undefined);
       const stored = await executor.all<{ blob_id: string | null }>({
         sql: 'SELECT blob_id FROM version WHERE org_id = ? AND id = ?',
         params: [a.orgId, versionId],

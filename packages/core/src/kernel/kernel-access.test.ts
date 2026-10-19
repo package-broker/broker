@@ -99,6 +99,7 @@ function liveEngine(state: Access): AuthorizationEngine {
         const found: EngineSessionAccess = {
           session: { id: 'sess-1', csrfHash: await sha256Hex(CSRF) },
           user: { id: 'user-1' },
+          identity: null,
           protectedHolder: false,
           project: input.boundary === 'project' ? { id: 'proj-1' } : null,
           organizationPermissions: state.organizationPermissions,
@@ -543,6 +544,7 @@ function sessionEngine(protectedHolder: boolean, serviceToken?: string): Authori
       lookupSession: async () => ({
         session: { id: 'sess-1', csrfHash: await sha256Hex(CSRF) },
         user: { id: 'user-1' },
+        identity: null,
         protectedHolder,
         project: null,
         organizationPermissions: ['org:read'],

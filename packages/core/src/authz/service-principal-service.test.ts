@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import type {
+  ServicePrincipalService,
+  ServicePrincipalStore,
+} from './service-principal-service.js';
+import type { ApiCall } from '../api/idempotency.js';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import { fixedClock } from '../ids.js';
 import type { ActorContext } from './administration.js';
@@ -106,7 +111,13 @@ describe('create', () => {
   it('snapshots exactly the creator non-sessionOnly permissions inside the project boundary', async () => {
     const { service, principals, authority, guard } = setup();
     const fence = fenceOf({});
-    const result = await service.create(ctx, actor, fence, { name: 'ci', projectId: PROJECT });
+    const result = await service.create(
+      ctx,
+      actor,
+      fence,
+      { name: 'ci', projectId: PROJECT },
+      apiCall,
+    );
     expect(result).toEqual({
       ok: true,
       value: {
@@ -115,6 +126,7 @@ describe('create', () => {
       },
     });
     expect(principals.create).toHaveBeenCalledWith(ctx, fence, guard, {
+      audit: expect.objectContaining({ action: 'service_principal.create' }),
       id: 'ID00',
       name: 'ci',
       projectId: PROJECT,
@@ -133,7 +145,7 @@ describe('create', () => {
 
   it('never snapshots session-only permissions such as the management and token-issue grants', async () => {
     const { service, principals } = setup();
-    await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT });
+    await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall);
     const stored = (principals.create.mock.calls[0] as unknown[])[3] as { permissions: string[] };
     expect(stored.permissions).not.toContain('project:service-principals:write');
     expect(stored.permissions).not.toContain('project:tokens:create');
@@ -143,7 +155,7 @@ describe('create', () => {
   it('refuses when the creator lacks project:service-principals:write, even with project:tokens:create', async () => {
     const { service, principals, log } = setup({ live: ['project:read', 'project:tokens:create'] });
     expect(
-      await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }),
+      await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -155,7 +167,13 @@ describe('create', () => {
   it('creates an organization-wide principal for a current admin from the org grants', async () => {
     const { service, principals, authority } = setup();
     const fence = fenceOf({});
-    const result = await service.create(ctx, admin, fence, { name: 'ci', projectId: null });
+    const result = await service.create(
+      ctx,
+      admin,
+      fence,
+      { name: 'ci', projectId: null },
+      apiCall,
+    );
     expect(result).toEqual({
       ok: true,
       value: { id: 'ID00', permissions: ['org:read', 'org:users:read', 'project:read'] },
@@ -173,7 +191,7 @@ describe('create', () => {
     const { service, principals } = setup();
     const notAdmin = { ...admin, isOrganizationAdmin: false };
     expect(
-      await service.create(ctx, notAdmin, fenceOf({}), { name: 'ci', projectId: null }),
+      await service.create(ctx, notAdmin, fenceOf({}), { name: 'ci', projectId: null }, apiCall),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -183,7 +201,9 @@ describe('create', () => {
 
   it('refuses an organization-wide principal for an admin missing org:service-principals:write', async () => {
     const { service, principals } = setup({ live: ['org:read'] });
-    expect(await service.create(ctx, admin, fenceOf({}), { name: 'ci', projectId: null })).toEqual({
+    expect(
+      await service.create(ctx, admin, fenceOf({}), { name: 'ci', projectId: null }, apiCall),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -201,7 +221,7 @@ describe('create', () => {
       const { service, principals, log } = setup();
       principals.create.mockResolvedValue(outcome);
       expect(
-        await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }),
+        await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall),
       ).toEqual(expected);
       expect(events(log, 'service_principal.changed')).toHaveLength(0);
     }
@@ -211,10 +231,16 @@ describe('create', () => {
     const { service, authority } = setup();
     for (const projectId of ['', 7, undefined]) {
       expect(
-        await service.create(ctx, actor, fenceOf({}), {
-          name: 'ci',
-          projectId: projectId as never,
-        }),
+        await service.create(
+          ctx,
+          actor,
+          fenceOf({}),
+          {
+            name: 'ci',
+            projectId: projectId as never,
+          },
+          apiCall,
+        ),
       ).toEqual({ ok: false, error: 'project_mismatch' });
     }
     expect(authority.livePermissions).not.toHaveBeenCalled();
@@ -223,7 +249,9 @@ describe('create', () => {
   it('rejects an invalid name before reading authority', async () => {
     const { service, authority } = setup();
     for (const name of ['', 'a\u0000b', 'x'.repeat(101), 7 as unknown as string]) {
-      expect(await service.create(ctx, actor, fenceOf({}), { name, projectId: PROJECT })).toEqual({
+      expect(
+        await service.create(ctx, actor, fenceOf({}), { name, projectId: PROJECT }, apiCall),
+      ).toEqual({
         ok: false,
         error: 'invalid_name',
       });
@@ -234,14 +262,20 @@ describe('create', () => {
   it('throws when the fence belongs to another user', async () => {
     const { service, principals } = setup();
     await expect(
-      service.create(ctx, actor, fenceOf({}, 'someone-else'), { name: 'ci', projectId: PROJECT }),
+      service.create(
+        ctx,
+        actor,
+        fenceOf({}, 'someone-else'),
+        { name: 'ci', projectId: PROJECT },
+        apiCall,
+      ),
     ).rejects.toThrow(TypeError);
     expect(principals.create).not.toHaveBeenCalled();
   });
 
   it('emits one change event on success', async () => {
     const { service, log } = setup();
-    await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT });
+    await service.create(ctx, actor, fenceOf({}), { name: 'ci', projectId: PROJECT }, apiCall);
     expect(events(log, 'service_principal.changed')).toEqual([
       expect.objectContaining({
         action: 'created',
@@ -259,20 +293,22 @@ describe('setPermissions', () => {
     const { service, principals, authority, guard } = setup();
     const fence = fenceOf();
     expect(
-      await service.setPermissions(ctx, actor, fence, 'sp-1', [
-        'project:read',
-        'project:packages:write',
-      ]),
+      await service.setPermissions(
+        ctx,
+        actor,
+        fence,
+        'sp-1',
+        ['project:read', 'project:packages:write'],
+        apiCall,
+      ),
     ).toEqual({ ok: true, value: null });
-    expect(principals.setPermissions).toHaveBeenCalledWith(
-      ctx,
-      fence,
-      guard,
-      'sp-1',
-      ['project:packages:write', 'project:read'],
-      NOW,
-      'ID00',
-    );
+    expect(principals.setPermissions).toHaveBeenCalledWith(ctx, fence, guard, {
+      audit: expect.objectContaining({ action: 'service_principal.permissions_set' }),
+      id: 'sp-1',
+      permissions: ['project:packages:write', 'project:read'],
+      now: NOW,
+      opId: 'ID00',
+    });
     expect(authority.guard).toHaveBeenCalledWith(ctx, fence, {
       permission: 'project:service-principals:write',
       projectId: PROJECT,
@@ -284,7 +320,14 @@ describe('setPermissions', () => {
   it('refuses a change beyond the actor live set', async () => {
     const { service, principals, log } = setup();
     expect(
-      await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:sources:read']),
+      await service.setPermissions(
+        ctx,
+        actor,
+        fenceOf(),
+        'sp-1',
+        ['project:sources:read'],
+        apiCall,
+      ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(principals.setPermissions).not.toHaveBeenCalled();
     expect(events(log, 'admin.denied')).toHaveLength(1);
@@ -292,7 +335,9 @@ describe('setPermissions', () => {
 
   it('refuses without the management permission', async () => {
     const { service, principals } = setup({ live: ['project:read'] });
-    expect(await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'])).toEqual({
+    expect(
+      await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'], apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -307,7 +352,9 @@ describe('setPermissions', () => {
       ['org:read'],
       ['project:read', 'project:read'],
     ]) {
-      expect(await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', list)).toMatchObject({
+      expect(
+        await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', list, apiCall),
+      ).toMatchObject({
         ok: false,
         error: 'invalid_permission',
       });
@@ -319,44 +366,60 @@ describe('setPermissions', () => {
     const wide = principal({ projectId: null });
     const { service, principals } = setup({ existing: wide });
     expect(
-      await service.setPermissions(ctx, admin, fenceOf(), 'sp-1', ['org:settings:write']),
+      await service.setPermissions(ctx, admin, fenceOf(), 'sp-1', ['org:settings:write'], apiCall),
     ).toMatchObject({
       ok: false,
       error: 'invalid_permission',
     });
-    expect(await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['org:read'])).toEqual({
+    expect(
+      await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['org:read'], apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
     expect(principals.setPermissions).not.toHaveBeenCalled();
     expect(
-      await service.setPermissions(ctx, admin, fenceOf(), 'sp-1', ['org:read', 'project:read']),
+      await service.setPermissions(
+        ctx,
+        admin,
+        fenceOf(),
+        'sp-1',
+        ['org:read', 'project:read'],
+        apiCall,
+      ),
     ).toEqual({ ok: true, value: null });
   });
 
   it('never carries a project binding to the repository', async () => {
     const { service, principals } = setup();
-    await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read']);
+    await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'], apiCall);
     const args = principals.setPermissions.mock.calls[0] as unknown[];
-    expect(args).toHaveLength(7);
-    expect(JSON.stringify(args.slice(3))).not.toContain(PROJECT);
+    expect(args).toHaveLength(4);
+    expect(args[3]).not.toHaveProperty('projectId');
   });
 
   it('answers not_found for an unknown id and invalid_revision for a fence with no revision', async () => {
     const missing = setup({ existing: null });
     expect(
-      await missing.service.setPermissions(ctx, actor, fenceOf(), 'nope', ['project:read']),
+      await missing.service.setPermissions(
+        ctx,
+        actor,
+        fenceOf(),
+        'nope',
+        ['project:read'],
+        apiCall,
+      ),
     ).toEqual({
       ok: false,
       error: 'not_found',
     });
     const { service, principals } = setup();
-    expect(await service.setPermissions(ctx, actor, fenceOf({}), 'sp-1', ['project:read'])).toEqual(
-      {
-        ok: false,
-        error: 'invalid_revision',
-      },
-    );
+    expect(
+      await service.setPermissions(ctx, actor, fenceOf({}), 'sp-1', ['project:read'], apiCall),
+    ).toEqual({
+      ok: false,
+      error: 'invalid_revision',
+    });
     expect(principals.setPermissions).not.toHaveBeenCalled();
   });
 
@@ -364,9 +427,16 @@ describe('setPermissions', () => {
     const { service, authority } = setup({
       existing: principal({ permissions: ['project:read', 'project:packages:read'] }),
     });
-    await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read']);
+    await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'], apiCall);
     expect(authority.guard.mock.calls[0]?.[2]).toMatchObject({ allowArchived: true });
-    await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:packages:write']);
+    await service.setPermissions(
+      ctx,
+      actor,
+      fenceOf(),
+      'sp-1',
+      ['project:packages:write'],
+      apiCall,
+    );
     expect(authority.guard.mock.calls[1]?.[2]).not.toHaveProperty('allowArchived');
   });
 
@@ -382,7 +452,7 @@ describe('setPermissions', () => {
       const { service, principals } = setup();
       principals.setPermissions.mockResolvedValue(outcome);
       expect(
-        await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read']),
+        await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'], apiCall),
       ).toMatchObject(expected as object);
     }
   });
@@ -391,19 +461,17 @@ describe('setPermissions', () => {
 describe('suspend and restore', () => {
   it('suspends one principal and touches nothing else', async () => {
     const { service, principals, createdBy, log } = setup();
-    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
     expect(principals.suspend).toHaveBeenCalledTimes(1);
-    expect(principals.suspend).toHaveBeenCalledWith(
-      ctx,
-      expect.anything(),
-      expect.anything(),
-      'sp-1',
-      NOW,
-      'ID00',
-    );
+    expect(principals.suspend).toHaveBeenCalledWith(ctx, expect.anything(), expect.anything(), {
+      audit: expect.objectContaining({ action: 'service_principal.suspend' }),
+      id: 'sp-1',
+      now: NOW,
+      opId: 'ID00',
+    });
     expect(principals.setPermissions).not.toHaveBeenCalled();
     expect(principals.restore).not.toHaveBeenCalled();
     expect(createdBy).not.toHaveBeenCalled();
@@ -414,12 +482,12 @@ describe('suspend and restore', () => {
 
   it('restores and reports not_suspended without an event', async () => {
     const { service, principals, log } = setup();
-    expect(await service.restore(ctx, actor, fenceOf(), 'sp-1')).toEqual({
+    expect(await service.restore(ctx, actor, fenceOf(), 'sp-1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
     principals.restore.mockResolvedValue('not_suspended');
-    expect(await service.restore(ctx, actor, fenceOf(), 'sp-1')).toEqual({
+    expect(await service.restore(ctx, actor, fenceOf(), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'not_suspended',
     });
@@ -428,16 +496,16 @@ describe('suspend and restore', () => {
 
   it('requires the management permission and, for organization-wide, admin status', async () => {
     const none = setup({ live: ['project:read'] });
-    expect(await none.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await none.service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
     const wide = setup({ existing: principal({ projectId: null, permissions: ['org:read'] }) });
-    expect(await wide.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await wide.service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await wide.service.restore(ctx, admin, fenceOf(), 'sp-1')).toEqual({
+    expect(await wide.service.restore(ctx, admin, fenceOf(), 'sp-1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
@@ -451,7 +519,7 @@ describe('suspend and restore', () => {
       permissions: ['project:packages:read', 'project:sources:read'],
     });
     const refused = setup({ existing: stale });
-    expect(await refused.service.restore(ctx, actor, fenceOf(), 'sp-1')).toEqual({
+    expect(await refused.service.restore(ctx, actor, fenceOf(), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -462,7 +530,7 @@ describe('suspend and restore', () => {
         permissions: ['project:read', 'project:packages:read'],
       }),
     });
-    expect(await service.restore(ctx, actor, fenceOf(), 'sp-1')).toEqual({
+    expect(await service.restore(ctx, actor, fenceOf(), 'sp-1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
@@ -479,18 +547,22 @@ describe('suspend and restore', () => {
     const { service, principals, authority } = setup({
       existing: principal({ status: 'suspended', permissions: ['project:read'], revision: 4 }),
     });
-    expect(await service.restore(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await service.restore(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'invalid_revision',
     });
-    expect(await service.restore(ctx, actor, fenceOf({ service_principal: 3 }), 'sp-1')).toEqual({
+    expect(
+      await service.restore(ctx, actor, fenceOf({ service_principal: 3 }), 'sp-1', apiCall),
+    ).toEqual({
       ok: false,
       error: 'conflict',
     });
     expect(principals.restore).not.toHaveBeenCalled();
     expect(authority.guard).not.toHaveBeenCalled();
     principals.restore.mockResolvedValue('conflict');
-    expect(await service.restore(ctx, actor, fenceOf({ service_principal: 4 }), 'sp-1')).toEqual({
+    expect(
+      await service.restore(ctx, actor, fenceOf({ service_principal: 4 }), 'sp-1', apiCall),
+    ).toEqual({
       ok: false,
       error: 'conflict',
     });
@@ -500,7 +572,9 @@ describe('suspend and restore', () => {
     const { service, principals, authority } = setup({
       existing: principal({ revision: 5 }),
     });
-    expect(await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'])).toEqual({
+    expect(
+      await service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read'], apiCall),
+    ).toEqual({
       ok: false,
       error: 'conflict',
     });
@@ -511,11 +585,13 @@ describe('suspend and restore', () => {
   it('treats an empty or non-string id as unknown, not_found for an actor who manages nothing', async () => {
     const { service } = setup({ live: ['project:read'] });
     for (const id of ['', 7 as unknown as string]) {
-      expect(await service.suspend(ctx, actor, fenceOf({}), id)).toEqual({
+      expect(await service.suspend(ctx, actor, fenceOf({}), id, apiCall)).toEqual({
         ok: false,
         error: 'not_found',
       });
-      expect(await service.setPermissions(ctx, actor, fenceOf(), id, ['project:read'])).toEqual({
+      expect(
+        await service.setPermissions(ctx, actor, fenceOf(), id, ['project:read'], apiCall),
+      ).toEqual({
         ok: false,
         error: 'not_found',
       });
@@ -525,7 +601,7 @@ describe('suspend and restore', () => {
   it('allows suspension on an archived project and answers an unchanged repeat without an event', async () => {
     const { service, principals, authority, log } = setup();
     principals.suspend.mockResolvedValue('unchanged');
-    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
@@ -539,15 +615,17 @@ describe('suspend and restore', () => {
 
   it('answers not_found for an unknown id when the actor manages nothing', async () => {
     const { service } = setup({ existing: null, live: ['project:read'] });
-    expect(await service.suspend(ctx, actor, fenceOf({}), 'nope')).toEqual({
+    expect(await service.suspend(ctx, actor, fenceOf({}), 'nope', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await service.restore(ctx, actor, fenceOf(), 'nope')).toEqual({
+    expect(await service.restore(ctx, actor, fenceOf(), 'nope', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await service.setPermissions(ctx, actor, fenceOf(), 'nope', ['project:read'])).toEqual({
+    expect(
+      await service.setPermissions(ctx, actor, fenceOf(), 'nope', ['project:read'], apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -555,18 +633,18 @@ describe('suspend and restore', () => {
 
   it('answers not_found and maps repository refusals', async () => {
     const missing = setup({ existing: null });
-    expect(await missing.service.suspend(ctx, actor, fenceOf({}), 'nope')).toEqual({
+    expect(await missing.service.suspend(ctx, actor, fenceOf({}), 'nope', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
     const { service, principals } = setup();
     principals.suspend.mockResolvedValue('authority');
-    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
     principals.suspend.mockResolvedValue('indeterminate');
-    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'indeterminate',
     });
@@ -635,10 +713,10 @@ describe('the actor must be organization-kind', () => {
     const { service, principals, authority, log } = setup();
     const fence = fenceOf();
     const results = [
-      await service.create(ctx, bad, fence, { name: 'ci', projectId: null }),
-      await service.setPermissions(ctx, bad, fence, 'sp-1', []),
-      await service.suspend(ctx, bad, fence, 'sp-1'),
-      await service.restore(ctx, bad, fence, 'sp-1'),
+      await service.create(ctx, bad, fence, { name: 'ci', projectId: null }, apiCall),
+      await service.setPermissions(ctx, bad, fence, 'sp-1', [], apiCall),
+      await service.suspend(ctx, bad, fence, 'sp-1', apiCall),
+      await service.restore(ctx, bad, fence, 'sp-1', apiCall),
     ];
     for (const result of results) expect(result).toEqual({ ok: false, error: 'forbidden' });
     for (const call of Object.values(principals)) expect(call).not.toHaveBeenCalled();
@@ -660,16 +738,30 @@ describe('existence of organization-wide principals', () => {
     const absent = setup({ existing: null, live: projectManager });
     const results = [
       [
-        await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1'),
-        await absent.service.suspend(ctx, actor, fenceOf({}), 'nope'),
+        await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall),
+        await absent.service.suspend(ctx, actor, fenceOf({}), 'nope', apiCall),
       ],
       [
-        await existing.service.restore(ctx, actor, fenceOf(), 'sp-1'),
-        await absent.service.restore(ctx, actor, fenceOf(), 'nope'),
+        await existing.service.restore(ctx, actor, fenceOf(), 'sp-1', apiCall),
+        await absent.service.restore(ctx, actor, fenceOf(), 'nope', apiCall),
       ],
       [
-        await existing.service.setPermissions(ctx, actor, fenceOf(), 'sp-1', ['project:read']),
-        await absent.service.setPermissions(ctx, actor, fenceOf(), 'nope', ['project:read']),
+        await existing.service.setPermissions(
+          ctx,
+          actor,
+          fenceOf(),
+          'sp-1',
+          ['project:read'],
+          apiCall,
+        ),
+        await absent.service.setPermissions(
+          ctx,
+          actor,
+          fenceOf(),
+          'nope',
+          ['project:read'],
+          apiCall,
+        ),
       ],
     ];
     for (const [found, missing] of results) expect(found).toEqual(missing);
@@ -680,10 +772,10 @@ describe('existence of organization-wide principals', () => {
   it('answers a non-admin holding the organization permission the same for both ids', async () => {
     const existing = setup({ existing: wide });
     const absent = setup({ existing: null });
-    expect(await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual(
-      await absent.service.suspend(ctx, actor, fenceOf({}), 'nope'),
+    expect(await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual(
+      await absent.service.suspend(ctx, actor, fenceOf({}), 'nope', apiCall),
     );
-    expect(await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1')).toEqual({
+    expect(await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -695,7 +787,8 @@ describe('existence of organization-wide principals', () => {
       setup({ existing: wide, live: projectManager }),
       setup({ existing: principal(), live: ['project:read'] }),
     ];
-    for (const { service } of cases) await service.suspend(ctx, actor, fenceOf({}), 'sp-1');
+    for (const { service } of cases)
+      await service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall);
     for (const { principals, authority } of cases) {
       expect(principals.get).toHaveBeenCalledTimes(1);
       expect(authority.livePermissions).toHaveBeenCalledTimes(1);
@@ -704,7 +797,7 @@ describe('existence of organization-wide principals', () => {
 
   it('keeps a full manager mistyped id out of the denial log', async () => {
     const { service, log } = setup({ existing: null });
-    expect(await service.suspend(ctx, admin, fenceOf({}), 'nope')).toEqual({
+    expect(await service.suspend(ctx, admin, fenceOf({}), 'nope', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -714,16 +807,111 @@ describe('existence of organization-wide principals', () => {
   it('logs the same denial for both ids', async () => {
     const existing = setup({ existing: wide, live: projectManager });
     const absent = setup({ existing: null, live: projectManager });
-    await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1');
-    await absent.service.suspend(ctx, actor, fenceOf({}), 'nope');
+    await existing.service.suspend(ctx, actor, fenceOf({}), 'sp-1', apiCall);
+    await absent.service.suspend(ctx, actor, fenceOf({}), 'nope', apiCall);
     expect(events(existing.log, 'admin.denied')).toEqual(events(absent.log, 'admin.denied'));
   });
 
   it('keeps not_found for a missing id when the actor manages at organization scope', async () => {
     const { service } = setup({ existing: null });
-    expect(await service.suspend(ctx, admin, fenceOf({}), 'nope')).toEqual({
+    expect(await service.suspend(ctx, admin, fenceOf({}), 'nope', apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
+
+describe('lifecycle audit and idempotency', () => {
+  it.each(['create', 'setPermissions', 'suspend', 'restore'] as const)(
+    'passes one %s event',
+    async (method) => {
+      const r = setup();
+      const held = fenceOf();
+      const call = { ...apiCall, idempotency: principalRecord };
+      const result =
+        method === 'create'
+          ? await r.service.create(ctx, actor, held, { name: 'ci', projectId: PROJECT }, call)
+          : method === 'setPermissions'
+            ? await r.service.setPermissions(ctx, actor, held, 'sp-1', ['project:read'], call)
+            : await r.service[method](ctx, actor, held, 'sp-1', call);
+      expect(result.ok).toBe(true);
+      expect(r.principals[method]).toHaveBeenCalledTimes(1);
+      const stored = (r.principals[method].mock.calls[0] as unknown[])[3] as Parameters<
+        ServicePrincipalStore['create']
+      >[3];
+      expect(stored.audit).toEqual({
+        id: method === 'create' ? 'ID02' : 'ID01',
+        occurredAt: NOW,
+        action: 'service_principal.' + (method === 'setPermissions' ? 'permissions_set' : method),
+        actor: { type: 'user', id: actor.userId },
+        target: { type: 'service_principal', id: method === 'create' ? 'ID00' : 'sp-1' },
+        projectId: PROJECT,
+        sourceIp: null,
+        tokenSelector: null,
+        payloadJson: expect.any(String),
+      });
+      const changes =
+        method === 'create'
+          ? {
+              name: { new: 'ci' },
+              project_id: { new: PROJECT },
+              permissions: {
+                new: ['project:packages:read', 'project:packages:write', 'project:read'],
+              },
+            }
+          : method === 'setPermissions'
+            ? { permissions: { new: ['project:read'] } }
+            : undefined;
+      expect(JSON.parse(stored.audit!.payloadJson)).toEqual({
+        op_id: call.audit.opId,
+        request_id: call.audit.requestId,
+        ...(changes === undefined ? {} : { changes }),
+      });
+      expect(stored.idempotency).toBe(principalRecord);
+    },
+  );
+
+  it.each(['create', 'setPermissions', 'suspend', 'restore'] as const)(
+    'omits absent %s idempotency',
+    async (method) => {
+      const r = setup();
+      const held = fenceOf();
+      if (method === 'create')
+        await r.service.create(ctx, actor, held, { name: 'ci', projectId: PROJECT }, apiCall);
+      else if (method === 'setPermissions')
+        await r.service.setPermissions(ctx, actor, held, 'sp-1', ['project:read'], apiCall);
+      else await r.service[method](ctx, actor, held, 'sp-1', apiCall);
+      expect((r.principals[method].mock.calls[0] as unknown[])[3]).not.toHaveProperty(
+        'idempotency',
+      );
+    },
+  );
+
+  it('requires a call for every user mutation', () => {
+    expectTypeOf<Parameters<ServicePrincipalService['create']>['length']>().toEqualTypeOf<5>();
+    expectTypeOf<
+      Parameters<ServicePrincipalService['setPermissions']>['length']
+    >().toEqualTypeOf<6>();
+    expectTypeOf<Parameters<ServicePrincipalService['suspend']>['length']>().toEqualTypeOf<5>();
+    expectTypeOf<Parameters<ServicePrincipalService['restore']>['length']>().toEqualTypeOf<5>();
+  });
+});
+const principalRecord = {
+  principalKey: 'user:actor-1',
+  key: 'principal',
+  route: '/principals',
+  requestHash: 'hash',
+  status: 200,
+  responseJson: '{}',
+  createdAt: NOW,
+  expiresAt: '2026-10-16T08:00:00.000Z',
+};

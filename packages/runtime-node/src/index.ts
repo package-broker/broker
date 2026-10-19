@@ -298,6 +298,7 @@ async function assembleAccess(
       ...common,
     }),
     tokenRevoke: createTokenRevokeService({
+      ids,
       tokens: tokenRepository,
       authority,
       ownership: tokenRepository,

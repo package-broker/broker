@@ -391,7 +391,14 @@ describe('PAT issuance: refuse, never narrow', () => {
     'forwards the requested %s level unchanged to the guarded batch',
     async (level) => {
       const { service, calls } = patRig();
-      const result = await service.issue(ctx, session(), fence(), patInput({ scope: level }));
+      const result = await service.issue(ctx, session(), fence(), patInput({ scope: level }), {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      });
       expect(result.ok).toBe(true);
       expect(calls).toHaveLength(1);
       expect(calls[0]?.input.scope).toBe(level);
@@ -402,7 +409,14 @@ describe('PAT issuance: refuse, never narrow', () => {
     'a %s request above a target policy is refused with no credential',
     async (level) => {
       const { service, calls, logs } = patRig({ status: 'refused', reason: 'authority' });
-      const result = await service.issue(ctx, session(), fence(), patInput({ scope: level }));
+      const result = await service.issue(ctx, session(), fence(), patInput({ scope: level }), {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      });
       expect(result).toEqual({ ok: false, error: 'forbidden' });
       expect(calls).toHaveLength(1);
       expect(calls[0]?.input.scope).toBe(level);
@@ -417,6 +431,14 @@ describe('PAT issuance: refuse, never narrow', () => {
       session(),
       fence(),
       patInput({ scope: level, readOnly: true }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'scope_conflict' });
     expect(calls).toHaveLength(0);
@@ -431,6 +453,14 @@ describe('PAT issuance: refuse, never narrow', () => {
         session(),
         fence(),
         patInput({ expiresAt: expiresAt as unknown as string }),
+        {
+          audit: {
+            opId: '01K00000000000000000000001',
+            requestId: '01K00000000000000000000002',
+            sourceIp: null,
+            tokenSelector: null,
+          },
+        },
       );
       expect(result).toEqual({ ok: false, error: 'invalid_expiry' });
       expect(calls).toHaveLength(0);
@@ -444,6 +474,14 @@ describe('PAT issuance: refuse, never narrow', () => {
       session(),
       fence(),
       patInput({ expiresAt: inDays(91) }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'invalid_expiry' });
     expect(calls).toHaveLength(0);
@@ -451,13 +489,27 @@ describe('PAT issuance: refuse, never narrow', () => {
 
   it('a self PAT issues with no permission port at all, so project:tokens:create is never consulted', async () => {
     const { service } = patRig();
-    const result = await service.issue(ctx, session(), fence(), patInput({ scope: 'full' }));
+    const result = await service.issue(ctx, session(), fence(), patInput({ scope: 'full' }), {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     expect(result.ok).toBe(true);
   });
 
   it('refuses a selected PAT with an empty binding set', async () => {
     const { service, calls } = patRig();
-    const result = await service.issue(ctx, session(), fence(), patInput({ projectIds: [] }));
+    const result = await service.issue(ctx, session(), fence(), patInput({ projectIds: [] }), {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     expect(result).toEqual({ ok: false, error: 'invalid_projects' });
     expect(calls).toHaveLength(0);
   });
@@ -541,6 +593,14 @@ describe('service token issuance: refuse, never narrow', () => {
       actor,
       fence(),
       svcInput({ scope: 'write' }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -559,6 +619,14 @@ describe('service token issuance: refuse, never narrow', () => {
       actor,
       fence(),
       svcInput({ scope: 'write' }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -579,6 +647,14 @@ describe('service token issuance: refuse, never narrow', () => {
         actor,
         fence(),
         svcInput({ scope: level, expiresAt: inDays(30) }),
+        {
+          audit: {
+            opId: '01K00000000000000000000001',
+            requestId: '01K00000000000000000000002',
+            sourceIp: null,
+            tokenSelector: null,
+          },
+        },
       );
       expect(result).toEqual({ ok: false, error: 'forbidden' });
       expect(calls[0]?.input.scope).toBe(level);
@@ -591,7 +667,21 @@ describe('service token issuance: refuse, never narrow', () => {
         permissions: ['project:read', 'project:packages:read', 'project:tokens:create'],
       }),
     });
-    const result = await service.issue(ctx, session(), actor, fence(), svcInput({ scope: 'full' }));
+    const result = await service.issue(
+      ctx,
+      session(),
+      actor,
+      fence(),
+      svcInput({ scope: 'full' }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
+    );
     expect(result.ok).toBe(true);
     expect(calls[0]?.input.authority.covers).toEqual(['project:packages:read', 'project:read']);
   });
@@ -604,6 +694,14 @@ describe('service token issuance: refuse, never narrow', () => {
       actor,
       fence(),
       svcInput({ scope: level, readOnly: true }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'scope_conflict' });
     expect(calls).toHaveLength(0);
@@ -617,6 +715,14 @@ describe('service token issuance: refuse, never narrow', () => {
       actor,
       fence(),
       svcInput({ expiresAt: expiresAt as unknown as string }),
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'invalid_expiry' });
     expect(calls).toHaveLength(0);
@@ -624,7 +730,14 @@ describe('service token issuance: refuse, never narrow', () => {
 
   it('a non-user session is refused', async () => {
     const { service, calls } = svcRig();
-    const result = await service.issue(ctx, session('service'), actor, fence(), svcInput());
+    const result = await service.issue(ctx, session('service'), actor, fence(), svcInput(), {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
   });

@@ -380,6 +380,7 @@ async function buildAuth(
       ...common,
     }),
     tokenRevoke: createTokenRevokeService({
+      ids,
       tokens: tokenRepository,
       authority,
       ownership: tokenRepository,

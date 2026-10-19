@@ -1638,8 +1638,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement()),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(blocked.status).toBe('refused');
       const untouched = await world.executor.all<{ revoked_at: string | null }>(
@@ -1651,8 +1650,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement(true)),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(allowed.status).toBe('revoked');
       const archivedLookup = await createAccessRepository(world.executor).lookupToken(world.a, {
@@ -1686,8 +1684,7 @@ const doubleRevoke: Case = (open, wrap) =>
             organizationAdmin: false,
             covers: [],
           }),
-          'victim',
-          now,
+          { tokenId: 'victim', now: now },
         );
       const stampA = iso(0);
       const stampB = iso(5000);

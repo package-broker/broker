@@ -1,3 +1,5 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { Organization } from '../db/organization.js';
 import type { OrgContext } from '../db/port.js';
@@ -45,6 +47,8 @@ export interface ServiceTokenStoreInput {
   readonly authority: ServiceTokenAuthority;
   /** Provider anchors of the organization, for the issuer's group and e-mail evidence. */
   readonly providerAnchors: readonly ProviderAnchor[];
+  readonly audit?: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
 }
 
 export type ServiceTokenIssueOutcome =
@@ -124,6 +128,7 @@ export interface ServiceTokenService {
     actor: ActorContext,
     fence: MutationFence,
     input: ServiceTokenIssueInput,
+    call: ApiCall,
   ): Promise<ServiceTokenResult>;
 }
 
@@ -225,7 +230,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
   }
 
   return {
-    async issue(ctx, authenticated, actor, fence, request) {
+    async issue(ctx, authenticated, actor, fence, request, call) {
       const input = {
         servicePrincipalId: request.servicePrincipalId,
         name: request.name,
@@ -272,8 +277,11 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
       );
       if (expiresMs > nowMs + days * DAY_MS) return fail('invalid_expiry');
 
-      const id = input.servicePrincipalId;
-      const target = typeof id === 'string' && id !== '' ? await principals.get(ctx, id) : null;
+      const principalId = input.servicePrincipalId;
+      const target =
+        typeof principalId === 'string' && principalId !== ''
+          ? await principals.get(ctx, principalId)
+          : null;
       if (target === null) {
         const live = await authority.livePermissions(ctx, fence, null);
         return live.has(PROJECT_ISSUE) || live.has(ORG_ISSUE)
@@ -296,11 +304,30 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
       const storeNow = clock.now();
       if (expiresMs <= storeNow.getTime()) return fail('invalid_expiry');
 
+      const id = ids.ulid();
+      const audit = auditEvent({
+        id: ids.ulid(),
+        now: isoTimestamp(storeNow),
+        action: 'token.issue',
+        actor: { type: 'user', id: actor.userId },
+        context: call.audit,
+        target: { type: 'token', id },
+        projectId: target.projectId,
+        changes: {
+          kind: { new: 'svc' },
+          name: { new: input.name },
+          scope: { new: scope.level },
+          expires_at: { new: input.expiresAt },
+          project_mode: { new: target.projectId === null ? 'all' : 'selected' },
+          project_count: { new: target.projectId === null ? 0 : 1 },
+        },
+      });
+      if (!audit.ok) throw new TypeError('Invalid token issue audit event');
       const outcome = await tokens.issueService(
         ctx,
         fence,
         {
-          id: ids.ulid(),
+          id,
           name: input.name,
           servicePrincipalId: target.id,
           projectId: target.projectId,
@@ -311,6 +338,15 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
           now: isoTimestamp(storeNow),
           authority: { ...requirement, covers },
           providerAnchors,
+          audit: audit.event,
+          ...(call.idempotency === undefined
+            ? {}
+            : {
+                idempotency: {
+                  ...call.idempotency,
+                  responseJson: JSON.stringify({ code: 'already_issued', id }),
+                },
+              }),
         },
         mint,
       );

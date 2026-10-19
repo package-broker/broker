@@ -955,3 +955,186 @@ it('restoration preserves non-refetchability and a later removal narrows re-fetc
   expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 0 });
   expect(await blobState()).toEqual(before);
 });
+
+describe('revival and the blob purge lease', () => {
+  const scope = { kind: 'package', packageId: PACKAGE } as const;
+  const LIVE = '2099-01-01T00:00:00.000Z';
+  const digest = (n: number) => n.toString(16).padStart(64, '0');
+
+  async function blobFor(owner: OrgContext, n: number, leaseUntil: string | null, sha = n) {
+    const id = `BLOB${String(n)}${owner.orgId}`;
+    await run(
+      stmt(
+        `INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, purge_lease_until)
+          VALUES (?, ?, ?, 1, ?, ?)`,
+        id,
+        owner.orgId,
+        digest(sha),
+        `k${String(n)}${owner.orgId}`,
+        leaseUntil,
+      ),
+    );
+    return id;
+  }
+
+  async function removedVersion(name: string, blobId: string | null): Promise<string> {
+    await seedVersions(PACKAGE, name);
+    const id = `V-${PACKAGE}-${name}`;
+    await run(
+      stmt(
+        "UPDATE version SET status = 'removed_upstream', removed_upstream_at = ?, blob_id = ? WHERE id = ?",
+        OLD,
+        blobId,
+        id,
+      ),
+    );
+    return id;
+  }
+
+  async function finalizeWith(present: readonly string[], executor = reconciler) {
+    const { stamp } = await executor.openListing(org, guard, scope);
+    await executor.markListing(org, guard, { scope, stamp, present });
+    return executor.finalizeListing(
+      org,
+      guard,
+      completeVersionListing({ packageId: PACKAGE, stamp, count: present.length }),
+    );
+  }
+
+  const statusOf = (id: string) => scalar('SELECT status AS v FROM version WHERE id = ?', id);
+  const revisionCount = () => scalar('SELECT count(*) AS v FROM version_revision');
+
+  it('1: an unleased blob revives with its revision row and epoch bump', async () => {
+    const id = await removedVersion('1.0.0', await blobFor(org, 1, null));
+    await run(stmt("UPDATE source SET removal_policy = 'exclude' WHERE id = ?", SOURCE));
+    const before = await epoch();
+    const result = await finalizeWith(['1.0.0']);
+    expect(result).toMatchObject({ restored: 1, leaseHeldBack: 0 });
+    expect(await statusOf(id)).toBe('active');
+    expect(await revisionCount()).toBe(1);
+    expect(await epoch()).not.toBe(before);
+  });
+
+  it('1: a live lease keeps the version removed_upstream with no revision, event or epoch bump', async () => {
+    const id = await removedVersion('1.0.0', await blobFor(org, 1, LIVE));
+    await run(stmt("UPDATE source SET removal_policy = 'exclude' WHERE id = ?", SOURCE));
+    const before = await epoch();
+    const rev = await scalar('SELECT revision AS v FROM version WHERE id = ?', id);
+    const result = await finalizeWith(['1.0.0']);
+    expect(result).toMatchObject({ restored: 0, removed: 0, leaseHeldBack: 1 });
+    expect(await statusOf(id)).toBe('removed_upstream');
+    expect(await revisionCount()).toBe(0);
+    expect(await epoch()).toBe(before);
+    expect(await scalar('SELECT revision AS v FROM version WHERE id = ?', id)).toBe(rev);
+    expect(await scalar('SELECT count(*) AS v FROM version WHERE last_op_id IS NOT NULL')).toBe(0);
+  });
+
+  it('2: after the lease expires a fresh finalize revives; before expiry it is held back each time', async () => {
+    const blobId = await blobFor(org, 1, LIVE);
+    const id = await removedVersion('1.0.0', blobId);
+    expect(await finalizeWith(['1.0.0'])).toMatchObject({ leaseHeldBack: 1, restored: 0 });
+    expect(await finalizeWith(['1.0.0'])).toMatchObject({ leaseHeldBack: 1, restored: 0 });
+    expect(await statusOf(id)).toBe('removed_upstream');
+    await run(stmt('UPDATE blob SET purge_lease_until = ? WHERE id = ?', OLD, blobId));
+    expect(await finalizeWith(['1.0.0'])).toMatchObject({ leaseHeldBack: 0, restored: 1 });
+    expect(await statusOf(id)).toBe('active');
+  });
+
+  it('a revive UPDATE that matches nothing writes no revision or epoch and reports held-back rows', async () => {
+    const id = await removedVersion('1.0.0', await blobFor(org, 1, null));
+    await run(stmt("UPDATE source SET removal_policy = 'exclude' WHERE id = ?", SOURCE));
+    const before = await epoch();
+    let reviveAttempted = false;
+    const spy = createCatalogueReconciler({
+      ...database.executor,
+      batch: (statements) =>
+        database.executor.batch(
+          statements.map((statement) => {
+            if (!/^UPDATE version SET status = 'active'/.test(statement.sql.trim())) {
+              return statement;
+            }
+            reviveAttempted = true;
+            return { ...statement, sql: `${statement.sql} AND 0` };
+          }),
+        ),
+    });
+    const result = await finalizeWith(['1.0.0'], spy);
+    expect(reviveAttempted).toBe(true);
+    expect(await revisionCount()).toBe(0);
+    expect(await epoch()).toBe(before);
+    expect(result).toMatchObject({ removed: 0, restored: 0, leaseHeldBack: 1 });
+    expect(await statusOf(id)).toBe('removed_upstream');
+    expect(await scalar('SELECT last_op_id AS v FROM version WHERE id = ?', id)).toBeNull();
+    expect(await scalar('SELECT rev AS v FROM package WHERE id = ?', PACKAGE)).toBe(1);
+  });
+
+  it('3: a version without a blob revives; a lease on an unrelated blob does not hold it back', async () => {
+    await blobFor(org, 9, LIVE);
+    const id = await removedVersion('1.0.0', null);
+    const result = await finalizeWith(['1.0.0']);
+    expect(result).toMatchObject({ restored: 1, leaseHeldBack: 0 });
+    expect(await statusOf(id)).toBe('active');
+  });
+
+  it('4: a lease on the same sha256 in another organization does not hold back revival; its own does', async () => {
+    await blobFor(other, 1, LIVE, 1);
+    const own = await blobFor(org, 2, null, 1);
+    const id = await removedVersion('1.0.0', own);
+    expect(await finalizeWith(['1.0.0'])).toMatchObject({ restored: 1, leaseHeldBack: 0 });
+    expect(await statusOf(id)).toBe('active');
+
+    await run(
+      stmt(
+        "UPDATE version SET status = 'removed_upstream', removed_upstream_at = ? WHERE id = ?",
+        OLD,
+        id,
+      ),
+      stmt('UPDATE blob SET purge_lease_until = ? WHERE id = ?', LIVE, own),
+    );
+    expect(await finalizeWith(['1.0.0'])).toMatchObject({ restored: 0, leaseHeldBack: 1 });
+    expect(await statusOf(id)).toBe('removed_upstream');
+  });
+
+  it('5: flagging an active version with a leased blob is unaffected and its SQL has no lease predicate', async () => {
+    await seedVersions(PACKAGE, '1.0.0', '2.0.0');
+    const blobId = await blobFor(org, 1, LIVE);
+    await run(stmt('UPDATE version SET blob_id = ? WHERE id = ?', blobId, `V-${PACKAGE}-2.0.0`));
+    const captured: Statement[] = [];
+    const spy = createCatalogueReconciler({
+      ...database.executor,
+      batch: (statements) => {
+        captured.push(...statements);
+        return database.executor.batch(statements);
+      },
+    });
+    const result = await finalizeWith(['1.0.0'], spy);
+    expect(result).toMatchObject({ removed: 1, restored: 0 });
+    expect(await statusOf(`V-${PACKAGE}-2.0.0`)).toBe('removed_upstream');
+    const flag = captured.filter((s) =>
+      /^UPDATE version SET status = 'removed_upstream'/.test(s.sql.trim()),
+    );
+    expect(flag).toHaveLength(1);
+    expect(flag[0]?.sql).not.toContain('purge_lease_until');
+    const revive = captured.filter((s) =>
+      /^UPDATE version SET status = 'active'/.test(s.sql.trim()),
+    );
+    expect(revive).toHaveLength(1);
+    expect(revive[0]?.sql).toContain('purge_lease_until');
+    expect(
+      captured.filter(
+        (s) => s.sql.trim().startsWith('UPDATE version') && s.sql.includes('purge_lease_until'),
+      ),
+    ).toEqual(revive);
+  });
+
+  it('4: a foreign leased blob reference behaves like an absent blob reference', async () => {
+    const foreign = await removedVersion('1.0.0', await blobFor(other, 1, LIVE));
+    const absent = await removedVersion('2.0.0', null);
+    expect(await finalizeWith(['1.0.0', '2.0.0'])).toMatchObject({
+      restored: 2,
+      leaseHeldBack: 0,
+    });
+    expect(await statusOf(foreign)).toBe('active');
+    expect(await statusOf(absent)).toBe('active');
+  });
+});

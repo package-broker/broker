@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import type { TokenRevokeService, TokenRevokeStore } from './token-revoke.js';
+import type { ApiCall } from '../api/idempotency.js';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { AuthenticatedSession } from '../auth/session.js';
 import { orgContext, type OrgContext } from '../db/port.js';
 import { fixedClock } from '../ids.js';
@@ -117,8 +119,7 @@ function setup(options: Setup = {}) {
         scope: OrgContext,
         _fence: unknown,
         _guard: FenceGuard,
-        tokenId: string,
-        now: string,
+        { tokenId, now }: Parameters<TokenRevokeStore['revoke']>[3],
       ): Promise<TokenRevokeOutcome> => {
         const forced = options.revoke?.(tokenId);
         if (forced !== undefined) return forced;
@@ -149,6 +150,7 @@ function setup(options: Setup = {}) {
     authority,
     ownership,
     clock: fixedClock(NOW),
+    ids: { ulid: () => 'event-revoke' },
     log,
   });
   const events = () =>
@@ -160,13 +162,17 @@ describe('own personal token', () => {
   it('revokes its own PAT with no project or organization grant at all', async () => {
     const { service, tokens, ownership, authority, rows, events } = setup();
     const held = fence();
-    expect(await service.revoke(ctx, session(), held, own('pat-own-selected'))).toEqual({
+    expect(await service.revoke(ctx, session(), held, own('pat-own-selected'), apiCall)).toEqual({
       ok: true,
       value: { revoked: true },
     });
     expect(tokens.get).toHaveBeenCalledWith(ctx, 'pat-own-selected');
     expect(ownership.ownPersonalToken).toHaveBeenCalledWith(ctx, held, 'pat-own-selected');
-    expect(tokens.revoke).toHaveBeenCalledWith(ctx, held, OWN_GUARD, 'pat-own-selected', NOW);
+    expect(tokens.revoke).toHaveBeenCalledWith(ctx, held, OWN_GUARD, {
+      audit: expect.objectContaining({ action: 'token.revoke' }),
+      tokenId: 'pat-own-selected',
+      now: NOW,
+    });
     expect(authority.guard).not.toHaveBeenCalled();
     expect(rows.get('pat-own-selected')?.revokedAt).toBe(NOW);
     expect(events()).toEqual([
@@ -186,7 +192,9 @@ describe('own personal token', () => {
 
   it('revokes its own all-project PAT after losing every project membership', async () => {
     const { service, rows } = setup({ projects: {} });
-    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'))).toMatchObject({
+    expect(
+      await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall),
+    ).toMatchObject({
       ok: true,
     });
     expect(rows.get('pat-own-all')?.revokedAt).toBe(NOW);
@@ -194,7 +202,7 @@ describe('own personal token', () => {
 
   it('does not treat another user PAT as own', async () => {
     const { service, tokens, ownership } = setup();
-    expect(await service.revoke(ctx, session(), fence(), own('pat-other-all'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('pat-other-all'), apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -204,8 +212,8 @@ describe('own personal token', () => {
 
   it('an unknown id on the own route answers like another user PAT', async () => {
     const { service } = setup();
-    expect(await service.revoke(ctx, session(), fence(), own('missing'))).toEqual(
-      await service.revoke(ctx, session(), fence(), own('pat-other-all')),
+    expect(await service.revoke(ctx, session(), fence(), own('missing'), apiCall)).toEqual(
+      await service.revoke(ctx, session(), fence(), own('pat-other-all'), apiCall),
     );
   });
 });
@@ -216,7 +224,7 @@ describe('project manager', () => {
   it('revokes a service token bound to the route project under an archived-tolerant guard', async () => {
     const { service, tokens, authority, rows, events } = setup(manager);
     const held = fence();
-    expect(await service.revoke(ctx, session(), held, onProject('svc-a'))).toMatchObject({
+    expect(await service.revoke(ctx, session(), held, onProject('svc-a'), apiCall)).toMatchObject({
       ok: true,
     });
     expect(authority.guard).toHaveBeenCalledWith(ctx, held, {
@@ -226,7 +234,11 @@ describe('project manager', () => {
       covers: [],
       allowArchived: true,
     });
-    expect(tokens.revoke).toHaveBeenCalledWith(ctx, held, AUTHORITY_GUARD, 'svc-a', NOW);
+    expect(tokens.revoke).toHaveBeenCalledWith(ctx, held, AUTHORITY_GUARD, {
+      audit: expect.objectContaining({ action: 'token.revoke' }),
+      tokenId: 'svc-a',
+      now: NOW,
+    });
     expect(rows.get('svc-a')?.revokedAt).toBe(NOW);
     expect(events()[0]).toMatchObject({ via: 'project', projectId: PROJECT_A, kind: 'svc' });
   });
@@ -241,7 +253,7 @@ describe('project manager', () => {
       'pat-other-selected',
       'svc-foreign-org',
     ]) {
-      expect(await service.revoke(ctx, session(), fence(), onProject(id))).toEqual({
+      expect(await service.revoke(ctx, session(), fence(), onProject(id), apiCall)).toEqual({
         ok: false,
         error: 'not_found',
       });
@@ -255,13 +267,15 @@ describe('project manager', () => {
     const { service, tokens } = setup({
       projects: { [PROJECT_A]: ['project:tokens:revoke'], [PROJECT_B]: ['project:tokens:revoke'] },
     });
-    expect(await service.revoke(ctx, session(), fence(), onProject('svc-b', PROJECT_A))).toEqual({
+    expect(
+      await service.revoke(ctx, session(), fence(), onProject('svc-b', PROJECT_A), apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
     expect(tokens.revoke).not.toHaveBeenCalled();
     expect(
-      await service.revoke(ctx, session(), fence(), onProject('svc-b', PROJECT_B)),
+      await service.revoke(ctx, session(), fence(), onProject('svc-b', PROJECT_B), apiCall),
     ).toMatchObject({ ok: true });
   });
 
@@ -269,7 +283,7 @@ describe('project manager', () => {
     const counts: number[] = [];
     for (const id of ['missing', 'svc-b', 'pat-other-all', 'svc-a']) {
       const { service, authority } = setup({ projects: {} });
-      await service.revoke(ctx, session(), fence(), onProject(id));
+      await service.revoke(ctx, session(), fence(), onProject(id), apiCall);
       counts.push(authority.livePermissions.mock.calls.length);
       expect(authority.livePermissions).toHaveBeenLastCalledWith(ctx, expect.anything(), PROJECT_A);
     }
@@ -281,7 +295,7 @@ describe('project manager', () => {
       projects: { [PROJECT_A]: ['project:tokens:read', 'project:tokens:create'] },
     });
     for (const id of ['svc-a', 'missing', 'pat-other-all']) {
-      expect(await service.revoke(ctx, session(), fence(), onProject(id))).toEqual({
+      expect(await service.revoke(ctx, session(), fence(), onProject(id), apiCall)).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -291,7 +305,7 @@ describe('project manager', () => {
 
   it('project authority does not reach a service token on the organization route', async () => {
     const { service, tokens } = setup(manager);
-    expect(await service.revoke(ctx, session(), fence(), own('svc-a'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('svc-a'), apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -309,21 +323,27 @@ describe('organization authority', () => {
   )('org:tokens:revoke revokes %s', async (id) => {
     const { service, tokens, authority, rows, events } = setup(admin);
     const held = fence();
-    expect(await service.revoke(ctx, session(), held, own(id))).toMatchObject({ ok: true });
+    expect(await service.revoke(ctx, session(), held, own(id), apiCall)).toMatchObject({
+      ok: true,
+    });
     expect(authority.guard).toHaveBeenCalledWith(ctx, held, {
       permission: 'org:tokens:revoke',
       projectId: null,
       organizationAdmin: false,
       covers: [],
     });
-    expect(tokens.revoke).toHaveBeenCalledWith(ctx, held, AUTHORITY_GUARD, id, NOW);
+    expect(tokens.revoke).toHaveBeenCalledWith(ctx, held, AUTHORITY_GUARD, {
+      audit: expect.objectContaining({ action: 'token.revoke' }),
+      tokenId: id,
+      now: NOW,
+    });
     expect(rows.get(id)?.revokedAt).toBe(NOW);
     expect(events()[0]).toMatchObject({ via: 'organization', tokenId: id });
   });
 
   it('reports an unknown id as not_found to an organization revoker', async () => {
     const { service, tokens } = setup(admin);
-    expect(await service.revoke(ctx, session(), fence(), own('missing'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('missing'), apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -332,7 +352,7 @@ describe('organization authority', () => {
 
   it('a token id of another organization behaves like an unknown id', async () => {
     const { service, tokens, rows } = setup(admin);
-    expect(await service.revoke(ctx, session(), fence(), own('svc-foreign-org'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('svc-foreign-org'), apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -343,11 +363,15 @@ describe('organization authority', () => {
 
   it('a route project that differs from the binding behaves like an unknown id', async () => {
     const { service, tokens } = setup(admin);
-    expect(await service.revoke(ctx, session(), fence(), onProject('svc-b', PROJECT_A))).toEqual({
+    expect(
+      await service.revoke(ctx, session(), fence(), onProject('svc-b', PROJECT_A), apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
-    expect(await service.revoke(ctx, session(), fence(), onProject('pat-other-all'))).toEqual({
+    expect(
+      await service.revoke(ctx, session(), fence(), onProject('pat-other-all'), apiCall),
+    ).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -356,7 +380,7 @@ describe('organization authority', () => {
 
   it('org:tokens:read alone revokes nothing', async () => {
     const { service, tokens } = setup({ organization: ['org:tokens:read'] });
-    expect(await service.revoke(ctx, session(), fence(), own('svc-org'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('svc-org'), apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -373,7 +397,7 @@ describe('sessions only', () => {
         projects: { [PROJECT_A]: ['project:tokens:revoke'] },
       });
       for (const input of [onProject('svc-a'), own('svc-org'), own('pat-own-all')]) {
-        expect(await service.revoke(ctx, session({ kind }), fence(), input)).toEqual({
+        expect(await service.revoke(ctx, session({ kind }), fence(), input, apiCall)).toEqual({
           ok: false,
           error: 'forbidden',
         });
@@ -385,10 +409,10 @@ describe('sessions only', () => {
   it('rejects a fence that does not belong to the session', async () => {
     const { service, tokens } = setup();
     await expect(
-      service.revoke(ctx, session(), fence('user-1', 'session-2'), own('pat-own-all')),
+      service.revoke(ctx, session(), fence('user-1', 'session-2'), own('pat-own-all'), apiCall),
     ).rejects.toThrow(TypeError);
     await expect(
-      service.revoke(ctx, session(), fence('user-2'), own('pat-own-all')),
+      service.revoke(ctx, session(), fence('user-2'), own('pat-own-all'), apiCall),
     ).rejects.toThrow(TypeError);
     expect(tokens.revoke).not.toHaveBeenCalled();
   });
@@ -396,13 +420,13 @@ describe('sessions only', () => {
   it('rejects an empty route project id', async () => {
     const { service } = setup();
     await expect(
-      service.revoke(ctx, session(), fence(), { tokenId: 'svc-a', routeProjectId: '' }),
+      service.revoke(ctx, session(), fence(), { tokenId: 'svc-a', routeProjectId: '' }, apiCall),
     ).rejects.toThrow(TypeError);
   });
 
   it('refuses an empty token id without reading', async () => {
     const { service, tokens } = setup({ organization: ['org:tokens:revoke'] });
-    expect(await service.revoke(ctx, session(), fence(), own(''))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own(''), apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -411,7 +435,7 @@ describe('sessions only', () => {
 
   it('a session that died before the batch is unauthenticated, with no denial event', async () => {
     const { service, log } = setup({ revoke: () => ({ status: 'refused', reason: 'authority' }) });
-    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall)).toEqual({
       ok: false,
       error: 'unauthenticated',
     });
@@ -422,12 +446,14 @@ describe('sessions only', () => {
 describe('idempotency and batch outcomes', () => {
   it('a repeated revoke succeeds with one revoked_at and one event', async () => {
     const { service, rows, events, tokens } = setup();
-    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'))).toMatchObject({
+    expect(
+      await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall),
+    ).toMatchObject({
       ok: true,
       value: { revoked: true },
     });
     const first = rows.get('pat-own-all')?.revokedAt;
-    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall)).toEqual({
       ok: true,
       value: { revoked: false },
     });
@@ -440,8 +466,8 @@ describe('idempotency and batch outcomes', () => {
   it('two revokes in flight together produce one event', async () => {
     const { service, events } = setup({ organization: ['org:tokens:revoke'] });
     const results = await Promise.all([
-      service.revoke(ctx, session(), fence(), own('svc-a')),
-      service.revoke(ctx, session(), fence(), own('svc-a')),
+      service.revoke(ctx, session(), fence(), own('svc-a'), apiCall),
+      service.revoke(ctx, session(), fence(), own('svc-a'), apiCall),
     ]);
     expect(results.every((result) => result.ok)).toBe(true);
     expect(events()).toHaveLength(1);
@@ -454,7 +480,7 @@ describe('idempotency and batch outcomes', () => {
         projects: { [PROJECT_A]: ['project:tokens:revoke'] },
         revoke: () => ({ status: 'refused', reason }),
       });
-      expect(await service.revoke(ctx, session(), fence(), onProject('svc-a'))).toEqual({
+      expect(await service.revoke(ctx, session(), fence(), onProject('svc-a'), apiCall)).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -468,7 +494,7 @@ describe('idempotency and batch outcomes', () => {
       projects: { [PROJECT_A]: ['project:tokens:revoke'] },
       revoke: () => ({ status: 'not_found' }),
     });
-    expect(await service.revoke(ctx, session(), fence(), onProject('svc-a'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), onProject('svc-a'), apiCall)).toEqual({
       ok: false,
       error: 'not_found',
     });
@@ -476,7 +502,7 @@ describe('idempotency and batch outcomes', () => {
 
   it('a lost response is indeterminate and emits no event', async () => {
     const { service, events } = setup({ revoke: () => ({ status: 'indeterminate' }) });
-    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'))).toEqual({
+    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall)).toEqual({
       ok: false,
       error: 'indeterminate',
     });
@@ -488,7 +514,9 @@ describe('idempotency and batch outcomes', () => {
     log.mockImplementation(() => {
       throw new Error('sink down');
     });
-    expect(await service.revoke(ctx, session(), fence(), own('pat-own-all'))).toMatchObject({
+    expect(
+      await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall),
+    ).toMatchObject({
       ok: true,
     });
     expect(rows.get('pat-own-all')?.revokedAt).toBe(NOW);
@@ -535,7 +563,7 @@ describe('effect on use', () => {
     expect(await authenticateToken(deps, presented, lookup, () => true)).toMatchObject({
       ok: true,
     });
-    await service.revoke(ctx, session(), fence(), own('pat-own-all'));
+    await service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall);
     expect(await authenticateToken(deps, presented, lookup, () => true)).toEqual({
       ok: false,
       reason: 'unauthorized',
@@ -543,3 +571,75 @@ describe('effect on use', () => {
     });
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
+
+describe('lifecycle audit and idempotency', () => {
+  it.each(['pat-own-all', 'svc-a', 'svc-org'])('passes one revoke candidate for %s', async (id) => {
+    const r = setup({ organization: ['org:tokens:revoke'] });
+    const call = { ...apiCall, idempotency: revokeRecord };
+    expect(await r.service.revoke(ctx, session(), fence(), own(id), call)).toEqual({
+      ok: true,
+      value: { revoked: true },
+    });
+    expect(r.tokens.revoke).toHaveBeenCalledTimes(1);
+    const stored = r.tokens.revoke.mock.calls[0]![3];
+    expect(stored.audit).toEqual({
+      id: 'event-revoke',
+      occurredAt: NOW,
+      action: 'token.revoke',
+      actor: { type: 'user', id: 'user-1' },
+      target: { type: 'token', id },
+      projectId: id === 'svc-a' ? PROJECT_A : null,
+      sourceIp: null,
+      tokenSelector: null,
+      payloadJson: JSON.stringify({
+        op_id: apiCall.audit.opId,
+        request_id: apiCall.audit.requestId,
+      }),
+    });
+    expect(stored.idempotency).toBe(revokeRecord);
+  });
+
+  it('a repeat only forwards its candidate and adds no audit log or extra store call', async () => {
+    const r = setup({ revoke: () => ({ status: 'already_revoked' }) });
+    expect(await r.service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall)).toEqual({
+      ok: true,
+      value: { revoked: false },
+    });
+    expect(r.tokens.revoke).toHaveBeenCalledTimes(1);
+    expect(r.tokens.revoke.mock.calls[0]![3].audit).toMatchObject({ action: 'token.revoke' });
+    expect(r.tokens.revoke.mock.calls[0]![3]).not.toHaveProperty('idempotency');
+    expect(r.log).not.toHaveBeenCalled();
+  });
+
+  it('does not retry an indeterminate revoke', async () => {
+    const r = setup({ revoke: () => ({ status: 'indeterminate' }) });
+    expect(await r.service.revoke(ctx, session(), fence(), own('pat-own-all'), apiCall)).toEqual({
+      ok: false,
+      error: 'indeterminate',
+    });
+    expect(r.tokens.revoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires the revoke call argument', () => {
+    expectTypeOf<Parameters<TokenRevokeService['revoke']>['length']>().toEqualTypeOf<5>();
+  });
+});
+const revokeRecord = {
+  principalKey: 'user:user-1',
+  key: 'revoke',
+  route: '/tokens/revoke',
+  requestHash: 'hash',
+  status: 200,
+  responseJson: '{}',
+  createdAt: NOW,
+  expiresAt: '2026-10-17T12:00:00.000Z',
+};

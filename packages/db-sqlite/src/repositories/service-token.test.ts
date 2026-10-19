@@ -788,7 +788,14 @@ describe('core service over the real repository', () => {
   };
 
   it('issues a verifiable svc token end to end', async () => {
-    const result = await service(repository).issue(a, authenticated(), actor, fence(), request);
+    const result = await service(repository).issue(a, authenticated(), actor, fence(), request, {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     if (!result.ok) throw new Error(result.error);
     const row = await one<{ hash: string; pepper_version: number; service_principal_id: string }>(
       'SELECT hash, pepper_version, service_principal_id FROM token WHERE id = ?',
@@ -810,7 +817,14 @@ describe('core service over the real repository', () => {
         return repository.issueService(ctx, held, storeInput, mint);
       },
     };
-    const result = await service(barrier).issue(a, authenticated(), actor, fence(), request);
+    const result = await service(barrier).issue(a, authenticated(), actor, fence(), request, {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(await count('token')).toBe(0);
   });
@@ -822,7 +836,14 @@ describe('core service over the real repository', () => {
         return repository.issueService(ctx, held, storeInput, mint);
       },
     };
-    const result = await service(barrier).issue(a, authenticated(), actor, fence(), request);
+    const result = await service(barrier).issue(a, authenticated(), actor, fence(), request, {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     expect(result).toEqual({ ok: false, error: 'conflict' });
     expect(await count('token')).toBe(0);
   });
@@ -836,7 +857,14 @@ describe('core service over the real repository', () => {
           return pair;
         }),
     };
-    const result = await service(barrier).issue(a, authenticated(), actor, fence(), request);
+    const result = await service(barrier).issue(a, authenticated(), actor, fence(), request, {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: null,
+        tokenSelector: null,
+      },
+    });
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(await count('token')).toBe(0);
   });

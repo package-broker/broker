@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { ApiCall } from '@package-broker/core/api/idempotency';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { fixedClock } from '@package-broker/core/ids';
@@ -12,9 +13,19 @@ import { createOrganizationRepository } from './organization.js';
 import { createRegisteredNameRepository } from './registered-name.js';
 import { createSourceRepository } from './source.js';
 
+const call: ApiCall = {
+  audit: {
+    opId: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+    requestId: '01ARZ3NDEKTSV4RRFFQ69G5FAW',
+    sourceIp: '192.0.2.1',
+    tokenSelector: null,
+  },
+};
+
 const USER = 'source-admin';
 const SESSION = 'source-session';
 const SOURCE = 'source';
+const ids = { ulid: vi.fn(() => SOURCE) };
 const NOW = '2026-10-18T12:00:00.000Z';
 const ANCHORS = [
   {
@@ -82,6 +93,7 @@ function statement(sql: string, ...params: Statement['params']): Statement {
 }
 
 beforeEach(async () => {
+  ids.ulid.mockReset().mockReturnValue(SOURCE);
   database = await openMigratedDatabase({ twoOrganizations: true });
   if (database.orgs === null) throw new Error('organizations were not seeded');
   ctx = database.orgs.a;
@@ -159,7 +171,7 @@ beforeEach(async () => {
     catalogue: { previewWinners: async () => [] },
     policy: { runtime: 'node', allowPrivateHosts: [], selfOrigins: [] },
     providerAnchors: ANCHORS,
-    ids: { ulid: () => SOURCE },
+    ids,
     log: () => {},
   });
 });
@@ -198,6 +210,77 @@ function expectCredentialBatch() {
 }
 
 describe('source service with the SQLite repositories and credential store', () => {
+  it('stages one registered_name.add audit row through the real repository', async () => {
+    await seedActiveSource();
+    ids.ulid.mockReturnValueOnce(SOURCE).mockReturnValueOnce('01ARZ3NDEKTSV4RRFFQ69G5FAX');
+    expect(
+      await service.addRegisteredName(
+        ctx,
+        actor,
+        fence,
+        { sourceId: SOURCE, pattern: 'vendor/*' },
+        call,
+      ),
+    ).toEqual({ ok: true, value: { id: SOURCE } });
+    expect(
+      await database.executor.all(
+        statement(
+          'SELECT org_id, action, target_type, target_id FROM audit_pending WHERE org_id = ?',
+          ctx.orgId,
+        ),
+      ),
+    ).toEqual([
+      {
+        org_id: ctx.orgId,
+        action: 'registered_name.add',
+        target_type: 'registered_name',
+        target_id: SOURCE,
+      },
+    ]);
+  });
+
+  it('pauses an active source after removing its last name and stages both audits', async () => {
+    await seedActiveSource();
+    await database.executor.all(
+      statement(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('name', ?, ?, 'composer', 'vendor/*')",
+        ctx.orgId,
+        SOURCE,
+      ),
+    );
+    ids.ulid
+      .mockReturnValueOnce('01ARZ3NDEKTSV4RRFFQ69G5FAX')
+      .mockReturnValueOnce('01ARZ3NDEKTSV4RRFFQ69G5FAY');
+    expect(await service.removeRegisteredName(ctx, actor, fence, 'name', call)).toEqual({
+      ok: true,
+      value: { paused: true },
+    });
+    expect(await sources.get(ctx, SOURCE)).toMatchObject({ status: 'paused' });
+    expect(
+      await database.executor.all(
+        statement(
+          'SELECT org_id, action, target_type, target_id, project_id FROM audit_pending WHERE org_id = ? ORDER BY action',
+          ctx.orgId,
+        ),
+      ),
+    ).toEqual([
+      {
+        org_id: ctx.orgId,
+        action: 'registered_name.remove',
+        target_type: 'registered_name',
+        target_id: 'name',
+        project_id: null,
+      },
+      {
+        org_id: ctx.orgId,
+        action: 'source.pause',
+        target_type: 'source',
+        target_id: SOURCE,
+        project_id: null,
+      },
+    ]);
+  });
+
   it('creates and replaces encrypted credentials in the source mutation batch', async () => {
     await seedActiveSource();
     expect(new TextDecoder().decode(await credentials.read(ctx, 'credential-1'))).toBe(

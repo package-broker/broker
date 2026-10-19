@@ -1,3 +1,4 @@
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -271,18 +272,14 @@ describe('servicePrincipalAuthorityGuard', () => {
       a,
       f,
       servicePrincipalAuthorityGuard(a, f, { ...PROJECT_MANAGE, covers: [] }),
-      SP,
-      NOW,
-      'op-1',
+      { id: SP, now: NOW, opId: 'op-1' },
     );
     expect(refused).toBe('authority');
     const allowed = await principals.suspend(
       a,
       f,
       servicePrincipalAuthorityGuard(a, f, { ...PROJECT_MANAGE, covers: [], allowArchived: true }),
-      SP,
-      NOW,
-      'op-2',
+      { id: SP, now: NOW, opId: 'op-2' },
     );
     expect(allowed).toBe('suspended');
   });
@@ -443,7 +440,9 @@ describe('servicePrincipalAuthorityGuard', () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       await suspended(['project:packages:read']);
       const { f, guard } = restoreWith();
-      expect(await principals.restore(a, f, guard, SP, NOW, 'op-r')).toBe('restored');
+      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
+        'restored',
+      );
       expect(await statusOf()).toEqual([{ status: 'active', revision: 2 }]);
     });
 
@@ -451,7 +450,9 @@ describe('servicePrincipalAuthorityGuard', () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       await suspended(['project:packages:read', 'project:sources:read']);
       const { f, guard } = restoreWith();
-      expect(await principals.restore(a, f, guard, SP, NOW, 'op-r')).toBe('authority');
+      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
+        'authority',
+      );
       expect(await statusOf()).toEqual([{ status: 'suspended', revision: 1 }]);
     });
 
@@ -459,7 +460,9 @@ describe('servicePrincipalAuthorityGuard', () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       await suspended(['project:packages:read']);
       const { f, guard } = restoreWith(fence(USER, SESSION, { service_principal: 7 }));
-      expect(await principals.restore(a, f, guard, SP, NOW, 'op-r')).toBe('conflict');
+      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
+        'conflict',
+      );
       expect(await statusOf()).toEqual([{ status: 'suspended', revision: 1 }]);
     });
 
@@ -469,14 +472,11 @@ describe('servicePrincipalAuthorityGuard', () => {
       const rival = await database.second();
       const gate = gated();
       const { f, guard } = restoreWith();
-      const racing = createServicePrincipalRepository(gate.executor).restore(
-        a,
-        f,
-        guard,
-        SP,
-        NOW,
-        'op-r',
-      );
+      const racing = createServicePrincipalRepository(gate.executor).restore(a, f, guard, {
+        id: SP,
+        now: NOW,
+        opId: 'op-r',
+      });
       await gate.arrived;
       await rival.batch([
         stmt(
@@ -494,10 +494,14 @@ describe('servicePrincipalAuthorityGuard', () => {
     it('answers not_found for an unknown id carrying an expected revision', async () => {
       await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
       const { f, guard } = restoreWith();
-      expect(await principals.restore(a, f, guard, SP, NOW, 'op-r')).toBe('not_found');
+      expect(await principals.restore(a, f, guard, { id: SP, now: NOW, opId: 'op-r' })).toBe(
+        'not_found',
+      );
       const stop = fence(USER, SESSION, { service_principal: 1 });
       const stopGuard = servicePrincipalAuthorityGuard(a, stop, { ...PROJECT_MANAGE, covers: [] });
-      expect(await principals.suspend(a, stop, stopGuard, SP, NOW, 'op-s')).toBe('not_found');
+      expect(await principals.suspend(a, stop, stopGuard, { id: SP, now: NOW, opId: 'op-s' })).toBe(
+        'not_found',
+      );
     });
 
     it('answers not_found when a rival deletes the principal between the read and the commit', async () => {
@@ -506,14 +510,11 @@ describe('servicePrincipalAuthorityGuard', () => {
       const rival = await database.second();
       const gate = gated();
       const { f, guard } = restoreWith();
-      const racing = createServicePrincipalRepository(gate.executor).restore(
-        a,
-        f,
-        guard,
-        SP,
-        NOW,
-        'op-r',
-      );
+      const racing = createServicePrincipalRepository(gate.executor).restore(a, f, guard, {
+        id: SP,
+        now: NOW,
+        opId: 'op-r',
+      });
       await gate.arrived;
       await rival.batch([stmt('DELETE FROM service_principal WHERE id = ?', SP)]);
       gate.release();
@@ -527,14 +528,11 @@ describe('servicePrincipalAuthorityGuard', () => {
       const rival = await database.second();
       const gate = gated();
       const { f, guard } = restoreWith();
-      const racing = createServicePrincipalRepository(gate.executor).restore(
-        a,
-        f,
-        guard,
-        SP,
-        NOW,
-        'op-r',
-      );
+      const racing = createServicePrincipalRepository(gate.executor).restore(a, f, guard, {
+        id: SP,
+        now: NOW,
+        opId: 'op-r',
+      });
       await gate.arrived;
       await rival.batch([
         stmt('UPDATE service_principal SET revision = revision + 1 WHERE id = ?', SP),
@@ -741,7 +739,13 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
   it('creates a project principal from the manager live project permissions', async () => {
     await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
     const { service } = compose();
-    const result = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    const result = await service.create(
+      a,
+      manager,
+      fence(),
+      { name: 'ci', projectId: PA },
+      apiCall,
+    );
     expect(result).toEqual({
       ok: true,
       value: {
@@ -762,7 +766,9 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
       grant('G1', '01J0ROLEREADER0000000000A1', PA),
     ]);
     const { service, log } = compose();
-    expect(await service.create(a, manager, fence(), { name: 'ci', projectId: PA })).toEqual({
+    expect(
+      await service.create(a, manager, fence(), { name: 'ci', projectId: PA }, apiCall),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -773,7 +779,9 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
   it('creates an organization-wide principal for a live admin only', async () => {
     await executor.batch([grant('G1', ORG_OPS_ROLE, null)]);
     const { service } = compose();
-    expect(await service.create(a, admin, fence(), { name: 'ops', projectId: null })).toEqual({
+    expect(
+      await service.create(a, admin, fence(), { name: 'ops', projectId: null }, apiCall),
+    ).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -781,7 +789,13 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     await executor.batch([
       stmt('UPDATE access_grant SET role_id = ? WHERE id = ?', ADMIN_ROLE, 'G1'),
     ]);
-    const created = await service.create(a, admin, fence(), { name: 'ops', projectId: null });
+    const created = await service.create(
+      a,
+      admin,
+      fence(),
+      { name: 'ops', projectId: null },
+      apiCall,
+    );
     expect(created.ok).toBe(true);
     expect(await stored()).toBe(1);
   });
@@ -789,21 +803,39 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
   it('narrows, suspends and restores against the stored revision', async () => {
     await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
     const { service } = compose();
-    const created = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    const created = await service.create(
+      a,
+      manager,
+      fence(),
+      { name: 'ci', projectId: PA },
+      apiCall,
+    );
     if (!created.ok) throw new Error('create failed');
     const id = created.value.id;
     expect(
-      await service.setPermissions(a, manager, fence(USER, SESSION, { service_principal: 1 }), id, [
-        'project:packages:read',
-      ]),
+      await service.setPermissions(
+        a,
+        manager,
+        fence(USER, SESSION, { service_principal: 1 }),
+        id,
+        ['project:packages:read'],
+        apiCall,
+      ),
     ).toEqual({ ok: true, value: null });
     expect(
-      await service.setPermissions(a, manager, fence(USER, SESSION, { service_principal: 2 }), id, [
-        'project:packages:read',
-        'project:sources:read',
-      ]),
+      await service.setPermissions(
+        a,
+        manager,
+        fence(USER, SESSION, { service_principal: 2 }),
+        id,
+        ['project:packages:read', 'project:sources:read'],
+        apiCall,
+      ),
     ).toEqual({ ok: false, error: 'forbidden' });
-    expect(await service.suspend(a, manager, fence(), id)).toEqual({ ok: true, value: null });
+    expect(await service.suspend(a, manager, fence(), id, apiCall)).toEqual({
+      ok: true,
+      value: null,
+    });
     const suspended = await principals.get(a, id);
     expect(suspended?.status).toBe('suspended');
     expect(
@@ -812,6 +844,7 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
         manager,
         fence(USER, SESSION, { service_principal: suspended?.revision ?? -1 }),
         id,
+        apiCall,
       ),
     ).toEqual({ ok: true, value: null });
     expect((await principals.get(a, id))?.status).toBe('active');
@@ -820,10 +853,16 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
   it('suspends a principal of an archived project', async () => {
     await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
     const { service } = compose();
-    const created = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    const created = await service.create(
+      a,
+      manager,
+      fence(),
+      { name: 'ci', projectId: PA },
+      apiCall,
+    );
     if (!created.ok) throw new Error('create failed');
     await executor.batch([stmt("UPDATE project SET status = 'archived' WHERE id = ?", PA)]);
-    expect(await service.suspend(a, manager, fence(), created.value.id)).toEqual({
+    expect(await service.suspend(a, manager, fence(), created.value.id, apiCall)).toEqual({
       ok: true,
       value: null,
     });
@@ -832,7 +871,13 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
   it('records creator offboarding per created principal and changes none of them', async () => {
     await executor.batch([grant('G1', MANAGER_ROLE, PA)]);
     const { service, log } = compose();
-    const created = await service.create(a, manager, fence(), { name: 'ci', projectId: PA });
+    const created = await service.create(
+      a,
+      manager,
+      fence(),
+      { name: 'ci', projectId: PA },
+      apiCall,
+    );
     if (!created.ok) throw new Error('create failed');
     const before = JSON.stringify(await rows('SELECT * FROM service_principal ORDER BY id'));
     await service.creatorOffboarded(a, { userId: USER, cause: 'suspended' });
@@ -850,3 +895,12 @@ describe('the core service-principal service over the db-sqlite adapters', () =>
     expect(JSON.stringify(await rows('SELECT * FROM service_principal ORDER BY id'))).toBe(before);
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

@@ -164,6 +164,11 @@ function checkExports(pkg, pkgJson, files) {
 
   const forbidden = FORBIDDEN_EXPORTS[pkg] ?? [];
   if (pkg === 'core') {
+    const runtime = exportsField['./runtime/*'];
+    if (runtime?.types !== './dist/runtime/*.d.ts' || runtime?.default !== './dist/runtime/*.js')
+      problems.push(
+        'export "./runtime/*" must map types and default to dist/runtime/*.d.ts and dist/runtime/*.js',
+      );
     const api = exportsField['./api/*'];
     if (api?.types !== './dist/api/*.d.ts' || api?.default !== './dist/api/*.js')
       problems.push(
@@ -519,7 +524,9 @@ for (const { pkg, result } of outcomes) {
     console.log(
       `${pkg}: ok (${result.files} packed files, ${result.targets} entry targets resolved)`,
     );
-    if (pkg === 'core')
+    if (pkg === 'core') {
       console.log('  ./api/*: ./api/openapi, ./api/openapi-route (types and default resolved)');
+      console.log('  ./runtime/*: ./runtime/core-jobs (types and default resolved)');
+    }
   }
 }

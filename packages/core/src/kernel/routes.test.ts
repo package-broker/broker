@@ -260,6 +260,35 @@ describe('authenticated boundary registration', () => {
   });
 });
 
+describe('self boundary registration', () => {
+  const self = { path: '/_pb/me/tokens', method: 'GET', permission: null, boundary: 'self' };
+  const core = { allowSelf: true };
+  const problems = (patch: Record<string, unknown>, options: object = core): string[] =>
+    routeBoundaryProblems({ ...self, ...patch }, 'route', options);
+
+  it('accepts a core route without permission and without :project', () => {
+    expect(problems({})).toEqual([]);
+  });
+
+  it('refuses a permission', () => {
+    const found = problems({ permission: 'org:read' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must not require a permission/);
+  });
+
+  it('refuses :project in the path', () => {
+    const found = problems({ path: '/_pb/projects/:project/tokens' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must not have :project/);
+  });
+
+  it('refuses a route registered without the core option', () => {
+    const found = problems({}, {});
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/not available to plugin routes/);
+  });
+});
+
 describe('bearer-only route registration', () => {
   const route = {
     method: 'POST',

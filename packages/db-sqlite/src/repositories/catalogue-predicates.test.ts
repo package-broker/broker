@@ -1,5 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { matchesPattern } from '@package-broker/core/catalogue/patterns';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  matchesPattern,
+  MAX_PATTERN_WILDCARDS,
+  MAX_PATTERNS_PER_RULE,
+} from '@package-broker/core/catalogue/patterns';
 import { orgContext, type OrgContext } from '@package-broker/core/db/port';
 import { sql } from 'kysely';
 import { compile, db } from '../kysely.js';
@@ -118,6 +122,74 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await database.close();
+});
+
+describe('catalogue pattern SQL limits', () => {
+  function expectLimits(
+    predicates: Pick<
+      typeof import('./catalogue-predicates.js'),
+      'admissionCondition' | 'proxyEligibleCondition'
+    >,
+    wildcards: number,
+    patterns: number,
+  ): void {
+    const admission = compile(
+      db
+        .selectFrom('package as pkg')
+        .select('pkg.id')
+        .where(
+          predicates.admissionCondition(
+            ctx,
+            sql.lit('P1'),
+            col('pkg.source_id'),
+            col('pkg.name'),
+            col('pkg.visible_to_new_projects'),
+          ),
+        ),
+    ).sql;
+    const proxy = compile(
+      db
+        .selectFrom('package as pkg')
+        .innerJoin('source as src', 'src.id', 'pkg.source_id')
+        .select('pkg.id')
+        .where(predicates.proxyEligibleCondition({ package: 'pkg', source: 'src' })),
+    ).sql;
+    for (const statement of [admission, proxy]) {
+      expect(statement).toContain(`, '*', '')) > ${wildcards}`);
+    }
+    expect([...admission.matchAll(/\)\s*<= (\d+)/g)].map((match) => Number(match[1]))).toEqual([
+      patterns,
+      patterns,
+    ]);
+  }
+
+  it('embeds the core limits in admission and proxy SQL', () => {
+    expectLimits(
+      { admissionCondition, proxyEligibleCondition },
+      MAX_PATTERN_WILDCARDS,
+      MAX_PATTERNS_PER_RULE,
+    );
+  });
+
+  it.each(['MAX_PATTERN_WILDCARDS', 'MAX_PATTERNS_PER_RULE'] as const)(
+    'follows a changed core %s instead of a local copy',
+    async (constant) => {
+      vi.resetModules();
+      const limits = { MAX_PATTERN_WILDCARDS, MAX_PATTERNS_PER_RULE };
+      limits[constant] += 1;
+      vi.doMock('@package-broker/core/catalogue/patterns', async (importOriginal) => ({
+        ...(await importOriginal<typeof import('@package-broker/core/catalogue/patterns')>()),
+        ...limits,
+      }));
+      try {
+        const predicates = await import('./catalogue-predicates.js');
+        expectLimits(predicates, limits.MAX_PATTERN_WILDCARDS, limits.MAX_PATTERNS_PER_RULE);
+      } finally {
+        vi.doUnmock('@package-broker/core/catalogue/patterns');
+        vi.resetModules();
+      }
+    },
+  );
 });
 
 describe('attachedSourceCondition', () => {

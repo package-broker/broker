@@ -21,8 +21,11 @@ export type PackBudgetErrorCode = 'objects' | 'retained_bytes' | 'object_bytes';
 export class PackBudgetError extends Error {
   override readonly name = 'PackBudgetError';
 
-  constructor(readonly code: PackBudgetErrorCode) {
+  readonly code: PackBudgetErrorCode;
+
+  constructor(code: PackBudgetErrorCode) {
     super(`pack budget exceeded: ${code}`);
+    this.code = code;
   }
 }
 
@@ -38,15 +41,22 @@ export type PackFormatErrorCode =
 export class PackFormatError extends Error {
   override readonly name = 'PackFormatError';
 
-  constructor(readonly code: PackFormatErrorCode) {
+  readonly code: PackFormatErrorCode;
+
+  constructor(code: PackFormatErrorCode) {
     super(`invalid packfile: ${code}`);
+    this.code = code;
   }
 }
 
 export class PackBudget {
   private retained = 0;
 
-  constructor(readonly limits: PackLimits) {}
+  readonly limits: PackLimits;
+
+  constructor(limits: PackLimits) {
+    this.limits = limits;
+  }
 
   get retainedBytes(): number {
     return this.retained;

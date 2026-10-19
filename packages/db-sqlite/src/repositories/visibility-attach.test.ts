@@ -1,3 +1,11 @@
+import type { AuditEvent } from '@package-broker/core/audit/actions';
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { ulid } from '@package-broker/core/ids';
+import { catalogueCacheKey, createCatalogueCache } from '@package-broker/core/catalogue/cache-keys';
+import { defaultEntry, type CacheEnvelope } from '@package-broker/core/platform/cache';
+import { createCatalogueReader } from './catalogue.js';
+import { createCatalogueEpochReader } from './catalogue-epoch.js';
+import { createVisibilityStore } from './catalogue-writer.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
@@ -866,5 +874,399 @@ describe('D1 limits', () => {
     expect((await repo.detachSource(a, owner(), { projectId: PA, sourceId: SO })).ok).toBe(true);
     expect(largest).toBeGreaterThan(0);
     expect(largest).toBeLessThanOrEqual(100);
+  });
+});
+
+describe('setOrder', () => {
+  const s1 = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const s2 = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
+  const s3 = '01ARZ3NDEKTSV4RRFFQ69G5FAX';
+  const orderFence = (revision = 1, user = OWNER, session = OWNER_SESSION) =>
+    mutationFence({ userId: user, sessionId: session } as AuthenticatedActor, {
+      project: revision,
+    });
+  const audit = (): AuditEvent => ({
+    id: ulid(),
+    occurredAt: new Date().toISOString(),
+    action: 'source.reorder',
+    actor: { type: 'user', id: OWNER },
+    tokenSelector: null,
+    sourceIp: null,
+    target: { type: 'project', id: PB },
+    projectId: PB,
+    payloadJson: '{}',
+  });
+  const idempotency: IdempotencyRecord = {
+    principalKey: `user:${OWNER}`,
+    key: 'ordering',
+    route: '/sources/order',
+    requestHash: 'a'.repeat(64),
+    status: 204,
+    responseJson: 'null',
+    createdAt: '2026-10-19T00:00:00.000Z',
+    expiresAt: '2026-10-20T00:00:00.000Z',
+  };
+  const input = (sourceIds = [s2, s1]) => ({ projectId: PB, sourceIds, audit: audit() });
+  async function readState() {
+    return {
+      project: await executor.all(
+        stmt('SELECT revision FROM project WHERE org_id = ? AND id = ?', ORG_A, PB),
+      ),
+      attachments: await executor.all(
+        stmt(
+          'SELECT source_id, precedence FROM project_source WHERE org_id = ? AND project_id = ? ORDER BY source_id',
+          ORG_A,
+          PB,
+        ),
+      ),
+      audit: await executor.all(stmt('SELECT * FROM audit_pending WHERE org_id = ?', ORG_A)),
+      idempotency: await executor.all(
+        stmt('SELECT * FROM api_idempotency WHERE org_id = ?', ORG_A),
+      ),
+      epoch: await epoch(),
+    };
+  }
+  beforeEach(async () => {
+    await executor.batch([
+      stmt('DELETE FROM project_source WHERE org_id = ? AND project_id = ?', ORG_A, PB),
+      ...[s1, s2, s3].map((id) =>
+        stmt(
+          "INSERT INTO source (id, org_id, project_id, name, ecosystem, type) VALUES (?, ?, ?, ?, 'composer', 'vcs')",
+          id,
+          ORG_A,
+          PB,
+          id.toLowerCase(),
+        ),
+      ),
+      ...[s1, s2].map((id, index) =>
+        stmt(
+          'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, ?)',
+          ORG_A,
+          PB,
+          id,
+          index + 10,
+        ),
+      ),
+    ]);
+  });
+  it('writes all precedence changes, one revision, audit and idempotency in one batch', async () => {
+    const batches: (readonly Statement[])[] = [];
+    const recording: SqlExecutor = {
+      driver: executor.driver,
+      all: (s) => executor.all(s),
+      batch: (statements) => {
+        batches.push(statements);
+        return executor.batch(statements);
+      },
+    };
+    const event = audit();
+    expect(
+      (
+        await repository(recording).setOrder(a, orderFence(), {
+          ...input(),
+          audit: event,
+          idempotency,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.some((s) => s.sql.includes('audit_pending'))).toBe(true);
+    expect(batches[0]?.some((s) => s.sql.includes('api_idempotency'))).toBe(true);
+    expect(await attachment(PB, s2)).toBe(0);
+    expect(await attachment(PB, s1)).toBe(1);
+    const state = await readState();
+    expect(state.project).toEqual([{ revision: 2 }]);
+    expect(state.audit).toEqual([
+      expect.objectContaining({ id: event.id, action: 'source.reorder', target_id: PB }),
+    ]);
+    expect(state.idempotency).toEqual([expect.objectContaining({ key: 'ordering' })]);
+  });
+  it.each([194, 400])('reorders %i sources within the production batch budget', async (count) => {
+    const ids = Array.from({ length: count - 2 }, () => ulid());
+    await executor.batch(
+      ids.flatMap((id, index) => [
+        stmt(
+          "INSERT INTO source (id, org_id, project_id, name, ecosystem, type) VALUES (?, ?, ?, ?, 'composer', 'vcs')",
+          id,
+          ORG_A,
+          index % 2 === 0 ? null : PB,
+          id.toLowerCase(),
+        ),
+        stmt(
+          'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, ?)',
+          ORG_A,
+          PB,
+          id,
+          index + 20,
+        ),
+      ]),
+    );
+    const batches: (readonly Statement[])[] = [];
+    const store = createVisibilityStore(
+      {
+        driver: executor.driver,
+        all: (s) => executor.all(s),
+        batch: (statements) => {
+          batches.push(statements);
+          return executor.batch(statements);
+        },
+      },
+      { providerAnchors: ANCHORS },
+    );
+    const sourceIds = [...ids, s2, s1].reverse();
+    expect(await store.setOrder(a, orderFence(), { ...input(sourceIds), idempotency })).toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+    const writes = batches.filter((batch) => batch.some((s) => s.sql.includes('audit_pending')));
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.length).toBeLessThanOrEqual(8);
+    const state = await readState();
+    expect(state.project).toEqual([{ revision: 2 }]);
+    expect(state.attachments).toEqual(
+      sourceIds
+        .map((source_id, precedence) => ({ source_id, precedence }))
+        .sort((left, right) => left.source_id.localeCompare(right.source_id)),
+    );
+    expect(state.audit).toEqual([expect.objectContaining({ action: 'source.reorder' })]);
+    expect(state.idempotency).toEqual([expect.objectContaining({ key: 'ordering' })]);
+  });
+  it('does not rewrite unchanged precedence rows or increment the revision for an unchanged order', async () => {
+    await executor.batch([
+      stmt(
+        'UPDATE project_source SET precedence = 0 WHERE project_id = ? AND source_id = ?',
+        PB,
+        s2,
+      ),
+      stmt(
+        'UPDATE project_source SET precedence = 1 WHERE project_id = ? AND source_id = ?',
+        PB,
+        s1,
+      ),
+      stmt(`CREATE TRIGGER reject_order_rewrite BEFORE UPDATE ON project_source
+        WHEN OLD.project_id = '${PB}' BEGIN SELECT RAISE(ABORT, 'unexpected rewrite'); END`),
+    ]);
+    expect((await repository().setOrder(a, orderFence(), input())).ok).toBe(true);
+    expect((await readState()).project).toEqual([{ revision: 1 }]);
+  });
+  it('rejects a stale revision without any writes', async () => {
+    const before = await readState();
+    expect(await repository().setOrder(a, orderFence(2), input())).toEqual({
+      ok: false,
+      reason: 'conflict',
+    });
+    expect(await readState()).toEqual(before);
+  });
+  it('rejects a missing attached source without any writes', async () => {
+    const before = await readState();
+    expect(await repository().setOrder(a, orderFence(), input([s1]))).toEqual({
+      ok: false,
+      reason: 'conflict',
+    });
+    expect(await readState()).toEqual(before);
+  });
+  it('rejects a concurrently attached source inside the batch', async () => {
+    let before: Awaited<ReturnType<typeof readState>> | undefined;
+    const racing: SqlExecutor = {
+      driver: executor.driver,
+      all: (s) => executor.all(s),
+      batch: async (statements) => {
+        await executor.batch([
+          stmt(
+            'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 50)',
+            ORG_A,
+            PB,
+            s3,
+          ),
+        ]);
+        before = await readState();
+        return executor.batch(statements);
+      },
+    };
+    expect(await repository(racing).setOrder(a, orderFence(), input())).toEqual({
+      ok: false,
+      reason: 'conflict',
+    });
+    expect(await readState()).toEqual(before);
+  });
+  it('rejects an id attached only to another project in the same organization', async () => {
+    await executor.batch([
+      stmt('UPDATE source SET project_id = ? WHERE id = ?', PA, s3),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 50)',
+        ORG_A,
+        PA,
+        s3,
+      ),
+    ]);
+    const before = await readState();
+    expect(await repository().setOrder(a, orderFence(), input([s1, s3]))).toEqual({
+      ok: false,
+      reason: 'not_attached',
+    });
+    expect(await readState()).toEqual(before);
+  });
+  it('rejects a missing project permission with no audit', async () => {
+    const before = await readState();
+    expect(await repository().setOrder(a, orderFence(1, ADMIN, ADMIN_SESSION), input())).toEqual({
+      ok: false,
+      reason: 'authority',
+    });
+    expect(await readState()).toEqual(before);
+  });
+  it('checks project permission for an organization-owned source too', async () => {
+    await executor.batch([stmt('UPDATE source SET project_id = NULL WHERE id = ?', s1)]);
+    const before = await readState();
+    expect(await repository().setOrder(a, orderFence(1, ADMIN, ADMIN_SESSION), input())).toEqual({
+      ok: false,
+      reason: 'authority',
+    });
+    expect(await readState()).toEqual(before);
+    expect((await repository().setOrder(a, orderFence(), input())).ok).toBe(true);
+  });
+  it('rejects a repeated idempotency key without a second audit or any other writes', async () => {
+    expect((await repository().setOrder(a, orderFence(), { ...input(), idempotency })).ok).toBe(
+      true,
+    );
+    const before = await readState();
+    expect(
+      await repository().setOrder(a, orderFence(2), { ...input([s1, s2]), idempotency }),
+    ).toEqual({ ok: false, reason: 'conflict' });
+    expect(await readState()).toEqual(before);
+  });
+  it('rolls back precedence, revision, epoch, audit and idempotency after a later statement fails', async () => {
+    const broken: SqlExecutor = {
+      driver: executor.driver,
+      all: (s) => executor.all(s),
+      batch: (statements) =>
+        executor.batch([
+          ...statements,
+          stmt('INSERT INTO project_source (org_id) VALUES (?)', ORG_A),
+        ]),
+    };
+    const before = await readState();
+    expect(
+      (await repository(broken).setOrder(a, orderFence(), { ...input(), idempotency })).ok,
+    ).toBe(false);
+    expect(await readState()).toEqual(before);
+  });
+  it.each([
+    ['empty', []],
+    ['non-ULID', ['invalid']],
+    ['duplicate', [s1, s1]],
+    ['too many', [s1, s2, s3]],
+  ])('throws TypeError for %s before writing', async (_, ids) => {
+    const before = await readState();
+    await expect(repository().setOrder(a, orderFence(), input(ids))).rejects.toThrow(TypeError);
+    expect(await readState()).toEqual(before);
+  });
+  it('requires the expected project revision', async () => {
+    await expect(repository().setOrder(a, owner(), input())).rejects.toThrow(TypeError);
+  });
+  it.each([PN, P_FOREIGN, PX])(
+    'returns not_found for absent, foreign or archived project %s',
+    async (projectId) => {
+      const before = await readState();
+      expect(await repository().setOrder(a, orderFence(), { ...input(), projectId })).toEqual({
+        ok: false,
+        reason: 'not_found',
+      });
+      expect(await readState()).toEqual(before);
+    },
+  );
+  it('classifies a concurrent archive as conflict', async () => {
+    const racing: SqlExecutor = {
+      driver: executor.driver,
+      all: (s) => executor.all(s),
+      batch: async (statements) => {
+        await executor.batch([stmt("UPDATE project SET status = 'archived' WHERE id = ?", PB)]);
+        return executor.batch(statements);
+      },
+    };
+    expect(await repository(racing).setOrder(a, orderFence(), input())).toEqual({
+      ok: false,
+      reason: 'conflict',
+    });
+    expect((await readState()).audit).toEqual([]);
+    expect(await attachment(PB, s1)).toBe(10);
+  });
+  it('invalidates a cached winner after reordering', async () => {
+    const p1 = ulid();
+    const p2 = ulid();
+    await executor.batch([
+      ...[
+        [p1, s1],
+        [p2, s2],
+      ].map(([id, source]) =>
+        stmt(
+          "INSERT INTO package (id, org_id, source_id, ecosystem, name, visible_to_new_projects) VALUES (?, ?, ?, 'composer', 'order/pkg', 1)",
+          id ?? '',
+          ORG_A,
+          source ?? '',
+        ),
+      ),
+      ...[p1, p2].map((id) =>
+        stmt(
+          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+          ORG_A,
+          PB,
+          id,
+        ),
+      ),
+    ]);
+    const reader = createCatalogueReader(executor);
+    const query = { projectId: PB, ecosystem: 'composer' as const, key: 'order/pkg', limit: 10 };
+    const resolve = async () => {
+      const result = await reader.resolveVersions(a, query);
+      if (result === null || 'changed' in result) throw new Error('missing package');
+      return result.pkg;
+    };
+    const before = await resolve();
+    expect(before.sourceId).toBe(s1);
+    const entries = new Map<string, CacheEnvelope>();
+    const cache = createCatalogueCache(
+      {
+        get: async (_ctx, key) => {
+          const entry = entries.get(key.digest);
+          return entry ? { entry, state: 'fresh' as const } : null;
+        },
+        set: async (_ctx, key, entry) => {
+          entries.set(key.digest, entry);
+        },
+        delete: async (_ctx, key) => {
+          entries.delete(key.digest);
+        },
+      },
+      before,
+      createCatalogueEpochReader(executor, before.packageId),
+      { deploymentId: 'test' },
+    );
+    const key = catalogueCacheKey(before, 'composer-p2');
+    await cache.get(a, key);
+    expect(
+      await cache.set(a, key, defaultEntry('metadata', new Uint8Array([1]), new Date()), {
+        expectedVersion: before.cacheEpoch ?? '',
+        origin: { status: 200, authenticated: true, authorized: true },
+      }),
+    ).toBe('stored');
+    expect((await cache.get(a, key)).hit).not.toBeNull();
+    expect((await repository().setOrder(a, orderFence(), input())).ok).toBe(true);
+    const after = await resolve();
+    expect(after.sourceId).toBe(s2);
+    expect(after.cacheEpoch).not.toBe(before.cacheEpoch);
+    const refreshed = createCatalogueCache(
+      {
+        get: async (_ctx, bound) => {
+          const entry = entries.get(bound.digest);
+          return entry ? { entry, state: 'fresh' as const } : null;
+        },
+        set: async () => {},
+        delete: async () => {},
+      },
+      after,
+      createCatalogueEpochReader(executor, after.packageId),
+      { deploymentId: 'test' },
+    );
+    expect((await refreshed.get(a, catalogueCacheKey(after, 'composer-p2'))).hit).toBeNull();
+    expect(catalogueCacheKey(after, 'composer-p2')).not.toEqual(key);
   });
 });

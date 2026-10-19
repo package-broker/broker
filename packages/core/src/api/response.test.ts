@@ -1,3 +1,5 @@
+import type { SourceError } from '../sources/source-service.js';
+import type { VisibilityResult } from '../catalogue/visibility-service.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { AdminError } from '../authz/administration.js';
 import type { ProjectError } from '../authz/project-service.js';
@@ -34,6 +36,12 @@ const statuses = {
 } as const;
 
 const expectedCodes: Record<string, ApiErrorCode> = {
+  credential_scope_mismatch: 'not_found',
+  proxy_source: 'invalid_request',
+  pattern_taken: 'conflict',
+  activation_requires_registered_names: 'conflict',
+  has_packages: 'conflict',
+  has_history: 'conflict',
   unknown_provider: 'invalid_request',
   role_scope_mismatch: 'invalid_request',
   project_mismatch: 'invalid_request',
@@ -300,6 +308,40 @@ describe('ProjectListError', () => {
   });
 });
 
+describe('SourceError', () => {
+  const members = [
+    'forbidden',
+    'not_found',
+    'invalid_config',
+    'credential_scope_mismatch',
+    'duplicate',
+    'conflict',
+    'indeterminate',
+    'activation_requires_registered_names',
+    'has_packages',
+    'has_history',
+    'invalid_pattern',
+    'proxy_source',
+    'pattern_taken',
+    'invalid_name',
+  ] as const satisfies readonly SourceError[];
+  it('covers every member with the specified code and status', () => {
+    expectTypeOf<Exclude<SourceError, (typeof members)[number]>>().toEqualTypeOf<never>();
+    expect(Object.keys(SERVICE_ERROR_TABLE.SourceError).sort()).toEqual([...members].sort());
+    for (const member of members) {
+      const code = member.startsWith('invalid_') ? 'invalid_request' : expectedCodes[member];
+      expect(code).toBeDefined();
+      expect(SERVICE_ERROR_TABLE.SourceError[member]).toEqual({
+        code,
+        status: statuses[code!],
+      });
+      expect(Object.hasOwn(API_ERROR_CODES, SERVICE_ERROR_TABLE.SourceError[member].code)).toBe(
+        true,
+      );
+    }
+  });
+});
+
 describe('response helpers', () => {
   it('has exactly the closed code list and specified statuses', async () => {
     expect(Object.keys(API_ERROR_CODES).sort()).toEqual(Object.keys(statuses).sort());
@@ -372,5 +414,32 @@ describe('response helpers', () => {
     expect(response.headers.get('etag')).toBe('"r0"');
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('content-type')).toBe('application/json');
+  });
+});
+
+describe('VisibilityError', () => {
+  const codes = {
+    forbidden: 'forbidden',
+    collision: 'conflict',
+    conflict: 'conflict',
+    not_found: 'not_found',
+    not_attached: 'not_found',
+    unclassified: 'unavailable',
+    invalid_pattern: 'invalid_request',
+    too_many_patterns: 'invalid_request',
+    not_eligible: 'conflict',
+  } as const;
+  it('covers every visibility error with an existing code and status', () => {
+    expectTypeOf<keyof typeof codes>().toEqualTypeOf<
+      Extract<VisibilityResult, { ok: false }>['error']
+    >();
+    expect(Object.keys(SERVICE_ERROR_TABLE.VisibilityError).sort()).toEqual(
+      Object.keys(codes).sort(),
+    );
+    for (const member of Object.keys(codes) as (keyof typeof codes)[]) {
+      const code = codes[member];
+      expect(SERVICE_ERROR_TABLE.VisibilityError[member]).toEqual({ code, status: statuses[code] });
+      expect(Object.hasOwn(API_ERROR_CODES, code)).toBe(true);
+    }
   });
 });

@@ -410,6 +410,14 @@ describe('createRole', () => {
     });
   });
 
+  it('returns conflict without emitting role.changed when role creation conflicts', async () => {
+    const { admin, log } = setup({ roles: { create: vi.fn(async () => 'conflict') } });
+    expect(
+      await admin.createRole(ctx, administrator, fenceFor(administrator), input, apiCall),
+    ).toEqual({ ok: false, error: 'conflict' });
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it('maps the repository results one to one', async () => {
     const duplicate = setup({ roles: { create: vi.fn(async () => 'duplicate_key') } });
     expect(

@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '../api/idempotency.js';
+import type { AuditEvent } from '../audit/actions.js';
 import type { FailureReason, MutationFence } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import type { NormalizedMetadata } from '../catalogue/metadata.js';
@@ -336,6 +338,12 @@ export type ListingScope =
   | { readonly kind: 'source'; readonly sourceId: string }
   | { readonly kind: 'package'; readonly packageId: string };
 
+export interface FinalizeEvidence {
+  readonly attemptedCandidates: number;
+  readonly successfulCandidates: number;
+  readonly definitiveAbsent: number;
+}
+
 export interface FinalizeResult {
   readonly removed: number;
   readonly restored: number;
@@ -354,6 +362,12 @@ export type CatalogueWriteMethod =
 export interface CatalogueWriter {
   /** Worst-case statements per call; for syncPackage, a call with CATALOGUE_SYNC_VERSIONS_PER_CALL versions. */
   readonly statementBudget: Readonly<Record<CatalogueWriteMethod, number>>;
+  /** Worst-case executed statements, including guards repeated after batch splits. */
+  syncPackageCost(shape: {
+    readonly versions: number;
+    readonly tags: number;
+    readonly guardStatements: number;
+  }): number;
   syncPackage(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
@@ -384,6 +398,7 @@ export interface CatalogueWriter {
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
     listing: CompleteSourceListing | CompleteVersionListing,
+    evidence: FinalizeEvidence,
   ): Promise<FinalizeResult>;
   quarantine(
     ctx: OrgContext,
@@ -430,6 +445,16 @@ export interface VisibilityStore {
     ctx: OrgContext,
     fence: MutationFence,
     input: { readonly projectId: string; readonly sourceId: string; readonly precedence: number },
+  ): Promise<VisibilityWriteResult>;
+  setOrder(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: {
+      readonly projectId: string;
+      readonly sourceIds: readonly string[];
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<VisibilityWriteResult>;
   setPackageFlag(
     ctx: OrgContext,

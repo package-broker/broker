@@ -30,6 +30,7 @@ import {
   type VersionCandidate,
 } from '../../sources/provider.js';
 import { ARRAY_ELEMENTS, extractMembers } from '../json-stream.js';
+import { isRegistryNotFound } from '../not-found-presets.js';
 import { retryAfterOf } from './retry-after.js';
 import type { ComposerRoot } from './root.js';
 
@@ -48,6 +49,7 @@ export class ComposerV2Error extends Error {
 
 export interface ComposerV2Source {
   readonly root: ComposerRoot;
+  readonly sourceType?: string;
   /** Origins besides the metadata-url origin that the fetch may reach. */
   readonly allowedOrigins: readonly string[];
   readonly credential?: UpstreamCredential;
@@ -88,7 +90,6 @@ const MAX_UPSTREAM_PATTERNS = 1000;
 const MAX_UPSTREAM_PATTERN_LENGTH = 255;
 const STRONG_ETAG = /^"[^"]+"$/;
 const ABSENT_SNAPSHOT = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-const COMPOSER_V2_NOT_FOUND_SHAPES: readonly string[] = ['{"packages":[]}'];
 const CHUNK = 64 * 1024;
 const encoder = new TextEncoder();
 
@@ -139,10 +140,10 @@ async function digest(scheme: string, parts: readonly Uint8Array[]): Promise<str
   return `sha256:${Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-function isNotFoundShape(bytes: Uint8Array): boolean {
+function isNotFoundShape(sourceType: string, bytes: Uint8Array): boolean {
   try {
     const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    return COMPOSER_V2_NOT_FOUND_SHAPES.includes(JSON.stringify(parsed));
+    return isRegistryNotFound(sourceType, parsed);
   } catch {
     return false;
   }
@@ -304,7 +305,8 @@ export async function describeComposerV2(
   if (dev?.kind === 'busy') return dev;
   if (p2.kind === 'failed') throw p2.error;
   const definitiveAbsence = (bytes: Uint8Array): boolean =>
-    source.credential === undefined && isNotFoundShape(bytes);
+    source.credential === undefined &&
+    isNotFoundShape(source.sourceType ?? 'composer_repository', bytes);
   if (p2.kind === 'missing') {
     return { kind: 'not_found', definitive: definitiveAbsence(p2.bytes) };
   }

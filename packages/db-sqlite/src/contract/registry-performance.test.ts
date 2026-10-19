@@ -105,6 +105,7 @@ describe('large registry package on node:sqlite', () => {
         const counted = countCalls(database.executor);
         const access = createPackageAccess(createCatalogueReader(counted.executor));
         const options = {
+          requestId: 'performance-request',
           access,
           actor,
           projectSlug: 'perf',

@@ -17,6 +17,7 @@ import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
 import { parsePendingValidators, type UpstreamForm } from '@package-broker/core/ingest/validators';
 import { NOW } from '../internal/lease-time.js';
+import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 import { finalizeListingStatements, removedBlobs } from './catalogue-reconcile.js';
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
@@ -69,7 +70,8 @@ export function createIngestFinalizer(
   const upstream = createUpstreamStateRepository(executor);
 
   return {
-    async finalize(ctx, session, input) {
+    async finalize(ctx, session, input, callerGuard) {
+      if (callerGuard !== undefined) assertCatalogueWriteGuard(ctx, callerGuard);
       const { expectedCount, upstreamComplete, validatorTtlSeconds } = input;
       if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
         throw new RangeError('expectedCount must be a non-negative integer');
@@ -146,7 +148,7 @@ export function createIngestFinalizer(
 
       const statements: Statement[] = [...ingestSessionGuard(ctx, session)];
       if (expectedCount >= 1) {
-        const guard = createIngestSessionWriteGuard(ctx, session);
+        const guard = callerGuard ?? createIngestSessionWriteGuard(ctx, session);
         const listing =
           scope.kind === 'source'
             ? completeSourceListing({ sourceId: scope.sourceId, stamp, count: expectedCount })
@@ -160,6 +162,7 @@ export function createIngestFinalizer(
             ? sql<boolean>`EXISTS (SELECT 1 FROM source WHERE org_id = ${ctx.orgId} AND id = ${scope.sourceId} AND listing_open_stamp = ${stamp})`
             : sql<boolean>`EXISTS (SELECT 1 FROM package WHERE org_id = ${ctx.orgId} AND id = ${scope.packageId} AND listing_open_stamp = ${stamp})`;
         statements.push(
+          ...(callerGuard ?? []),
           ...assertCheck(openStamp),
           ...assertCheck(sql<boolean>`${markedRows(ctx, scope, stamp)} = 0`),
         );

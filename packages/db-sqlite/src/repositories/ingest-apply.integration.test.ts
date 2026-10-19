@@ -1,0 +1,473 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
+import type { VersionInput } from '@package-broker/core/db/catalogue';
+import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import {
+  applyChunk,
+  type ApplyDeps,
+  type ApplyOutcome,
+} from '@package-broker/core/ingest/apply-description';
+import { INVOCATION_BUDGET } from '@package-broker/core/ingest/plan-chunk';
+import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
+import type { JobGuard } from '@package-broker/core/platform/job-repository';
+import {
+  createPackageDescription,
+  snapshotRef,
+  type VersionCandidate,
+} from '@package-broker/core/sources/provider';
+import { registerCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { createCatalogueWriter } from './catalogue-writer.js';
+import { createExistingVersionsReader } from './existing-versions.js';
+import { createIngestFinalizer } from './ingest-finalize.js';
+import {
+  createIngestSessions,
+  createIngestSessionWriteGuard,
+  ingestSessionGuard,
+  type IngestSessions,
+} from './ingest-session.js';
+
+const SOURCE = '01J0SRC0000000000000000S01';
+const OWNER = '01J0WWWWWWWWWWWWWWWWWW0A01';
+const KEY = 'acme/big';
+const SNAPSHOT = '"big-1"';
+const VERSIONS = 1200;
+
+let database: MigratedDatabase;
+let org: OrgContext;
+
+function counting(executor: SqlExecutor): { executor: SqlExecutor; take(): number } {
+  let count = 0;
+  return {
+    executor: {
+      driver: executor.driver,
+      all<R>(statement: Statement) {
+        count += 1;
+        return executor.all<R>(statement);
+      },
+      batch(statements) {
+        count += statements.length;
+        return executor.batch(statements);
+      },
+    },
+    take() {
+      const taken = count;
+      count = 0;
+      return taken;
+    },
+  };
+}
+
+function toVersion(candidate: VersionCandidate): VersionInput {
+  const parsed = JSON.parse(candidate.raw) as { version: string };
+  return {
+    version: parsed.version,
+    versionNormalized: `${parsed.version}.0`,
+    license: null,
+    distType: 'zip',
+    sourceRef: null,
+    upstreamReleasedAt: null,
+    metadata: normalizeVersionMetadata('composer', parsed),
+    history: { basis: 'release_date', at: '2026-10-01T00:00:00.000Z' },
+  };
+}
+
+const upstream = Array.from({ length: VERSIONS }, (_, n) => `1.${Math.floor(n / 100)}.${n % 100}`);
+
+function describeUpstream(snapshot = SNAPSHOT) {
+  return createPackageDescription({
+    name: KEY,
+    snapshot: snapshotRef(snapshot),
+    validators: {},
+    members: (async function* () {
+      for (const [ordinal, version] of upstream.entries()) {
+        await Promise.resolve();
+        yield {
+          ordinal,
+          version,
+          form: 'composer-p2',
+          raw: JSON.stringify({ name: KEY, version, description: `release ${version}` }),
+        } satisfies VersionCandidate;
+      }
+    })(),
+    documentsComplete: true,
+  });
+}
+
+interface SyncOptions {
+  readonly snapshots?: (invocation: number) => string;
+  readonly after?: (invocation: number, outcome: ApplyOutcome) => Promise<void>;
+  /** Runs the apply under this job's lease, as a package-sync job does. */
+  readonly job?: JobGuard;
+  readonly sessions?: (sessions: IngestSessions) => IngestSessions;
+}
+
+async function syncToCompletion(
+  executor: SqlExecutor,
+  options: SyncOptions = {},
+): Promise<{ counts: number[]; last: ApplyOutcome }> {
+  const counter = counting(executor);
+  const deps: ApplyDeps = {
+    writer: createCatalogueWriter(counter.executor),
+    sessions: (options.sessions ?? ((s) => s))(createIngestSessions(counter.executor)),
+    existing: createExistingVersionsReader(counter.executor),
+    finalizer: createIngestFinalizer(counter.executor),
+  };
+  const acquired = await createIngestSessions(executor).acquire(
+    org,
+    { scope: 'package', sourceId: SOURCE, packageKey: KEY },
+    OWNER,
+    600,
+  );
+  if (acquired === 'held') throw new Error('session held');
+  let session: IngestSessionHandle = acquired;
+  const guard =
+    options.job === undefined
+      ? registerCatalogueWriteGuard(org, [
+          ...ingestSessionGuard(org, session),
+          ...ingestSessionGuard(org, session),
+        ])
+      : createIngestSessionWriteGuard(org, session, options.job);
+  const counts: number[] = [];
+  for (let invocation = 0; invocation < 100; invocation++) {
+    counter.take();
+    const outcome = await applyChunk(org, deps, {
+      session,
+      guard,
+      source: {
+        id: SOURCE,
+        key: KEY,
+        type: 'composer_repository',
+        ecosystem: 'composer',
+        covered: true,
+      },
+      description: describeUpstream(options.snapshots?.(invocation)),
+      packageDescription: 'big package',
+      toVersion,
+      validatorTtlSeconds: 300,
+    });
+    counts.push(counter.take());
+    await options.after?.(invocation, outcome);
+    if (outcome.done) return { counts, last: outcome };
+    expect(outcome.status).toBe('progress');
+    session = outcome.session;
+  }
+  throw new Error('apply did not finish');
+}
+
+const activeRows = (executor: SqlExecutor) =>
+  executor.all<Record<string, unknown>>({
+    sql: `SELECT version, version_normalized, status, metadata_json FROM version
+      WHERE status = 'active' ORDER BY version_normalized`,
+    params: [],
+  });
+
+beforeEach(async () => {
+  database = await openMigratedDatabase({ twoOrganizations: true });
+  org = database.orgs!.a;
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'main', 'composer', 'composer_repository')",
+      params: [SOURCE, org.orgId],
+    },
+  ]);
+});
+
+afterEach(async () => {
+  await database.close();
+});
+
+describe('applyChunk against the SQLite catalogue writer', () => {
+  it('applies 1,200 versions over several invocations of at most 450 statements', async () => {
+    const { counts, last } = await syncToCompletion(database.executor);
+
+    expect(last.status).toBe('complete');
+    expect(counts.length).toBeGreaterThan(1);
+    expect(Math.max(...counts)).toBeLessThanOrEqual(INVOCATION_BUDGET);
+
+    const reference = await openMigratedDatabase({ twoOrganizations: true });
+    try {
+      const ref = reference.orgs!.a;
+      await reference.executor.batch([
+        {
+          sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'main', 'composer', 'composer_repository')",
+          params: [SOURCE, ref.orgId],
+        },
+      ]);
+      const writer = createCatalogueWriter(reference.executor);
+      const guard = registerCatalogueWriteGuard(ref, [{ sql: 'SELECT 1', params: [] }]);
+      const inputs = upstream.map((version, ordinal) =>
+        toVersion({
+          ordinal,
+          version,
+          form: 'composer-p2',
+          raw: JSON.stringify({ name: KEY, version, description: `release ${version}` }),
+        }),
+      );
+      for (let offset = 0; offset < inputs.length; offset += 50) {
+        await writer.syncPackage(ref, guard, {
+          sourceId: SOURCE,
+          ecosystem: 'composer',
+          key: KEY,
+          description: 'big package',
+          versions: inputs.slice(offset, offset + 50),
+        });
+      }
+      const expected = await activeRows(reference.executor);
+      expect(expected).toHaveLength(VERSIONS);
+      expect(await activeRows(database.executor)).toEqual(expected);
+    } finally {
+      await reference.close();
+    }
+
+    const [session] = await database.executor.all<{ state: string; seen_count: number }>({
+      sql: 'SELECT state, seen_count FROM ingest_session',
+      params: [],
+    });
+    expect(session).toEqual({ state: 'complete', seen_count: VERSIONS });
+  }, 120_000);
+
+  it('removes a version upstream no longer lists only through the finalize', async () => {
+    await database.executor.batch([
+      {
+        sql: `INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('pkg-old', ?, ?, 'composer', ?)`,
+        params: [org.orgId, SOURCE, KEY],
+      },
+      {
+        sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at,
+            published_at_basis, metadata_json)
+          VALUES ('ver-gone', ?, 'pkg-old', '0.9.0', '0.9.0.0', '2020-01-01T00:00:00.000Z', 'release_date', '{}')`,
+        params: [org.orgId],
+      },
+    ]);
+    const status = () =>
+      database.executor.all<{ status: string }>({
+        sql: "SELECT status FROM version WHERE id = 'ver-gone'",
+        params: [],
+      });
+    let checked = false;
+    const { last } = await syncToCompletion(database.executor, {
+      after: async (invocation, outcome) => {
+        if (invocation !== 0) return;
+        expect(outcome.status).toBe('progress');
+        expect(await status()).toEqual([{ status: 'active' }]);
+        checked = true;
+      },
+    });
+    expect(checked).toBe(true);
+    expect(last.status).toBe('complete');
+    const [gone] = await database.executor.all<{ status: string }>({
+      sql: "SELECT status FROM version WHERE id = 'ver-gone'",
+      params: [],
+    });
+    expect(gone).toEqual({ status: 'removed_upstream' });
+  }, 120_000);
+
+  it('refreshes an unchanged package with reads and marks only', async () => {
+    await syncToCompletion(database.executor);
+    const before = await database.executor.all<{ updated: string }>({
+      sql: 'SELECT max(revision) AS updated FROM version',
+      params: [],
+    });
+    const { counts, last } = await syncToCompletion(database.executor);
+    expect(last.status).toBe('complete');
+    expect(Math.max(...counts)).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    expect(counts.length).toBeLessThanOrEqual(2);
+    expect(
+      await database.executor.all({
+        sql: 'SELECT max(revision) AS updated FROM version',
+        params: [],
+      }),
+    ).toEqual(before);
+  }, 120_000);
+
+  it('abandons on a snapshot change between chunks and leaves every status unchanged', async () => {
+    await database.executor.batch([
+      {
+        sql: `INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('pkg-old', ?, ?, 'composer', ?)`,
+        params: [org.orgId, SOURCE, KEY],
+      },
+      {
+        sql: `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 50)
+          INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at,
+            published_at_basis, metadata_json)
+          SELECT 'old-' || i, ?, 'pkg-old', '0.' || i || '.0', '0.' || i || '.0.0',
+            '2020-01-01T00:00:00.000Z', 'release_date', '{}' FROM n`,
+        params: [org.orgId],
+      },
+    ]);
+    const statuses = () =>
+      database.executor.all({
+        sql: 'SELECT id, status FROM version ORDER BY id',
+        params: [],
+      });
+    const { counts, last } = await syncToCompletion(database.executor, {
+      snapshots: (invocation) => (invocation === 0 ? SNAPSHOT : '"big-2"'),
+    });
+    expect(counts).toHaveLength(2);
+    expect(last.status).toBe('abandoned');
+    const rows = (await statuses()) as { id: string; status: string }[];
+    expect(rows.filter((row) => row.status !== 'active')).toEqual([]);
+    expect(rows.filter((row) => row.id.startsWith('old-'))).toHaveLength(50);
+    expect(
+      await database.executor.all({ sql: 'SELECT state FROM ingest_session', params: [] }),
+    ).toEqual([{ state: 'abandoned' }]);
+  }, 120_000);
+
+  it('refuses the finalize when the job lease expires after the last advance', async () => {
+    const job: JobGuard = { id: 'job-apply', owner: OWNER, fence: 1 };
+    await database.executor.batch([
+      {
+        sql: `INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('pkg-old', ?, ?, 'composer', ?)`,
+        params: [org.orgId, SOURCE, KEY],
+      },
+      {
+        sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at,
+            published_at_basis, metadata_json)
+          VALUES ('ver-gone', ?, 'pkg-old', '0.9.0', '0.9.0.0', '2020-01-01T00:00:00.000Z', 'release_date', '{}')`,
+        params: [org.orgId],
+      },
+      {
+        sql: `INSERT INTO job (id, org_id, type, state, lease_owner, lease_until, fence)
+          VALUES (?, ?, 'core:package-sync:v1', 'running', ?,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 hour'), 1)`,
+        params: [job.id, org.orgId, job.owner],
+      },
+    ]);
+    const { last } = await syncToCompletion(database.executor, {
+      job,
+      sessions: (sessions) => ({
+        ...sessions,
+        async advance(ctx, held, input) {
+          const progress = await sessions.advance(ctx, held, input);
+          if (input.cursor?.includes('"tail":"finalize"') === true) {
+            await database.executor.batch([
+              {
+                sql: `UPDATE job SET lease_until = '2000-01-01T00:00:00.000Z' WHERE id = ?`,
+                params: [job.id],
+              },
+            ]);
+          }
+          return progress;
+        },
+      }),
+    });
+    expect(last.status).toBe('superseded');
+    expect(
+      await database.executor.all({
+        sql: "SELECT status FROM version WHERE id = 'ver-gone'",
+        params: [],
+      }),
+    ).toEqual([{ status: 'active' }]);
+    expect(
+      await database.executor.all({ sql: 'SELECT state FROM ingest_session', params: [] }),
+    ).toEqual([{ state: 'running' }]);
+  }, 120_000);
+
+  it('does not extend the session lease on an advance whose job lease expired', async () => {
+    const job: JobGuard = { id: 'job-apply', owner: OWNER, fence: 1 };
+    await database.executor.batch([
+      {
+        sql: `INSERT INTO job (id, org_id, type, state, lease_owner, lease_until, fence)
+          VALUES (?, ?, 'core:package-sync:v1', 'running', ?,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 hour'), 1)`,
+        params: [job.id, org.orgId, job.owner],
+      },
+    ]);
+    const lease = async () =>
+      (
+        await database.executor.all<{ lease_until: string }>({
+          sql: 'SELECT lease_until FROM ingest_session',
+          params: [],
+        })
+      )[0]?.lease_until;
+    let before: string | undefined;
+    const { last } = await syncToCompletion(database.executor, {
+      job,
+      sessions: (sessions) => ({
+        ...sessions,
+        async advance(ctx, held, input, writeGuard) {
+          if (input.cursor?.includes('"tail":"finalize"') === true) {
+            await database.executor.batch([
+              {
+                sql: `UPDATE job SET lease_until = '2000-01-01T00:00:00.000Z' WHERE id = ?`,
+                params: [job.id],
+              },
+            ]);
+            before = await lease();
+          }
+          return sessions.advance(ctx, held, input, writeGuard);
+        },
+      }),
+    });
+    expect(last.status).toBe('superseded');
+    expect(before).toBeDefined();
+    expect(await lease()).toBe(before);
+    expect(
+      await database.executor.all({
+        sql: "SELECT state, cursor NOT LIKE '%finalize%' AS old FROM ingest_session",
+        params: [],
+      }),
+    ).toEqual([{ state: 'running', old: 1 }]);
+  }, 120_000);
+
+  it('splits writer calls by parameter bytes: ten Composer members of 200 KiB each', async () => {
+    const big = 'd'.repeat(200 * 1024);
+    const versions = Array.from({ length: 10 }, (_, n) => `3.0.${n}`);
+    const counter = counting(database.executor);
+    const deps: ApplyDeps = {
+      writer: createCatalogueWriter(counter.executor),
+      sessions: createIngestSessions(counter.executor),
+      existing: createExistingVersionsReader(counter.executor),
+      finalizer: createIngestFinalizer(counter.executor),
+    };
+    const acquired = await createIngestSessions(database.executor).acquire(
+      org,
+      { scope: 'package', sourceId: SOURCE, packageKey: KEY },
+      OWNER,
+      600,
+    );
+    if (acquired === 'held') throw new Error('session held');
+    let session: IngestSessionHandle = acquired;
+    const guard = createIngestSessionWriteGuard(org, session);
+    let status = 'progress';
+    for (let invocation = 0; invocation < 20 && status === 'progress'; invocation++) {
+      const outcome = await applyChunk(org, deps, {
+        session,
+        guard,
+        source: {
+          id: SOURCE,
+          key: KEY,
+          type: 'composer_repository',
+          ecosystem: 'composer',
+          covered: true,
+        },
+        description: createPackageDescription({
+          name: KEY,
+          snapshot: snapshotRef(SNAPSHOT),
+          validators: {},
+          members: (async function* () {
+            for (const [ordinal, version] of versions.entries()) {
+              await Promise.resolve();
+              yield {
+                ordinal,
+                version,
+                form: 'composer-p2',
+                raw: JSON.stringify({ name: KEY, version, description: big }),
+              } satisfies VersionCandidate;
+            }
+          })(),
+          documentsComplete: true,
+        }),
+        packageDescription: null,
+        toVersion,
+        validatorTtlSeconds: 300,
+      });
+      expect(counter.take()).toBeLessThanOrEqual(INVOCATION_BUDGET);
+      status = outcome.status;
+      session = outcome.session;
+    }
+    expect(status).toBe('complete');
+    expect(await activeRows(database.executor)).toHaveLength(10);
+  }, 120_000);
+});

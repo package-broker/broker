@@ -2,6 +2,7 @@ import { sql } from 'kysely';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
   type CatalogueWriter,
+  type SyncPackageInput,
   type VisibilityStore,
   type VisibilityWriteResult,
 } from '@package-broker/core/db/catalogue';
@@ -42,10 +43,9 @@ const MAX_STATEMENTS = 500;
 const MAX_BATCH_STATEMENTS = 200;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 const encoder = new TextEncoder();
-function checkBatch(statements: readonly Statement[]): void {
-  const bytes = statements.reduce((sum, s) => {
-    if (s.params.length > 100) throw new RangeError('statement exceeds 100 parameters');
-    return (
+function parameterBytes(statements: readonly Statement[]): number {
+  return statements.reduce(
+    (sum, s) =>
       sum +
       s.params.reduce<number>(
         (n, p) =>
@@ -58,10 +58,15 @@ function checkBatch(statements: readonly Statement[]): void {
                 ? 0
                 : 8),
         0,
-      )
-    );
-  }, 0);
-  if (statements.length > MAX_BATCH_STATEMENTS || bytes > MAX_BATCH_BYTES)
+      ),
+    0,
+  );
+}
+function checkBatch(statements: readonly Statement[]): void {
+  if (statements.some((s) => s.params.length > 100)) {
+    throw new RangeError('statement exceeds 100 parameters');
+  }
+  if (statements.length > MAX_BATCH_STATEMENTS || parameterBytes(statements) > MAX_BATCH_BYTES)
     throw new RangeError('catalogue batch budget exceeded');
 }
 function batchExecutor(executor: SqlExecutor): SqlExecutor {
@@ -96,6 +101,21 @@ function bindPackage(statement: Statement, placeholder: string, lookup: Statemen
   return { sql: text, params };
 }
 
+function packageLookup(
+  ctx: OrgContext,
+  input: Pick<SyncPackageInput, 'sourceId' | 'ecosystem' | 'key'>,
+): Statement {
+  return compile(
+    db
+      .selectFrom('package')
+      .select('id')
+      .where('org_id', '=', ctx.orgId)
+      .where('source_id', '=', input.sourceId)
+      .where('ecosystem', '=', input.ecosystem)
+      .where('name', '=', input.key),
+  );
+}
+
 export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
   const bounded = batchExecutor(executor);
   const reconcile = createCatalogueReconciler(bounded);
@@ -109,6 +129,36 @@ export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
       finalizeListing: 13,
       quarantine: 5,
       markPackageAbsent: 8,
+    },
+    syncPayloadLimit: MAX_BATCH_BYTES,
+    syncPayloadBytes(ctx, guard, input) {
+      const lookup = packageLookup(ctx, input);
+      const placeholder = newOpId();
+      const request = {
+        packageId: placeholder,
+        ecosystem: input.ecosystem,
+        versions: [input.version],
+      };
+      const bound = (statements: readonly Statement[]) =>
+        parameterBytes(statements.map((s) => bindPackage(s, placeholder, lookup)));
+      const group = (build: () => { readonly statements: readonly Statement[] }): number => {
+        try {
+          return bound(build().statements);
+        } catch (error) {
+          if (
+            error instanceof RangeError &&
+            (error as { code?: unknown }).code === 'batch_too_large'
+          ) {
+            return Number.POSITIVE_INFINITY;
+          }
+          throw error;
+        }
+      };
+      // syncPackage binds every accepted version into both the update and the insert group.
+      return Math.max(
+        group(() => versionUpdateStatements(ctx, guard, request)),
+        group(() => versionInsertStatements(ctx, guard, request)),
+      );
     },
     syncPackageCost({ versions, tags, guardStatements: guard }) {
       if (
@@ -153,15 +203,7 @@ export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
       if (Object.keys(input.tags ?? {}).length > MAX_TAGS_PER_CALL)
         throw new RangeError('catalogue call exceeds 100 tags');
       const upsert = packageUpsertStatements(ctx, guard, input);
-      const lookup = compile(
-        db
-          .selectFrom('package')
-          .select('id')
-          .where('org_id', '=', ctx.orgId)
-          .where('source_id', '=', input.sourceId)
-          .where('ecosystem', '=', input.ecosystem)
-          .where('name', '=', input.key),
-      );
+      const lookup = packageLookup(ctx, input);
       const placeholder = newOpId();
       const refusals = new Map<number, 'invalid' | 'too_large' | 'tombstoned'>();
       const seen = new Set<string>();

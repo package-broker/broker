@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'kysely';
 import {
   mutationFence,
+  tokenMutationFence,
+  type AuthenticatedTokenActor,
   type AuthenticatedActor,
   type FenceGuard,
 } from '@package-broker/core/authz/fence';
@@ -208,6 +210,59 @@ describe('runOrgFenced', () => {
     await expect(run(assertGuard(condition(1), other), [addUser('u-foreign')])).rejects.toThrow(
       TypeError,
     );
+    expect(await count('SELECT count(*) AS n FROM user_account')).toBe(0);
+  });
+
+  const tokenFence = () =>
+    tokenMutationFence(
+      { tokenId: 'token', tokenKind: 'pat', principalId: 'u' } as AuthenticatedTokenActor,
+      'org:import:write',
+      {},
+    );
+  it('commits a token fence with a guard built for the organization', async () => {
+    const outcome = await runOrgFenced(
+      database.executor,
+      org,
+      tokenFence(),
+      assertGuard(condition(1), org),
+      [addUser('u-token')],
+      {},
+    );
+    expect(outcome.ok).toBe(true);
+    expect(await count("SELECT count(*) AS n FROM user_account WHERE id = 'u-token'")).toBe(1);
+  });
+  it('refuses a token fence guard built for another organization and stores nothing', async () => {
+    const other = database.orgs?.b;
+    if (other === undefined) throw new Error('second organization missing');
+    await expect(
+      runOrgFenced(
+        database.executor,
+        org,
+        tokenFence(),
+        assertGuard(condition(1), other),
+        [addUser('u-token-foreign')],
+        {},
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(await count('SELECT count(*) AS n FROM user_account')).toBe(0);
+  });
+  it('refuses a token mutation touching cache_epoch and stores nothing', async () => {
+    await expect(
+      runOrgFenced(
+        database.executor,
+        org,
+        tokenFence(),
+        assertGuard(condition(1), org),
+        [
+          addUser('u-token-bump'),
+          {
+            sql: 'UPDATE cache_epoch SET version = ? WHERE org_id = ?',
+            params: ['x', org.orgId],
+          },
+        ],
+        {},
+      ),
+    ).rejects.toThrow(TypeError);
     expect(await count('SELECT count(*) AS n FROM user_account')).toBe(0);
   });
 

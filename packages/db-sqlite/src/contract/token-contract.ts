@@ -334,6 +334,7 @@ function ssoAnchors(count: number): Case {
           ctx,
           mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {}),
           {
+            audit: mutationAudit('token.issue', null),
             id: 'issued-token',
             name: 'Contract',
             scope: 'full',
@@ -681,6 +682,7 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
 
       const revoke = (tokenId: string) =>
         tokens.revoke(ctx, fence(), tokens.ownPersonalToken(ctx, fence(), tokenId), {
+          audit: mutationAudit('token.revoke', null),
           tokenId: tokenId,
           now: iso(0),
         });
@@ -694,8 +696,12 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
       ).toEqual([{ id: 'revoked-pat' }]);
       expect((await revoke('own-pat')).status).toBe('revoked');
       for (const statement of statements) {
-        expect(statement.sql).not.toMatch(SECRET_COLUMNS);
+        const sql = statement.sql.startsWith('INSERT INTO audit_pending')
+          ? statement.sql.replace(/\btoken_selector\b/g, '')
+          : statement.sql;
+        expect(sql).not.toMatch(SECRET_COLUMNS);
       }
+      expect(statements.flatMap((statement) => statement.params)).not.toContain('aaaaaaaaaaaa');
     },
     wrap,
   );

@@ -1,4 +1,5 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import {
   MAX_PATTERN_BYTES,
@@ -22,6 +23,7 @@ import {
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 
 const PROXY_TYPES = ['packagist_proxy', 'npmjs_proxy'] as const;
 const COMPOSER_PATTERN = /^[a-z0-9._*-]+\/[a-z0-9._*-]+$/;
@@ -84,6 +86,13 @@ function probe(condition: Guard, negate: boolean): Statement {
 
 function allOf(conditions: readonly Guard[]): Guard {
   return sql<SqlBool>`(${sql.join(conditions, sql` and `)})`;
+}
+
+function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
+  return record === undefined
+    ? sql<SqlBool>`0`
+    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
+        and principal_key = ${record.principalKey} and key = ${record.key})`;
 }
 
 interface SourceRow {
@@ -162,6 +171,11 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
     async add(ctx, fence, input) {
       const held = authority(ctx, fence, null, input.providerAnchors);
       if (!(await holds(held))) return 'forbidden';
+      if (
+        input.idempotency !== undefined &&
+        (await holds(idempotencyCollision(ctx, input.idempotency)))
+      )
+        return 'conflict';
       const source = await readSource(ctx, input.sourceId);
       if (source === null) return 'not_found';
       if (isProxy(source.type)) return 'proxy_source';
@@ -192,15 +206,30 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         ctx,
         fence,
         assertGuard(allOf([held, sourceUnchanged]), ctx),
-        [insert, auditPendingStatement(ctx, input.audit)],
+        [
+          insert,
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
         {
           authority: probe(held, true),
-          conflict: probe(otherSource, false),
+          conflict: probe(
+            sql<SqlBool>`(${idempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,
+            false,
+          ),
           collision: probe(sameSource, false),
         },
       );
       if (outcome.ok) return 'added';
       if (outcome.reason === 'authority') return 'forbidden';
+      if (
+        outcome.reason === 'conflict' &&
+        input.idempotency !== undefined &&
+        (await holds(idempotencyCollision(ctx, input.idempotency)))
+      )
+        return 'conflict';
       if (outcome.reason === 'conflict') return 'pattern_taken';
       if (outcome.reason === 'collision') return 'duplicate';
       if (outcome.reason === 'indeterminate') return 'indeterminate';
@@ -210,6 +239,11 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
     async remove(ctx, fence, input) {
       const held = authority(ctx, fence, null, input.providerAnchors);
       if (!(await holds(held))) return 'forbidden';
+      if (
+        input.idempotency !== undefined &&
+        (await holds(idempotencyCollision(ctx, input.idempotency)))
+      )
+        return 'conflict';
       const sourceId = await readName(ctx, input.id);
       if (sourceId === null) return 'not_found';
       if (input.pauseAudit.target.type !== 'source' || input.pauseAudit.target.id !== sourceId)
@@ -241,28 +275,37 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
           pause,
           auditPendingStatement(ctx, input.pauseAudit, { sql: 'changes() = 1', params: [] }),
           auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
         ],
-        { authority: probe(held, true) },
+        {
+          authority: probe(held, true),
+          conflict: probe(idempotencyCollision(ctx, input.idempotency), false),
+        },
       );
       if (outcome.ok) {
-        return outcome.results[outcome.results.length - 3]?.changes === 1
+        return outcome.results[outcome.results.length - (input.idempotency === undefined ? 3 : 4)]
+          ?.changes === 1
           ? 'removed_and_paused'
           : 'removed';
       }
       if (outcome.reason === 'authority') return 'forbidden';
+      if (outcome.reason === 'conflict') return 'conflict';
       if (outcome.reason === 'indeterminate') return 'indeterminate';
       return (await readName(ctx, input.id)) === null ? 'not_found' : 'conflict';
     },
 
     async enable(ctx, fence, input) {
       const source = await readSource(ctx, input.id);
-      if (source === null) {
-        return (await holds(authority(ctx, fence, null, input.providerAnchors)))
-          ? 'not_found'
-          : 'forbidden';
-      }
-      const held = authority(ctx, fence, source.project_id, input.providerAnchors);
+      const held = authority(ctx, fence, source?.project_id ?? null, input.providerAnchors);
       if (!(await holds(held))) return 'forbidden';
+      if (
+        input.idempotency !== undefined &&
+        (await holds(idempotencyCollision(ctx, input.idempotency)))
+      )
+        return 'conflict';
+      if (source === null) return 'not_found';
       if (source.status !== 'paused') return 'already_enabled';
       const owned = sql<SqlBool>`exists (select 1 from source as target
         where target.id = ${input.id} and target.org_id = ${ctx.orgId}
@@ -290,15 +333,27 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               .where('status', '=', 'paused'),
           ),
           auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
         ],
         {
           authority: probe(held, true),
-          conflict: probe(allOf([owned, paused, sql<SqlBool>`not ${activatable}`]), false),
+          conflict: probe(
+            sql<SqlBool>`(${idempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,
+            false,
+          ),
           collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),
         },
       );
       if (outcome.ok) return 'enabled';
       if (outcome.reason === 'authority') return 'forbidden';
+      if (
+        outcome.reason === 'conflict' &&
+        input.idempotency !== undefined &&
+        (await holds(idempotencyCollision(ctx, input.idempotency)))
+      )
+        return 'conflict';
       if (outcome.reason === 'conflict') return 'activation_requires_registered_names';
       if (outcome.reason === 'collision') return 'already_enabled';
       if (outcome.reason === 'indeterminate') return 'indeterminate';

@@ -1,3 +1,5 @@
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import {
   describeTokenContract,
   tokenContractCases,
@@ -151,6 +153,7 @@ async function seeded(binding: string, projectCount: number) {
 
 function input(ids: string[]) {
   return {
+    audit: mutationAudit(),
     id: '01J0TOKEN0000000000000000A',
     name: 'laptop',
     scope: 'read' as const,
@@ -285,3 +288,17 @@ describe('D1 token lookup SQL mutation', () => {
     expect(mutations).toBeGreaterThan(0);
   }, 120_000);
 });
+
+function mutationAudit() {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: iso(0),
+    action: 'token.issue',
+    actor: { type: 'system', id: null },
+    target: { type: 'token', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

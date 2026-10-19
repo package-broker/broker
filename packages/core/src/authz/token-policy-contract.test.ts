@@ -473,7 +473,7 @@ describe('PAT issuance: refuse, never narrow', () => {
       ctx,
       session(),
       fence(),
-      patInput({ expiresAt: inDays(91) }),
+      patInput({ expiresAt: inDays(366) }),
       {
         audit: {
           opId: '01K00000000000000000000001',
@@ -577,6 +577,7 @@ function svcRig(
 function svcInput(extra: Partial<ServiceTokenIssueInput> = {}): ServiceTokenIssueInput {
   return {
     servicePrincipalId: 'sp-1',
+    routeProjectId: 'proj-1',
     name: 'ci',
     scope: 'read',
     expiresAt: inDays(30),

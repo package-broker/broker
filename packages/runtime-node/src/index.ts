@@ -68,7 +68,7 @@ import {
 import { scopedEnv, buildIdentityProviders } from '@package-broker/core/identity/providers';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
-import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
+import { defaultLog, envelopeResponse, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
 import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
@@ -117,6 +117,8 @@ export interface NodeServerOptions {
   readonly observability?: KernelObservability;
   readonly platformServices?: PlatformServices;
   readonly authorization?: AuthorizationEngine;
+  /** Resolves true once the broker may serve; a falsy answer refuses everything except liveness. */
+  readonly servingGate?: () => Promise<boolean>;
 }
 
 /** The step 5 domain services; PB-32 resolves each one from here. */
@@ -459,29 +461,39 @@ export function createNodeServer(
   kernel.catch(() => undefined);
   services.catch(() => undefined);
 
+  const gate = options.servingGate;
+  const refuse = (request: Request): Response => {
+    const response = envelopeResponse(503, 'not_ready', 'Not ready', crypto.randomUUID());
+    return request.method === 'HEAD' ? new Response(null, response) : response;
+  };
+  const serving = async (request: Request): Promise<boolean> =>
+    gate === undefined || new URL(request.url).pathname === '/health/live' || (await gate());
+
   const server = createServer(
-    getRequestListener((request) =>
-      kernel.then(
-        async (ready) => {
-          const url = new URL(request.url);
-          if (url.pathname === '/_pb/ui') {
-            const response = await ready.fetch(request);
-            if (response.status !== 200) return response;
-            url.pathname = '/_pb/ui/';
-            return new Response(null, {
-              status: 303,
-              headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-            });
-          }
-          if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
-          url.pathname = '/_pb/ui';
-          return ready.fetch(new Request(url, request));
-        },
-        (error: unknown) => {
-          const response = errorResponse(error, crypto.randomUUID(), log);
-          return request.method === 'HEAD' ? new Response(null, response) : response;
-        },
-      ),
+    getRequestListener(async (request) =>
+      !(await serving(request))
+        ? refuse(request)
+        : kernel.then(
+            async (ready) => {
+              const url = new URL(request.url);
+              if (url.pathname === '/_pb/ui') {
+                const response = await ready.fetch(request);
+                if (response.status !== 200) return response;
+                url.pathname = '/_pb/ui/';
+                return new Response(null, {
+                  status: 303,
+                  headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
+                });
+              }
+              if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
+              url.pathname = '/_pb/ui';
+              return ready.fetch(new Request(url, request));
+            },
+            (error: unknown) => {
+              const response = errorResponse(error, crypto.randomUUID(), log);
+              return request.method === 'HEAD' ? new Response(null, response) : response;
+            },
+          ),
     ),
   );
 

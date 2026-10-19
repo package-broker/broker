@@ -148,6 +148,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'DEFERRED: catalogue reader factory exceeds visibleWinner registration; owner T782n follow-up',
   'repositories/organization.ts#createOrganizationBootstrap':
     'REDUNDANT_BY_SCHEMA: 0001_init.sql organization_singleton UNIQUE (singleton), CHECK (singleton = 1); bootstrap selects the installation singleton rather than an organization context',
+  'repositories/keyring-verifier.ts#createKeyringVerifierStore':
+    'REDUNDANT_BY_SCHEMA: 0015_keyring_verifier.sql keyring_verifier PRIMARY KEY (key_version); the verifier is installation-global and has no organization column',
   'repositories/existing-versions.ts#createExistingVersionsReader':
     'DEFERRED: existing version reader needs foreign package fixtures; owner T782n follow-up',
   'repositories/local-login.ts#createLocalLoginReader':

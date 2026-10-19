@@ -1,3 +1,5 @@
+import { SCOPE_LEVELS } from './scope.js';
+import type { ScopeLevel } from './scope.js';
 import type { AuthenticatedActor } from './fence.js';
 import type { Principal, RequestContext, RouteBoundary } from '../plugin.js';
 import { buildOrganizationActor } from './actor.js';
@@ -25,6 +27,11 @@ export interface AccessContextSnapshot {
   readonly projectId: string | null;
   readonly boundary: AccessRouteClass;
   readonly sessionId: string | null;
+  readonly token: {
+    readonly kind: 'pat' | 'svc';
+    readonly scope: ScopeLevel | null;
+    readonly readOnly: boolean;
+  } | null;
   readonly actor: ActorAccessSnapshot | null;
   readonly rateKey: AccessRateKey;
 }
@@ -38,6 +45,7 @@ const ROUTE_CLASSES = [
   'self',
   'authenticated',
 ] as const satisfies readonly AccessRouteClass[];
+const TOKEN_KINDS = ['pat', 'svc'] as const;
 const PRINCIPAL_KINDS = [
   'user',
   'service',
@@ -74,6 +82,17 @@ function principalOf(value: unknown): Principal | null {
   if (value === null) return null;
   const raw = record(value);
   return Object.freeze({ kind: oneOf(PRINCIPAL_KINDS, raw['kind']), id: text(raw['id']) });
+}
+
+function tokenOf(value: unknown): AccessContextSnapshot['token'] {
+  if (value === null) return null;
+  const raw = record(value);
+  if (typeof raw['readOnly'] !== 'boolean') refuse();
+  return Object.freeze({
+    kind: oneOf(TOKEN_KINDS, raw['kind']),
+    scope: raw['scope'] === null ? null : oneOf(SCOPE_LEVELS, raw['scope']),
+    readOnly: raw['readOnly'],
+  });
 }
 
 function actorOf(value: unknown): ActorAccessSnapshot | null {
@@ -123,10 +142,14 @@ function samePrincipal(a: Principal | null, b: Principal | null): boolean {
 }
 
 function checkConsistency(ctx: RequestContext, snapshot: AccessContextSnapshot): void {
-  const { principal, projectId, boundary, sessionId, actor } = snapshot;
+  const { principal, projectId, boundary, sessionId, token, actor, rateKey } = snapshot;
   if (!samePrincipal(principal, ctx.principal) || projectId !== ctx.projectId) refuse();
   if ((boundary === 'project') !== (projectId !== null)) refuse();
   if (boundary !== 'none' && principal === null) refuse();
+  if (sessionId !== null && token !== null) refuse();
+  if (rateKey.stage === 'authenticated' && rateKey.tokenSelector !== null && token === null) {
+    refuse();
+  }
   if (boundary === 'none' && (actor !== null || sessionId !== null)) refuse();
   if (principal?.kind !== 'user' && (actor !== null || sessionId !== null)) refuse();
   if (actor !== null && (actor.user.id !== principal?.id || actor.session.id !== sessionId)) {
@@ -148,6 +171,7 @@ export function setAccessContext(ctx: RequestContext, snapshot: AccessContextSna
     projectId: optionalText(raw['projectId']),
     boundary,
     sessionId: optionalText(raw['sessionId']),
+    token: tokenOf(raw['token']),
     actor: actorOf(raw['actor']),
     rateKey: rateKeyOf(raw['rateKey'], principal, boundary),
   });

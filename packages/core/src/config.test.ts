@@ -1,10 +1,67 @@
 import { describe, expect, it } from 'vitest';
 import {
+  brokerAssetsProblems,
   brokerMcpProblems,
   brokerObservabilityProblems,
   mcpEnabled,
   type BrokerConfig,
+  defineAssets,
+  defineConfig,
 } from './config.js';
+import { collectRegistrations, KernelConfigError } from './kernel/registry.js';
+
+describe('build assets config', () => {
+  const ui = defineAssets({ kind: 'ui', provider: '@package-broker/ui-assets' });
+  const withAssets = (assets?: unknown): BrokerConfig =>
+    ({
+      platform: 'node',
+      plugins: [],
+      ...(assets === undefined ? {} : { assets }),
+    }) as unknown as BrokerConfig;
+
+  it('selects no assets when absent or empty', () => {
+    expect(defineConfig(withAssets()).assets).toBeUndefined();
+    expect(brokerAssetsProblems(withAssets())).toEqual([]);
+    expect(brokerAssetsProblems(withAssets([]))).toEqual([]);
+  });
+
+  it('accepts a single ui selection', () => {
+    expect(brokerAssetsProblems(withAssets([ui]))).toEqual([]);
+  });
+
+  it('rejects duplicate ui selections even with different providers', () => {
+    expect(brokerAssetsProblems(withAssets([ui, { ...ui, provider: 'custom-assets' }]))).toEqual([
+      'assets: duplicate ui selection',
+    ]);
+  });
+
+  it('rejects unsupported kinds', () => {
+    expect(brokerAssetsProblems(withAssets([{ ...ui, kind: 'secret' }]))).toEqual([
+      'assets: unsupported kind',
+    ]);
+  });
+
+  it.each([null, {}, 'secret', 1])('rejects a non-list selection (%#)', (value) => {
+    expect(brokerAssetsProblems(withAssets(value))).toEqual(['assets: must be a list']);
+  });
+
+  it('validates each declaration', () => {
+    expect(brokerAssetsProblems(withAssets([null, { kind: 'ui' }]))).toEqual([
+      'assets: declaration must be an object',
+      'assets: provider must be a package specifier',
+    ]);
+  });
+
+  it('rejects an asset declaration placed in plugins during composition', () => {
+    const selected = defineConfig({
+      ...withAssets([ui]),
+      plugins: [ui] as unknown as BrokerConfig['plugins'],
+    });
+    expect(() => collectRegistrations(selected.plugins)).toThrow(KernelConfigError);
+    expect(() => collectRegistrations(selected.plugins)).toThrow('unknown key "kind"');
+    expect(() => collectRegistrations(selected.plugins)).toThrow('unknown key "provider"');
+  });
+});
 
 function config(observability?: unknown): BrokerConfig {
   return {

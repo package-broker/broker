@@ -1,17 +1,48 @@
+import { assetDeclarationProblems, type AssetDeclaration } from './asset-provider.js';
 import type { TokenLifetimeInput } from './authz/token-lifetime.js';
 import type { PlatformPortConfig } from './platform/port-config.js';
 import type { RegistryConfigInput } from './registry/registry-config.js';
 import type { Platform, PluginDefinition } from './plugin.js';
 
+export {
+  defineAssets,
+  assetDeclarationProblems,
+  assetProviderProblems,
+  assetProviderResultProblems,
+} from './asset-provider.js';
+export type {
+  AssetDeclaration,
+  AssetProviderContextV1,
+  AssetProviderResultV1,
+  AssetProviderV1,
+} from './asset-provider.js';
+
 export interface BrokerConfig {
   readonly platform: Platform;
   readonly plugins: readonly PluginDefinition[];
+  readonly assets?: readonly AssetDeclaration[];
   readonly platformPorts?: Partial<Record<Platform, PlatformPortConfig>>;
   readonly registry?: RegistryConfigInput;
   readonly tokens?: TokenLifetimeInput;
   readonly observability?: BrokerObservabilityConfig;
   /** Read-only MCP endpoint for `read` tokens; requires the Rate Limiting binding on Workers. */
   readonly mcp?: { readonly enabled?: boolean };
+}
+
+export function brokerAssetsProblems(config: BrokerConfig): string[] {
+  const value: unknown = config.assets;
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return ['assets: must be a list'];
+  const problems = value.flatMap(assetDeclarationProblems);
+  if (
+    value.filter(
+      (entry: unknown) =>
+        typeof entry === 'object' && entry !== null && 'kind' in entry && entry.kind === 'ui',
+    ).length > 1
+  ) {
+    problems.push('assets: duplicate ui selection');
+  }
+  return problems;
 }
 
 export interface BrokerObservabilityConfig {

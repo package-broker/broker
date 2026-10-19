@@ -1,12 +1,14 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core/config';
+import { looksLikeCredential } from '@package-broker/core/platform/credential';
 import { safeErrorName, safeRecord } from '@package-broker/core/platform/observability';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { SecretsConfigError } from '@package-broker/core/secrets/master-key';
 import type { NodeBroker } from './index.js';
-import { startNode, type StartOptions } from './startup.js';
+import { startNode, StartupConfigError, type StartOptions } from './startup.js';
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8000;
@@ -39,7 +41,7 @@ export function parsePort(raw: string | undefined): number {
     const port = Number(raw);
     if (port >= 1 && port <= 65535) return port;
   }
-  throw new Error(`PORT must be an integer between 1 and 65535, received ${JSON.stringify(raw)}`);
+  throw new Error('PORT must be an integer between 1 and 65535');
 }
 
 function parseShutdownTimeout(raw: string | undefined): number {
@@ -145,15 +147,28 @@ export async function runEntry(
 }
 
 function failureRecord(event: string, error: unknown): string {
-  return JSON.stringify(
-    safeRecord({
+  const variable =
+    event === 'startup.failed' &&
+    (error instanceof StartupConfigError || error instanceof SecretsConfigError)
+      ? error.variable
+      : undefined;
+  const configKey =
+    variable !== undefined &&
+    variable.length <= 64 &&
+    /^[A-Za-z_][A-Za-z0-9_.]*$/.test(variable) &&
+    !looksLikeCredential(variable)
+      ? variable
+      : undefined;
+  return JSON.stringify({
+    ...safeRecord({
       level: 'error',
       event,
       service: 'package-broker',
       runtime: 'node',
       error_name: safeErrorName(error),
     }),
-  );
+    ...(configKey === undefined ? {} : { config_key: configKey }),
+  });
 }
 
 export function isMainEntry(argv1: string | undefined, moduleUrl: string): boolean {

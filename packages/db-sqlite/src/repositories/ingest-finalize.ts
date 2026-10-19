@@ -10,7 +10,7 @@ import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
 import type { UpstreamForm } from '../schema.js';
 import { NOW } from '../internal/lease-time.js';
-import { finalizeListingStatements } from './catalogue-reconcile.js';
+import { finalizeListingStatements, removedBlobs } from './catalogue-reconcile.js';
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
 
@@ -93,24 +93,6 @@ function markedRows(ctx: OrgContext, scope: ListingScope, stamp: string): RawBui
     : sql<number>`(SELECT count(*) FROM version
         WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${scope.packageId}
           AND version.listing_seen_stamp = ${stamp})`;
-}
-
-function removedBlobs(ctx: OrgContext, scope: ListingScope): Statement {
-  const inScope =
-    scope.kind === 'source'
-      ? sql`version.package_id IN (SELECT package.id FROM package
-          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId})`
-      : sql`version.package_id = ${scope.packageId}`;
-  return compile({
-    compile: () =>
-      sql`UPDATE blob SET refetchable = 0
-        WHERE blob.org_id = ${ctx.orgId} AND blob.refetchable = 1
-          AND blob.deleted_at IS NULL AND blob.purge_after IS NULL
-          AND (blob.purge_lease_until IS NULL OR blob.purge_lease_until <= ${NOW})
-          AND blob.id IN (SELECT version.blob_id FROM version
-            WHERE version.org_id = ${ctx.orgId} AND version.status = 'removed_upstream'
-              AND version.blob_id IS NOT NULL AND ${inScope})`.compile(db),
-  });
 }
 
 function completeSession(ctx: OrgContext, session: IngestSessionHandle): Statement[] {

@@ -17,7 +17,7 @@ const HASH_FIELDS: ReadonlySet<string> = new Set(['sha256_old', 'sha256_new', 'p
 const ID_FIELDS: ReadonlySet<string> = new Set(['id', 'project_id', 'role_id', 'source_id']);
 const HASH_64 = /^[0-9a-fA-F]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CREDENTIAL_REF = /^op:\/\/[A-Za-z0-9 ._/-]{1,200}$/;
+const ENV_CREDENTIAL_REF = /^env:[A-Z_][A-Z0-9_]{0,127}$/;
 const UUID_ANYWHERE =
   /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/i;
 const ULID = /^[0-9A-Z]{26}$/;
@@ -79,6 +79,14 @@ const TLD = /^(?:\p{L}{2,}|xn--[a-z0-9-]+)$/iu;
 const SEMVER_DOMAIN = /^\d+\.\d+\.\d+/;
 const IPV4_DOMAIN = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const SERVICE_MAILBOXES: ReadonlySet<string> = new Set(['git']);
+
+function isCredentialRef(value: string): boolean {
+  if (/\p{Cc}/u.test(value)) return false;
+  if (value.startsWith('env:')) return ENV_CREDENTIAL_REF.exec(value)?.[0] === value;
+  if (!value.startsWith('file:')) return false;
+  const path = value.slice(5);
+  return path.length > 0 && new TextEncoder().encode(path).byteLength <= 1024;
+}
 
 function fieldKind(field: string): FieldKind {
   if (field === 'url') return 'url';
@@ -299,12 +307,14 @@ export function redactValue(value: string, limit: number, field: string): Redact
   if (field === 'external_ref') {
     if (UUID.test(value)) return { ok: true, value };
     // Opaque references retain their spelling; only whole UUID path segments are IDs.
-    const scanned = CREDENTIAL_REF.test(value)
-      ? value
-          .split('/')
-          .map((segment) => (UUID.test(segment) ? 'id' : segment))
-          .join('/')
-      : value;
+    const scanned =
+      value.startsWith('file:') && isCredentialRef(value)
+        ? `file:${value
+            .slice(5)
+            .split(/([/\\])/)
+            .map((segment) => (UUID.test(segment) ? 'id' : segment))
+            .join('')}`
+        : value;
     return hasCredential(scanned, TEXT_SCAN)
       ? { ok: false, reason: 'credential_value' }
       : { ok: true, value };

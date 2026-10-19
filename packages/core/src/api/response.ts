@@ -124,6 +124,7 @@ export const SERVICE_ERROR_TABLE = {
     indeterminate: { status: 503, code: 'unavailable' },
   } satisfies Record<ServiceTokenError, ServiceErrorMapping>,
   ServicePrincipalError: {
+    reauth_required: { status: 403, code: 'reauth_required' },
     forbidden: { status: 403, code: 'forbidden' },
     invalid_name: { status: 400, code: 'invalid_request' },
     invalid_permission: { status: 400, code: 'invalid_request' },

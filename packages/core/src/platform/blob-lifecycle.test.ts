@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import { blobStorageKey, parseSha256, type ByteStore, type PurgeGeneration } from './blob.js';
 import { createBlobLifecycle } from './blob-lifecycle.js';
+import { createBlobRemoveJob } from './blob-remove-job.js';
+import { type JobContext, type Jobs, validateIdempotencyKey } from './jobs.js';
 
 const ctx = orgContext('org-a');
 const key = parseSha256('b'.repeat(64));
@@ -189,3 +191,69 @@ it('uses each organization context unchanged for recheck and physical storage', 
   expect(f.metadata.canStartRemove).toHaveBeenCalledExactlyOnceWith(other, key, generation, 2000);
   expect(f.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(other.orgId, key));
 });
+
+it.each([true, false])('queue admission %s avoids byte removal', async (eligible) => {
+  const enqueue = vi.fn<Jobs['enqueue']>(async () => ({ id: 'job', created: true }));
+  const service = createBlobLifecycle({ ...f.options, jobs: { enqueue, get: vi.fn() } });
+  f.metadata.canStartRemove.mockResolvedValue(eligible);
+  for (const g of [generation, 'd'.repeat(32) as PurgeGeneration]) {
+    await expect(service.removeBytes(ctx, key, g)).resolves.toBe(eligible ? 'queued' : 'refused');
+    if (eligible)
+      expect(enqueue).toHaveBeenLastCalledWith(
+        ctx,
+        'blob-remove',
+        { sha256: key, generation: g },
+        { idempotencyKey: `blob-remove:${key}:${g}`, resourceKey: key },
+      );
+  }
+  expect(f.metadata.canStartRemove).toHaveBeenCalledWith(ctx, key, generation, 2000);
+  expect(enqueue).toHaveBeenCalledTimes(eligible ? 2 : 0);
+  for (const call of enqueue.mock.calls)
+    expect(() => validateIdempotencyKey(call[3].idempotencyKey)).not.toThrow();
+  expect(new Set(enqueue.mock.calls.map((call) => call[3].idempotencyKey)).size).toBe(
+    eligible ? 2 : 0,
+  );
+  await expect(service.removeBytes(ctx, key, 'c'.repeat(33) as PurgeGeneration)).rejects.toThrow();
+  expect(enqueue).toHaveBeenCalledTimes(eligible ? 2 : 0);
+  expect(f.remove).not.toHaveBeenCalled();
+  expect(f.metadata.markDeleted).not.toHaveBeenCalled();
+});
+it.each(['removed', 'timeout', 'refused', 'stale'] as const)(
+  'synchronous removeBytes: %s',
+  async (outcome) => {
+    if (outcome === 'timeout') f.remove.mockReturnValue(new Promise(() => {}));
+    if (outcome === 'refused') f.metadata.canStartRemove.mockResolvedValue(false);
+    if (outcome === 'stale') f.metadata.markDeleted.mockResolvedValue(false);
+    const result = f.service.removeBytes(ctx, key, generation);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(result).resolves.toBe(outcome === 'removed' ? 'removed' : 'refused');
+    expect(f.metadata.markDeleted).toHaveBeenCalledTimes(
+      outcome === 'removed' || outcome === 'stale' ? 1 : 0,
+    );
+  },
+);
+it.each(['live', 'aborted', 'refused', 'error', 'stale', 'foreign'] as const)(
+  'blob removal job: %s',
+  async (mode) => {
+    const controller = new AbortController();
+    if (mode === 'aborted') controller.abort();
+    if (mode === 'refused' || mode === 'foreign')
+      f.metadata.canStartRemove.mockResolvedValue(false);
+    if (mode === 'error') f.remove.mockRejectedValue(new Error('storage failure'));
+    if (mode === 'stale') f.metadata.markDeleted.mockResolvedValue(false);
+    if (mode === 'live')
+      f.metadata.canStartRemove.mockResolvedValueOnce(true).mockResolvedValue(false);
+    const org = mode === 'foreign' ? orgContext('org-b') : ctx;
+    const job = createBlobRemoveJob(f.service);
+    const context = { org, signal: controller.signal } as JobContext;
+    const payload = job.validate({ sha256: key, generation });
+    await expect(job.handler(payload, context)).resolves.toBeUndefined();
+    if (mode === 'live') await job.handler(payload, context);
+    expect(f.remove).toHaveBeenCalledTimes(['live', 'error', 'stale'].includes(mode) ? 1 : 0);
+    expect(f.metadata.markDeleted).toHaveBeenCalledTimes(['live', 'stale'].includes(mode) ? 1 : 0);
+    if (mode === 'live')
+      expect(f.metadata.markDeleted).toHaveBeenCalledExactlyOnceWith(ctx, key, generation);
+    if (mode === 'aborted') expect(f.metadata.canStartRemove).not.toHaveBeenCalled();
+    else expect(f.metadata.canStartRemove).toHaveBeenCalledWith(org, key, generation, 2000);
+  },
+);

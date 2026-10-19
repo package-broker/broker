@@ -10,7 +10,7 @@ const ASSET = '/_pb/ui/assets/app.012345abcdef.js';
 const BODY = 'console.log("π")';
 const tag = (body: string) => `"${createHash('sha256').update(body).digest('hex')}"`;
 
-async function app(stream = false) {
+async function app(stream = false, withKernelOrigin = true) {
   let entry = '<!doctype html><title>First</title>';
   let script = BODY;
   const assets: StaticAssets = {
@@ -42,6 +42,7 @@ async function app(stream = false) {
   };
   const kernel = await createKernel({
     platform: 'node',
+    ...(withKernelOrigin ? { publicOrigin: ORIGIN } : {}),
     plugins: [],
     ports: {
       organizations: { get: () => Promise.resolve(null) },
@@ -88,13 +89,38 @@ describe('UI asset ETags', () => {
   });
 
   it('retains every security header on 304', async () => {
-    const response = await (await app()).fetch(ASSET, tag(BODY));
+    const server = await app();
+    const full = await server.fetch();
+    const response = await server.fetch(ASSET, tag(BODY));
+    expect(full.status).toBe(200);
     expect(response.status).toBe(304);
     expect(response.headers.get('content-security-policy')).toBe(UI_CSP);
     expect(response.headers.get('cross-origin-opener-policy')).toBe('same-origin');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     expect(response.headers.get('referrer-policy')).toBe('same-origin');
-    expect(response.headers.get('strict-transport-security')).toBe('max-age=31536000');
+    expect(response.headers.get('strict-transport-security')).toBe(
+      'max-age=31536000; includeSubDomains',
+    );
+    const securityHeaderNames = new Set([
+      'content-security-policy',
+      'cross-origin-opener-policy',
+      'x-content-type-options',
+      'referrer-policy',
+      'strict-transport-security',
+    ]);
+    const securityHeaders = (headers: Headers) =>
+      Object.fromEntries([...headers].filter(([name]) => securityHeaderNames.has(name)));
+    expect(securityHeaders(response.headers)).toEqual(securityHeaders(full.headers));
+  });
+
+  it('omits HSTS on 200 and 304 without a kernel public origin', async () => {
+    const server = await app(false, false);
+    const full = await server.fetch();
+    const response = await server.fetch(ASSET, tag(BODY));
+    expect(full.status).toBe(200);
+    expect(response.status).toBe(304);
+    expect(full.headers.has('strict-transport-security')).toBe(false);
+    expect(response.headers.has('strict-transport-security')).toBe(false);
   });
 
   it('returns 200 and the body on a mismatched validator', async () => {

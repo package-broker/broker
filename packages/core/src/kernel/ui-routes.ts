@@ -8,7 +8,7 @@ export const UI_CSP =
 const UI_PATH = '/_pb/ui';
 const NO_CACHE = 'no-cache';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
-const HSTS = 'max-age=31536000';
+const HSTS = 'max-age=31536000; includeSubDomains';
 const CONTENT_HASH = /\.[0-9a-f]{12}\./;
 const SAFE_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STRONG_ETAG_LIST =

@@ -1043,6 +1043,9 @@ export function createWorker(
     try {
       const kernel = await createKernel({
         platform: 'cloudflare',
+        ...(env?.PB_PUBLIC_URL === undefined
+          ? {}
+          : { publicOrigin: publicOriginOf(env.PB_PUBLIC_URL) }),
         plugins,
         registration,
         ports,

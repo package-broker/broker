@@ -33,7 +33,7 @@ const engine: AuthorizationEngine = {
   ),
 };
 
-import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { parseUiManifest } from '@package-broker/core/platform/ui-manifest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -75,7 +75,27 @@ describe('Node UI mount', () => {
     const baseline = [...(await withoutAssets.ready()).coreRoutes];
     await withoutAssets.close();
     fixture.root = await mkdtemp(join(tmpdir(), 'pb-ui-mount-'));
-    await cp(new URL('../../ui/dist/assets/', import.meta.url), fixture.root, { recursive: true });
+    const fixtureDocument =
+      '<!doctype html><title>Package Broker</title><script src="app.fixture.js"></script>';
+    const fixtureAsset = 'console.log("Package Broker");';
+    await Promise.all([
+      writeFile(join(fixture.root, 'index.html'), fixtureDocument),
+      writeFile(join(fixture.root, 'app.fixture.js'), fixtureAsset),
+      writeFile(
+        join(fixture.root, 'manifest.json'),
+        JSON.stringify({
+          version: 1,
+          entry: 'index.html',
+          files: {
+            'index.html': { contentType: 'text/html', bytes: Buffer.byteLength(fixtureDocument) },
+            'app.fixture.js': {
+              contentType: 'text/javascript',
+              bytes: Buffer.byteLength(fixtureAsset),
+            },
+          },
+        }),
+      ),
+    ]);
     const manifest = parseUiManifest(await readFile(join(fixture.root, 'manifest.json'), 'utf8'));
     const document = await readFile(join(fixture.root, manifest.entry), 'utf8');
     const referencedAsset = /<script[^>]+src="([^"]+)"/.exec(document)?.[1];

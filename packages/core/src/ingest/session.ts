@@ -74,6 +74,11 @@ export interface IngestSessions {
   latest(ctx: OrgContext, scope: IngestScopeRef): Promise<IngestSessionLatest | null>;
 }
 
+export interface IngestSessionRelease {
+  /** Ends this holder's lease, preserving the running generation and resume state; false when not held. */
+  release(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;
+}
+
 export interface IngestSessionSweep {
   readonly abandoned: number;
   readonly deleted: number;

@@ -67,6 +67,7 @@ async function app(
   const clock: Clock = { now: () => new Date('2026-10-15T12:00:00.000Z') };
   return createKernel({
     platform: 'node',
+    publicOrigin,
     plugins: [],
     ports: {
       organizations: { get: () => Promise.resolve(null) },
@@ -120,7 +121,9 @@ describe('UI response headers', () => {
 
   it('sends HSTS for an https public origin', async () => {
     const response = await (await app(fakeAssets(), HTTPS)).fetch(get('/_pb/ui'));
-    expect(response.headers.get('strict-transport-security')).toBe('max-age=31536000');
+    expect(response.headers.get('strict-transport-security')).toBe(
+      'max-age=31536000; includeSubDomains',
+    );
   });
 
   it('omits HSTS for an http public origin', async () => {

@@ -195,6 +195,11 @@ export interface SourceRepository {
     ecosystem: SourceEcosystem,
   ): Promise<boolean>;
   get(ctx: OrgContext, id: string): Promise<SourceRecord | null>;
+  /** VCS sources across all projects; exact provider, case-insensitive repository, lowest id first. */
+  findByRepository(
+    ctx: OrgContext,
+    input: { provider: string; repository: string },
+  ): Promise<SourceRecord | null>;
   /** Non-paused sources with `next_poll_at` reached on database time, oldest first. `limit` is an integer from 1 to 50. */
   listDue(ctx: OrgContext, limit: number): Promise<SourceRecord[]>;
   /** `stale` when the job guard no longer holds; nothing is written then. */

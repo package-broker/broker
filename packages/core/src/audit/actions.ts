@@ -1,3 +1,4 @@
+import { MAX_KEY_LENGTH, packageKey } from '../catalogue/names.js';
 import { isUlid } from '../ids.js';
 import { redactValue } from './redact.js';
 
@@ -41,6 +42,7 @@ export const AUDIT_ACTIONS = [
   'registered_name.remove',
   'version.state_change',
   'version.rebuilt',
+  'version.published_at_set',
   'import_run.create',
   'import_run.approve',
   'import_run.apply',
@@ -101,6 +103,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'registered_name.remove': REGISTERED_NAME_FIELDS,
   'version.state_change': ['from_status', 'to_status', 'package_name', 'version'],
   'version.rebuilt': ['package_name', 'version', 'sha256_old', 'sha256_new'],
+  'version.published_at_set': ['package_name', 'version', 'published_at', 'published_at_basis'],
   'import_run.create': IMPORT_RUN_FIELDS,
   'import_run.approve': IMPORT_RUN_FIELDS,
   'import_run.apply': IMPORT_RUN_FIELDS,
@@ -166,12 +169,26 @@ function cleanString(value: string, limit: number, field: string): Cleaned {
   return result.ok ? { ok: true, value: result.value } : result;
 }
 
+function stringLimit(value: string, field: string): number {
+  if (field === 'package_name' && value.length <= MAX_KEY_LENGTH) {
+    for (const ecosystem of ['composer', 'npm'] as const) {
+      try {
+        if (packageKey(value, { ecosystem }) === value) return MAX_KEY_LENGTH;
+      } catch {
+        // The other ecosystem may accept this name.
+      }
+    }
+  }
+  if (field === 'version' && /^[0-9A-Za-z][0-9A-Za-z.+_~/-]{0,255}$/.test(value)) return 256;
+  return MAX_STRING;
+}
+
 function cleanValue(value: unknown, field: string): Cleaned {
   if (value === null || typeof value === 'boolean') return { ok: true, value };
   if (typeof value === 'number') {
     return Number.isFinite(value) ? { ok: true, value } : { ok: false, reason: 'bad_value' };
   }
-  if (typeof value === 'string') return cleanString(value, MAX_STRING, field);
+  if (typeof value === 'string') return cleanString(value, stringLimit(value, field), field);
   if (Array.isArray(value)) {
     if (value.length > MAX_ARRAY) return { ok: false, reason: 'bad_value' };
     const items: string[] = [];

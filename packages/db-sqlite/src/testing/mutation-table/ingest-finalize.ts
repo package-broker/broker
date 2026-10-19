@@ -12,7 +12,14 @@ import {
 import { HASH, OWNER, NOT_NULL, seedSource, seedPackage, seedVersion } from './fixtures.js';
 
 const STAMP = 'finalize-stamp';
-const INPUT = { expectedCount: 0, upstreamComplete: true, validatorTtlSeconds: 60 };
+const INPUT = {
+  expectedCount: 0,
+  upstreamComplete: true,
+  validatorTtlSeconds: 60,
+  attemptedCandidates: 0,
+  successfulCandidates: 0,
+  definitiveAbsent: 0,
+};
 
 function executorOf(context: CaseContext): SqlExecutor {
   return {

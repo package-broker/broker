@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mutationFence,
@@ -256,18 +258,27 @@ async function ensureActor(): Promise<void> {
 async function deleteGrant(id: string) {
   await ensureActor();
   counter += 1;
-  return grants.deleteOrganization(a, await fenceFor(id), { id: id, opId: `OP${counter}` });
+  return grants.deleteOrganization(a, await fenceFor(id), {
+    audit: mutationAudit('grant.revoke', id),
+    id: id,
+    opId: `OP${counter}`,
+  });
 }
 
 async function suspend(userId: string, now: string) {
   await ensureActor();
-  return grants.suspendUser(a, await fenceFor(userId), { userId: userId, now: now });
+  return grants.suspendUser(a, await fenceFor(userId), {
+    audit: mutationAudit('user.suspend', userId),
+    userId: userId,
+    now: now,
+  });
 }
 
 async function changeGrantRole(id: string, roleId: string, now: string) {
   await ensureActor();
   counter += 1;
   return grants.changeRole(a, await fenceFor(id), {
+    audit: mutationAudit('grant.role_change', id),
     id: id,
     roleId: roleId,
     now: now,
@@ -903,3 +914,17 @@ describe('e-mail authority by domain', () => {
     expect(statements).toEqual([]);
   });
 });
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

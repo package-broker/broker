@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -390,7 +392,7 @@ describe('project roles never protect a last holder', () => {
     const refused = await repository().deleteOrganization(
       a,
       fence({ grant: await revisionOf(G1) }),
-      { id: G1, opId: 'OP-ORG-LAST' },
+      { audit: mutationAudit('grant.revoke', G1), id: G1, opId: 'OP-ORG-LAST' },
     );
 
     expect(removed).toMatchObject({ status: 'deleted' });
@@ -430,6 +432,7 @@ describe('removing a contribution counts holders after exclusion', () => {
   it('lets the writer remove one contribution and refuses the last one', async () => {
     expect(
       await repository().deleteOrganization(a, fence({ grant: await revisionOf(G1) }), {
+        audit: mutationAudit('grant.revoke', G1),
         id: G1,
         opId: 'OP-1',
       }),
@@ -437,6 +440,7 @@ describe('removing a contribution counts holders after exclusion', () => {
     expect(await holders()).toBe(1);
     expect(
       await repository().deleteOrganization(a, fence({ grant: await revisionOf(G_ADMINS) }), {
+        audit: mutationAudit('grant.revoke', G_ADMINS),
         id: G_ADMINS,
         opId: 'OP-2',
       }),
@@ -496,13 +500,17 @@ describe('concurrent last-admin operations', () => {
     const result = await repository(connection).deleteOrganization(
       a,
       fence({ grant: await revisionOf(grantId) }),
-      { id: grantId, opId: `OP-${counter}` },
+      { audit: mutationAudit('grant.revoke', grantId), id: grantId, opId: `OP-${counter}` },
     );
     return typeof result === 'string' ? result : result.outcome;
   }
 
   const suspendOf = (userId: string) => (connection: SqlExecutor) =>
-    repository(connection).suspendUser(a, fence({ grant: 1 }), { userId: userId, now: now() });
+    repository(connection).suspendUser(a, fence({ grant: 1 }), {
+      audit: mutationAudit('user.suspend', userId),
+      userId: userId,
+      now: now(),
+    });
 
   async function unlinkU1(connection: SqlExecutor): Promise<string> {
     const found = await connection.all<{ subject: string }>(
@@ -544,3 +552,17 @@ describe('concurrent last-admin operations', () => {
     }
   }
 });
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

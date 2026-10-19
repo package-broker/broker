@@ -1,3 +1,4 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
 import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -28,6 +29,8 @@ import {
 import { holdsPermission, permissionRows } from './access.js';
 import { revokeAllForUserStatement } from './session.js';
 import { liveSessionCondition } from './session-liveness.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_GROUP_LENGTH = 256;
@@ -260,18 +263,31 @@ function probe(condition: Guard): ScalarStatement {
   return scalar(db.selectNoFrom(sql<number>`${condition}`.as('holds')));
 }
 
+function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
+  return record === undefined
+    ? sql<SqlBool>`0`
+    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
+        and principal_key = ${record.principalKey} and key = ${record.key})`;
+}
+
 function probesFor(
+  ctx: OrgContext,
   authority: GrantAuthority,
   collision: readonly Guard[],
+  idempotency: IdempotencyRecord | undefined,
   revision?: { readonly ctx: OrgContext; readonly id: string; readonly expected: number },
 ): FailureProbes {
   return {
     authority: probe(sql<SqlBool>`(${authority.live} and ${authority.reach}) is not 1`),
-    ...(revision === undefined
+    ...(revision === undefined && idempotency === undefined
       ? {}
       : {
           conflict: probe(
-            sql<SqlBool>`exists (select 1 from access_grant where org_id = ${revision.ctx.orgId} and id = ${revision.id} and scope = 'organization' and revision <> ${revision.expected})`,
+            sql<SqlBool>`(${idempotencyCollision(ctx, idempotency)} or ${
+              revision === undefined
+                ? sql<SqlBool>`0`
+                : sql<SqlBool>`exists (select 1 from access_grant where org_id = ${revision.ctx.orgId} and id = ${revision.id} and scope = 'organization' and revision <> ${revision.expected})`
+            })`,
           ),
         }),
     collision: probe(sql<SqlBool>`(${sql.join(collision, sql` and `)}) is not 1`),
@@ -541,12 +557,15 @@ export function createGrantRepository(
           ...assertCheck(creatorHolds),
           ...assertCheck(unused),
           insert,
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
         ],
-        probesFor(authority, [roleHolds, creatorHolds, unused]),
+        probesFor(ctx, authority, [roleHolds, creatorHolds, unused], input.idempotency),
       );
       if (!outcome.ok) {
         const reason = refusedBy(outcome, 'grant create');
-        if (reason === 'conflict') throw new Error('grant create has no revision to conflict with');
         if (reason !== 'collision') return reason;
         const found = await executor.all<{ role_ok: number; creator_ok: number }>(
           scalar(
@@ -562,12 +581,12 @@ export function createGrantRepository(
         }
         return 'duplicate';
       }
-      const inserted = outcome.results[outcome.results.length - 1];
+      const inserted = outcome.results.at(input.idempotency === undefined ? -2 : -3);
       if ((inserted?.rows.length ?? 0) > 0) return 'created';
       throw new Error('grant create inserted no row after its guards held');
     },
 
-    async deleteOrganization(ctx, fence, { id, opId }) {
+    async deleteOrganization(ctx, fence, { id, opId, audit, idempotency }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
@@ -627,15 +646,17 @@ export function createGrantRepository(
               .where('access_grant.revision', '=', expected)
               .returning('id'),
           ),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
-        probesFor(authority, [revision, lastHolder], { ctx, id, expected }),
+        probesFor(ctx, authority, [revision, lastHolder], idempotency, { ctx, id, expected }),
       );
       if (outcome.ok) {
-        const deleted = outcome.results[outcome.results.length - 1];
+        const deleted = outcome.results.at(idempotency === undefined ? -2 : -3);
         if ((deleted?.rows.length ?? 0) === 0) {
           throw new Error('grant delete matched no row after its guards held');
         }
-        const row = outcome.results.at(-2)?.rows[0] as
+        const row = outcome.results.at(idempotency === undefined ? -3 : -4)?.rows[0] as
           { offboarded_user_id: string | null } | undefined;
         return { outcome: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };
       }
@@ -645,7 +666,7 @@ export function createGrantRepository(
       return remaining.length > 0 ? 'last_holder' : 'not_found';
     },
 
-    async changeRole(ctx, fence, { id, roleId, now, opId }) {
+    async changeRole(ctx, fence, { id, roleId, now, opId, audit, idempotency }) {
       const stamp = timestamp(now);
       requireNonEmpty(id, 'id');
       requireNonEmpty(roleId, 'roleId');
@@ -690,11 +711,17 @@ export function createGrantRepository(
               .where('access_grant.revision', '=', expected)
               .returning('id'),
           ),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
-        probesFor(authority, [revision, roleHolds, lastHolder], { ctx, id, expected }),
+        probesFor(ctx, authority, [revision, roleHolds, lastHolder], idempotency, {
+          ctx,
+          id,
+          expected,
+        }),
       );
       if (outcome.ok) {
-        const updated = outcome.results[outcome.results.length - 1];
+        const updated = outcome.results.at(idempotency === undefined ? -2 : -3);
         if ((updated?.rows.length ?? 0) > 0) return 'updated';
         throw new Error('grant change matched no row after its guards held');
       }
@@ -712,7 +739,7 @@ export function createGrantRepository(
       return row.role_ok === 1 ? 'last_holder' : 'role_scope_mismatch';
     },
 
-    async suspendUser(ctx, fence, { userId, now }) {
+    async suspendUser(ctx, fence, { userId, now, audit, idempotency }) {
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
@@ -750,9 +777,14 @@ export function createGrantRepository(
           update,
           ...assertCheck(sql<SqlBool>`changes() = 1`),
           revokeAllForUserStatement(ctx, userId, stamp, [userHasStatus(ctx, userId, 'suspended')]),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
         {
           authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
+          ...(idempotency === undefined
+            ? {}
+            : { conflict: probe(idempotencyCollision(ctx, idempotency)) }),
           collision: probe(sql<SqlBool>`(${active} and ${lastHolder}) is not 1`),
         },
       );
@@ -767,7 +799,7 @@ export function createGrantRepository(
       return current === 'suspended' ? 'unchanged' : 'last_holder';
     },
 
-    async reactivateUser(ctx, fence, { userId, now }) {
+    async reactivateUser(ctx, fence, { userId, now, audit, idempotency }) {
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
@@ -800,9 +832,14 @@ export function createGrantRepository(
               .where('user_account.status', '=', 'suspended')
               .returning('id'),
           ),
+          auditPendingStatement(ctx, audit),
+          ...(idempotency === undefined ? [] : [idempotencyInsertStatement(ctx, idempotency)]),
         ],
         {
           authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
+          ...(idempotency === undefined
+            ? {}
+            : { conflict: probe(idempotencyCollision(ctx, idempotency)) }),
           collision: probe(sql<SqlBool>`${suspended} is not 1`),
         },
       );

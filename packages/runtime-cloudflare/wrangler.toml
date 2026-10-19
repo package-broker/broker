@@ -49,6 +49,9 @@ compatibility_flags = ["nodejs_compat"]
 #
 # [observability]
 # enabled = true
+#
+# [observability.logs]
+# enabled = true
 # invocation_logs = false
 #
 # [assets]

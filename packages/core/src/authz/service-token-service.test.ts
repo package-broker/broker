@@ -566,6 +566,7 @@ describe('service token issuance', () => {
     } as unknown as ActorContext;
     const logs: Record<string, unknown>[] = [];
     const principals = createServicePrincipalService({
+      sessions: { isReauthFresh: () => true },
       principals: {
         get: async () => principal(),
         create: async () => 'created',

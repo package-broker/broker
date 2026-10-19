@@ -224,6 +224,7 @@ describe('step 5 release gate on Miniflare D1', () => {
           const actor = { ...viewed, permissions: new Set(viewed.permissions) };
           const principal = await services.servicePrincipals.create(
             ctx.org,
+            session,
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId },

@@ -405,6 +405,7 @@ async function buildAuth(
       ...common,
     }),
     servicePrincipals: createServicePrincipalService({
+      sessions: auth.sessions,
       principals: principalRepository,
       authority,
       directory: principalRepository,

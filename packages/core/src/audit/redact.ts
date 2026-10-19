@@ -17,6 +17,7 @@ const HASH_FIELDS: ReadonlySet<string> = new Set(['sha256_old', 'sha256_new', 'p
 const ID_FIELDS: ReadonlySet<string> = new Set(['id', 'project_id', 'role_id', 'source_id']);
 const HASH_64 = /^[0-9a-fA-F]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CREDENTIAL_REF = /^op:\/\/[A-Za-z0-9 ._/-]{1,200}$/;
 const UUID_ANYWHERE =
   /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/i;
 const ULID = /^[0-9A-Z]{26}$/;
@@ -295,6 +296,19 @@ function storedForm(value: string, kind: FieldKind): RedactResult {
 
 export function redactValue(value: string, limit: number, field: string): RedactResult {
   if (value.length > limit) return { ok: false, reason: 'bad_value' };
+  if (field === 'external_ref') {
+    if (UUID.test(value)) return { ok: true, value };
+    // Opaque references retain their spelling; only whole UUID path segments are IDs.
+    const scanned = CREDENTIAL_REF.test(value)
+      ? value
+          .split('/')
+          .map((segment) => (UUID.test(segment) ? 'id' : segment))
+          .join('/')
+      : value;
+    return hasCredential(scanned, TEXT_SCAN)
+      ? { ok: false, reason: 'credential_value' }
+      : { ok: true, value };
+  }
   const kind = fieldKind(field);
   const stored = storedForm(value, kind);
   if (!stored.ok) return stored;

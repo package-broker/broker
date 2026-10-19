@@ -13,6 +13,7 @@ export interface AuthorizationRequest {
     readonly path: string;
     readonly permission: string;
     readonly boundary?: RouteBoundary;
+    readonly bearerOnly?: true;
   };
   readonly params: Readonly<Record<string, string>>;
 }

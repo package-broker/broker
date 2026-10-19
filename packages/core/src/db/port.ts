@@ -39,3 +39,16 @@ export function orgContext(orgId: string): OrgContext {
   }
   return Object.freeze({ orgId: orgId as OrgId });
 }
+
+export type {
+  ExistingVersion,
+  ExistingVersionsPage,
+  ExistingVersionsQuery,
+  ExistingVersionsReader,
+} from './existing-versions.js';
+export type {
+  PublishedValidators,
+  UpstreamForm,
+  UpstreamState,
+  UpstreamStateRepository,
+} from './upstream-state.js';

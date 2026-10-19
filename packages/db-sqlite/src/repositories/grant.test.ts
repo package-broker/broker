@@ -23,6 +23,15 @@ import {
   type ProtectedHolderInput,
 } from './grant.js';
 
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
+
 const NOW = '2026-10-15T12:00:00.000Z';
 const LATER = '2026-10-15T13:00:00.000Z';
 
@@ -204,19 +213,26 @@ function createGrantRepository(
     listOrganization: async (ctx) =>
       (await fenced.listOrganization(ctx)).filter((grant) => grant.id !== actorOf(ctx).grant),
     suspendUser: async (ctx, userId, now) =>
-      fenced.suspendUser(ctx, await fenceFor(ctx), userId, now),
+      fenced.suspendUser(ctx, await fenceFor(ctx), { userId: userId, now: now }),
     reactivateUser: async (ctx, userId, now) =>
-      fenced.reactivateUser(ctx, await fenceFor(ctx), userId, now),
+      fenced.reactivateUser(ctx, await fenceFor(ctx), { userId: userId, now: now }),
     countProtectedHolders: (ctx) => fenced.countProtectedHolders(ctx),
     createOrganization: async (ctx, input) =>
       fenced.createOrganization(ctx, await fenceFor(ctx), { ...input, opId: nextOp() }),
     deleteOrganization: async (ctx, id) => {
-      return outcomeOf(await fenced.deleteOrganization(ctx, await fenceFor(ctx, id), id, nextOp()));
+      return outcomeOf(
+        await fenced.deleteOrganization(ctx, await fenceFor(ctx, id), { id: id, opId: nextOp() }),
+      );
     },
     revoke: async (ctx, id) =>
-      fenced.deleteOrganization(ctx, await fenceFor(ctx, id), id, nextOp()),
+      fenced.deleteOrganization(ctx, await fenceFor(ctx, id), { id: id, opId: nextOp() }),
     changeRole: async (ctx, id, roleId, now) =>
-      fenced.changeRole(ctx, await fenceFor(ctx, id), id, roleId, now, nextOp()),
+      fenced.changeRole(ctx, await fenceFor(ctx, id), {
+        id: id,
+        roleId: roleId,
+        now: now,
+        opId: nextOp(),
+      }),
   };
 }
 
@@ -1027,7 +1043,7 @@ describe('deleteOrganization reports the user it offboards', () => {
           emailAuthoritativeDomains: ['example.test', 'actor.test'],
         })),
         holderInput,
-      }).deleteOrganization(a, await fenceFor(a, G1), G1, nextOp()),
+      }).deleteOrganization(a, await fenceFor(a, G1), { id: G1, opId: nextOp() }),
     ).toEqual(deleted(U1));
     expect(statements.length).toBeGreaterThan(0);
     for (const statement of statements) expect(statement.params.length).toBeLessThanOrEqual(100);
@@ -1349,7 +1365,9 @@ describe('user status fence', () => {
       holderInput,
     });
     const epoch = await epochOf(a);
-    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
+      'authority',
+    );
     expect(await statusOf(U2)).toBe('active');
     expect(await rows("SELECT revoked_at FROM session WHERE id LIKE '01J0SESSION%'")).toEqual([
       { revoked_at: null },
@@ -1373,7 +1391,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
+      'authority',
+    );
     expect(await statusOf(U2)).toBe('active');
   });
 
@@ -1394,7 +1414,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('suspended');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
+      'suspended',
+    );
   });
 
   it('a non-admin may suspend a user who is no holder', async () => {
@@ -1408,7 +1430,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('suspended');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'suspended',
+    );
   });
 
   it('an actor without org:users:write is refused by the batch', async () => {
@@ -1422,10 +1446,14 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'authority',
+    );
     expect(await statusOf(U3)).toBe('active');
     await executor.all(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", U3));
-    expect(await repository.reactivateUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await repository.reactivateUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'authority',
+    );
     expect(await statusOf(U3)).toBe('suspended');
   });
 
@@ -1443,7 +1471,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'authority',
+    );
     expect(await statusOf(U3)).toBe('active');
   });
 
@@ -1461,7 +1491,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U3, LATER)).toBe('authority');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'authority',
+    );
   });
 
   it('reactivating a user who is not suspended writes nothing', async () => {
@@ -1513,7 +1545,9 @@ describe('user status fence', () => {
     });
     const before = await snapshot();
     const epoch = await epochOf(a);
-    expect(await repository.reactivateUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await repository.reactivateUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
+      'authority',
+    );
     expect(await snapshot()).toBe(before);
     expect(await epochOf(a)).toBe(epoch);
     expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
@@ -1538,7 +1572,9 @@ describe('user status fence', () => {
       holderInput,
     });
     const before = await snapshot();
-    expect(await repository.reactivateUser(a, limitedFence(), U2, LATER)).toBe('authority');
+    expect(await repository.reactivateUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
+      'authority',
+    );
     expect(await snapshot()).toBe(before);
     expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
   });
@@ -1555,7 +1591,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.reactivateUser(a, limitedFence(), U3, LATER)).toBe('reactivated');
+    expect(await repository.reactivateUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'reactivated',
+    );
   });
 
   it('a refusal whose cause is gone by the time it is classified is a retryable conflict', async () => {
@@ -1587,7 +1625,9 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await repository.suspendUser(a, limitedFence(), U2, LATER)).toBe('conflict');
+    expect(await repository.suspendUser(a, limitedFence(), { userId: U2, now: LATER })).toBe(
+      'conflict',
+    );
     expect(await statusOf(U2)).toBe('active');
   });
 
@@ -1644,8 +1684,10 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    expect(await busy.suspendUser(a, limitedFence(), U3, LATER)).toBe('conflict');
-    expect(await busy.reactivateUser(a, limitedFence(), U3, LATER)).toBe('conflict');
+    expect(await busy.suspendUser(a, limitedFence(), { userId: U3, now: LATER })).toBe('conflict');
+    expect(await busy.reactivateUser(a, limitedFence(), { userId: U3, now: LATER })).toBe(
+      'conflict',
+    );
     const big = createFencedGrantRepository(failing('too_big'), {
       providerAnchors: HOLDER_PROVIDERS.map((provider) => ({
         provider,
@@ -1655,10 +1697,14 @@ describe('user status fence', () => {
       })),
       holderInput,
     });
-    await expect(big.suspendUser(a, limitedFence(), U3, LATER)).rejects.toMatchObject({
+    await expect(
+      big.suspendUser(a, limitedFence(), { userId: U3, now: LATER }),
+    ).rejects.toMatchObject({
       kind: 'too_big',
     });
-    await expect(big.reactivateUser(a, limitedFence(), U3, LATER)).rejects.toMatchObject({
+    await expect(
+      big.reactivateUser(a, limitedFence(), { userId: U3, now: LATER }),
+    ).rejects.toMatchObject({
       kind: 'too_big',
     });
   });
@@ -2012,7 +2058,7 @@ describe('concurrent guarded operations on one file database', () => {
       };
       const fence = await fenceFor(org);
       const calls = administrators.map((administration) =>
-        administration.suspendUser(org, admin, fence, U2),
+        administration.suspendUser(org, admin, fence, U2, apiCall),
       );
       await Promise.all(gates.map((gate) => gate.reached));
       const winner = order === 'first connection' ? 0 : 1;
@@ -2494,19 +2540,26 @@ describe('fenced grant mutators', () => {
               success = 'created';
               break;
             case 'delete':
-              result = outcomeOf(await fenced.deleteOrganization(a, fence, G2, 'OPRECOVERY'));
+              result = outcomeOf(
+                await fenced.deleteOrganization(a, fence, { id: G2, opId: 'OPRECOVERY' }),
+              );
               success = 'deleted';
               break;
             case 'changeRole':
-              result = await fenced.changeRole(a, fence, G2, HIGH, LATER, 'OPRECOVERY');
+              result = await fenced.changeRole(a, fence, {
+                id: G2,
+                roleId: HIGH,
+                now: LATER,
+                opId: 'OPRECOVERY',
+              });
               success = 'updated';
               break;
             case 'suspend':
-              result = await fenced.suspendUser(a, fence, U1, LATER);
+              result = await fenced.suspendUser(a, fence, { userId: U1, now: LATER });
               success = 'suspended';
               break;
             case 'reactivate':
-              result = await fenced.reactivateUser(a, fence, U1, LATER);
+              result = await fenced.reactivateUser(a, fence, { userId: U1, now: LATER });
               success = 'reactivated';
               break;
           }
@@ -2546,19 +2599,39 @@ describe('fenced grant mutators', () => {
       emailGrant(a, G2, 'peer@example.test', LOW),
     ]);
     const before = await worldState();
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, LOW, LATER, 'OP1')).toBe(
-      'authority',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G2, HIGH, LATER, 'OP2')).toBe(
-      'authority',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G2, ADMIN, LATER, 'OP3')).toBe(
-      'authority',
-    );
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP1',
+      }),
+    ).toBe('authority');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G2,
+        roleId: HIGH,
+        now: LATER,
+        opId: 'OP2',
+      }),
+    ).toBe('authority');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G2,
+        roleId: ADMIN,
+        now: LATER,
+        opId: 'OP3',
+      }),
+    ).toBe('authority');
     expect(await worldState()).toBe(before);
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G2, LOW, LATER, 'OP4')).toBe(
-      'updated',
-    );
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G2,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP4',
+      }),
+    ).toBe('updated');
   });
 
   it('1: the subset is read inside the batch: a permission lost after the fence was built refuses', async () => {
@@ -2588,27 +2661,29 @@ describe('fenced grant mutators', () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     await seed([stmt('UPDATE session SET revoked_at = ? WHERE id = ?', NOW, writer.sessionId)]);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toBe(
-      'authority',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP1' }),
+    ).toBe('authority');
     const other = await actingAs('other', WRITER);
     await seed([
       stmt('UPDATE user_account SET status = ? WHERE id = ?', 'suspended', other.userId),
     ]);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(other, 1), G1, 'OP2')).toBe(
-      'authority',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(other, 1), { id: G1, opId: 'OP2' }),
+    ).toBe('authority');
     const foreign = await actingAs('foreign', WRITER);
-    expect(await fenced.deleteOrganization(b, fenceOfActing(foreign, 1), G1, 'OP3')).toBe(
-      'authority',
-    );
+    expect(
+      await fenced.deleteOrganization(b, fenceOfActing(foreign, 1), { id: G1, opId: 'OP3' }),
+    ).toBe('authority');
     expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([{ id: G1 }]);
   });
 
   it('2: a non-admin revokes a grant whose role holds permissions it lacks', async () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'departing@example.test', HIGH)]);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toMatchObject({
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP1' }),
+    ).toMatchObject({
       outcome: 'deleted',
     });
     expect(await rows('SELECT id FROM access_grant WHERE id = ?', G1)).toEqual([]);
@@ -2622,14 +2697,21 @@ describe('fenced grant mutators', () => {
       emailGrant(a, G2, 'u2@example.test', ADMIN),
     ]);
     const before = await worldState();
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP1')).toBe(
-      'authority',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, LOW, LATER, 'OP2')).toBe(
-      'authority',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP1' }),
+    ).toBe('authority');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP2',
+      }),
+    ).toBe('authority');
     expect(await worldState()).toBe(before);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(admin, 1), G1, 'OP3')).toMatchObject({
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(admin, 1), { id: G1, opId: 'OP3' }),
+    ).toMatchObject({
       outcome: 'deleted',
     });
   });
@@ -2645,12 +2727,17 @@ describe('fenced grant mutators', () => {
       emailGrant(a, G1, 'u1@example.test', ADMIN),
     ]);
     const before = await worldState();
-    expect(await fenced.deleteOrganization(a, fenceOfActing(admin, 1), G1, 'OP1')).toBe(
-      'last_holder',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(admin, 1), G1, LOW, LATER, 'OP2')).toBe(
-      'last_holder',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(admin, 1), { id: G1, opId: 'OP1' }),
+    ).toBe('last_holder');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(admin, 1), {
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP2',
+      }),
+    ).toBe('last_holder');
     expect(await worldState()).toBe(before);
   });
 
@@ -2658,12 +2745,17 @@ describe('fenced grant mutators', () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     const before = await worldState();
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 7), G1, 'OP1')).toBe(
-      'conflict',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 7), G1, LOW, LATER, 'OP2')).toBe(
-      'conflict',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 7), { id: G1, opId: 'OP1' }),
+    ).toBe('conflict');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 7), {
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP2',
+      }),
+    ).toBe('conflict');
     expect(await worldState()).toBe(before);
   });
 
@@ -2671,36 +2763,45 @@ describe('fenced grant mutators', () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
     const stale = fenceOfActing(writer, 1);
-    expect(await fenced.changeRole(a, stale, G1, LOW, LATER, 'OPCHANGE')).toBe('updated');
+    expect(
+      await fenced.changeRole(a, stale, { id: G1, roleId: LOW, now: LATER, opId: 'OPCHANGE' }),
+    ).toBe('updated');
     expect(await rows('SELECT revision, last_op_id FROM access_grant WHERE id = ?', G1)).toEqual([
       { revision: 2, last_op_id: 'OPCHANGE' },
     ]);
-    expect(await fenced.changeRole(a, stale, G1, LOW, LATER, 'OPAGAIN')).toBe('conflict');
-    expect(await fenced.deleteOrganization(a, stale, G1, 'OPDELETE')).toBe('conflict');
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, 2), G1, 'OPDELETE'),
+      await fenced.changeRole(a, stale, { id: G1, roleId: LOW, now: LATER, opId: 'OPAGAIN' }),
+    ).toBe('conflict');
+    expect(await fenced.deleteOrganization(a, stale, { id: G1, opId: 'OPDELETE' })).toBe(
+      'conflict',
+    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 2), { id: G1, opId: 'OPDELETE' }),
     ).toMatchObject({ outcome: 'deleted' });
   });
 
   it('3: an unknown grant is not_found and a missing role is role_scope_mismatch', async () => {
     const writer = await actingAs('writer', WRITER);
     await seed([emailGrant(a, G1, 'x@example.test', LOW)]);
-    expect(await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G3, 'OP1')).toBe(
-      'not_found',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G3, LOW, LATER, 'OP2')).toBe(
-      'not_found',
-    );
+    expect(
+      await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G3, opId: 'OP1' }),
+    ).toBe('not_found');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G3,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP2',
+      }),
+    ).toBe('not_found');
     await seed([role(a, '01J0ROLEPROJECTOPEN000000', 'open_project', 'project', 0)]);
     expect(
-      await fenced.changeRole(
-        a,
-        fenceOfActing(writer, 1),
-        G1,
-        '01J0ROLEPROJECTOPEN000000',
-        LATER,
-        'OP3',
-      ),
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G1,
+        roleId: '01J0ROLEPROJECTOPEN000000',
+        now: LATER,
+        opId: 'OP3',
+      }),
     ).toBe('role_scope_mismatch');
     expect(await create(writer, '01J0ROLEMISSING000000000A')).toBe('role_scope_mismatch');
   });
@@ -2708,15 +2809,15 @@ describe('fenced grant mutators', () => {
   it('refuses a fence without a grant revision and an empty op id before any SQL', async () => {
     const writer = await actingAs('writer', WRITER);
     statements.length = 0;
-    await expect(fenced.deleteOrganization(a, fenceOfActing(writer), G1, 'OP1')).rejects.toThrow(
-      TypeError,
-    );
     await expect(
-      fenced.changeRole(a, fenceOfActing(writer), G1, LOW, LATER, 'OP1'),
+      fenced.deleteOrganization(a, fenceOfActing(writer), { id: G1, opId: 'OP1' }),
     ).rejects.toThrow(TypeError);
-    await expect(fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, '')).rejects.toThrow(
-      TypeError,
-    );
+    await expect(
+      fenced.changeRole(a, fenceOfActing(writer), { id: G1, roleId: LOW, now: LATER, opId: 'OP1' }),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: '' }),
+    ).rejects.toThrow(TypeError);
     expect(statements).toEqual([]);
   });
 
@@ -2729,19 +2830,34 @@ describe('fenced grant mutators', () => {
     statements.length = 0;
     await create(writer, HIGH, G3, 'z@example.test');
     await create(writer, LOW, G3, 'z@example.test');
-    await fenced.changeRole(a, fenceOfActing(writer, 1), G2, HIGH, LATER, 'OP1');
-    await fenced.changeRole(a, fenceOfActing(writer, 9), G2, LOW, LATER, 'OP2');
-    await fenced.changeRole(a, fenceOfActing(writer, 1), G2, LOW, LATER, 'OP3');
-    await fenced.deleteOrganization(a, fenceOfActing(writer, 9), G1, 'OP4');
-    await fenced.deleteOrganization(a, fenceOfActing(writer, 1), G1, 'OP5');
+    await fenced.changeRole(a, fenceOfActing(writer, 1), {
+      id: G2,
+      roleId: HIGH,
+      now: LATER,
+      opId: 'OP1',
+    });
+    await fenced.changeRole(a, fenceOfActing(writer, 9), {
+      id: G2,
+      roleId: LOW,
+      now: LATER,
+      opId: 'OP2',
+    });
+    await fenced.changeRole(a, fenceOfActing(writer, 1), {
+      id: G2,
+      roleId: LOW,
+      now: LATER,
+      opId: 'OP3',
+    });
+    await fenced.deleteOrganization(a, fenceOfActing(writer, 9), { id: G1, opId: 'OP4' });
+    await fenced.deleteOrganization(a, fenceOfActing(writer, 1), { id: G1, opId: 'OP5' });
     const manager = await actingAs('manager', ['org:users:write', 'org:read']);
     const lowManager = await actingAs('lowmanager', ['org:read']);
-    await fenced.suspendUser(a, fenceOfActing(manager), U1, LATER);
-    await fenced.suspendUser(a, fenceOfActing(manager), U1, LATER);
-    await fenced.suspendUser(a, fenceOfActing(lowManager), U2, LATER);
-    await fenced.reactivateUser(a, fenceOfActing(lowManager), U1, LATER);
-    await fenced.reactivateUser(a, fenceOfActing(manager), U1, LATER);
-    await fenced.reactivateUser(a, fenceOfActing(manager), U1, LATER);
+    await fenced.suspendUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
+    await fenced.suspendUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
+    await fenced.suspendUser(a, fenceOfActing(lowManager), { userId: U2, now: LATER });
+    await fenced.reactivateUser(a, fenceOfActing(lowManager), { userId: U1, now: LATER });
+    await fenced.reactivateUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
+    await fenced.reactivateUser(a, fenceOfActing(manager), { userId: U1, now: LATER });
     expect(statements.length).toBeGreaterThan(20);
     expect(Math.max(...statements.map((statement) => statement.params.length))).toBeLessThanOrEqual(
       100,
@@ -2817,8 +2933,8 @@ describe('fenced grant mutators', () => {
         { grant: 1 },
       );
       const outcomes = await Promise.all([
-        one.changeRole(org, fence, G1, ADMIN_TWO, LATER, 'OPONE'),
-        two.changeRole(org, fence, G1, ADMIN, LATER, 'OPTWO'),
+        one.changeRole(org, fence, { id: G1, roleId: ADMIN_TWO, now: LATER, opId: 'OPONE' }),
+        two.changeRole(org, fence, { id: G1, roleId: ADMIN, now: LATER, opId: 'OPTWO' }),
       ]);
       expect([...outcomes].sort()).toEqual(['conflict', 'updated']);
       expect(
@@ -2886,16 +3002,26 @@ describe('fenced grant mutators', () => {
     const revisionOfListed = async () =>
       (await fenced.listOrganization(a)).find((grant) => grant.id === G1)?.revision;
     expect(await revisionOfListed()).toBe(1);
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, HIGH, LATER, 'OP1')).toBe(
-      'authority',
-    );
-    expect(await fenced.changeRole(a, fenceOfActing(writer, 1), G1, LOW, LATER, 'OP2')).toBe(
-      'updated',
-    );
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G1,
+        roleId: HIGH,
+        now: LATER,
+        opId: 'OP1',
+      }),
+    ).toBe('authority');
+    expect(
+      await fenced.changeRole(a, fenceOfActing(writer, 1), {
+        id: G1,
+        roleId: LOW,
+        now: LATER,
+        opId: 'OP2',
+      }),
+    ).toBe('updated');
     const revision = await revisionOfListed();
     expect(revision).toBe(2);
     expect(
-      await fenced.deleteOrganization(a, fenceOfActing(writer, revision), G1, 'OP3'),
+      await fenced.deleteOrganization(a, fenceOfActing(writer, revision), { id: G1, opId: 'OP3' }),
     ).toMatchObject({ outcome: 'deleted' });
   });
 
@@ -3060,10 +3186,16 @@ describe('fenced grant mutators', () => {
     it('create: the actor loses a permission after the service authorized it', async () => {
       const before = JSON.stringify(await grantRows());
       beforeBatch = dropPermission;
-      const result = await admin.grantOrganization(org, staleActor, fence(), {
-        subject: { type: 'email', value: 'new@example.test' },
-        roleId: HIGH,
-      });
+      const result = await admin.grantOrganization(
+        org,
+        staleActor,
+        fence(),
+        {
+          subject: { type: 'email', value: 'new@example.test' },
+          roleId: HIGH,
+        },
+        apiCall,
+      );
       expect(result).toEqual({ ok: false, error: 'forbidden' });
       expect(JSON.stringify(await grantRows())).toBe(before);
     });
@@ -3072,7 +3204,7 @@ describe('fenced grant mutators', () => {
       await shared.executor.batch([emailGrant(org, G1, 'x@example.test', LOW)]);
       const before = JSON.stringify(await grantRows());
       beforeBatch = dropPermission;
-      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, HIGH)).toEqual({
+      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, HIGH, apiCall)).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -3093,7 +3225,7 @@ describe('fenced grant mutators', () => {
             ),
           ])
           .then(() => undefined);
-      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, HIGH)).toEqual({
+      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, HIGH, apiCall)).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -3114,7 +3246,7 @@ describe('fenced grant mutators', () => {
             ),
           ])
           .then(() => undefined);
-      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, LOW)).toEqual({
+      expect(await admin.changeGrantRole(org, staleActor, fence(1), G1, LOW, apiCall)).toEqual({
         ok: false,
         error: 'forbidden',
       });

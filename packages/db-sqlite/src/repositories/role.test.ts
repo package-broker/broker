@@ -279,10 +279,15 @@ function createRoleRepository(executor: ScalarSqlExecutor): UnfencedRoles {
     get: raw.get,
     create: async (ctx, input) => raw.create(ctx, await fence(ctx), { ...input, opId: opId() }),
     rename: async (ctx, id, name, now) =>
-      raw.rename(ctx, await fence(ctx, id), id, name, now, opId()),
+      raw.rename(ctx, await fence(ctx, id), { id: id, name: name, now: now, opId: opId() }),
     setPermissions: async (ctx, id, permissions, now) =>
-      raw.setPermissions(ctx, await fence(ctx, id), id, permissions, now, opId()),
-    delete: async (ctx, id) => raw.delete(ctx, await fence(ctx, id), id, opId()),
+      raw.setPermissions(ctx, await fence(ctx, id), {
+        id: id,
+        permissions: permissions,
+        now: now,
+        opId: opId(),
+      }),
+    delete: async (ctx, id) => raw.delete(ctx, await fence(ctx, id), { id: id, opId: opId() }),
   };
 }
 
@@ -1128,11 +1133,16 @@ describe('fenced role mutators', () => {
     const revision = await revisionOf(CUSTOM.id);
     const before = await snapshot();
     expect(
-      await repository.rename(a, fenceFor(actor, revision), CUSTOM.id, 'Hijack', LATER, opId()),
+      await repository.rename(a, fenceFor(actor, revision), {
+        id: CUSTOM.id,
+        name: 'Hijack',
+        now: LATER,
+        opId: opId(),
+      }),
     ).toBe('authority');
-    expect(await repository.delete(a, fenceFor(actor, revision), CUSTOM.id, opId())).toBe(
-      'authority',
-    );
+    expect(
+      await repository.delete(a, fenceFor(actor, revision), { id: CUSTOM.id, opId: opId() }),
+    ).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
 
@@ -1145,14 +1155,12 @@ describe('fenced role mutators', () => {
     const revision = await revisionOf(CUSTOM.id);
     const before = await snapshot();
     expect(
-      await repository.setPermissions(
-        a,
-        fenceFor(actor, revision),
-        CUSTOM.id,
-        ['org:read', 'org:users:write'],
-        LATER,
-        opId(),
-      ),
+      await repository.setPermissions(a, fenceFor(actor, revision), {
+        id: CUSTOM.id,
+        permissions: ['org:read', 'org:users:write'],
+        now: LATER,
+        opId: opId(),
+      }),
     ).toBe('authority');
     await database.executor.all({
       sql: 'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
@@ -1160,14 +1168,12 @@ describe('fenced role mutators', () => {
     });
     const superior = await snapshot();
     expect(
-      await repository.setPermissions(
-        a,
-        fenceFor(actor, revision),
-        CUSTOM.id,
-        ['org:read'],
-        LATER,
-        opId(),
-      ),
+      await repository.setPermissions(a, fenceFor(actor, revision), {
+        id: CUSTOM.id,
+        permissions: ['org:read'],
+        now: LATER,
+        opId: opId(),
+      }),
     ).toBe('authority');
     expect(await snapshot()).toBe(superior);
     expect(before).not.toBe(superior);
@@ -1237,19 +1243,24 @@ describe('fenced role mutators', () => {
     const before = await snapshot();
     const stale = (await revisionOf(CUSTOM.id)) + 5;
     expect(
-      await repository.rename(a, fenceFor(actor, stale), CUSTOM.id, 'Late', LATER, opId()),
+      await repository.rename(a, fenceFor(actor, stale), {
+        id: CUSTOM.id,
+        name: 'Late',
+        now: LATER,
+        opId: opId(),
+      }),
     ).toBe('conflict');
     expect(
-      await repository.setPermissions(
-        a,
-        fenceFor(actor, stale),
-        CUSTOM.id,
-        ['org:read'],
-        LATER,
-        opId(),
-      ),
+      await repository.setPermissions(a, fenceFor(actor, stale), {
+        id: CUSTOM.id,
+        permissions: ['org:read'],
+        now: LATER,
+        opId: opId(),
+      }),
     ).toBe('conflict');
-    expect(await repository.delete(a, fenceFor(actor, stale), CUSTOM.id, opId())).toBe('conflict');
+    expect(
+      await repository.delete(a, fenceFor(actor, stale), { id: CUSTOM.id, opId: opId() }),
+    ).toBe('conflict');
     expect(await snapshot()).toBe(before);
   });
 
@@ -1260,19 +1271,22 @@ describe('fenced role mutators', () => {
     });
     const actor = await actorFor(a);
     expect(await revisionOf(CUSTOM.id)).toBe(1);
-    expect(await repository.rename(a, fenceFor(actor, 1), CUSTOM.id, 'One', LATER, opId())).toBe(
-      'renamed',
-    );
+    expect(
+      await repository.rename(a, fenceFor(actor, 1), {
+        id: CUSTOM.id,
+        name: 'One',
+        now: LATER,
+        opId: opId(),
+      }),
+    ).toBe('renamed');
     expect(await revisionOf(CUSTOM.id)).toBe(2);
     expect(
-      await repository.setPermissions(
-        a,
-        fenceFor(actor, 2),
-        CUSTOM.id,
-        ['org:read', 'org:users:read'],
-        LATER,
-        opId(),
-      ),
+      await repository.setPermissions(a, fenceFor(actor, 2), {
+        id: CUSTOM.id,
+        permissions: ['org:read', 'org:users:read'],
+        now: LATER,
+        opId: opId(),
+      }),
     ).toBe('updated');
     expect(await revisionOf(CUSTOM.id)).toBe(3);
     const rows = await database.executor.all<{ last_op_id: string | null }>({
@@ -1290,8 +1304,18 @@ describe('fenced role mutators', () => {
     const actor = await actorFor(a);
     const fence = fenceFor(actor, 1);
     const results = await Promise.all([
-      repository.setPermissions(a, fence, CUSTOM.id, ['org:read', 'org:users:read'], LATER, opId()),
-      repository.setPermissions(a, fence, CUSTOM.id, ['org:read', 'org:audit:read'], LATER, opId()),
+      repository.setPermissions(a, fence, {
+        id: CUSTOM.id,
+        permissions: ['org:read', 'org:users:read'],
+        now: LATER,
+        opId: opId(),
+      }),
+      repository.setPermissions(a, fence, {
+        id: CUSTOM.id,
+        permissions: ['org:read', 'org:audit:read'],
+        now: LATER,
+        opId: opId(),
+      }),
     ]);
     expect([...results].sort()).toEqual(['conflict', 'updated']);
     expect(await revisionOf(CUSTOM.id)).toBe(2);
@@ -1304,15 +1328,13 @@ describe('fenced role mutators', () => {
     });
     const actor = await limited();
     const before = [await snapshot(), JSON.stringify(await epoch())];
-    await repository.setPermissions(
-      a,
-      fenceFor(actor, 1),
-      CUSTOM.id,
-      ['org:users:write'],
-      LATER,
-      opId(),
-    );
-    await repository.delete(a, fenceFor(actor, 99), CUSTOM.id, opId());
+    await repository.setPermissions(a, fenceFor(actor, 1), {
+      id: CUSTOM.id,
+      permissions: ['org:users:write'],
+      now: LATER,
+      opId: opId(),
+    });
+    await repository.delete(a, fenceFor(actor, 99), { id: CUSTOM.id, opId: opId() });
     expect([await snapshot(), JSON.stringify(await epoch())]).toEqual(before);
   });
 
@@ -1323,7 +1345,12 @@ describe('fenced role mutators', () => {
     });
     const actor = await actorFor(a);
     const before = JSON.stringify(await epoch());
-    await repository.rename(a, fenceFor(actor, 1), CUSTOM.id, 'Epoch', LATER, opId());
+    await repository.rename(a, fenceFor(actor, 1), {
+      id: CUSTOM.id,
+      name: 'Epoch',
+      now: LATER,
+      opId: opId(),
+    });
     expect(JSON.stringify(await epoch())).not.toBe(before);
   });
 
@@ -1333,13 +1360,20 @@ describe('fenced role mutators', () => {
       providerAnchors: PROVIDERS,
     });
     const fence = fenceFor(await actorFor(a));
-    await expect(repository.rename(a, fence, CUSTOM.id, 'x', LATER, opId())).rejects.toBeInstanceOf(
-      TypeError,
-    );
     await expect(
-      repository.setPermissions(a, fence, CUSTOM.id, [], LATER, opId()),
+      repository.rename(a, fence, { id: CUSTOM.id, name: 'x', now: LATER, opId: opId() }),
     ).rejects.toBeInstanceOf(TypeError);
-    await expect(repository.delete(a, fence, CUSTOM.id, opId())).rejects.toBeInstanceOf(TypeError);
+    await expect(
+      repository.setPermissions(a, fence, {
+        id: CUSTOM.id,
+        permissions: [],
+        now: LATER,
+        opId: opId(),
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    await expect(
+      repository.delete(a, fence, { id: CUSTOM.id, opId: opId() }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 
   it('3: every mutator refuses a fence that mutationFence did not issue', async () => {
@@ -1355,12 +1389,19 @@ describe('fenced role mutators', () => {
       repository.create(a, forged, { ...ORG_CUSTOM, opId: opId() }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      repository.rename(a, forged, CUSTOM.id, 'x', LATER, opId()),
+      repository.rename(a, forged, { id: CUSTOM.id, name: 'x', now: LATER, opId: opId() }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      repository.setPermissions(a, forged, CUSTOM.id, [], LATER, opId()),
+      repository.setPermissions(a, forged, {
+        id: CUSTOM.id,
+        permissions: [],
+        now: LATER,
+        opId: opId(),
+      }),
     ).rejects.toBeInstanceOf(TypeError);
-    await expect(repository.delete(a, forged, CUSTOM.id, opId())).rejects.toBeInstanceOf(TypeError);
+    await expect(
+      repository.delete(a, forged, { id: CUSTOM.id, opId: opId() }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 
   it('3: a foreign-organization actor holds no authority in this organization', async () => {
@@ -1405,21 +1446,38 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     const f = (id: string) => fenceFor(admin, 1 + 0 * id.length);
 
     expect(
-      await unchanged(() => repo().rename(a, f(adminRole.id), adminRole.id, 'Boss', LATER, opId())),
-    ).toBe('locked');
-    expect(
       await unchanged(() =>
-        repo().setPermissions(a, f(adminRole.id), adminRole.id, ['org:read'], LATER, opId()),
+        repo().rename(a, f(adminRole.id), {
+          id: adminRole.id,
+          name: 'Boss',
+          now: LATER,
+          opId: opId(),
+        }),
       ),
     ).toBe('locked');
     expect(
       await unchanged(() =>
-        repo().setPermissions(a, f(auditor.id), auditor.id, ['org:read'], LATER, opId()),
+        repo().setPermissions(a, f(adminRole.id), {
+          id: adminRole.id,
+          permissions: ['org:read'],
+          now: LATER,
+          opId: opId(),
+        }),
+      ),
+    ).toBe('locked');
+    expect(
+      await unchanged(() =>
+        repo().setPermissions(a, f(auditor.id), {
+          id: auditor.id,
+          permissions: ['org:read'],
+          now: LATER,
+          opId: opId(),
+        }),
       ),
     ).toBe('invalid_permissions');
-    expect(await unchanged(() => repo().delete(a, f(auditor.id), auditor.id, opId()))).toBe(
-      'system',
-    );
+    expect(
+      await unchanged(() => repo().delete(a, f(auditor.id), { id: auditor.id, opId: opId() })),
+    ).toBe('system');
 
     await createCustom();
     await database.executor.all({
@@ -1429,7 +1487,9 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     });
     const revision = await revisionOf(CUSTOM.id);
     expect(
-      await unchanged(() => repo().delete(a, fenceFor(admin, revision), CUSTOM.id, opId())),
+      await unchanged(() =>
+        repo().delete(a, fenceFor(admin, revision), { id: CUSTOM.id, opId: opId() }),
+      ),
     ).toBe('in_use');
     expect(
       await unchanged(() =>
@@ -1540,11 +1600,18 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     });
     expect(
       await unchanged(() =>
-        repo().rename(a, fenceFor(actor, revision), CUSTOM.id, 'Late', LATER, opId()),
+        repo().rename(a, fenceFor(actor, revision), {
+          id: CUSTOM.id,
+          name: 'Late',
+          now: LATER,
+          opId: opId(),
+        }),
       ),
     ).toBe('authority');
     expect(
-      await unchanged(() => repo().delete(a, fenceFor(actor, revision), CUSTOM.id, opId())),
+      await unchanged(() =>
+        repo().delete(a, fenceFor(actor, revision), { id: CUSTOM.id, opId: opId() }),
+      ),
     ).toBe('authority');
   });
 
@@ -1566,19 +1633,14 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
         createFencedRoleRepository(database.executor, options).setPermissions(
           a,
           fenceFor(actor, 1),
-          CUSTOM.id,
-          ['org:read', 'org:users:read'],
-          LATER,
-          opId(),
+          { id: CUSTOM.id, permissions: ['org:read', 'org:users:read'], now: LATER, opId: opId() },
         ),
-        createFencedRoleRepository(other, options).setPermissions(
-          a,
-          fenceFor(actor, 1),
-          CUSTOM.id,
-          ['org:read', 'org:audit:read'],
-          LATER,
-          opId(),
-        ),
+        createFencedRoleRepository(other, options).setPermissions(a, fenceFor(actor, 1), {
+          id: CUSTOM.id,
+          permissions: ['org:read', 'org:audit:read'],
+          now: LATER,
+          opId: opId(),
+        }),
       ]);
       expect([...results].sort()).toEqual(['conflict', 'updated']);
       expect(await revisionOf(CUSTOM.id)).toBe(2);
@@ -1621,7 +1683,12 @@ it('lets a non-admin rename a role with a retired permission and preserves it', 
     permissions: ['org:roles:write', 'org:read'],
   });
   expect(
-    await repository.rename(a, fenceFor(manager, 1), CUSTOM.id, 'Renamed', LATER, opId()),
+    await repository.rename(a, fenceFor(manager, 1), {
+      id: CUSTOM.id,
+      name: 'Renamed',
+      now: LATER,
+      opId: opId(),
+    }),
   ).toBe('renamed');
   expect((await repository.get(a, CUSTOM.id))?.permissions).toContain('retired:permission');
 });

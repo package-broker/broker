@@ -508,7 +508,7 @@ export function createRoleRepository(
       return inserted !== undefined && inserted.rows.length > 0 ? 'created' : 'duplicate_key';
     },
 
-    async rename(ctx, fence, id, name, now, opId) {
+    async rename(ctx, fence, { id, name, now, opId }) {
       requireName(name);
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
@@ -534,7 +534,7 @@ export function createRoleRepository(
       throw new Error('role rename refused for an unknown reason');
     },
 
-    async setPermissions(ctx, fence, id, permissions, now, opId) {
+    async setPermissions(ctx, fence, { id, permissions, now, opId }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);
@@ -591,7 +591,7 @@ export function createRoleRepository(
       return found.protects_last_holder === 1 ? 'locked' : 'invalid_permissions';
     },
 
-    async delete(ctx, fence, id, opId) {
+    async delete(ctx, fence, { id, opId }) {
       requireNonEmpty(id, 'id');
       requireNonEmpty(opId, 'opId');
       const expected = expectedRevision(fence);

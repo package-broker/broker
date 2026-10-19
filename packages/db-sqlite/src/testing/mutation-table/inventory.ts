@@ -106,6 +106,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
   'repositories/ingest-session.ts#createIngestSessionMaintenance':
     'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
+  'repositories/catalogue-reconcile.ts#finalizeListingStatements':
+    'DEFERRED: createCatalogueReconciler.finalizeListing wraps exactly these statements and is exercised by the registered reconcile cases; owner T782n follow-up',
   'repositories/catalogue-lookup.ts#createCatalogueLookup':
     'DEFERRED: lookup adapter needs executable foreign winner fixtures; owner T782n follow-up',
   'repositories/registered-name.ts#createRegisteredNameRepository':

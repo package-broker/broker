@@ -1,3 +1,4 @@
+import { parsePublicOrigin } from './public-origin.js';
 import type { StaticAssets } from '../platform/assets.js';
 import type { RequestContext, RouteDefinition } from '../plugin.js';
 import { defaultLog, envelopeResponse, type KernelLog } from './errors.js';
@@ -8,7 +9,7 @@ export const UI_CSP =
 const UI_PATH = '/_pb/ui';
 const NO_CACHE = 'no-cache';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
-const HSTS = 'max-age=31536000';
+const HSTS = 'max-age=31536000; includeSubDomains';
 const CONTENT_HASH = /\.[0-9a-f]{12}\./;
 const SAFE_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STRONG_ETAG_LIST =
@@ -61,7 +62,7 @@ export function createUiRoutes(
   options: UiRouteOptions,
 ): readonly RouteDefinition[] {
   const log = options.log ?? defaultLog;
-  const hsts = new URL(options.publicOrigin).protocol === 'https:';
+  const hsts = parsePublicOrigin(options.publicOrigin, { http: 'allow' }).startsWith('https:');
 
   function secured(response: Response): Response {
     response.headers.set('content-security-policy', UI_CSP);

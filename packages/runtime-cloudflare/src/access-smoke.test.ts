@@ -1,3 +1,11 @@
+const call = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -194,6 +202,7 @@ describe('cloudflare access smoke on Miniflare D1', () => {
             { ...viewed, permissions: new Set(viewed.permissions) },
             mutationFence(authenticated, {}),
             { slug: 'alpha', name: 'Alpha' },
+            call,
           );
           return Response.json(created.ok ? { id: created.value.id } : { error: created.error }, {
             status: created.ok ? 200 : 409,

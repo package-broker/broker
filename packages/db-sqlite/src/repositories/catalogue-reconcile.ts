@@ -21,7 +21,7 @@ import {
   type FinalizeGuardOptions,
 } from '@package-broker/core/ingest/finalize-guard';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
-import { leaseLive } from './blob-lease-guard.js';
+import { blobLeaseNotLive, leaseLive } from './blob-lease-guard.js';
 import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 
 const MAX_KEY_BYTES = 512;
@@ -33,6 +33,10 @@ const CLOCK = sql`strftime('%Y-%m-%dT%H:%M:%fZ', max(
   unixepoch('now', 'subsec'),
   unixepoch(package.modified_at, 'subsec') + 0.001
 ), 'unixepoch')`;
+
+export interface ReconcileFinalizeResult extends FinalizeResult {
+  readonly leaseHeldBack: number;
+}
 
 export interface CatalogueReconciler {
   openListing(
@@ -59,7 +63,7 @@ export interface CatalogueReconciler {
     guard: CatalogueWriteGuard,
     listing: CompleteSourceListing | CompleteVersionListing,
     evidence: FinalizeEvidence,
-  ): Promise<FinalizeResult>;
+  ): Promise<ReconcileFinalizeResult>;
   markPackageAbsent(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
@@ -73,6 +77,19 @@ function statementOf(fragment: RawBuilder<unknown>): Statement {
 
 function checkOf(condition: RawBuilder<boolean>): readonly Statement[] {
   return assertCheck(condition);
+}
+
+function leaseNotLive(ctx: OrgContext, versionAlias: string): RawBuilder<boolean> {
+  const { sql: text, params } = blobLeaseNotLive(ctx, versionAlias);
+  const parts = text.split('?');
+  if (parts.length !== params.length + 1)
+    throw new TypeError('blob lease guard placeholder mismatch');
+  return sql<boolean>`${sql.join(
+    parts.flatMap((part, i) =>
+      i < params.length ? [sql.raw(part), sql.val(params[i])] : [sql.raw(part)],
+    ),
+    sql``,
+  )}`;
 }
 
 function requireStamp(stamp: string): void {
@@ -191,13 +208,19 @@ function transitionStatements(
     packageId === undefined ? sql`1 = 1` : sql`version.package_id = ${packageId}`;
   const rows = sql`${packageFilter} AND version.org_id = ${ctx.orgId}
     AND version.status = ${from} AND ${predicate}`;
+  const revisionRows =
+    to === 'active'
+      ? sql`${packageFilter} AND version.org_id = ${ctx.orgId}
+          AND version.last_op_id = ${opId} AND version.status = 'active'`
+      : rows;
   return {
     revision: statementOf(
       sql`INSERT INTO version_revision
           (id, org_id, version_id, revision, blob_id, source_ref, metadata_json, reason, op_id)
-        SELECT lower(hex(randomblob(16))), version.org_id, version.id, version.revision,
+        SELECT lower(hex(randomblob(16))), version.org_id, version.id,
+          ${to === 'active' ? sql`version.revision - 1` : sql`version.revision`},
           version.blob_id, version.source_ref, version.metadata_json, ${revisionReason}, ${opId}
-        FROM version WHERE ${rows}`,
+        FROM version WHERE ${revisionRows}`,
     ),
     update: statementOf(
       to === 'active'
@@ -296,6 +319,7 @@ export function finalizeListingStatements(
 
   const unseen = sql<boolean>`version.updated_at < ${boundary}`;
   const returned = sql<boolean>`version.updated_at >= ${boundary}`;
+  const revivable = sql<boolean>`${returned} AND ${leaseNotLive(ctx, 'version')}`;
   const packageRevival = sql<boolean>`package.status = 'removed_upstream'
     AND package.removal_cause = 'document_absent'`;
   const removal = transitionStatements(
@@ -314,10 +338,16 @@ export function finalizeListingStatements(
     'removed_upstream',
     'active',
     'listing_present',
-    returned,
+    revivable,
   );
-  const statements = [
-    ...preconditions,
+  const statements = [...preconditions];
+  statements.push(removal.revision);
+  const removalIndex = statements.length;
+  statements.push(removal.update, removedBlobs(ctx, { opId }));
+  const revivalIndex = statements.length;
+  statements.push(
+    revival.update,
+    revival.revision,
     ...conditionalEpochBump(
       ctx,
       sql<boolean>`EXISTS (SELECT 1 FROM package
@@ -326,16 +356,8 @@ export function finalizeListingStatements(
           AND source.removal_policy = 'exclude'
           AND ((${packageRevival}) OR EXISTS (SELECT 1 FROM version
             WHERE version.package_id = package.id AND version.org_id = package.org_id
-              AND ((version.status = 'active' AND ${unseen})
-                OR (version.status = 'removed_upstream' AND ${returned})))))`,
+              AND version.last_op_id = ${opId})))`,
     ),
-  ];
-  statements.push(removal.revision);
-  const removalIndex = statements.length;
-  statements.push(removal.update, removedBlobs(ctx, { opId }), revival.revision);
-  const revivalIndex = statements.length;
-  statements.push(
-    revival.update,
     statementOf(sql`UPDATE package SET status = 'active', removed_upstream_at = NULL,
       removal_cause = NULL, last_op_id = ${opId}
       WHERE package.id = ${id} AND package.org_id = ${ctx.orgId} AND ${packageRevival}`),
@@ -414,10 +436,23 @@ export function createCatalogueReconciler(
         options,
       );
       const results = await executor.batch(statements);
+      let leaseHeldBack = 0;
+      if ('packageId' in listing) {
+        const [held] = await executor.all<{ held: number }>(
+          statementOf(
+            sql`SELECT count(*) AS held FROM version
+              WHERE version.package_id = ${listing.packageId} AND version.org_id = ${ctx.orgId}
+                AND version.status = 'removed_upstream'
+                AND version.updated_at >= ${sweepBoundary(ctx, { kind: 'package', packageId: listing.packageId })}`,
+          ),
+        );
+        leaseHeldBack = Number(held?.held ?? 0);
+      }
       return {
         removed: results[removalIndex]?.changes ?? 0,
         restored: results[restorationIndex]?.changes ?? 0,
         statements: statements.length,
+        leaseHeldBack,
       };
     },
 

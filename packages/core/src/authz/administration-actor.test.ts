@@ -76,23 +76,35 @@ function everyMutation(s: ReturnType<typeof setup>, actor: ActorContext) {
   const { admin } = s;
   const fence = fenceFor(actor);
   return Promise.all([
-    admin.createRole(ctx, actor, fence, {
-      key: 'ops_two',
-      name: 'Ops',
-      scope: 'organization',
-      permissions: [],
-    }),
-    admin.renameRole(ctx, actor, fence, 'r1', 'Name'),
-    admin.setRolePermissions(ctx, actor, fence, 'r1', []),
-    admin.deleteRole(ctx, actor, fence, 'r1'),
-    admin.grantOrganization(ctx, actor, fence, {
-      subject: { type: 'email', value: 'me@example.com' },
-      roleId: 'r1',
-    }),
-    admin.revokeOrganizationGrant(ctx, actor, fence, 'g1'),
-    admin.changeGrantRole(ctx, actor, fence, 'g1', 'r1'),
-    admin.suspendUser(ctx, actor, fence, 'u1'),
-    admin.reactivateUser(ctx, actor, fence, 'u1'),
+    admin.createRole(
+      ctx,
+      actor,
+      fence,
+      {
+        key: 'ops_two',
+        name: 'Ops',
+        scope: 'organization',
+        permissions: [],
+      },
+      apiCall,
+    ),
+    admin.renameRole(ctx, actor, fence, 'r1', 'Name', apiCall),
+    admin.setRolePermissions(ctx, actor, fence, 'r1', [], apiCall),
+    admin.deleteRole(ctx, actor, fence, 'r1', apiCall),
+    admin.grantOrganization(
+      ctx,
+      actor,
+      fence,
+      {
+        subject: { type: 'email', value: 'me@example.com' },
+        roleId: 'r1',
+      },
+      apiCall,
+    ),
+    admin.revokeOrganizationGrant(ctx, actor, fence, 'g1', apiCall),
+    admin.changeGrantRole(ctx, actor, fence, 'g1', 'r1', apiCall),
+    admin.suspendUser(ctx, actor, fence, 'u1', apiCall),
+    admin.reactivateUser(ctx, actor, fence, 'u1', apiCall),
   ]);
 }
 
@@ -124,12 +136,18 @@ describe('only an organization-kind actor holds organization authority', () => {
       permissions: new Set(['org:roles:write']),
       isOrganizationAdmin: false,
     } as unknown as ActorContext;
-    const result = await s.admin.createRole(ctx, untagged, fenceFor(untagged), {
-      key: 'ops_two',
-      name: 'Ops',
-      scope: 'organization',
-      permissions: [],
-    });
+    const result = await s.admin.createRole(
+      ctx,
+      untagged,
+      fenceFor(untagged),
+      {
+        key: 'ops_two',
+        name: 'Ops',
+        scope: 'organization',
+        permissions: [],
+      },
+      apiCall,
+    );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     for (const call of writes(s)) expect(call).not.toHaveBeenCalled();
     expect(s.log).toHaveBeenCalledExactlyOnceWith({
@@ -178,7 +196,7 @@ describe('only an organization-kind actor holds organization authority', () => {
       permissions: new Set(ORG_PERMISSIONS),
       isOrganizationAdmin: true,
     };
-    expect(await s.admin.deleteRole(ctx, actor, fenceFor(actor), 'r1')).toEqual({
+    expect(await s.admin.deleteRole(ctx, actor, fenceFor(actor), 'r1', apiCall)).toEqual({
       ok: true,
       value: null,
     });
@@ -208,11 +226,11 @@ describe('isOrganizationAdmin is read once and must be exactly true', () => {
       permissions: new Set(['org:roles:write', 'org:read']),
       isOrganizationAdmin: 'false',
     } as unknown as ActorContext;
-    expect(await s.admin.deleteRole(ctx, actor, fenceFor(actor), 'r1')).toEqual({
+    expect(await s.admin.deleteRole(ctx, actor, fenceFor(actor), 'r1', apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
-    expect(await s.admin.renameRole(ctx, actor, fenceFor(actor), 'r1', 'Name')).toEqual({
+    expect(await s.admin.renameRole(ctx, actor, fenceFor(actor), 'r1', 'Name', apiCall)).toEqual({
       ok: false,
       error: 'forbidden',
     });
@@ -230,7 +248,7 @@ describe('isOrganizationAdmin is read once and must be exactly true', () => {
       userId: 'x@example.com',
       permissions: ['org:roles:write'],
     } as unknown as ActorContext;
-    await s.admin.deleteRole(ctx, bad, fenceFor(bad), 'r1');
+    await s.admin.deleteRole(ctx, bad, fenceFor(bad), 'r1', apiCall);
     expect(s.roles.delete).not.toHaveBeenCalled();
     expect(s.log).toHaveBeenCalledExactlyOnceWith({
       level: 'info',
@@ -252,12 +270,18 @@ describe('a project-scoped role never carries org:* permissions', () => {
 
   it('createRole refuses an org permission in a project role', async () => {
     const s = setup();
-    const result = await s.admin.createRole(ctx, actor, fenceFor(actor), {
-      key: 'proj_ops',
-      name: 'Ops',
-      scope: 'project',
-      permissions: ['org:read'],
-    });
+    const result = await s.admin.createRole(
+      ctx,
+      actor,
+      fenceFor(actor),
+      {
+        key: 'proj_ops',
+        name: 'Ops',
+        scope: 'project',
+        permissions: ['org:read'],
+      },
+      apiCall,
+    );
     expect(result).toMatchObject({ ok: false, error: 'invalid_permission' });
     expect(s.roles.create).not.toHaveBeenCalled();
   });
@@ -265,10 +289,24 @@ describe('a project-scoped role never carries org:* permissions', () => {
   it('setRolePermissions refuses an org permission on a stored project role', async () => {
     const s = setup();
     s.roles.get.mockResolvedValue({ ...roleOf('r1', []), scope: 'project' });
-    const result = await s.admin.setRolePermissions(ctx, actor, fenceFor(actor), 'r1', [
-      'org:roles:write',
-    ]);
+    const result = await s.admin.setRolePermissions(
+      ctx,
+      actor,
+      fenceFor(actor),
+      'r1',
+      ['org:roles:write'],
+      apiCall,
+    );
     expect(result).toMatchObject({ ok: false, error: 'invalid_permission' });
     expect(s.roles.setPermissions).not.toHaveBeenCalled();
   });
 });
+
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

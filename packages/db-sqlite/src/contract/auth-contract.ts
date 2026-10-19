@@ -1054,13 +1054,24 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       operation: GrantOperation,
     ): Promise<string> => {
       if (operation.kind === 'suspend') {
-        return repository.suspendUser(a, await fenceFor(operation.target), operation.target, LATER);
+        return repository.suspendUser(a, await fenceFor(operation.target), {
+          userId: operation.target,
+          now: LATER,
+        });
       }
       const fence = await fenceFor(operation.target);
       if (operation.kind !== 'delete') {
-        return repository.changeRole(a, fence, operation.target, auditor, LATER, newOpId());
+        return repository.changeRole(a, fence, {
+          id: operation.target,
+          roleId: auditor,
+          now: LATER,
+          opId: newOpId(),
+        });
       }
-      const result = await repository.deleteOrganization(a, fence, operation.target, newOpId());
+      const result = await repository.deleteOrganization(a, fence, {
+        id: operation.target,
+        opId: newOpId(),
+      });
       return typeof result === 'string' ? result : result.outcome;
     };
     const rowOf = (operation: GrantOperation) =>

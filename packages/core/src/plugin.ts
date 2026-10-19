@@ -43,6 +43,7 @@ export type { Clock } from './ids.js';
 export { versionsFromRefs } from './registry/composer/version-rules.js';
 export { readFileAtRefs } from './sources/git/fetch.js';
 export { lsRefs } from './sources/git/refs.js';
+export type { DiscoveryCandidate, PlanEntry, SkipReason } from './sources/plan.js';
 export { GITHUB_API_VERSION, UpstreamError } from './sources/policy-fetch.js';
 export type { PolicyFetch, UpstreamCredential, UpstreamResponse } from './sources/policy-fetch.js';
 export { createPackageDescription, snapshotRef } from './sources/provider.js';

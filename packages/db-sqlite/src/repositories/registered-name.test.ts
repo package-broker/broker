@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'kysely';
+import {
+  settleIdempotent,
+  replayResponse,
+  type IdempotencyRecord,
+} from '@package-broker/core/api/idempotency';
+import { createIdempotencyRepository, idempotencyInsertStatement } from './idempotency.js';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
@@ -1185,4 +1191,246 @@ describe('registered-name audit', () => {
       { id: NAME_1 },
     ]);
   });
+});
+
+describe('registered-name idempotency', () => {
+  const cases = [
+    ['add', 'added'],
+    ['remove', 'removed_and_paused'],
+    ['remove-covered', 'removed'],
+    ['enable', 'enabled'],
+  ] as const;
+  type Operation = (typeof cases)[number][0];
+
+  function record(result: string, requestHash = 'a'.repeat(64)): IdempotencyRecord {
+    return {
+      principalKey: `user:${ORG_ADMIN}`,
+      key: 'registered-name-request',
+      route: '/sources/registered-names',
+      requestHash,
+      status: 200,
+      responseJson: JSON.stringify({ result }),
+      createdAt: NOW,
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    };
+  }
+
+  async function state() {
+    return Promise.all(
+      ['source', 'registered_name', 'cache_epoch', 'audit_pending', 'api_idempotency'].map(
+        (table) => rows(`SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1, 2`, a.orgId),
+      ),
+    );
+  }
+
+  async function fixture(operation: Operation, target = executor) {
+    if (operation !== 'add') {
+      await executor.batch([
+        stmt(
+          "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'acme/*')",
+          NAME_1,
+          a.orgId,
+          SRC_ORG,
+        ),
+      ]);
+    }
+    if (operation.startsWith('remove')) {
+      await executor.batch([
+        stmt("UPDATE source SET status = 'active' WHERE org_id = ? AND id = ?", a.orgId, SRC_ORG),
+      ]);
+    }
+    if (operation === 'remove-covered') {
+      await executor.batch([
+        stmt(
+          "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'tools/*')",
+          NAME_2,
+          a.orgId,
+          SRC_ORG,
+        ),
+      ]);
+    }
+    const repository = createRegisteredNameRepository(target);
+    return (idempotency: IdempotencyRecord) => {
+      const common = { providerAnchors: ANCHORS, idempotency };
+      if (operation === 'add')
+        return repository.add(a, orgFence(), {
+          ...common,
+          id: NAME_2,
+          sourceId: SRC_ORG,
+          pattern: 'tools/*',
+          audit: audit('registered_name.add', NAME_2, 'tools/*'),
+        });
+      if (operation === 'enable')
+        return repository.enable(a, orgFence(), {
+          ...common,
+          id: SRC_ORG,
+          audit: audit('source.resume', SRC_ORG),
+        });
+      return repository.remove(a, orgFence(), {
+        ...common,
+        id: NAME_1,
+        audit: audit('registered_name.remove', NAME_1),
+        pauseAudit: audit('source.pause', SRC_ORG),
+      });
+    };
+  }
+
+  it.each(cases)(
+    '%s persists the response and replays the original success',
+    async (operation, success) => {
+      const invoke = await fixture(operation);
+      const saved = record(success);
+      expect(await invoke(saved)).toBe(success);
+      const find = () =>
+        createIdempotencyRepository(executor).find(a, saved.principalKey, saved.key, NOW);
+      expect(await find()).toEqual(saved);
+      const before = await state();
+      const replay = await settleIdempotent({
+        record: saved,
+        hash: saved.requestHash,
+        now: new Date(NOW),
+        find,
+        run: () => invoke(saved),
+        failed: (result) => result !== success,
+      });
+      expect(replay).toEqual({ kind: 'replay', record: saved });
+      if (replay.kind !== 'replay') throw new Error('expected replay');
+      const response = replayResponse(replay.record, 'retry');
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Idempotent-Replayed')).toBe('true');
+      expect(await response.json()).toEqual({ result: success });
+      expect(await state()).toEqual(before);
+      const changed = record(success, 'b'.repeat(64));
+      expect(
+        await settleIdempotent({
+          record: changed,
+          hash: changed.requestHash,
+          now: new Date(NOW),
+          find,
+          run: () => invoke(changed),
+          failed: (result) => result !== success,
+        }),
+      ).toEqual({ kind: 'mismatch' });
+      expect(await state()).toEqual(before);
+    },
+  );
+
+  it.each(cases)('%s rejects a direct retry with a different body', async (operation, success) => {
+    const invoke = await fixture(operation);
+    const saved = record(success);
+    expect(await invoke(saved)).toBe(success);
+    const before = await state();
+    expect(await invoke(record(success, 'b'.repeat(64)))).toBe('conflict');
+    expect(await state()).toEqual(before);
+    expect(
+      await createIdempotencyRepository(executor).find(a, saved.principalKey, saved.key, NOW),
+    ).toEqual(saved);
+  });
+
+  it.each(cases)(
+    '%s preserves the original response after a direct retry with the same body',
+    async (operation, success) => {
+      const invoke = await fixture(operation);
+      const saved = record(success);
+      expect(await invoke(saved)).toBe(success);
+      const before = await state();
+      expect(await invoke(saved)).toBe('conflict');
+      const winner = await createIdempotencyRepository(executor).find(
+        a,
+        saved.principalKey,
+        saved.key,
+        NOW,
+      );
+      expect(winner).toEqual(saved);
+      if (winner === null) throw new Error('expected original response');
+      const response = replayResponse(winner, 'direct-retry');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ result: success });
+      expect(await state()).toEqual(before);
+    },
+  );
+
+  it.each(cases)('%s checks authorization before a reused key', async (operation, success) => {
+    const invoke = await fixture(operation);
+    const saved = record(success);
+    expect(await invoke(saved)).toBe(success);
+    await executor.batch([
+      stmt('DELETE FROM access_grant WHERE org_id = ? AND role_id = ?', a.orgId, ORG_ROLE),
+    ]);
+    const before = await state();
+    expect(await invoke(record(success, 'b'.repeat(64)))).toBe('forbidden');
+    expect(await state()).toEqual(before);
+  });
+
+  for (const hash of ['a'.repeat(64), 'b'.repeat(64)]) {
+    it.each(cases)(
+      `%s fences a concurrent key winner (hash ${hash[0]})`,
+      async (operation, success) => {
+        const winner = record(success);
+        const racer: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          batch: async (statements) => {
+            await executor.batch([idempotencyInsertStatement(a, winner)]);
+            return executor.batch(statements);
+          },
+        };
+        const invoke = await fixture(operation, racer);
+        const before = await state();
+        expect(await invoke(record(success, hash))).toBe('conflict');
+        const after = await state();
+        expect(after.slice(0, 4)).toEqual(before.slice(0, 4));
+        expect(
+          await createIdempotencyRepository(executor).find(a, winner.principalKey, winner.key, NOW),
+        ).toEqual(winner);
+      },
+    );
+  }
+
+  for (const failure of ['audit', 'after-record'] as const) {
+    it.each(cases)(
+      `%s rolls back all effects on ${failure} failure`,
+      async (operation, success) => {
+        const failing: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          batch: (statements) =>
+            executor.batch([
+              ...statements,
+              stmt("INSERT INTO access_mutation_guard (key) VALUES ('injected'), ('injected')"),
+            ]),
+        };
+        const invoke = await fixture(operation, failure === 'audit' ? executor : failing);
+        if (failure === 'audit')
+          await executor.batch([
+            stmt(
+              "CREATE TRIGGER fail_registered_name_audit BEFORE INSERT ON audit_pending BEGIN SELECT RAISE(ABORT, 'injected'); END",
+            ),
+          ]);
+        const before = await state();
+        expect(await invoke(record(success))).toBe(
+          failure === 'audit' ? 'indeterminate' : 'conflict',
+        );
+        expect(await state()).toEqual(before);
+      },
+    );
+  }
+
+  it.each(['organization', 'principal'] as const)(
+    'allows the same key for another %s',
+    async (scope) => {
+      const saved = record('added');
+      await executor.batch([
+        idempotencyInsertStatement(scope === 'organization' ? b : a, {
+          ...saved,
+          principalKey: scope === 'principal' ? 'user:other' : saved.principalKey,
+        }),
+      ]);
+      const invoke = await fixture('add');
+      expect(await invoke(saved)).toBe('added');
+      expect(
+        await createIdempotencyRepository(executor).find(a, saved.principalKey, saved.key, NOW),
+      ).toEqual(saved);
+    },
+  );
 });

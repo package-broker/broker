@@ -1,3 +1,4 @@
+import { API_ERROR_CODES, jsonResponse } from '../../api/response.js';
 import type { ProjectActor } from '../../authz/project-actor.js';
 import { displayName } from '../../catalogue/names.js';
 import type { PackageAccess } from '../../catalogue/package-access.js';
@@ -26,6 +27,8 @@ export const ABBREVIATED_VERSION_FIELDS = [
 ] as const;
 
 export interface NpmRenderOptions {
+  /** The request id supplied by the caller. */
+  readonly requestId: string;
   readonly access: PackageAccess;
   readonly actor: ProjectActor;
   readonly projectSlug: string;
@@ -58,11 +61,15 @@ function headers(abbreviated: boolean): Headers {
   });
 }
 
-function unavailable(status: 404 | 503): Response {
-  return new Response(null, {
-    status,
-    headers: status === 503 ? { 'Retry-After': '10' } : { 'Cache-Control': 'private, max-age=300' },
-  });
+function unavailable(status: 404 | 503, options: NpmRenderOptions): Response {
+  const requestId = options.requestId;
+  const code = status === 503 ? 'unavailable' : 'not_found';
+  const { message } = API_ERROR_CODES[code];
+  const response = jsonResponse(status, { error: message, code, requestId });
+  response.headers.set('x-request-id', requestId);
+  if (status === 503) response.headers.set('Retry-After', '10');
+  else response.headers.set('Cache-Control', 'private, max-age=300');
+  return response;
 }
 
 function manifest(options: NpmRenderOptions, version: CatalogueVersion, name: string): Json {
@@ -166,7 +173,7 @@ export async function renderPackument(options: NpmRenderOptions): Promise<Respon
       }
     } catch (error) {
       if (error instanceof Changed) continue;
-      if (error instanceof Unavailable) return unavailable(error.status);
+      if (error instanceof Unavailable) return unavailable(error.status, options);
       throw error;
     }
     let index = 0;
@@ -194,7 +201,7 @@ export async function renderPackument(options: NpmRenderOptions): Promise<Respon
     );
     return new Response(stream, { headers: headers(!!options.abbreviated) });
   }
-  return unavailable(503);
+  return unavailable(503, options);
 }
 
 export async function renderVersionDocument(
@@ -211,8 +218,8 @@ export async function renderVersionDocument(
   const result = exact
     ? await access.version(actor, 'npm', name, versionOrTag)
     : await access.tag(actor, 'npm', name, versionOrTag);
-  if (result === null) return unavailable(404);
-  if (!result.pkg.listingComplete) return unavailable(503);
+  if (result === null) return unavailable(404, options);
+  if (!result.pkg.listingComplete) return unavailable(503, options);
   return new Response(
     JSON.stringify(manifest(options, result.version, displayName(result.pkg.key))),
     { headers: headers(!!options.abbreviated) },

@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { BrokerConfig } from '@package-broker/core/config';
 import { safeErrorName, safeRecord } from '@package-broker/core/platform/observability';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -10,6 +11,7 @@ import { startNode, type StartOptions } from './startup.js';
 const DEFAULT_PORT = 8787;
 
 export interface EntryManifest {
+  readonly observability?: BrokerConfig['observability'];
   readonly plugins: readonly PluginDefinition[];
   readonly migrations: readonly MigrationSource[];
   readonly platformPorts?: PlatformPortConfig | null;
@@ -63,7 +65,7 @@ export async function runEntry(
   let broker: NodeBroker;
   let port: number;
   try {
-    const { plugins, migrations, platformPorts } = await manifest;
+    const { plugins, migrations, platformPorts, observability } = await manifest;
     try {
       port = parsePort(env['PORT']);
     } catch (error) {
@@ -76,6 +78,7 @@ export async function runEntry(
       migrations,
       env,
       ...(platformPorts == null ? {} : { platformPorts }),
+      ...(observability === undefined ? {} : { observability }),
     });
   } catch (error) {
     runtime.error(failureRecord('startup.failed', error));

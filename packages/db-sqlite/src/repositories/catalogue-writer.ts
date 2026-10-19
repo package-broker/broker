@@ -247,6 +247,7 @@ export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
               packageId: placeholder,
               ecosystem: input.ecosystem,
               tags: input.tags,
+              ...(input.tagNames === undefined ? {} : { tagNames: input.tagNames }),
               actorType: 'sync',
               actorId: null,
               opId: newOpId(),

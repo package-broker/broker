@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
-import type { VersionInput } from '@package-broker/core/db/catalogue';
+import { catalogueCacheKey } from '@package-broker/core/catalogue/cache-keys';
+import type { ResolvedPackage, VersionInput } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
   applyChunk,
@@ -329,7 +330,7 @@ describe('applyChunk against the SQLite catalogue writer', () => {
       expect(outcome).toMatchObject({
         done: true,
         status: 'refused',
-        refusal: 'incomplete',
+        refusal: 'snapshot_corrupt',
         planned: 1,
       });
       expect(counter.take()).toBe(1);
@@ -646,4 +647,422 @@ describe('applyChunk against the SQLite catalogue writer', () => {
     expect(status).toBe('complete');
     expect(await activeRows(database.executor)).toHaveLength(10);
   }, 120_000);
+});
+
+async function applyDescription(
+  describe: () => ReturnType<typeof createPackageDescription>,
+  convert: (candidate: VersionCandidate) => VersionInput,
+  source: Parameters<typeof applyChunk>[2]['source'] = {
+    id: SOURCE,
+    key: KEY,
+    type: 'composer_repository',
+    ecosystem: 'composer',
+    covered: true,
+  },
+  inspect?: (
+    query: Parameters<ApplyDeps['existing']['existingVersions']>[1],
+    rows: readonly string[],
+  ) => void,
+) {
+  const counter = counting(database.executor);
+  const reader = createExistingVersionsReader(counter.executor);
+  const deps: ApplyDeps = {
+    writer: createCatalogueWriter(counter.executor),
+    sessions: createIngestSessions(counter.executor),
+    existing: {
+      existingVersions: async (ctx, query) => {
+        const result = await reader.existingVersions(ctx, query);
+        inspect?.(
+          query,
+          result.rows.map((r) => r.versionNormalized),
+        );
+        return result;
+      },
+    },
+    finalizer: createIngestFinalizer(counter.executor),
+  };
+  const acquired = await deps.sessions.acquire(
+    org,
+    {
+      scope: 'package',
+      sourceId: source.id,
+      packageKey: source.key,
+    },
+    OWNER,
+    600,
+  );
+  if (acquired === 'held') throw new Error('session held');
+  let session = acquired;
+  const guard = createIngestSessionWriteGuard(org, session);
+  const counts: number[] = [];
+  for (let invocation = 0; invocation < 250; invocation++) {
+    counter.take();
+    const last = await applyChunk(org, deps, {
+      session,
+      guard,
+      source,
+      description: describe(),
+      packageDescription: null,
+      toVersion: convert,
+      validatorTtlSeconds: 300,
+    });
+    const actual = counter.take();
+    expect(actual).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    expect(actual).toBeLessThanOrEqual(last.planned);
+    expect(last.planned).toBeLessThanOrEqual(INVOCATION_BUDGET);
+    counts.push(actual);
+    if (last.done) return { counts, last };
+    expect(last.status).toBe('progress');
+    session = last.session;
+  }
+  throw new Error('apply did not complete');
+}
+
+it('refreshes 100k unchanged versions with candidate-only metadata reads and at most 450 statements per invocation', async () => {
+  const total = 100_000;
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('large', ?, ?, 'composer', ?)",
+      params: [org.orgId, SOURCE, KEY],
+    },
+    {
+      sql: `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+      INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json)
+      SELECT 'large-' || i, ?, 'large', '1.0.' || i, '1.0.' || i || '.0', '2026-01-01T00:00:00.000Z', 'release_date', '{}' FROM n`,
+      params: [total - 1, org.orgId],
+    },
+  ]);
+  const metadata = normalizeVersionMetadata('composer', {});
+  const describe = () =>
+    createPackageDescription({
+      name: KEY,
+      snapshot: snapshotRef(SNAPSHOT),
+      validators: {},
+      documentsComplete: true,
+      members: (async function* () {
+        for (let ordinal = 0; ordinal < total; ordinal++)
+          yield {
+            ordinal,
+            version: `1.0.${ordinal}`,
+            form: 'composer-p2',
+            raw: '{}',
+          } as const;
+      })(),
+    });
+  let metadataRows = 0;
+  let metadataReads = 0;
+  let keyReads = 0;
+  const { counts, last } = await applyDescription(
+    describe,
+    (candidate) => ({
+      version: candidate.version,
+      versionNormalized: `${candidate.version}.0`,
+      metadata,
+      license: null,
+      distType: 'zip',
+      sourceRef: null,
+      upstreamReleasedAt: null,
+      history: { basis: 'release_date', at: '2026-01-01T00:00:00.000Z' },
+    }),
+    undefined,
+    (query, rows) => {
+      expect(query.keys).toBeDefined();
+      const candidates = new Set(query.keys);
+      expect(rows.every((key) => candidates.has(key))).toBe(true);
+      if (query.withMetadata) {
+        metadataReads++;
+        metadataRows += rows.length;
+      } else keyReads++;
+    },
+  );
+  expect(last.status).toBe('complete');
+  expect(last.session.seenCount).toBe(total);
+  expect(counts).toHaveLength(100);
+  expect(keyReads).toBe(100);
+  expect(metadataReads).toBe(500);
+  expect(metadataRows).toBe(total);
+  expect(
+    await database.executor.all({
+      sql: 'SELECT max(revision) AS revision, count(*) AS total FROM version WHERE org_id = ?',
+      params: [org.orgId],
+    }),
+  ).toEqual([{ revision: 1, total }]);
+}, 120_000);
+
+it('counts a real tombstoned row as present and completes without changing its status', async () => {
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('tomb', ?, ?, 'composer', ?)",
+      params: [org.orgId, SOURCE, KEY],
+    },
+    {
+      sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, status, tombstoned_at, published_at, published_at_basis, metadata_json)
+      VALUES ('tomb-v', ?, 'tomb', '1.0.0', '1.0.0.0', 'tombstoned', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'release_date', '{}')`,
+      params: [org.orgId],
+    },
+  ]);
+  const { last } = await applyDescription(
+    () =>
+      createPackageDescription({
+        name: KEY,
+        snapshot: snapshotRef(SNAPSHOT),
+        validators: {},
+        documentsComplete: true,
+        members: (async function* () {
+          yield {
+            ordinal: 0,
+            version: '1.0.0',
+            form: 'composer-p2',
+            raw: '{"version":"1.0.0"}',
+          } as const;
+        })(),
+      }),
+    toVersion,
+  );
+  expect(last).toMatchObject({ status: 'complete', session: { seenCount: 1 } });
+  expect(
+    await database.executor.all({
+      sql: "SELECT status, revision FROM version WHERE id = 'tomb-v'",
+      params: [],
+    }),
+  ).toEqual([{ status: 'tombstoned', revision: 1 }]);
+});
+
+it('adds and removes npm deprecation, bumps package revision and changes metadata cache keys', async () => {
+  const source = {
+    id: 'npm-source',
+    key: 'left-pad',
+    type: 'npm_registry' as const,
+    ecosystem: 'npm' as const,
+    covered: true,
+  };
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'npm', 'npm', 'npm_registry')",
+      params: [source.id, org.orgId],
+    },
+  ]);
+  const integrity = `sha512-${'A'.repeat(86)}==`;
+  const describe =
+    (deprecated: string | null, digest = integrity, tags?: Record<string, string>) =>
+    () =>
+      createPackageDescription({
+        name: source.key,
+        snapshot: snapshotRef(SNAPSHOT),
+        validators: {},
+        documentsComplete: true,
+        ...(tags === undefined ? {} : { distTags: tags }),
+        members: (async function* () {
+          yield {
+            ordinal: 0,
+            version: '1.0.0',
+            form: 'npm-full',
+            raw: JSON.stringify({
+              name: source.key,
+              version: '1.0.0',
+              ...(deprecated === null ? {} : { deprecated }),
+              dist: {
+                integrity: digest,
+                shasum: 'a'.repeat(40),
+                tarball: 'https://registry.example.test/left-pad/-/left-pad-1.0.0.tgz',
+              },
+            }),
+          } as const;
+        })(),
+      });
+  const convert = (candidate: VersionCandidate): VersionInput => ({
+    version: candidate.version,
+    versionNormalized: candidate.version,
+    metadata: normalizeVersionMetadata('npm', JSON.parse(candidate.raw)),
+    license: null,
+    distType: 'tgz',
+    sourceRef: null,
+    upstreamReleasedAt: null,
+    history: { basis: 'release_date', at: '2026-01-01T00:00:00.000Z' },
+  });
+  const read = async () =>
+    (
+      await database.executor.all<{
+        packageId: string;
+        rev: number;
+        modifiedAt: string;
+        createdAt: string;
+        deprecated: string | null;
+        status: string;
+      }>({
+        sql: `SELECT p.id AS packageId, p.rev, p.modified_at AS modifiedAt, p.created_at AS createdAt,
+      v.deprecated_message AS deprecated, v.status FROM package p JOIN version v ON v.package_id = p.id AND v.org_id = p.org_id
+      WHERE p.org_id = ? AND p.source_id = ?`,
+        params: [org.orgId, source.id],
+      })
+    )[0]!;
+  const cacheKey = (row: Awaited<ReturnType<typeof read>>) =>
+    catalogueCacheKey(
+      {
+        ...row,
+        projectId: 'project',
+        sourceId: source.id,
+        ecosystem: 'npm',
+        key: source.key,
+        cacheEpoch: 'epoch',
+        listingComplete: true,
+      } satisfies ResolvedPackage,
+      'npm-full',
+    );
+  expect((await applyDescription(describe(null), convert, source)).last.status).toBe('complete');
+  let before = await read();
+  for (const deprecated of ['Use version 2', null]) {
+    const cached = new Map([[JSON.stringify(cacheKey(before)), 'previous packument']]);
+    expect((await applyDescription(describe(deprecated), convert, source)).last.status).toBe(
+      'complete',
+    );
+    const after = await read();
+    expect(after.deprecated).toBe(deprecated);
+    expect(after.rev).toBe(before.rev + 1);
+    expect(cached.get(JSON.stringify(cacheKey(after)))).toBeUndefined();
+    // Repeating the same metadata remains a read-and-mark refresh.
+    expect((await applyDescription(describe(deprecated), convert, source)).last.status).toBe(
+      'complete',
+    );
+    expect((await read()).rev).toBe(after.rev);
+    before = after;
+  }
+  const conflicting = `sha512-${'B'.repeat(86)}==`;
+  expect(
+    (await applyDescription(describe('Should not apply', conflicting), convert, source)).last
+      .status,
+  ).toBe('complete');
+  expect(await read()).toMatchObject({ status: 'quarantined', deprecated: null });
+});
+
+it('retains all tag slices and removes obsolete tags across budgeted invocations', async () => {
+  const source = {
+    id: 'npm-source',
+    key: 'left-pad',
+    type: 'npm_registry' as const,
+    ecosystem: 'npm' as const,
+    covered: true,
+  };
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'npm', 'npm', 'npm_registry')",
+      params: [source.id, org.orgId],
+    },
+  ]);
+  const version: VersionInput = {
+    version: '1.0.0',
+    versionNormalized: '1.0.0',
+    license: null,
+    distType: 'tgz',
+    sourceRef: null,
+    upstreamReleasedAt: null,
+    metadata: normalizeVersionMetadata('npm', {
+      name: source.key,
+      version: '1.0.0',
+      dist: {
+        integrity: `sha512-${'A'.repeat(86)}==`,
+        tarball: 'https://registry.example.test/left-pad/-/left-pad-1.0.0.tgz',
+      },
+    }),
+    history: { basis: 'release_date', at: '2026-01-01T00:00:00.000Z' },
+  };
+  const describe = (tags: Record<string, string>) => () =>
+    createPackageDescription({
+      name: source.key,
+      snapshot: snapshotRef(SNAPSHOT),
+      validators: {},
+      documentsComplete: true,
+      distTags: tags,
+      members: (async function* () {
+        yield {
+          ordinal: 0,
+          version: '1.0.0',
+          form: 'npm-full',
+          raw: version.metadata.json,
+        } as const;
+      })(),
+    });
+  await applyDescription(describe({ obsolete: '1.0.0' }), () => version, source);
+  const tags = Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`tag${i}`, '1.0.0']));
+  const stored = () =>
+    database.executor.all({
+      sql: 'SELECT t.tag AS tag, v.version_normalized AS version FROM dist_tag t JOIN version v ON v.id = t.version_id WHERE t.org_id = ? ORDER BY t.tag',
+      params: [org.orgId],
+    });
+  const { counts, last } = await applyDescription(describe(tags), () => version, source);
+  expect(last).toMatchObject({ status: 'complete', tagsSkipped: false });
+  expect(counts.length).toBeGreaterThan(1);
+  expect(await stored()).toEqual(
+    Object.keys(tags)
+      .sort()
+      .map((tag) => ({ tag, version: '1.0.0' })),
+  );
+  const empty = await applyDescription(describe({}), () => version, source);
+  expect(empty.last).toMatchObject({ status: 'complete', tagsSkipped: false });
+  expect(await stored()).toEqual([]);
+});
+
+it('does not publish a tag slice under a stale session guard', async () => {
+  const source = {
+    id: 'npm-source',
+    key: 'left-pad',
+    type: 'npm_registry' as const,
+    ecosystem: 'npm' as const,
+    covered: true,
+  };
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'npm', 'npm', 'npm_registry')",
+      params: [source.id, org.orgId],
+    },
+  ]);
+  const sessions = createIngestSessions(database.executor);
+  const acquired = await sessions.acquire(
+    org,
+    { scope: 'package', sourceId: source.id, packageKey: source.key },
+    OWNER,
+    600,
+  );
+  if (acquired === 'held') throw new Error('session held');
+  const guard = createIngestSessionWriteGuard(org, acquired);
+  expect(await sessions.abandon(org, acquired)).toBe(true);
+  const writer = createCatalogueWriter(database.executor);
+  const version: VersionInput = {
+    version: '1.0.0',
+    versionNormalized: '1.0.0',
+    license: null,
+    distType: 'tgz',
+    sourceRef: null,
+    upstreamReleasedAt: null,
+    metadata: normalizeVersionMetadata('npm', {
+      name: source.key,
+      version: '1.0.0',
+      dist: {
+        integrity: `sha512-${'A'.repeat(86)}==`,
+        tarball: 'https://registry.example.test/left-pad/-/left-pad-1.0.0.tgz',
+      },
+    }),
+    history: { basis: 'release_date', at: '2026-01-01T00:00:00.000Z' },
+  };
+  const before = await database.executor.all({ sql: 'SELECT * FROM dist_tag', params: [] });
+  await writer
+    .syncPackage(org, guard, {
+      sourceId: source.id,
+      ecosystem: 'npm',
+      key: source.key,
+      description: null,
+      versions: [version],
+      tags: { latest: '1.0.0' },
+      tagNames: ['latest', 'next'],
+    })
+    .catch(() => undefined);
+  expect(await database.executor.all({ sql: 'SELECT * FROM dist_tag', params: [] })).toEqual(
+    before,
+  );
+  expect(
+    await database.executor.all({
+      sql: 'SELECT id FROM version WHERE org_id = ?',
+      params: [org.orgId],
+    }),
+  ).toEqual([]);
 });

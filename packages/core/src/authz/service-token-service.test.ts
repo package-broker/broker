@@ -1,6 +1,6 @@
 import type { ServiceTokenService } from './service-token-service.js';
 import type { ApiCall } from '../api/idempotency.js';
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   REAUTH_WINDOW_MS,
   createSessionService,
@@ -164,6 +164,7 @@ function rig(
 
 const request = (extra: Partial<ServiceTokenIssueInput> = {}): ServiceTokenIssueInput => ({
   servicePrincipalId: 'sp-1',
+  routeProjectId: 'project-1',
   name: 'deploy',
   scope: 'read',
   expiresAt: inDays(30),
@@ -254,7 +255,7 @@ describe('service token issuance', () => {
     });
     const result = await issue(
       r,
-      request({ scope: 'full', expiresAt: inDays(30) }),
+      request({ routeProjectId: null, scope: 'full', expiresAt: inDays(30) }),
       session(),
       fence(),
       actor({ isOrganizationAdmin: true }),
@@ -273,7 +274,7 @@ describe('service token issuance', () => {
       principal: principal({ projectId: null, permissions: ['project:read'] }),
       live: ['org:service-principals:write', 'project:read'],
     });
-    const result = await issue(r, request({ scope: 'full' }));
+    const result = await issue(r, request({ routeProjectId: null, scope: 'full' }));
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(r.calls).toHaveLength(0);
   });
@@ -584,7 +585,7 @@ const apiCall: ApiCall = {
 
 describe('lifecycle audit and idempotency', () => {
   it.each(['project-1', null] as const)('passes one issue event for %s', async (mode) => {
-    const input = request();
+    const input = request({ routeProjectId: mode });
     const projectId = mode;
     const r = rig({
       principal: principal({ projectId, permissions: ['project:packages:read'] }),
@@ -722,3 +723,43 @@ const issueRecord = {
   createdAt: NOW,
   expiresAt: inDays(1),
 };
+
+describe('route principal binding', () => {
+  it.each(['', 42 as never])('rejects malformed routeProjectId %s', async (routeProjectId) => {
+    const r = rig();
+    const get = vi.spyOn(r.deps.principals, 'get');
+    const store = vi.spyOn(r.deps.tokens, 'issueService');
+    await expect(issue(r, request({ routeProjectId }))).rejects.toThrow(TypeError);
+    expect(get).not.toHaveBeenCalled();
+    expect(store).not.toHaveBeenCalled();
+    expect(r.liveCalls).toHaveLength(0);
+    expect(r.minted).toHaveLength(0);
+  });
+
+  it.each([
+    ['project route', 'project-2'],
+    ['organization route', null],
+  ] as const)('%s hides a principal outside its boundary', async (_name, routeProjectId) => {
+    const r = rig();
+    const absent = rig({ principal: null });
+    const store = vi.spyOn(r.deps.tokens, 'issueService');
+    const input = request({ routeProjectId });
+    expect(await issue(r, input)).toEqual(await issue(absent, input));
+    expect(r.logs).toEqual(absent.logs);
+    expect(r.liveCalls).toEqual([null]);
+    expect(store).not.toHaveBeenCalled();
+    expect(absent.calls).toHaveLength(0);
+  });
+
+  it('uses the absent-principal denial for a caller without issue permission', async () => {
+    const r = rig({ live: [] });
+    const absent = rig({ principal: null, live: [] });
+    const store = vi.spyOn(r.deps.tokens, 'issueService');
+    const input = request({ routeProjectId: 'project-2' });
+    expect(await issue(r, input)).toEqual(await issue(absent, input));
+    expect(r.logs).toEqual(absent.logs);
+    expect(r.liveCalls).toEqual([null]);
+    expect(store).not.toHaveBeenCalled();
+    expect(absent.calls).toHaveLength(0);
+  });
+});

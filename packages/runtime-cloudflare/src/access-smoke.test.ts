@@ -250,6 +250,7 @@ describe('cloudflare access smoke on Miniflare D1', () => {
             {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
+              via: 'own',
             },
             apiCall,
           );

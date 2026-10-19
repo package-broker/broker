@@ -24,6 +24,7 @@ export interface ExistingChunkVersion {
   readonly npmIntegrity: string | null;
   readonly composerShasum: string | null;
   readonly metadataJson?: string;
+  readonly deprecatedMessage?: string | null;
 }
 
 export interface ChunkSource {
@@ -60,6 +61,7 @@ export type PlannedWriterCall =
 export interface ChunkPlan {
   readonly inserts: readonly VersionInput[];
   readonly composerUpdates: readonly VersionInput[];
+  readonly npmUpdates: readonly VersionInput[];
   readonly npmConflicts: readonly NpmConflict[];
   readonly unchanged: readonly string[];
   readonly refused: readonly { readonly version: string; readonly reason: PlanRefusal }[];
@@ -105,8 +107,11 @@ function decideNpm(incoming: VersionInput, existing: ExistingChunkVersion): Deci
   if (existing.metadataJson === undefined) return { kind: 'needs_metadata' };
   const next = npmDigests(incoming.metadata.json);
   const prior = npmDigests(existing.metadataJson);
-  return next.shasum !== prior.shasum || next.tarballName !== prior.tarballName
-    ? { kind: 'conflict', existing }
+  if (next.shasum !== prior.shasum || next.tarballName !== prior.tarballName) {
+    return { kind: 'conflict', existing };
+  }
+  return incoming.metadata.deprecatedMessage !== (existing.deprecatedMessage ?? null)
+    ? { kind: 'update' }
     : { kind: 'unchanged' };
 }
 
@@ -116,6 +121,9 @@ function decide(
   existing: ExistingChunkVersion | undefined,
 ): Decision {
   if (existing === undefined) return { kind: 'insert' };
+  if (existing.status === 'tombstoned' || existing.status === 'quarantined') {
+    return { kind: 'unchanged' };
+  }
   if (npm) return decideNpm(incoming, existing);
   return existing.metadataJson === incoming.metadata.json
     ? { kind: 'unchanged' }
@@ -235,7 +243,8 @@ export function planChunk(
 
   return {
     inserts,
-    composerUpdates: updates,
+    composerUpdates: npm ? [] : updates,
+    npmUpdates: npm ? updates : [],
     npmConflicts: conflicts,
     unchanged,
     refused,

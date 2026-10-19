@@ -17,6 +17,8 @@ export interface DistTagRequest {
   readonly ecosystem: 'composer' | 'npm';
   /** Tag to version_normalized; the package's tags become exactly this map. */
   readonly tags: Readonly<Record<string, string>>;
+  /** Full snapshot names when this call applies only a slice. */
+  readonly tagNames?: readonly string[];
   readonly actorType: DistTagActorType;
   readonly actorId: string | null;
   readonly opId: string;
@@ -167,7 +169,7 @@ export function distTagStatements(
     );
   }
 
-  const keep = JSON.stringify(entries.map(([tag]) => tag));
+  const keep = JSON.stringify(request.tagNames ?? entries.map(([tag]) => tag));
   const absent = sql<boolean>`dist_tag.package_id = ${packageId} AND dist_tag.org_id = ${ctx.orgId}
     AND dist_tag.tag NOT IN (SELECT value FROM json_each(${keep}))`;
   const removeHistory = compile(

@@ -10,13 +10,7 @@ import {
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { compile, db } from '../kysely.js';
-import {
-  attachedSourceCondition,
-  col,
-  proxyEligibleCondition,
-  readTimeCondition,
-  winnerOrder,
-} from './catalogue-predicates.js';
+import { visibleRowsCondition, winnerOrder } from './catalogue-predicates.js';
 
 const SEARCH_TEXT_MAX = 100;
 /** D1 refuses LIKE patterns longer than 50 bytes. */
@@ -28,17 +22,6 @@ interface Row {
   readonly package_id: string | null;
   readonly source_id: string | null;
   readonly description: string | null;
-}
-
-function rowsFilter(ctx: OrgContext, alias: { pp: string; pkg: string; src: string; ps: string }) {
-  const { pp, pkg, src, ps } = alias;
-  return sql`${sql.ref(`${pp}.org_id`)} = ${ctx.orgId}
-    and ${sql.ref(`${pkg}.org_id`)} = ${ctx.orgId}
-    and ${sql.ref(`${src}.org_id`)} = ${ctx.orgId}
-    and ${sql.ref(`${ps}.org_id`)} = ${ctx.orgId}
-    and ${attachedSourceCondition(ctx, col(`${pp}.project_id`), col(`${pkg}.source_id`), col(`${pkg}.ecosystem`))}
-    and ${readTimeCondition(ctx, col(`${pp}.project_id`), { package: pkg, source: src })}
-    and ${proxyEligibleCondition({ package: pkg, source: src })}`;
 }
 
 function winners(
@@ -56,14 +39,14 @@ function winners(
   join source as src on src.id = pkg.source_id
   join project_source as ps on ps.project_id = pp.project_id and ps.source_id = pkg.source_id
   where pp.project_id = ${projectId} and pkg.ecosystem = ${ecosystem} and ${filter}
-    and ${rowsFilter(ctx, { pp: 'pp', pkg: 'pkg', src: 'src', ps: 'ps' })}
+    and ${visibleRowsCondition(ctx, { pp: 'pp', pkg: 'pkg', src: 'src', ps: 'ps' })}
     and not exists (
       select 1 from package as bp indexed by package_by_name
       join project_package as bpp on bpp.project_id = pp.project_id and bpp.package_id = bp.id
       join source as bs on bs.id = bp.source_id
       join project_source as bps on bps.project_id = pp.project_id and bps.source_id = bp.source_id
       where bp.org_id = pkg.org_id and bp.ecosystem = pkg.ecosystem and bp.name = pkg.name
-        and ${rowsFilter(ctx, { pp: 'bpp', pkg: 'bp', src: 'bs', ps: 'bps' })}
+        and ${visibleRowsCondition(ctx, { pp: 'bpp', pkg: 'bp', src: 'bs', ps: 'bps' })}
         and (${better}) < (${current})
     )
   order by pkg.name

@@ -1,3 +1,4 @@
+import type { ApiCall } from '../api/idempotency.js';
 import { describe, expect, it } from 'vitest';
 import type { AuthenticatedSession } from '../auth/session.js';
 import type { Organization } from '../db/organization.js';
@@ -118,13 +119,13 @@ function world() {
       });
       return 'created';
     },
-    async setPermissions(_ctx, _fence, _guard, id, permissions) {
+    async setPermissions(_ctx, _fence, _guard, { id, permissions }) {
       const found = principals.get(id);
       if (found === undefined) return 'not_found';
       principals.set(id, { ...found, permissions: [...permissions], revision: found.revision + 1 });
       return 'updated';
     },
-    async suspend(_ctx, _fence, _guard, id) {
+    async suspend(_ctx, _fence, _guard, { id }) {
       const found = principals.get(id);
       if (found === undefined) return 'not_found';
       if (found.status === 'suspended') return 'unchanged';
@@ -264,21 +265,34 @@ function world() {
   }
 
   async function createPrincipal(userId: string, projectId: string | null): Promise<string> {
-    const created = await principalService.create(ctx, actorOf(userId), fenceOf(userId), {
-      name: 'ci',
-      projectId,
-    });
+    const created = await principalService.create(
+      ctx,
+      actorOf(userId),
+      fenceOf(userId),
+      {
+        name: 'ci',
+        projectId,
+      },
+      apiCall,
+    );
     if (!created.ok) throw new Error(`create refused: ${created.error}`);
     return created.value.id;
   }
 
   function attemptIssue(userId: string, principalId: string, scope: ScopeLevel) {
-    return tokenService.issue(ctx, authenticated(userId), actorOf(userId), fenceOf(userId), {
-      servicePrincipalId: principalId,
-      name: 'deploy',
-      scope,
-      expiresAt: new Date(NOW_MS + 30 * DAY).toISOString(),
-    });
+    return tokenService.issue(
+      ctx,
+      authenticated(userId),
+      actorOf(userId),
+      fenceOf(userId),
+      {
+        servicePrincipalId: principalId,
+        name: 'deploy',
+        scope,
+        expiresAt: new Date(NOW_MS + 30 * DAY).toISOString(),
+      },
+      apiCall,
+    );
   }
 
   async function issue(userId: string, principalId: string, scope: ScopeLevel): Promise<string> {
@@ -431,6 +445,7 @@ describe('service authority removal through the principal service and the princi
       w.fenceOf(ADMIN, await w.revision(principalId)),
       principalId,
       ['project:read', READ],
+      apiCall,
     );
     expect(narrowed).toEqual({ ok: true, value: null });
     expect(await w.use(plaintext, alpha())).toBe('denied');
@@ -445,6 +460,7 @@ describe('service authority removal through the principal service and the princi
       w.actorOf(ADMIN),
       w.fenceOf(ADMIN),
       principalId,
+      apiCall,
     );
     expect(suspended).toEqual({ ok: true, value: null });
     expect(await w.use(plaintext, alpha())).toBe('principal_inactive');
@@ -462,6 +478,7 @@ describe('service authority removal through the principal service and the princi
       w.fenceOf(ADMIN, await w.revision(principalId)),
       principalId,
       ['project:read', READ],
+      apiCall,
     );
     expect(await w.use(plaintext, beta())).toBe('denied');
     expect(await w.use(plaintext, beta(READ))).toBe('allowed');
@@ -516,3 +533,12 @@ describe('secret handling', () => {
     expect(w.logs.some((line) => line.includes(parsed.canonical))).toBe(false);
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

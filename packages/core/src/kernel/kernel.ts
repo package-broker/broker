@@ -1,3 +1,4 @@
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '../ingest/finalize-guard.js';
 import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
@@ -135,7 +136,7 @@ type KernelEnv = {
 type RegisteredRoute = Registration['routes'][number];
 
 const CORE_PLUGIN = 'core';
-/** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated boundary. */
+/** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated and self boundaries. */
 const AUTHENTICATED_PLACEHOLDER = 'authenticated';
 const CORE_PREFIX = '/_pb/';
 const RESERVED_ROOTS = ['/health', '/_pb'] as const;
@@ -375,8 +376,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ].filter((path) => portAccepts('route', path)),
   );
   const registry: ObsRegistry = {
-    events: KERNEL_EVENTS,
-    reasonCodes: KERNEL_REASON_CODES,
+    events: new Set([...KERNEL_EVENTS, ...INGEST_EVENTS]),
+    reasonCodes: new Set([...KERNEL_REASON_CODES, ...INGEST_REASON_CODES]),
     routeTemplates,
   };
   const obsContext: KernelObsContext = {
@@ -493,11 +494,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
     scope.set({ route: route.path });
     const permission =
-      route.permission ?? (route.boundary === 'authenticated' ? AUTHENTICATED_PLACEHOLDER : null);
-    if (route.boundary === 'self') {
-      guard.reason('authz.unauthenticated');
-      return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
-    }
+      route.permission ??
+      (route.boundary === 'authenticated' || route.boundary === 'self'
+        ? AUTHENTICATED_PLACEHOLDER
+        : null);
     if (permission === null) {
       const org = route.needsOrg === false ? null : await resolveOrg();
       return invoke(route, c, org, null, null, {

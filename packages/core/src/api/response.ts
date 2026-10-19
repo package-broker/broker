@@ -1,4 +1,5 @@
 import type { SourceError } from '../sources/source-service.js';
+import type { VisibilityResult } from '../catalogue/visibility-service.js';
 import type { AdminError } from '../authz/administration.js';
 import type { ProjectError } from '../authz/project-service.js';
 import type { PersonalTokenError } from '../authz/pat-service.js';
@@ -54,6 +55,17 @@ export const SERVICE_ERROR_TABLE = {
     pattern_taken: { status: 409, code: 'conflict' },
     invalid_name: { status: 400, code: 'invalid_request' },
   } satisfies Record<SourceError, ServiceErrorMapping>,
+  VisibilityError: {
+    forbidden: { status: 403, code: 'forbidden' },
+    collision: { status: 409, code: 'conflict' },
+    conflict: { status: 409, code: 'conflict' },
+    not_found: { status: 404, code: 'not_found' },
+    not_attached: { status: 404, code: 'not_found' },
+    unclassified: { status: 503, code: 'unavailable' },
+    invalid_pattern: { status: 400, code: 'invalid_request' },
+    too_many_patterns: { status: 400, code: 'invalid_request' },
+    not_eligible: { status: 409, code: 'conflict' },
+  } satisfies Record<Extract<VisibilityResult, { ok: false }>['error'], ServiceErrorMapping>,
   AdminError: {
     invalid_permission: { status: 400, code: 'invalid_request' },
     invalid_key: { status: 400, code: 'invalid_request' },

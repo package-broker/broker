@@ -264,16 +264,13 @@ describe('construction', () => {
 });
 
 describe('route shape', () => {
-  it.each(['absent', 'none', 'self', 'package'] as const)(
-    'denies boundary %s with 403',
-    async (b) => {
-      const state = freshState();
-      const engine = createAuthorizationEngine(deps(state));
-      const request = req({ headers: cookie, boundary: b });
-      expect(await engine.authorize(request)).toEqual({ allow: false, status: 403 });
-      expect(state.lookups).toBe(0);
-    },
-  );
+  it.each(['absent', 'none', 'package'] as const)('denies boundary %s with 403', async (b) => {
+    const state = freshState();
+    const engine = createAuthorizationEngine(deps(state));
+    const request = req({ headers: cookie, boundary: b });
+    expect(await engine.authorize(request)).toEqual({ allow: false, status: 403 });
+    expect(state.lookups).toBe(0);
+  });
 });
 
 describe('session', () => {
@@ -1327,16 +1324,6 @@ describe('authenticated boundary', () => {
     const engine = createAuthorizationEngine(deps(state));
     expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
   });
-
-  it('still answers 403 for the self boundary with a valid session', async () => {
-    const state = freshState();
-    const engine = createAuthorizationEngine(deps(state));
-    expect(await engine.authorize(req({ headers: cookie, boundary: 'self' }))).toEqual({
-      allow: false,
-      status: 403,
-    });
-    expect(state.lookups).toBe(0);
-  });
 });
 
 describe('authenticated boundary through the kernel', () => {
@@ -1558,5 +1545,248 @@ describe('SSO freshness outside the authenticated boundary', () => {
       ).allow,
     ).toBe(true);
     expect((await engine.authorize(req({ headers: cookie }))).allow).toBe(true);
+  });
+});
+
+describe('self boundary', () => {
+  const BASE = 'http://broker.test';
+  const ask = (headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
+    req({
+      headers,
+      boundary: 'self',
+      permission: 'self',
+      params: {},
+      ...extra,
+    });
+
+  async function kernelWith(state: State, calls: unknown[], overrides = {}) {
+    return createKernel({
+      platform: 'node',
+      plugins: [],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock: fixedClock('2026-10-16T12:00:00.000Z'),
+        ids: { ulid: () => '01JA0000000000000000000000' },
+      },
+      resolveOrg: () => Promise.resolve(org),
+      health: () => Promise.resolve(true),
+      log: () => undefined,
+      authorization: createAuthorizationEngine(deps(state, overrides)),
+      coreRoutes: [
+        {
+          method: 'GET',
+          path: '/_pb/organization',
+          permission: 'org:read',
+          boundary: 'organization',
+          handler: () => Response.json({ ok: true }),
+        },
+        {
+          method: 'POST',
+          path: '/_pb/organization',
+          permission: 'org:read',
+          boundary: 'organization',
+          handler: () => Response.json({ ok: true }),
+        },
+        {
+          method: 'GET',
+          path: '/_pb/me/tokens',
+          permission: null,
+          boundary: 'self',
+          handler: (context) => {
+            const access = accessContextOf(context);
+            calls.push({
+              principal: context.principal,
+              projectId: context.projectId,
+              sessionId: access?.sessionId ?? null,
+              actor: access?.actor ?? null,
+            });
+            return Response.json({ ok: true });
+          },
+        },
+        {
+          method: 'POST',
+          path: '/_pb/me/tokens',
+          permission: null,
+          boundary: 'self',
+          handler: (context) => {
+            calls.push({ principal: context.principal });
+            return Response.json({ ok: true });
+          },
+        },
+      ],
+    });
+  }
+
+  const strip = (body: { error: { requestId?: string } }) => ({
+    ...body,
+    error: { ...body.error, requestId: undefined },
+  });
+
+  async function selfResponse(headers: Record<string, string>, state = freshState()) {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls);
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/me/tokens`, { headers }));
+    return { status: response.status, body: strip((await response.json()) as never), calls };
+  }
+
+  it('runs the handler for a live session with the user principal and the session id', async () => {
+    const result = await selfResponse(cookie);
+    expect(result.status).toBe(200);
+    expect(result.calls).toEqual([
+      {
+        principal: { kind: 'user', id: 'user-1' },
+        projectId: null,
+        sessionId: 'sess-1',
+        actor: expect.objectContaining({
+          session: { id: 'sess-1', userId: 'user-1' },
+          user: { id: 'user-1' },
+        }),
+      },
+    ]);
+  });
+
+  it('allows a session with no permission rows at the engine', async () => {
+    const state = freshState();
+    state.sessionOrg = [];
+    state.sessionProjectPermissions = [];
+    const decision = await createAuthorizationEngine(deps(state)).authorize(ask(cookie));
+    expect(decision).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+    });
+  });
+
+  it('answers 401 without a credential', async () => {
+    const result = await selfResponse({});
+    expect(result.status).toBe(401);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a malformed cookie with the same 401 body', async () => {
+    const anonymous = await selfResponse({});
+    const malformed = await selfResponse({ cookie: '__Host-pb_session=not-a-session' });
+    expect(malformed.status).toBe(401);
+    expect(malformed.body).toEqual(anonymous.body);
+    expect(malformed.calls).toEqual([]);
+  });
+
+  it('answers a revoked session with the same 401 body', async () => {
+    const state = freshState();
+    state.sessionRevoked = true;
+    const anonymous = await selfResponse({});
+    const revoked = await selfResponse(cookie, state);
+    expect(revoked.status).toBe(401);
+    expect(revoked.body).toEqual(anonymous.body);
+    expect(revoked.calls).toEqual([]);
+  });
+
+  const FORBIDDEN_BODY = {
+    error: { code: 'forbidden', message: 'Forbidden', requestId: undefined },
+  };
+
+  async function validTokenResponse(token: string, kind: 'pat' | 'svc') {
+    const state = freshState();
+    state.token.kind = kind;
+    state.token.hashOf = token;
+    const result = await selfResponse(bearer(token), state);
+    expect(state.touches).toEqual([]);
+    return result;
+  }
+
+  it('answers a valid PAT with the generic forbidden envelope', async () => {
+    const result = await validTokenResponse(PAT, 'pat');
+    expect(result.status).toBe(403);
+    expect(result.body).toEqual(FORBIDDEN_BODY);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a valid service token with the generic forbidden envelope', async () => {
+    const result = await validTokenResponse(SVC, 'svc');
+    expect(result.status).toBe(403);
+    expect(result.body).toEqual(FORBIDDEN_BODY);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers the PAT and service token refusals with identical bodies', async () => {
+    const pat = await validTokenResponse(PAT, 'pat');
+    const svc = await validTokenResponse(SVC, 'svc');
+    expect(svc.body).toEqual(pat.body);
+  });
+
+  it.each([
+    ['an inconsistent binding', (s: State) => void (s.token.bindingOk = false)],
+    ['an unparseable scope', (s: State) => void (s.token.scope = null)],
+    ['no project mode', (s: State) => void (s.token.projectMode = null)],
+    ['an inactive principal', (s: State) => void (s.token.principalStatus = 'suspended')],
+  ])('answers a Bearer with %s with the uniform 401', async (_name, break_) => {
+    const anonymous = await selfResponse({});
+    const state = freshState();
+    break_(state);
+    const result = await selfResponse(bearer(PAT), state);
+    expect(result.status).toBe(401);
+    expect(result.body).toEqual(anonymous.body);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a Bearer that does not authenticate with 401', async () => {
+    const state = freshState();
+    state.token.revoked = true;
+    const result = await selfResponse(bearer(PAT), state);
+    expect(result.status).toBe(401);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a Basic credential with 401', async () => {
+    const result = await selfResponse({ authorization: `Basic ${btoa(`${PAT}:x`)}` });
+    expect(result.status).toBe(401);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('ignores a valid session cookie when a Bearer credential is present', async () => {
+    const result = await selfResponse({ ...cookie, ...bearer(PAT) });
+    expect(result.status).toBe(403);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('refuses a stale SSO identity like an authenticated route', async () => {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: false };
+    state.sessionOrg = [];
+    const result = await selfResponse(cookie, state);
+    expect(result.status).toBe(403);
+    expect(result.calls).toEqual([]);
+    expect(state.touches).toEqual([]);
+  });
+
+  it('refuses a cookie POST without X-CSRF-Token exactly as an organization route does', async () => {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(freshState(), calls);
+    const headers = { ...cookie, origin: ORIGIN };
+    const self = await kernel.fetch(
+      new Request(`${BASE}/_pb/me/tokens`, { method: 'POST', headers }),
+    );
+    const organization = await kernel.fetch(
+      new Request(`${BASE}/_pb/organization`, { method: 'POST', headers }),
+    );
+    expect(self.status).toBe(403);
+    expect(self.status).toBe(organization.status);
+    expect(strip((await self.json()) as never)).toEqual(
+      strip((await organization.json()) as never),
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('runs a cookie POST that carries same-origin and the CSRF token', async () => {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(freshState(), calls);
+    const response = await kernel.fetch(
+      new Request(`${BASE}/_pb/me/tokens`, {
+        method: 'POST',
+        headers: { ...cookie, origin: ORIGIN, 'x-csrf-token': CSRF },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
   });
 });

@@ -1,3 +1,7 @@
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { idempotencyInsertStatement } from './idempotency.js';
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -279,15 +283,27 @@ function createRoleRepository(executor: ScalarSqlExecutor): UnfencedRoles {
     get: raw.get,
     create: async (ctx, input) => raw.create(ctx, await fence(ctx), { ...input, opId: opId() }),
     rename: async (ctx, id, name, now) =>
-      raw.rename(ctx, await fence(ctx, id), { id: id, name: name, now: now, opId: opId() }),
+      raw.rename(ctx, await fence(ctx, id), {
+        audit: mutationAudit('role.rename', id),
+        id: id,
+        name: name,
+        now: now,
+        opId: opId(),
+      }),
     setPermissions: async (ctx, id, permissions, now) =>
       raw.setPermissions(ctx, await fence(ctx, id), {
+        audit: mutationAudit('role.permissions_set', id),
         id: id,
         permissions: permissions,
         now: now,
         opId: opId(),
       }),
-    delete: async (ctx, id) => raw.delete(ctx, await fence(ctx, id), { id: id, opId: opId() }),
+    delete: async (ctx, id) =>
+      raw.delete(ctx, await fence(ctx, id), {
+        audit: mutationAudit('role.delete', id),
+        id: id,
+        opId: opId(),
+      }),
   };
 }
 
@@ -541,7 +557,11 @@ describe('list and get', () => {
 
   it('5: a role without permissions is listed with an empty set', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, { ...CUSTOM, permissions: [] });
+    await repository.create(a, {
+      audit: mutationAudit('role.create', CUSTOM.id),
+      ...CUSTOM,
+      permissions: [],
+    });
     expect((await repository.get(a, CUSTOM.id))?.permissions).toEqual([]);
   });
 
@@ -569,17 +589,25 @@ describe('list and get', () => {
 
   it('5: the same custom key can exist in two organizations', async () => {
     const repository = createRoleRepository(database.executor);
-    expect(await repository.create(a, CUSTOM)).toBe('created');
-    expect(await repository.create(b, { ...CUSTOM, id: '01J0CUSTOM00000000000000BB' })).toBe(
-      'created',
-    );
+    expect(
+      await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) }),
+    ).toBe('created');
+    expect(
+      await repository.create(b, {
+        audit: mutationAudit('role.create', '01J0CUSTOM00000000000000BB'),
+        ...CUSTOM,
+        id: '01J0CUSTOM00000000000000BB',
+      }),
+    ).toBe('created');
   });
 });
 
 describe('create', () => {
   it('4: stores a custom role that never protects the last holder and is not a system role', async () => {
     const repository = createRoleRepository(database.executor);
-    expect(await repository.create(a, CUSTOM)).toBe('created');
+    expect(
+      await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) }),
+    ).toBe('created');
     const stored = await repository.get(a, CUSTOM.id);
     expect(stored).toEqual({
       id: CUSTOM.id,
@@ -599,6 +627,7 @@ describe('create', () => {
     const before = [await count('role'), await count('role_permission')];
     expect(
       await repository.create(a, {
+        audit: mutationAudit('role.create', '01J0CUSTOM00000000000000DD'),
         ...CUSTOM,
         id: '01J0CUSTOM00000000000000DD',
         key: 'organization_admin',
@@ -612,16 +641,26 @@ describe('create', () => {
 
   it('4: a second custom role with the same key answers duplicate_key', async () => {
     const repository = createRoleRepository(database.executor);
-    expect(await repository.create(a, CUSTOM)).toBe('created');
-    expect(await repository.create(a, { ...CUSTOM, id: '01J0CUSTOM00000000000000CC' })).toBe(
-      'duplicate_key',
-    );
+    expect(
+      await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) }),
+    ).toBe('created');
+    expect(
+      await repository.create(a, {
+        audit: mutationAudit('role.create', '01J0CUSTOM00000000000000CC'),
+        ...CUSTOM,
+        id: '01J0CUSTOM00000000000000CC',
+      }),
+    ).toBe('duplicate_key');
     expect(await repository.get(a, '01J0CUSTOM00000000000000CC')).toBeNull();
   });
 
   it('4: duplicate permissions in the input are stored once', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, { ...CUSTOM, permissions: ['project:read', 'project:read'] });
+    await repository.create(a, {
+      audit: mutationAudit('role.create', CUSTOM.id),
+      ...CUSTOM,
+      permissions: ['project:read', 'project:read'],
+    });
     expect((await repository.get(a, CUSTOM.id))?.permissions).toEqual(['project:read']);
   });
 
@@ -630,7 +669,9 @@ describe('create', () => {
     const repository = createRoleRepository(counted.executor);
     for (const key of ['', 'Admin', '1abc', 'a-b', 'a b', 'a'.repeat(65)]) {
       expect(ROLE_KEY_PATTERN.test(key)).toBe(false);
-      await expect(repository.create(a, { ...CUSTOM, key })).rejects.toBeInstanceOf(TypeError);
+      await expect(
+        repository.create(a, { audit: mutationAudit('role.create', CUSTOM.id), ...CUSTOM, key }),
+      ).rejects.toBeInstanceOf(TypeError);
     }
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
   });
@@ -641,7 +682,7 @@ describe('create', () => {
       createFencedRoleRepository(database.executor, { providerAnchors: PROVIDERS }).create(
         orphan,
         fenceFor({ userId: 'nobody', sessionId: 'none' }),
-        { ...CUSTOM, opId: opId() },
+        { audit: mutationAudit('role.create', CUSTOM.id), ...CUSTOM, opId: opId() },
       ),
     ).rejects.toThrow('cache_epoch');
     expect(await count('role')).toBe(0);
@@ -652,7 +693,7 @@ describe('rename', () => {
   it('renames a system and a custom role and stamps updated_at', async () => {
     await seed(a, 'S1');
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     const auditor = await byKey(a, 'project_auditor');
     expect(await repository.rename(a, auditor.id, 'Reader', LATER)).toBe('renamed');
     expect(await repository.rename(a, CUSTOM.id, 'Releaser', LATER)).toBe('renamed');
@@ -673,7 +714,7 @@ describe('rename', () => {
 describe('setPermissions', () => {
   it('replaces the whole set of a custom role and stamps updated_at', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     expect(
       await repository.setPermissions(a, CUSTOM.id, ['project:audit:read', 'project:read'], LATER),
     ).toBe('updated');
@@ -690,7 +731,7 @@ describe('setPermissions', () => {
 
   it('can empty a role, and duplicates in the input are stored once', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     expect(
       await repository.setPermissions(a, CUSTOM.id, ['project:read', 'project:read'], LATER),
     ).toBe('updated');
@@ -731,7 +772,7 @@ describe('setPermissions', () => {
 
   it('is one batch and no other call', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     const counted = countCalls(database.executor);
     await createRoleRepository(counted.executor).setPermissions(
       a,
@@ -767,7 +808,12 @@ describe('delete', () => {
 
   it('4: a custom role used by a grant answers in_use and keeps its permissions', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, { ...CUSTOM, scope: 'organization', permissions: ['org:read'] });
+    await repository.create(a, {
+      audit: mutationAudit('role.create', CUSTOM.id),
+      ...CUSTOM,
+      scope: 'organization',
+      permissions: ['org:read'],
+    });
     await database.executor.all({
       sql: `INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id)
             VALUES (?, ?, 'email', ?, 'organization', ?)`,
@@ -779,7 +825,7 @@ describe('delete', () => {
 
   it('4: an unused custom role is deleted and its permissions cascade', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     expect(await permissionRows(CUSTOM.id)).toHaveLength(2);
     expect(await repository.delete(a, CUSTOM.id)).toBe('deleted');
     expect(await repository.get(a, CUSTOM.id)).toBeNull();
@@ -795,7 +841,7 @@ describe('delete', () => {
   it('4: a successful delete is one batch and a refusal of a system role is one batch', async () => {
     await seed(a, 'S1');
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     const counted = countCalls(database.executor);
     const counting = createRoleRepository(counted.executor);
     expect(await counting.delete(a, CUSTOM.id)).toBe('deleted');
@@ -828,6 +874,7 @@ describe('create never touches an existing role', () => {
       const existing = await byKey(a, role.key);
       expect(
         await repository.create(a, {
+          audit: mutationAudit('role.create', existing.id),
           id: existing.id,
           key: role.key,
           name: role.name,
@@ -842,25 +889,44 @@ describe('create never touches an existing role', () => {
 
   it('2: the same id and key of a custom role with no permissions and another name gains nothing', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, { ...CUSTOM, permissions: [] });
+    await repository.create(a, {
+      audit: mutationAudit('role.create', CUSTOM.id),
+      ...CUSTOM,
+      permissions: [],
+    });
     const before = await snapshot();
     expect(
-      await repository.create(a, { ...CUSTOM, name: 'Other name', permissions: ['project:read'] }),
+      await repository.create(a, {
+        audit: mutationAudit('role.create', CUSTOM.id),
+        ...CUSTOM,
+        name: 'Other name',
+        permissions: ['project:read'],
+      }),
     ).toBe('duplicate_key');
     expect(await snapshot()).toBe(before);
   });
 
   it('2: replaying identical input against an empty custom role fills in the requested permissions', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, { ...CUSTOM, permissions: [] });
-    expect(await repository.create(a, CUSTOM)).toBe('duplicate_key');
+    await repository.create(a, {
+      audit: mutationAudit('role.create', CUSTOM.id),
+      ...CUSTOM,
+      permissions: [],
+    });
+    expect(
+      await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) }),
+    ).toBe('duplicate_key');
     expect((await repository.get(a, CUSTOM.id))?.permissions).toEqual([
       'project:packages:read',
       'project:read',
     ]);
-    expect(await repository.create(a, { ...CUSTOM, permissions: ['project:audit:read'] })).toBe(
-      'duplicate_key',
-    );
+    expect(
+      await repository.create(a, {
+        audit: mutationAudit('role.create', CUSTOM.id),
+        ...CUSTOM,
+        permissions: ['project:audit:read'],
+      }),
+    ).toBe('duplicate_key');
     expect((await repository.get(a, CUSTOM.id))?.permissions).toEqual([
       'project:packages:read',
       'project:read',
@@ -869,11 +935,15 @@ describe('create never touches an existing role', () => {
 
   it('2: the same id and key of a custom role that already has permissions gains nothing', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     const before = await snapshot();
-    expect(await repository.create(a, { ...CUSTOM, permissions: ['project:audit:read'] })).toBe(
-      'duplicate_key',
-    );
+    expect(
+      await repository.create(a, {
+        audit: mutationAudit('role.create', CUSTOM.id),
+        ...CUSTOM,
+        permissions: ['project:audit:read'],
+      }),
+    ).toBe('duplicate_key');
     expect(await snapshot()).toBe(before);
   });
 
@@ -882,7 +952,13 @@ describe('create never touches an existing role', () => {
     const repository = createRoleRepository(database.executor);
     const before = await snapshot();
     const admin = await byKey(a, 'organization_admin');
-    expect(await repository.create(a, { ...CUSTOM, id: admin.id })).toBe('duplicate_key');
+    expect(
+      await repository.create(a, {
+        audit: mutationAudit('role.create', admin.id),
+        ...CUSTOM,
+        id: admin.id,
+      }),
+    ).toBe('duplicate_key');
     expect(await snapshot()).toBe(before);
   });
 
@@ -890,7 +966,13 @@ describe('create never touches an existing role', () => {
     const counted = countCalls(database.executor);
     const repository = createRoleRepository(counted.executor);
     for (const role of DEFAULT_ROLES) {
-      expect(await repository.create(a, { ...CUSTOM, key: role.key })).toBe('duplicate_key');
+      expect(
+        await repository.create(a, {
+          audit: mutationAudit('role.create', CUSTOM.id),
+          ...CUSTOM,
+          key: role.key,
+        }),
+      ).toBe('duplicate_key');
     }
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
     expect(await count('role')).toBe(0);
@@ -906,7 +988,13 @@ describe('invalid_permissions', () => {
       ['project:read', 'org:audit:read'],
       [''],
     ]) {
-      expect(await repository.create(a, { ...CUSTOM, permissions })).toBe('invalid_permissions');
+      expect(
+        await repository.create(a, {
+          audit: mutationAudit('role.create', CUSTOM.id),
+          ...CUSTOM,
+          permissions,
+        }),
+      ).toBe('invalid_permissions');
     }
     expect(await count('role')).toBe(0);
     expect(await count('role_permission')).toBe(0);
@@ -916,6 +1004,7 @@ describe('invalid_permissions', () => {
     const repository = createRoleRepository(database.executor);
     expect(
       await repository.create(a, {
+        audit: mutationAudit('role.create', CUSTOM.id),
         ...CUSTOM,
         scope: 'organization',
         permissions: ['org:read', 'project:read'],
@@ -925,7 +1014,7 @@ describe('invalid_permissions', () => {
 
   it('3: setPermissions refuses an unknown name and leaves the role unchanged', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     const before = await snapshot();
     expect(await repository.setPermissions(a, CUSTOM.id, ['project:read', 'nope'], LATER)).toBe(
       'invalid_permissions',
@@ -954,7 +1043,12 @@ describe('invalid_permissions', () => {
 
   it('3: setPermissions accepts org and project names on an organization role', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, { ...CUSTOM, scope: 'organization', permissions: ['org:read'] });
+    await repository.create(a, {
+      audit: mutationAudit('role.create', CUSTOM.id),
+      ...CUSTOM,
+      scope: 'organization',
+      permissions: ['org:read'],
+    });
     expect(
       await repository.setPermissions(a, CUSTOM.id, ['org:users:read', 'project:read'], LATER),
     ).toBe('updated');
@@ -987,7 +1081,9 @@ describe('rename guards', () => {
     const repository = createRoleRepository(counted.executor);
     for (const name of ['', 'x'.repeat(101), 'a\nb', 'a\u0000b', 'a\u007fb', 'a\u0085b']) {
       await expect(repository.rename(a, CUSTOM.id, name, LATER)).rejects.toBeInstanceOf(TypeError);
-      await expect(repository.create(a, { ...CUSTOM, name })).rejects.toBeInstanceOf(TypeError);
+      await expect(
+        repository.create(a, { audit: mutationAudit('role.create', CUSTOM.id), ...CUSTOM, name }),
+      ).rejects.toBeInstanceOf(TypeError);
     }
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
   });
@@ -1006,14 +1102,16 @@ describe('rename guards', () => {
     ];
     for (const name of names) {
       await expect(repository.rename(a, CUSTOM.id, name, LATER)).rejects.toBeInstanceOf(TypeError);
-      await expect(repository.create(a, { ...CUSTOM, name })).rejects.toBeInstanceOf(TypeError);
+      await expect(
+        repository.create(a, { audit: mutationAudit('role.create', CUSTOM.id), ...CUSTOM, name }),
+      ).rejects.toBeInstanceOf(TypeError);
     }
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
   });
 
   it('5: the length limit counts code points, not UTF-16 units', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     expect(await repository.rename(a, CUSTOM.id, '\u{1F600}'.repeat(100), LATER)).toBe('renamed');
     await expect(
       repository.rename(a, CUSTOM.id, '\u{1F600}'.repeat(101), LATER),
@@ -1022,7 +1120,7 @@ describe('rename guards', () => {
 
   it('5: rename is one batch and nothing else', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     const counted = countCalls(database.executor);
     expect(await createRoleRepository(counted.executor).rename(a, CUSTOM.id, 'Once', LATER)).toBe(
       'renamed',
@@ -1032,7 +1130,7 @@ describe('rename guards', () => {
 
   it('5: a name of exactly 100 characters is accepted', async () => {
     const repository = createRoleRepository(database.executor);
-    await repository.create(a, CUSTOM);
+    await repository.create(a, { ...CUSTOM, audit: mutationAudit('role.create', CUSTOM.id) });
     expect(await repository.rename(a, CUSTOM.id, 'x'.repeat(100), LATER)).toBe('renamed');
   });
 });
@@ -1094,10 +1192,7 @@ describe('fenced role mutators', () => {
     await createFencedRoleRepository(database.executor, { providerAnchors: PROVIDERS }).create(
       a,
       fenceFor(admin),
-      {
-        ...ORG_CUSTOM,
-        opId: opId(),
-      },
+      { audit: mutationAudit('role.create', ORG_CUSTOM.id), ...ORG_CUSTOM, opId: opId() },
     );
   }
 
@@ -1109,15 +1204,20 @@ describe('fenced role mutators', () => {
     const before = await snapshot();
     expect(
       await repository.create(a, fenceFor(actor), {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
         ...ORG_CUSTOM,
         permissions: ['org:read', 'org:users:write'],
         opId: opId(),
       }),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
-    expect(await repository.create(a, fenceFor(actor), { ...ORG_CUSTOM, opId: opId() })).toBe(
-      'created',
-    );
+    expect(
+      await repository.create(a, fenceFor(actor), {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
+        ...ORG_CUSTOM,
+        opId: opId(),
+      }),
+    ).toBe('created');
   });
 
   it('1: a non-admin cannot rename or delete a role that exceeds its live permissions', async () => {
@@ -1134,6 +1234,7 @@ describe('fenced role mutators', () => {
     const before = await snapshot();
     expect(
       await repository.rename(a, fenceFor(actor, revision), {
+        audit: mutationAudit('role.rename', CUSTOM.id),
         id: CUSTOM.id,
         name: 'Hijack',
         now: LATER,
@@ -1141,7 +1242,11 @@ describe('fenced role mutators', () => {
       }),
     ).toBe('authority');
     expect(
-      await repository.delete(a, fenceFor(actor, revision), { id: CUSTOM.id, opId: opId() }),
+      await repository.delete(a, fenceFor(actor, revision), {
+        audit: mutationAudit('role.delete', CUSTOM.id),
+        id: CUSTOM.id,
+        opId: opId(),
+      }),
     ).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
@@ -1156,6 +1261,7 @@ describe('fenced role mutators', () => {
     const before = await snapshot();
     expect(
       await repository.setPermissions(a, fenceFor(actor, revision), {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: ['org:read', 'org:users:write'],
         now: LATER,
@@ -1169,6 +1275,7 @@ describe('fenced role mutators', () => {
     const superior = await snapshot();
     expect(
       await repository.setPermissions(a, fenceFor(actor, revision), {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: ['org:read'],
         now: LATER,
@@ -1190,7 +1297,13 @@ describe('fenced role mutators', () => {
       params: [actorIds(a, 'LIMITED').role],
     });
     const before = [await snapshot(), JSON.stringify(await epoch())];
-    expect(await repository.create(a, fence, { ...ORG_CUSTOM, opId: opId() })).toBe('authority');
+    expect(
+      await repository.create(a, fence, {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
+        ...ORG_CUSTOM,
+        opId: opId(),
+      }),
+    ).toBe('authority');
     expect([await snapshot(), JSON.stringify(await epoch())]).toEqual(before);
   });
 
@@ -1216,6 +1329,7 @@ describe('fenced role mutators', () => {
       const actor = await actorFor(a, { name, ...options });
       expect(
         await repository.create(a, fenceFor(actor), {
+          audit: mutationAudit('role.create', `01J0X${name}`.padEnd(26, '0')),
           ...ORG_CUSTOM,
           id: `01J0X${name}`.padEnd(26, '0'),
           opId: opId(),
@@ -1227,6 +1341,7 @@ describe('fenced role mutators', () => {
     const second = await actorFor(a, { name: 'OWNER_B' });
     expect(
       await repository.create(a, fenceFor({ userId: first.userId, sessionId: second.sessionId }), {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
         ...ORG_CUSTOM,
         opId: opId(),
       }),
@@ -1244,6 +1359,7 @@ describe('fenced role mutators', () => {
     const stale = (await revisionOf(CUSTOM.id)) + 5;
     expect(
       await repository.rename(a, fenceFor(actor, stale), {
+        audit: mutationAudit('role.rename', CUSTOM.id),
         id: CUSTOM.id,
         name: 'Late',
         now: LATER,
@@ -1252,6 +1368,7 @@ describe('fenced role mutators', () => {
     ).toBe('conflict');
     expect(
       await repository.setPermissions(a, fenceFor(actor, stale), {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: ['org:read'],
         now: LATER,
@@ -1259,7 +1376,11 @@ describe('fenced role mutators', () => {
       }),
     ).toBe('conflict');
     expect(
-      await repository.delete(a, fenceFor(actor, stale), { id: CUSTOM.id, opId: opId() }),
+      await repository.delete(a, fenceFor(actor, stale), {
+        audit: mutationAudit('role.delete', CUSTOM.id),
+        id: CUSTOM.id,
+        opId: opId(),
+      }),
     ).toBe('conflict');
     expect(await snapshot()).toBe(before);
   });
@@ -1273,6 +1394,7 @@ describe('fenced role mutators', () => {
     expect(await revisionOf(CUSTOM.id)).toBe(1);
     expect(
       await repository.rename(a, fenceFor(actor, 1), {
+        audit: mutationAudit('role.rename', CUSTOM.id),
         id: CUSTOM.id,
         name: 'One',
         now: LATER,
@@ -1282,6 +1404,7 @@ describe('fenced role mutators', () => {
     expect(await revisionOf(CUSTOM.id)).toBe(2);
     expect(
       await repository.setPermissions(a, fenceFor(actor, 2), {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: ['org:read', 'org:users:read'],
         now: LATER,
@@ -1305,12 +1428,14 @@ describe('fenced role mutators', () => {
     const fence = fenceFor(actor, 1);
     const results = await Promise.all([
       repository.setPermissions(a, fence, {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: ['org:read', 'org:users:read'],
         now: LATER,
         opId: opId(),
       }),
       repository.setPermissions(a, fence, {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: ['org:read', 'org:audit:read'],
         now: LATER,
@@ -1329,12 +1454,17 @@ describe('fenced role mutators', () => {
     const actor = await limited();
     const before = [await snapshot(), JSON.stringify(await epoch())];
     await repository.setPermissions(a, fenceFor(actor, 1), {
+      audit: mutationAudit('role.permissions_set', CUSTOM.id),
       id: CUSTOM.id,
       permissions: ['org:users:write'],
       now: LATER,
       opId: opId(),
     });
-    await repository.delete(a, fenceFor(actor, 99), { id: CUSTOM.id, opId: opId() });
+    await repository.delete(a, fenceFor(actor, 99), {
+      audit: mutationAudit('role.delete', CUSTOM.id),
+      id: CUSTOM.id,
+      opId: opId(),
+    });
     expect([await snapshot(), JSON.stringify(await epoch())]).toEqual(before);
   });
 
@@ -1346,6 +1476,7 @@ describe('fenced role mutators', () => {
     const actor = await actorFor(a);
     const before = JSON.stringify(await epoch());
     await repository.rename(a, fenceFor(actor, 1), {
+      audit: mutationAudit('role.rename', CUSTOM.id),
       id: CUSTOM.id,
       name: 'Epoch',
       now: LATER,
@@ -1361,10 +1492,17 @@ describe('fenced role mutators', () => {
     });
     const fence = fenceFor(await actorFor(a));
     await expect(
-      repository.rename(a, fence, { id: CUSTOM.id, name: 'x', now: LATER, opId: opId() }),
+      repository.rename(a, fence, {
+        audit: mutationAudit('role.rename', CUSTOM.id),
+        id: CUSTOM.id,
+        name: 'x',
+        now: LATER,
+        opId: opId(),
+      }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
       repository.setPermissions(a, fence, {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: [],
         now: LATER,
@@ -1372,7 +1510,11 @@ describe('fenced role mutators', () => {
       }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      repository.delete(a, fence, { id: CUSTOM.id, opId: opId() }),
+      repository.delete(a, fence, {
+        audit: mutationAudit('role.delete', CUSTOM.id),
+        id: CUSTOM.id,
+        opId: opId(),
+      }),
     ).rejects.toBeInstanceOf(TypeError);
   });
 
@@ -1386,13 +1528,24 @@ describe('fenced role mutators', () => {
       expected: { role: 1 },
     } as unknown as MutationFence;
     await expect(
-      repository.create(a, forged, { ...ORG_CUSTOM, opId: opId() }),
+      repository.create(a, forged, {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
+        ...ORG_CUSTOM,
+        opId: opId(),
+      }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      repository.rename(a, forged, { id: CUSTOM.id, name: 'x', now: LATER, opId: opId() }),
+      repository.rename(a, forged, {
+        audit: mutationAudit('role.rename', CUSTOM.id),
+        id: CUSTOM.id,
+        name: 'x',
+        now: LATER,
+        opId: opId(),
+      }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
       repository.setPermissions(a, forged, {
+        audit: mutationAudit('role.permissions_set', CUSTOM.id),
         id: CUSTOM.id,
         permissions: [],
         now: LATER,
@@ -1400,7 +1553,11 @@ describe('fenced role mutators', () => {
       }),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      repository.delete(a, forged, { id: CUSTOM.id, opId: opId() }),
+      repository.delete(a, forged, {
+        audit: mutationAudit('role.delete', CUSTOM.id),
+        id: CUSTOM.id,
+        opId: opId(),
+      }),
     ).rejects.toBeInstanceOf(TypeError);
   });
 
@@ -1410,9 +1567,13 @@ describe('fenced role mutators', () => {
     });
     const foreign = await actorFor(b);
     const before = await snapshot();
-    expect(await repository.create(a, fenceFor(foreign), { ...ORG_CUSTOM, opId: opId() })).toBe(
-      'authority',
-    );
+    expect(
+      await repository.create(a, fenceFor(foreign), {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
+        ...ORG_CUSTOM,
+        opId: opId(),
+      }),
+    ).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
 });
@@ -1435,7 +1596,11 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
   }
 
   async function createCustom(): Promise<void> {
-    await repo().create(a, fenceFor(await actorFor(a)), { ...ORG_CUSTOM, opId: opId() });
+    await repo().create(a, fenceFor(await actorFor(a)), {
+      audit: mutationAudit('role.create', ORG_CUSTOM.id),
+      ...ORG_CUSTOM,
+      opId: opId(),
+    });
   }
 
   it('3: locked, system, invalid_permissions, in_use and duplicate_key roll back and keep the epoch', async () => {
@@ -1448,6 +1613,7 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     expect(
       await unchanged(() =>
         repo().rename(a, f(adminRole.id), {
+          audit: mutationAudit('role.rename', adminRole.id),
           id: adminRole.id,
           name: 'Boss',
           now: LATER,
@@ -1458,6 +1624,7 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     expect(
       await unchanged(() =>
         repo().setPermissions(a, f(adminRole.id), {
+          audit: mutationAudit('role.permissions_set', adminRole.id),
           id: adminRole.id,
           permissions: ['org:read'],
           now: LATER,
@@ -1468,6 +1635,7 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     expect(
       await unchanged(() =>
         repo().setPermissions(a, f(auditor.id), {
+          audit: mutationAudit('role.permissions_set', auditor.id),
           id: auditor.id,
           permissions: ['org:read'],
           now: LATER,
@@ -1476,7 +1644,13 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
       ),
     ).toBe('invalid_permissions');
     expect(
-      await unchanged(() => repo().delete(a, f(auditor.id), { id: auditor.id, opId: opId() })),
+      await unchanged(() =>
+        repo().delete(a, f(auditor.id), {
+          audit: mutationAudit('role.delete', auditor.id),
+          id: auditor.id,
+          opId: opId(),
+        }),
+      ),
     ).toBe('system');
 
     await createCustom();
@@ -1488,23 +1662,41 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     const revision = await revisionOf(CUSTOM.id);
     expect(
       await unchanged(() =>
-        repo().delete(a, fenceFor(admin, revision), { id: CUSTOM.id, opId: opId() }),
+        repo().delete(a, fenceFor(admin, revision), {
+          audit: mutationAudit('role.delete', CUSTOM.id),
+          id: CUSTOM.id,
+          opId: opId(),
+        }),
       ),
     ).toBe('in_use');
     expect(
       await unchanged(() =>
-        repo().create(a, fenceFor(admin), { ...ORG_CUSTOM, name: 'Other', opId: opId() }),
+        repo().create(a, fenceFor(admin), {
+          audit: mutationAudit('role.create', ORG_CUSTOM.id),
+          ...ORG_CUSTOM,
+          name: 'Other',
+          opId: opId(),
+        }),
       ),
     ).toBe('duplicate_key');
   });
 
   it('2: a replay that fills in permissions bumps the revision once', async () => {
     const admin = await actorFor(a);
-    await repo().create(a, fenceFor(admin), { ...ORG_CUSTOM, permissions: [], opId: opId() });
+    await repo().create(a, fenceFor(admin), {
+      audit: mutationAudit('role.create', ORG_CUSTOM.id),
+      ...ORG_CUSTOM,
+      permissions: [],
+      opId: opId(),
+    });
     expect(await revisionOf(CUSTOM.id)).toBe(1);
-    expect(await repo().create(a, fenceFor(admin), { ...ORG_CUSTOM, opId: opId() })).toBe(
-      'duplicate_key',
-    );
+    expect(
+      await repo().create(a, fenceFor(admin), {
+        audit: mutationAudit('role.create', ORG_CUSTOM.id),
+        ...ORG_CUSTOM,
+        opId: opId(),
+      }),
+    ).toBe('duplicate_key');
     expect(await revisionOf(CUSTOM.id)).toBe(2);
     expect((await repo().get(a, CUSTOM.id))?.permissions).toEqual(['org:read']);
   });
@@ -1544,6 +1736,7 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
 
     const attempt = (actor: TestActor, id: string) =>
       repo().create(a, fenceFor(actor), {
+        audit: mutationAudit('role.create', id),
         ...ORG_CUSTOM,
         id,
         key: `k${id.slice(-6).toLowerCase()}`,
@@ -1569,7 +1762,13 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
       projectGrant: true,
     });
     expect(
-      await unchanged(() => repo().create(a, fenceFor(actor), { ...ORG_CUSTOM, opId: opId() })),
+      await unchanged(() =>
+        repo().create(a, fenceFor(actor), {
+          audit: mutationAudit('role.create', ORG_CUSTOM.id),
+          ...ORG_CUSTOM,
+          opId: opId(),
+        }),
+      ),
     ).toBe('authority');
   });
 
@@ -1580,7 +1779,13 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
       protects: false,
     });
     expect(
-      await unchanged(() => repo().create(a, fenceFor(actor), { ...ORG_CUSTOM, opId: opId() })),
+      await unchanged(() =>
+        repo().create(a, fenceFor(actor), {
+          audit: mutationAudit('role.create', ORG_CUSTOM.id),
+          ...ORG_CUSTOM,
+          opId: opId(),
+        }),
+      ),
     ).toBe('authority');
   });
 
@@ -1601,6 +1806,7 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     expect(
       await unchanged(() =>
         repo().rename(a, fenceFor(actor, revision), {
+          audit: mutationAudit('role.rename', CUSTOM.id),
           id: CUSTOM.id,
           name: 'Late',
           now: LATER,
@@ -1610,7 +1816,11 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
     ).toBe('authority');
     expect(
       await unchanged(() =>
-        repo().delete(a, fenceFor(actor, revision), { id: CUSTOM.id, opId: opId() }),
+        repo().delete(a, fenceFor(actor, revision), {
+          audit: mutationAudit('role.delete', CUSTOM.id),
+          id: CUSTOM.id,
+          opId: opId(),
+        }),
       ),
     ).toBe('authority');
   });
@@ -1633,9 +1843,16 @@ describe('fenced role mutators: refusals, authority sources and races', () => {
         createFencedRoleRepository(database.executor, options).setPermissions(
           a,
           fenceFor(actor, 1),
-          { id: CUSTOM.id, permissions: ['org:read', 'org:users:read'], now: LATER, opId: opId() },
+          {
+            audit: mutationAudit('role.permissions_set', CUSTOM.id),
+            id: CUSTOM.id,
+            permissions: ['org:read', 'org:users:read'],
+            now: LATER,
+            opId: opId(),
+          },
         ),
         createFencedRoleRepository(other, options).setPermissions(a, fenceFor(actor, 1), {
+          audit: mutationAudit('role.permissions_set', CUSTOM.id),
           id: CUSTOM.id,
           permissions: ['org:read', 'org:audit:read'],
           now: LATER,
@@ -1665,6 +1882,7 @@ it('lets a non-admin rename a role with a retired permission and preserves it', 
   const admin = await actorFor(a);
   expect(
     await repository.create(a, fenceFor(admin), {
+      audit: mutationAudit('role.create', CUSTOM.id),
       ...CUSTOM,
       scope: 'organization',
       permissions: ['org:read'],
@@ -1684,6 +1902,7 @@ it('lets a non-admin rename a role with a retired permission and preserves it', 
   });
   expect(
     await repository.rename(a, fenceFor(manager, 1), {
+      audit: mutationAudit('role.rename', CUSTOM.id),
       id: CUSTOM.id,
       name: 'Renamed',
       now: LATER,
@@ -1691,4 +1910,360 @@ it('lets a non-admin rename a role with a retired permission and preserves it', 
     }),
   ).toBe('renamed');
   expect((await repository.get(a, CUSTOM.id))?.permissions).toContain('retired:permission');
+});
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+
+describe('role mutation audit and idempotency', () => {
+  const cases = [
+    ['create', 'role.create', 'created'],
+    ['rename', 'role.rename', 'renamed'],
+    ['setPermissions', 'role.permissions_set', 'updated'],
+    ['delete', 'role.delete', 'deleted'],
+  ] as const;
+  type Method = (typeof cases)[number][0];
+
+  function record(requestHash = 'a'.repeat(64)): IdempotencyRecord {
+    return {
+      principalKey: 'user:admin',
+      key: 'role-request',
+      route: '/roles',
+      requestHash,
+      status: 200,
+      responseJson: '{"ok":true}',
+      createdAt: NOW,
+      expiresAt: LATER,
+    };
+  }
+
+  async function snapshot() {
+    return Promise.all(
+      ['role', 'role_permission', 'cache_epoch', 'audit_pending', 'api_idempotency'].map((table) =>
+        database.executor.all({
+          sql: `SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1, 2`,
+          params: [a.orgId],
+        }),
+      ),
+    );
+  }
+
+  async function fixture(method: Method, target = database.executor) {
+    const actor = await actorFor(a);
+    const repository = createFencedRoleRepository(target, { providerAnchors: PROVIDERS });
+    const ids = ['audit-role-one', 'audit-role-two'];
+    if (method !== 'create') {
+      await database.executor.batch(
+        ids.flatMap((id) => [
+          {
+            sql: "INSERT INTO role (id, org_id, key, name, scope) VALUES (?, ?, ?, ?, 'project')",
+            params: [id, a.orgId, id.replaceAll('-', '_'), 'Original'],
+          },
+          {
+            sql: 'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+            params: [a.orgId, id, 'project:read'],
+          },
+        ]),
+      );
+    }
+    async function invoke(
+      index: number,
+      audit: ReturnType<typeof mutationAudit>,
+      idempotency?: IdempotencyRecord,
+      revision = 1,
+    ) {
+      const id = ids[index]!;
+      const common = {
+        id,
+        audit,
+        ...(idempotency === undefined ? {} : { idempotency }),
+        opId: opId(),
+      };
+      const fence = fenceFor(actor, method === 'create' ? undefined : revision);
+      switch (method) {
+        case 'create':
+          return repository.create(a, fence, {
+            ...common,
+            key: id.replaceAll('-', '_'),
+            name: 'Created',
+            scope: 'project',
+            permissions: ['project:read'],
+            now: NOW,
+          });
+        case 'rename':
+          return repository.rename(a, fence, { ...common, name: 'Changed', now: LATER });
+        case 'setPermissions':
+          return repository.setPermissions(a, fence, {
+            ...common,
+            permissions: ['project:packages:read'],
+            now: LATER,
+          });
+        case 'delete':
+          return repository.delete(a, fence, common);
+      }
+    }
+    return { actor, ids, invoke };
+  }
+
+  for (const withIdempotency of [false, true]) {
+    it.each(cases)(
+      `%s persists one audit event (idempotency: ${withIdempotency})`,
+      async (method, action, success) => {
+        const f = await fixture(method);
+        const audit = mutationAudit(action, f.ids[0]!);
+        expect(await f.invoke(0, audit, withIdempotency ? record() : undefined)).toBe(success);
+        expect(
+          await database.executor.all({
+            sql: 'SELECT org_id, action, target_type, target_id FROM audit_pending',
+            params: [],
+          }),
+        ).toEqual([{ org_id: a.orgId, action, target_type: 'role', target_id: f.ids[0] }]);
+        expect(
+          await database.executor.all({
+            sql: 'SELECT org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at FROM api_idempotency',
+            params: [],
+          }),
+        ).toEqual(
+          withIdempotency
+            ? [
+                {
+                  org_id: a.orgId,
+                  principal_key: record().principalKey,
+                  key: record().key,
+                  route: record().route,
+                  request_hash: record().requestHash,
+                  status: 200,
+                  response_json: record().responseJson,
+                  created_at: NOW,
+                  expires_at: LATER,
+                },
+              ]
+            : [],
+        );
+      },
+    );
+  }
+
+  it.each(cases)('%s authority refusal stores neither event nor record', async (method, action) => {
+    const f = await fixture(method);
+    await database.executor.batch([
+      {
+        sql: 'DELETE FROM role_permission WHERE org_id = ? AND role_id = ?',
+        params: [a.orgId, actorIds(a, 'ADMIN').role],
+      },
+    ]);
+    const before = await snapshot();
+    expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record())).toBe('authority');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(cases.filter(([method]) => method !== 'create'))(
+    '%s stale revision stores neither event nor record',
+    async (method, action) => {
+      const f = await fixture(method);
+      const before = await snapshot();
+      expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record(), 2)).toBe('conflict');
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  for (const hash of ['a'.repeat(64), 'b'.repeat(64)]) {
+    it.each(cases)(
+      `%s rolls back a repeated idempotency key (hash ${hash[0]})`,
+      async (method, action, success) => {
+        const f = await fixture(method);
+        expect(await f.invoke(0, mutationAudit(action, f.ids[0]!), record())).toBe(success);
+        const before = await snapshot();
+        expect(await f.invoke(1, mutationAudit(action, f.ids[1]!), record(hash))).toBe('conflict');
+        expect(await snapshot()).toEqual(before);
+      },
+    );
+  }
+
+  it.each(cases)(
+    '%s rolls back mutation, event and record when a later statement fails',
+    async (method, action) => {
+      const failing = {
+        driver: database.executor.driver,
+        all: database.executor.all,
+        batch: (statements: Parameters<ScalarSqlExecutor['batch']>[0]) =>
+          database.executor.batch([
+            ...statements,
+            {
+              sql: "INSERT INTO access_mutation_guard (key) VALUES ('injected'), ('injected')",
+              params: [],
+            },
+          ]),
+      };
+      const f = await fixture(method, failing);
+      const before = await snapshot();
+      await expect(f.invoke(0, mutationAudit(action, f.ids[0]!), record())).rejects.toThrow(
+        /unclassified/,
+      );
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  it('role-key collision remains duplicate_key and stores neither event nor record', async () => {
+    const f = await fixture('create');
+    expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!))).toBe('created');
+    const before = await snapshot();
+    expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!), record())).toBe(
+      'duplicate_key',
+    );
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(cases)(
+    '%s replaying the same request and idempotency key stores no second event or record',
+    async (method, action, success) => {
+      const actor = await actorFor(a);
+      const repository = createFencedRoleRepository(database.executor, {
+        providerAnchors: PROVIDERS,
+      });
+      const id = 'replayed-role';
+      if (method !== 'create') {
+        await database.executor.batch([
+          {
+            sql: "INSERT INTO role (id, org_id, key, name, scope) VALUES (?, ?, ?, ?, 'project')",
+            params: [id, a.orgId, 'replayed_role', 'Original'],
+          },
+        ]);
+      }
+      const input = {
+        id,
+        key: 'replayed_role',
+        name: 'Replayed',
+        scope: 'project' as const,
+        permissions: [],
+        now: NOW,
+        opId: opId(),
+        idempotency: record(),
+      };
+      const fence = fenceFor(actor, method === 'create' ? undefined : 1);
+      const invoke = () =>
+        repository[method](a, fence, {
+          ...input,
+          audit: mutationAudit(action, id),
+        });
+      expect(await invoke()).toBe(success);
+      const before = await snapshot();
+      expect(await invoke()).toBe('conflict');
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  for (const withIdempotency of [false, true]) {
+    it(`empty create replay stores no event or record (idempotency: ${withIdempotency})`, async () => {
+      const actor = await actorFor(a);
+      const repository = createFencedRoleRepository(database.executor, {
+        providerAnchors: PROVIDERS,
+      });
+      const input = {
+        ...CUSTOM,
+        permissions: [],
+        opId: opId(),
+      };
+      expect(
+        await repository.create(a, fenceFor(actor), {
+          ...input,
+          audit: mutationAudit('role.create', input.id),
+        }),
+      ).toBe('created');
+      const before = await snapshot();
+      expect(
+        await repository.create(a, fenceFor(actor), {
+          ...input,
+          opId: opId(),
+          audit: mutationAudit('role.create', input.id),
+          ...(withIdempotency ? { idempotency: record() } : {}),
+        }),
+      ).toBe('duplicate_key');
+      expect(await snapshot()).toEqual(before);
+    });
+  }
+
+  it('create replay that adds permissions persists an event and record', async () => {
+    const actor = await actorFor(a);
+    const repository = createFencedRoleRepository(database.executor, {
+      providerAnchors: PROVIDERS,
+    });
+    expect(
+      await repository.create(a, fenceFor(actor), {
+        ...CUSTOM,
+        permissions: [],
+        opId: opId(),
+        audit: mutationAudit('role.create', CUSTOM.id),
+      }),
+    ).toBe('created');
+    const audit = mutationAudit('role.create', CUSTOM.id);
+    expect(
+      await repository.create(a, fenceFor(actor), {
+        ...CUSTOM,
+        opId: opId(),
+        audit,
+        idempotency: record(),
+      }),
+    ).toBe('duplicate_key');
+    expect((await repository.get(a, CUSTOM.id))?.permissions).toEqual([
+      'project:packages:read',
+      'project:read',
+    ]);
+    expect(
+      await database.executor.all({
+        sql: 'SELECT id FROM audit_pending WHERE org_id = ? AND id = ?',
+        params: [a.orgId, audit.id],
+      }),
+    ).toEqual([{ id: audit.id }]);
+    expect(
+      await database.executor.all({
+        sql: 'SELECT key FROM api_idempotency WHERE org_id = ?',
+        params: [a.orgId],
+      }),
+    ).toEqual([{ key: record().key }]);
+  });
+
+  it('the same idempotency key in another organization does not conflict', async () => {
+    const f = await fixture('create');
+    await database.executor.batch([idempotencyInsertStatement(b, record())]);
+    expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!), record('b'.repeat(64)))).toBe(
+      'created',
+    );
+  });
+
+  it('the same idempotency key for another principal does not conflict', async () => {
+    const f = await fixture('create');
+    await database.executor.batch([
+      idempotencyInsertStatement(a, { ...record(), principalKey: 'user:other' }),
+    ]);
+    expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!), record('b'.repeat(64)))).toBe(
+      'created',
+    );
+  });
+
+  it('audit organization comes from context despite a foreign organization in the payload', async () => {
+    const f = await fixture('create');
+    const audit = {
+      ...mutationAudit('role.create', f.ids[0]!),
+      payloadJson: JSON.stringify({ orgId: b.orgId }),
+    };
+    expect(await f.invoke(0, audit)).toBe('created');
+    expect(
+      await database.executor.all({
+        sql: 'SELECT org_id, payload_json FROM audit_pending',
+        params: [],
+      }),
+    ).toEqual([{ org_id: a.orgId, payload_json: audit.payloadJson }]);
+  });
 });

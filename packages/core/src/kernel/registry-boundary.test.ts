@@ -247,6 +247,7 @@ describe('core self route', () => {
       resolveOrg: () => Promise.resolve(orgContext('org-1')),
       health: () => Promise.resolve(true),
       log: () => undefined,
+      authorization: { authorize: () => Promise.resolve({ allow: false, status: 401 }) },
       coreRoutes: [
         route({
           path: '/_pb/me',

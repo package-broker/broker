@@ -1,4 +1,5 @@
 import type { SourceError } from '../sources/source-service.js';
+import type { VisibilityResult } from '../catalogue/visibility-service.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { AdminError } from '../authz/administration.js';
 import type { ProjectError } from '../authz/project-service.js';
@@ -413,5 +414,32 @@ describe('response helpers', () => {
     expect(response.headers.get('etag')).toBe('"r0"');
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('content-type')).toBe('application/json');
+  });
+});
+
+describe('VisibilityError', () => {
+  const codes = {
+    forbidden: 'forbidden',
+    collision: 'conflict',
+    conflict: 'conflict',
+    not_found: 'not_found',
+    not_attached: 'not_found',
+    unclassified: 'unavailable',
+    invalid_pattern: 'invalid_request',
+    too_many_patterns: 'invalid_request',
+    not_eligible: 'conflict',
+  } as const;
+  it('covers every visibility error with an existing code and status', () => {
+    expectTypeOf<keyof typeof codes>().toEqualTypeOf<
+      Extract<VisibilityResult, { ok: false }>['error']
+    >();
+    expect(Object.keys(SERVICE_ERROR_TABLE.VisibilityError).sort()).toEqual(
+      Object.keys(codes).sort(),
+    );
+    for (const member of Object.keys(codes) as (keyof typeof codes)[]) {
+      const code = codes[member];
+      expect(SERVICE_ERROR_TABLE.VisibilityError[member]).toEqual({ code, status: statuses[code] });
+      expect(Object.hasOwn(API_ERROR_CODES, code)).toBe(true);
+    }
   });
 });

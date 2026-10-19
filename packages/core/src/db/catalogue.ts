@@ -1,3 +1,5 @@
+import type { IdempotencyRecord } from '../api/idempotency.js';
+import type { AuditEvent } from '../audit/actions.js';
 import type { FailureReason, MutationFence } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import type { NormalizedMetadata } from '../catalogue/metadata.js';
@@ -336,6 +338,12 @@ export type ListingScope =
   | { readonly kind: 'source'; readonly sourceId: string }
   | { readonly kind: 'package'; readonly packageId: string };
 
+export interface FinalizeEvidence {
+  readonly attemptedCandidates: number;
+  readonly successfulCandidates: number;
+  readonly definitiveAbsent: number;
+}
+
 export interface FinalizeResult {
   readonly removed: number;
   readonly restored: number;
@@ -384,6 +392,7 @@ export interface CatalogueWriter {
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
     listing: CompleteSourceListing | CompleteVersionListing,
+    evidence: FinalizeEvidence,
   ): Promise<FinalizeResult>;
   quarantine(
     ctx: OrgContext,
@@ -430,6 +439,16 @@ export interface VisibilityStore {
     ctx: OrgContext,
     fence: MutationFence,
     input: { readonly projectId: string; readonly sourceId: string; readonly precedence: number },
+  ): Promise<VisibilityWriteResult>;
+  setOrder(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: {
+      readonly projectId: string;
+      readonly sourceIds: readonly string[];
+      readonly audit: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<VisibilityWriteResult>;
   setPackageFlag(
     ctx: OrgContext,

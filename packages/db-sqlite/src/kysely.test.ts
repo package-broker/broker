@@ -6,7 +6,6 @@ import {
   EVIDENCE_FUTURE_SKEW_MS,
   EVIDENCE_MAX_AGE_MS,
   compile,
-  databaseTimeMs,
   db,
   newOpId,
   protectedHolder,
@@ -104,32 +103,28 @@ describe('protectedHolder database time', () => {
       },
     ],
   } as const;
-  const render = (options?: Parameters<typeof protectedHolder>[3]) =>
+  const render = (now: string = input.now) =>
     compile(
       db
         .selectFrom('user_account as holder')
         .select('holder.id')
-        .where((eb) => protectedHolder(org, eb.ref('holder.id'), input, options)),
+        .where((eb) => protectedHolder(org, eb.ref('holder.id'), { ...input, now })),
     );
 
   it('renders the database clock in place of the supplied instant', () => {
-    const statement = render({ now: databaseTimeMs });
+    const statement = render();
 
     expect(statement.sql).toContain("unixepoch('now', 'subsec')");
   });
 
   it('does not bind the supplied instant when the database clock is used', () => {
-    const statement = render({ now: databaseTimeMs });
+    const statement = render();
 
     expect(statement.params).not.toContain(0 - EVIDENCE_MAX_AGE_MS);
     expect(statement.params).not.toContain(EVIDENCE_FUTURE_SKEW_MS);
   });
 
-  it('keeps binding the supplied instant when no database clock is given', () => {
-    const statement = render();
-
-    expect(statement.sql).not.toContain("unixepoch('now', 'subsec')");
-    expect(statement.params).toContain(-EVIDENCE_MAX_AGE_MS);
-    expect(statement.params).toContain(EVIDENCE_FUTURE_SKEW_MS);
+  it('ignores changes to a legacy host timestamp for the freshness decision', () => {
+    expect(render('2099-01-01T00:00:00.000Z')).toEqual(render());
   });
 });

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Duplex, Writable } from 'node:stream';
+import { setImmediate } from 'node:timers/promises';
 import { createDeflateRaw } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
@@ -11,7 +12,6 @@ import { buildZipFromTree, type ArchiveIo } from './archive.js';
 import type { GitTree, GitTreeEntry } from './fetch.js';
 
 const MIB = 1024 * 1024;
-// heapUsed also counts garbage the collector has not reclaimed yet; buffering a whole 40 MiB archive would still exceed this bound.
 const PEAK_BOUND = 32 * MIB;
 const CHUNK = 64 * 1024;
 
@@ -67,14 +67,27 @@ function blobStream(seed: number, size: number): ReadableStream<Uint8Array> {
 
 async function gitOid(seed: number, size: number): Promise<string> {
   const h = createHash('sha1').update(`blob ${size}\0`);
-  for await (const chunk of blobStream(seed, size)) h.update(chunk);
+  const scratch = new Uint8Array(Math.min(CHUNK, size));
+  for (let index = 0; index * CHUNK < size; index++) {
+    const chunk = scratch.subarray(0, Math.min(CHUNK, size - index * CHUNK));
+    fill(seed, index, chunk);
+    h.update(chunk);
+  }
   return h.digest('hex');
 }
 
-const used = (): number => {
-  const m = process.memoryUsage();
-  return m.heapUsed + m.arrayBuffers;
-};
+// Buffer and Uint8Array backing stores count here, without unrelated JS heap garbage or RSS.
+const used = (): number => process.memoryUsage().arrayBuffers;
+
+async function stableBaseline(): Promise<number> {
+  globalThis.gc?.();
+  let baseline = used();
+  for (let i = 0; i < 5; i++) {
+    await setImmediate();
+    baseline = Math.min(baseline, used());
+  }
+  return baseline;
+}
 
 let dir: string;
 
@@ -129,7 +142,8 @@ async function peakAboveBaseline(blobs: { path: string; seed: number; size: numb
         }),
     },
   };
-  const baseline = used();
+  // Finish fixture and sink setup before measuring archive allocations.
+  const baseline = await stableBaseline();
   const result = await buildZipFromTree(tree, codecs, io);
   peak = Math.max(peak, used());
   expect(result.size).toBeGreaterThan(40 * MIB * 0.4);

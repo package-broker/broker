@@ -1,3 +1,4 @@
+import type { PlanEntry } from '@package-broker/core/plugin';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { describe, expect, it } from 'vitest';
@@ -8,7 +9,6 @@ import {
   planRepository,
   type PlanRepositoryOptions,
   type DiscoveryOptions,
-  type PlanEntry,
 } from './discovery.js';
 import {
   InstallationTokenError,

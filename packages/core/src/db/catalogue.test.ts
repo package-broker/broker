@@ -1,3 +1,6 @@
+import type { AuditEvent } from '../audit/actions.js';
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import type { VisibilityService } from '../catalogue/visibility-service.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { ActorContext } from '../authz/administration.js';
 import type { ProjectActor } from '../authz/project-actor.js';
@@ -296,4 +299,15 @@ describe('normalized metadata writer boundary', () => {
       MetadataError,
     );
   });
+});
+
+it('requires audit on the ordering port and ApiCall only on its service method', () => {
+  type Order = Parameters<VisibilityStore['setOrder']>[2];
+  expectTypeOf<Order['audit']>().toEqualTypeOf<AuditEvent>();
+  expectTypeOf<Order['idempotency']>().toEqualTypeOf<IdempotencyRecord | undefined>();
+  expectTypeOf<Order['sourceIds']>().toEqualTypeOf<readonly string[]>();
+  expectTypeOf<Parameters<VisibilityService['setOrder']>[3]>().toEqualTypeOf<ApiCall>();
+  expectTypeOf<Parameters<VisibilityService['setOrder']>['length']>().toEqualTypeOf<4>();
+  type Other = Exclude<keyof VisibilityService, 'setOrder'>;
+  expectTypeOf<Parameters<VisibilityService[Other]>['length']>().toEqualTypeOf<3>();
 });

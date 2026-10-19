@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { sql } from 'kysely';
 import { describe, expect, it } from 'vitest';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
@@ -1600,6 +1602,7 @@ const projectRoleCarriesOrg: Case = (open, wrap) =>
         n += 1;
         expect(
           await roles.create(world.a, FENCE(), {
+            audit: mutationAudit('role.create', `invalid-${n}`),
             id: `invalid-${n}`,
             key: `invalid_${n}`,
             name: 'Invalid',
@@ -1618,6 +1621,7 @@ const projectRoleCarriesOrg: Case = (open, wrap) =>
           role: 1,
         }),
         {
+          audit: mutationAudit('role.permissions_set', ROLE_PROJECT),
           id: ROLE_PROJECT,
           permissions: ['project:read', 'org:read'],
           now: iso(0),
@@ -1671,8 +1675,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement()),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(blocked.status).toBe('refused');
       const untouched = await world.executor.all<{ revoked_at: string | null }>(
@@ -1684,8 +1687,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement(true)),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(allowed.status).toBe('revoked');
       const archivedLookup = await createAccessRepository(world.executor).lookupToken(world.a, {
@@ -1719,8 +1721,7 @@ const doubleRevoke: Case = (open, wrap) =>
             organizationAdmin: false,
             covers: [],
           }),
-          'victim',
-          now,
+          { tokenId: 'victim', now: now },
         );
       const stampA = iso(0);
       const stampB = iso(5000);
@@ -1844,3 +1845,17 @@ export function describeAccessContract(label: string, open: Open): void {
 }
 
 export { describeAccessRace, type OpenedRaceDatabase } from './access-race.js';
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

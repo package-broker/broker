@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { readdirSync, readFileSync } from 'node:fs';
 import { sql } from 'kysely';
 import { describe, expect, it } from 'vitest';
@@ -1055,6 +1057,7 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
     ): Promise<string> => {
       if (operation.kind === 'suspend') {
         return repository.suspendUser(a, await fenceFor(operation.target), {
+          audit: mutationAudit('user.suspend', operation.target),
           userId: operation.target,
           now: LATER,
         });
@@ -1062,6 +1065,7 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
       const fence = await fenceFor(operation.target);
       if (operation.kind !== 'delete') {
         return repository.changeRole(a, fence, {
+          audit: mutationAudit('grant.role_change', operation.target),
           id: operation.target,
           roleId: auditor,
           now: LATER,
@@ -1069,6 +1073,7 @@ const lastAdminRaces: Case = async (open, wrap = (executor) => executor) => {
         });
       }
       const result = await repository.deleteOrganization(a, fence, {
+        audit: mutationAudit('grant.revoke', operation.target),
         id: operation.target,
         opId: newOpId(),
       });
@@ -1564,4 +1569,18 @@ export function describeAuthContract(name: string, open: Open): void {
     it('11. access mutation guard: true lands, false and NULL fail with UNIQUE and leave no row', () =>
       authContractCases.accessMutationGuard(open));
   });
+}
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
 }

@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -648,6 +650,7 @@ describe('unlinkIdentity against concurrent holder changes', () => {
         ],
         holderInput: async () => holders(),
       }).suspendUser(org, fenceOf(SECOND_ADMIN, SECOND_SESSION), {
+        audit: mutationAudit('user.suspend', ACTOR),
         userId: ACTOR,
         now: '2026-10-15T13:00:00.000Z',
       });
@@ -720,3 +723,17 @@ describe('unlinkIdentity against concurrent holder changes', () => {
     });
   }
 });
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

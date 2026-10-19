@@ -1,3 +1,4 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
 import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
@@ -331,7 +332,7 @@ export function describeAccessRace(label: string, open: Open): void {
       world.a,
       fence(),
       authority.guard(world.a, fence(), orgRevoke),
-      { tokenId: tokenId, now: now },
+      { audit: mutationAudit('token.revoke', null), tokenId: tokenId, now: now },
     );
   }
 
@@ -453,6 +454,7 @@ export function describeAccessRace(label: string, open: Open): void {
     });
 
     const input = (id: string) => ({
+      audit: mutationAudit('token.issue', id),
       id,
       name: id,
       scope: 'write' as const,
@@ -625,7 +627,7 @@ export function describeAccessRace(label: string, open: Open): void {
               throw new Error('a service token is never revoked through ownership');
             },
           },
-          ids: { ulid: () => 'audit-revoke' },
+          ids: { ulid: () => ulid(Date.now()) },
           clock: { now: () => new Date() },
           log: (entry) => events.push(entry as Record<string, unknown>),
         });
@@ -935,3 +937,17 @@ const apiCall: ApiCall = {
     tokenSelector: null,
   },
 };
+
+function mutationAudit(action: AuditAction = 'token.issue', targetId: string | null = null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

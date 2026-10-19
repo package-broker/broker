@@ -47,7 +47,7 @@ export interface TokenRevokeStore {
     input: {
       readonly tokenId: string;
       readonly now: string;
-      readonly audit?: AuditEvent;
+      readonly audit: AuditEvent;
       readonly idempotency?: IdempotencyRecord;
     },
   ): Promise<TokenRevokeOutcome>;

@@ -209,3 +209,17 @@ export function winnerOrder(refs: WinnerRefs): readonly Expression<unknown>[] {
     source('id'),
   ];
 }
+
+export function visibleRowsCondition(
+  ctx: OrgContext,
+  alias: { pp: string; pkg: string; src: string; ps: string },
+) {
+  const { pp, pkg, src, ps } = alias;
+  return sql`${sql.ref(`${pp}.org_id`)} = ${ctx.orgId}
+    and ${sql.ref(`${pkg}.org_id`)} = ${ctx.orgId}
+    and ${sql.ref(`${src}.org_id`)} = ${ctx.orgId}
+    and ${sql.ref(`${ps}.org_id`)} = ${ctx.orgId}
+    and ${attachedSourceCondition(ctx, col(`${pp}.project_id`), col(`${pkg}.source_id`), col(`${pkg}.ecosystem`))}
+    and ${readTimeCondition(ctx, col(`${pp}.project_id`), { package: pkg, source: src })}
+    and ${proxyEligibleCondition({ package: pkg, source: src })}`;
+}

@@ -988,7 +988,7 @@ it.each(['package', 'source', 'absent'] as const)(
       expect(effect.restored).toBe(0);
       statements = effect.statements;
     }
-    expect(statements).toBe({ package: 14, source: 11, absent: 9 }[kind]);
+    expect(statements).toBe({ package: 15, source: 11, absent: 9 }[kind]);
     expect(statements).toBeLessThanOrEqual(100);
     const after = await blobState();
     expect(after).toEqual(
@@ -1150,6 +1150,44 @@ describe('revival and the blob purge lease', () => {
     expect(await finalizeWith(['1.0.0'])).toMatchObject({ leaseHeldBack: 0, restored: 1 });
     expect(await statusOf(id)).toBe('active');
   });
+
+  it.each([
+    { change: 'starts', before: null, after: LIVE, held: 0, restored: 1 },
+    { change: 'ends', before: LIVE, after: OLD, held: 1, restored: 0 },
+  ])(
+    'reports the batch decision when a lease $change immediately afterward',
+    async ({ before, after, held, restored }) => {
+      const blobId = await blobFor(org, 1, before);
+      const id = await removedVersion('1.0.0', blobId);
+      let interleaved = false;
+      const wrapped = createCatalogueReconciler({
+        ...database.executor,
+        all: () => {
+          throw new Error('reconciliation must not read after the batch');
+        },
+        batch: async (statements) => {
+          const results = await database.executor.batch(statements);
+          if (statements.some((s) => /^UPDATE version SET status = 'active'/.test(s.sql.trim()))) {
+            await run(stmt('UPDATE blob SET purge_lease_until = ? WHERE id = ?', after, blobId));
+            interleaved = true;
+          }
+          return results;
+        },
+      });
+      expect(await finalizeWith(['1.0.0'], wrapped)).toMatchObject({
+        removed: 0,
+        restored,
+        leaseHeldBack: held,
+        statements: 15,
+      });
+      expect(interleaved).toBe(true);
+      expect(await scalar('SELECT purge_lease_until AS v FROM blob WHERE id = ?', blobId)).toBe(
+        after,
+      );
+      expect(await statusOf(id)).toBe(restored === 1 ? 'active' : 'removed_upstream');
+      expect(await revisionCount()).toBe(restored);
+    },
+  );
 
   it('a revive UPDATE that matches nothing writes no revision or epoch and reports held-back rows', async () => {
     const id = await removedVersion('1.0.0', await blobFor(org, 1, null));

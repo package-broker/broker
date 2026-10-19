@@ -248,7 +248,7 @@ describe('build failure disclosure', () => {
     return options;
   }
 
-  it('prints only the error name and exits 1 when a config value is invalid', async () => {
+  it('prints the error name and config key and exits 1 without the invalid value', async () => {
     const options = await sentinelFixture();
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
@@ -265,7 +265,27 @@ describe('build failure disclosure', () => {
     expect(exit).toHaveBeenCalledWith(1);
     const printed = error.mock.calls.map((call) => call.join(' ')).join('\n');
     expect(printed).not.toContain(SENTINEL);
-    expect(printed).toBe('error: Error');
+    expect(printed).toBe('error: Error: invalid broker config: plugins.apiVersion');
+  });
+
+  it('reports the invalid platform port key without its value', async () => {
+    const options = await buildFixture({
+      node: { ...NODE_PORTS, blob: { ...NODE_PORTS.blob, rootEnv: SENTINEL } },
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'cwd').mockReturnValue(options.cwd);
+    const failure: unknown = await run(['build', '--config', options.configPath]).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      name: 'Error',
+      configKeys: [
+        'node.blob.rootEnv: invalid env reference name',
+        'node.blob.rootEnv: looks like a credential value',
+      ],
+    });
+    expect(String(failure)).not.toContain(SENTINEL);
+    expect(error).not.toHaveBeenCalled();
   });
 });
 

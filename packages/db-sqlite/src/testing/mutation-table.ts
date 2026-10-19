@@ -33,6 +33,7 @@ import { entries as catalogueDistEntries } from './mutation-table/catalogue-dist
 import { entries as sourceFactoryEntries } from './mutation-table/source-factory.js';
 import { entries as upstreamStateEntries } from './mutation-table/upstream-state.js';
 import { entries as ingestSessionFactoriesEntries } from './mutation-table/ingest-session-factories.js';
+import { entries as importJournalEntries } from './mutation-table/import-journal.js';
 import { entries as idempotencyEntries } from './mutation-table/idempotency.js';
 import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.js';
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
@@ -126,6 +127,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueWriterEntries,
   ...catalogueReconcileEntries,
   ...importRunEntries,
+  ...importJournalEntries,
   ...projectReadableEntries,
   ...catalogueStatusEntries,
   ...catalogueStatusRepositoryEntries,

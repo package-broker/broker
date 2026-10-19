@@ -6,6 +6,9 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
+import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { readMasterKeys } from '@package-broker/core/secrets/master-key';
 import { createWorker } from './index.js';
 import type { Env } from './index.js';
 
@@ -47,7 +50,9 @@ async function database(applyVerifierMigration = true): Promise<D1DatabaseLike> 
     '0004_cache_epoch.sql',
     '0005_admin_permission_topup.sql',
     '0006_ports.sql',
-    ...(applyVerifierMigration ? ['0015_keyring_verifier.sql'] : []),
+    ...(applyVerifierMigration
+      ? ['0015_keyring_verifier.sql', '0016_keyring_version_indexes.sql']
+      : []),
   ];
   const sources = await Promise.all(
     names.map(async (name) =>
@@ -150,13 +155,18 @@ describe('keyring verification on Miniflare D1', () => {
   });
 
   async function seedCredential(db: D1DatabaseLike, version: number): Promise<void> {
+    const aad = credentialAad({ id: `01C${version}`, orgId: '01ORG', kind: 'k' });
+    const sealed = await createSecretCipher(
+      createKeyring(readMasterKeys({ current: version === 1 ? KEY_V1 : KEY_V2 })),
+      'credential-encryption',
+    ).seal(new Uint8Array([7]), aad);
     await createD1Executor(db).batch([
       {
         sql: "INSERT OR IGNORE INTO organization (id, slug, name) VALUES ('01ORG', 'acme', 'Acme')",
         params: [],
       },
       {
-        sql: `INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES ('01C${version}', '01ORG', 'k', X'00', X'000000000000000000000000', ${version}, 'a')`,
+        sql: `INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES ('01C${version}', '01ORG', 'k', X'${Buffer.from(sealed.ciphertext).toString('hex')}', X'${Buffer.from(sealed.nonce).toString('hex')}', ${version}, '${aad}')`,
         params: [],
       },
     ]);
@@ -193,6 +203,7 @@ describe('keyring verification on Miniflare D1', () => {
     const again = await probe(db, { PB_KEYRING_RESEED: '1' });
     expect(again.status).toBe(200);
     expect(again.logs).not.toContain('keyring.reseeded');
+    expect(again.logs).toContain('keyring.reseed_ignored');
   });
 
   it('7: two first boots with disjoint key versions enroll exactly one', async () => {
@@ -220,5 +231,12 @@ describe('keyring verification on Miniflare D1', () => {
     expect(result.status).toBe(503);
     expect(code(result.text)).toBe('misconfigured');
     expect(result.logs).toContain('version 1');
+  });
+  it('refuses authenticated re-seed with a wrong master key without recording a verifier', async () => {
+    const db = await database();
+    await seedCredential(db, 1);
+    const result = await probe(db, { PB_MASTER_KEY: KEY_V1_OTHER, PB_KEYRING_RESEED: '1' });
+    expect(result.status).toBe(503);
+    expect(await versions(db)).toEqual([]);
   });
 });

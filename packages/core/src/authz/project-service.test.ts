@@ -702,3 +702,12 @@ describe('project mutation audit', () => {
     expect(service).toBeDefined();
   });
 });
+
+it('a create idempotency conflict is returned without logging a change', async () => {
+  const { service, log } = setup({ create: 'conflict' });
+  expect(await service.createProject(ctx, actor, fenceOf(), input, call)).toEqual({
+    ok: false,
+    error: 'conflict',
+  });
+  expect(log).not.toHaveBeenCalled();
+});

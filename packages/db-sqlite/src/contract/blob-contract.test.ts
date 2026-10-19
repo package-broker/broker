@@ -127,7 +127,13 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixtur
         state.failPublish = false;
         throw new Error('database down');
       }
-      return repository.publish(ctx, input);
+      const result = await repository.publish(ctx, input);
+      await exec(
+        "UPDATE blob SET published_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
+        ctx.orgId,
+        input.sha256,
+      );
+      return result;
     },
     find: (ctx, key) => repository.find(ctx, key),
     narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),

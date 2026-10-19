@@ -8,6 +8,7 @@ import { NotBootstrappedError } from './org.js';
 import { KernelConfigError } from './registry.js';
 
 export type KernelLog = (entry: Readonly<Record<string, unknown>>) => void;
+export type ErrorFormat = 'nested' | 'npm';
 
 export const defaultLog: KernelLog = (entry) => {
   console.error(JSON.stringify(entry));
@@ -26,8 +27,13 @@ export function envelopeResponse(
   message: string,
   requestId: string,
   reason?: KernelReasonCode,
+  format: ErrorFormat = 'nested',
 ): Response {
-  const response = Response.json(errorEnvelope(code, message, requestId), {
+  const body =
+    format === 'npm'
+      ? { error: message, code, requestId }
+      : errorEnvelope(code, message, requestId);
+  const response = Response.json(body, {
     status,
     headers: {
       'content-type': 'application/json',
@@ -73,8 +79,13 @@ export function logError(log: KernelLog, requestId: string, error: unknown): voi
   }
 }
 
-export function errorResponse(error: unknown, requestId: string, log: KernelLog): Response {
+export function errorResponse(
+  error: unknown,
+  requestId: string,
+  log: KernelLog,
+  format: ErrorFormat = 'nested',
+): Response {
   const { status, code, message } = mappingOf(error);
   if (status >= 500) logError(log, requestId, error);
-  return envelopeResponse(status, code, message, requestId, envelopeReason(code));
+  return envelopeResponse(status, code, message, requestId, envelopeReason(code), format);
 }

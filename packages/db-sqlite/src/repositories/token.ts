@@ -1,3 +1,7 @@
+import type { AuditEvent } from '@package-broker/core/audit/actions';
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement } from './idempotency.js';
 import { sql, type Compilable, type Expression, type Kysely } from 'kysely';
 import {
   type FailureReason,
@@ -75,6 +79,8 @@ export type TokenValidation =
   { readonly kind: 'local' } | { readonly kind: 'sso'; readonly identityId: string };
 
 export interface IssuePersonalTokenInput {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly name: string;
   readonly scope: TokenScope;
@@ -456,6 +462,10 @@ function issueStatements(
     ...checks.flatMap((check) => assertCheck(check)),
     ...compiled,
     ...assertCheck(bindingCount),
+    auditPendingStatement(ctx, input.audit),
+    ...(input.idempotency === undefined
+      ? []
+      : [idempotencyInsertStatement(ctx, input.idempotency)]),
   ];
 }
 
@@ -660,7 +670,31 @@ function serviceStatements(
         created_at: input.now,
       }),
     ),
+    auditPendingStatement(ctx, input.audit),
+    ...(input.idempotency === undefined
+      ? []
+      : [idempotencyInsertStatement(ctx, input.idempotency)]),
   ];
+}
+
+function watchIssue(inner: SqlExecutor) {
+  let selectorCollision = false;
+  const executor: SqlExecutor = {
+    driver: inner.driver,
+    all: (statement) => inner.all(statement),
+    async batch(statements) {
+      try {
+        return await inner.batch(statements);
+      } catch (error) {
+        selectorCollision =
+          error instanceof DbError &&
+          error.kind === 'unique' &&
+          error.constraint === 'token.selector';
+        throw error;
+      }
+    },
+  };
+  return { executor, selectorCollision: () => selectorCollision };
 }
 
 export interface TokenRepositoryOptions {
@@ -684,8 +718,9 @@ export function createTokenRepository(
       for (let attempt = 1; attempt <= MAX_SELECTOR_ATTEMPTS; attempt += 1) {
         const minted = await mint();
         validateMinted(minted);
+        const observed = watchIssue(executor);
         const outcome = await runOrgFenced(
-          executor,
+          observed.executor,
           ctx,
           fence,
           assertGuard(guard, ctx),
@@ -699,7 +734,8 @@ export function createTokenRepository(
         if (await anyLost(executor, [guard, ...checks])) {
           return { status: 'refused', reason: 'authority' };
         }
-        if (outcome.reason === 'collision') continue;
+        if (outcome.reason === 'collision' && observed.selectorCollision()) continue;
+        if (outcome.reason === 'collision') return { status: 'refused', reason: 'unclassified' };
         if (outcome.reason === 'conflict') return { status: 'refused', reason: 'id_conflict' };
         return { status: 'refused', reason: outcome.reason };
       }
@@ -720,8 +756,9 @@ export function createTokenRepository(
       for (let attempt = 1; attempt <= MAX_SELECTOR_ATTEMPTS; attempt += 1) {
         const minted = await mint();
         validateMinted(minted, SERVICE_PLAINTEXT, SERVICE_PLAINTEXT_PREFIX);
+        const observed = watchIssue(executor);
         const outcome = await runOrgFenced(
-          executor,
+          observed.executor,
           ctx,
           fence,
           guard,
@@ -736,17 +773,24 @@ export function createTokenRepository(
           return { status: 'refused', reason: 'authority' };
         }
         if (await anyLost(executor, [unchanged])) return { status: 'refused', reason: 'conflict' };
-        if (outcome.reason === 'collision') continue;
+        if (outcome.reason === 'collision' && observed.selectorCollision()) continue;
+        if (outcome.reason === 'collision') return { status: 'refused', reason: 'unclassified' };
         if (outcome.reason === 'conflict') return { status: 'refused', reason: 'id_conflict' };
         return { status: 'refused', reason: 'unclassified' };
       }
       return { status: 'refused', reason: 'selector_collision' };
     },
 
-    async revoke(ctx, fence, guard, { tokenId, now }) {
+    async revoke(ctx, fence, guard, { tokenId, now, audit, idempotency }) {
       nonEmpty('tokenId', tokenId);
       const stamp = timestamp('now', now);
       const opId = newOpId();
+      const performed = {
+        sql: 'exists (select 1 from token where org_id = ? and id = ? and last_op_id = ? and revoked_at is not null)',
+        params: [ctx.orgId, tokenId, opId],
+      };
+      const replay =
+        idempotency === undefined ? undefined : idempotencyInsertStatement(ctx, idempotency);
       const live = sessionLive(ctx, fence, idleSeconds);
       const tokenLive = sql<boolean>`exists (
         select 1 from token where id = ${tokenId} and org_id = ${ctx.orgId} and revoked_at is null)`;
@@ -767,6 +811,15 @@ export function createTokenRepository(
               .where('revoked_at', 'is', null)
               .returning('id'),
           ),
+          auditPendingStatement(ctx, audit, performed),
+          ...(replay === undefined
+            ? []
+            : [
+                {
+                  sql: `${replay.sql.replace('VALUES (', 'SELECT * FROM (VALUES (')}) WHERE ${performed.sql}`,
+                  params: [...replay.params, ...performed.params],
+                },
+              ]),
         ],
         {},
       );

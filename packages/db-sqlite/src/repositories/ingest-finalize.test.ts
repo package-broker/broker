@@ -533,3 +533,77 @@ describe('ingest session finalize', () => {
     await expectUntouched();
   });
 });
+
+describe('ingest session finalize with a caller guard', () => {
+  const JOB = { id: 'job-finalize', owner: OWNER, fence: 1 };
+
+  async function runningJob(): Promise<void> {
+    await run(
+      stmt(
+        `INSERT INTO job (id, org_id, type, state, lease_owner, lease_until, fence)
+          VALUES (?, ?, 'core:package-sync:v1', 'running', ?,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 hour'), 1)`,
+        JOB.id,
+        org.orgId,
+        JOB.owner,
+      ),
+    );
+  }
+
+  function recording(): { executor: SqlExecutor; batches: Statement[][]; reads: number } {
+    const seen = { batches: [] as Statement[][], reads: 0 };
+    return {
+      get batches() {
+        return seen.batches;
+      },
+      get reads() {
+        return seen.reads;
+      },
+      executor: {
+        ...database.executor,
+        all: (statement) => {
+          seen.reads += 1;
+          return database.executor.all(statement);
+        },
+        batch: (statements) => {
+          seen.batches.push([...statements]);
+          return database.executor.batch(statements);
+        },
+      },
+    };
+  }
+
+  const jobChecks = (batch: readonly Statement[]) =>
+    batch.filter((s) => s.sql.includes('FROM job') && s.params.includes(JOB.id)).length;
+
+  it.each([2, 0])('runs the caller guard once in the finalize batch (count %i)', async (count) => {
+    await seedVersions('1.0.0', '1.1.0');
+    await runningJob();
+    const { session, mark } = await begin('package');
+    if (count > 0) await mark(['1.0.0', '1.1.0']);
+    const guard = createIngestSessionWriteGuard(org, session, JOB);
+    const recorder = recording();
+    const result = await createIngestFinalizer(recorder.executor).finalize(
+      org,
+      session,
+      input(count),
+      guard,
+    );
+    expect(result).toMatchObject({ status: 'complete' });
+    expect(recorder.batches).toHaveLength(1);
+    expect(jobChecks(recorder.batches[0]!)).toBe(1);
+  });
+
+  it('rejects a caller guard registered for another organization before any read', async () => {
+    await seedVersions('1.0.0');
+    const { session } = await begin('package');
+    const foreign = createIngestSessionWriteGuard(other, session);
+    const recorder = recording();
+    await expect(
+      createIngestFinalizer(recorder.executor).finalize(org, session, input(1), foreign),
+    ).rejects.toThrow(TypeError);
+    expect(recorder.reads).toBe(0);
+    expect(recorder.batches).toEqual([]);
+    await expectUntouched();
+  });
+});

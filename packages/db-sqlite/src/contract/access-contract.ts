@@ -1216,6 +1216,7 @@ function issueInput(
   overrides: Partial<Parameters<ReturnType<typeof createTokenRepository>['issuePersonal']>[2]> = {},
 ) {
   return {
+    audit: mutationAudit('token.issue', 'issued'),
     id: 'issued',
     name: 'Issued',
     scope: 'write' as const,
@@ -1675,7 +1676,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement()),
-        { tokenId: 'svc-old', now: iso(0) },
+        { audit: mutationAudit('token.revoke', null), tokenId: 'svc-old', now: iso(0) },
       );
       expect(blocked.status).toBe('refused');
       const untouched = await world.executor.all<{ revoked_at: string | null }>(
@@ -1687,7 +1688,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement(true)),
-        { tokenId: 'svc-old', now: iso(0) },
+        { audit: mutationAudit('token.revoke', null), tokenId: 'svc-old', now: iso(0) },
       );
       expect(allowed.status).toBe('revoked');
       const archivedLookup = await createAccessRepository(world.executor).lookupToken(world.a, {
@@ -1721,7 +1722,7 @@ const doubleRevoke: Case = (open, wrap) =>
             organizationAdmin: false,
             covers: [],
           }),
-          { tokenId: 'victim', now: now },
+          { audit: mutationAudit('token.revoke', null), tokenId: 'victim', now: now },
         );
       const stampA = iso(0);
       const stampB = iso(5000);

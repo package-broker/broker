@@ -115,7 +115,13 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
           kind === 'source'
             ? completeSourceListing({ sourceId: 'OS', stamp, count: 2 })
             : completeVersionListing({ packageId: 'OK', stamp, count: 2 });
-        await expect(reconciler.finalizeListing(own, guard, listing)).resolves.toMatchObject({
+        await expect(
+          reconciler.finalizeListing(own, guard, listing, {
+            attemptedCandidates: 2,
+            successfulCandidates: 2,
+            definitiveAbsent: 0,
+          }),
+        ).resolves.toMatchObject({
           removed: 1,
           restored: 1,
           statements: kind === 'source' ? 11 : 14,

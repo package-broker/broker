@@ -115,7 +115,8 @@ export async function rebindProvider(
       .deleteFrom('identity')
       .where('identity.org_id', '=', ctx.orgId)
       .where('identity.provider', '=', provider)
-      .where(bound),
+      .where(bound)
+      .returning('identity.id'),
     db
       .updateTable('identity_provider_binding')
       .set({ anchor: newAnchor, created_at: now })
@@ -127,7 +128,7 @@ export async function rebindProvider(
   const results = await executor.batch(statements);
   return {
     swapped: (results[BINDING]?.changes ?? 0) > 0,
-    identities: results[IDENTITIES]?.changes ?? 0,
+    identities: results[IDENTITIES]?.rows.length ?? 0,
     sessions: results[SESSIONS]?.changes ?? 0,
   };
 }

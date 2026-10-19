@@ -16,6 +16,7 @@ import type {
 import { mutationFence } from '@package-broker/core/authz/fence';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { orgContext } from '@package-broker/core/db/port';
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { ulid } from '@package-broker/core/ids';
 import { definePlugin, SUPPORTED_PLUGIN_API } from '@package-broker/core/plugin';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -104,6 +105,10 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
     headers: { 'content-type': 'application/json', origin: PUBLIC_URL, ...headers },
     body: JSON.stringify(body),
   });
+}
+
+function auditCall(requestId: string): ApiCall {
+  return { audit: { opId: ulid(), requestId, sourceIp: null, tokenSelector: null } };
 }
 
 describe('step 5 release gate on Miniflare D1', () => {
@@ -195,6 +200,7 @@ describe('step 5 release gate on Miniflare D1', () => {
               projectMode: 'all',
               projectIds: [],
             },
+            auditCall(ctx.requestId),
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           return Response.json({ id: issued.value.id, plaintext: issued.value.plaintext });
@@ -220,6 +226,7 @@ describe('step 5 release gate on Miniflare D1', () => {
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId },
+            auditCall(ctx.requestId),
           );
           if (!principal.ok) return Response.json({ error: principal.error }, { status: 409 });
           const issued = await services.serviceTokens.issue(
@@ -233,6 +240,7 @@ describe('step 5 release gate on Miniflare D1', () => {
               scope: 'read',
               expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
             },
+            auditCall(ctx.requestId),
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           return Response.json({ id: issued.value.id, plaintext: issued.value.plaintext });
@@ -258,6 +266,7 @@ describe('step 5 release gate on Miniflare D1', () => {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
             },
+            auditCall(ctx.requestId),
           );
           return Response.json(revoked);
         },

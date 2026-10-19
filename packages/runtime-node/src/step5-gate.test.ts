@@ -17,6 +17,7 @@ import type {
 import { mutationFence } from '@package-broker/core/authz/fence';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { orgContext, type SqlValue } from '@package-broker/core/db/port';
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { ulid } from '@package-broker/core/ids';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
 import {
@@ -67,6 +68,10 @@ function cookieHeader(response: Response): string {
     .getSetCookie()
     .map((line) => line.split(';')[0] as string)
     .join('; ');
+}
+
+function auditCall(requestId: string): ApiCall {
+  return { audit: { opId: ulid(), requestId, sourceIp: null, tokenSelector: null } };
 }
 
 describe('step 5 release gate on the node runtime', () => {
@@ -161,6 +166,7 @@ describe('step 5 release gate on the node runtime', () => {
               projectMode: 'all',
               projectIds: [],
             },
+            auditCall(ctx.requestId),
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           return Response.json({ id: issued.value.id, plaintext: issued.value.plaintext });
@@ -186,6 +192,7 @@ describe('step 5 release gate on the node runtime', () => {
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId },
+            auditCall(ctx.requestId),
           );
           if (!principal.ok) return Response.json({ error: principal.error }, { status: 409 });
           const issued = await services.serviceTokens.issue(
@@ -199,6 +206,7 @@ describe('step 5 release gate on the node runtime', () => {
               scope: 'read',
               expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
             },
+            auditCall(ctx.requestId),
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           return Response.json({ id: issued.value.id, plaintext: issued.value.plaintext });
@@ -224,6 +232,7 @@ describe('step 5 release gate on the node runtime', () => {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
             },
+            auditCall(ctx.requestId),
           );
           return Response.json(revoked);
         },

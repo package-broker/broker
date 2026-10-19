@@ -1,3 +1,4 @@
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
@@ -235,6 +236,7 @@ export const AUTH_EVENTS = Object.freeze([
 
 export const NODE_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
   ...AUDIT_EVENTS,
+  ...INGEST_EVENTS,
   ...JOB_EVENTS,
   ...AUTH_EVENTS,
   'http.error',
@@ -403,7 +405,7 @@ function createTelemetry(ports: PlatformPortConfig, options: StartOptions): Tele
         },
         {
           events: NODE_RUNTIME_EVENTS,
-          reasonCodes: AUTH_REASON_CODES,
+          reasonCodes: new Set([...AUTH_REASON_CODES, ...INGEST_REASON_CODES]),
           routeTemplates: routes,
         },
       ),
@@ -490,7 +492,7 @@ function startJobs(
 ): JobLoop {
   const registry: ObsRegistry = {
     events: NODE_RUNTIME_EVENTS,
-    reasonCodes: new Set(),
+    reasonCodes: INGEST_REASON_CODES,
     routeTemplates: telemetry.routes,
   };
   const scope: ObservabilityScope = {

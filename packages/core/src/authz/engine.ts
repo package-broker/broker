@@ -254,7 +254,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     });
     if (found === null) return UNAUTHORIZED;
     if (
-      request.route.boundary === 'authenticated' &&
+      (request.route.boundary === 'authenticated' || request.route.boundary === 'self') &&
       found.identity !== null &&
       !found.identity.fresh
     ) {
@@ -386,6 +386,30 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     return { ...decision, tokenId: found.token.id };
   }
 
+  async function selfBearerDecision(
+    request: AuthorizationRequest,
+    token: { readonly canonical: string },
+    input: EngineLookupInput,
+  ): Promise<AuthorizationDecision> {
+    const gate: TokenUseDeps = {
+      ...tokenUse,
+      touch: () => Promise.resolve(true),
+      log: logTouchFailure,
+      dispatch: () => undefined,
+    };
+    const result = await authenticateToken(
+      gate,
+      token.canonical,
+      (selector) => access.lookupToken(request.org, { ...input, selector }),
+      (found) => patValidation.decide(found).allowed,
+    );
+    if (!result.ok) return UNAUTHORIZED;
+    const { token: held } = result.access;
+    if (!held.bindingOk || held.scope === null || held.projectMode === null) return UNAUTHORIZED;
+    if (principalOf(result.access) === undefined) return UNAUTHORIZED;
+    return FORBIDDEN;
+  }
+
   return Object.freeze({
     async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
       grants.delete(request);
@@ -394,16 +418,26 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       if (
         routeBoundary !== 'organization' &&
         routeBoundary !== 'project' &&
-        routeBoundary !== 'authenticated'
+        routeBoundary !== 'authenticated' &&
+        routeBoundary !== 'self'
       ) {
         return FORBIDDEN;
       }
-      const permission = routeBoundary === 'authenticated' ? null : request.route.permission;
+      const permissionFree = routeBoundary === 'authenticated' || routeBoundary === 'self';
+      const permission = permissionFree ? null : request.route.permission;
       const boundary: EngineBoundary = routeBoundary === 'project' ? 'project' : 'organization';
       const slug = boundary === 'project' ? request.params['project'] : undefined;
       const slugValid = boundary === 'organization' || isValidProjectSlug(slug);
       const credential = parseAuthorization(request.request.headers.get('authorization'));
       if (credential.outcome === 'invalid') return UNAUTHORIZED;
+      if (routeBoundary === 'self' && credential.outcome === 'token') {
+        if (credential.scheme !== 'bearer') return UNAUTHORIZED;
+        return selfBearerDecision(request, credential.token, {
+          boundary: 'organization',
+          projectSlug: null,
+          providerAnchors: await deps.providerAnchors(request.org),
+        });
+      }
       const secret =
         credential.outcome === 'none' ? readCookie(request.request, SESSION_COOKIE) : null;
       if (

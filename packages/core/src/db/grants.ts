@@ -24,7 +24,7 @@ export interface OrganizationGrantDeleted {
   readonly offboardedUserId: string | null;
 }
 
-type MutationInput = { readonly audit?: AuditEvent; readonly idempotency?: IdempotencyRecord };
+type MutationInput = { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord };
 
 export interface GrantRepository {
   /** Organization-scope grants only, oldest first. */

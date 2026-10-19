@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid, type Clock } from '@package-broker/core/ids';
-import { registerCoreJob, type RegisteredJob } from '@package-broker/core/kernel/registry';
+import type { RegisteredJob } from '@package-broker/core/kernel/registry';
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import {

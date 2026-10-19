@@ -35,6 +35,8 @@ export interface ChunkSource {
 
 export interface ChunkBudget {
   readonly sessionStatements: number;
+  /** Requires statementBudget for quarantine and listing mark costs. */
+  readonly syncCost?: (versions: number) => number;
   readonly statementBudget?: Readonly<Record<CatalogueWriteMethod, number>>;
 }
 
@@ -112,6 +114,9 @@ function decide(
 }
 
 function checkBudget(budget: ChunkBudget): void {
+  if (budget.syncCost !== undefined && budget.statementBudget === undefined) {
+    throw new TypeError('invalid chunk budget');
+  }
   const costs = [budget.sessionStatements, ...Object.values(budget.statementBudget ?? {})];
   if (costs.some((cost) => !Number.isSafeInteger(cost) || cost < 0)) {
     throw new TypeError('invalid chunk budget');
@@ -131,6 +136,11 @@ export function planChunk(
   const costs = budget.statementBudget;
   const markCost = costs?.markListing ?? 1;
   const maxCalls = costs === undefined ? 1 : Number.POSITIVE_INFINITY;
+  const syncCost = (versions: number): number => {
+    const cost = budget.syncCost?.(versions) ?? costs?.syncPackage ?? 0;
+    if (!Number.isSafeInteger(cost) || cost < 0) throw new TypeError('invalid chunk budget');
+    return cost;
+  };
   const classify = (m: ChunkMember): Decision =>
     refusing
       ? { kind: 'refused' }
@@ -161,12 +171,13 @@ export function planChunk(
     if (decision.kind === 'conflict') {
       extraCalls = 1;
       extraStatements = costs?.quarantine ?? 0;
-    } else if (
-      (decision.kind === 'insert' || decision.kind === 'update') &&
-      (open === null || open.length >= CATALOGUE_SYNC_VERSIONS_PER_CALL)
-    ) {
-      extraCalls = 1;
-      extraStatements = costs?.syncPackage ?? 0;
+    } else if (decision.kind === 'insert' || decision.kind === 'update') {
+      if (open === null || open.length >= CATALOGUE_SYNC_VERSIONS_PER_CALL) {
+        extraCalls = 1;
+        extraStatements = syncCost(1);
+      } else if (budget.syncCost !== undefined) {
+        extraStatements = syncCost(open.length + 1) - syncCost(open.length);
+      }
     }
     const total = budget.sessionStatements + marks + writeStatements + extraStatements;
     if (calls.length + extraCalls > maxCalls || total > INVOCATION_BUDGET) {

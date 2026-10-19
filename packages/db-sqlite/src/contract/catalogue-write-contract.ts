@@ -347,6 +347,7 @@ async function publicationPhases(open: Open, wrap?: Wrap) {
         w.org,
         w.guard,
         completeVersionListing({ packageId, stamp, count: 2 }),
+        { attemptedCandidates: 2, successfulCandidates: 2, definitiveAbsent: 0 },
       );
       const databaseNow = async () => {
         const [row] = await w.rows(
@@ -527,8 +528,20 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
             kind === 'source'
               ? completeSourceListing({ sourceId: 'source', stamp, count: 1 })
               : completeVersionListing({ packageId, stamp, count: 1 });
-          await expect(w.writer.finalizeListing(w.org, w.guard, input as never)).rejects.toThrow();
-          await expect(w.writer.finalizeListing(w.org, w.guard, complete())).rejects.toThrow();
+          await expect(
+            w.writer.finalizeListing(w.org, w.guard, input as never, {
+              attemptedCandidates: 0,
+              successfulCandidates: 0,
+              definitiveAbsent: 0,
+            }),
+          ).rejects.toThrow();
+          await expect(
+            w.writer.finalizeListing(w.org, w.guard, complete(), {
+              attemptedCandidates: 0,
+              successfulCandidates: 0,
+              definitiveAbsent: 0,
+            }),
+          ).rejects.toThrow();
           expect(() =>
             kind === 'source'
               ? completeSourceListing({ sourceId: 'source', stamp, count: 0 })
@@ -558,6 +571,7 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
               kind === 'source'
                 ? completeSourceListing({ sourceId: 'source', stamp, count: 2 })
                 : completeVersionListing({ packageId, stamp, count: 2 }),
+              { attemptedCandidates: 2, successfulCandidates: 2, definitiveAbsent: 0 },
             ),
           ).toMatchObject({ removed: 1, restored: 0 });
           const key = kind === 'source' ? 'name' : 'version_normalized';

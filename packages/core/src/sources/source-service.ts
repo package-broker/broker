@@ -1,3 +1,6 @@
+import type { ApiCall } from '../api/idempotency.js';
+import { auditEvent, type AuditAction } from '../audit/actions.js';
+import { isValidPattern } from '../catalogue/patterns.js';
 import type { ActorContext, AdminLog } from '../authz/administration.js';
 import type { MutationFence } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
@@ -36,11 +39,27 @@ export type SourceUpdateInput = Omit<SourceChanges, 'credentialId'> & {
   readonly credential?: SourceCredentialInput | null;
 };
 
+export type SourceError =
+  | 'forbidden'
+  | 'not_found'
+  | 'invalid_config'
+  | 'credential_scope_mismatch'
+  | 'duplicate'
+  | 'conflict'
+  | 'indeterminate'
+  | 'activation_requires_registered_names'
+  | 'has_packages'
+  | 'has_history'
+  | 'invalid_pattern'
+  | 'proxy_source'
+  | 'pattern_taken'
+  | 'invalid_name';
+
 export type SourceServiceResult<T> =
   | { readonly ok: true; readonly value: T; readonly warnings?: readonly SourceConfigProblem[] }
   | {
       readonly ok: false;
-      readonly error: string;
+      readonly error: SourceError;
       readonly problems?: readonly SourceConfigProblem[];
     };
 
@@ -54,11 +73,17 @@ export interface SourceService {
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
   delete(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
   resume(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
-  enable(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
+  enable(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   addRegisteredName(
-    ...args: [...WriteArgs, input: { readonly sourceId: string; readonly pattern: string }]
+    ...args: [
+      ...WriteArgs,
+      input: { readonly sourceId: string; readonly pattern: string },
+      call: ApiCall,
+    ]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
-  removeRegisteredName(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
+  removeRegisteredName(
+    ...args: [...WriteArgs, id: string, call: ApiCall]
+  ): Promise<SourceServiceResult<{ readonly paused: boolean }>>;
   preview(
     ctx: OrgContext,
     actor: SourceActor,
@@ -88,7 +113,7 @@ export interface SourceServiceDeps {
   readonly log: AdminLog;
 }
 
-const fail = (error: string): SourceServiceResult<never> => ({ ok: false, error });
+const fail = (error: SourceError): SourceServiceResult<never> => ({ ok: false, error });
 const invalid = (field: string, message: string): SourceServiceResult<never> => ({
   ok: false,
   error: 'invalid_config',
@@ -275,7 +300,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       hasCredential,
     });
     if (!result.ok)
-      return { ok: false as const, error: 'invalid_config', problems: result.problems };
+      return { ok: false as const, error: 'invalid_config' as const, problems: result.problems };
     return {
       ok: true as const,
       value: { url, configJson: JSON.stringify(result.config) },
@@ -299,20 +324,39 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     who: SourceActor,
     fence: MutationFence,
     id: string,
-    action: 'delete' | 'resume' | 'enable',
+    action: 'delete' | 'resume',
   ): Promise<SourceServiceResult<null>> {
     if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
       return fail('forbidden');
     requireFence(who, fence);
     if ((await owned(ctx, who, id)) === null) return fail('not_found');
     const target = { id, providerAnchors: deps.providerAnchors };
-    const answer =
-      action === 'enable'
-        ? await deps.registeredNames.enable(ctx, fence, target)
-        : await deps.sources[action](ctx, fence, target);
-    return ['deleted', 'resumed', 'enabled', 'already_enabled'].includes(answer)
-      ? success(null)
-      : fail(answer);
+    const answer = await deps.sources[action](ctx, fence, target);
+    return answer === 'deleted' || answer === 'resumed' ? success(null) : fail(answer);
+  }
+
+  function mutationAudit(
+    call: ApiCall,
+    who: SourceActor,
+    action: AuditAction,
+    type: string,
+    id: string,
+    projectId: string | null = null,
+  ) {
+    const result = auditEvent({
+      id: deps.ids.ulid(),
+      now: new Date().toISOString(),
+      action,
+      actor: { type: 'user', id: who.actor.userId },
+      context: call.audit,
+      target: { type, id },
+      projectId,
+    });
+    if (!result.ok) throw new TypeError('Invalid source audit event');
+    return {
+      audit: result.event,
+      ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+    };
   }
 
   return {
@@ -424,26 +468,53 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     },
     delete: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'delete'),
     resume: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'resume'),
-    enable: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'enable'),
-    async addRegisteredName(ctx, who, fence, input) {
+    async enable(ctx, who, fence, id, call) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await owned(ctx, who, id);
+      if (source === null) return fail('not_found');
+      const answer = await deps.registeredNames.enable(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+        ...mutationAudit(call, who, 'source.resume', 'source', id, source.projectId),
+      });
+      return answer === 'enabled' || answer === 'already_enabled' ? success(null) : fail(answer);
+    },
+    async addRegisteredName(ctx, who, fence, input, call) {
       if (!orgOnly(who)) return fail('forbidden');
       requireFence(who, fence);
+      if (!isValidPattern(input.pattern)) return fail('invalid_pattern');
       const id = deps.ids.ulid();
       const answer = await deps.registeredNames.add(ctx, fence, {
         ...input,
         id,
+        ...mutationAudit(call, who, 'registered_name.add', 'registered_name', id),
         providerAnchors: deps.providerAnchors,
       });
       return answer === 'added' ? success({ id }) : fail(answer);
     },
-    async removeRegisteredName(ctx, who, fence, id) {
+    async removeRegisteredName(ctx, who, fence, id, call) {
       if (!orgOnly(who)) return fail('forbidden');
       requireFence(who, fence);
+      const owner = await deps.registeredNames.owner(ctx, id);
+      if (owner === null) return fail('not_found');
       const answer = await deps.registeredNames.remove(ctx, fence, {
         id,
+        ...mutationAudit(call, who, 'registered_name.remove', 'registered_name', id),
+        pauseAudit: mutationAudit(
+          call,
+          who,
+          'source.pause',
+          'source',
+          owner.sourceId,
+          owner.projectId,
+        ).audit,
         providerAnchors: deps.providerAnchors,
       });
-      return answer === 'removed' || answer === 'removed_and_paused' ? success(null) : fail(answer);
+      return answer === 'removed' || answer === 'removed_and_paused'
+        ? success({ paused: answer === 'removed_and_paused' })
+        : fail(answer);
     },
     async preview(ctx, who, input) {
       if (

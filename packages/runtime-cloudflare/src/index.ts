@@ -1,3 +1,4 @@
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
@@ -81,7 +82,8 @@ import {
 } from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
-import { collectRegistrations, registerCoreJob } from '@package-broker/core/kernel/registry';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
@@ -350,7 +352,6 @@ async function buildAuth(
         createUnlinkRepository(executor, {
           holderInput: () => ({
             kind: 'fresh',
-            now: systemClock.now().toISOString(),
             providers: anchorList,
           }),
         }),
@@ -420,6 +421,7 @@ async function buildAuth(
       ...common,
     }),
     tokenRevoke: createTokenRevokeService({
+      ids,
       tokens: tokenRepository,
       authority,
       ownership: tokenRepository,
@@ -854,11 +856,16 @@ export function createWorker(
     const registry = (templates: ReadonlySet<string>): ObsRegistry => ({
       events: new Set<string>([
         ...KERNEL_EVENTS,
+        ...INGEST_EVENTS,
         ...AUDIT_EVENTS,
         ...JOB_EVENTS,
         ...STARTUP_EVENTS,
       ]),
-      reasonCodes: new Set<string>([...KERNEL_REASON_CODES, ...JOB_REASON_CODES]),
+      reasonCodes: new Set<string>([
+        ...KERNEL_REASON_CODES,
+        ...JOB_REASON_CODES,
+        ...INGEST_REASON_CODES,
+      ]),
       routeTemplates: templates,
     });
     const scope = {

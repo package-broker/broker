@@ -446,7 +446,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         opId,
         ...audit,
       });
-      if (result === 'authority' || result === 'indeterminate') {
+      if (result === 'authority' || result === 'conflict' || result === 'indeterminate') {
         return fencedFailure(ctx, actor, 'created', result);
       }
       if (result === 'duplicate_key') return fail('duplicate');

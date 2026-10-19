@@ -77,7 +77,8 @@ import { createNodeAssets } from './assets.js';
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
-import { collectRegistrations, registerCoreJob } from '@package-broker/core/kernel/registry';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
@@ -230,7 +231,6 @@ async function assembleAccess(
         createUnlinkRepository(executor, {
           holderInput: () => ({
             kind: 'fresh',
-            now: systemClock.now().toISOString(),
             providers: anchorList,
           }),
         }),
@@ -300,6 +300,7 @@ async function assembleAccess(
       ...common,
     }),
     tokenRevoke: createTokenRevokeService({
+      ids,
       tokens: tokenRepository,
       authority,
       ownership: tokenRepository,

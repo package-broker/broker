@@ -5,6 +5,7 @@ import {
   resolveWinner,
   type VisibilityConfig,
 } from '@package-broker/core/catalogue/visibility';
+import { patternAdmits } from '@package-broker/core/catalogue/patterns';
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import {
   CATALOGUE_KEY_LIST_MAX,
@@ -36,6 +37,14 @@ const ORG_A = '01J00000000000000000000A0A';
 const ORG_B = '01J00000000000000000000B0B';
 
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+function expectNoWholeMetadata(text: string): void {
+  const stripped = text.replace(
+    /json_(?:extract|type)\([a-z_][a-z0-9_]*\.metadata_json, (\?|'\$\.[^']+')\)/gi,
+    '',
+  );
+  expect(stripped).not.toContain('metadata_json');
+}
 
 function metadataFor(ecosystem: NameEcosystem, n: number): string | null {
   if (n % 3 === 0) return null;
@@ -200,7 +209,18 @@ describe('pageEdges against the oracle', () => {
     }
   });
 
+  it('rejects a bare metadata_json select alongside allowed path reads', () => {
+    expect(() =>
+      expectNoWholeMetadata(
+        "select v.metadata_json, json_extract(v.metadata_json, '$.require'), json_type(v.metadata_json, '$.require') from version as v",
+      ),
+    ).toThrow();
+  });
+
   it('3: no statement selects metadata_json whole', async () => {
+    expectNoWholeMetadata(
+      "select json_extract(ev.metadata_json, '$.require'), json_type(ev.metadata_json, '$.require') from version as ev",
+    );
     const database = await openMigratedDatabase({ d1PatternLimit: true });
     try {
       const seen: string[] = [];
@@ -222,8 +242,7 @@ describe('pageEdges against the oracle', () => {
       await closure.previewWinners(ctx, { ...base, key: 'a' });
       expect(seen.length).toBe(5);
       for (const text of seen) {
-        const stripped = text.replace(/json_extract\(v\.metadata_json, (\?|'[^']*')\)/g, '');
-        expect(stripped).not.toContain('metadata_json');
+        expectNoWholeMetadata(text);
       }
       expect(seen.some((text) => text.includes('metadata_json'))).toBe(true);
     } finally {
@@ -262,6 +281,20 @@ describe('classify, classifyWinners and previewWinners against the oracle', () =
                     p.orgId === project.orgId &&
                     p.ecosystem === ecosystem &&
                     p.key === key &&
+                    patternAdmits(
+                      {
+                        flag: p.visible,
+                        includes:
+                          inputs.attachments.find(
+                            (a) => a.projectId === project.id && a.sourceId === p.sourceId,
+                          )?.includes ?? [],
+                        excludes:
+                          inputs.attachments.find(
+                            (a) => a.projectId === project.id && a.sourceId === p.sourceId,
+                          )?.excludes ?? [],
+                      },
+                      key,
+                    ) &&
                     config.sources.some(
                       (s) =>
                         s.id === p.sourceId &&

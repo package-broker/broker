@@ -179,3 +179,149 @@ describe('auditCall', () => {
     expect(deps.clientIp).not.toHaveBeenCalled();
   });
 });
+
+import { projectSessionCallContext } from './context.js';
+
+function projectContext() {
+  return context(
+    { projectId: 'project-1' },
+    {
+      boundary: 'project',
+      projectId: 'project-1',
+      actor: {
+        session: { id: 'session-1', userId: 'user-1' },
+        user: { id: 'user-1' },
+        organizationPermissions: ['org:read', 'org:service-principals:write'],
+        projectPermissions: ['project:service-principals:write'],
+        protectedHolder: true,
+      },
+      rateKey: {
+        stage: 'authenticated',
+        tokenSelector: null,
+        principalId: 'user-1',
+        routeClass: 'project',
+      },
+    },
+  );
+}
+
+describe('projectSessionCallContext', () => {
+  it('returns project identity, revision fence and audit context without copying authority', () => {
+    const ctx = projectContext();
+    const deps = dependencies();
+    const expected = { service_principal: 3 };
+    const result = projectSessionCallContext(ctx, deps, expected);
+    expect(result.org).toBe(ctx.org);
+    expect(result.projectId).toBe('project-1');
+    expect(result.actor).toEqual({
+      kind: 'organization',
+      userId: 'user-1',
+      sessionId: 'session-1',
+      permissions: expect.anything(),
+      isOrganizationAdmin: false,
+    });
+    expect([...result.actor.permissions]).toEqual([]);
+    expect(result.actor.permissions.has('org:service-principals:write')).toBe(false);
+    expect(Object.isFrozen(result.actor)).toBe(true);
+    expect(Object.isFrozen(result.actor.permissions)).toBe(true);
+    expect(result.actor.permissions).not.toHaveProperty('add');
+    expect(fenceKind(result.fence)).toBe('session');
+    expect(result.fence).toEqual({ userId: 'user-1', sessionId: 'session-1', expected });
+    expect(result.call).toEqual({
+      audit: {
+        opId: 'operation-1',
+        requestId: ctx.requestId,
+        sourceIp: '203.0.113.7',
+        tokenSelector: null,
+      },
+    });
+    expect(deps.ids.ulid).toHaveBeenCalledTimes(1);
+    expect(deps.clientIp).toHaveBeenCalledExactlyOnceWith(ctx.request);
+    expect(projectSessionCallContext(ctx, deps).fence.expected).toEqual({});
+  });
+
+  it.each([
+    ['no snapshot', () => context({}, null)],
+    ...(['organization', 'self', 'authenticated'] as const).map(
+      (boundary) =>
+        [
+          boundary,
+          () =>
+            context(
+              {},
+              {
+                boundary,
+                rateKey: {
+                  stage: 'authenticated',
+                  tokenSelector: null,
+                  principalId: 'user-1',
+                  routeClass: boundary,
+                },
+              },
+            ),
+        ] as const,
+    ),
+    [
+      'token credential',
+      () =>
+        context(
+          { projectId: 'project-1' },
+          {
+            ...tokenSnapshot,
+            boundary: 'project',
+            projectId: 'project-1',
+            rateKey: { ...tokenSnapshot.rateKey, routeClass: 'project' },
+          },
+        ),
+    ],
+    [
+      'no organization',
+      () => {
+        const ctx = projectContext();
+        Object.assign(ctx, { org: null });
+        return ctx;
+      },
+    ],
+    [
+      'different project',
+      () => {
+        const ctx = projectContext();
+        Object.assign(ctx, { projectId: 'other' });
+        return ctx;
+      },
+    ],
+    [
+      'null project',
+      () => {
+        const ctx = projectContext();
+        Object.assign(ctx, { projectId: null });
+        return ctx;
+      },
+    ],
+    [
+      'no actor',
+      () =>
+        context(
+          { projectId: 'project-1' },
+          {
+            boundary: 'project',
+            projectId: 'project-1',
+            actor: null,
+            rateKey: {
+              stage: 'authenticated',
+              tokenSelector: null,
+              principalId: 'user-1',
+              routeClass: 'project',
+            },
+          },
+        ),
+    ],
+  ] as const)('rejects %s before dependencies', (_name, makeContext) => {
+    const deps = dependencies();
+    expect(() => projectSessionCallContext(makeContext(), deps)).toThrow(
+      'route requires a project session context',
+    );
+    expect(deps.ids.ulid).not.toHaveBeenCalled();
+    expect(deps.clientIp).not.toHaveBeenCalled();
+  });
+});

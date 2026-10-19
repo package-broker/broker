@@ -915,3 +915,82 @@ const principalRecord = {
   createdAt: NOW,
   expiresAt: '2026-10-16T08:00:00.000Z',
 };
+
+import { setAccessContext } from './access-context.js';
+import { projectSessionCallContext } from '../api/routes/context.js';
+import type { RequestContext } from '../plugin.js';
+
+function projectIdentity() {
+  const request: RequestContext = {
+    request: new Request('https://broker.test/_pb/projects/demo/service-principals'),
+    requestId: apiCall.audit.requestId,
+    org: ctx,
+    principal: { kind: 'user', id: 'actor-1' },
+    projectId: PROJECT,
+    params: {},
+    ports: {
+      organizations: { get: async () => null },
+      clock: fixedClock(NOW),
+      ids: { ulid: () => 'unused' },
+    },
+  };
+  setAccessContext(request, {
+    principal: request.principal,
+    boundary: 'project',
+    projectId: PROJECT,
+    sessionId: 'session-1',
+    token: null,
+    actor: {
+      session: { id: 'session-1' },
+      user: { id: 'actor-1' },
+      organizationPermissions: ['org:service-principals:write'],
+      projectPermissions: ['project:service-principals:write'],
+      protectedHolder: true,
+    },
+    rateKey: {
+      stage: 'authenticated',
+      tokenSelector: null,
+      principalId: 'actor-1',
+      routeClass: 'project',
+    },
+  });
+  return projectSessionCallContext(request, {
+    ids: { ulid: () => apiCall.audit.opId },
+    clock: fixedClock(NOW),
+    clientIp: () => null,
+  });
+}
+
+describe('project session identity actor', () => {
+  it('suspends a project principal through the live fenced project authority', async () => {
+    const identity = projectIdentity();
+    const { service, authority, principals } = setup({
+      live: ['project:service-principals:write'],
+    });
+    expect(
+      await service.suspend(identity.org, identity.actor, identity.fence, 'sp-1', identity.call),
+    ).toEqual({ ok: true, value: null });
+    expect(authority.guard).toHaveBeenCalledTimes(1);
+    expect(principals.suspend).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot manage an organization principal even with both live permissions', async () => {
+    const identity = projectIdentity();
+    const { service, authority, principals } = setup({
+      existing: principal({ projectId: null }),
+      live: ['org:service-principals:write', 'project:service-principals:write'],
+    });
+    expect(
+      await service.suspend(identity.org, identity.actor, identity.fence, 'sp-1', identity.call),
+    ).toEqual({ ok: false, error: 'not_found' });
+    expect(authority.guard).not.toHaveBeenCalled();
+    for (const write of [
+      principals.create,
+      principals.setPermissions,
+      principals.suspend,
+      principals.restore,
+    ]) {
+      expect(write).not.toHaveBeenCalled();
+    }
+  });
+});

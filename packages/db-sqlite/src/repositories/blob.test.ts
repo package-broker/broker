@@ -88,7 +88,35 @@ async function expireLease(org: OrgContext, sha: Sha256): Promise<void> {
   );
 }
 
+async function makeEligible(org: OrgContext, sha: Sha256): Promise<void> {
+  await exec(
+    "UPDATE blob SET published_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
+    org.orgId,
+    sha,
+  );
+}
+
+async function reference(type = 'npmjs_proxy', status = 'active'): Promise<void> {
+  await exec(
+    "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('S', ?, 's', 'npm', ?)",
+    a.orgId,
+    type,
+  );
+  await exec(
+    "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('P', ?, 'S', 'npm', 'p')",
+    a.orgId,
+  );
+  await exec(
+    "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, tombstoned_at) SELECT 'V', org_id, 'P', '1.0.0', '1.0.0', created_at, 'upstream', '{}', id, ?, ? FROM blob WHERE org_id = ? AND sha256 = ?",
+    status,
+    status === 'tombstoned' ? '2000-01-01T00:00:00.000Z' : null,
+    a.orgId,
+    D1,
+  );
+}
+
 async function due(org: OrgContext, sha: Sha256): Promise<void> {
+  await makeEligible(org, sha);
   await exec(
     "UPDATE blob SET purge_after = strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 days') WHERE org_id = ? AND sha256 = ?",
     org.orgId,
@@ -652,10 +680,82 @@ describe('purge lifecycle', () => {
     return repo;
   }
 
+  it.each(['active', 'hosted', 'young', 'reput'])(
+    'refuses a claim for %s blobs without hiding them',
+    async (state) => {
+      const repo = await scheduled();
+      if (state === 'active') await reference();
+      if (state === 'hosted') await reference('hosted', 'tombstoned');
+      if (state === 'young')
+        await exec("UPDATE blob SET published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')");
+      if (state === 'reput') {
+        await publish(repo);
+        await exec("UPDATE blob SET purge_after = '2000-01-01T00:00:00.000Z'");
+      }
+      expect(await repo.claimPurge(a, D1)).toBeNull();
+      expect((await rowOf(a, D1))?.purge_lease_until).toBeNull();
+      expect(await repo.find(a, D1)).not.toBeNull();
+    },
+  );
+
+  it.each(['markDeleted', 'cancelPurge'] as const)(
+    'rechecks a new reference but still permits %s',
+    async (finish) => {
+      const repo = await scheduled();
+      const generation = (await repo.claimPurge(a, D1)) as PurgeGeneration;
+      expect(await repo.canStartRemove(a, D1, generation, 1000)).toBe(true);
+      await reference();
+      expect(await repo.canStartRemove(a, D1, generation, 1000)).toBe(false);
+      expect(await repo[finish](a, D1, 'f'.repeat(32) as PurgeGeneration)).toBe(false);
+      expect(await repo[finish](a, D1, generation)).toBe(true);
+      expect((await rowOf(a, D1))?.purge_lease_until).toBeNull();
+      if (finish === 'cancelPurge') expect((await rowOf(a, D1))?.purge_after).toBeNull();
+    },
+  );
+
+  it.each(['referenced', 'young', 'eligible', 'leased', 'unscheduled', 'deleted'])(
+    'unschedules only unleased ineligible rows: %s',
+    async (state) => {
+      const repo = await scheduled();
+      if (state === 'leased') expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+      if (state !== 'eligible') await reference();
+      if (state === 'young') {
+        await exec('DELETE FROM version WHERE org_id = ?', a.orgId);
+        await exec("UPDATE blob SET published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')");
+      }
+      if (state === 'unscheduled') await exec('UPDATE blob SET purge_after = NULL');
+      if (state === 'deleted')
+        await exec("UPDATE blob SET deleted_at = '2000-01-01T00:00:00.000Z'");
+      const before = await rowOf(a, D1);
+      const clears = state === 'referenced' || state === 'young';
+      expect(await repo.unschedule(a, D1)).toBe(clears);
+      expect(await rowOf(a, D1)).toEqual(clears ? { ...before, purge_after: null } : before);
+    },
+  );
+
+  it.each(['claimPurge', 'canStartRemove', 'unschedule'] as const)(
+    '%s treats another organization as absent',
+    async (method) => {
+      const repo = await scheduled();
+      const generation =
+        method === 'canStartRemove'
+          ? ((await repo.claimPurge(a, D1)) as PurgeGeneration)
+          : ('f'.repeat(32) as PurgeGeneration);
+      if (method === 'unschedule') await reference();
+      const before = await rowOf(a, D1);
+      expect(await repo[method](b, D1, generation, 1000)).toBe(
+        await repo[method](b, D2, generation, 1000),
+      );
+      expect(await repo.find(b, D1)).toBeNull();
+      expect(await rowOf(a, D1)).toEqual(before);
+    },
+  );
+
   it('claimPurge needs a due purge_after', async () => {
     const repo = createBlobRepository(executor);
     expect(await repo.claimPurge(a, D1)).toBeNull();
     await publish(repo);
+    await makeEligible(a, D1);
     expect(await repo.claimPurge(a, D1)).toBeNull();
     await repo.softDelete(a, D1, { removedAt: new Date().toISOString() });
     expect(await repo.claimPurge(a, D1)).toBeNull();

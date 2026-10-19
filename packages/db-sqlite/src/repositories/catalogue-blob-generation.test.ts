@@ -133,7 +133,8 @@ for (const writer of ['attach', 'replace'] as const) {
     async function claim() {
       await database.executor.batch([
         statement(
-          'UPDATE blob SET purge_after = ? WHERE org_id = ? AND sha256 = ?',
+          'UPDATE blob SET purge_after = ?, published_at = ? WHERE org_id = ? AND sha256 = ?',
+          PAST,
           PAST,
           org.orgId,
           SHA,

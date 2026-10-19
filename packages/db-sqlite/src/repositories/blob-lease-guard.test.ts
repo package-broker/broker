@@ -143,6 +143,7 @@ describe('blobLeaseNotLive', () => {
   );
 
   it('agrees with claimPurge for null, expired and future leases', async () => {
+    await run("UPDATE package SET status = 'removed_upstream' WHERE org_id = ?", [a.orgId]);
     const repo = createBlobRepository(executor);
     for (const [i, lease] of [null, '-1 seconds', '+900 seconds'].entries()) {
       const n = i + 10;
@@ -156,6 +157,7 @@ describe('blobLeaseNotLive', () => {
   });
 
   it('agrees with leaseLive and canStartRemove when the lease equals database now', async () => {
+    await run("UPDATE package SET status = 'removed_upstream' WHERE org_id = ?", [a.orgId]);
     const now = '2026-10-17T12:00:00.000Z';
     const freeze = (statement: Statement): Statement => ({
       ...statement,

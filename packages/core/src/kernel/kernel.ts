@@ -1,3 +1,4 @@
+import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
 import { engineGrantOf } from '../authz/engine.js';
@@ -715,7 +716,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   });
 
   const https =
-    options.publicOrigin !== undefined && new URL(options.publicOrigin).protocol === 'https:';
+    options.publicOrigin !== undefined &&
+    parsePublicOrigin(options.publicOrigin, { http: 'allow' }).startsWith('https:');
 
   async function fetch(request: Request): Promise<Response> {
     const responsePolicy = { noStore: false };

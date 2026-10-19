@@ -2,7 +2,7 @@ import { type $ZodType, type output } from 'zod/v4/core';
 import { routeApiProblems } from '../kernel/routes.js';
 import type { ApiSlot, RequestContext, RouteBoundary, RouteDefinition } from '../plugin.js';
 import { assertRepresentable } from './json-schema.js';
-import { apiError, jsonResponse, type ApiErrorCode, type SERVICE_ERROR_TABLE } from './response.js';
+import { apiError, jsonResponse, SERVICE_ERROR_TABLE, type ApiErrorCode } from './response.js';
 import {
   readJsonBody,
   VALIDATION_CODES,
@@ -28,6 +28,21 @@ export interface ApiRouteSpec {
 export type ApiOutcome =
   | { readonly status: number; readonly body?: unknown; readonly etag?: number }
   | { readonly error: ApiErrorCode; readonly details?: readonly ValidationDetail[] };
+
+type ServiceFamily = keyof typeof SERVICE_ERROR_TABLE;
+
+export type RouteOutcome<S extends ApiRouteSpec> =
+  | ApiOutcome
+  | (S['service'] extends ServiceFamily
+      ? { readonly serviceError: keyof (typeof SERVICE_ERROR_TABLE)[S['service']] & string }
+      : never);
+
+const STALE_REVISION_ERROR: {
+  readonly [F in ServiceFamily]?: keyof (typeof SERVICE_ERROR_TABLE)[F] & string;
+} = {
+  AdminError: 'conflict',
+  ServicePrincipalError: 'conflict',
+};
 
 type Parsed<S extends $ZodType | undefined, Fallback> = S extends $ZodType ? output<S> : Fallback;
 
@@ -119,7 +134,7 @@ function withRequestId(response: Response, requestId: string): Response {
 
 export function apiRoute<const S extends ApiRouteSpec>(
   spec: S,
-  handler: (call: ApiCall<S>) => Promise<ApiOutcome>,
+  handler: (call: ApiCall<S>) => Promise<RouteOutcome<S>>,
 ): RouteDefinition {
   const { api, concurrency } = defineApi(spec);
   const declared = (status: number): boolean => Object.hasOwn(api.responses, String(status));
@@ -183,6 +198,26 @@ export function apiRoute<const S extends ApiRouteSpec>(
         body: parsedBody,
         expectedRevision,
       } as ApiCall<S>);
+
+      if ('serviceError' in outcome) {
+        const { service } = spec;
+        const key: unknown = outcome.serviceError;
+        if (
+          service === undefined ||
+          !Object.hasOwn(SERVICE_ERROR_TABLE, service) ||
+          typeof key !== 'string' ||
+          !Object.hasOwn(SERVICE_ERROR_TABLE[service], key)
+        ) {
+          throw new TypeError('API handler returned an invalid service error');
+        }
+        if (concurrency !== undefined && STALE_REVISION_ERROR[service] === key) {
+          return fail('precondition_failed');
+        }
+        const mapping = (SERVICE_ERROR_TABLE[service] as Record<string, { code: ApiErrorCode }>)[
+          key
+        ];
+        return fail(mapping!.code);
+      }
 
       if ('error' in outcome) {
         if (outcome.error === 'conflict' && concurrency !== undefined) {

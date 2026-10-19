@@ -1,5 +1,9 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
-import { MAX_PATTERN_BYTES } from '@package-broker/core/catalogue/patterns';
+import {
+  MAX_PATTERN_BYTES,
+  MAX_PATTERN_WILDCARDS,
+  MAX_PATTERNS_PER_RULE,
+} from '@package-broker/core/catalogue/patterns';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { guardAliases } from '../kysely.js';
 
@@ -20,9 +24,6 @@ export interface WinnerRefs {
 }
 
 const PROXY_TYPES = sql`('packagist_proxy', 'npmjs_proxy')`;
-
-const MAX_PATTERN_WILDCARDS = 4;
-const MAX_PATTERNS_PER_RULE = 64;
 
 // Mirrors isValidPattern in core/catalogue/patterns.ts; length() and glob stop at NUL, so a byte-length mismatch (NUL, non-ASCII) is invalid.
 function invalidPattern(pattern: Expression<unknown>): Expression<SqlBool> {

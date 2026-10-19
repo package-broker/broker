@@ -82,7 +82,8 @@
   },
   "files": [
     "dist",
-    "!dist/**/*.test.*"
+    "!dist/**/*.test.*",
+    "!dist/test-support"
   ],
   "dependencies": {
     "hono": "catalog:",

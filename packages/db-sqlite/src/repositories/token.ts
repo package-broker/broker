@@ -142,8 +142,7 @@ export interface TokenRepository {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    tokenId: string,
-    now: string,
+    input: Parameters<TokenRevokeStore['revoke']>[3],
   ): Promise<RevokeTokenResult>;
   /** Revoked and expired tokens included; null when the id is not in the organization. */
   get(ctx: OrgContext, tokenId: string): Promise<RevocableToken | null>;
@@ -744,7 +743,7 @@ export function createTokenRepository(
       return { status: 'refused', reason: 'selector_collision' };
     },
 
-    async revoke(ctx, fence, guard, tokenId, now) {
+    async revoke(ctx, fence, guard, { tokenId, now }) {
       nonEmpty('tokenId', tokenId);
       const stamp = timestamp('now', now);
       const opId = newOpId();

@@ -1,3 +1,5 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent, type AuditEventInput } from '../audit/actions.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp } from '../ids.js';
@@ -68,6 +70,8 @@ export interface ServicePrincipalStore {
       readonly createdByUserId: string;
       readonly permissions: readonly string[];
       readonly now: string;
+      readonly audit?: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
       readonly opId: string;
     },
   ): Promise<
@@ -82,10 +86,14 @@ export interface ServicePrincipalStore {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    permissions: readonly string[],
-    now: string,
-    opId: string,
+    input: {
+      readonly id: string;
+      readonly permissions: readonly string[];
+      readonly now: string;
+      readonly audit?: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+      readonly opId: string;
+    },
   ): Promise<
     'updated' | 'not_found' | 'invalid_permissions' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -93,17 +101,25 @@ export interface ServicePrincipalStore {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    now: string,
-    opId: string,
+    input: {
+      readonly id: string;
+      readonly now: string;
+      readonly audit?: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+      readonly opId: string;
+    },
   ): Promise<'suspended' | 'unchanged' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'>;
   restore(
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    id: string,
-    now: string,
-    opId: string,
+    input: {
+      readonly id: string;
+      readonly now: string;
+      readonly audit?: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+      readonly opId: string;
+    },
   ): Promise<
     'restored' | 'not_suspended' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
   >;
@@ -131,6 +147,7 @@ export interface ServicePrincipalService {
     actor: ActorContext,
     fence: MutationFence,
     input: { readonly name: string; readonly projectId: string | null },
+    call: ApiCall,
   ): Promise<
     ServicePrincipalResult<{ readonly id: string; readonly permissions: readonly string[] }>
   >;
@@ -140,18 +157,21 @@ export interface ServicePrincipalService {
     fence: MutationFence,
     id: string,
     permissions: readonly string[],
+    call: ApiCall,
   ): Promise<ServicePrincipalResult<null>>;
   suspend(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     id: string,
+    call: ApiCall,
   ): Promise<ServicePrincipalResult<null>>;
   restore(
     ctx: OrgContext,
     actor: ActorContext,
     fence: MutationFence,
     id: string,
+    call: ApiCall,
   ): Promise<ServicePrincipalResult<null>>;
   /** Records that a creator left or was suspended; the principals they created keep working. */
   creatorOffboarded(
@@ -196,6 +216,32 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
   const { principals, authority, directory, clock, ids } = deps;
 
   const now = (): string => isoTimestamp(clock.now());
+
+  function mutationAudit(
+    call: ApiCall,
+    actor: ActorContext,
+    action: AuditEventInput['action'],
+    id: string,
+    projectId: string | null,
+    stamp: string,
+    changes?: AuditEventInput['changes'],
+  ): { audit: AuditEvent; idempotency?: IdempotencyRecord } {
+    const result = auditEvent({
+      id: ids.ulid(),
+      now: stamp,
+      action,
+      actor: { type: 'user', id: actor.userId },
+      context: call.audit,
+      target: { type: 'service_principal', id },
+      projectId,
+      ...(changes === undefined ? {} : { changes }),
+    });
+    if (!result.ok) throw new TypeError('Invalid service principal audit event');
+    return {
+      audit: result.event,
+      ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+    };
+  }
 
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
@@ -318,6 +364,7 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
     fence: MutationFence,
     id: string,
     action: 'suspended' | 'restored',
+    call: ApiCall,
   ): Promise<ServicePrincipalResult<null>> {
     const refused = untagged(ctx, actor, action);
     if (refused !== null) return refused;
@@ -338,10 +385,25 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
       ...(action === 'restored' ? { coversStoredOf: id } : {}),
       ...(action === 'suspended' ? { allowArchived: true } : {}),
     });
+    const stamp = now();
+    const opId = ids.ulid();
+    const input = {
+      id,
+      now: stamp,
+      opId,
+      ...mutationAudit(
+        call,
+        actor,
+        action === 'suspended' ? 'service_principal.suspend' : 'service_principal.restore',
+        id,
+        target.projectId,
+        stamp,
+      ),
+    };
     const result: string =
       action === 'suspended'
-        ? await principals.suspend(ctx, held, guard, id, now(), ids.ulid())
-        : await principals.restore(ctx, held, guard, id, now(), ids.ulid());
+        ? await principals.suspend(ctx, held, guard, input)
+        : await principals.restore(ctx, held, guard, input);
     if (result === 'unchanged') return OK;
     if (result !== 'suspended' && result !== 'restored') {
       return refusal(ctx, actor, action, result);
@@ -351,7 +413,7 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
   }
 
   return {
-    async create(ctx, actor, fence, input) {
+    async create(ctx, actor, fence, input, call) {
       const refused = untagged(ctx, actor, 'created');
       if (refused !== null) return refused;
       const held = requireFence(actor, fence);
@@ -369,21 +431,28 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
         covers: snapshot,
       });
       const id = ids.ulid();
+      const stamp = now();
+      const opId = ids.ulid();
       const result = await principals.create(ctx, held, guard, {
         id,
         name: input.name,
         projectId,
         createdByUserId: actor.userId,
         permissions: snapshot,
-        now: now(),
-        opId: ids.ulid(),
+        now: stamp,
+        opId,
+        ...mutationAudit(call, actor, 'service_principal.create', id, projectId, stamp, {
+          name: { new: input.name },
+          project_id: { new: projectId },
+          permissions: { new: snapshot },
+        }),
       });
       if (result !== 'created') return refusal(ctx, actor, 'created', result);
       changed(ctx, actor, 'created', id, projectId);
       return { ok: true, value: { id, permissions: snapshot } };
     },
 
-    async setPermissions(ctx, actor, fence, id, permissions) {
+    async setPermissions(ctx, actor, fence, id, permissions, call) {
       const refused = untagged(ctx, actor, 'permissions_changed');
       if (refused !== null) return refused;
       const held = requireFence(actor, fence);
@@ -414,15 +483,33 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
         covers: next,
         ...(narrowing ? { allowArchived: true } : {}),
       });
-      const result = await principals.setPermissions(ctx, held, guard, id, next, now(), ids.ulid());
+      const stamp = now();
+      const opId = ids.ulid();
+      const result = await principals.setPermissions(ctx, held, guard, {
+        id,
+        permissions: next,
+        now: stamp,
+        opId,
+        ...mutationAudit(
+          call,
+          actor,
+          'service_principal.permissions_set',
+          id,
+          target.projectId,
+          stamp,
+          {
+            permissions: { new: next },
+          },
+        ),
+      });
       if (result !== 'updated') return refusal(ctx, actor, 'permissions_changed', result);
       changed(ctx, actor, 'permissions_changed', id, target.projectId);
       return OK;
     },
 
-    suspend: (ctx, actor, fence, id) => transition(ctx, actor, fence, id, 'suspended'),
+    suspend: (ctx, actor, fence, id, call) => transition(ctx, actor, fence, id, 'suspended', call),
 
-    restore: (ctx, actor, fence, id) => transition(ctx, actor, fence, id, 'restored'),
+    restore: (ctx, actor, fence, id, call) => transition(ctx, actor, fence, id, 'restored', call),
 
     async creatorOffboarded(ctx, input) {
       let created: Awaited<ReturnType<ServicePrincipalDeps['directory']['createdBy']>>;

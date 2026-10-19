@@ -21,7 +21,7 @@ export interface Role {
   readonly permissions: readonly string[];
 }
 
-type MutationInput = { readonly audit?: AuditEvent; readonly idempotency?: IdempotencyRecord };
+type MutationInput = { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord };
 
 export interface RoleRepository {
   list(ctx: OrgContext): Promise<Role[]>;
@@ -53,7 +53,9 @@ export interface RoleRepository {
       readonly now: string;
       readonly opId: string;
     },
-  ): Promise<'created' | 'duplicate_key' | 'invalid_permissions' | 'authority' | 'indeterminate'>;
+  ): Promise<
+    'created' | 'duplicate_key' | 'invalid_permissions' | 'authority' | 'conflict' | 'indeterminate'
+  >;
   /**
    * `locked` for a role that protects the last holder. Rejects a name of 0 or more than 100 code
    * points, or one holding control, format, line or paragraph separator characters or a lone

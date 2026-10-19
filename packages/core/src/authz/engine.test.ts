@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { sha256Hex } from '../auth/primitives.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
@@ -9,6 +9,10 @@ import type { AuthorizationRequest } from '../kernel/authorize.js';
 import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
+import { accessContextOf } from './access-context.js';
+import type { AccessContextSnapshot } from './access-context.js';
+import type { AccessCheckInput } from '../plugin.js';
+import type { ScopeLevel } from './scope.js';
 import { createAuthorizationEngine, engineGrantOf, patValidationGate } from './engine.js';
 import type { AuthorizationEngineDeps, EngineSessionAccess, EngineTokenAccess } from './engine.js';
 
@@ -43,7 +47,7 @@ interface State {
     hashOf: string;
     bindingOk: boolean;
     projectMode: 'all' | 'selected' | null;
-    scope: { level: string; readOnly: boolean } | null;
+    scope: { level: ScopeLevel; readOnly: boolean } | null;
     lastUsedAt: string | null;
   };
   lookups: number;
@@ -260,16 +264,13 @@ describe('construction', () => {
 });
 
 describe('route shape', () => {
-  it.each(['absent', 'none', 'self', 'package'] as const)(
-    'denies boundary %s with 403',
-    async (b) => {
-      const state = freshState();
-      const engine = createAuthorizationEngine(deps(state));
-      const request = req({ headers: cookie, boundary: b });
-      expect(await engine.authorize(request)).toEqual({ allow: false, status: 403 });
-      expect(state.lookups).toBe(0);
-    },
-  );
+  it.each(['absent', 'none', 'package'] as const)('denies boundary %s with 403', async (b) => {
+    const state = freshState();
+    const engine = createAuthorizationEngine(deps(state));
+    const request = req({ headers: cookie, boundary: b });
+    expect(await engine.authorize(request)).toEqual({ allow: false, status: 403 });
+    expect(state.lookups).toBe(0);
+  });
 });
 
 describe('session', () => {
@@ -845,6 +846,94 @@ describe('with the kernel', () => {
 });
 
 describe('engine grants', () => {
+  it.each([
+    { name: 'read PAT', kind: 'pat', scope: 'read', readOnly: true },
+    { name: 'write service token', kind: 'svc', scope: 'write', readOnly: false },
+    { name: 'session', kind: null, scope: null, readOnly: false },
+  ] as const)(
+    'carries $name metadata through the kernel only to the core snapshot',
+    async ({ kind, scope, readOnly }) => {
+      const state = freshState();
+      if (kind !== null && scope !== null) {
+        state.token.kind = kind;
+        state.token.hashOf = kind === 'pat' ? PAT : SVC;
+        state.token.scope = { level: scope, readOnly };
+      }
+      const snapshots: (AccessContextSnapshot | null)[] = [];
+      const hookInputs: AccessCheckInput[] = [];
+      let grantToken: unknown;
+      const baseEngine = createAuthorizationEngine(deps(state));
+      const kernel = await createKernel({
+        platform: 'node',
+        plugins: [
+          {
+            id: 'observer',
+            package: '@test/observer',
+            apiVersion: 3,
+            platforms: ['node'],
+            register(registry) {
+              registry.hook('access.check', (input) => {
+                hookInputs.push(input);
+              });
+            },
+          },
+        ],
+        ports: {
+          organizations: { get: () => Promise.resolve(null) },
+          clock: fixedClock('2026-10-16T12:00:00.000Z'),
+          ids: { ulid: () => '01JA0000000000000000000000' },
+        },
+        resolveOrg: () => Promise.resolve(org),
+        health: () => Promise.resolve(true),
+        log: () => undefined,
+        authorization: {
+          async authorize(request) {
+            const decision = await baseEngine.authorize(request);
+            grantToken = engineGrantOf(request)?.token;
+            return decision;
+          },
+        },
+        coreRoutes: [
+          {
+            method: 'GET',
+            path: '/_pb/projects/:project',
+            permission: 'project:read',
+            boundary: 'project',
+            handler(context) {
+              snapshots.push(accessContextOf(context));
+              expect(context).not.toHaveProperty('token');
+              return Response.json({ ok: true });
+            },
+          },
+        ],
+      });
+      const response = await kernel.fetch(
+        new Request(`${ORIGIN}/_pb/projects/demo`, {
+          headers: kind === null ? cookie : bearer(state.token.hashOf),
+        }),
+      );
+      expect(response.status).toBe(200);
+      const expected = kind === null ? null : { kind, scope, readOnly };
+      expect(grantToken).toEqual(expected);
+      expect(Object.isFrozen(grantToken)).toBe(true);
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]?.token).toEqual(expected);
+      if (state.token.scope !== null) state.token.scope.readOnly = !readOnly;
+      expect(snapshots[0]?.token).toEqual(expected);
+      expect(hookInputs).toEqual([
+        {
+          org,
+          principal:
+            kind === 'svc' ? { kind: 'service', id: 'svc-1' } : { kind: 'user', id: 'user-1' },
+          permission: 'project:read',
+          projectId: 'proj-1',
+        },
+      ]);
+      expect(hookInputs[0]).not.toHaveProperty('scope');
+      expect(hookInputs[0]).not.toHaveProperty('token');
+    },
+  );
+
   it.each([true, false])(
     'copies and freezes the session snapshot (protected=%s)',
     async (protectedHolder) => {
@@ -912,6 +1001,7 @@ describe('engine grants', () => {
         sessionId: null,
         actor: null,
         tokenSelector: kind === 'pat' ? SELECTOR : 'mnopqrstuvwx',
+        token: { kind, scope: 'full', readOnly: false },
       });
     },
   );
@@ -1234,16 +1324,6 @@ describe('authenticated boundary', () => {
     const engine = createAuthorizationEngine(deps(state));
     expect(await engine.authorize(ask(bearer(PAT)))).toEqual({ allow: false, status: 401 });
   });
-
-  it('still answers 403 for the self boundary with a valid session', async () => {
-    const state = freshState();
-    const engine = createAuthorizationEngine(deps(state));
-    expect(await engine.authorize(req({ headers: cookie, boundary: 'self' }))).toEqual({
-      allow: false,
-      status: 403,
-    });
-    expect(state.lookups).toBe(0);
-  });
 });
 
 describe('authenticated boundary through the kernel', () => {
@@ -1465,5 +1545,373 @@ describe('SSO freshness outside the authenticated boundary', () => {
       ).allow,
     ).toBe(true);
     expect((await engine.authorize(req({ headers: cookie }))).allow).toBe(true);
+  });
+});
+
+describe('self boundary', () => {
+  const BASE = 'http://broker.test';
+  const ask = (headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
+    req({
+      headers,
+      boundary: 'self',
+      permission: 'self',
+      params: {},
+      ...extra,
+    });
+
+  async function kernelWith(state: State, calls: unknown[], overrides = {}) {
+    return createKernel({
+      platform: 'node',
+      plugins: [],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock: fixedClock('2026-10-16T12:00:00.000Z'),
+        ids: { ulid: () => '01JA0000000000000000000000' },
+      },
+      resolveOrg: () => Promise.resolve(org),
+      health: () => Promise.resolve(true),
+      log: () => undefined,
+      authorization: createAuthorizationEngine(deps(state, overrides)),
+      coreRoutes: [
+        {
+          method: 'GET',
+          path: '/_pb/organization',
+          permission: 'org:read',
+          boundary: 'organization',
+          handler: () => Response.json({ ok: true }),
+        },
+        {
+          method: 'POST',
+          path: '/_pb/organization',
+          permission: 'org:read',
+          boundary: 'organization',
+          handler: () => Response.json({ ok: true }),
+        },
+        {
+          method: 'GET',
+          path: '/_pb/me/tokens',
+          permission: null,
+          boundary: 'self',
+          handler: (context) => {
+            const access = accessContextOf(context);
+            calls.push({
+              principal: context.principal,
+              projectId: context.projectId,
+              sessionId: access?.sessionId ?? null,
+              actor: access?.actor ?? null,
+            });
+            return Response.json({ ok: true });
+          },
+        },
+        {
+          method: 'POST',
+          path: '/_pb/me/tokens',
+          permission: null,
+          boundary: 'self',
+          handler: (context) => {
+            calls.push({ principal: context.principal });
+            return Response.json({ ok: true });
+          },
+        },
+      ],
+    });
+  }
+
+  const strip = (body: { error: { requestId?: string } }) => ({
+    ...body,
+    error: { ...body.error, requestId: undefined },
+  });
+
+  async function selfResponse(headers: Record<string, string>, state = freshState()) {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(state, calls);
+    const response = await kernel.fetch(new Request(`${BASE}/_pb/me/tokens`, { headers }));
+    return { status: response.status, body: strip((await response.json()) as never), calls };
+  }
+
+  it('runs the handler for a live session with the user principal and the session id', async () => {
+    const result = await selfResponse(cookie);
+    expect(result.status).toBe(200);
+    expect(result.calls).toEqual([
+      {
+        principal: { kind: 'user', id: 'user-1' },
+        projectId: null,
+        sessionId: 'sess-1',
+        actor: expect.objectContaining({
+          session: { id: 'sess-1', userId: 'user-1' },
+          user: { id: 'user-1' },
+        }),
+      },
+    ]);
+  });
+
+  it('allows a session with no permission rows at the engine', async () => {
+    const state = freshState();
+    state.sessionOrg = [];
+    state.sessionProjectPermissions = [];
+    const decision = await createAuthorizationEngine(deps(state)).authorize(ask(cookie));
+    expect(decision).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+    });
+  });
+
+  it('answers 401 without a credential', async () => {
+    const result = await selfResponse({});
+    expect(result.status).toBe(401);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a malformed cookie with the same 401 body', async () => {
+    const anonymous = await selfResponse({});
+    const malformed = await selfResponse({ cookie: '__Host-pb_session=not-a-session' });
+    expect(malformed.status).toBe(401);
+    expect(malformed.body).toEqual(anonymous.body);
+    expect(malformed.calls).toEqual([]);
+  });
+
+  it('answers a revoked session with the same 401 body', async () => {
+    const state = freshState();
+    state.sessionRevoked = true;
+    const anonymous = await selfResponse({});
+    const revoked = await selfResponse(cookie, state);
+    expect(revoked.status).toBe(401);
+    expect(revoked.body).toEqual(anonymous.body);
+    expect(revoked.calls).toEqual([]);
+  });
+
+  const FORBIDDEN_BODY = {
+    error: { code: 'forbidden', message: 'Forbidden', requestId: undefined },
+  };
+
+  async function validTokenResponse(token: string, kind: 'pat' | 'svc') {
+    const state = freshState();
+    state.token.kind = kind;
+    state.token.hashOf = token;
+    const result = await selfResponse(bearer(token), state);
+    expect(state.touches).toEqual([]);
+    return result;
+  }
+
+  it('answers a valid PAT with the generic forbidden envelope', async () => {
+    const result = await validTokenResponse(PAT, 'pat');
+    expect(result.status).toBe(403);
+    expect(result.body).toEqual(FORBIDDEN_BODY);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a valid service token with the generic forbidden envelope', async () => {
+    const result = await validTokenResponse(SVC, 'svc');
+    expect(result.status).toBe(403);
+    expect(result.body).toEqual(FORBIDDEN_BODY);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers the PAT and service token refusals with identical bodies', async () => {
+    const pat = await validTokenResponse(PAT, 'pat');
+    const svc = await validTokenResponse(SVC, 'svc');
+    expect(svc.body).toEqual(pat.body);
+  });
+
+  it.each([
+    ['an inconsistent binding', (s: State) => void (s.token.bindingOk = false)],
+    ['an unparseable scope', (s: State) => void (s.token.scope = null)],
+    ['no project mode', (s: State) => void (s.token.projectMode = null)],
+    ['an inactive principal', (s: State) => void (s.token.principalStatus = 'suspended')],
+  ])('answers a Bearer with %s with the uniform 401', async (_name, break_) => {
+    const anonymous = await selfResponse({});
+    const state = freshState();
+    break_(state);
+    const result = await selfResponse(bearer(PAT), state);
+    expect(result.status).toBe(401);
+    expect(result.body).toEqual(anonymous.body);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a Bearer that does not authenticate with 401', async () => {
+    const state = freshState();
+    state.token.revoked = true;
+    const result = await selfResponse(bearer(PAT), state);
+    expect(result.status).toBe(401);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('answers a Basic credential with 401', async () => {
+    const result = await selfResponse({ authorization: `Basic ${btoa(`${PAT}:x`)}` });
+    expect(result.status).toBe(401);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('ignores a valid session cookie when a Bearer credential is present', async () => {
+    const result = await selfResponse({ ...cookie, ...bearer(PAT) });
+    expect(result.status).toBe(403);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('refuses a stale SSO identity like an authenticated route', async () => {
+    const state = freshState();
+    state.sessionIdentity = { id: 'identity-1', provider: 'oidc', fresh: false };
+    state.sessionOrg = [];
+    const result = await selfResponse(cookie, state);
+    expect(result.status).toBe(403);
+    expect(result.calls).toEqual([]);
+    expect(state.touches).toEqual([]);
+  });
+
+  it('refuses a cookie POST without X-CSRF-Token exactly as an organization route does', async () => {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(freshState(), calls);
+    const headers = { ...cookie, origin: ORIGIN };
+    const self = await kernel.fetch(
+      new Request(`${BASE}/_pb/me/tokens`, { method: 'POST', headers }),
+    );
+    const organization = await kernel.fetch(
+      new Request(`${BASE}/_pb/organization`, { method: 'POST', headers }),
+    );
+    expect(self.status).toBe(403);
+    expect(self.status).toBe(organization.status);
+    expect(strip((await self.json()) as never)).toEqual(
+      strip((await organization.json()) as never),
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('runs a cookie POST that carries same-origin and the CSRF token', async () => {
+    const calls: unknown[] = [];
+    const kernel = await kernelWith(freshState(), calls);
+    const response = await kernel.fetch(
+      new Request(`${BASE}/_pb/me/tokens`, {
+        method: 'POST',
+        headers: { ...cookie, origin: ORIGIN, 'x-csrf-token': CSRF },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('bearer-only authenticated MCP POST', () => {
+  const ask = (headers: Record<string, string>): AuthorizationRequest => {
+    const request = req({
+      headers,
+      method: 'POST',
+      boundary: 'authenticated',
+      permission: 'authenticated',
+      params: {},
+    });
+    return { ...request, route: { ...request.route, path: '/_pb/mcp', bearerOnly: true } };
+  };
+
+  it('allows a bearer token and retains the T680 grant', async () => {
+    const state = freshState();
+    state.token.organizationPermissions = [];
+    const engine = createAuthorizationEngine(deps(state));
+    const request = ask(bearer(PAT));
+    expect(await engine.authorize(request)).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: null,
+      tokenId: 'tok-1',
+    });
+    expect(engineGrantOf(request)).toMatchObject({
+      principal: { kind: 'user', id: 'user-1' },
+      sessionId: null,
+      tokenSelector: SELECTOR,
+      token: { kind: 'pat', scope: 'full', readOnly: false },
+    });
+  });
+
+  it('ignores a valid session cookie without reading the session repository', async () => {
+    const dependencies = deps(freshState());
+    const lookup = vi.spyOn(dependencies.access, 'lookupSession');
+    const engine = createAuthorizationEngine(dependencies);
+    expect(await engine.authorize(ask(cookie))).toEqual(await engine.authorize(ask({})));
+    expect(await engine.authorize(ask(cookie))).toEqual({ allow: false, status: 401 });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('refuses Basic credentials with the missing-credential 401', async () => {
+    const dependencies = deps(freshState());
+    const lookup = vi.spyOn(dependencies.access, 'lookupToken');
+    const engine = createAuthorizationEngine(dependencies);
+    const decision = await engine.authorize(ask({ authorization: `Basic ${btoa(`${PAT}:x`)}` }));
+    expect(decision).toEqual(await engine.authorize(ask({})));
+    expect(decision).toEqual({ allow: false, status: 401 });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  async function kernelWith(state: State) {
+    const dependencies = deps(state);
+    const lookup = vi.spyOn(dependencies.access, 'lookupSession');
+    const kernel = await createKernel({
+      platform: 'node',
+      plugins: [],
+      coreRoutes: [
+        {
+          method: 'POST',
+          path: '/_pb/mcp',
+          permission: null,
+          boundary: 'authenticated',
+          bearerOnly: true,
+          handler: (context) =>
+            Response.json({
+              principal: context.principal,
+              token: accessContextOf(context)?.token,
+            }),
+        },
+      ],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock: fixedClock('2026-10-16T12:00:00.000Z'),
+        ids: { ulid: () => '01JA0000000000000000000000' },
+      },
+      resolveOrg: () => Promise.resolve(org),
+      health: () => Promise.resolve(true),
+      log: () => undefined,
+      authorization: createAuthorizationEngine(dependencies),
+    });
+    return { kernel, lookup };
+  }
+
+  it('carries the flag through the kernel and allows Bearer with a cookie present', async () => {
+    const { kernel, lookup } = await kernelWith(freshState());
+    const response = await kernel.fetch(
+      new Request(`${ORIGIN}/_pb/mcp`, {
+        method: 'POST',
+        headers: { ...cookie, ...bearer(PAT) },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      principal: { kind: 'user', id: 'user-1' },
+      token: { kind: 'pat' },
+    });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  async function refusal(headers: Record<string, string>) {
+    const { kernel, lookup } = await kernelWith(freshState());
+    const response = await kernel.fetch(
+      new Request(`${ORIGIN}/_pb/mcp`, { method: 'POST', headers }),
+    );
+    const body = (await response.json()) as { error: { requestId?: string } };
+    delete body.error.requestId;
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.delete('x-request-id');
+    expect(lookup).not.toHaveBeenCalled();
+    return { status: response.status, body, headers: [...responseHeaders] };
+  }
+
+  it('returns the missing-credential envelope for a cookie-only POST', async () => {
+    const anonymous = await refusal({});
+    expect(anonymous.status).toBe(401);
+    expect(await refusal(cookie)).toEqual(anonymous);
+  });
+
+  it('returns the missing-credential envelope for a Basic POST', async () => {
+    expect(await refusal({ authorization: `Basic ${btoa(`${PAT}:x`)}` })).toEqual(
+      await refusal({}),
+    );
   });
 });

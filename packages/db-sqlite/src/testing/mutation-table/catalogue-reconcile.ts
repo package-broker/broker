@@ -115,7 +115,13 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
           kind === 'source'
             ? completeSourceListing({ sourceId: 'OS', stamp, count: 2 })
             : completeVersionListing({ packageId: 'OK', stamp, count: 2 });
-        await expect(reconciler.finalizeListing(own, guard, listing)).resolves.toMatchObject({
+        await expect(
+          reconciler.finalizeListing(own, guard, listing, {
+            attemptedCandidates: 2,
+            successfulCandidates: 2,
+            definitiveAbsent: 0,
+          }),
+        ).resolves.toMatchObject({
           removed: 1,
           restored: 1,
           statements: kind === 'source' ? 11 : 14,
@@ -180,7 +186,7 @@ export const entries: readonly MutationEntry[] = [
         name: `${kind} transitions select only own versions`,
         locate: /version.org_id = \?(?=\s+AND version.status = \? AND)/,
         neutral: NOT_NULL,
-        copies: kind === 'package' ? 4 : 2,
+        copies: kind === 'package' ? 3 : 2,
         caseName: reconcileCase(kind).name,
       })),
       {
@@ -192,6 +198,12 @@ export const entries: readonly MutationEntry[] = [
       },
     ],
     waivers: [
+      {
+        locate:
+          /version.org_id = \?(?=\s+AND version.last_op_id = \? AND version.status = 'active')/,
+        reason:
+          'Revival revisions select the rows stamped with this operation id, and only the organization scoped revival update stamps it.',
+      },
       {
         locate: /blob.org_id = \?/,
         reason: 'The composed removedBlobs builder has its own organization mutation registration.',

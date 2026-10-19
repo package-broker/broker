@@ -4,12 +4,14 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
+import { brokerObservabilityProblems } from '@package-broker/core/config';
 import { validatePlatformPorts } from '@package-broker/core/platform/port-config';
 import {
   collectRegistrations,
   KernelConfigError,
   type Registration,
 } from '@package-broker/core/kernel/registry';
+import type { PackageVisibilityPort } from '@package-broker/core/db/catalogue';
 import type { Platform } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
 import {
@@ -47,6 +49,11 @@ export interface BuildResult {
   buildInfo: string;
   metafile: Metafile;
 }
+
+export const declarationOnlyPackageResolver: PackageVisibilityPort = Object.freeze({
+  resolve: () =>
+    Promise.reject(new Error('the build-time package resolver validates declarations only')),
+});
 
 export class BuildDiagnosticsError extends Error {
   readonly problems: readonly string[];
@@ -110,6 +117,8 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const config = await loadConfig(configPath, cwd);
   const target = options.target ?? config.platform;
 
+  const observabilityProblems = brokerObservabilityProblems(config);
+  if (observabilityProblems.length > 0) throw new BuildDiagnosticsError(observabilityProblems);
   const errors = validatePluginShape(config.plugins, target);
   errors.push(...validatePlatformPorts(config.platformPorts, target));
   const stanza =
@@ -124,7 +133,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const plugins = orderPlugins(config.plugins);
   let registration: Registration;
   try {
-    registration = collectRegistrations(plugins);
+    registration = collectRegistrations(plugins, {
+      packageResolver: declarationOnlyPackageResolver,
+    });
   } catch (error) {
     if (!(error instanceof KernelConfigError)) throw error;
     if (error.problems.every(isRouteProblem)) throw new BuildDiagnosticsError(error.problems);

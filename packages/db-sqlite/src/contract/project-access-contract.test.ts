@@ -6,6 +6,8 @@ const call = {
     tokenSelector: null,
   },
 };
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
@@ -376,6 +378,7 @@ describe('project access with real persistence', () => {
           org,
           fence(),
           {
+            audit: mutationAudit('role.create', id(nextId++)),
             id: id(nextId++),
             key: 'invalid',
             name: 'Invalid',
@@ -536,3 +539,17 @@ describe('project access with real persistence', () => {
     expect(await snapshot()).toBe(before);
   });
 });
+
+function mutationAudit(action: AuditAction, targetId: string | null) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: '2026-10-19T00:00:00.000Z',
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

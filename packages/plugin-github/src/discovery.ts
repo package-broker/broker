@@ -1,8 +1,10 @@
-import {
-  GITHUB_API_VERSION,
-  UpstreamError,
-  type PolicyFetch,
-  type UpstreamCredential,
+import { GITHUB_API_VERSION, UpstreamError } from '@package-broker/core/plugin';
+import type {
+  DiscoveryCandidate as ExistingCandidate,
+  PlanEntry,
+  PolicyFetch,
+  SkipReason,
+  UpstreamCredential,
 } from '@package-broker/core/plugin';
 import { InstallationTokenError, type InstallationTokens } from './installation-token.js';
 
@@ -34,28 +36,7 @@ export class DiscoveryError extends Error {
 
 export type DiscoveryEcosystem = 'composer' | 'npm';
 
-export type SkipReason =
-  | 'archived'
-  | 'no_manifest'
-  | 'invalid_name'
-  | 'npm_from_vcs_unsupported'
-  | 'filtered_out'
-  | 'error_451'
-  | 'error_404';
-
-export interface PlanEntry {
-  readonly repository: string;
-  readonly ecosystem: DiscoveryEcosystem | null;
-  readonly packageName: string | null;
-  readonly action: 'new' | 'existing' | 'skipped';
-  readonly reason: SkipReason | null;
-}
-
-export interface ExistingCandidate {
-  readonly repository: string;
-  readonly ecosystem: DiscoveryEcosystem;
-  readonly packageName: string;
-}
+export type { DiscoveryCandidate as ExistingCandidate } from '@package-broker/core/plugin';
 
 export interface DiscoveryOptions {
   readonly tokens: InstallationTokens;

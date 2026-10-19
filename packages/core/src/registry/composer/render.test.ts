@@ -75,6 +75,7 @@ function harness() {
     })),
   };
   const options = {
+    requestId: crypto.randomUUID(),
     actor,
     access,
     clock,
@@ -336,5 +337,53 @@ describe('Composer documents', () => {
     expect(await (await renderPackagesJson(h.options)).json()).not.toHaveProperty(
       'available-packages',
     );
+  });
+});
+
+describe('Composer error envelopes', () => {
+  it.each(['missing', 'empty', 'denied', 'incomplete', 'changed'])(
+    'uses the request id and fixed message for %s',
+    async (scenario) => {
+      const h = harness();
+      if (scenario === 'missing') h.versions.mockResolvedValue(null);
+      if (scenario === 'empty') h.versions.mockResolvedValue(page([]));
+      if (scenario === 'incomplete')
+        h.versions.mockResolvedValue(
+          page([version()], { pkg: { ...pkg, listingComplete: false } }),
+        );
+      if (scenario === 'changed') h.versions.mockResolvedValue({ changed: true });
+      const unavailable = scenario === 'incomplete' || scenario === 'changed';
+      const requestId = crypto.randomUUID();
+      const response = await renderComposerP2({
+        ...h.options,
+        requestId,
+        ...(scenario === 'denied' ? { actor: { ...actor, permissions: new Set<string>() } } : {}),
+      });
+      expect(response.status).toBe(unavailable ? 503 : 404);
+      expect(response.headers.get('x-request-id')).toBe(requestId);
+      expect(response.headers.get('cache-control')).toBe(
+        unavailable ? 'no-store' : 'private, max-age=300',
+      );
+      expect(await response.json()).toEqual({
+        error: {
+          code: unavailable ? 'unavailable' : 'not_found',
+          message: unavailable ? 'Service unavailable' : 'Not found',
+          requestId,
+        },
+      });
+    },
+  );
+
+  it('uses the supplied request id for denied packages.json', async () => {
+    const h = harness();
+    const response = await renderPackagesJson({
+      ...h.options,
+      actor: { ...actor, permissions: new Set() },
+    });
+    const requestId = h.options.requestId;
+    expect(response.headers.get('x-request-id')).toBe(requestId);
+    expect(await response.json()).toEqual({
+      error: { code: 'not_found', message: 'Not found', requestId },
+    });
   });
 });

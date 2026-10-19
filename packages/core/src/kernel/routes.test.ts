@@ -259,3 +259,89 @@ describe('authenticated boundary registration', () => {
     expect(descriptor?.sessionOnly).toBe(false);
   });
 });
+
+describe('self boundary registration', () => {
+  const self = { path: '/_pb/me/tokens', method: 'GET', permission: null, boundary: 'self' };
+  const core = { allowSelf: true };
+  const problems = (patch: Record<string, unknown>, options: object = core): string[] =>
+    routeBoundaryProblems({ ...self, ...patch }, 'route', options);
+
+  it('accepts a core route without permission and without :project', () => {
+    expect(problems({})).toEqual([]);
+  });
+
+  it('refuses a permission', () => {
+    const found = problems({ permission: 'org:read' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must not require a permission/);
+  });
+
+  it('refuses :project in the path', () => {
+    const found = problems({ path: '/_pb/projects/:project/tokens' });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/must not have :project/);
+  });
+
+  it('refuses a route registered without the core option', () => {
+    const found = problems({}, {});
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/not available to plugin routes/);
+  });
+});
+
+describe('bearer-only route registration', () => {
+  const route = {
+    method: 'POST',
+    path: '/_pb/mcp',
+    permission: null,
+    boundary: 'authenticated',
+    bearerOnly: true,
+  };
+  const core = { allowAuthenticated: true };
+  const problems = (patch: Record<string, unknown> = {}) =>
+    routeBoundaryProblems({ ...route, ...patch }, 'route', core);
+
+  it('accepts the core authenticated MCP POST', () => {
+    expect(problems()).toEqual([]);
+  });
+
+  it('refuses another path', () => {
+    expect(problems({ path: '/_pb/other' }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses another boundary', () => {
+    expect(problems({ boundary: 'none' }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses another method', () => {
+    expect(problems({ method: 'GET' }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses a permission', () => {
+    expect(problems({ permission: 'org:read' }).length).toBeGreaterThan(0);
+  });
+
+  it('refuses a non-true flag', () => {
+    expect(problems({ bearerOnly: false }).join(' ')).toContain('bearerOnly');
+  });
+
+  it('refuses bearerOnly on a real plugin route independently of its boundary', () => {
+    const plugin: PluginDefinition = {
+      id: 'demo',
+      package: '@test/demo',
+      apiVersion: SUPPORTED_PLUGIN_API[1],
+      platforms: ['node'],
+      register(registry) {
+        const definition = {
+          method: 'GET' as const,
+          path: '/items',
+          permission: null,
+          bearerOnly: true as const,
+          handler: () => new Response('ok'),
+        };
+        registry.route(definition);
+      },
+    };
+    expect(() => collectRegistrations([plugin])).toThrow(/bearerOnly/);
+  });
+});

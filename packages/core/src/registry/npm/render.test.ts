@@ -70,6 +70,7 @@ function harness(overrides: Partial<CatalogueReader> = {}) {
   return {
     reader,
     options: {
+      requestId: crypto.randomUUID(),
       access: createPackageAccess(reader),
       actor,
       projectSlug: 'project',
@@ -318,5 +319,56 @@ describe('npm rendering', () => {
       })(),
     ).rejects.toThrow('catalogue changed');
     expect(resolveVersions).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('npm errors', () => {
+  it.each(['packument', 'version', 'tag'] as const)(
+    'uses a fixed npm error shape and preserves headers for %s failures',
+    async (form) => {
+      for (const unavailable of [false, true]) {
+        const { options } = harness();
+        const access = {
+          ...options.access,
+          versions: vi.fn(async () =>
+            unavailable ? { ...page, pkg: { ...page.pkg, listingComplete: false } } : null,
+          ),
+          version: vi.fn(async () =>
+            unavailable ? { pkg: { ...page.pkg, listingComplete: false }, version } : null,
+          ),
+          tag: vi.fn(async () =>
+            unavailable ? { pkg: { ...page.pkg, listingComplete: false }, version } : null,
+          ),
+        };
+        const requestId = crypto.randomUUID();
+        const input = { ...options, access, requestId };
+        const response =
+          form === 'packument'
+            ? await renderPackument(input)
+            : await renderVersionDocument(input, form === 'version' ? '1.0.0' : 'latest');
+        expect(response.status).toBe(unavailable ? 503 : 404);
+        expect(response.headers.get('x-request-id')).toBe(requestId);
+        expect(response.headers.get(unavailable ? 'retry-after' : 'cache-control')).toBe(
+          unavailable ? '10' : 'private, max-age=300',
+        );
+        expect(await response.json()).toEqual({
+          error: unavailable ? 'Service unavailable' : 'Not found',
+          code: unavailable ? 'unavailable' : 'not_found',
+          requestId,
+        });
+      }
+    },
+  );
+
+  it('uses the supplied id for standalone renderer calls', async () => {
+    const { options } = harness({ resolveVersions: vi.fn(async () => null) });
+    const response = await renderPackument(options);
+    const requestId = options.requestId;
+    expect(response.headers.get('x-request-id')).toBe(requestId);
+    expect(await response.json()).toEqual({
+      error: 'Not found',
+      code: 'not_found',
+      requestId,
+    });
   });
 });

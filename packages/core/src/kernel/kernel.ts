@@ -1,3 +1,4 @@
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '../ingest/finalize-guard.js';
 import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
 import type { AccessContextSnapshot } from '../authz/access-context.js';
@@ -12,7 +13,6 @@ import type {
   Platform,
   Principal,
   RequestContext,
-  RouteDefinition,
 } from '../plugin.js';
 import { createRepositoryJobs } from '../platform/jobs-port.js';
 import type { JobsFactory } from '../platform/jobs-port.js';
@@ -34,7 +34,7 @@ import type {
 } from './authorize.js';
 import { denialResponse } from './denial-page.js';
 import { defaultLog, envelopeResponse, errorResponse, responseReason } from './errors.js';
-import type { KernelLog } from './errors.js';
+import type { ErrorFormat, KernelLog } from './errors.js';
 import { reportableErrorName } from './error-name.js';
 import { liveResponse, readyResponse } from './health.js';
 import {
@@ -59,6 +59,7 @@ import type { PlatformServices } from './plugin-ports.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { packageActorOf } from '../internal/package-actor.js';
 import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
+import type { RouteDefinition } from './routes.js';
 import {
   compareRoutePrecedence,
   ownedRoutesConflict,
@@ -135,7 +136,7 @@ type KernelEnv = {
 type RegisteredRoute = Registration['routes'][number];
 
 const CORE_PLUGIN = 'core';
-/** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated boundary. */
+/** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated and self boundaries. */
 const AUTHENTICATED_PLACEHOLDER = 'authenticated';
 const CORE_PREFIX = '/_pb/';
 const RESERVED_ROOTS = ['/health', '/_pb'] as const;
@@ -143,6 +144,12 @@ const RESERVED_ROOTS = ['/health', '/_pb'] as const;
 const REQUEST_ID_HEADER = 'x-request-id';
 const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
 const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
+
+function errorFormat(route: string | undefined): ErrorFormat {
+  return route === '/:project/npm' || route?.startsWith('/:project/npm/') === true
+    ? 'npm'
+    : 'nested';
+}
 
 function authOrSessionPath(path: string): boolean {
   return (
@@ -203,27 +210,29 @@ async function failed(
   requestId: string,
   log: KernelLog,
   guard: CompletionGuard,
+  format: ErrorFormat,
 ): Promise<Response> {
   try {
-    const response = errorResponse(error, requestId, log);
+    const response = errorResponse(error, requestId, log, format);
     guard.reason(responseReason(response) ?? 'http.handler_status');
     return response;
   } catch {
     log({ level: 'error', event: 'http.error', error_name: 'Error' });
     guard.reason('error.internal');
-    return envelopeResponse(500, 'internal', 'Internal error', requestId);
+    return envelopeResponse(500, 'internal', 'Internal error', requestId, undefined, format);
   }
 }
 
 export const AUTHORIZATION_RETRY_AFTER_SECONDS = 5;
 
-function authorizationUnavailable(requestId: string): Response {
+function authorizationUnavailable(requestId: string, format: ErrorFormat): Response {
   const response = envelopeResponse(
     503,
     'unavailable',
     'Authorization is temporarily unavailable',
     requestId,
     'authz.engine_error',
+    format,
   );
   response.headers.set('retry-after', String(AUTHORIZATION_RETRY_AFTER_SECONDS));
   return response;
@@ -375,8 +384,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ].filter((path) => portAccepts('route', path)),
   );
   const registry: ObsRegistry = {
-    events: KERNEL_EVENTS,
-    reasonCodes: KERNEL_REASON_CODES,
+    events: new Set([...KERNEL_EVENTS, ...INGEST_EVENTS]),
+    reasonCodes: new Set([...KERNEL_REASON_CODES, ...INGEST_REASON_CODES]),
     routeTemplates,
   };
   const obsContext: KernelObsContext = {
@@ -469,7 +478,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
           error_name: reportableErrorName(error),
           reason_code: hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN),
         });
-        return authorizationUnavailable(c.env.requestId);
+        return authorizationUnavailable(c.env.requestId, errorFormat(route.path));
       }
     }
     const response: unknown = await route.handler(context);
@@ -482,22 +491,22 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     return response;
   }
 
-  function routeNotFound(requestId: string): Response {
-    return envelopeResponse(404, 'not_found', 'Route not found', requestId);
+  function routeNotFound(requestId: string, format: ErrorFormat = 'nested'): Response {
+    return envelopeResponse(404, 'not_found', 'Route not found', requestId, undefined, format);
   }
 
   async function serve(route: RegisteredRoute, c: Context<KernelEnv>): Promise<Response> {
     const { requestId, scope, guard } = c.env;
+    const format = errorFormat(route.path);
     if (route.boundary === 'self' || authOrSessionPath(route.path)) {
       c.env.responsePolicy.noStore = true;
     }
     scope.set({ route: route.path });
     const permission =
-      route.permission ?? (route.boundary === 'authenticated' ? AUTHENTICATED_PLACEHOLDER : null);
-    if (route.boundary === 'self') {
-      guard.reason('authz.unauthenticated');
-      return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
-    }
+      route.permission ??
+      (route.boundary === 'authenticated' || route.boundary === 'self'
+        ? AUTHENTICATED_PLACEHOLDER
+        : null);
     if (permission === null) {
       const org = route.needsOrg === false ? null : await resolveOrg();
       return invoke(route, c, org, null, null, {
@@ -505,6 +514,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         projectId: null,
         boundary: 'none',
         sessionId: null,
+        token: null,
         actor: null,
         rateKey: { stage: 'anonymous', ip: null, routeClass: 'none' },
       });
@@ -567,6 +577,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ...(route.boundary === undefined
           ? {}
           : { boundary: route.boundary === 'package' ? 'project' : route.boundary }),
+        ...('bearerOnly' in route && route.bearerOnly === true
+          ? { bearerOnly: true as const }
+          : {}),
       },
       params: Object.freeze({ ...c.req.param() }),
     };
@@ -579,13 +592,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     );
     engineOpen = false;
     if (!decision.allow) {
-      if (engineFailed) return authorizationUnavailable(requestId);
+      if (engineFailed) return authorizationUnavailable(requestId, format);
       guard.reason(engineStatusReason(decision.status));
       if (decision.status === 401) {
-        return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId);
+        return envelopeResponse(401, 'unauthorized', 'Unauthorized', requestId, undefined, format);
       }
-      if (decision.status === 404) return routeNotFound(requestId);
-      return denialResponse(c.req.raw, requestId);
+      if (decision.status === 404) return routeNotFound(requestId, format);
+      return denialResponse(c.req.raw, requestId, format);
     }
     scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
     const grant = engineGrantOf(authorizationRequest);
@@ -605,7 +618,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
           packageActor.orgId !== org.orgId))
     ) {
       onHookError({ plugin: ENGINE_PLUGIN, error: new TypeError('inconsistent engine grant') });
-      return authorizationUnavailable(requestId);
+      return authorizationUnavailable(requestId, format);
     }
     let resolved: Exclude<PackageVisibility, { kind: 'absent' }> | null = null;
     if (route.boundary === 'package') {
@@ -616,7 +629,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       const name = binding.name(authorizationRequest.params);
       const absent = (): Response => {
         guard.reason(engineStatusReason(404));
-        return routeNotFound(requestId);
+        return routeNotFound(requestId, format);
       };
       if (typeof name !== 'string' || name.length === 0) return absent();
       const outcome = await options.packageResolver.resolve(packageActor, binding.ecosystem, name);
@@ -655,6 +668,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       projectId: grant.projectId,
       boundary,
       sessionId: grant.sessionId,
+      token: grant.token,
       actor: grant.actor,
       rateKey: {
         stage: 'authenticated',
@@ -710,7 +724,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   app.notFound(reservedNotFound);
   app.onError(async (error, c) => {
-    const response = await failed(error, c.env.requestId, c.env.log, c.env.guard);
+    const response = await failed(
+      error,
+      c.env.requestId,
+      c.env.log,
+      c.env.guard,
+      errorFormat(c.env.scope.fields().route),
+    );
     c.env.markLogged();
     return response;
   });
@@ -743,14 +763,26 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
           log,
         });
       } catch (error) {
-        response = await failed(error, requestId, logged ? silent : log, guard);
+        response = await failed(
+          error,
+          requestId,
+          logged ? silent : log,
+          guard,
+          errorFormat(scope.fields().route),
+        );
         logged = true;
       }
       try {
         if (isHead) response = new Response(null, response);
         response = withRequestId(response, requestId);
       } catch (error) {
-        const failure = await failed(error, requestId, logged ? silent : log, guard);
+        const failure = await failed(
+          error,
+          requestId,
+          logged ? silent : log,
+          guard,
+          errorFormat(scope.fields().route),
+        );
         response = isHead ? new Response(null, failure) : failure;
       }
       response = finaliseSecurityHeaders(response, https, responsePolicy.noStore);

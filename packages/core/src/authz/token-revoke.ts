@@ -1,3 +1,5 @@
+import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import type { AuthenticatedSession } from '../auth/session.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
@@ -42,8 +44,12 @@ export interface TokenRevokeStore {
     ctx: OrgContext,
     fence: MutationFence,
     guard: FenceGuard,
-    tokenId: string,
-    now: string,
+    input: {
+      readonly tokenId: string;
+      readonly now: string;
+      readonly audit?: AuditEvent;
+      readonly idempotency?: IdempotencyRecord;
+    },
   ): Promise<TokenRevokeOutcome>;
 }
 
@@ -56,6 +62,7 @@ export interface TokenRevokeDeps {
   readonly authority: Pick<ServicePrincipalAuthority, 'guard' | 'livePermissions'>;
   readonly ownership: TokenOwnershipGuard;
   readonly clock: Clock;
+  readonly ids: { ulid(): string };
   readonly log: AdminLog;
 }
 
@@ -74,13 +81,14 @@ export interface TokenRevokeInput {
 export interface TokenRevokeService {
   /**
    * CSRF is asserted by the HTTP boundary before this call. Only a user session revokes; a token
-   * credential has no session. `revoked: false` is an idempotent repeat with no event.
+   * credential has no session. The store persists the candidate only when this batch revokes.
    */
   revoke(
     ctx: OrgContext,
     authenticated: AuthenticatedSession,
     fence: MutationFence,
     input: TokenRevokeInput,
+    call: ApiCall,
   ): Promise<TokenRevokeResult>;
 }
 
@@ -94,7 +102,7 @@ function fail(error: TokenRevokeError): TokenRevokeResult {
 }
 
 export function createTokenRevokeService(deps: TokenRevokeDeps): TokenRevokeService {
-  const { tokens, authority, ownership, clock } = deps;
+  const { tokens, authority, ownership, clock, ids } = deps;
 
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
@@ -110,7 +118,7 @@ export function createTokenRevokeService(deps: TokenRevokeDeps): TokenRevokeServ
   }
 
   return {
-    async revoke(ctx, authenticated, fence, input) {
+    async revoke(ctx, authenticated, fence, input, call) {
       const { session, principal } = authenticated;
       if (typeof fence !== 'object' || fence === null) {
         throw new TypeError('revoke requires a mutation fence');
@@ -169,7 +177,23 @@ export function createTokenRevokeService(deps: TokenRevokeDeps): TokenRevokeServ
         return deny(ctx, actorUserId);
       }
 
-      const outcome = await tokens.revoke(ctx, fence, guard, target.id, isoTimestamp(clock.now()));
+      const now = isoTimestamp(clock.now());
+      const audit = auditEvent({
+        id: ids.ulid(),
+        now,
+        action: 'token.revoke',
+        actor: { type: 'user', id: actorUserId },
+        context: call.audit,
+        target: { type: 'token', id: target.id },
+        projectId: target.projectId,
+      });
+      if (!audit.ok) throw new TypeError('Invalid token revoke audit event');
+      const outcome = await tokens.revoke(ctx, fence, guard, {
+        tokenId: target.id,
+        now,
+        audit: audit.event,
+        ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+      });
       switch (outcome.status) {
         case 'revoked':
           emit({

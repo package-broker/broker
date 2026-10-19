@@ -81,6 +81,7 @@ function kernelActor(organizationPermissions: readonly string[]) {
     projectId: null,
     boundary: 'organization',
     sessionId: 'session',
+    token: null,
     actor: {
       session: { id: 'session', userId: 'actor' },
       user: { id: 'actor' },

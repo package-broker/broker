@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import type { PersonalTokenService } from './pat-service.js';
+import type { ApiCall } from '../api/idempotency.js';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   REAUTH_WINDOW_MS,
   createSessionService,
@@ -159,6 +161,7 @@ describe('personal token issuance', () => {
         authenticated,
         fence(),
         allInput(),
+        apiCall,
       );
       expect(result.ok).toBe(false);
       expect(result).toMatchObject({ ok: false, error: 'forbidden' });
@@ -178,7 +181,7 @@ describe('personal token issuance', () => {
     const result = await createPersonalTokenService({
       ...r.deps,
       sessions: service,
-    }).issue(ctx, authenticated, fence(), allInput());
+    }).issue(ctx, authenticated, fence(), allInput(), apiCall);
     expect(result).toEqual({ ok: false, error: 'reauth_required' });
     expect(r.calls).toHaveLength(0);
   });
@@ -191,6 +194,7 @@ describe('personal token issuance', () => {
       authenticated,
       fence(),
       allInput(),
+      apiCall,
     );
     expect(result.ok).toBe(true);
   });
@@ -201,7 +205,7 @@ describe('personal token issuance', () => {
     const result = await createPersonalTokenService({
       ...r.deps,
       sessions: { isReauthFresh: () => ++calls === 1 },
-    }).issue(ctx, session(), fence(), allInput());
+    }).issue(ctx, session(), fence(), allInput(), apiCall);
     expect(result).toEqual({ ok: false, error: 'reauth_required' });
   });
 
@@ -221,7 +225,7 @@ describe('personal token issuance', () => {
         },
       },
     };
-    await createPersonalTokenService(deps).issue(ctx, session(), fence(), input);
+    await createPersonalTokenService(deps).issue(ctx, session(), fence(), input, apiCall);
     expect(r.calls[0]?.input.projectIds).toEqual(['project-1']);
     expect(r.calls[0]?.input.scope).toBe('read');
   });
@@ -244,6 +248,7 @@ describe('personal token issuance', () => {
       session(),
       fence(),
       allInput({ expiresAt: inDays(0, 1000) }),
+      apiCall,
     );
     expect(result).toEqual({ ok: false, error: 'invalid_expiry' });
     expect(r.calls).toHaveLength(0);
@@ -252,7 +257,7 @@ describe('personal token issuance', () => {
   it.each([0, -5, 1.5, Number.NaN])('denies a configured expiry of %s days', async (days) => {
     const r = rig({ days });
     expect(
-      await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput()),
+      await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput(), apiCall),
     ).toEqual({
       ok: false,
       error: 'forbidden',
@@ -267,6 +272,7 @@ describe('personal token issuance', () => {
       session(),
       fence(),
       allInput(),
+      apiCall,
     );
     expect(result).toEqual({ ok: false, error: 'reauth_required' });
     expect(r.calls).toHaveLength(0);
@@ -279,17 +285,18 @@ describe('personal token issuance', () => {
       session(),
       fence(),
       allInput(),
+      apiCall,
     );
     expect(result.ok).toBe(true);
   });
 
   it('refuses a fence that belongs to another user or session', async () => {
     const service = createPersonalTokenService(rig().deps);
-    await expect(service.issue(ctx, session(), fence('user-2'), allInput())).rejects.toThrow(
-      TypeError,
-    );
     await expect(
-      service.issue(ctx, session(), fence('user-1', 'session-2'), allInput()),
+      service.issue(ctx, session(), fence('user-2'), allInput(), apiCall),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      service.issue(ctx, session(), fence('user-1', 'session-2'), allInput(), apiCall),
     ).rejects.toThrow(TypeError);
   });
 
@@ -302,6 +309,7 @@ describe('personal token issuance', () => {
       session({ identityId: 'identity-1' }),
       fence(),
       allInput(),
+      apiCall,
     );
     expect(r.calls[0]?.input).toMatchObject({
       id: 'tok-1',
@@ -317,7 +325,7 @@ describe('personal token issuance', () => {
 
   it('uses the local origin for a session without an identity', async () => {
     const r = rig();
-    await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput());
+    await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput(), apiCall);
     expect(r.calls[0]?.input.validation).toEqual({ kind: 'local' });
   });
 
@@ -328,6 +336,7 @@ describe('personal token issuance', () => {
       session(),
       fence(),
       allInput(),
+      apiCall,
     );
     if (!result.ok) throw new Error('expected issued');
     const parsed = parseToken(result.value.plaintext);
@@ -347,7 +356,7 @@ describe('personal token issuance', () => {
 
   it('mints a different token on every call to mint', async () => {
     const r = rig();
-    await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput());
+    await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput(), apiCall);
     const again = await r.calls[0]!.mint();
     expect(again.plaintext).not.toBe(r.minted[0]!.plaintext);
     expect(again.plaintext.slice(7, 19)).toBe(again.selector);
@@ -361,6 +370,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         allInput({ scope: scope as never }),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'invalid_scope' });
       expect(r.calls).toHaveLength(0);
@@ -373,6 +383,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         allInput({ scope, readOnly: true }),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'scope_conflict' });
       expect(r.calls).toHaveLength(0);
@@ -382,11 +393,24 @@ describe('personal token issuance', () => {
       const r = rig();
       const service = createPersonalTokenService(r.deps);
       expect(
-        await service.issue(ctx, session(), fence(), allInput({ scope: 'read', readOnly: false })),
+        await service.issue(
+          ctx,
+          session(),
+          fence(),
+          allInput({ scope: 'read', readOnly: false }),
+          apiCall,
+        ),
       ).toEqual({ ok: false, error: 'scope_conflict' });
       expect(
-        (await service.issue(ctx, session(), fence(), allInput({ scope: 'read', readOnly: true })))
-          .ok,
+        (
+          await service.issue(
+            ctx,
+            session(),
+            fence(),
+            allInput({ scope: 'read', readOnly: true }),
+            apiCall,
+          )
+        ).ok,
       ).toBe(true);
     });
 
@@ -397,6 +421,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         allInput({ scope: 'full' }),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'forbidden' });
       expect(r.calls[0]?.input.scope).toBe('full');
@@ -417,6 +442,7 @@ describe('personal token issuance', () => {
           session(),
           fence(),
           allInput({ expiresAt: expiresAt as never }),
+          apiCall,
         );
         expect(result).toEqual({ ok: false, error: 'invalid_expiry' });
         expect(r.calls).toHaveLength(0);
@@ -426,7 +452,9 @@ describe('personal token issuance', () => {
     it('refuses an expiry that is now or in the past', async () => {
       const service = createPersonalTokenService(rig().deps);
       for (const expiresAt of [NOW, inDays(0, -1), inDays(-1)]) {
-        expect(await service.issue(ctx, session(), fence(), allInput({ expiresAt }))).toEqual({
+        expect(
+          await service.issue(ctx, session(), fence(), allInput({ expiresAt }), apiCall),
+        ).toEqual({
           ok: false,
           error: 'invalid_expiry',
         });
@@ -437,10 +465,17 @@ describe('personal token issuance', () => {
       const r = rig({ days: 30 });
       const service = createPersonalTokenService(r.deps);
       expect(
-        (await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(30) }))).ok,
+        (await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(30) }), apiCall))
+          .ok,
       ).toBe(true);
       expect(
-        await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(30, 1) })),
+        await service.issue(
+          ctx,
+          session(),
+          fence(),
+          allInput({ expiresAt: inDays(30, 1) }),
+          apiCall,
+        ),
       ).toEqual({ ok: false, error: 'invalid_expiry' });
     });
 
@@ -448,17 +483,30 @@ describe('personal token issuance', () => {
       const r = rig({ days: 365 });
       const service = createPersonalTokenService(r.deps);
       expect(
-        (await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(90) }))).ok,
+        (await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(90) }), apiCall))
+          .ok,
       ).toBe(true);
       expect(
-        await service.issue(ctx, session(), fence(), allInput({ expiresAt: inDays(90, 1) })),
+        await service.issue(
+          ctx,
+          session(),
+          fence(),
+          allInput({ expiresAt: inDays(90, 1) }),
+          apiCall,
+        ),
       ).toEqual({ ok: false, error: 'invalid_expiry' });
     });
 
     it('denies when the organization settings cannot be read', async () => {
       const r = rig({ days: null });
       expect(
-        await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput()),
+        await createPersonalTokenService(r.deps).issue(
+          ctx,
+          session(),
+          fence(),
+          allInput(),
+          apiCall,
+        ),
       ).toEqual({
         ok: false,
         error: 'forbidden',
@@ -474,7 +522,9 @@ describe('personal token issuance', () => {
       const r = rig();
       const service = createPersonalTokenService(r.deps);
       for (const projectIds of [[], ids(201)]) {
-        expect(await service.issue(ctx, session(), fence(), selectedInput(projectIds))).toEqual({
+        expect(
+          await service.issue(ctx, session(), fence(), selectedInput(projectIds), apiCall),
+        ).toEqual({
           ok: false,
           error: 'invalid_projects',
         });
@@ -494,6 +544,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         selectedInput(projectIds as never),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'invalid_projects' });
       expect(r.calls).toHaveLength(0);
@@ -503,10 +554,16 @@ describe('personal token issuance', () => {
       const r = rig();
       const service = createPersonalTokenService(r.deps);
       expect(
-        await service.issue(ctx, session(), fence(), allInput({ projectMode: 'some' as never })),
+        await service.issue(
+          ctx,
+          session(),
+          fence(),
+          allInput({ projectMode: 'some' as never }),
+          apiCall,
+        ),
       ).toEqual({ ok: false, error: 'invalid_projects' });
       expect(
-        await service.issue(ctx, session(), fence(), selectedInput('project-1' as never)),
+        await service.issue(ctx, session(), fence(), selectedInput('project-1' as never), apiCall),
       ).toEqual({ ok: false, error: 'invalid_projects' });
       expect(r.calls).toHaveLength(0);
     });
@@ -518,13 +575,14 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         allInput({ projectIds: ['project-1'] }),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'invalid_projects' });
     });
 
     it('passes the all mode with no ids, so no binding rows are requested', async () => {
       const r = rig();
-      await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput());
+      await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput(), apiCall);
       expect(r.calls[0]?.input).toMatchObject({ projectMode: 'all', projectIds: [] });
     });
 
@@ -535,6 +593,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         selectedInput(ids(200)),
+        apiCall,
       );
       expect(result.ok).toBe(true);
       expect(r.calls).toHaveLength(1);
@@ -548,6 +607,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         selectedInput(['project-1']),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'forbidden' });
     });
@@ -561,6 +621,7 @@ describe('personal token issuance', () => {
         session(),
         fence(),
         allInput({ name: name as never }),
+        apiCall,
       );
       expect(result).toEqual({ ok: false, error: 'invalid_name' });
       expect(r.calls).toHaveLength(0);
@@ -575,7 +636,13 @@ describe('personal token issuance', () => {
     ] as const)('maps %j to %s', async (outcome, error) => {
       const r = rig({ outcome: outcome as PersonalTokenIssueOutcome });
       expect(
-        await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput()),
+        await createPersonalTokenService(r.deps).issue(
+          ctx,
+          session(),
+          fence(),
+          allInput(),
+          apiCall,
+        ),
       ).toEqual({ ok: false, error });
       expect(r.logs.some((entry) => entry['event'] === 'token.issued')).toBe(false);
     });
@@ -583,7 +650,7 @@ describe('personal token issuance', () => {
     it('throws on an unclassified refusal rather than guessing', async () => {
       const r = rig({ outcome: { status: 'refused', reason: 'unclassified' } });
       await expect(
-        createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput()),
+        createPersonalTokenService(r.deps).issue(ctx, session(), fence(), allInput(), apiCall),
       ).rejects.toThrow(/unclassified/);
     });
 
@@ -596,8 +663,138 @@ describe('personal token issuance', () => {
         }),
       };
       expect(
-        (await createPersonalTokenService(deps).issue(ctx, session(), fence(), allInput())).ok,
+        (await createPersonalTokenService(deps).issue(ctx, session(), fence(), allInput(), apiCall))
+          .ok,
       ).toBe(true);
     });
   });
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
+
+describe('lifecycle audit and idempotency', () => {
+  it.each(['selected', 'all'] as const)('passes one issue event for %s', async (mode) => {
+    const input = mode === 'selected' ? selectedInput(['project-1', 'project-2']) : allInput();
+    const projectId = null;
+    const r = rig();
+    const generated = ['tok-audit', 'event-audit'];
+    r.deps.ids.ulid = () => generated.shift()!;
+    const call = { ...apiCall, idempotency: issueRecord };
+    const result = await createPersonalTokenService(r.deps).issue(
+      ctx,
+      session(),
+      fence(),
+      input,
+      call,
+    );
+    expect(result.ok).toBe(true);
+    expect(r.calls).toHaveLength(1);
+    const stored = r.calls[0]!.input;
+    expect(stored.audit).toEqual({
+      id: 'event-audit',
+      occurredAt: NOW,
+      action: 'token.issue',
+      actor: { type: 'user', id: 'user-1' },
+      target: { type: 'token', id: 'tok-audit' },
+      projectId,
+      sourceIp: null,
+      tokenSelector: null,
+      payloadJson: expect.any(String),
+    });
+    expect(JSON.parse(stored.audit!.payloadJson)).toEqual({
+      op_id: apiCall.audit.opId,
+      request_id: apiCall.audit.requestId,
+      changes: {
+        kind: { new: 'pat' },
+        name: { new: input.name },
+        scope: { new: input.scope },
+        expires_at: { new: input.expiresAt },
+        project_mode: { new: input.projectMode },
+        project_count: { new: input.projectIds.length },
+      },
+    });
+    expect(stored.idempotency).toEqual({
+      ...issueRecord,
+      responseJson: JSON.stringify({ code: 'already_issued', id: stored.id }),
+    });
+    expect(issueRecord.responseJson).toBe('{}');
+  });
+
+  it('excludes a sentinel minted plaintext from audit and idempotency', async () => {
+    const r = rig();
+    const plaintext = 'pb_pat_abcdefghijkl_' + 'Q'.repeat(43);
+    r.deps.tokens.issuePersonal = async (ctx, fence, input, mint) => {
+      r.calls.push({ ctx, fence, input, mint });
+      r.minted.push(await mint());
+      return { status: 'issued', id: input.id, plaintext };
+    };
+    const input = selectedInput(['project-1', 'project-2']);
+    const call = {
+      ...apiCall,
+      idempotency: { ...issueRecord, responseJson: JSON.stringify({ plaintext }) },
+    };
+    expect(
+      await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), input, call),
+    ).toMatchObject({ ok: true, value: { plaintext } });
+    const stored = r.calls[0]!.input;
+    const serialized = JSON.stringify([stored.audit, stored.idempotency]);
+    expect(stored.audit).toBeDefined();
+    expect(stored.idempotency).toBeDefined();
+    expect(serialized).not.toContain(plaintext);
+    expect(serialized).not.toContain('Q'.repeat(43));
+    const minted = parseToken(r.minted[0]!.plaintext);
+    expect(minted.ok).toBe(true);
+    if (!minted.ok) throw new Error('Expected minted token');
+    expect(serialized).not.toContain(minted.canonical);
+    expect(serialized).not.toContain(minted.secret);
+  });
+
+  it('omits absent issue idempotency', async () => {
+    const r = rig();
+    const input = selectedInput(['project-1', 'project-2']);
+    const call = apiCall;
+    await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), input, call);
+    expect(r.calls[0]!.input).not.toHaveProperty('idempotency');
+  });
+
+  it.each(['reauth_required', 'forbidden', 'scope_conflict'] as const)(
+    'refuses %s without a store event',
+    async (error) => {
+      const r = rig(
+        error === 'reauth_required'
+          ? { fresh: false }
+          : error === 'forbidden'
+            ? { days: null }
+            : {},
+      );
+      const input = allInput(error === 'scope_conflict' ? { scope: 'write', readOnly: true } : {});
+      const call = apiCall;
+      expect(
+        await createPersonalTokenService(r.deps).issue(ctx, session(), fence(), input, call),
+      ).toEqual({ ok: false, error });
+      expect(r.calls).toHaveLength(0);
+    },
+  );
+
+  it('requires the issue call argument', () => {
+    expectTypeOf<Parameters<PersonalTokenService['issue']>['length']>().toEqualTypeOf<5>();
+  });
+});
+
+const issueRecord = {
+  principalKey: 'user:user-1',
+  key: 'issue',
+  route: '/tokens',
+  requestHash: 'hash',
+  status: 201,
+  responseJson: '{}',
+  createdAt: NOW,
+  expiresAt: inDays(1),
+};

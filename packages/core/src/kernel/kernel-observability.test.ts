@@ -513,6 +513,7 @@ describe('kernel authorization records', () => {
     const logs: Entry[] = [];
     const kernel = await createKernel(
       options([], logs, {
+        authorization: { authorize: () => Promise.resolve({ allow: false, status: 401 }) },
         coreRoutes: [
           {
             method: 'GET',

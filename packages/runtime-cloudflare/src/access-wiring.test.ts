@@ -6,6 +6,7 @@ const call = {
     tokenSelector: null,
   },
 };
+import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -317,6 +318,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
               projectMode: 'all',
               projectIds: [],
             },
+            apiCall,
           );
           if (!issued.ok) return Response.json({ error: issued.error }, { status: 409 });
           const own = await services.tokenList.listOwn(ctx.org, authenticated.userId, {
@@ -369,6 +371,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
             actor,
             mutationFence(authenticated, {}),
             { name: 'deploy', projectId: project },
+            apiCall,
           );
           const issued = principal.ok
             ? await services.serviceTokens.issue(
@@ -382,6 +385,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
                   scope: 'read',
                   expiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
                 },
+                apiCall,
               )
             : null;
           return Response.json({ granted, principal, issued });
@@ -407,6 +411,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
               tokenId: new URL(ctx.request.url).searchParams.get('id') ?? '',
               routeProjectId: null,
             },
+            apiCall,
           );
           return Response.json(revoked);
         },
@@ -843,3 +848,12 @@ describe('cloudflare access wiring on Miniflare D1', () => {
     });
   }, 60_000);
 });
+
+const apiCall: ApiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

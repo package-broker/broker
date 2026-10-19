@@ -41,6 +41,9 @@ import type { PluginDefinition } from '@package-broker/core/plugin';
 import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
 import {
   KeyringStoreUnavailableError,
+  KeyringMismatchError,
+  KeyringVerifierMissingError,
+  KeyringVersionInUseError,
   RESEED_VARIABLE,
   verifyKeyring,
 } from '@package-broker/core/secrets/keyring-verifier';
@@ -521,7 +524,11 @@ async function keyringGate(
   const store = createKeyringVerifierStore(executor);
   const reseed = options.env[RESEED_VARIABLE] === '1';
   const attempt = async (): Promise<void> => {
-    const result = await verifyKeyring(keyring, store, { reseed });
+    const result = await verifyKeyring(keyring, store, {
+      reseed,
+      onReseedIgnored: (keyVersion) =>
+        options.log?.({ level: 'warn', event: 'keyring.reseed_ignored', key_version: keyVersion }),
+    });
     if (result.reseeded) {
       options.log?.({ level: 'warn', event: 'keyring.reseeded', key_version: result.keyVersion });
     }
@@ -535,8 +542,9 @@ async function keyringGate(
     if (!deferred) throw error;
   }
   let verified = false;
-  return async () => {
-    if (verified) return true;
+  let inFlight: Promise<boolean> | undefined;
+  let nextAttempt = Date.now() + 1000;
+  const retry = async (): Promise<boolean> => {
     try {
       await attempt();
       verified = true;
@@ -545,9 +553,24 @@ async function keyringGate(
         level: 'error',
         event: 'keyring.unverified',
         error_name: error instanceof Error ? error.name : 'Error',
+        ...(error instanceof KeyringMismatchError ||
+        error instanceof KeyringVerifierMissingError ||
+        error instanceof KeyringVersionInUseError
+          ? { key_version: error.keyVersion }
+          : {}),
       });
     }
     return verified;
+  };
+  return async () => {
+    if (verified) return true;
+    if (inFlight !== undefined) return inFlight;
+    if (Date.now() < nextAttempt) return false;
+    nextAttempt = Date.now() + 1000;
+    inFlight = retry().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }
 
@@ -622,6 +645,12 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     const slug = options.env['PB_ORG_SLUG'];
     const name = options.env['PB_ORG_NAME'];
     if (slug !== undefined && name !== undefined) {
+      if (servingGate !== undefined) {
+        throw new StartupConfigError(
+          'PB_ORG_SLUG',
+          'organization bootstrap requires applied migrations and a verified keyring',
+        );
+      }
       await bootstrapOrganization(opened.executor, slug, name);
     } else if (slug !== undefined || name !== undefined) {
       throw new Error('PB_ORG_SLUG and PB_ORG_NAME must be set together');

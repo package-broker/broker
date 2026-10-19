@@ -112,6 +112,7 @@ it('records document absence and revives an npm package without changing its sou
     ctx,
     guard,
     await listing({ kind: 'package', packageId: 'P' }, ['1.0.0']),
+    { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
   );
   expect(await pkg()).toMatchObject({
     status: 'active',
@@ -141,7 +142,13 @@ it('rejects a marked package listing when a newer document absence removes the p
   const snapshot = () =>
     Promise.all(['package', 'version', 'version_revision', 'cache_epoch'].map(rows));
   const before = await snapshot();
-  await expect(writer.finalizeListing(ctx, guard, stale)).rejects.toThrow();
+  await expect(
+    writer.finalizeListing(ctx, guard, stale, {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    }),
+  ).rejects.toThrow();
   expect(await snapshot()).toEqual(before);
   await expect(
     writer.markListing(ctx, guard, { scope, stamp: stale.stamp, present: ['2.0.0'] }),
@@ -150,7 +157,11 @@ it('rejects a marked package listing when a newer document absence removes the p
 
   const fresh = await listing(scope, ['1.0.0']);
   expect(fresh.stamp > stale.stamp).toBe(true);
-  await writer.finalizeListing(ctx, guard, fresh);
+  await writer.finalizeListing(ctx, guard, fresh, {
+    attemptedCandidates: 1,
+    successfulCandidates: 1,
+    definitiveAbsent: 0,
+  });
   expect(await pkg()).toMatchObject({ status: 'active', removal_cause: null });
   expect((await rows('version')).map((v) => v['status'])).toEqual([
     'active',
@@ -181,7 +192,13 @@ it('invalidates a marked listing when eligible absence changes no statuses', asy
   const snapshot = () =>
     Promise.all(['package', 'version', 'version_revision', 'cache_epoch'].map(rows));
   const before = await snapshot();
-  await expect(writer.finalizeListing(ctx, guard, stale)).rejects.toThrow();
+  await expect(
+    writer.finalizeListing(ctx, guard, stale, {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    }),
+  ).rejects.toThrow();
   expect(await snapshot()).toEqual(before);
   await expect(
     writer.markListing(ctx, guard, { scope, stamp: stale.stamp, present: ['2.0.0'] }),
@@ -189,7 +206,11 @@ it('invalidates a marked listing when eligible absence changes no statuses', asy
   expect(await snapshot()).toEqual(before);
   const fresh = await listing(scope, ['1.0.0']);
   expect(fresh.stamp > stale.stamp).toBe(true);
-  await writer.finalizeListing(ctx, guard, fresh);
+  await writer.finalizeListing(ctx, guard, fresh, {
+    attemptedCandidates: 1,
+    successfulCandidates: 1,
+    definitiveAbsent: 0,
+  });
   expect(await pkg()).toMatchObject({ status: 'active', removal_cause: null });
   expect((await rows('version')).map((v) => v['status'])).toEqual([
     'active',
@@ -237,7 +258,11 @@ it.each(['source', 'package'] as const)(
       kind === 'source'
         ? completeSourceListing({ sourceId: 'S', stamp, count: 1 })
         : completeVersionListing({ packageId: 'P', stamp, count: 1 });
-    await writer.finalizeListing(ctx, guard, proof);
+    await writer.finalizeListing(ctx, guard, proof, {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     const table = kind === 'source' ? 'package' : 'version';
     const added = (await rows(table)).find((row) =>
       kind === 'source' ? row['id'] === 'R' : row['version'] === '4.0.0',
@@ -264,7 +289,11 @@ it('source removal cascades once, preserves protected versions, and only the sou
     ),
   );
   const source = await listing({ kind: 'source', sourceId: 'S' }, ['other']);
-  await writer.finalizeListing(ctx, guard, source);
+  await writer.finalizeListing(ctx, guard, source, {
+    attemptedCandidates: 1,
+    successfulCandidates: 1,
+    definitiveAbsent: 0,
+  });
   expect(await pkg()).toMatchObject({
     status: 'removed_upstream',
     removal_cause: 'source_listing',
@@ -276,12 +305,17 @@ it('source removal cascades once, preserves protected versions, and only the sou
   ]);
   expect(await rows('version_revision')).toHaveLength(2);
   expect(await rows('epoch_bumps')).toHaveLength(1);
-  await writer.finalizeListing(ctx, guard, source);
+  await writer.finalizeListing(ctx, guard, source, {
+    attemptedCandidates: 1,
+    successfulCandidates: 1,
+    definitiveAbsent: 0,
+  });
   expect(await rows('epoch_bumps')).toHaveLength(1);
   await writer.finalizeListing(
     ctx,
     guard,
     await listing({ kind: 'package', packageId: 'P' }, ['1.0.0']),
+    { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
   );
   expect(await pkg()).toMatchObject({
     status: 'removed_upstream',
@@ -291,6 +325,7 @@ it('source removal cascades once, preserves protected versions, and only the sou
     ctx,
     guard,
     await listing({ kind: 'source', sourceId: 'S' }, ['widget', 'other']),
+    { attemptedCandidates: 2, successfulCandidates: 2, definitiveAbsent: 0 },
   );
   expect(await pkg()).toMatchObject({ status: 'active', removal_cause: null });
   expect((await rows('version'))[1]?.['status']).toBe('removed_upstream');
@@ -307,7 +342,13 @@ it.each(['source', 'package'] as const)(
     const snapshot = () =>
       Promise.all(['package', 'version', 'version_revision', 'cache_epoch'].map(rows));
     const before = await snapshot();
-    await expect(writer.finalizeListing(ctx, guard, stale)).rejects.toThrow();
+    await expect(
+      writer.finalizeListing(ctx, guard, stale, {
+        attemptedCandidates: 2,
+        successfulCandidates: 2,
+        definitiveAbsent: 0,
+      }),
+    ).rejects.toThrow();
     expect(await snapshot()).toEqual(before);
     await expect(
       writer.markListing(ctx, guard, { scope, stamp: stale.stamp, present }),
@@ -324,7 +365,13 @@ it.each(['source', 'package'] as const)(
       const before = await Promise.all(
         ['package', 'version', 'version_revision', 'cache_epoch'].map(rows),
       );
-      await expect(writer.finalizeListing(ctx, guard, proof)).rejects.toThrow();
+      await expect(
+        writer.finalizeListing(ctx, guard, proof, {
+          attemptedCandidates: 2,
+          successfulCandidates: 2,
+          definitiveAbsent: 0,
+        }),
+      ).rejects.toThrow();
       expect(
         await Promise.all(['package', 'version', 'version_revision', 'cache_epoch'].map(rows)),
       ).toEqual(before);
@@ -361,6 +408,11 @@ it('leaves a refused stored version unmarked and removes it using the successful
     ctx,
     guard,
     completeVersionListing({ packageId: 'P', stamp, count: 2 - result.refused.length }),
+    {
+      attemptedCandidates: 2,
+      successfulCandidates: 2 - result.refused.length,
+      definitiveAbsent: 0,
+    },
   );
   expect((await rows('version'))[1]).toMatchObject({ status: 'removed_upstream', updated_at: OLD });
 });
@@ -388,12 +440,14 @@ it('source absence supersedes document absence before a version listing can revi
     ctx,
     guard,
     await listing({ kind: 'source', sourceId: 'S' }, ['other']),
+    { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
   );
   expect(await pkg()).toMatchObject({ removal_cause: 'source_listing' });
   await writer.finalizeListing(
     ctx,
     guard,
     await listing({ kind: 'package', packageId: 'P' }, ['1.0.0']),
+    { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
   );
   expect(await pkg()).toMatchObject({
     status: 'removed_upstream',

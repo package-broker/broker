@@ -17,6 +17,7 @@ import type {
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { Sha256 } from '@package-broker/core/platform/blob';
 import { createCatalogueWriteGuard } from '../repositories/catalogue-write-package.js';
+import { createCatalogueReconciler } from '../repositories/catalogue-reconcile.js';
 import { createCatalogueWriter, createVisibilityStore } from '../repositories/catalogue-writer.js';
 import { createCatalogueReader } from '../repositories/catalogue.js';
 import { seedTwoOrganizations } from './two-organizations.js';
@@ -569,10 +570,11 @@ const cases: Record<string, Case> = {
       w,
       order,
       (actor) =>
-        actor.writer.finalizeListing(
+        createCatalogueReconciler(actor.executor, { maxAbsenceShare: 0.5 }).finalizeListing(
           w.org,
           actor.guard,
           completeVersionListing({ packageId, stamp, count: 1 }),
+          { attemptedCandidates: 2, successfulCandidates: 1, definitiveAbsent: 1 },
         ),
       discover(w, 'widget', [2]),
     );

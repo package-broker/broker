@@ -1,3 +1,4 @@
+import { registerCoreJob } from '../runtime/core-jobs.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { fixedClock } from '../ids.js';
 import { createKernel } from './kernel.js';
@@ -7,7 +8,6 @@ import type { JobDefinition } from '../platform/jobs.js';
 import {
   KernelConfigError,
   collectRegistrations,
-  registerCoreJob,
   type RegistrationOptions,
   type RegisteredCoreJob,
   type RegisteredJob,

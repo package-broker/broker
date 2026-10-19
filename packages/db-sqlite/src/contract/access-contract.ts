@@ -827,7 +827,7 @@ const routeRegistration: Case = (open, wrap) =>
       expect(engineCalls).toBe(0);
       expect(await authorizeRoute(request, counting, [])).toMatchObject({ allow: true });
 
-      for (const boundary of [undefined, 'none', 'self', 'package', 'other']) {
+      for (const boundary of [undefined, 'none', 'package', 'other']) {
         const route = { ...request.route, boundary } as unknown as AuthorizationRequest['route'];
         expect(await real.authorize({ ...request, route })).toEqual(FORBIDDEN);
       }
@@ -835,6 +835,33 @@ const routeRegistration: Case = (open, wrap) =>
         FORBIDDEN,
       );
       expect(await decide(world, session({ permission: 'org:read' }))).toEqual(FORBIDDEN);
+
+      const selfRoute = { ...request.route, boundary: 'self' } as const;
+      expect(await real.authorize({ ...request, route: selfRoute })).toEqual({
+        allow: true,
+        principal: { kind: 'user', id: USER },
+        projectId: null,
+      });
+      await addPrincipal(world, ['project:read']);
+      for (const kind of ['pat', 'svc'] as const) {
+        const bearer = await addToken(world, {
+          id: `self-${kind}`,
+          kind,
+          selectorNo: kind === 'pat' ? 1 : 2,
+        });
+        expect(await decide(world, { bearer })).toMatchObject({ allow: true });
+        const tokenRequest = requestFor(world, { bearer });
+        expect(await real.authorize({ ...tokenRequest, route: selfRoute })).toEqual(FORBIDDEN);
+      }
+      await world.executor.batch([
+        st(
+          'UPDATE session SET expires_at = ? WHERE org_id = ? AND id = ?',
+          iso(-HOUR),
+          world.a.orgId,
+          SESSION,
+        ),
+      ]);
+      expect(await real.authorize({ ...request, route: selfRoute })).toEqual(UNAUTHORIZED);
 
       const problems = (route: Parameters<typeof routeBoundaryProblems>[0], apiVersion?: number) =>
         routeBoundaryProblems(route, 'GET /x', apiVersion === undefined ? {} : { apiVersion });
@@ -1644,8 +1671,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement()),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(blocked.status).toBe('refused');
       const untouched = await world.executor.all<{ revoked_at: string | null }>(
@@ -1657,8 +1683,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement(true)),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(allowed.status).toBe('revoked');
       const archivedLookup = await createAccessRepository(world.executor).lookupToken(world.a, {
@@ -1692,8 +1717,7 @@ const doubleRevoke: Case = (open, wrap) =>
             organizationAdmin: false,
             covers: [],
           }),
-          'victim',
-          now,
+          { tokenId: 'victim', now: now },
         );
       const stampA = iso(0);
       const stampB = iso(5000);

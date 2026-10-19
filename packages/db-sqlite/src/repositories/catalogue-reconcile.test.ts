@@ -157,6 +157,7 @@ describe('source listing reconciliation', () => {
       org,
       guard,
       completeSourceListing({ sourceId: EXCLUDE_SOURCE, stamp, count: 1001 }),
+      { attemptedCandidates: 1001, successfulCandidates: 1001, definitiveAbsent: 0 },
     );
     expect(result).toMatchObject({ removed: 0, restored: 0 });
     expect(
@@ -176,7 +177,11 @@ describe('source listing reconciliation', () => {
       ),
     );
     const listing = await sourceListing(['acme/two']);
-    const result = await reconciler.finalizeListing(org, guard, listing);
+    const result = await reconciler.finalizeListing(org, guard, listing, {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(result).toMatchObject({ removed: 1, restored: 1 });
     expect(await statuses('package', `source_id = '${SOURCE}'`)).toEqual([
       { k: 'acme/one', status: 'removed_upstream' },
@@ -200,7 +205,11 @@ describe('source listing reconciliation', () => {
     });
     expect(() => completeSourceListing({ sourceId: SOURCE, stamp, count: 0 })).toThrow();
     await expect(
-      reconciler.finalizeListing(org, guard, { sourceId: SOURCE, stamp, count: 0 } as never),
+      reconciler.finalizeListing(org, guard, { sourceId: SOURCE, stamp, count: 0 } as never, {
+        attemptedCandidates: 0,
+        successfulCandidates: 0,
+        definitiveAbsent: 0,
+      }),
     ).rejects.toThrow(TypeError);
   });
 
@@ -219,6 +228,7 @@ describe('source listing reconciliation', () => {
         org,
         guard,
         completeSourceListing({ sourceId: SOURCE, stamp, count: 2 }),
+        { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
       ),
     ).rejects.toThrow();
     expect((await statuses('package')).every((row) => row.status === 'active')).toBe(true);
@@ -227,7 +237,13 @@ describe('source listing reconciliation', () => {
   it('2: finalize after lease takeover rolls back', async () => {
     const listing = await sourceListing(['acme/one']);
     await run(stmt('UPDATE job SET fence = 4 WHERE id = ?', JOB_ID));
-    await expect(reconciler.finalizeListing(org, guard, listing)).rejects.toThrow();
+    await expect(
+      reconciler.finalizeListing(org, guard, listing, {
+        attemptedCandidates: 1,
+        successfulCandidates: 1,
+        definitiveAbsent: 0,
+      }),
+    ).rejects.toThrow();
     expect((await statuses('package')).every((row) => row.status === 'active')).toBe(true);
   });
 
@@ -294,9 +310,17 @@ describe('source listing reconciliation', () => {
       ),
     );
     const before = await epoch();
-    await reconciler.finalizeListing(org, guard, await sourceListing(['acme/one']));
+    await reconciler.finalizeListing(org, guard, await sourceListing(['acme/one']), {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(await epoch()).toBe(before);
-    await reconciler.finalizeListing(org, guard, await sourceListing(['ex/one'], EXCLUDE_SOURCE));
+    await reconciler.finalizeListing(org, guard, await sourceListing(['ex/one'], EXCLUDE_SOURCE), {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(await epoch()).not.toBe(before);
     expect(await scalar("SELECT status AS v FROM package WHERE id = 'EX2'")).toBe(
       'removed_upstream',
@@ -317,7 +341,11 @@ describe('version listing reconciliation', () => {
     await seedVersions(PACKAGE, '1.0.0', '2.0.0');
     await seedVersions(PACKAGE_B, '1.0.0', '2.0.0');
     const listing = await versionListing(PACKAGE, ['1.0.0']);
-    await reconciler.finalizeListing(org, guard, listing);
+    await reconciler.finalizeListing(org, guard, listing, {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(await statuses('version')).toEqual([
       { k: `V-${PACKAGE}-1.0.0`, status: 'active' },
       { k: `V-${PACKAGE}-2.0.0`, status: 'removed_upstream' },
@@ -339,6 +367,7 @@ describe('version listing reconciliation', () => {
       org,
       guard,
       await versionListing(PACKAGE, ['1.0.0']),
+      { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
     );
     expect(result).toMatchObject({ removed: 1, restored: 1 });
     const revisions = await database.executor.all<{
@@ -375,7 +404,11 @@ describe('version listing reconciliation', () => {
     expect(
       await scalar('SELECT last_synced_at AS v FROM package WHERE id = ?', PACKAGE),
     ).toBeNull();
-    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']));
+    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']), {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(
       await scalar('SELECT last_synced_at IS NOT NULL AS v FROM package WHERE id = ?', PACKAGE),
     ).toBe(1);
@@ -407,7 +440,11 @@ describe('version listing reconciliation', () => {
   it('3: removal under exclude bumps the epoch; under flag it does not', async () => {
     await seedVersions(PACKAGE, '1.0.0', '2.0.0');
     const before = await epoch();
-    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']));
+    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']), {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(await epoch()).toBe(before);
     await run(stmt('UPDATE package SET source_id = ? WHERE id = ?', EXCLUDE_SOURCE, PACKAGE));
     await run(
@@ -416,7 +453,11 @@ describe('version listing reconciliation', () => {
         PACKAGE,
       ),
     );
-    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']));
+    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']), {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect(await epoch()).not.toBe(before);
   });
 
@@ -430,7 +471,11 @@ describe('version listing reconciliation', () => {
         `V-${PACKAGE}-3.0.0`,
       ),
     );
-    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']));
+    await reconciler.finalizeListing(org, guard, await versionListing(PACKAGE, ['1.0.0']), {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
     expect((await statuses('version')).map((row) => row.status)).toEqual([
       'active',
       'quarantined',
@@ -442,7 +487,13 @@ describe('version listing reconciliation', () => {
     await seedVersions(PACKAGE, '1.0.0', '2.0.0');
     const listing = await versionListing(PACKAGE, ['1.0.0']);
     await run(stmt('UPDATE job SET fence = 4 WHERE id = ?', JOB_ID));
-    await expect(reconciler.finalizeListing(org, guard, listing)).rejects.toThrow();
+    await expect(
+      reconciler.finalizeListing(org, guard, listing, {
+        attemptedCandidates: 1,
+        successfulCandidates: 1,
+        definitiveAbsent: 0,
+      }),
+    ).rejects.toThrow();
     expect(
       await scalar('SELECT last_synced_at AS v FROM package WHERE id = ?', PACKAGE),
     ).toBeNull();
@@ -607,7 +658,13 @@ describe('reconciliation safeguards', () => {
         kind === 'source'
           ? completeSourceListing({ sourceId: EXCLUDE_SOURCE, stamp, count: 1 })
           : completeVersionListing({ packageId: PACKAGE, stamp, count: 1 });
-      expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({
+      expect(
+        await reconciler.finalizeListing(org, guard, listing, {
+          attemptedCandidates: 1,
+          successfulCandidates: 1,
+          definitiveAbsent: 0,
+        }),
+      ).toMatchObject({
         removed: 1,
         restored: 1,
       });
@@ -620,7 +677,13 @@ describe('reconciliation safeguards', () => {
         epoch: await epoch(),
       });
       const before = await snapshot();
-      expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({
+      expect(
+        await reconciler.finalizeListing(org, guard, listing, {
+          attemptedCandidates: 1,
+          successfulCandidates: 1,
+          definitiveAbsent: 0,
+        }),
+      ).toMatchObject({
         removed: 0,
         restored: 0,
       });
@@ -658,6 +721,7 @@ describe('reconciliation safeguards', () => {
         org,
         guard,
         completeVersionListing({ packageId: PACKAGE, stamp, count: 1 }),
+        { attemptedCandidates: 1, successfulCandidates: 1, definitiveAbsent: 0 },
       ),
     ).toMatchObject({ removed: 0, restored: 0 });
     expect(await scalar("SELECT status AS v FROM version WHERE version = '3.0.0'")).toBe('active');
@@ -692,7 +756,13 @@ describe('reconciliation safeguards', () => {
           ? completeSourceListing({ sourceId: EXCLUDE_SOURCE, stamp, count: 1 })
           : completeVersionListing({ packageId: PACKAGE, stamp, count: 1 });
       const before = await epoch();
-      expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({
+      expect(
+        await reconciler.finalizeListing(org, guard, listing, {
+          attemptedCandidates: 1,
+          successfulCandidates: 1,
+          definitiveAbsent: 0,
+        }),
+      ).toMatchObject({
         removed: 0,
         restored: 1,
       });
@@ -755,7 +825,13 @@ describe('reconciliation safeguards', () => {
         reconciler.markListing(other, foreign, { scope, stamp, present }),
       ).rejects.toThrow();
       expect(await snapshot()).toEqual(before);
-      await expect(reconciler.finalizeListing(other, foreign, listing)).rejects.toThrow();
+      await expect(
+        reconciler.finalizeListing(other, foreign, listing, {
+          attemptedCandidates: 1,
+          successfulCandidates: 1,
+          definitiveAbsent: 0,
+        }),
+      ).rejects.toThrow();
       expect(await snapshot()).toEqual(before);
       await expect(
         reconciler.markPackageAbsent(other, foreign, { packageId: PACKAGE }),
@@ -827,14 +903,17 @@ const blobState = () => database.executor.all(stmt('SELECT * FROM blob ORDER BY 
 it.each(['package', 'source', 'absent'] as const)(
   '%s removal retains bytes while respecting purge ownership and organization boundaries',
   async (kind) => {
-    reconciler = createCatalogueReconciler({
-      ...database.executor,
-      batch: (statements) => {
-        expect(statements.length).toBeLessThanOrEqual(100);
-        expect(statements.every((statement) => statement.params.length <= 100)).toBe(true);
-        return database.executor.batch(statements);
+    reconciler = createCatalogueReconciler(
+      {
+        ...database.executor,
+        batch: (statements) => {
+          expect(statements.length).toBeLessThanOrEqual(100);
+          expect(statements.every((statement) => statement.params.length <= 100)).toBe(true);
+          return database.executor.batch(statements);
+        },
       },
-    });
+      { maxAbsenceShare: kind === 'package' ? 7 / 8 : 0.5 },
+    );
     const names = [
       'removed',
       'scheduled',
@@ -900,7 +979,11 @@ it.each(['package', 'source', 'absent'] as const)(
     } else {
       const listing =
         kind === 'source' ? await sourceListing(['acme/two']) : await packageListing(['stays']);
-      const effect = await reconciler.finalizeListing(org, guard, listing);
+      const effect = await reconciler.finalizeListing(org, guard, listing, {
+        attemptedCandidates: kind === 'source' ? 2 : names.length,
+        successfulCandidates: 1,
+        definitiveAbsent: kind === 'source' ? 1 : names.length - 1,
+      });
       expect(effect.removed).toBe(kind === 'source' ? 1 : 6);
       expect(effect.restored).toBe(0);
       statements = effect.statements;
@@ -928,6 +1011,11 @@ it.each(['package', 'source', 'absent'] as const)(
         org,
         guard,
         kind === 'source' ? await sourceListing(['acme/two']) : await packageListing(['stays']),
+        {
+          attemptedCandidates: kind === 'source' ? 2 : names.length,
+          successfulCandidates: 1,
+          definitiveAbsent: kind === 'source' ? 1 : names.length - 1,
+        },
       );
     }
     expect(await blobState()).toEqual(after);
@@ -936,23 +1024,37 @@ it.each(['package', 'source', 'absent'] as const)(
 );
 
 it('restoration preserves non-refetchability and a later removal narrows re-fetched bytes again', async () => {
+  reconciler = createCatalogueReconciler(database.executor, { maxAbsenceShare: 0.5 });
   await seedVersions(PACKAGE, '1.0.0', '2.0.0');
   await attachBlob('1.0.0');
   await attachBlob('2.0.0');
-  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0']));
-  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0', '2.0.0']));
+  const removalEvidence = {
+    attemptedCandidates: 2,
+    successfulCandidates: 1,
+    definitiveAbsent: 1,
+  };
+  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0']), removalEvidence);
+  await reconciler.finalizeListing(org, guard, await packageListing(['1.0.0', '2.0.0']), {
+    attemptedCandidates: 2,
+    successfulCandidates: 2,
+    definitiveAbsent: 0,
+  });
   expect(await scalar('SELECT refetchable AS v FROM blob WHERE id = ?', `B-${PACKAGE}-2.0.0`)).toBe(
     0,
   );
   await run(stmt('UPDATE blob SET refetchable = 1 WHERE id = ?', `B-${PACKAGE}-2.0.0`));
   await run(stmt('UPDATE version SET updated_at = ? WHERE id = ?', OLD, `V-${PACKAGE}-2.0.0`));
   const listing = await packageListing(['1.0.0']);
-  expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 1 });
+  expect(await reconciler.finalizeListing(org, guard, listing, removalEvidence)).toMatchObject({
+    removed: 1,
+  });
   expect(await scalar('SELECT refetchable AS v FROM blob WHERE id = ?', `B-${PACKAGE}-2.0.0`)).toBe(
     0,
   );
   const before = await blobState();
-  expect(await reconciler.finalizeListing(org, guard, listing)).toMatchObject({ removed: 0 });
+  expect(await reconciler.finalizeListing(org, guard, listing, removalEvidence)).toMatchObject({
+    removed: 0,
+  });
   expect(await blobState()).toEqual(before);
 });
 

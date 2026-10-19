@@ -5,6 +5,7 @@ import {
   CATALOGUE_KEY_LIST_MAX,
   type CatalogueWriteGuard,
   type FinalizeResult,
+  type FinalizeEvidence,
   type ListingScope,
   type WriteEffect,
 } from '@package-broker/core/db/catalogue';
@@ -15,6 +16,10 @@ import {
   type CompleteSourceListing,
   type CompleteVersionListing,
 } from '@package-broker/core/catalogue/version-rules';
+import {
+  assertFinalizeAllowed,
+  type FinalizeGuardOptions,
+} from '@package-broker/core/ingest/finalize-guard';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import { blobLeaseNotLive, leaseLive } from './blob-lease-guard.js';
 import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
@@ -57,6 +62,7 @@ export interface CatalogueReconciler {
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
     listing: CompleteSourceListing | CompleteVersionListing,
+    evidence: FinalizeEvidence,
   ): Promise<ReconcileFinalizeResult>;
   markPackageAbsent(
     ctx: OrgContext,
@@ -236,12 +242,15 @@ export function finalizeListingStatements(
   ctx: OrgContext,
   guard: CatalogueWriteGuard,
   listing: CompleteSourceListing | CompleteVersionListing,
+  evidence: FinalizeEvidence,
+  options: FinalizeGuardOptions = {},
 ): FinalizeStatements {
   assertCatalogueWriteGuard(ctx, guard);
   if (!isCompleteListing(listing)) {
     throw new TypeError('finalize needs a complete listing minted by the ingest session');
   }
   const { stamp, count } = listing;
+  assertFinalizeAllowed(count, evidence, options);
   const scope: ListingScope =
     'sourceId' in listing
       ? { kind: 'source', sourceId: listing.sourceId }
@@ -365,7 +374,10 @@ export function finalizeListingStatements(
   return { statements, removalIndex, restorationIndex: revivalIndex };
 }
 
-export function createCatalogueReconciler(executor: SqlExecutor): CatalogueReconciler {
+export function createCatalogueReconciler(
+  executor: SqlExecutor,
+  options: FinalizeGuardOptions = {},
+): CatalogueReconciler {
   return {
     async openListing(ctx, guard, scope) {
       assertCatalogueWriteGuard(ctx, guard);
@@ -415,11 +427,13 @@ export function createCatalogueReconciler(executor: SqlExecutor): CatalogueRecon
       return { changed: changed > 0, statements: statements.length };
     },
 
-    async finalizeListing(ctx, guard, listing) {
+    async finalizeListing(ctx, guard, listing, evidence) {
       const { statements, removalIndex, restorationIndex } = finalizeListingStatements(
         ctx,
         guard,
         listing,
+        evidence,
+        options,
       );
       const results = await executor.batch(statements);
       let leaseHeldBack = 0;

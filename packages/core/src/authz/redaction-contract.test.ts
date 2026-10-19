@@ -265,13 +265,26 @@ function routes(rig: Rig): RouteDefinition[] {
       method: 'POST',
       path: '/_pb/projects/:project/tokens',
       handler: async () => {
-        const result = await personalService(rig).issue(orgContext(ORG), authenticated(), fence(), {
-          name: 'laptop',
-          scope: 'write',
-          expiresAt: inDays(7),
-          projectMode: 'selected',
-          projectIds: ['proj-1'],
-        });
+        const result = await personalService(rig).issue(
+          orgContext(ORG),
+          authenticated(),
+          fence(),
+          {
+            name: 'laptop',
+            scope: 'write',
+            expiresAt: inDays(7),
+            projectMode: 'selected',
+            projectIds: ['proj-1'],
+          },
+          {
+            audit: {
+              opId: '01K00000000000000000000001',
+              requestId: '01K00000000000000000000002',
+              sourceIp: null,
+              tokenSelector: null,
+            },
+          },
+        );
         return Response.json(result, {
           status: result.ok ? 201 : 400,
           headers: { 'cache-control': 'no-store' },
@@ -289,6 +302,14 @@ function routes(rig: Rig): RouteDefinition[] {
           actor,
           fence(),
           { servicePrincipalId: 'sp-1', name: 'ci', scope: 'read', expiresAt: inDays(30) },
+          {
+            audit: {
+              opId: '01K00000000000000000000001',
+              requestId: '01K00000000000000000000002',
+              sourceIp: null,
+              tokenSelector: null,
+            },
+          },
         );
         return Response.json(result, {
           status: result.ok ? 201 : 400,
@@ -533,13 +554,26 @@ describe('the show-once value is the sole response with plaintext', () => {
   it('a refused issuance carries a fixed error code and no plaintext', async () => {
     issued.length = 0;
     const service = personalService(fresh(), { status: 'refused', reason: 'authority' });
-    const result = await service.issue(orgContext(ORG), authenticated(), fence(), {
-      name: 'laptop',
-      scope: 'write',
-      expiresAt: inDays(7),
-      projectMode: 'selected',
-      projectIds: ['proj-1'],
-    });
+    const result = await service.issue(
+      orgContext(ORG),
+      authenticated(),
+      fence(),
+      {
+        name: 'laptop',
+        scope: 'write',
+        expiresAt: inDays(7),
+        projectMode: 'selected',
+        projectIds: ['proj-1'],
+      },
+      {
+        audit: {
+          opId: '01K00000000000000000000001',
+          requestId: '01K00000000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
+    );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     const entry = issued[0];
     expect(JSON.stringify([result, serviceLogs])).not.toContain(entry?.plaintext);

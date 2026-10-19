@@ -312,12 +312,15 @@ async function stopChild() {
   await waitExit(child, 2_000).catch(() => {});
 }
 
-async function run() {
+async function startBundle(source) {
+  if (copy !== undefined) await rm(copy, { recursive: true, force: true });
+  childStdout = '';
+  childStderr = '';
   step = 'copying the bundle';
   copy = await realpath(await mkdtemp(join(tmpdir(), 'pb-node-smoke-')));
-  await cp(join(SOURCE, '.'), copy, { recursive: true });
+  await cp(join(source, '.'), copy, { recursive: true });
   await cp(join(REPO_ROOT, 'packages/ui/dist/assets'), join(copy, 'assets'), { recursive: true });
-  console.log(`smoke:node copied ${SOURCE} to ${copy}`);
+  console.log(`smoke:node copied ${source} to ${copy}`);
 
   if (process.env['SMOKE_OFFLINE'] === '1') {
     step = 'copying installed production dependencies';
@@ -388,6 +391,102 @@ async function run() {
   const base = `http://127.0.0.1:${port}`;
   await Promise.race([waitReady(base), failure]);
   console.log('smoke:node GET /health/ready 200');
+  return { base, env };
+}
+
+function seedPackageCatalogue(database) {
+  const db = new DatabaseSync(database);
+  try {
+    db.exec('PRAGMA busy_timeout = 5000');
+    const orgId = db.prepare('SELECT id FROM organization LIMIT 1').get().id;
+    const ids = Object.fromEntries(
+      ['project', 'source', 'visible', 'hidden'].map((name) => [name, randomUUID()]),
+    );
+    db.prepare("INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'alpha', 'Alpha')").run(
+      ids.project,
+      orgId,
+    );
+    db.prepare(
+      "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'fixture', 'npm', 'npm_registry')",
+    ).run(ids.source, orgId);
+    db.prepare('INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)').run(
+      orgId,
+      ids.project,
+      ids.source,
+    );
+    for (const [id, name] of [
+      [ids.visible, 'visible'],
+      [ids.hidden, 'hidden'],
+    ]) {
+      db.prepare(
+        "INSERT INTO package (id, org_id, source_id, ecosystem, name, visible_to_new_projects) VALUES (?, ?, ?, 'npm', ?, 1)",
+      ).run(id, orgId, ids.source, name);
+      db.prepare(
+        "INSERT INTO version (id, org_id, package_id, version, version_normalized, stability, published_at, published_at_basis, metadata_json) VALUES (?, ?, ?, '1.0.0', '1.0.0', 'stable', ?, 'import_time', '{}')",
+      ).run(randomUUID(), orgId, id, new Date().toISOString());
+    }
+    db.prepare(
+      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+    ).run(orgId, ids.project, ids.visible);
+    return ids;
+  } finally {
+    db.close();
+  }
+}
+
+async function checkPackageRoute() {
+  step = 'building the package-route bundle';
+  const out = join(REPO_ROOT, '.pb', 'package-route-node');
+  const built = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      'build',
+      '--config',
+      join(REPO_ROOT, 'fixtures', 'package-route.config.ts'),
+      '--target',
+      'node',
+      '--out',
+      out,
+    ],
+    { cwd: REPO_ROOT, encoding: 'utf8' },
+  );
+  if (built.status !== 0) throw new Error(`pb build exited with ${built.status}: ${built.stderr}`);
+  const { base, env } = await startBundle(out);
+
+  step = 'checking the package-boundary route';
+  const route = (name) => `${base}/fixture/alpha/pkg/${name}`;
+  const fetchRoute = (name, headers = {}) =>
+    fetch(route(name), { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  await expectStatus(await fetchRoute('visible'), 401, 'GET package route without credentials');
+  const cookie = await mintSession(base, env['PB_SQLITE_PATH']);
+  const ids = seedPackageCatalogue(env['PB_SQLITE_PATH']);
+  const visible = await fetchRoute('visible', { cookie });
+  await expectStatus(visible, 200, 'GET package route for a visible package');
+  const resolved = await visible.json();
+  if (resolved?.kind !== 'visible' || resolved?.pkg?.packageId !== ids.visible) {
+    throw new Error('the package route did not resolve the visible package');
+  }
+  const hiddenResponse = await fetchRoute('hidden', { cookie });
+  const missingResponse = await fetchRoute('missing', { cookie });
+  await expectStatus(hiddenResponse, 404, 'GET package route for an invisible package');
+  await expectStatus(missingResponse, 404, 'GET package route for a missing package');
+  const strip = (text) => text.replace(/"requestId":"[^"]*"/, '');
+  if (strip(await hiddenResponse.text()) !== strip(await missingResponse.text())) {
+    throw new Error('an invisible package must answer with the same 404 as a missing package');
+  }
+  console.log(
+    'smoke:node package route: 401 without credentials, 200 visible, uniform 404 invisible',
+  );
+
+  step = 'shutting down the package-route server';
+  child.kill('SIGTERM');
+  const code = await waitExit(child, EXIT_TIMEOUT_MS);
+  if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
+}
+
+async function run() {
+  const { base, env } = await startBundle(SOURCE);
 
   step = 'checking the not-found envelope';
   const envelope = JSON.parse(await request(`${base}/nope`, 404));
@@ -440,6 +539,8 @@ async function run() {
   const code = await waitExit(child, EXIT_TIMEOUT_MS);
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
   console.log('smoke:node SIGTERM exit code 0');
+
+  await checkPackageRoute();
 
   console.log('smoke:node ok');
 }

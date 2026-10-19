@@ -1,3 +1,6 @@
+import { settleIdempotent, replayResponse } from '@package-broker/core/api/idempotency';
+import { createIdempotencyRepository } from '../repositories/idempotency.js';
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import { describe, expect, it } from 'vitest';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import type {
@@ -198,7 +201,13 @@ interface World {
   epoch(): Promise<unknown>;
   owner(): Promise<StatementResult[]>;
 }
-const target = { projectId: 'project', sourceId: 'source' };
+const target = {
+  get audit() {
+    return visibilityAudit();
+  },
+  projectId: 'project',
+  sourceId: 'source',
+};
 const ref = {
   projectId: 'project',
   ecosystem: 'npm' as const,
@@ -585,6 +594,135 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
               .sort(),
           ).toEqual([...present].sort());
           expect(rows.filter((row) => row['status'] === 'removed_upstream')).toHaveLength(1);
+        });
+      });
+    }
+    const visibilityCases = [
+      { method: 'attachSource', action: 'source.attach' },
+      { method: 'detachSource', action: 'source.detach' },
+      { method: 'setPrecedence', action: 'source.reorder' },
+      { method: 'addPattern', effect: 'include', action: 'source.update' },
+      { method: 'addPattern', effect: 'exclude', action: 'source.update' },
+      { method: 'removePattern', effect: 'include', action: 'source.update' },
+      { method: 'removePattern', effect: 'exclude', action: 'source.update' },
+    ] as const;
+    for (const operation of visibilityCases) {
+      it(`${operation.method} ${'effect' in operation ? operation.effect : ''}: audit rollback, replay and no-op are atomic`, async () => {
+        await withWorld(open, async (w) => {
+          if (operation.method !== 'attachSource') {
+            await w.executor.batch([
+              st(
+                "INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, 'project', 'source', 100)",
+                w.org.orgId,
+              ),
+            ]);
+          }
+          if (operation.method === 'removePattern') {
+            await w.executor.batch([
+              st(
+                "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('pattern', ?, 'project', 'source', 'widget*', ?)",
+                w.org.orgId,
+                operation.effect,
+              ),
+            ]);
+          }
+          await w.sync();
+          const snapshot = async () => {
+            const state = [];
+            for (const table of [
+              'project',
+              'project_source',
+              'project_package_pattern',
+              'project_package',
+              'cache_epoch',
+              'audit_pending',
+              'api_idempotency',
+            ]) {
+              state.push(await w.rows(`SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1`));
+            }
+            return state;
+          };
+          const audit = visibilityAudit(operation.action);
+          const idempotency = {
+            principalKey: 'user:admin',
+            key: 'visibility',
+            route: '/visibility',
+            requestHash: 'a'.repeat(64),
+            status: 204,
+            responseJson: 'null',
+            createdAt: '2026-10-19T00:00:00.000Z',
+            expiresAt: '2026-10-20T00:00:00.000Z',
+          };
+          const run = (withIdempotency = true, event = audit, record = idempotency) => {
+            const input = {
+              projectId: 'project',
+              sourceId: 'source',
+              audit: event,
+              ...(withIdempotency ? { idempotency: record } : {}),
+            };
+            switch (operation.method) {
+              case 'attachSource':
+                return w.store.attachSource(w.org, fence(), input);
+              case 'detachSource':
+                return w.store.detachSource(w.org, fence(), input);
+              case 'setPrecedence':
+                return w.store.setPrecedence(w.org, fence(), { ...input, precedence: 17 });
+              case 'addPattern':
+                return w.store.addPattern(w.org, fence(), {
+                  ...input,
+                  pattern: 'widget*',
+                  effect: operation.effect,
+                });
+              case 'removePattern':
+                return w.store.removePattern(w.org, fence(), { ...input, pattern: 'widget*' });
+            }
+          };
+          await w.executor.batch([
+            st(
+              "CREATE TRIGGER reject_visibility_audit BEFORE INSERT ON audit_pending BEGIN SELECT RAISE(ABORT, 'audit rejected'); END",
+            ),
+          ]);
+          const before = await snapshot();
+          expect(await run()).toMatchObject({ ok: false });
+          expect(await snapshot()).toEqual(before);
+          await w.executor.batch([st('DROP TRIGGER reject_visibility_audit')]);
+          const epochBefore = await w.epoch();
+          expect(await run()).toMatchObject({ ok: true });
+          expect(await w.epoch()).not.toBe(epochBefore);
+          expect(
+            await w.rows('SELECT id, action, org_id FROM audit_pending WHERE org_id = ?'),
+          ).toEqual([{ id: audit.id, action: operation.action, org_id: w.org.orgId }]);
+          const stored = await snapshot();
+          const replay = await settleIdempotent({
+            record: idempotency,
+            hash: idempotency.requestHash,
+            now: new Date(idempotency.createdAt),
+            find: () =>
+              createIdempotencyRepository(w.executor).find(
+                w.org,
+                idempotency.principalKey,
+                idempotency.key,
+                idempotency.createdAt,
+              ),
+            run,
+            failed: (result) => !result.ok,
+          });
+          expect(replay).toEqual({ kind: 'replay', record: idempotency });
+          expect(replayResponse(idempotency, 'replay').status).toBe(204);
+          expect(await snapshot()).toEqual(stored);
+          const noop = await run(false, visibilityAudit(operation.action));
+          expect(noop).toMatchObject(
+            operation.method === 'detachSource' || operation.method === 'removePattern'
+              ? { ok: false, reason: 'not_found' }
+              : { ok: true },
+          );
+          expect(await snapshot()).toEqual(stored);
+          if (operation.method === 'detachSource' || operation.method === 'removePattern') {
+            expect(
+              await run(true, visibilityAudit(operation.action), { ...idempotency, key: 'absent' }),
+            ).toMatchObject({ ok: false, reason: 'not_found' });
+            expect(await snapshot()).toEqual(stored);
+          }
         });
       });
     }

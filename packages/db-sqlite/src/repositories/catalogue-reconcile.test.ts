@@ -1093,13 +1093,22 @@ describe('revival and the blob purge lease', () => {
     return id;
   }
 
-  async function finalizeWith(present: readonly string[], executor = reconciler) {
+  async function finalizeWith(
+    present: readonly string[],
+    executor = reconciler,
+    definitiveAbsent = 0,
+  ) {
     const { stamp } = await executor.openListing(org, guard, scope);
     await executor.markListing(org, guard, { scope, stamp, present });
     return executor.finalizeListing(
       org,
       guard,
       completeVersionListing({ packageId: PACKAGE, stamp, count: present.length }),
+      {
+        attemptedCandidates: present.length + definitiveAbsent,
+        successfulCandidates: present.length,
+        definitiveAbsent,
+      },
     );
   }
 
@@ -1202,14 +1211,17 @@ describe('revival and the blob purge lease', () => {
     const blobId = await blobFor(org, 1, LIVE);
     await run(stmt('UPDATE version SET blob_id = ? WHERE id = ?', blobId, `V-${PACKAGE}-2.0.0`));
     const captured: Statement[] = [];
-    const spy = createCatalogueReconciler({
-      ...database.executor,
-      batch: (statements) => {
-        captured.push(...statements);
-        return database.executor.batch(statements);
+    const spy = createCatalogueReconciler(
+      {
+        ...database.executor,
+        batch: (statements) => {
+          captured.push(...statements);
+          return database.executor.batch(statements);
+        },
       },
-    });
-    const result = await finalizeWith(['1.0.0'], spy);
+      { maxAbsenceShare: 0.5 },
+    );
+    const result = await finalizeWith(['1.0.0'], spy, 1);
     expect(result).toMatchObject({ removed: 1, restored: 0 });
     expect(await statusOf(`V-${PACKAGE}-2.0.0`)).toBe('removed_upstream');
     const flag = captured.filter((s) =>

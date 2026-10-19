@@ -1,8 +1,10 @@
+import type { ApiCall } from '../api/idempotency.js';
+import { auditEvent } from '../audit/actions.js';
 import type { AdminLog } from '../authz/administration.js';
 import { fenceKind, type MutationFence } from '../authz/fence.js';
 import type { VisibilityStore, VisibilityWriteResult } from '../db/catalogue.js';
 import type { OrgContext } from '../db/port.js';
-import { isUlid } from '../ids.js';
+import { isUlid, ulid } from '../ids.js';
 import { isValidPattern } from './patterns.js';
 
 export type VisibilityResult =
@@ -22,12 +24,15 @@ export type VisibilityResult =
     };
 
 type Operation = keyof VisibilityStore;
-type Input<K extends Operation> = Parameters<VisibilityStore[K]>[2];
+type Input<K extends Operation> = K extends 'setOrder'
+  ? Pick<Parameters<VisibilityStore['setOrder']>[2], 'projectId' | 'sourceIds'>
+  : Parameters<VisibilityStore[K]>[2];
 export type VisibilityService = {
   [K in Operation]: (
     ctx: OrgContext,
     fence: MutationFence,
     input: Input<K>,
+    ...call: K extends 'setOrder' ? [call: ApiCall] : []
   ) => Promise<VisibilityResult>;
 };
 
@@ -35,6 +40,7 @@ const ID_FIELDS = {
   attachSource: ['projectId', 'sourceId'],
   detachSource: ['projectId', 'sourceId'],
   setPrecedence: ['projectId', 'sourceId'],
+  setOrder: ['projectId'],
   setPackageFlag: ['packageId'],
   addPattern: ['projectId', 'sourceId'],
   removePattern: ['projectId', 'sourceId'],
@@ -52,6 +58,16 @@ function validate(operation: Operation, input: unknown): asserts input is Record
     if (typeof fields[key] !== 'string' || !isUlid(fields[key])) {
       throw new TypeError('invalid visibility id');
     }
+  }
+  if (operation === 'setOrder') {
+    const ids = fields['sourceIds'];
+    if (
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      ids.some((id: unknown) => typeof id !== 'string' || !isUlid(id)) ||
+      new Set(ids).size !== ids.length
+    )
+      throw new TypeError('invalid visibility order');
   }
   if (
     operation === 'setPrecedence' ||
@@ -126,7 +142,7 @@ export function createVisibilityService(deps: {
     operation: K,
     ctx: OrgContext,
     fence: MutationFence,
-    input: Input<K>,
+    input: Parameters<VisibilityStore[K]>[2],
     write: VisibilityStore[K],
   ): Promise<VisibilityResult> {
     if (fenceKind(fence) !== 'session') throw new TypeError('visibility requires a session fence');
@@ -158,6 +174,36 @@ export function createVisibilityService(deps: {
       execute('detachSource', ctx, fence, input, deps.store.detachSource),
     setPrecedence: (ctx, fence, input) =>
       execute('setPrecedence', ctx, fence, input, deps.store.setPrecedence),
+    setOrder: async (ctx, fence, input, call) => {
+      if (fenceKind(fence) !== 'session')
+        throw new TypeError('visibility requires a session fence');
+      validate('setOrder', input);
+      if (fence.expected['project'] === undefined) {
+        throw new TypeError('fence must carry an expected project revision');
+      }
+      const event = auditEvent({
+        id: ulid(),
+        now: new Date().toISOString(),
+        action: 'source.reorder',
+        actor: { type: 'user', id: fence.userId },
+        context: call.audit,
+        target: { type: 'project', id: input.projectId },
+        projectId: input.projectId,
+      });
+      if (!event.ok) throw new TypeError('invalid visibility audit event');
+      return execute(
+        'setOrder',
+        ctx,
+        fence,
+        {
+          projectId: input.projectId,
+          sourceIds: input.sourceIds,
+          audit: event.event,
+          ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
+        },
+        deps.store.setOrder,
+      );
+    },
     setPackageFlag: (ctx, fence, input) =>
       execute('setPackageFlag', ctx, fence, input, deps.store.setPackageFlag),
     addPattern: (ctx, fence, input) =>

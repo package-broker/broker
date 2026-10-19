@@ -1,3 +1,7 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import type { IssueServiceTokenInput } from './token.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +106,7 @@ function minter(...selectors: string[]): { mint: () => MintedToken; calls: () =>
 function baseInput(overrides: Record<string, unknown> = {}) {
   return {
     id: TOKEN,
+    audit: mutationAudit(),
     name: 'laptop',
     scope: 'read' as const,
     expiresAt: iso(86_400_000),
@@ -635,6 +640,7 @@ describe('revoke', () => {
     await issue();
     const stamp = '2026-10-16T10:00:00.000Z';
     const result = await repository.revoke(a, fence(), liveSession(), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: stamp,
     });
@@ -651,11 +657,13 @@ describe('revoke', () => {
   it('is idempotent: the second revoke changes nothing and carries no marker', async () => {
     await issue();
     const first = await repository.revoke(a, fence(), liveSession(), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: '2026-10-16T10:00:00.000Z',
     });
     const before = await one('SELECT revoked_at, last_op_id FROM token WHERE id = ?', TOKEN);
     const second = await repository.revoke(a, fence(), liveSession(), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: '2026-10-16T11:00:00.000Z',
     });
@@ -672,6 +680,7 @@ describe('revoke', () => {
 
     expect(
       await repository.revoke(a, fence(), liveSession(), {
+        audit: mutationAudit('token.revoke'),
         tokenId: '01J0TOKENMISSING00000000000',
         now: iso(0),
       }),
@@ -700,11 +709,12 @@ describe('revoke', () => {
         b,
         fence('01J0USER00000000000000000B', '01J0SESSION000000000000000B'),
         assertGuard(sql<boolean>`1`, b),
-        { tokenId: TOKEN, now: iso(0) },
+        { audit: mutationAudit('token.revoke'), tokenId: TOKEN, now: iso(0) },
       ),
     ).toEqual({ status: 'not_found' });
     expect(
       await repository.revoke(b, fence(), assertGuard(sql<boolean>`1`, b), {
+        audit: mutationAudit('token.revoke'),
         tokenId: TOKEN,
         now: iso(0),
       }),
@@ -718,7 +728,11 @@ describe('revoke', () => {
   it('refuses a malformed timestamp before SQL', async () => {
     await issue();
     await expect(
-      repository.revoke(a, fence(), liveSession(), { tokenId: TOKEN, now: 'now' }),
+      repository.revoke(a, fence(), liveSession(), {
+        audit: mutationAudit('token.revoke'),
+        tokenId: TOKEN,
+        now: 'now',
+      }),
     ).rejects.toThrow(TypeError);
   });
 });
@@ -1029,6 +1043,7 @@ describe('fenced revoke', () => {
       params: [SESSION],
     });
     const result = await repository.revoke(a, fence(), liveSession(), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: iso(0),
     });
@@ -1042,7 +1057,11 @@ describe('fenced revoke', () => {
 
   it('refuses an empty token id', async () => {
     await expect(
-      repository.revoke(a, fence(), liveSession(), { tokenId: '', now: iso(0) }),
+      repository.revoke(a, fence(), liveSession(), {
+        audit: mutationAudit('token.revoke'),
+        tokenId: '',
+        now: iso(0),
+      }),
     ).rejects.toThrow(TypeError);
   });
 
@@ -1085,6 +1104,7 @@ describe('fenced revoke', () => {
       const results = await Promise.all(
         [first, second].map((e) =>
           createTokenRepository(e).revoke(org, fence(), liveSession(org), {
+            audit: mutationAudit('token.revoke'),
             tokenId: TOKEN,
             now: iso(0),
           }),
@@ -1284,13 +1304,18 @@ describe('cache epoch', () => {
   it('bumps once per successful revoke and not when the guard refuses', async () => {
     await repository.issuePersonal(a, fence(), baseInput(), minter('abcdefghijkl').mint);
     const before = await epoch();
-    await repository.revoke(a, fence(), liveSession(), { tokenId: TOKEN, now: iso(0) });
+    await repository.revoke(a, fence(), liveSession(), {
+      audit: mutationAudit('token.revoke'),
+      tokenId: TOKEN,
+      now: iso(0),
+    });
     const after = await epoch();
     await executor.all({
       sql: "UPDATE session SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
       params: [SESSION],
     });
     const refused = await repository.revoke(a, fence(), liveSession(), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: iso(0),
     });
@@ -1494,6 +1519,7 @@ describe('round 6 hardening', () => {
       params: [SESSION],
     });
     const result = await repository.revoke(a, fence(), alwaysTrue(), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: iso(0),
     });
@@ -1508,17 +1534,28 @@ describe('round 6 hardening', () => {
   it('does not bump the cache epoch for an already revoked or an unknown token', async () => {
     await repository.issuePersonal(a, fence(), baseInput(), minter('abcdefghijkl').mint);
     expect(
-      (await repository.revoke(a, fence(), alwaysTrue(), { tokenId: TOKEN, now: iso(0) })).status,
+      (
+        await repository.revoke(a, fence(), alwaysTrue(), {
+          audit: mutationAudit('token.revoke'),
+          tokenId: TOKEN,
+          now: iso(0),
+        })
+      ).status,
     ).toBe('revoked');
     const before = await epoch();
 
     expect(
-      await repository.revoke(a, fence(), alwaysTrue(), { tokenId: TOKEN, now: iso(0) }),
+      await repository.revoke(a, fence(), alwaysTrue(), {
+        audit: mutationAudit('token.revoke'),
+        tokenId: TOKEN,
+        now: iso(0),
+      }),
     ).toEqual({
       status: 'already_revoked',
     });
     expect(
       await repository.revoke(a, fence(), alwaysTrue(), {
+        audit: mutationAudit('token.revoke'),
         tokenId: '01J0TOKENMISSING00000000000',
         now: iso(0),
       }),
@@ -1592,11 +1629,372 @@ describe('bound parameter budget', () => {
     await repository.issuePersonal(a, fence(), baseInput(), minter('abcdefghijkl').mint);
     const { spy, seen } = recorder();
     await createTokenRepository(spy).revoke(a, fence(), assertGuard(sql<boolean>`1`, a), {
+      audit: mutationAudit('token.revoke'),
       tokenId: TOKEN,
       now: iso(0),
     });
 
     expect(seen.length).toBeGreaterThan(0);
     for (const statement of seen) expect(statement.params.length).toBeLessThanOrEqual(100);
+  });
+});
+
+function mutationAudit(action: AuditAction = 'token.issue', target = TOKEN) {
+  const result = auditEvent({
+    id: ulid(),
+    now: iso(0),
+    action,
+    actor: { type: 'user', id: USER },
+    context: { opId: ulid(), requestId: ulid(), sourceIp: null, tokenSelector: null },
+    target: { type: 'token', id: target },
+  });
+  if (!result.ok) throw new Error('Invalid test audit');
+  return result.event;
+}
+
+function mutationIdempotency(key = 'issue'): IdempotencyRecord {
+  return {
+    principalKey: USER,
+    key,
+    route: 'POST /tokens',
+    requestHash: 'a'.repeat(64),
+    status: 201,
+    responseJson: JSON.stringify({ code: 'already_issued', id: TOKEN }),
+    createdAt: iso(0),
+    expiresAt: iso(86_400_000),
+  };
+}
+
+async function stagedCounts() {
+  return Promise.all(
+    ['token', 'audit_pending', 'api_idempotency'].map(
+      async (table) => (await one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`))?.n,
+    ),
+  );
+}
+
+async function serviceAuditInput(): Promise<IssueServiceTokenInput> {
+  await executor.batch([
+    insert(
+      "INSERT INTO service_principal (id, org_id, name, created_by_user_id, created_at, updated_at) VALUES ('audit-principal', ?, 'ci', ?, ?, ?)",
+      a.orgId,
+      USER,
+      iso(0),
+      iso(0),
+    ),
+  ]);
+  await executor.batch([
+    insert(
+      "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, 'audit-principal', 'project:packages:read')",
+      a.orgId,
+    ),
+    insert(
+      "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, 'org:service-principals:write')",
+      a.orgId,
+      ADMIN_ROLE,
+    ),
+  ]);
+  return {
+    id: TOKEN,
+    name: 'ci',
+    servicePrincipalId: 'audit-principal',
+    projectId: null,
+    principalRevision: 1,
+    scope: 'read',
+    readOnly: true,
+    expiresAt: iso(86_400_000),
+    now: iso(0),
+    authority: {
+      permission: 'org:service-principals:write',
+      organizationAdmin: true,
+      covers: ['project:packages:read'],
+    },
+    providerAnchors: ANCHORS,
+    audit: mutationAudit(),
+    idempotency: mutationIdempotency(),
+  };
+}
+
+function serviceAuditMinter(...selectors: string[]) {
+  const source = minter(...selectors);
+  return {
+    calls: source.calls,
+    mint: () => {
+      const minted = source.mint();
+      return { ...minted, plaintext: minted.plaintext.replace('pb_pat_', 'pb_svc_') };
+    },
+  };
+}
+
+describe('atomic token audit', () => {
+  it.each(['personal', 'service', 'revoke'] as const)(
+    'stages exactly one event for %s',
+    async (kind) => {
+      const audit = mutationAudit(kind === 'revoke' ? 'token.revoke' : 'token.issue');
+      if (kind === 'service') {
+        const input = { ...(await serviceAuditInput()), audit };
+        expect(
+          (
+            await repository.issueService(
+              a,
+              fence(),
+              input,
+              serviceAuditMinter('aaaaaaaaaaaa').mint,
+            )
+          ).status,
+        ).toBe('issued');
+      } else {
+        expect(
+          (
+            await repository.issuePersonal(
+              a,
+              fence(),
+              baseInput({ audit: mutationAudit() }),
+              minter('aaaaaaaaaaaa').mint,
+            )
+          ).status,
+        ).toBe('issued');
+        await executor.batch([insert('DELETE FROM audit_pending')]);
+        if (kind === 'revoke') {
+          expect(
+            (
+              await repository.revoke(a, fence(), liveSession(), {
+                tokenId: TOKEN,
+                now: iso(0),
+                audit,
+              })
+            ).status,
+          ).toBe('revoked');
+        } else {
+          await executor.batch([insert('DELETE FROM token')]);
+          expect(
+            (
+              await repository.issuePersonal(
+                a,
+                fence(),
+                baseInput({ audit }),
+                minter('bbbbbbbbbbbb').mint,
+              )
+            ).status,
+          ).toBe('issued');
+        }
+      }
+      expect(
+        await executor.all({
+          sql: 'SELECT action, target_type, target_id FROM audit_pending',
+          params: [],
+        }),
+      ).toEqual([{ action: audit.action, target_type: audit.target.type, target_id: TOKEN }]);
+    },
+  );
+
+  it('stages nothing for a second revoke', async () => {
+    await repository.issuePersonal(
+      a,
+      fence(),
+      baseInput({ audit: mutationAudit() }),
+      minter('aaaaaaaaaaaa').mint,
+    );
+    await repository.revoke(a, fence(), liveSession(), {
+      tokenId: TOKEN,
+      now: iso(0),
+      audit: mutationAudit('token.revoke'),
+      idempotency: mutationIdempotency('first'),
+    });
+    const before = await stagedCounts();
+    expect(
+      await repository.revoke(a, fence(), liveSession(), {
+        tokenId: TOKEN,
+        now: iso(0),
+        audit: mutationAudit('token.revoke'),
+        idempotency: mutationIdempotency('second'),
+      }),
+    ).toEqual({ status: 'already_revoked' });
+    expect(await stagedCounts()).toEqual(before);
+  });
+
+  it('stages nothing for an absent token', async () => {
+    expect(
+      await repository.revoke(a, fence(), liveSession(), {
+        tokenId: TOKEN,
+        now: iso(0),
+        audit: mutationAudit('token.revoke'),
+        idempotency: mutationIdempotency(),
+      }),
+    ).toEqual({ status: 'not_found' });
+    expect(await stagedCounts()).toEqual([0, 0, 0]);
+  });
+
+  it('stages nothing for a foreign token', async () => {
+    await repository.issuePersonal(
+      a,
+      fence(),
+      baseInput({ audit: mutationAudit() }),
+      minter('aaaaaaaaaaaa').mint,
+    );
+    await executor.batch([insert('DELETE FROM audit_pending')]);
+    expect(
+      (
+        await repository.revoke(b, fence(), assertGuard(sql<boolean>`1`, b), {
+          tokenId: TOKEN,
+          now: iso(0),
+          audit: mutationAudit('token.revoke'),
+          idempotency: mutationIdempotency(),
+        })
+      ).status,
+    ).not.toBe('revoked');
+    expect(await stagedCounts()).toEqual([1, 0, 0]);
+  });
+
+  it.each([
+    ['stale session', "UPDATE session SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?"],
+    ['missing permission', 'DELETE FROM role_permission WHERE role_id = ?'],
+    ['expired reauth', "UPDATE session SET reauth_at = '2020-01-01T00:00:00.000Z' WHERE id = ?"],
+  ])('rolls back all rows for %s', async (name, statement) => {
+    const projects = await addProjects(a, 1);
+    await executor.batch([insert(statement, name === 'missing permission' ? ADMIN_ROLE : SESSION)]);
+    const result = await repository.issuePersonal(
+      a,
+      fence(),
+      baseInput({
+        projectMode: 'selected',
+        projectIds: projects,
+        audit: mutationAudit(),
+        idempotency: mutationIdempotency(),
+      }),
+      minter('aaaaaaaaaaaa').mint,
+    );
+    expect(result).toEqual({ status: 'refused', reason: 'authority' });
+    expect(await stagedCounts()).toEqual([0, 0, 0]);
+  });
+
+  it.each(['personal', 'service'] as const)(
+    'stages only the committed %s collision attempt',
+    async (kind) => {
+      await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ id: 'occupied', audit: mutationAudit() }),
+        minter('aaaaaaaaaaaa').mint,
+      );
+      await executor.batch([insert('DELETE FROM audit_pending')]);
+      const minted =
+        kind === 'personal'
+          ? minter('aaaaaaaaaaaa', 'bbbbbbbbbbbb')
+          : serviceAuditMinter('aaaaaaaaaaaa', 'bbbbbbbbbbbb');
+      const result =
+        kind === 'personal'
+          ? await repository.issuePersonal(
+              a,
+              fence(),
+              baseInput({ audit: mutationAudit(), idempotency: mutationIdempotency() }),
+              minted.mint,
+            )
+          : await repository.issueService(a, fence(), await serviceAuditInput(), minted.mint);
+      expect(result.status).toBe('issued');
+      expect(minted.calls()).toBe(2);
+      expect(await stagedCounts()).toEqual([2, 1, 1]);
+    },
+  );
+
+  it('stores the supplied service replay response without plaintext', async () => {
+    const input = await serviceAuditInput();
+    const minted = serviceAuditMinter('aaaaaaaaaaaa');
+    const result = await repository.issueService(a, fence(), input, minted.mint);
+    expect(result.status).toBe('issued');
+    if (result.status !== 'issued') throw new Error('Issue failed');
+    const row = await one<{ response_json: string }>('SELECT * FROM api_idempotency');
+    expect(JSON.parse(row?.response_json ?? 'null')).toEqual({ code: 'already_issued', id: TOKEN });
+    expect(JSON.stringify(row).includes(result.plaintext)).toBe(false);
+  });
+
+  it.each(['personal', 'service'] as const)(
+    'does not retry a %s idempotency unique-key failure even with a colliding selector',
+    async (kind) => {
+      const input =
+        kind === 'service'
+          ? await serviceAuditInput()
+          : baseInput({ audit: mutationAudit(), idempotency: mutationIdempotency() });
+      await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ id: 'occupied', audit: mutationAudit() }),
+        minter('aaaaaaaaaaaa').mint,
+      );
+      await executor.batch([
+        insert('DELETE FROM audit_pending'),
+        insert(
+          "INSERT INTO api_idempotency (org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at) VALUES (?, ?, 'issue', 'POST /tokens', ?, 201, '{}', ?, ?)",
+          a.orgId,
+          USER,
+          'a'.repeat(64),
+          iso(0),
+          iso(86_400_000),
+        ),
+      ]);
+      const minted =
+        kind === 'personal'
+          ? minter('bbbbbbbbbbbb', 'aaaaaaaaaaaa')
+          : serviceAuditMinter('bbbbbbbbbbbb', 'aaaaaaaaaaaa');
+      // The selector becomes occupied before the failure probes, after the idempotency failure.
+      const wrapped: SqlExecutor = {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        async batch(statements) {
+          try {
+            return await executor.batch(statements);
+          } catch (error) {
+            await executor.batch([
+              insert("UPDATE token SET selector = 'bbbbbbbbbbbb' WHERE id = 'occupied'"),
+            ]);
+            throw error;
+          }
+        },
+      };
+      const tokens = createTokenRepository(wrapped);
+      const result =
+        kind === 'personal'
+          ? await tokens.issuePersonal(
+              a,
+              fence(),
+              input as ReturnType<typeof baseInput>,
+              minted.mint,
+            )
+          : await tokens.issueService(a, fence(), input as IssueServiceTokenInput, minted.mint);
+      expect(result.status).not.toBe('issued');
+      expect(minted.calls()).toBe(1);
+      expect(await stagedCounts()).toEqual([1, 0, 1]);
+      expect(await one('SELECT id FROM token WHERE id = ?', TOKEN)).toBeUndefined();
+    },
+  );
+
+  it('measures the issue batch with 200 projects, audit and idempotency', async () => {
+    const projects = await addProjects(a, 200);
+    let count = 0;
+    const measured: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch(statements) {
+        count = statements.length;
+        return executor.batch(statements);
+      },
+    };
+    expect(
+      (
+        await createTokenRepository(measured).issuePersonal(
+          a,
+          fence(),
+          baseInput({
+            projectMode: 'selected',
+            projectIds: projects,
+            audit: mutationAudit(),
+            idempotency: mutationIdempotency(),
+          }),
+          minter('aaaaaaaaaaaa').mint,
+        )
+      ).status,
+    ).toBe('issued');
+    expect(count).toBeLessThanOrEqual(100);
+    console.info('T508 maximum-project issue batch statements:', count);
   });
 });

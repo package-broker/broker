@@ -47,7 +47,7 @@ export interface ServiceTokenStoreInput {
   readonly authority: ServiceTokenAuthority;
   /** Provider anchors of the organization, for the issuer's group and e-mail evidence. */
   readonly providerAnchors: readonly ProviderAnchor[];
-  readonly audit?: AuditEvent;
+  readonly audit: AuditEvent;
   readonly idempotency?: IdempotencyRecord;
 }
 

@@ -336,6 +336,23 @@ export function describeBlobContract(name: string, make: () => Promise<BlobContr
       expect(() => requireBlobFixtureHooks(fixture)).not.toThrow();
     });
 
+    it('returns the current generation from put, head and get, and bumps it on another put', async () => {
+      const f = await ready(make);
+      const org = await f.seed(nextOrg());
+      const data = bytes('generation fence');
+      const key = await digestOf(data);
+      const upload = () => f.store.put(org, key, streamOf(data), { size: data.length, ...PLAIN });
+      const first = await upload();
+      expect(first.generation).toMatch(/^[0-9a-f]{32}$/);
+      const second = await upload();
+      expect(second.generation).toMatch(/^[0-9a-f]{32}$/);
+      expect(second.generation).not.toBe(first.generation);
+      expect((await f.store.head(org, key))?.generation).toBe(second.generation);
+      const read = await f.store.get(org, key);
+      expect(read?.info.generation).toBe(second.generation);
+      await read?.body.cancel();
+    });
+
     it('round-trips a full body with its info', async () => {
       const f = await ready(make);
       const org = await f.seed(nextOrg());
@@ -343,6 +360,7 @@ export function describeBlobContract(name: string, make: () => Promise<BlobContr
       const key = await put(f.store, org, data, { mediaType: 'text/plain' });
       const read = await f.store.get(org, key);
       expect(read?.info).toEqual({
+        generation: expect.any(String),
         sha256: key,
         size: data.length,
         mediaType: 'text/plain',
@@ -786,6 +804,7 @@ export function describeBlobLifecycleContract(
       expect(await f.refetchableOf(org, key)).toBe(true);
       const narrowed = await f.narrowRefetchable(org, args);
       expect(narrowed).toEqual({
+        generation: before,
         sha256: key,
         size: data.length,
         mediaType: PLAIN.mediaType,

@@ -376,7 +376,7 @@ describe('replaceBlobStatements', () => {
     await expectRefused(() => replace());
   });
 
-  it('an expired purge lease does not block the replacement', async () => {
+  it('an expired purge lease still blocks the replacement until put revokes it', async () => {
     await database.executor.batch([
       stmt(
         `UPDATE blob SET purge_generation = 'g',
@@ -384,7 +384,7 @@ describe('replaceBlobStatements', () => {
         BLOB_B,
       ),
     ]);
-    expect((await replace()).changed).toBe(true);
+    await expectRefused(() => replace());
   });
 
   it('a stale job guard rolls the whole batch back', async () => {

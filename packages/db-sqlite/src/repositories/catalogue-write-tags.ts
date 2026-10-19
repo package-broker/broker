@@ -3,7 +3,7 @@ import type { CatalogueWriteGuard, SyncResult } from '@package-broker/core/db/ca
 import type { OrgContext, Statement, StatementResult } from '@package-broker/core/db/port';
 import { validateVersion } from '@package-broker/core/catalogue/versions';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
-import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
+import { assertCatalogueWriteGuard, monotonicNow } from '../internal/catalogue-write-guard.js';
 
 export const MAX_TAGS_PER_CALL = 100;
 
@@ -210,10 +210,7 @@ export function distTagStatements(
       .updateTable('package')
       .set({
         rev: sql<number>`package.rev + 1`,
-        modified_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', max(
-          unixepoch('now', 'subsec'),
-          unixepoch(package.modified_at, 'subsec') + 0.001
-        ), 'unixepoch')`,
+        modified_at: monotonicNow,
       })
       .where('package.id', '=', packageId)
       .where('package.org_id', '=', ctx.orgId)

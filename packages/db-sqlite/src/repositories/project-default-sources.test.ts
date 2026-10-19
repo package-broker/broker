@@ -1,3 +1,5 @@
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mutationFence,
@@ -60,7 +62,13 @@ function fence(userId = USER, sessionId = SESSION): MutationFence {
 }
 
 function create(id = NEW_PROJECT, slug = 'fresh') {
-  return projects.create(a, fence(), { id, slug, name: slug, now: NOW });
+  return projects.create(a, fence(), {
+    audit: mutationAudit('project.create', id, id),
+    id,
+    slug,
+    name: slug,
+    now: NOW,
+  });
 }
 
 async function visible(projectId: string): Promise<string[]> {
@@ -245,6 +253,7 @@ describe('project creation attaches organization sources', () => {
     ]);
     const before = await counts();
     const outcome = await projects.create(a, fence(uid('U2'), uid('S2')), {
+      audit: mutationAudit('project.create', NEW_PROJECT, NEW_PROJECT),
       id: NEW_PROJECT,
       slug: 'fresh',
       name: 'fresh',
@@ -257,6 +266,7 @@ describe('project creation attaches organization sources', () => {
   it('writes no source or package rows when the initial role is not allowed', async () => {
     const before = await counts();
     const outcome = await projects.create(a, fence(), {
+      audit: mutationAudit('project.create', NEW_PROJECT, NEW_PROJECT),
       id: NEW_PROJECT,
       slug: 'fresh',
       name: 'fresh',
@@ -273,3 +283,18 @@ describe('project creation attaches organization sources', () => {
     expect(await attachments(FOREIGN_PROJECT)).toEqual({});
   });
 });
+
+function mutationAudit(action: AuditAction, targetId: string, projectId: string) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: new Date().toISOString(),
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: targetId },
+    projectId,
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

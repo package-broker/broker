@@ -14,18 +14,11 @@ import {
 } from '@package-broker/core/ingest/finalize-guard';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
-import type { UpstreamForm } from '../schema.js';
+import { parsePendingValidators, type UpstreamForm } from '@package-broker/core/ingest/validators';
 import { NOW } from '../internal/lease-time.js';
-import { finalizeListingStatements } from './catalogue-reconcile.js';
+import { finalizeListingStatements, removedBlobs } from './catalogue-reconcile.js';
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
-
-const FORMS: readonly UpstreamForm[] = [
-  'composer-p2',
-  'composer-p2-dev',
-  'composer-v1-provider',
-  'npm-packument',
-];
 
 export type IngestFinalizeRefusal =
   | 'mass_absence'
@@ -68,32 +61,6 @@ interface SessionRow {
   pending_validators: string | null;
 }
 
-function nullableText(field: string, value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== 'string') throw new TypeError(`${field} must be a string or null`);
-  return value;
-}
-
-function validatorsOf(raw: string | null): [UpstreamForm, PublishedValidators][] {
-  if (raw === null) return [];
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return Object.entries(parsed).map(([form, value]) => {
-    if (!FORMS.includes(form as UpstreamForm)) throw new RangeError('unknown upstream form');
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new TypeError('pending validators must map each form to an object');
-    }
-    const entry = value as Record<string, unknown>;
-    return [
-      form as UpstreamForm,
-      {
-        etag: nullableText('etag', entry['etag']),
-        lastModified: nullableText('lastModified', entry['lastModified']),
-        contentSha256: nullableText('contentSha256', entry['contentSha256']),
-      },
-    ];
-  });
-}
-
 function markedRows(ctx: OrgContext, scope: ListingScope, stamp: string): RawBuilder<number> {
   return scope.kind === 'source'
     ? sql<number>`(SELECT count(*) FROM package
@@ -102,24 +69,6 @@ function markedRows(ctx: OrgContext, scope: ListingScope, stamp: string): RawBui
     : sql<number>`(SELECT count(*) FROM version
         WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${scope.packageId}
           AND version.listing_seen_stamp = ${stamp})`;
-}
-
-function removedBlobs(ctx: OrgContext, scope: ListingScope): Statement {
-  const inScope =
-    scope.kind === 'source'
-      ? sql`version.package_id IN (SELECT package.id FROM package
-          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId})`
-      : sql`version.package_id = ${scope.packageId}`;
-  return compile({
-    compile: () =>
-      sql`UPDATE blob SET refetchable = 0
-        WHERE blob.org_id = ${ctx.orgId} AND blob.refetchable = 1
-          AND blob.deleted_at IS NULL AND blob.purge_after IS NULL
-          AND (blob.purge_lease_until IS NULL OR blob.purge_lease_until <= ${NOW})
-          AND blob.id IN (SELECT version.blob_id FROM version
-            WHERE version.org_id = ${ctx.orgId} AND version.status = 'removed_upstream'
-              AND version.blob_id IS NOT NULL AND ${inScope})`.compile(db),
-  });
 }
 
 function completeSession(ctx: OrgContext, session: IngestSessionHandle): Statement[] {
@@ -199,7 +148,13 @@ export function createIngestFinalizer(
         scope = { kind: 'package', packageId: found.id };
       }
 
-      const validators = scope.kind === 'package' ? validatorsOf(row.pending_validators) : [];
+      const validators =
+        scope.kind === 'package'
+          ? (Object.entries(parsePendingValidators(JSON.parse(row.pending_validators ?? '{}'))) as [
+              UpstreamForm,
+              PublishedValidators,
+            ][])
+          : [];
       const [counted] = await executor.all<{ n: number }>(
         compile(db.selectNoFrom(markedRows(ctx, scope, stamp).as('n'))),
       );

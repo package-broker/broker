@@ -74,12 +74,20 @@ type Method = 'createOrganization' | 'deleteOrganization' | 'changeRole';
 
 const CALLS: Record<string, Call> = {
   grantOrganization: (admin, fence) =>
-    admin.grantOrganization(ctx, actor, fence, {
-      subject: { type: 'email', value: 'new@example.com' },
-      roleId: 'role-1',
-    }),
-  revokeOrganizationGrant: (admin, fence) => admin.revokeOrganizationGrant(ctx, actor, fence, 'g1'),
-  changeGrantRole: (admin, fence) => admin.changeGrantRole(ctx, actor, fence, 'g1', 'role-1'),
+    admin.grantOrganization(
+      ctx,
+      actor,
+      fence,
+      {
+        subject: { type: 'email', value: 'new@example.com' },
+        roleId: 'role-1',
+      },
+      apiCall,
+    ),
+  revokeOrganizationGrant: (admin, fence) =>
+    admin.revokeOrganizationGrant(ctx, actor, fence, 'g1', apiCall),
+  changeGrantRole: (admin, fence) =>
+    admin.changeGrantRole(ctx, actor, fence, 'g1', 'role-1', apiCall),
 };
 
 const METHOD: Record<string, Method> = {
@@ -99,10 +107,7 @@ describe('grant mutators carry the fence', () => {
       const args = (grants[method] as ReturnType<typeof vi.fn>).mock.calls[0] as unknown[];
       expect(args[0]).toBe(ctx);
       expect(args[1]).toBe(fence);
-      const opId =
-        method === 'createOrganization'
-          ? (args[2] as { opId?: string }).opId
-          : args.find((value) => typeof value === 'string' && /^ID\d+$/.test(value));
+      const opId = (args[2] as { opId?: string }).opId;
       expect(opId).toMatch(/^ID\d+$/);
     });
 
@@ -154,7 +159,7 @@ describe('grant mutators carry the fence', () => {
   it('the expected grant revision reaches the repository only through the fence', async () => {
     const { admin, grants } = setup();
     const fence = fenceOf('actor-1', { grant: 9 });
-    await admin.changeGrantRole(ctx, actor, fence, 'g1', 'role-1');
+    await admin.changeGrantRole(ctx, actor, fence, 'g1', 'role-1', apiCall);
     expect((grants.changeRole.mock.calls[0] as unknown[])[1]).toMatchObject({
       expected: { grant: 9 },
     });
@@ -176,9 +181,20 @@ describe('revocation needs no subset of the removed role', () => {
       ids: { ulid: () => 'ID00' },
       log: vi.fn(),
     });
-    expect(await admin.revokeOrganizationGrant(ctx, actor, fenceOf('actor-1'), 'g1')).toEqual({
+    expect(
+      await admin.revokeOrganizationGrant(ctx, actor, fenceOf('actor-1'), 'g1', apiCall),
+    ).toEqual({
       ok: true,
       value: null,
     });
   });
 });
+
+const apiCall = {
+  audit: {
+    opId: '01K00000000000000000000001',
+    requestId: '01K00000000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};

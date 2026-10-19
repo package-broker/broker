@@ -21,6 +21,7 @@ import {
   type FinalizeGuardOptions,
 } from '@package-broker/core/ingest/finalize-guard';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
+import { leaseLive } from './blob-lease-guard.js';
 import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 
 const MAX_KEY_BYTES = 512;
@@ -153,6 +154,29 @@ function conditionalEpochBump(ctx: OrgContext, condition: RawBuilder<boolean>): 
   ];
 }
 
+export function removedBlobs(
+  ctx: OrgContext,
+  scope: ListingScope | { readonly opId: string },
+): Statement {
+  const inScope =
+    'opId' in scope
+      ? sql`version.last_op_id = ${scope.opId}`
+      : scope.kind === 'source'
+        ? sql`version.package_id IN (SELECT package.id FROM package
+          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId})`
+        : sql`version.package_id = ${scope.packageId}`;
+  return compile({
+    compile: () =>
+      sql`UPDATE blob SET refetchable = 0
+        WHERE blob.org_id = ${ctx.orgId} AND blob.refetchable = 1
+          AND blob.deleted_at IS NULL AND blob.purge_after IS NULL
+          AND NOT ${leaseLive('blob.purge_lease_until')}
+          AND blob.id IN (SELECT version.blob_id FROM version
+            WHERE version.org_id = ${ctx.orgId} AND version.status = 'removed_upstream'
+              AND version.blob_id IS NOT NULL AND ${inScope})`.compile(db),
+  });
+}
+
 function transitionStatements(
   ctx: OrgContext,
   packageId: string | undefined,
@@ -258,6 +282,7 @@ export function finalizeListingStatements(
     statements.push(
       cascade.revision,
       cascade.update,
+      removedBlobs(ctx, { opId }),
       ...conditionalEpochBump(
         ctx,
         sql<boolean>`EXISTS (SELECT 1 FROM package
@@ -307,7 +332,7 @@ export function finalizeListingStatements(
   ];
   statements.push(removal.revision);
   const removalIndex = statements.length;
-  statements.push(removal.update, revival.revision);
+  statements.push(removal.update, removedBlobs(ctx, { opId }), revival.revision);
   const revivalIndex = statements.length;
   statements.push(
     revival.update,
@@ -444,6 +469,7 @@ export function createCatalogueReconciler(
       statements.push(
         transition.revision,
         transition.update,
+        removedBlobs(ctx, { opId }),
         ...conditionalEpochBump(
           ctx,
           sql<boolean>`EXISTS (SELECT 1 FROM package

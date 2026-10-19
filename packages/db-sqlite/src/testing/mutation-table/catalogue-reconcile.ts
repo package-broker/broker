@@ -90,7 +90,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         );
         await expect(
           reconciler.markPackageAbsent(own, guard, { packageId: 'OK' }),
-        ).resolves.toMatchObject({ changed: true });
+        ).resolves.toMatchObject({ changed: true, statements: 9 });
       } else {
         const scope =
           kind === 'source'
@@ -124,6 +124,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         ).resolves.toMatchObject({
           removed: 1,
           restored: 1,
+          statements: kind === 'source' ? 11 : 14,
         });
       }
       expect(await snapshot()).toEqual(before);
@@ -197,6 +198,10 @@ export const entries: readonly MutationEntry[] = [
       },
     ],
     waivers: [
+      {
+        locate: /blob.org_id = \?/,
+        reason: 'The composed removedBlobs builder has its own organization mutation registration.',
+      },
       {
         locate: /(?<=UPDATE version SET updated_at[^]*?WHERE )org_id = \?/,
         reason:

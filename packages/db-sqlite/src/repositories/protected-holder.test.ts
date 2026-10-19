@@ -256,18 +256,23 @@ async function ensureActor(): Promise<void> {
 async function deleteGrant(id: string) {
   await ensureActor();
   counter += 1;
-  return grants.deleteOrganization(a, await fenceFor(id), id, `OP${counter}`);
+  return grants.deleteOrganization(a, await fenceFor(id), { id: id, opId: `OP${counter}` });
 }
 
 async function suspend(userId: string, now: string) {
   await ensureActor();
-  return grants.suspendUser(a, await fenceFor(userId), userId, now);
+  return grants.suspendUser(a, await fenceFor(userId), { userId: userId, now: now });
 }
 
 async function changeGrantRole(id: string, roleId: string, now: string) {
   await ensureActor();
   counter += 1;
-  return grants.changeRole(a, await fenceFor(id), id, roleId, now, `OP${counter}`);
+  return grants.changeRole(a, await fenceFor(id), {
+    id: id,
+    roleId: roleId,
+    now: now,
+    opId: `OP${counter}`,
+  });
 }
 
 async function seed(...statements: Statement[]): Promise<void> {

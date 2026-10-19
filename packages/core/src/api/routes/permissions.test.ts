@@ -56,7 +56,7 @@ function authorizationEngine(options: Options = {}) {
               servicePrincipalId: null,
               bindingOk: true,
               projectMode: 'all',
-              scope: { level: 'organization', readOnly: true },
+              scope: { level: 'read', readOnly: true },
             },
             principalStatus: 'active',
             projectVisible: false,

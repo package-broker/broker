@@ -6,6 +6,7 @@ import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-s
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import * as kernelModule from '@package-broker/core/kernel/kernel';
 import * as registryModule from '@package-broker/core/kernel/registry';
+import * as coreJobsModule from '@package-broker/core/runtime/core-jobs';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { definePlugin } from '@package-broker/core/plugin';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
@@ -69,7 +70,7 @@ describe('Worker audit job configuration gate', () => {
           ? { PB_PUBLIC_URL: 'https://broker.test' }
           : { PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8' }),
       };
-      const coreRegistration = vi.spyOn(registryModule, 'registerCoreJob');
+      const coreRegistration = vi.spyOn(coreJobsModule, 'registerCoreJob');
       const collection = vi.spyOn(registryModule, 'collectRegistrations');
       try {
         const response = await worker.fetch(new Request('https://broker.test/health/live'), env);

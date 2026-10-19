@@ -30,6 +30,9 @@ async function app(extra: Partial<KernelOptions> = {}) {
     resolveOrg: () => Promise.resolve(orgContext('org-1')),
     health: () => Promise.resolve(true),
     log: () => undefined,
+    authorization: {
+      authorize: () => Promise.resolve({ allow: false, status: 401 }),
+    },
     coreRoutes: [
       route('/_pb/json'),
       route('/_pb/auth/providers'),

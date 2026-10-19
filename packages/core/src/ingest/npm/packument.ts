@@ -1,3 +1,4 @@
+import { isRegistryNotFound } from '../not-found-presets.js';
 import { packageKey } from '../../catalogue/names.js';
 import type { OrgContext } from '../../db/port.js';
 import type { BlobStore } from '../../platform/blob.js';
@@ -56,6 +57,7 @@ export interface NpmPackumentDeps {
 }
 
 export interface NpmPackumentTarget {
+  readonly sourceType?: string;
   readonly name: string;
   readonly url: string;
   readonly credential?: UpstreamCredential;
@@ -211,13 +213,6 @@ function assertNamed(expected: string, raw: string | undefined): void {
   if (raw === undefined || (JSON.parse(raw) as unknown) !== expected) {
     throw invalidPackument(expected);
   }
-}
-
-function isNotFoundBody(parsed: unknown): boolean {
-  if (!isRecord(parsed)) return false;
-  const keys = Object.keys(parsed);
-  const error = parsed.error;
-  return keys.length === 1 && error === 'Not found';
 }
 
 /** Track presence without retaining the versions object or confusing it with an empty one. */
@@ -406,6 +401,7 @@ async function describeStaged(
     return {
       kind: 'not_found',
       definitive:
+        (target.sourceType ?? 'npmjs_proxy') === 'npmjs_proxy' &&
         new URL(target.url).origin === 'https://registry.npmjs.org' &&
         target.credential === undefined &&
         ref.definitiveAbsence === true,
@@ -472,6 +468,7 @@ export async function describeNpmPackument(
   const conditional = known !== undefined;
   const response = await request(conditional);
   const definitiveAbsence =
+    (target.sourceType ?? 'npmjs_proxy') === 'npmjs_proxy' &&
     new URL(target.url).origin === 'https://registry.npmjs.org' &&
     target.credential === undefined &&
     response.redirected === false;
@@ -493,7 +490,7 @@ export async function describeNpmPackument(
     if (body !== null && definitiveAbsence) {
       try {
         const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
-        definitive = isNotFoundBody(parsed);
+        definitive = isRegistryNotFound(target.sourceType ?? 'npmjs_proxy', parsed);
       } catch {
         definitive = false;
       }

@@ -17,7 +17,6 @@ import {
   compile,
   db,
   existsGuard,
-  databaseTimeMs,
   protectedHolder,
   runOrgFenced,
   type Database,
@@ -874,10 +873,8 @@ export function createGrantRepository(
         sql.ref('holder.id'),
         input ?? {
           kind: 'fresh',
-          now: '1970-01-01T00:00:00.000Z',
           providers,
         },
-        input === undefined ? { now: databaseTimeMs } : {},
       );
       const rows = await executor.all<IdRow>(
         scalar(

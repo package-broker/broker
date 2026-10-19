@@ -31,14 +31,15 @@ const inputs = {
   releaseQuarantine: { versionId },
   tombstoneVersion: { versionId, reason: 'admin_tombstone' },
 } as const;
-type Operation = keyof VisibilityStore;
+type Operation = Exclude<keyof VisibilityStore, 'setOrder'>;
 const operations = Object.keys(inputs) as Operation[];
 
 function setup(answer: VisibilityWriteResult = { ok: true, opId: 'operation-id' }) {
-  const store = Object.fromEntries(
-    operations.map((op) => [op, vi.fn(async () => answer)]),
-  ) as unknown as {
-    [K in Operation]: ReturnType<typeof vi.fn<VisibilityStore[K]>>;
+  const store = {
+    ...Object.fromEntries(operations.map((op) => [op, vi.fn(async () => answer)])),
+    setOrder: vi.fn(async () => answer),
+  } as unknown as {
+    [K in keyof VisibilityStore]: ReturnType<typeof vi.fn<VisibilityStore[K]>>;
   };
   const log = vi.fn();
   const service = createVisibilityService({ store, log });
@@ -48,7 +49,7 @@ function setup(answer: VisibilityWriteResult = { ok: true, opId: 'operation-id' 
       (rawFence.length === 0 ? fence : rawFence[0]) as MutationFence,
       input as never,
     );
-  return { store, log, call };
+  return { store, log, call, service };
 }
 
 describe('visibility administration', () => {
@@ -199,4 +200,98 @@ describe('visibility administration', () => {
     });
     expect(await call('addPattern')).toEqual({ ok: true, opId: 'operation-id' });
   });
+});
+
+const orderFence = mutationFence({ userId: projectId, sessionId: sourceId } as AuthenticatedActor, {
+  project: 1,
+});
+const apiCall = {
+  audit: { opId: packageId, requestId: versionId, sourceIp: null, tokenSelector: null },
+  idempotency: {
+    principalKey: `user:${projectId}`,
+    key: 'order',
+    route: '/sources/order',
+    requestHash: 'a'.repeat(64),
+    status: 204,
+    responseJson: 'null',
+    createdAt: '2026-10-19T00:00:00.000Z',
+    expiresAt: '2026-10-20T00:00:00.000Z',
+  },
+};
+describe('setOrder', () => {
+  it.each([
+    ['empty', []],
+    ['non-ULID', ['invalid']],
+    ['duplicate', [sourceId, sourceId]],
+    ['non-array', null],
+  ])('rejects %s sourceIds before storage', async (_, sourceIds) => {
+    const { store, service } = setup();
+    await expect(
+      service.setOrder(ctx, orderFence, { projectId, sourceIds } as never, apiCall),
+    ).rejects.toThrow(TypeError);
+    expect(store.setOrder).not.toHaveBeenCalled();
+  });
+  it('rejects a missing revision, invalid project, input or audit before storage', async () => {
+    const { store, service } = setup();
+    await expect(
+      service.setOrder(ctx, fence, { projectId, sourceIds: [sourceId] }, apiCall),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      service.setOrder(ctx, orderFence, { projectId: 'invalid', sourceIds: [sourceId] }, apiCall),
+    ).rejects.toThrow(TypeError);
+    await expect(service.setOrder(ctx, orderFence, null as never, apiCall)).rejects.toThrow(
+      TypeError,
+    );
+    await expect(
+      service.setOrder(
+        ctx,
+        orderFence,
+        { projectId, sourceIds: [sourceId] },
+        { audit: { ...apiCall.audit, requestId: 'invalid' } },
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(store.setOrder).not.toHaveBeenCalled();
+  });
+  it('rejects a non-session fence', async () => {
+    const { store, service } = setup();
+    await expect(
+      service.setOrder(
+        ctx,
+        systemMutationFence(
+          'purge',
+          { id: 'job', owner: 'worker', fence: 1 },
+          { project: 1 },
+        ) as never,
+        { projectId, sourceIds: [sourceId] },
+        apiCall,
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(store.setOrder).not.toHaveBeenCalled();
+  });
+  it.each([true, false])(
+    'builds the catalogue event and forwards optional idempotency=%s',
+    async (withIdempotency) => {
+      const { store, service } = setup();
+      const call = withIdempotency ? apiCall : { audit: apiCall.audit };
+      expect(
+        await service.setOrder(ctx, orderFence, { projectId, sourceIds: [sourceId] }, call),
+      ).toEqual({ ok: true, opId: 'operation-id' });
+      expect(store.setOrder).toHaveBeenCalledExactlyOnceWith(ctx, orderFence, {
+        projectId,
+        sourceIds: [sourceId],
+        audit: {
+          id: expect.stringMatching(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/),
+          occurredAt: expect.stringMatching(/^\d{4}-.*Z$/),
+          action: 'source.reorder',
+          actor: { type: 'user', id: orderFence.userId },
+          tokenSelector: null,
+          sourceIp: null,
+          target: { type: 'project', id: projectId },
+          projectId,
+          payloadJson: JSON.stringify({ op_id: packageId, request_id: versionId }),
+        },
+        ...(withIdempotency ? { idempotency: apiCall.idempotency } : {}),
+      });
+    },
+  );
 });

@@ -680,13 +680,10 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
       }
 
       const revoke = (tokenId: string) =>
-        tokens.revoke(
-          ctx,
-          fence(),
-          tokens.ownPersonalToken(ctx, fence(), tokenId),
-          tokenId,
-          iso(0),
-        );
+        tokens.revoke(ctx, fence(), tokens.ownPersonalToken(ctx, fence(), tokenId), {
+          tokenId: tokenId,
+          now: iso(0),
+        });
       expect(await revoke('other-user-pat')).toEqual({ status: 'refused', reason: 'unclassified' });
       expect(await revoke('svc-token')).toEqual({ status: 'refused', reason: 'unclassified' });
       expect(await revoke('expired-pat')).toEqual({ status: 'refused', reason: 'unclassified' });

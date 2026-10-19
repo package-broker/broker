@@ -132,6 +132,9 @@ async function begin(scope: 'package' | 'source', executor: SqlExecutor = databa
 
 const input = (expectedCount: number, extra: Partial<IngestFinalizeInput> = {}) => ({
   expectedCount,
+  attemptedCandidates: expectedCount,
+  successfulCandidates: expectedCount,
+  definitiveAbsent: 0,
   upstreamComplete: true,
   validatorTtlSeconds: TTL,
   ...extra,
@@ -181,11 +184,23 @@ describe('ingest session finalize', () => {
       status: 'refused',
       reason: 'incomplete',
     });
-    expect(await finalizer.finalize(org, session, input(3))).toEqual({
+    expect(
+      await finalizer.finalize(
+        org,
+        session,
+        input(3, { attemptedCandidates: 2, successfulCandidates: 2 }),
+      ),
+    ).toEqual({
       status: 'refused',
       reason: 'count_mismatch',
     });
-    expect(await finalizer.finalize(org, session, input(1))).toEqual({
+    expect(
+      await finalizer.finalize(
+        org,
+        session,
+        input(1, { attemptedCandidates: 2, successfulCandidates: 2 }),
+      ),
+    ).toEqual({
       status: 'refused',
       reason: 'count_mismatch',
     });

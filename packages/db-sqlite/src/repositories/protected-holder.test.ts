@@ -16,7 +16,7 @@ import {
   type ProtectedHolderProvider,
 } from './grant.js';
 
-const NOW = '2026-10-15T12:00:00.000Z';
+let NOW: string;
 const HOUR = 3600_000;
 
 const ADMIN = '01J0ROLEADMIN00000000000AA';
@@ -306,6 +306,10 @@ beforeEach(async () => {
   if (database.orgs === null) throw new Error('two organizations were not seeded');
   ({ a, b } = database.orgs);
   executor = database.executor;
+  const [clock] = await executor.all<{ now: string }>(
+    stmt("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS now"),
+  );
+  NOW = clock!.now;
   actorSeeded = false;
   grants = createGrantRepository(executor, {
     providerAnchors: [AUTHORITATIVE],
@@ -343,13 +347,26 @@ describe('isProtectedHolder through a group', () => {
     expect(await grants.isProtectedHolder(a, U2, fresh([SSO]))).toBe(false);
   });
 
-  it('keeps the 24 h boundary exact to the second', async () => {
+  it('keeps the one-second edges around 24 h', async () => {
+    // Simulate setup outlasting the one-second margin after the database-clock sample.
+    NOW = ago(2000);
     await seed(
       grant(a, G_GROUP, 'group', 'admins', ADMIN, 'oidc'),
-      member(a, U1, 'admins', ago(24 * HOUR)),
+      member(a, U1, 'admins'),
       identity(a, U1, 'u1@example.test'),
-      member(a, U2, 'admins', ago(24 * HOUR + 1000)),
+      member(a, U2, 'admins'),
       identity(a, U2, 'u2@example.test'),
+    );
+
+    // Evaluate both edges on the holder query's SQLite statement clock.
+    await executor.all(
+      stmt(`CREATE TEMP VIEW user_group AS
+        SELECT org_id, user_id, provider, group_name,
+          strftime('%Y-%m-%dT%H:%M:%fZ',
+            unixepoch('now', 'subsec') - 24 * 3600
+              + CASE WHEN user_id = '${U1}' THEN 1 ELSE -1 END,
+            'unixepoch') AS refreshed_at
+        FROM main.user_group WHERE org_id = '${a.orgId}'`),
     );
 
     expect(await grants.isProtectedHolder(a, U1, fresh([SSO]))).toBe(true);
@@ -720,39 +737,51 @@ describe('provider mutants', () => {
   });
 });
 
-describe('time boundaries', () => {
-  const holdsWith = async (refreshed: string, validated: string): Promise<boolean> => {
+describe('time boundaries on the database clock', () => {
+  const cases = [
+    ['membership one second inside 24 h', -24 * HOUR + 1000, -HOUR, true],
+    ['membership exactly 24 h', -24 * HOUR, -HOUR, true],
+    ['membership one second outside 24 h', -24 * HOUR - 1000, -HOUR, false],
+    ['identity one second inside 24 h', -HOUR, -24 * HOUR + 1000, true],
+    ['identity exactly 24 h', -HOUR, -24 * HOUR, true],
+    ['identity one second outside 24 h', -HOUR, -24 * HOUR - 1000, false],
+    ['membership one second inside future skew', 59_000, -HOUR, true],
+    ['identity one second inside future skew', -HOUR, 59_000, true],
+    ['both exactly at future skew', 60_000, 60_000, true],
+    ['membership one second outside future skew', 61_000, -HOUR, false],
+    ['identity one second outside future skew', -HOUR, 61_000, false],
+  ] as const;
+
+  it.each(cases)('%s', async (_name, refreshed, validated, expected) => {
     await seed(
-      stmt('DELETE FROM user_group'),
-      stmt('DELETE FROM identity'),
-      stmt('DELETE FROM access_grant'),
       grant(a, G_GROUP, 'group', 'admins', ADMIN, 'oidc'),
-      member(a, U1, 'admins', refreshed),
-      identity(a, U1, 'u1@example.test', { validatedAt: validated }),
+      member(a, U1, 'admins'),
+      identity(a, U1, 'u1@example.test'),
     );
-    return grants.isProtectedHolder(a, U1, fresh([SSO]));
-  };
-
-  it('identity validated_at is inclusive at exactly 24 h', async () => {
-    expect(await holdsWith(ago(HOUR), ago(24 * HOUR))).toBe(true);
-  });
-
-  it('refuses identity evidence one second older than 24 h', async () => {
-    expect(await holdsWith(ago(HOUR), ago(24 * HOUR + 1000))).toBe(false);
-  });
-
-  it('refuses evidence one millisecond older than 24 h', async () => {
-    expect(await holdsWith(ago(24 * HOUR + 1), ago(HOUR))).toBe(false);
-    expect(await holdsWith(ago(HOUR), ago(24 * HOUR + 1))).toBe(false);
-  });
-
-  it('accepts evidence dated up to 60 s ahead and refuses more', async () => {
-    expect(await holdsWith(ago(-60_000), ago(-60_000))).toBe(true);
-  });
-
-  it('refuses evidence dated more than 60 s ahead', async () => {
-    expect(await holdsWith(ago(-60_001), ago(HOUR))).toBe(false);
-    expect(await holdsWith(ago(HOUR), ago(-61_000))).toBe(false);
+    // Views keep exact inclusive edges on the same SQLite statement clock as the predicate.
+    for (const [table, column, offset] of [
+      ['user_group', 'refreshed_at', refreshed],
+      ['identity', 'validated_at', validated],
+    ] as const) {
+      const columns = await executor.all<{ name: string }>(stmt(`PRAGMA table_info(${table})`));
+      const projection = columns
+        .map(({ name }) =>
+          name === column
+            ? `strftime('%Y-%m-%dT%H:%M:%fZ', unixepoch('now', 'subsec') + ${offset / 1000}, 'unixepoch') AS ${name}`
+            : name,
+        )
+        .join(', ');
+      await executor.all(
+        stmt(`CREATE TEMP VIEW ${table} AS SELECT ${projection} FROM main.${table}`),
+      );
+    }
+    expect(
+      await grants.isProtectedHolder(a, U1, {
+        kind: 'fresh',
+        providers: [SSO],
+        now: '1970-01-01T00:00:00.000Z',
+      }),
+    ).toBe(expected);
   });
 });
 

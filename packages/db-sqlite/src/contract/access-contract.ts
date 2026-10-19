@@ -13,7 +13,12 @@ import { mutationFence, type AuthenticatedActor } from '@package-broker/core/aut
 import type { ActorContext } from '@package-broker/core/authz/actor';
 import type { ProjectActor } from '@package-broker/core/authz/project-actor';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
-import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import type {
+  OrgContext,
+  SqlExecutor,
+  Statement,
+  StatementResult,
+} from '@package-broker/core/db/port';
 import {
   authorizeRoute,
   denyAllEngine,
@@ -40,7 +45,8 @@ export interface OpenedAccessDatabase {
 }
 
 type Open = () => Promise<OpenedAccessDatabase>;
-type Wrap = (executor: SqlExecutor) => SqlExecutor;
+export type AccessContractWrap = (executor: SqlExecutor) => SqlExecutor;
+type Wrap = AccessContractWrap;
 type Case = (open: Open, wrap?: Wrap) => Promise<void>;
 
 const NOT_FOUND = { allow: false, status: 404 } as const;
@@ -823,7 +829,7 @@ const routeRegistration: Case = (open, wrap) =>
       expect(engineCalls).toBe(0);
       expect(await authorizeRoute(request, counting, [])).toMatchObject({ allow: true });
 
-      for (const boundary of [undefined, 'none', 'self', 'package', 'other']) {
+      for (const boundary of [undefined, 'none', 'package', 'other']) {
         const route = { ...request.route, boundary } as unknown as AuthorizationRequest['route'];
         expect(await real.authorize({ ...request, route })).toEqual(FORBIDDEN);
       }
@@ -831,6 +837,33 @@ const routeRegistration: Case = (open, wrap) =>
         FORBIDDEN,
       );
       expect(await decide(world, session({ permission: 'org:read' }))).toEqual(FORBIDDEN);
+
+      const selfRoute = { ...request.route, boundary: 'self' } as const;
+      expect(await real.authorize({ ...request, route: selfRoute })).toEqual({
+        allow: true,
+        principal: { kind: 'user', id: USER },
+        projectId: null,
+      });
+      await addPrincipal(world, ['project:read']);
+      for (const kind of ['pat', 'svc'] as const) {
+        const bearer = await addToken(world, {
+          id: `self-${kind}`,
+          kind,
+          selectorNo: kind === 'pat' ? 1 : 2,
+        });
+        expect(await decide(world, { bearer })).toMatchObject({ allow: true });
+        const tokenRequest = requestFor(world, { bearer });
+        expect(await real.authorize({ ...tokenRequest, route: selfRoute })).toEqual(FORBIDDEN);
+      }
+      await world.executor.batch([
+        st(
+          'UPDATE session SET expires_at = ? WHERE org_id = ? AND id = ?',
+          iso(-HOUR),
+          world.a.orgId,
+          SESSION,
+        ),
+      ]);
+      expect(await real.authorize({ ...request, route: selfRoute })).toEqual(UNAUTHORIZED);
 
       const problems = (route: Parameters<typeof routeBoundaryProblems>[0], apiVersion?: number) =>
         routeBoundaryProblems(route, 'GET /x', apiVersion === undefined ? {} : { apiVersion });
@@ -1642,8 +1675,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement()),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(blocked.status).toBe('refused');
       const untouched = await world.executor.all<{ revoked_at: string | null }>(
@@ -1655,8 +1687,7 @@ const archivedProjectRevocation: Case = (open, wrap) =>
         world.a,
         FENCE(),
         authority.guard(world.a, FENCE(), requirement(true)),
-        'svc-old',
-        iso(0),
+        { tokenId: 'svc-old', now: iso(0) },
       );
       expect(allowed.status).toBe('revoked');
       const archivedLookup = await createAccessRepository(world.executor).lookupToken(world.a, {
@@ -1690,8 +1721,7 @@ const doubleRevoke: Case = (open, wrap) =>
             organizationAdmin: false,
             covers: [],
           }),
-          'victim',
-          now,
+          { tokenId: 'victim', now: now },
         );
       const stampA = iso(0);
       const stampB = iso(5000);
@@ -1722,6 +1752,54 @@ const doubleRevoke: Case = (open, wrap) =>
     },
     wrap,
   );
+
+const TOKEN_REVOKE_UPDATE = /update\s+"token"\s+set\s+"revoked_at"/i;
+
+export interface RevokeLatch {
+  readonly wrap: AccessContractWrap;
+  readonly released: () => readonly number[];
+}
+
+export function revokeLatch(order: 'arrival' | 'reverse'): RevokeLatch {
+  interface Waiting {
+    readonly index: number;
+    readonly run: () => Promise<StatementResult[]>;
+    readonly settle: (result: Promise<StatementResult[]>) => void;
+  }
+  const waiting: Waiting[] = [];
+  const releasedOrder: number[] = [];
+  let open = false;
+
+  async function release(): Promise<void> {
+    open = true;
+    const sequence = order === 'arrival' ? [...waiting] : [...waiting].reverse();
+    for (const entry of sequence) {
+      releasedOrder.push(entry.index);
+      const result = entry.run();
+      entry.settle(result);
+      await result.catch(() => undefined);
+    }
+  }
+
+  return {
+    wrap: (executor) => ({
+      ...executor,
+      batch(statements) {
+        const revokes = statements.some((statement) => TOKEN_REVOKE_UPDATE.test(statement.sql));
+        if (!revokes || open) return executor.batch(statements);
+        return new Promise<StatementResult[]>((resolve, reject) => {
+          waiting.push({
+            index: waiting.length,
+            run: () => executor.batch(statements),
+            settle: (result) => result.then(resolve, reject),
+          });
+          if (waiting.length === 2) void release();
+        });
+      },
+    }),
+    released: () => releasedOrder,
+  };
+}
 
 export const accessContractCases = {
   crossOrganization,

@@ -44,6 +44,13 @@ compatibility_flags = ["nodejs_compat"]
 # binding = "ANALYTICS"
 # dataset = "<deployment>_metrics"
 #
+# Required when MCP is enabled. Limits are keyed by the token selector.
+# [[unsafe.bindings]]
+# name = "MCP_RATE_LIMIT"
+# type = "ratelimit"
+# namespace_id = "<mcp-rate-limit-namespace-id>"
+# simple = { limit = 60, period = 60 }
+#
 # [vars]
 # DEPLOYMENT_ID = "<deployment>"
 #

@@ -58,6 +58,9 @@ const NEXT = [
   'POST /_pb/auth/local/setup/finish {"token","password","code"}',
 ];
 
+const BROWSER_NEXT =
+  'next: open /_pb/ui/setup on the broker in a browser and paste the setup token there; the token never goes into the address bar. Or call the two POST routes named under "next".';
+
 function say(command: string, text: string): void {
   console.error(`${command}: ${text}`);
 }
@@ -325,6 +328,7 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
         'warning: the setup token is being written to a non-terminal stdout; use --token-file to keep it out of logs',
       );
     }
+    say(command, BROWSER_NEXT);
     console.log(
       JSON.stringify({
         result: outcome.result,

@@ -150,6 +150,8 @@ describe('Worker UI mount', () => {
             needsOrg: route.needsOrg,
           })),
       ).toEqual([
+        { method: 'GET', path: '/_pb/ui/setup/document', boundary: undefined, needsOrg: false },
+        { method: 'GET', path: '/_pb/ui/setup/assets/:file', boundary: undefined, needsOrg: false },
         { method: 'GET', path: '/_pb/ui', boundary: 'authenticated', needsOrg: true },
         { method: 'GET', path: '/_pb/ui/:file', boundary: 'authenticated', needsOrg: true },
       ]);

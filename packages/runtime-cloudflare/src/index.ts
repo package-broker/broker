@@ -130,7 +130,11 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
+import {
+  createSetupUiRoutes,
+  createUiRoutes,
+  rewriteSetupRequest,
+} from '@package-broker/core/kernel/ui-routes';
 import { createWorkersAssets } from './assets.js';
 import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
 import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
@@ -1795,6 +1799,13 @@ export function createWorker(
       },
       { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
     );
+    const setupRoutes = createSetupUiRoutes(
+      {
+        manifest: async () => (await uiAssets())?.manifest() ?? null,
+        read: async (name) => (await uiAssets())?.read(name) ?? null,
+      },
+      { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
+    );
     const uiRoutes = ui.map((route) => ({
       ...route,
       path: route.path.replace('/assets/:file', '/:file'),
@@ -1822,7 +1833,10 @@ export function createWorker(
         ...(services === undefined ? {} : { platformServices: services.platformServices }),
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
-        coreRoutes: [...(auth?.coreRoutes ?? []), ...(env?.ASSETS === undefined ? [] : uiRoutes)],
+        coreRoutes: [
+          ...(auth?.coreRoutes ?? []),
+          ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
+        ],
         ...(authorization === undefined ? {} : { authorization }),
         ...(registryModule === undefined
           ? reads === undefined
@@ -1980,6 +1994,8 @@ export function createWorker(
       }
       return inScope(application, ctx, async () => {
         try {
+          const setup = rewriteSetupRequest(request);
+          if (setup !== null) return await application.kernel.fetch(setup, ctx);
           const url = new URL(request.url);
           if (url.pathname === '/_pb/ui') {
             const response = await application.kernel.fetch(request, ctx);

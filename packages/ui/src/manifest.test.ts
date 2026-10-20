@@ -217,6 +217,7 @@ describe('packed UI assets', () => {
       const layout = manifestBytes
         .toString('utf8')
         .replace(/app\.[a-f0-9]{12}\.js/g, 'app.<hash>.js')
+        .replace(/setup\.[a-f0-9]{12}\.js/g, 'setup.<hash>.js')
         .replace(/app\.[a-f0-9]{12}\.css/g, 'app.<hash>.css')
         .replace(/"bytes": \d+/g, '"bytes": <bytes>');
       expect(layout).toBe(`{
@@ -227,7 +228,15 @@ describe('packed UI assets', () => {
       "contentType": "text/html",
       "bytes": <bytes>
     },
+    "setup.html": {
+      "contentType": "text/html",
+      "bytes": <bytes>
+    },
     "app.<hash>.js": {
+      "contentType": "text/javascript",
+      "bytes": <bytes>
+    },
+    "setup.<hash>.js": {
       "contentType": "text/javascript",
       "bytes": <bytes>
     },

@@ -5,7 +5,7 @@ import type { RouteDefinition } from '../plugin.js';
 import { createKernel } from './kernel.js';
 import type { KernelOptions } from './kernel.js';
 import { KernelConfigError } from './registry.js';
-import { createUiRoutes } from './ui-routes.js';
+import { createSetupUiRoutes, createUiRoutes } from './ui-routes.js';
 
 function options(
   coreRoutes: readonly RouteDefinition[],
@@ -95,5 +95,28 @@ describe('createKernel api requirement for core routes', () => {
 
   it('leaves undocumented ecosystem routes to their own validation', async () => {
     expect(await problemsOf(options([], [route('/:project/packages.json')]))).toEqual([]);
+  });
+});
+
+describe('setup UI routes and the api requirement', () => {
+  it('accepts the setup routes as built, without an api slot', async () => {
+    const setup = createSetupUiRoutes(
+      { manifest: async () => null, read: async () => null },
+      { publicOrigin: 'https://broker.test' },
+    );
+    expect(setup.map((definition) => definition.path)).toEqual([
+      '/_pb/ui/setup/document',
+      '/_pb/ui/setup/assets/:file',
+    ]);
+    expect(await problemsOf(options(setup))).toEqual([]);
+  });
+
+  it('rejects a sibling of the setup paths that is not on the exempt list', async () => {
+    expect(await problemsOf(options([route('/_pb/ui/setup/assets/:file/raw')]))).toEqual([
+      'core route GET /_pb/ui/setup/assets/:file/raw: api is required under /_pb/',
+    ]);
+    expect(await problemsOf(options([route('/_pb/ui/setup/other')]))).toEqual([
+      'core route GET /_pb/ui/setup/other: api is required under /_pb/',
+    ]);
   });
 });

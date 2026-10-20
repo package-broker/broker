@@ -48,8 +48,7 @@ const MAX_SELECTOR_ATTEMPTS = 3;
 const MAX_PROJECTS = 200;
 const REAUTH_WINDOW_SECONDS = 600;
 const FRESHNESS_SECONDS = 86_400;
-const MAX_EXPIRY_DAYS = 90;
-const MAX_CI_READ_ONLY_EXPIRY_DAYS = 365;
+const MAX_LIFETIME_DAYS_CEILING = 3650;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SELECTOR = /^[a-z2-7]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -85,6 +84,7 @@ export interface IssuePersonalTokenInput {
   readonly name: string;
   readonly scope: TokenScope;
   readonly expiresAt: string;
+  readonly maxLifetimeDays: number;
   readonly now: string;
   readonly validation: TokenValidation;
   readonly projectMode: 'all' | 'selected';
@@ -130,8 +130,8 @@ export interface TokenRepository {
    * one fenced batch. The batch requires on database time: a live, freshly reauthenticated session;
    * the issuer's live management permission and every covered permission; the principal active,
    * bound to `projectId`, at `principalRevision` and storing every covered permission; an active
-   * project whose token_max_scope admits the scope; and an expiry within min(CI setting, 365) days
-   * for a read token or min(default setting, 90) days otherwise. `conflict`: the principal changed.
+   * project whose token_max_scope admits the scope; and an expiry within `maxLifetimeDays` of
+   * database time. `conflict`: the principal changed.
    */
   issueService(
     ctx: OrgContext,
@@ -212,7 +212,16 @@ function nonEmpty(field: string, value: unknown): string {
   return value;
 }
 
+function requireMaxLifetimeDays(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_LIFETIME_DAYS_CEILING) {
+    throw new RangeError(
+      `maxLifetimeDays must be a safe integer from 1 to ${MAX_LIFETIME_DAYS_CEILING}`,
+    );
+  }
+}
+
 function validateInput(input: IssuePersonalTokenInput): string {
+  requireMaxLifetimeDays(input.maxLifetimeDays);
   nonEmpty('id', input.id);
   requireProviders(input.providerAnchors);
   nonEmpty('name', input.name);
@@ -362,14 +371,13 @@ function conditions(
       and issuing_session.user_id = ip.user_id
     join user_account as issuing_user
       on issuing_user.id = issuing_session.user_id and issuing_user.org_id = issuing_session.org_id
-    join organization as issuing_org on issuing_org.id = issuing_session.org_id
     where ${liveSessionCondition('issuing_session', idleSeconds)}
       and unixepoch(issuing_session.reauth_at)
         between unixepoch('now') - ${sql.lit(REAUTH_WINDOW_SECONDS)} and unixepoch('now')
       and issuing_user.status = 'active'
-      and unixepoch(ip.expires_at) > unixepoch('now')
-      and unixepoch(ip.expires_at) <= unixepoch('now')
-        + ${sql.lit(86_400)} * min(issuing_org.token_default_expiry_days, ${sql.lit(MAX_EXPIRY_DAYS)})
+      and unixepoch(ip.expires_at, 'subsec') > unixepoch('now', 'subsec')
+      and unixepoch(ip.expires_at, 'subsec') <= unixepoch('now', 'subsec')
+        + ${sql.lit(86_400)} * ${input.maxLifetimeDays}
       and ${validation}
       and ${selectedPolicy})`;
 
@@ -532,6 +540,7 @@ function sessionLive(ctx: OrgContext, fence: MutationFence, idleSeconds: number)
 }
 
 function validateServiceInput(input: IssueServiceTokenInput): void {
+  requireMaxLifetimeDays(input.maxLifetimeDays);
   nonEmpty('id', input.id);
   nonEmpty('name', input.name);
   nonEmpty('servicePrincipalId', input.servicePrincipalId);
@@ -592,7 +601,6 @@ function serviceIssuance(
       and issuing_session.user_id = ip.user_id
     join user_account as issuing_user
       on issuing_user.id = issuing_session.user_id and issuing_user.org_id = issuing_session.org_id
-    join organization as issuing_org on issuing_org.id = issuing_session.org_id
     join service_principal as principal
       on principal.id = ip.principal_id and principal.org_id = ip.org_id
     where issuing_session.revoked_at is null
@@ -603,11 +611,8 @@ function serviceIssuance(
         between unixepoch('now') - ${sql.lit(REAUTH_WINDOW_SECONDS)} and unixepoch('now')
       and issuing_user.status = 'active'
       and unixepoch(ip.expires_at, 'subsec') > unixepoch('now', 'subsec')
-      and unixepoch(ip.expires_at, 'subsec') <= unixepoch('now', 'subsec') + ${sql.lit(86_400)} * (
-        case when ip.read_only = 1
-          then min(issuing_org.token_ci_readonly_expiry_days, ${sql.lit(MAX_CI_READ_ONLY_EXPIRY_DAYS)})
-          else min(issuing_org.token_default_expiry_days, ${sql.lit(MAX_EXPIRY_DAYS)})
-        end)
+      and unixepoch(ip.expires_at, 'subsec') <= unixepoch('now', 'subsec')
+        + ${sql.lit(86_400)} * ${input.maxLifetimeDays}
       and principal.status = 'active'
       and principal.project_id is ip.project_id
       and (principal.project_id is null or exists (

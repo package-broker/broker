@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -b && pnpm --filter @package-broker/ui run build",
     "test": "vitest run",
+    "rehearsal": "pnpm build && pnpm bundle && vitest run --project runtime-node --project runtime-cloudflare src/restore-rehearsal",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc -b",

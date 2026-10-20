@@ -117,7 +117,7 @@ export function commandEnvelope(command: string, dryRun = false) {
     remote_state: null as 'absent' | 'present' | null,
     plan: [] as PlanEntry[],
     checks: [] as { name: string; status: string }[],
-    rollback: { status: 'not_needed', target_version_id: null },
+    rollback: { status: 'not_needed' as string, target_version_id: null as string | null },
     bootstrap_url: null as string | null,
     error: null as { code: ErrorCode; message: string; retryable: boolean; stage: string } | null,
   };
@@ -150,6 +150,7 @@ export interface ApiOptions {
   jitter?: () => number;
   deadline?: number;
 }
+export type ApiMethod = 'GET' | 'POST' | 'PUT' | 'PATCH';
 export interface ApiResponse {
   result: unknown;
   result_info?: Record<string, unknown>;
@@ -180,6 +181,13 @@ const BUDGET_MS = 600_000;
 const REQUEST_TIMEOUT_MS = 35_000;
 const RECONCILIATION_MS = 15_000;
 export const CREATE_SETTLE_MS = REQUEST_TIMEOUT_MS + RECONCILIATION_MS;
+const RECOVERY_READS_MS = 60_000;
+const RECOVERY_STEP_MS = CREATE_SETTLE_MS + 20_000;
+const UNSENT = new WeakSet<CloudflareError>();
+/** True only when the client refused a mutation locally, before any byte reached the transport. */
+export function wasNotSent(error: unknown): boolean {
+  return error instanceof CloudflareError && UNSENT.has(error);
+}
 interface Scheduler {
   next: number;
   tail: Promise<unknown>;
@@ -216,8 +224,16 @@ export class CloudflareApi {
   get deadline(): number {
     return this.budgetEnd;
   }
-  restartDeadline(): void {
-    if (!this.fixedDeadline) this.budgetEnd = this.now() + BUDGET_MS;
+  restartDeadline(budgetMs = BUDGET_MS): void {
+    if (!this.fixedDeadline) this.budgetEnd = this.now() + budgetMs;
+  }
+  /** Each recovery mutation keeps its full settle reserve plus its own read-back allowance. */
+  reserveRecovery(mutations: number): void {
+    if (!this.fixedDeadline)
+      this.budgetEnd = Math.max(
+        this.budgetEnd,
+        this.now() + RECOVERY_READS_MS + mutations * RECOVERY_STEP_MS,
+      );
   }
   assertCreateBudget(): void {
     if (this.deadline - this.now() < CREATE_SETTLE_MS)
@@ -228,22 +244,61 @@ export class CloudflareApi {
     if (ms > 0) await this.sleep(ms);
     if (this.now() >= this.deadline) throw new CloudflareError('provider_failure', 1, true);
   }
-  request(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<ApiResponse> {
-    const task = this.scheduler.tail.then(() => this.send(path, method, body));
+  request(path: string, method: ApiMethod = 'GET', body?: unknown): Promise<ApiResponse> {
+    return this.enqueue(path, method, body);
+  }
+  requestZone(
+    zone: string,
+    path: string,
+    method: ApiMethod = 'GET',
+    body?: unknown,
+  ): Promise<ApiResponse> {
+    if (!/^[a-f0-9]{32}$/.test(zone)) throw new CloudflareError('invalid_input', 2);
+    return this.enqueue(path, method, body, `/zones/${zone}`);
+  }
+  uploadAssets(body: FormData, sessionToken: string): Promise<ApiResponse> {
+    if (!/^[A-Za-z0-9_.-]+$/.test(sessionToken)) throw new CloudflareError('provider_failure');
+    return this.enqueue(
+      '/workers/assets/upload?base64=true',
+      'POST',
+      body,
+      undefined,
+      sessionToken,
+    );
+  }
+  private enqueue(
+    path: string,
+    method: ApiMethod,
+    body?: unknown,
+    prefix?: string,
+    token?: string,
+  ): Promise<ApiResponse> {
+    const task = this.scheduler.tail.then(() => this.send(path, method, body, prefix, token));
     this.scheduler.tail = task.catch(() => undefined);
     return task;
   }
-  private async send(path: string, method: 'GET' | 'POST', body?: unknown): Promise<ApiResponse> {
+  private async send(
+    path: string,
+    method: ApiMethod,
+    body?: unknown,
+    prefix?: string,
+    token?: string,
+  ): Promise<ApiResponse> {
     if (
-      (method !== 'GET' && method !== 'POST') ||
+      !['GET', 'POST', 'PUT', 'PATCH'].includes(method) ||
       !/^\/[a-zA-Z0-9_/?=&%.-]+$/.test(path) ||
       path.includes('..') ||
       path.startsWith('//')
     )
       throw new CloudflareError('invalid_input', 2);
     for (let attempt = 0; attempt < (method === 'GET' ? 5 : 1); attempt++) {
-      await this.pause(Math.max(0, this.scheduler.next - this.now()));
-      if (method === 'POST') this.assertCreateBudget();
+      try {
+        await this.pause(Math.max(0, this.scheduler.next - this.now()));
+        if (method !== 'GET') this.assertCreateBudget();
+      } catch (error) {
+        if (method !== 'GET' && error instanceof CloudflareError) UNSENT.add(error);
+        throw error;
+      }
       this.scheduler.next = this.now() + 1000;
       const controller = new AbortController();
       const timer = setTimeout(
@@ -257,16 +312,18 @@ export class CloudflareApi {
       try {
         response = await Promise.race([
           (this.options.fetch ?? fetch)(
-            `https://api.cloudflare.com/client/v4/accounts/${this.options.accountId}${path}`,
+            `https://api.cloudflare.com/client/v4${prefix ?? `/accounts/${this.options.accountId}`}${path}`,
             {
               method,
               redirect: 'manual',
               signal: controller.signal,
               headers: {
-                authorization: `Bearer ${this.options.apiToken}`,
-                'content-type': 'application/json',
+                authorization: `Bearer ${token ?? this.options.apiToken}`,
+                ...(body instanceof FormData ? {} : { 'content-type': 'application/json' }),
               },
-              ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+              ...(body === undefined
+                ? {}
+                : { body: body instanceof FormData ? body : JSON.stringify(body) }),
             },
           ),
           aborted,

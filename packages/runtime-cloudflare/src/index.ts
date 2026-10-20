@@ -1,5 +1,8 @@
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
+import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
+import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
+import { createImportRollbackStore } from '@package-broker/db-sqlite/repositories/import-rollback';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
@@ -1281,6 +1284,7 @@ export function createWorker(
           }),
       });
     }
+    const importJobs = createImportJobHolder();
     const reads = db === undefined ? undefined : buildPackageReads(executor as SqlExecutor);
     const collectRegistration = (): Registration =>
       collectRegistrations(plugins, {
@@ -1291,6 +1295,7 @@ export function createWorker(
             : [
                 registerAuditJob(auditSealJob(createAuditSealRepository(executor as SqlExecutor))),
                 registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor))),
+                ...(db === undefined ? [] : importJobRegistrations(importJobs)),
               ],
       });
     const built =
@@ -1310,6 +1315,19 @@ export function createWorker(
       config === null || bound === null
         ? undefined
         : buildPlatform(config, bound, executor as SqlExecutor, registration, resolveOrg);
+    if (built !== undefined && services !== undefined) {
+      importJobs.set({
+        applyStore: createImportJournalStore({
+          executor: executor as SqlExecutor,
+          providerAnchors: built.anchors,
+        }),
+        rollbackStore: createImportRollbackStore({
+          executor: executor as SqlExecutor,
+          providerAnchors: built.anchors,
+        }),
+        blobs: services.platformServices.blob,
+      });
+    }
 
     const registryModule =
       built === undefined ||

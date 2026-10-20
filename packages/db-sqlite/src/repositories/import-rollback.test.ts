@@ -464,6 +464,40 @@ describe('import rollback store', () => {
     expect(source.rolled_back_at).toBeNull();
   });
 
+  describe.each([
+    ['after the read', true],
+    ['before the read', false],
+  ])('a registered name of another organization %s', (_when, late) => {
+    it('keeps the source it references and survives the rollback', async () => {
+      await apply();
+      const sourceId = (
+        await rows<{ id: string }>(
+          "SELECT id FROM source WHERE org_id = ? AND name = 'registry'",
+          ctx.orgId,
+        )
+      )[0]!.id;
+      const insert = async (): Promise<void> => {
+        await exec(
+          "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('foreign-name', ?, ?, 'npm', 'foreign/*')",
+          foreign.orgId,
+          sourceId,
+        );
+      };
+      if (late) {
+        hookWhen = (statements) => statements.some((s) => s.sql.startsWith('DELETE FROM source '));
+        beforeBatch = insert;
+      } else {
+        await insert();
+      }
+      await rollback();
+      expect(await count('source', sourceId)).toBe(1);
+      expect(await count('registered_name', 'foreign-name')).toBe(1);
+      const source = (await refs()).find((ref) => ref.entity_type === 'source')!;
+      expect(source.conflict_state).toBe('changed_after_import');
+      expect(source.rolled_back_at).toBeNull();
+    });
+  });
+
   it('restores the prior published_at_basis with the version', async () => {
     await apply();
     expect(await rows("SELECT published_at_basis FROM version WHERE id = 'version'")).toEqual([

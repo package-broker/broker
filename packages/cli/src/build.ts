@@ -257,7 +257,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     target: 'es2022',
     platform: target === 'cloudflare' ? 'neutral' : 'node',
     conditions: target === 'cloudflare' ? ['workerd', 'worker', 'browser'] : [],
-    external: target === 'cloudflare' ? ['cloudflare:*', 'node:async_hooks'] : ['better-sqlite3'],
+    external:
+      target === 'cloudflare'
+        ? ['cloudflare:*', 'node:async_hooks', 'node:buffer', 'node:zlib']
+        : ['better-sqlite3'],
     alias: { '#pb-manifest': manifestTs },
     nodePaths: [path.join(cwd, 'node_modules')],
     absWorkingDir: cwd,

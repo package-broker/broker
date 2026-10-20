@@ -13,11 +13,12 @@ import {
   type Sha256,
 } from '@package-broker/core/platform/blob';
 import { compile, db } from '../kysely.js';
-import { blobEligibleCondition } from './blob-references.js';
+import { blobEligibleCondition, blobOrphanCondition } from './blob-references.js';
 import { leaseLive } from './blob-lease-guard.js';
 
 export interface BlobLifecycleMetadata {
   unschedule(ctx: OrgContext, key: Sha256): Promise<boolean>;
+  scheduleOrphan(ctx: OrgContext, key: Sha256): Promise<boolean>;
   softDelete(ctx: OrgContext, key: Sha256, input: { removedAt: string }): Promise<boolean>;
   claimPurge(ctx: OrgContext, key: Sha256): Promise<PurgeGeneration | null>;
   canStartRemove(
@@ -301,6 +302,26 @@ AND (purge_lease_until IS NULL OR purge_lease_until <= strftime('${FORMAT}', 'no
 AND NOT ${eligible.sql}`,
           params: [ctx.orgId, sha256, ...eligible.params],
         } satisfies ScalarStatement,
+      ]);
+      return result?.changes === 1;
+    },
+
+    async scheduleOrphan(ctx, key) {
+      const sha256 = parseSha256(key);
+      const orphan = blobOrphanCondition(ctx, 'blob');
+      const [result] = await executor.batch([
+        eligibleStatement(
+          ctx,
+          db
+            .updateTable('blob')
+            .set({ purge_after: NOW })
+            .where('org_id', '=', ctx.orgId)
+            .where('sha256', '=', sha256)
+            .where('deleted_at', 'is', null)
+            .where('purge_after', 'is', null)
+            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
+            .where(sql<SqlBool>`${sql.raw(orphan.sql)}`),
+        ),
       ]);
       return result?.changes === 1;
     },

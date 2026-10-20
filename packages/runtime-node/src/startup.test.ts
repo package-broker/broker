@@ -1135,6 +1135,7 @@ describe('blob purge timing', () => {
         markDeleted: async () => false,
         cancelPurge: async () => false,
         unschedule: async () => false,
+        scheduleOrphan: async () => false,
       };
       const lifecycle = () =>
         createBlobLifecycle({

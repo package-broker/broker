@@ -23,6 +23,7 @@ export interface BlobLifecycleMetadataPort {
   markDeleted(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<boolean>;
   cancelPurge(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<boolean>;
   unschedule(ctx: OrgContext, key: Sha256): Promise<boolean>;
+  scheduleOrphan(ctx: OrgContext, key: Sha256): Promise<boolean>;
 }
 
 export interface BlobLifecycleOptions {
@@ -48,7 +49,7 @@ export function createBlobLifecycle({
   leaseMs,
   observability,
 }: BlobLifecycleOptions): BlobLifecycle &
-  Pick<BlobLifecycleMetadataPort, 'unschedule'> & {
+  Pick<BlobLifecycleMetadataPort, 'unschedule' | 'scheduleOrphan'> & {
     removeBytes(
       ctx: OrgContext,
       key: Sha256,
@@ -108,6 +109,10 @@ export function createBlobLifecycle({
     async unschedule(ctx, key) {
       parseSha256(key);
       return metadata.unschedule(ctx, key);
+    },
+    async scheduleOrphan(ctx, key) {
+      parseSha256(key);
+      return metadata.scheduleOrphan(ctx, key);
     },
     async recheckAndRemove(ctx, key, generation) {
       parseSha256(key);

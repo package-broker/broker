@@ -623,7 +623,10 @@ describe('project mutation audit', () => {
           target: { type: 'project', id: ID },
           projectId: ID,
         },
-        idempotency: record,
+        idempotency:
+          method === 'create'
+            ? { ...record, responseJson: '{"id":"' + ID + '","slug":"shop"}' }
+            : record,
       });
       const payload = JSON.parse((staged as { audit: { payloadJson: string } }).audit.payloadJson);
       expect(payload).toMatchObject({ op_id: call.audit.opId, request_id: call.audit.requestId });

@@ -111,6 +111,7 @@ describe('AdminError', () => {
 describe('ProjectError', () => {
   const members = [
     'forbidden',
+    'reauth_required',
     'invalid_name',
     'invalid_scope',
     'invalid_policy',

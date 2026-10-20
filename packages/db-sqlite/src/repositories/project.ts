@@ -74,7 +74,12 @@ export interface ProjectRepository extends ProjectStore {
   /** Ordered by id; `limit` is 1 to 200 (TypeError otherwise). */
   list(
     ctx: OrgContext,
-    page: { readonly afterId?: string; readonly limit: number; readonly status?: ProjectStatus },
+    page: {
+      readonly afterId?: string;
+      readonly limit: number;
+      readonly status?: ProjectStatus;
+      readonly ids?: readonly string[];
+    },
   ): Promise<Project[]>;
   /**
    * Requires org:projects:create. One fenced batch inserts the active project and the actor's
@@ -122,7 +127,13 @@ export interface ProjectRepository extends ProjectStore {
     fence: MutationFence,
     input: Parameters<ProjectStore['restore']>[2],
   ): Promise<
-    'restored' | 'not_archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
+    | 'restored'
+    | 'not_archived'
+    | 'not_found'
+    | 'conflict'
+    | 'authority'
+    | 'reauth_required'
+    | 'indeterminate'
   >;
 }
 
@@ -238,14 +249,14 @@ export function createProjectRepository(
   const providerAnchors = options.providerAnchors ?? [];
   const idleSeconds = requireIdleSeconds(options.idleSeconds ?? DEFAULT_IDLE_SECONDS);
 
-  function projectAuthority(
+  function authorityParts(
     ctx: OrgContext,
     fence: MutationFence,
     permission: string,
-    scope: { readonly projectId?: string; readonly reauth?: boolean } = {},
-  ): Guard {
-    const session = existsGuard((database) => {
-      let query = database
+    scope: { readonly projectId?: string } = {},
+  ): { readonly base: Guard; readonly fresh: Guard } {
+    const session = existsGuard((database) =>
+      database
         .selectFrom('session as s')
         .innerJoin('user_account as actor', (join) =>
           join.onRef('actor.id', '=', 's.user_id').onRef('actor.org_id', '=', 's.org_id'),
@@ -262,14 +273,8 @@ export function createProjectRepository(
         .where('s.id', '=', fence.sessionId)
         .where('s.user_id', '=', fence.userId)
         .where('actor.status', '=', 'active')
-        .where(liveSessionCondition('s', idleSeconds));
-      if (scope.reauth === true) {
-        query = query.where(
-          sql<SqlBool>`unixepoch(s.reauth_at, 'subsec') > unixepoch('now', 'subsec') - ${REAUTH_SECONDS}`,
-        );
-      }
-      return query;
-    });
+        .where(liveSessionCondition('s', idleSeconds)),
+    );
     const held = holdsPermission(ctx, {
       userId: fence.userId,
       permission,
@@ -278,7 +283,27 @@ export function createProjectRepository(
       projectState: 'any',
       session: fence.sessionId,
     });
-    return eb.and([session, held]);
+    const fresh = existsGuard((database) =>
+      database
+        .selectFrom('session as rs')
+        .select('rs.id')
+        .where('rs.org_id', '=', ctx.orgId)
+        .where('rs.id', '=', fence.sessionId)
+        .where(
+          sql<SqlBool>`unixepoch(rs.reauth_at, 'subsec') > unixepoch('now', 'subsec') - ${REAUTH_SECONDS}`,
+        ),
+    );
+    return { base: eb.and([session, held]), fresh };
+  }
+
+  function projectAuthority(
+    ctx: OrgContext,
+    fence: MutationFence,
+    permission: string,
+    scope: { readonly projectId?: string; readonly reauth?: boolean } = {},
+  ): Guard {
+    const { base, fresh } = authorityParts(ctx, fence, permission, scope);
+    return scope.reauth === true ? eb.and([base, fresh]) : base;
   }
 
   function authorityProbe(condition: Guard): ScalarStatement {
@@ -295,14 +320,23 @@ export function createProjectRepository(
     ctx: OrgContext,
     id: string,
     authority: Guard,
-  ): Promise<{ readonly held: boolean; readonly project: Project | null }> {
+    reauth?: { readonly base: Guard; readonly fresh: Guard },
+  ): Promise<{
+    readonly held: boolean;
+    readonly stale: boolean;
+    readonly project: Project | null;
+  }> {
     requireId(id, 'id');
+    const level =
+      reauth === undefined
+        ? sql<number>`${authority} is 1`
+        : sql<number>`case when ${reauth.base} is 1 then (case when ${reauth.fresh} is 1 then 1 else 2 end) else 0 end`;
     const [row] = await executor.all<
       { held: number } & { [K in keyof ProjectRow]: ProjectRow[K] | null }
     >(
       scalar(
         db
-          .selectFrom(db.selectNoFrom(sql<number>`${authority} is 1`.as('held')).as('probe'))
+          .selectFrom(db.selectNoFrom(level.as('held')).as('probe'))
           .leftJoin('project as p', (join) =>
             join.on('p.org_id', '=', ctx.orgId).on('p.id', '=', id),
           )
@@ -318,8 +352,12 @@ export function createProjectRepository(
           ]),
       ),
     );
-    if (row?.held !== 1) return { held: false, project: null };
-    return { held: true, project: row.id === null ? null : toProject(row as ProjectRow) };
+    if (row?.held !== 1) return { held: false, stale: row?.held === 2, project: null };
+    return {
+      held: true,
+      stale: false,
+      project: row.id === null ? null : toProject(row as ProjectRow),
+    };
   }
 
   function revisionCheck(ctx: OrgContext, id: string, expected: number, status: ProjectStatus) {
@@ -388,12 +426,15 @@ export function createProjectRepository(
     reauth: boolean,
     audit: AuditEvent,
     idempotency: IdempotencyRecord | undefined,
-  ): Promise<Done | Noop | 'not_found' | 'conflict' | 'authority' | 'indeterminate'> {
+  ): Promise<
+    Done | Noop | 'not_found' | 'conflict' | 'authority' | 'reauth_required' | 'indeterminate'
+  > {
     const stamp = timestamp(now);
     const expected = expectedRevision(fence);
     const authority = projectAuthority(ctx, fence, 'org:projects:archive', { reauth });
-    const { held, project } = await loadAuthorized(ctx, id, authority);
-    if (!held) return 'authority';
+    const parts = reauth ? authorityParts(ctx, fence, 'org:projects:archive') : undefined;
+    const { held, stale, project } = await loadAuthorized(ctx, id, authority, parts);
+    if (!held) return stale ? 'reauth_required' : 'authority';
     if (project === null) return 'not_found';
 
     const guard = assertGuard(authority, ctx);
@@ -428,6 +469,12 @@ export function createProjectRepository(
     );
     if (!outcome.ok) {
       const reason = failure(outcome.reason);
+      if (reason === 'authority' && reauth) {
+        const [probe] = await executor.all<{ refused: number }>(
+          authorityProbe(projectAuthority(ctx, fence, 'org:projects:archive')),
+        );
+        return probe?.refused === 0 ? 'reauth_required' : 'authority';
+      }
       return reason === 'collision' ? noop : reason;
     }
     const changed = outcome.results[changedAt];
@@ -454,6 +501,10 @@ export function createProjectRepository(
       let query = selectProjects(ctx).orderBy('id').limit(page.limit);
       if (page.afterId !== undefined) query = query.where('id', '>', page.afterId);
       if (page.status !== undefined) query = query.where('status', '=', page.status);
+      if (page.ids !== undefined) {
+        if (page.ids.length === 0) return [];
+        query = query.where('id', 'in', [...page.ids]);
+      }
       return (await executor.all<ProjectRow>(scalar(query))).map(toProject);
     },
 
@@ -670,8 +721,8 @@ export function createProjectRepository(
       return changed !== undefined && changed.rows.length > 0 ? 'updated' : 'unchanged';
     },
 
-    archive(ctx, fence, { id, now, audit, idempotency }) {
-      return transition(
+    async archive(ctx, fence, { id, now, audit, idempotency }) {
+      const answer = await transition(
         ctx,
         fence,
         id,
@@ -684,6 +735,7 @@ export function createProjectRepository(
         audit,
         idempotency,
       );
+      return answer === 'reauth_required' ? 'authority' : answer;
     },
 
     restore(ctx, fence, { id, now, audit, idempotency }) {

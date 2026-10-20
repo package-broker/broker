@@ -226,7 +226,13 @@ describe('core migrations', () => {
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
     const after = await snapshot();
-    expect(after).toEqual(before);
+    expect(after).toEqual({
+      ...before,
+      user_account: (before.user_account ?? []).map((row) => ({
+        ...row,
+        pat_invalid_before: null,
+      })),
+    });
     expect(await rows('SELECT id, validated_at FROM identity')).toEqual([
       { id: IDENTITY, validated_at: null },
     ]);

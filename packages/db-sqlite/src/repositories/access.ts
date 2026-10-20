@@ -683,6 +683,7 @@ interface TokenRow {
   readonly expired: number;
   readonly principal_status: string | null;
   readonly binding_ok: number;
+  readonly stamp_invalid: number;
   readonly principal_project_id: string | null;
   readonly visible_project_id: string | null;
   readonly service_visible: number;
@@ -866,6 +867,9 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
       sql<number>`case t.kind when 'svc' then (t.project_id is sp.project_id) else (t.project_id is null) end`.as(
         'binding_ok',
       ),
+      sql<number>`case when t.kind = 'pat' and u.pat_invalid_before is not null
+        and coalesce(unixepoch(t.created_at, 'subsec') >= unixepoch(u.pat_invalid_before, 'subsec'), 0) = 0
+        then 1 else 0 end`.as('stamp_invalid'),
       'sp.project_id as principal_project_id',
       ...visibilityColumns,
       ...projectColumns,
@@ -901,7 +905,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
   const projectMode = tokenProjectMode(row.kind, row.project_mode, row.principal_project_id);
   const isService = row.kind === 'svc';
   const expired = row.expired === 1;
-  const revoked = row.revoked_at !== null;
+  const revoked = row.revoked_at !== null || row.stamp_invalid === 1;
   const principalActive = row.principal_status === 'active';
   const credentialValid = row.binding_ok === 1 && (isService || row.validation_fresh === 1);
   const project: AccessProject | null =
@@ -1071,7 +1075,7 @@ export function createAccessRepository(
             )
             .where(
               sql<SqlBool>`(
-                (token.kind = 'pat' and exists (select 1 from user_account where user_account.id = token.user_id and user_account.org_id = token.org_id and user_account.status = 'active'))
+                (token.kind = 'pat' and exists (select 1 from user_account where user_account.id = token.user_id and user_account.org_id = token.org_id and user_account.status = 'active' and (user_account.pat_invalid_before is null or unixepoch(token.created_at, 'subsec') >= unixepoch(user_account.pat_invalid_before, 'subsec'))))
                 or (token.kind = 'svc' and exists (select 1 from service_principal where service_principal.id = token.service_principal_id and service_principal.org_id = token.org_id and service_principal.status = 'active'))
               )`,
             )

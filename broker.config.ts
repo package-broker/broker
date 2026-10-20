@@ -1,10 +1,11 @@
-import { defineConfig } from '@package-broker/core/config';
+import { defineAssets, defineConfig } from '@package-broker/core/config';
 import github from '@package-broker/plugin-github';
 import ssoOidc from '@package-broker/plugin-sso-oidc';
 
 export default defineConfig({
   platform: 'cloudflare',
   plugins: [ssoOidc(), github()],
+  assets: [defineAssets({ kind: 'ui', provider: '@package-broker/ui-assets' })],
   platformPorts: {
     cloudflare: {
       blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 67108864 },

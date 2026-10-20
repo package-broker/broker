@@ -274,6 +274,9 @@ importers:
       '@package-broker/runtime-node':
         specifier: workspace:^
         version: link:packages/runtime-node
+      '@package-broker/ui-assets':
+        specifier: workspace:^
+        version: link:packages/ui-assets
       '@types/node':
         specifier: 'catalog:'
         version: 24.19.2

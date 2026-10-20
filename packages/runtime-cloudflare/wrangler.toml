@@ -56,7 +56,7 @@ compatibility_flags = ["nodejs_compat"]
 #
 # [assets]
 # binding = "ASSETS"
-# directory = "../../packages/ui/dist/assets"
+# directory = "../../.pb/cloudflare/assets"
 # run_worker_first = true
 # html_handling = "none"
 # not_found_handling = "none"

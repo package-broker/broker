@@ -803,6 +803,7 @@ describe('import journal', () => {
       published_at: '2026-01-01T00:00:00.000Z',
       status: 'tombstoned',
       metadata_json: '{}',
+      published_at_basis: 'source_release',
     });
     await verify();
     expect(
@@ -853,7 +854,7 @@ describe('import journal', () => {
       ),
     ).toEqual([{ action: 'create', before_image_json: null }]);
   });
-  it('stores exactly the four version domain keys and the override basis', async () => {
+  it('stores the four version domain keys, the prior basis and the override basis', async () => {
     expect(await apply([override])).toEqual({ ok: true });
     const [row] = await executor.all<{ before_image_json: string; published_at_basis: string }>(
       stmt(
@@ -866,6 +867,7 @@ describe('import journal', () => {
       published_at: '2026-01-01T00:00:00.000Z',
       status: 'tombstoned',
       metadata_json: '{}',
+      published_at_basis: 'source_release',
     });
     expect(row!.published_at_basis).toBe('import_time');
   });

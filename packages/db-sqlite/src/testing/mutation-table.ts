@@ -1,6 +1,40 @@
-import { entries as visibilityAuditEntries } from './mutation-table/visibility-audit.js';
-import { entries as visibilityAttachRepositoryEntries } from './mutation-table/visibility-attach-repository.js';
+import { entries as identityBlockEntries } from './mutation-table/identity-block.js';
+import { entries as loginEntries } from './mutation-table/login.js';
+import { entries as localLoginSuccessEntries } from './mutation-table/local-login-success.js';
+import { entries as localLoginSetupEntries } from './mutation-table/local-login-setup.js';
 import { entries as visibilitySubsetEntries } from './mutation-table/visibility-subset.js';
+import { entries as visibilityAttachFactoryEntries } from './mutation-table/visibility-attach-factory.js';
+import { entries as registeredNameFactoryEntries } from './mutation-table/registered-name-factory.js';
+import { entries as importCredentialEntries } from './mutation-table/import-credential.js';
+import { entries as importAuthorityEntries } from './mutation-table/import-authority.js';
+import { entries as scopedAdmissionEntries } from './mutation-table/scoped-admission.js';
+import { entries as proxyAdmissionFactoryEntries } from './mutation-table/proxy-admission-factory.js';
+import { entries as finalizeListingEntries } from './mutation-table/finalize-listing.js';
+import { entries as jobFactoryEntries } from './mutation-table/job-factory.js';
+import { entries as representationClockEntries } from './mutation-table/representation-clock.js';
+import { entries as blobReferencesFactoryEntries } from './mutation-table/blob-references-factory.js';
+import { entries as cacheEpochFactoryEntries } from './mutation-table/cache-epoch-factory.js';
+import { entries as catalogueListFactoryEntries } from './mutation-table/catalogue-list-factory.js';
+import { entries as closureEdgesFactoryEntries } from './mutation-table/closure-edges-factory.js';
+import { entries as catalogueReadFactoryEntries } from './mutation-table/catalogue-read-factory.js';
+import { entries as catalogueLookupFactoryEntries } from './mutation-table/catalogue-lookup-factory.js';
+import { entries as localLoginFactoryEntries } from './mutation-table/local-login-factory.js';
+import { entries as existingVersionsFactoryEntries } from './mutation-table/existing-versions-factory.js';
+import { entries as userFactoryEntries } from './mutation-table/user-factory.js';
+import { entries as sessionFactoryEntries } from './mutation-table/session-factory.js';
+import { entries as roleFactoryEntries } from './mutation-table/role-factory.js';
+import { entries as grantFactoryEntries } from './mutation-table/grant-factory.js';
+import { entries as jobScheduleFactoryEntries } from './mutation-table/job-schedule-factory.js';
+import { entries as fetchLeaseFactoryEntries } from './mutation-table/fetch-lease-factory.js';
+import { entries as credentialFactoryEntries } from './mutation-table/credential-factory.js';
+import { entries as blobFactoryEntries } from './mutation-table/blob-factory.js';
+import { entries as blobAccessFactoryEntries } from './mutation-table/blob-access-factory.js';
+import { entries as catalogueDistEntries } from './mutation-table/catalogue-dist.js';
+import { entries as sourceFactoryEntries } from './mutation-table/source-factory.js';
+import { entries as upstreamStateEntries } from './mutation-table/upstream-state.js';
+import { entries as ingestSessionFactoriesEntries } from './mutation-table/ingest-session-factories.js';
+import { entries as visibilityAttachRepositoryEntries } from './mutation-table/visibility-attach-repository.js';
+import { entries as visibilityAuditEntries } from './mutation-table/visibility-audit.js';
 import { entries as importJournalEntries } from './mutation-table/import-journal.js';
 import { entries as idempotencyEntries } from './mutation-table/idempotency.js';
 import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.js';
@@ -45,6 +79,7 @@ import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js'
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import { entries as registryReadsEntries } from './mutation-table/registry-reads.js';
 import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
+import { entries as importRollbackEntries } from './mutation-table/import-rollback.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
 import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
 import {
@@ -57,9 +92,43 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...identityBlockEntries,
+  ...loginEntries,
+  ...localLoginSuccessEntries,
+  ...localLoginSetupEntries,
+  ...visibilitySubsetEntries,
+  ...visibilityAttachFactoryEntries,
+  ...registeredNameFactoryEntries,
+  ...importCredentialEntries,
+  ...importAuthorityEntries,
+  ...scopedAdmissionEntries,
+  ...proxyAdmissionFactoryEntries,
+  ...finalizeListingEntries,
+  ...jobFactoryEntries,
+  ...representationClockEntries,
+  ...blobReferencesFactoryEntries,
+  ...cacheEpochFactoryEntries,
+  ...catalogueListFactoryEntries,
+  ...closureEdgesFactoryEntries,
+  ...catalogueReadFactoryEntries,
+  ...catalogueLookupFactoryEntries,
+  ...ingestSessionFactoriesEntries,
+  ...upstreamStateEntries,
+  ...sourceFactoryEntries,
+  ...catalogueDistEntries,
+  ...blobAccessFactoryEntries,
+  ...blobFactoryEntries,
+  ...credentialFactoryEntries,
+  ...fetchLeaseFactoryEntries,
+  ...jobScheduleFactoryEntries,
+  ...grantFactoryEntries,
+  ...roleFactoryEntries,
+  ...sessionFactoryEntries,
+  ...userFactoryEntries,
+  ...existingVersionsFactoryEntries,
+  ...localLoginFactoryEntries,
   ...visibilityAuditEntries,
   ...visibilityAttachRepositoryEntries,
-  ...visibilitySubsetEntries,
   ...idempotencyEntries,
   ...removedBlobsEntries,
   ...catalogueWriterEntries,
@@ -106,6 +175,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...epochEntries,
   ...sessionEntries,
   ...patOffboardingEntries,
+  ...importRollbackEntries,
 ];
 
 export function checkCompleteness(

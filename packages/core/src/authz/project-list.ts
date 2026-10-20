@@ -95,13 +95,28 @@ export interface ProjectLister {
 export interface ProjectListerDeps {
   readonly source: ProjectListSource;
   /**
-   * Required when `readable` is absent and ignored when it is wired. Without `readable`, a caller
-   * lacking organization `project:read` gets at most ten source reads per page and may see
-   * `scan_incomplete`.
+   * Required when `readable` is absent and ignored when it is wired. Without `readable`, an
+   * unrestricted caller lacking organization `project:read` gets at most ten source reads per page
+   * and may see `scan_incomplete`. A restricted listing never does: at its read cap it returns the
+   * greatest bound id reached as the cursor.
    */
   readonly access?: ProjectReadAccess;
   /** Lists project-grant readable projects for a caller lacking organization `project:read`. */
   readonly readable?: ReadableProjectSource;
+}
+
+const ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/** The greatest id of the same length that sorts strictly below `id`, or null when none exists. */
+function idBefore(id: string): string | null {
+  for (let i = id.length - 1; i >= 0; i -= 1) {
+    const at = ID_ALPHABET.indexOf(id[i] as string);
+    if (at > 0) {
+      return id.slice(0, i) + (ID_ALPHABET[at - 1] as string) + 'Z'.repeat(id.length - i - 1);
+    }
+    if (at < 0) return null;
+  }
+  return null;
 }
 
 function fail(error: ProjectListError): ProjectListResult {
@@ -139,65 +154,86 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
     }
     const bound = [...new Set(restrictTo as string[])].sort();
     const wanted = new Set(bound);
+    const lastBound = bound[bound.length - 1] as string;
     const { limit, status } = page;
-    const viaReadable = !inheritsAll && readable !== undefined;
     const items: ProjectListEntry[] = [];
-    let cursor = page.afterId;
-    let exhausted = false;
-    for (
-      let reads = 0;
-      items.length < limit && !exhausted && (!viaReadable || reads < MAX_SOURCE_READS);
-      reads += 1
-    ) {
-      let rows: readonly ProjectListEntry[];
-      let granted: ReadonlyMap<string, ReadonlySet<string>> | null = null;
-      if (viaReadable) {
-        rows = await readable.listReadableProjects(
+    const finish = (resume: string, exhausted: boolean): ProjectListResult => {
+      const last = items[items.length - 1];
+      const done = exhausted || (last !== undefined && last.id >= lastBound);
+      return { ok: true, value: { items, nextAfterId: done ? null : resume } };
+    };
+
+    if (!inheritsAll && readable !== undefined) {
+      let cursor = page.afterId;
+      let resume = page.afterId;
+      for (let reads = 0; reads < MAX_SOURCE_READS; reads += 1) {
+        const at = cursor;
+        const next = bound.find((id) => at === undefined || id > at);
+        if (next === undefined) return finish(resume as string, true);
+        const floor = idBefore(next);
+        if (floor !== null && (at === undefined || floor > at)) cursor = floor;
+        const from = cursor;
+        const rows = await readable.listReadableProjects(
           ctx,
           { userId },
           {
-            ...(cursor === undefined ? {} : { afterId: cursor }),
+            ...(from === undefined ? {} : { afterId: from }),
             limit: PROJECT_LIST_MAX_LIMIT,
             status,
           },
         );
-        exhausted = rows.length < PROJECT_LIST_MAX_LIMIT;
-        cursor = rows[rows.length - 1]?.id;
-      } else {
-        const start = cursor;
-        const chunk = bound
-          .filter((id) => start === undefined || id > start)
-          .slice(0, RESTRICTED_CHUNK);
-        const last = chunk[chunk.length - 1];
-        if (last === undefined) break;
-        rows = await pages.list(ctx, { limit: chunk.length, status, ids: chunk });
-        granted = inheritsAll
-          ? null
-          : await (access as ProjectReadAccess).permissionsFor(
-              ctx,
-              userId,
-              rows.map((row) => row.id),
-            );
-        cursor = last;
-        exhausted = bound[bound.length - 1] === last;
+        let passed = false;
+        let scanned = from;
+        for (const row of rows) {
+          if (from !== undefined && row.id <= from) continue;
+          if (row.id > lastBound) {
+            passed = true;
+            break;
+          }
+          scanned = row.id;
+          if (row.status !== status || !wanted.has(row.id)) continue;
+          items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
+          resume = row.id;
+          if (items.length === limit) return finish(resume, false);
+        }
+        if (passed || rows.length < PROJECT_LIST_MAX_LIMIT) return finish(resume as string, true);
+        if (scanned === from) return fail('source_invalid');
+        cursor = scanned;
+        const reached = [...bound].reverse().find((id) => id <= (scanned as string));
+        if (reached !== undefined && (resume === undefined || reached > resume)) resume = reached;
       }
+      if (resume === undefined || resume === page.afterId) return fail('source_invalid');
+      return finish(resume, false);
+    }
+
+    let cursor = page.afterId;
+    while (items.length < limit) {
+      const start = cursor;
+      const chunk = bound
+        .filter((id) => start === undefined || id > start)
+        .slice(0, RESTRICTED_CHUNK);
+      const last = chunk[chunk.length - 1];
+      if (last === undefined) return finish(cursor as string, true);
+      const rows = await pages.list(ctx, { limit: chunk.length, status, ids: chunk });
+      const granted = inheritsAll
+        ? null
+        : await (access as ProjectReadAccess).permissionsFor(
+            ctx,
+            userId,
+            rows.map((row) => row.id),
+          );
+      cursor = last;
       for (const row of rows) {
-        if (items.length === limit) break;
         if (row.status !== status || !wanted.has(row.id)) continue;
         if (granted !== null && granted.get(row.id)?.has('project:read') !== true) continue;
         items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
+        if (items.length === limit) {
+          cursor = row.id;
+          break;
+        }
       }
     }
-    const lastItem = items[items.length - 1];
-    if (lastItem === undefined) {
-      return exhausted || cursor === undefined || !viaReadable
-        ? { ok: true, value: { items, nextAfterId: null } }
-        : fail('scan_incomplete');
-    }
-    return {
-      ok: true,
-      value: { items, nextAfterId: exhausted && items.length < limit ? null : lastItem.id },
-    };
+    return finish(cursor as string, false);
   }
 
   return {

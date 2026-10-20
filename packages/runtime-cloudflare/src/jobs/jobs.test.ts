@@ -13,7 +13,8 @@ import {
   type JobClaim,
   type JobRepository,
 } from '@package-broker/core/platform/job-repository';
-import { JobError } from '@package-broker/core/platform/jobs';
+import { fenceKind } from '@package-broker/core/authz/fence';
+import { JobError, type JobContext } from '@package-broker/core/platform/jobs';
 import {
   DROPPED_COUNTER,
   createObservability,
@@ -809,6 +810,62 @@ describe('createQueueHandler transport boundaries', () => {
     });
     await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
     expect(settle).toHaveBeenCalledWith(orgA, expect.anything(), { outcome: 'succeeded' });
+  });
+  it('hands the handler a fence issuer bound to the claimed job lease', async () => {
+    let seen: ReturnType<NonNullable<JobContext['fences']>['delegated']> | undefined;
+    const fenced = registerCoreJob({
+      name: 'fenced',
+      version: 1,
+      validate: (input) => input,
+      handler: (_payload, context) => {
+        seen = context.fences!.delegated('user-1', 'run-1', { a: 1 });
+        return Promise.resolve();
+      },
+    });
+    const claim = { ...fakeClaim(fenced.qualifiedName), fence: 7 };
+    const handle = createQueueHandler({
+      repository: fakeRepository({
+        claim: () => Promise.resolve(claim),
+        settle: () => Promise.resolve(),
+      }),
+      jobs: { jobs: [fenced] },
+      observability: recorder().observability,
+      scope: () => ({ ports, observability: recorder().observability }),
+    });
+    await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
+    expect(fenceKind(seen!)).toBe('delegated');
+    expect(seen!.job).toEqual({ id: claim.id, owner: claim.owner, fence: 7 });
+    expect(seen!.approverUserId).toBe('user-1');
+    expect(seen!.runId).toBe('run-1');
+  });
+
+  it('gives a plugin job no fence issuer', async () => {
+    let seen: JobContext | undefined = undefined;
+    const plugin: RegisteredJob = {
+      plugin: 'acme',
+      qualifiedName: 'acme:work:v1',
+      definition: {
+        name: 'work',
+        version: 1,
+        validate: (input) => input,
+        handler: (_payload, context) => {
+          seen = context;
+          return Promise.resolve();
+        },
+      },
+    };
+    const handle = createQueueHandler({
+      repository: fakeRepository({
+        claim: () => Promise.resolve(fakeClaim(plugin.qualifiedName)),
+        settle: () => Promise.resolve(),
+      }),
+      jobs: { jobs: [plugin] },
+      observability: recorder().observability,
+      scope: () => ({ ports, observability: recorder().observability }),
+    });
+    await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
+    expect(seen).toBeDefined();
+    expect((seen as JobContext | undefined)?.fences).toBeUndefined();
   });
 });
 

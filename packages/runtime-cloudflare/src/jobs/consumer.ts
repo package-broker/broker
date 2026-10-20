@@ -1,7 +1,8 @@
 import { orgContext, type OrgContext } from '@package-broker/core/db/port';
 import { isUlid, ulid } from '@package-broker/core/ids';
 import { reportableErrorName } from '@package-broker/core/kernel/error-name';
-import type { RegisteredJob } from '@package-broker/core/kernel/registry';
+import type { RegisteredCoreJob, RegisteredJob } from '@package-broker/core/kernel/registry';
+import { isRegisteredCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import {
   JOB_HANDLER_BUDGET_SECONDS,
@@ -12,6 +13,7 @@ import {
   type JobRepository,
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
+import { jobFences } from '@package-broker/core/platform/job-fences';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
 import type { Observability } from '@package-broker/core/platform/observability';
 
@@ -319,6 +321,9 @@ async function execute(
         signal: controller.signal,
         ports: scoped.ports,
         observability: scoped.observability,
+        ...(isRegisteredCoreJob(job as RegisteredCoreJob)
+          ? { fences: jobFences({ id: claim.id, owner: claim.owner, fence: claim.fence }) }
+          : {}),
       }),
     );
     run.catch(() => undefined);

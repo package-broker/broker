@@ -65,6 +65,10 @@ import {
   resolveRegistryConfig,
   type RegistryConfig,
 } from '@package-broker/core/registry/registry-config';
+import {
+  resolveTokenLifetimePolicy,
+  TokenConfigError,
+} from '@package-broker/core/authz/token-lifetime';
 import { createJobLoop, JOB_EVENTS, type JobLoop } from './jobs/loop.js';
 import { createStdioSink, type StdioStream } from './observability/stdio.js';
 
@@ -76,6 +80,7 @@ export interface StartOptions {
   readonly platformPorts?: PlatformPortConfig | null;
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
+  readonly tokens?: BrokerConfig['tokens'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -236,6 +241,15 @@ function registryConfig(input: StartOptions['registry'], origin: string): Regist
   } catch (error) {
     if (!(error instanceof RegistryConfigError)) throw error;
     throw new StartupConfigError('registry', error.problems.join('; '));
+  }
+}
+
+function checkTokens(input: StartOptions['tokens']): void {
+  try {
+    resolveTokenLifetimePolicy(input);
+  } catch (error) {
+    if (!(error instanceof TokenConfigError)) throw error;
+    throw new StartupConfigError('config', error.problems.join('; '));
   }
 }
 
@@ -673,6 +687,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       throw new StartupConfigError('registry', 'requires platformPorts');
     }
     const registry = registryConfig(options.registry, origin);
+    checkTokens(options.tokens);
     await selfTestPasswordHashing(keyring);
 
     if (ports !== null) {
@@ -706,6 +721,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     broker = createNodeServer(options.plugins, {
       executor: opened.executor,
       closeDatabase,
+      ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
       ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined

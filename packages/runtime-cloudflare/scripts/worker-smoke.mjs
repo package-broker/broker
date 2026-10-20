@@ -492,6 +492,7 @@ async function run() {
       [
         ['core:audit-seal:v1', 60],
         ['core:audit-verify:v1', 86400],
+        ['core:pat-offboarding-sweep:v1', 86400],
       ],
     );
     await executor.batch([

@@ -106,6 +106,7 @@ function rig(options: Options = {}) {
   let gate: Promise<void> | null = null;
   const state = {
     opens: 0,
+    signals: [] as AbortSignal[],
     gets: 0,
     heads: 0,
     acquireCalls: 0,
@@ -242,8 +243,9 @@ function rig(options: Options = {}) {
   } as unknown as ProviderSource;
   const deps = {
     provider: {
-      async openDist() {
+      async openDist(providerContext: ProviderContext) {
         state.opens += 1;
+        state.signals.push(providerContext.signal);
         if (gate !== null) await gate;
         return { body: streamOf(upstream), size: null };
       },
@@ -357,6 +359,42 @@ const text = async (result: DistServeResult): Promise<string> => {
 const owner = actor('project_a');
 
 describe('createDistService', () => {
+  it('aborts the upstream fetch when the caller signal aborts and rejects the request', async () => {
+    const r = rig({ initial: null });
+    const open = r.hold();
+    const controller = new AbortController();
+    const pending = r.service.serve(owner, request(1), { signal: controller.signal });
+    const settled = pending.then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(r.state.signals).toHaveLength(1);
+    expect(r.state.signals[0]!.aborted).toBe(false);
+    controller.abort(new Error('client gone'));
+    expect(r.state.signals[0]!.aborted).toBe(true);
+    expect(await settled).toBe('rejected');
+    open();
+  });
+
+  it('rejects before planning or fetching when the signal is already aborted', async () => {
+    const r = rig({ initial: null });
+    const controller = new AbortController();
+    controller.abort(new Error('client gone'));
+    await expect(
+      r.service.serve(owner, request(1), { signal: controller.signal }),
+    ).rejects.toBeDefined();
+    expect(r.state.planned).toHaveLength(0);
+    expect(r.state.opens).toBe(0);
+  });
+
+  it('serves stored bytes without consulting the signal', async () => {
+    const r = rig();
+    const controller = new AbortController();
+    const result = await r.service.serve(owner, request(1), { signal: controller.signal });
+    expect(await text(result)).toBe('v1 bytes');
+  });
+
   it('streams live bytes with the immutable download headers and records the access', async () => {
     const r = rig();
     const result = await r.service.serve(owner, request(1));

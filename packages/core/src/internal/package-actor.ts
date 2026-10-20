@@ -1,5 +1,6 @@
 import { PACKAGE_BOUNDARY_PERMISSIONS, type ProjectActor } from '../authz/project-actor.js';
 import { catalogueTokenEligible } from '../authz/catalogue.js';
+import type { RequestContext } from '../plugin.js';
 import type { AuthorizationDecision, AuthorizationRequest } from '../kernel/authorize.js';
 
 const packageActors = new WeakMap<AuthorizationRequest, ProjectActor>();
@@ -50,4 +51,24 @@ export function setPackageActor(
 
 export function clearPackageActor(request: AuthorizationRequest): void {
   packageActors.delete(request);
+}
+
+const contextActors = new WeakMap<RequestContext, ProjectActor>();
+
+export function setContextPackageActor(ctx: RequestContext, actor: ProjectActor): void {
+  if (contextActors.has(ctx)) throw new TypeError('package actor is already set');
+  contextActors.set(ctx, actor);
+}
+
+export function contextPackageActorOf(ctx: RequestContext): ProjectActor | null {
+  return contextActors.get(ctx) ?? null;
+}
+
+export function narrowPackageActor(actor: ProjectActor, permission: string | null): ProjectActor {
+  return Object.freeze({
+    ...actor,
+    permissions: packagePermissionView(
+      [...actor.permissions].filter((name) => name === permission),
+    ),
+  });
 }

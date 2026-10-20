@@ -1,6 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { fork, spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
+import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,15 +47,38 @@ function positiveInteger(name, raw, fallback) {
   return value;
 }
 
-function workerdPids() {
+const children = new Set();
+const instances = new Map();
+// Node publishes only children spawned by this process, including Miniflare's private runtime.
+channel('child_process').subscribe(({ process: child }) => {
+  children.add(child);
+  child.once('close', () => children.delete(child));
+});
+
+function processLabel() {
+  const pids = [...children].flatMap((child) => (child.pid === undefined ? [] : [child.pid]));
+  return `smoke PID ${process.pid}; child PIDs: ${pids.join(', ') || 'none'}`;
+}
+
+async function within(promise, limitMs, label) {
+  let timer;
   try {
-    return execFileSync('pgrep', ['-x', 'workerd'], { encoding: 'utf8' })
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line !== '');
-  } catch {
-    return [];
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} exceeded ${limitMs}ms (${processLabel()})`));
+        }, limitMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+function trackMiniflare(instance) {
+  instances.set(instance, undefined);
+  return instance;
 }
 
 const workerLogs = [];
@@ -67,45 +92,66 @@ async function waitForAuditLog(predicate, label, limitMs) {
 }
 let step = 'startup';
 let mf;
-let disposed = false;
-let cleaned = false;
+let cleanupPromise;
 let timedOut = false;
 let deadlineTimer;
-const baselineWorkerd = new Set(workerdPids());
 
-async function disposeMiniflare() {
-  if (mf === undefined || disposed) return;
-  disposed = true;
-  let timer;
-  try {
-    await Promise.race([
-      mf.dispose().catch(() => undefined),
-      new Promise((done) => {
-        timer = setTimeout(done, DISPOSE_GRACE_MS);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
+function disposeMiniflare(instance = mf) {
+  if (instance === undefined) return Promise.resolve();
+  let disposal = instances.get(instance);
+  if (disposal === undefined) {
+    disposal = within(
+      Promise.resolve().then(() => instance.dispose()),
+      DISPOSE_GRACE_MS,
+      'Miniflare disposal',
+    );
+    instances.set(instance, disposal);
   }
+  return disposal;
 }
 
-async function stopLeftoverWorkerd() {
-  for (const pid of workerdPids()) {
-    if (baselineWorkerd.has(pid)) continue;
+function cleanup() {
+  cleanupPromise ??= (async () => {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     try {
-      process.kill(Number(pid), 'SIGKILL');
-    } catch {
-      // the process already exited
+      const results = await Promise.allSettled([...instances.keys()].map(disposeMiniflare));
+      const failures = results.filter((result) => result.status === 'rejected');
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((result) => result.reason),
+          failures
+            .map((result) =>
+              result.reason instanceof Error ? result.reason.message : String(result.reason),
+            )
+            .join('; '),
+        );
+      }
+    } finally {
+      const remaining = [...children];
+      const exits = remaining.map((child) => once(child, 'close'));
+      for (const child of remaining) {
+        if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL');
+        }
+      }
+      await within(Promise.all(exits), DISPOSE_GRACE_MS, 'Child process cleanup');
     }
-  }
+  })();
+  return cleanupPromise;
 }
 
-async function cleanup() {
-  if (cleaned) return;
-  cleaned = true;
-  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-  await disposeMiniflare();
-  await stopLeftoverWorkerd();
+function fail(error) {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+}
+
+async function exitAfterCleanup(code) {
+  try {
+    await cleanup();
+    process.exit(code);
+  } catch (error) {
+    fail(error);
+  }
 }
 
 for (const [signal, code] of [
@@ -114,7 +160,7 @@ for (const [signal, code] of [
 ]) {
   process.on(signal, () => {
     console.error(`smoke:cloudflare received ${signal} while ${step}; cleaning up`);
-    void cleanup().then(() => process.exit(code));
+    void exitAfterCleanup(code);
   });
 }
 
@@ -198,31 +244,33 @@ async function expectStatus(label, response, status) {
 }
 
 function createMiniflare(script) {
-  return new Miniflare(
-    convertV4MiniflareOptions({
-      rootPath: dirname(script),
-      handleStructuredLogs: (record) => workerLogs.push(record.message),
-      modules: true,
-      scriptPath: basename(script),
-      compatibilityDate: '2026-10-01',
-      compatibilityFlags: ['nodejs_compat'],
-      d1Databases: ['DB'],
-      assets: {
-        directory: join(repoRoot, 'packages/ui/dist/assets'),
-        binding: 'ASSETS',
-        run_worker_first: true,
-        routerConfig: { has_user_worker: true },
-        assetConfig: { html_handling: 'none' },
-      },
-      r2Buckets: ['STORAGE'],
-      queueProducers: { JOBS: 'pb-smoke-jobs' },
-      analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
-      bindings: {
-        PB_MASTER_KEY: MASTER_KEY,
-        PB_PUBLIC_URL: PUBLIC_ORIGIN,
-        DEPLOYMENT_ID: 'smoke',
-      },
-    }),
+  return trackMiniflare(
+    new Miniflare(
+      convertV4MiniflareOptions({
+        rootPath: dirname(script),
+        handleStructuredLogs: (record) => workerLogs.push(record.message),
+        modules: true,
+        scriptPath: basename(script),
+        compatibilityDate: '2026-10-01',
+        compatibilityFlags: ['nodejs_compat'],
+        d1Databases: ['DB'],
+        assets: {
+          directory: join(repoRoot, 'packages/ui/dist/assets'),
+          binding: 'ASSETS',
+          run_worker_first: true,
+          routerConfig: { has_user_worker: true },
+          assetConfig: { html_handling: 'none' },
+        },
+        r2Buckets: ['STORAGE'],
+        queueProducers: { JOBS: 'pb-smoke-jobs' },
+        analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
+        bindings: {
+          PB_MASTER_KEY: MASTER_KEY,
+          PB_PUBLIC_URL: PUBLIC_ORIGIN,
+          DEPLOYMENT_ID: 'smoke',
+        },
+      }),
+    ),
   );
 }
 
@@ -239,10 +287,10 @@ async function run() {
   );
 
   deadlineTimer = setTimeout(() => {
-    if (cleaned) return;
+    if (cleanupPromise !== undefined) return;
     timedOut = true;
     console.error(`smoke:cloudflare: ${deadlineMs}ms deadline exceeded while ${step}`);
-    void cleanup().then(() => process.exit(1));
+    void exitAfterCleanup(1);
   }, deadlineMs);
 
   try {
@@ -508,7 +556,7 @@ async function run() {
 
     step = 'building the package-route Worker';
     const routeOut = join(repoRoot, '.pb', 'package-route-cloudflare');
-    execFileSync(
+    const build = spawn(
       process.execPath,
       [
         join(repoRoot, 'packages', 'cli', 'dist', 'bin.js'),
@@ -520,10 +568,13 @@ async function run() {
         '--out',
         routeOut,
       ],
-      { cwd: repoRoot, stdio: 'pipe' },
+      { cwd: repoRoot, stdio: 'inherit' },
     );
+    const [buildCode, buildSignal] = await once(build, 'exit');
+    if (buildCode !== 0) {
+      throw new Error(`package-route build PID ${build.pid} failed (${buildSignal ?? buildCode})`);
+    }
     await disposeMiniflare();
-    disposed = false;
     mf = createMiniflare(join(routeOut, 'worker.js'));
     const routeExecutor = createD1Executor(await mf.getD1Database('DB'));
     await migrate(routeExecutor, await readMigrations(routeOut), { holder: 'smoke' });
@@ -628,14 +679,106 @@ async function run() {
     );
 
     step = 'done';
-    console.log('smoke:cloudflare ok');
   } finally {
     await cleanup();
   }
+  console.log('smoke:cloudflare ok');
 }
 
-run().catch((error) => {
-  if (timedOut) return;
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+async function selfCheck() {
+  let disposeCalls = 0;
+  const hung = trackMiniflare({
+    dispose() {
+      disposeCalls += 1;
+      return new Promise(() => {});
+    },
+  });
+  try {
+    const disposal = disposeMiniflare(hung);
+    assert.equal(disposeMiniflare(hung), disposal, 'disposal must be shared across cleanup calls');
+    await assert.rejects(
+      disposal,
+      new RegExp(
+        `Miniflare disposal exceeded ${DISPOSE_GRACE_MS}ms \\(smoke PID ${process.pid}; child PIDs:`,
+      ),
+    );
+    assert.equal(disposeCalls, 1, 'dispose must be called once per instance');
+  } finally {
+    instances.delete(hung);
+  }
+  const failure = new Error('self-check disposal failure');
+  const broken = trackMiniflare({ dispose: () => Promise.reject(failure) });
+  try {
+    await assert.rejects(disposeMiniflare(broken), (error) => error === failure);
+  } finally {
+    instances.delete(broken);
+  }
+  console.log('smoke:cloudflare self-check: disposal timeout, PID diagnostic and rejection passed');
+  const smoke = fork(fileURLToPath(import.meta.url), ['--self-check-child'], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+  });
+  const exit = once(smoke, 'exit');
+  try {
+    await within(once(smoke, 'message'), DEFAULT_TIMEOUT_MS, 'Self-check child startup');
+    // Start after the smoke's initialization so a machine-wide PID-difference sweep would kill it.
+    const unrelated = trackMiniflare(
+      new Miniflare(
+        convertV4MiniflareOptions({
+          modules: true,
+          script: 'export default { fetch() { return new Response("unrelated workerd alive") } }',
+          compatibilityDate: '2026-10-01',
+        }),
+      ),
+    );
+    await within(unrelated.ready, DEFAULT_TIMEOUT_MS, 'Unrelated workerd startup');
+    const unrelatedChildren = [...children].filter((child) => child !== smoke);
+    assert.ok(unrelatedChildren.length > 0, 'self-check must start an unrelated workerd');
+    smoke.send('run');
+    const [code, signal] = await within(
+      exit,
+      DEFAULT_DEADLINE_MS + 3 * DISPOSE_GRACE_MS,
+      'Self-check smoke run',
+    );
+    assert.equal(signal, null, 'smoke must exit without a signal');
+    assert.equal(code, 0, 'smoke must succeed');
+    for (const child of unrelatedChildren) {
+      assert.equal(child.exitCode, null, `unrelated PID ${child.pid} must survive`);
+      assert.equal(child.signalCode, null, `unrelated PID ${child.pid} must not be killed`);
+      assert.ok(child.kill(0), `unrelated PID ${child.pid} must still exist`);
+    }
+    assert.equal(
+      await within(
+        unrelated.dispatchFetch('http://unrelated.test').then((response) => response.text()),
+        DEFAULT_TIMEOUT_MS,
+        'Unrelated workerd response',
+      ),
+      'unrelated workerd alive',
+    );
+    console.log('smoke:cloudflare self-check: unrelated workerd survived the smoke run');
+  } finally {
+    try {
+      if (smoke.exitCode === null && smoke.signalCode === null) {
+        smoke.kill('SIGTERM');
+        await within(exit, 3 * DISPOSE_GRACE_MS, 'Self-check child shutdown');
+      }
+    } finally {
+      await cleanup();
+    }
+  }
+}
+
+async function main() {
+  if (process.argv.includes('--self-check')) return selfCheck();
+  if (process.argv.includes('--self-check-child')) {
+    const start = once(process, 'message');
+    process.send('ready');
+    await start;
+    process.disconnect();
+  }
+  return run();
+}
+
+main().catch((error) => {
+  if (!timedOut) fail(error);
 });

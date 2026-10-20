@@ -13,6 +13,7 @@ import {
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
+import { runImportSatisPlan } from './commands/import-satis.js';
 import { runOpenApi } from './commands/openapi.js';
 import { runBootstrapSqlite, runMigrateSqlite } from './commands/sqlite.js';
 
@@ -28,6 +29,7 @@ const USAGE =
   '       pb admin reset-local --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
+  '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
@@ -68,6 +70,11 @@ function parseCliArgs(argv: string[]) {
         domain: { type: 'string' },
         yes: { type: 'boolean' },
         json: { type: 'boolean' },
+        project: { type: 'string' },
+        credentials: { type: 'string' },
+        'repository-map': { type: 'string' },
+        baseline: { type: 'string' },
+        mode: { type: 'string' },
       },
     });
   } catch {
@@ -122,6 +129,15 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'database-id',
   ],
   'admin show-provider-binding': ['provider', 'sqlite', 'cloudflare', 'database-id'],
+  'import satis plan': [
+    'config',
+    'out',
+    'project',
+    'credentials',
+    'repository-map',
+    'baseline',
+    'mode',
+  ],
   openapi: ['out'],
   version: [],
 };
@@ -177,6 +193,28 @@ export async function run(argv: readonly string[]): Promise<number> {
   const [command, subcommand] = positionals;
 
   if (command === 'openapi') return runOpenApi(values.out);
+
+  if (command === 'import' && subcommand === 'satis') {
+    const { config, out, mode } = values;
+    if (
+      config === undefined ||
+      out === undefined ||
+      (mode !== undefined && mode !== 'merge' && mode !== 'override')
+    ) {
+      return usageError();
+    }
+    return runImportSatisPlan({
+      config,
+      out,
+      ...(values.project === undefined ? {} : { project: values.project }),
+      ...(values.credentials === undefined ? {} : { credentials: values.credentials }),
+      ...(values['repository-map'] === undefined
+        ? {}
+        : { repositoryMap: values['repository-map'] }),
+      ...(values.baseline === undefined ? {} : { baseline: values.baseline }),
+      ...(mode === undefined ? {} : { mode }),
+    });
+  }
 
   if (command === 'cloudflare' && subcommand === 'provision') {
     if (

@@ -18,6 +18,7 @@ function fixture() {
     markDeleted: vi.fn(async () => true),
     cancelPurge: vi.fn(async () => true),
     unschedule: vi.fn(async () => true),
+    scheduleOrphan: vi.fn(async () => true),
   };
   const remove = vi.fn<ByteStore['remove']>(async () => undefined);
   const store = { remove } as unknown as ByteStore;
@@ -255,5 +256,20 @@ it.each(['live', 'aborted', 'refused', 'error', 'stale', 'foreign'] as const)(
       expect(f.metadata.markDeleted).toHaveBeenCalledExactlyOnceWith(ctx, key, generation);
     if (mode === 'aborted') expect(f.metadata.canStartRemove).not.toHaveBeenCalled();
     else expect(f.metadata.canStartRemove).toHaveBeenCalledWith(org, key, generation, 2000);
+  },
+);
+it('delegates scheduleOrphan with the caller context and key', async () => {
+  await expect(f.service.scheduleOrphan(ctx, key)).resolves.toBe(true);
+  expect(f.metadata.scheduleOrphan).toHaveBeenCalledExactlyOnceWith(ctx, key);
+  f.metadata.scheduleOrphan.mockResolvedValue(false);
+  await expect(f.service.scheduleOrphan(ctx, key)).resolves.toBe(false);
+});
+it.each(['A'.repeat(64), 'b'.repeat(63), '', null, 123, 'malformed'])(
+  'rejects malformed digest %s before scheduleOrphan reaches the port',
+  async (invalid) => {
+    await expect(async () => f.service.scheduleOrphan(ctx, invalid as never)).rejects.toThrow(
+      'invalid blob input',
+    );
+    for (const port of Object.values(f.metadata)) expect(port).not.toHaveBeenCalled();
   },
 );

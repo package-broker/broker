@@ -62,7 +62,15 @@ describe('check-treeshake cloudflare node: allow-list', () => {
     expect(result).toEqual({ code: 0, output: '' });
   });
 
-  it.each(['node:fs', 'node:child_process', 'node:async_hooks/extra'])(
+  it('admits node:buffer and node:zlib as external imports', async () => {
+    const result = await check({
+      external: ['node:buffer', 'node:zlib'],
+      text: 'import{Buffer}from"node:buffer";import{gunzipSync}from"node:zlib";export default 1;\n',
+    });
+    expect(result).toEqual({ code: 0, output: '' });
+  });
+
+  it.each(['node:fs', 'node:child_process', 'node:async_hooks/extra', 'node:zlib/extra'])(
     'still rejects %s as an external import',
     async (specifier) => {
       const result = await check({ external: [specifier] });

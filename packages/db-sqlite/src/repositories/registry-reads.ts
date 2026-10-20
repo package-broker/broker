@@ -53,6 +53,10 @@ export function versionByIdStatement(
         sql<boolean>`(rr_v.status = 'active'
           or (rr_v.status = 'removed_upstream' and rr_s.removal_policy = 'flag'))`,
       )
+      .where(
+        sql<boolean>`(rr_p.status = 'active'
+          or (rr_p.status = 'removed_upstream' and rr_s.removal_policy = 'flag'))`,
+      )
       .limit(1),
   ) as ScalarStatement;
 }

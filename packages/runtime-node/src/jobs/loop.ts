@@ -1,7 +1,8 @@
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid, type Clock } from '@package-broker/core/ids';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
-import type { RegisteredJob } from '@package-broker/core/kernel/registry';
+import type { RegisteredCoreJob, RegisteredJob } from '@package-broker/core/kernel/registry';
+import { isRegisteredCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import {
   JOB_HANDLER_BUDGET_SECONDS,
@@ -14,6 +15,7 @@ import {
   type JobRepository,
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
+import { jobFences } from '@package-broker/core/platform/job-fences';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
 import { safeErrorName, type Observability } from '@package-broker/core/platform/observability';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
@@ -276,6 +278,7 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
           signal: controller.signal,
           ports: scoped.ports,
           observability: scoped.observability,
+          ...(isRegisteredCoreJob(job as RegisteredCoreJob) ? { fences: jobFences(guard) } : {}),
         });
         return { outcome: 'succeeded' };
       } catch (error) {

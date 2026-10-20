@@ -11,7 +11,7 @@ const DYNAMIC_IMPORT = /(?:^|[^\w$.])import\s*\(/g;
 const REQUIRE_CALL = /(?:^|[^\w$.])(?:__)?require\s*\(/g;
 const FROM_SPECIFIER = /\bfrom\s*/g;
 const STATIC_IMPORT = /(?:^|[^\w$.])import\s+/g;
-const CLOUDFLARE_ALLOWED_NODE = new Set(['node:async_hooks']);
+const CLOUDFLARE_ALLOWED_NODE = new Set(['node:async_hooks', 'node:buffer', 'node:zlib']);
 const FIXTURE = process.env.PB_CHECK_TREESHAKE_FIXTURE;
 
 function skipSpace(text, start) {

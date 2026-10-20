@@ -99,6 +99,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'REDUNDANT_BY_SCHEMA: 0001_init.sql organization_singleton UNIQUE (singleton), CHECK (singleton = 1); bootstrap selects the installation singleton rather than an organization context',
   'repositories/keyring-verifier.ts#createKeyringVerifierStore':
     'REDUNDANT_BY_SCHEMA: 0015_keyring_verifier.sql keyring_verifier PRIMARY KEY (key_version); the verifier is installation-global and has no organization column',
+  'repositories/webhook-delivery.ts#createWebhookDeliveryRepository':
+    'NOT_A_MUTATION: the factory only sequences the four registered webhook delivery statements, maps their rows and issues no SQL of its own.',
 
   'internal/lease-time.ts#until':
     'NOT_A_MUTATION: builds a lease timestamp expression without tables or organization predicates.',

@@ -30,7 +30,8 @@ import {
 import { openFilesystemByteStore } from './blob/filesystem.js';
 import { createLruCache } from './cache/lru.js';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
-import { createNodeServer, type NodeBroker } from './index.js';
+import { type NodeBroker } from './index.js';
+import { createNodeServerWithSeams } from './testing/node-server.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const NAME = 'acme/widget';
@@ -460,7 +461,7 @@ describe('registry clients against the Node runtime', { timeout: TEST_TIMEOUT_MS
     };
 
     const byteStore = await openFilesystemByteStore({ root: join(directory, 'blobs') });
-    broker = createNodeServer(
+    broker = createNodeServerWithSeams(
       [],
       {
         executor: db.executor,
@@ -665,7 +666,7 @@ describe('registry clients against the Node runtime', { timeout: TEST_TIMEOUT_MS
       const box = await prepare('npm-bad');
       const installed = await run('npm', ['install', NPM_NAME], box.project, box.env);
       expect(installed.code).not.toBe(0);
-      expect(installed.output).toContain('E404');
+      expect(installed.output).toContain('E502');
       expect(installed.output).toContain(
         `${origin}/alpha/npm/${NPM_NAME}/-/${NPM_NAME}-${VERSION}.tgz`,
       );

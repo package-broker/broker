@@ -42,9 +42,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 51 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(51);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(51);
+  it('has 52 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(52);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(52);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -61,6 +61,47 @@ describe('AUDIT_ACTIONS', () => {
 
   it('allows no change fields for session.login', () => {
     expect(AUDIT_FIELDS['session.login']).toEqual([]);
+  });
+});
+
+describe('token rotation audit registration', () => {
+  it('registers token.rotate with exactly its three allowed fields', () => {
+    expect(AUDIT_ACTIONS).toContain('token.rotate');
+    expect(AUDIT_FIELDS['token.rotate' as AuditAction]).toEqual([
+      'replacement_id',
+      'overlap_days',
+      'expires_at',
+    ]);
+    const changes = {
+      replacement_id: { new: '01J0TOKEN000000000000000001' },
+      overlap_days: { new: 7 },
+      expires_at: { new: '2026-10-24T09:00:00.000Z' },
+    };
+    const result = build('token.rotate', changes);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result)).changes).toEqual(changes);
+  });
+
+  it('rejects a field outside the token.rotate allowlist', () => {
+    expect(build('token.rotate', { cause: { new: 'suspended' } })).toEqual({
+      ok: false,
+      reason: 'unknown_field',
+    });
+  });
+
+  it.each(['suspended', 'membership_removed', 'erased'])(
+    'preserves the token.revoke cause %s',
+    (cause) => {
+      const result = build('token.revoke', { cause: { new: cause } });
+      expect(result.ok).toBe(true);
+      expect(JSON.parse(payloadOf(result)).changes).toEqual({ cause: { new: cause } });
+    },
+  );
+
+  it('keeps a manual token.revoke free of a cause', () => {
+    const result = build('token.revoke');
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result))).not.toHaveProperty('changes');
   });
 });
 

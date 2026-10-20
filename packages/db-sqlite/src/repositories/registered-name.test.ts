@@ -1416,6 +1416,26 @@ describe('registered-name idempotency', () => {
     );
   }
 
+  it.each(cases)(
+    '%s succeeds over an expired record with the same key',
+    async (operation, success) => {
+      const saved = record(success);
+      await executor.batch([
+        idempotencyInsertStatement(a, {
+          ...saved,
+          requestHash: 'c'.repeat(64),
+          createdAt: '2026-10-13T12:00:00.000Z',
+          expiresAt: '2026-10-14T12:00:00.000Z',
+        }),
+      ]);
+      const invoke = await fixture(operation);
+      expect(await invoke(saved)).toBe(success);
+      expect(
+        await createIdempotencyRepository(executor).find(a, saved.principalKey, saved.key, NOW),
+      ).toEqual(saved);
+    },
+  );
+
   it.each(['organization', 'principal'] as const)(
     'allows the same key for another %s',
     async (scope) => {

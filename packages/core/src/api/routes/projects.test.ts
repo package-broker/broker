@@ -25,6 +25,8 @@ import { projectRoutes } from './projects.js';
 
 const ORIGIN = 'https://broker.test';
 const PROJECT = '01JA0000000000000000000001';
+const OTHER = '01JA0000000000000000000002';
+const STRAY = '01JA0000000000000000000003';
 const SECRET = 'A'.repeat(43);
 const CSRF = 'B'.repeat(43);
 const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
@@ -59,6 +61,9 @@ async function fixture(
     tokenScope?: 'read' | 'full';
     projectMode?: 'all' | 'selected';
     tokenKind?: 'pat' | 'service';
+    boundProjectIds?: readonly string[];
+    protectedHolder?: boolean;
+    inheritsProjectRead?: boolean;
     projectVisible?: boolean;
     row?: StoredProject | null;
     storeAnswer?: Partial<Record<'create' | 'update' | 'archive' | 'restore', string>>;
@@ -186,6 +191,7 @@ async function fixture(
                 userId: options.tokenKind === 'service' ? null : 'user-1',
                 servicePrincipalId: options.tokenKind === 'service' ? 'svc-1' : null,
                 bindingOk: true,
+                boundProjectIds: options.boundProjectIds ?? [],
                 projectMode: options.projectMode ?? 'all',
                 scope: {
                   level: options.tokenScope ?? 'full',
@@ -193,6 +199,8 @@ async function fixture(
                 },
               },
               principalStatus: 'active',
+              protectedHolder: options.protectedHolder ?? false,
+              projectReadInherited: options.inheritsProjectRead ?? false,
               projectVisible: true,
               validation:
                 options.tokenKind === 'service'
@@ -333,25 +341,86 @@ describe('GET /_pb/projects', () => {
     expect(f.lister.list).not.toHaveBeenCalled();
   });
 
-  it('answers an empty list to a read-scope PAT without asking the lister', async () => {
+  it('lists a read-scope PAT through the lister with the owner and no org permissions', async () => {
     const f = await fixture({
       tokenScope: 'read',
       listed: { ok: true, value: { items: [entry], nextAfterId: null } },
     });
     const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ items: [], next: null });
-    expect(f.lister.list).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ items: [entry], next: null });
+    const [, actor, request] = vi.mocked(f.lister.list).mock.calls[0]!;
+    expect(actor).toMatchObject({ kind: 'organization', userId: 'user-1' });
+    expect(actor.isOrganizationAdmin).toBe(false);
+    expect([...actor.permissions]).toEqual([]);
+    expect(request).not.toHaveProperty('restrictTo');
   });
 
-  it('answers an empty list to a PAT bound to selected projects', async () => {
+  it('gives an all-mode PAT the owner project:read inheritance only when the lookup says so', async () => {
+    const f = await fixture({ inheritsProjectRead: true });
+    await f.request('GET', '/_pb/projects', { auth: 'token' });
+    const actor = vi.mocked(f.lister.list).mock.calls[0]![1];
+    expect([...actor.permissions]).toEqual(['project:read']);
+  });
+
+  it('marks the lister actor of an admin all-mode PAT and forwards the archived status', async () => {
+    const f = await fixture({ protectedHolder: true });
+    await f.request('GET', '/_pb/projects?status=archived', { auth: 'token' });
+    const [, actor, request] = vi.mocked(f.lister.list).mock.calls[0]!;
+    expect(actor.isOrganizationAdmin).toBe(true);
+    expect(request.status).toBe('archived');
+    expect(request).not.toHaveProperty('restrictTo');
+  });
+
+  it('does not mark a PAT admin when the lookup does not', async () => {
+    const f = await fixture({ protectedHolder: false });
+    await f.request('GET', '/_pb/projects?status=archived', { auth: 'token' });
+    expect(vi.mocked(f.lister.list).mock.calls[0]![1].isOrganizationAdmin).toBe(false);
+  });
+
+  it('narrows a PAT bound to selected projects to those projects', async () => {
     const f = await fixture({
       projectMode: 'selected',
+      boundProjectIds: [PROJECT, OTHER],
+      listed: { ok: true, value: { items: [entry], nextAfterId: null } },
+    });
+    const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
+    expect(await response.json()).toEqual({ items: [entry], next: null });
+    expect(vi.mocked(f.lister.list).mock.calls[0]![2]).toMatchObject({
+      restrictTo: [PROJECT, OTHER],
+    });
+  });
+
+  it('drops a listed project the selected PAT is not bound to', async () => {
+    const stray = { ...entry, id: STRAY, slug: 'stray' };
+    const f = await fixture({
+      projectMode: 'selected',
+      boundProjectIds: [PROJECT],
+      listed: { ok: true, value: { items: [entry, stray], nextAfterId: null } },
+    });
+    const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
+    expect(await response.json()).toEqual({ items: [entry], next: null });
+  });
+
+  it('answers an empty list to a selected PAT with no bound project without asking the lister', async () => {
+    const f = await fixture({
+      projectMode: 'selected',
+      boundProjectIds: [],
       listed: { ok: true, value: { items: [entry], nextAfterId: null } },
     });
     const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
     expect(await response.json()).toEqual({ items: [], next: null });
     expect(f.lister.list).not.toHaveBeenCalled();
+  });
+
+  it('never grants a selected PAT the admin flag', async () => {
+    const f = await fixture({
+      projectMode: 'selected',
+      boundProjectIds: [PROJECT],
+      protectedHolder: true,
+    });
+    await f.request('GET', '/_pb/projects?status=archived', { auth: 'token' });
+    expect(vi.mocked(f.lister.list).mock.calls[0]![1].isOrganizationAdmin).toBe(false);
   });
 
   it('answers an empty list to a service token', async () => {
@@ -512,6 +581,30 @@ describe('POST /_pb/projects', () => {
       expect(await second.json()).toEqual(created);
       expect(f.created).toHaveLength(1);
       expect(f.audits).toEqual(['project.create']);
+    });
+
+    it('stores the created id with the idempotency record and replays it without a slug lookup', async () => {
+      const f = await fixture();
+      const first = await f.request('POST', '/_pb/projects', { body, headers });
+      const created = (await first.json()) as { id: string; slug: string };
+      const stored = JSON.parse(
+        f.store.create.mock.calls[0]![2].idempotency!.responseJson,
+      ) as Record<string, unknown>;
+      expect(stored).toEqual({ id: created.id, slug: body.slug });
+      f.projects.getBySlug.mockClear();
+      const second = await f.request('POST', '/_pb/projects', { body, headers });
+      expect(await second.json()).toEqual(created);
+      expect(f.projects.getBySlug).not.toHaveBeenCalled();
+      expect(f.projects.get).not.toHaveBeenCalled();
+    });
+
+    it('replays the stored id even when the slug now belongs to another project', async () => {
+      const f = await fixture();
+      const first = await f.request('POST', '/_pb/projects', { body, headers });
+      const created = (await first.json()) as { id: string; slug: string };
+      f.projects.getBySlug.mockResolvedValue({ ...PROJECT_ROW, id: STRAY, slug: body.slug });
+      const second = await f.request('POST', '/_pb/projects', { body, headers });
+      expect(await second.json()).toEqual(created);
     });
 
     it('answers 409 idempotency_mismatch for the same key and another body', async () => {
@@ -770,11 +863,18 @@ describe.each(['archive', 'restore'] as const)('POST /_pb/projects/:project/%s',
 });
 
 describe('POST /_pb/projects/:project/restore reauthentication', () => {
-  it('answers 403 reauth_required when the store refuses the stale session', async () => {
-    const f = await fixture({ storeAnswer: { restore: 'authority' } });
+  it('answers 403 reauth_required when the store reports a stale reauthentication', async () => {
+    const f = await fixture({ storeAnswer: { restore: 'reauth_required' } });
     const response = await f.request('POST', '/_pb/projects/demo/restore', { ifMatch: '"r7"' });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'reauth_required' } });
+  });
+
+  it('answers 403 forbidden when the store reports lost authority', async () => {
+    const f = await fixture({ storeAnswer: { restore: 'authority' } });
+    const response = await f.request('POST', '/_pb/projects/demo/restore', { ifMatch: '"r7"' });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: 'forbidden' } });
   });
 
   it('keeps a refused archive a generic 403', async () => {

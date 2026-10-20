@@ -1,5 +1,6 @@
 import { accessContextOf } from '../../authz/access-context.js';
 import { buildOrganizationActor, type ActorContext } from '../../authz/actor.js';
+import type { Permission } from '../../authz/administration.js';
 import type { ProjectActor } from '../../authz/project-actor.js';
 import type { ProjectLister } from '../../authz/project-list.js';
 import type { ProjectChanges, ProjectService } from '../../authz/project-service.js';
@@ -56,10 +57,30 @@ function ifMatchRevision(
   return Number.isSafeInteger(revision) ? revision : 'invalid_request';
 }
 
-function listActor(ctx: RequestContext): ActorContext | null {
+interface ListCaller {
+  readonly actor: ActorContext;
+  readonly restrictTo?: readonly string[];
+}
+
+function listCaller(ctx: RequestContext): ListCaller | null {
   const access = accessContextOf(ctx);
   if (access === null) return null;
-  if (access.actor !== null) return buildOrganizationActor('organization', access.actor);
+  if (access.actor !== null) {
+    const actor = buildOrganizationActor('organization', access.actor);
+    return actor === null ? null : { actor };
+  }
+  const { token, principal } = access;
+  if (token === null || token.kind !== 'pat' || principal?.kind !== 'user') return null;
+  const actor: ActorContext = Object.freeze({
+    kind: 'organization',
+    userId: principal.id,
+    permissions: new Set<Permission>(token.projectReadInherited === true ? ['project:read'] : []),
+    isOrganizationAdmin: token.projectMode === 'all' && token.organizationAdmin === true,
+  });
+  if (token.projectMode === 'all') return { actor };
+  if (token.projectMode === 'selected' && (token.projectIds?.length ?? 0) > 0) {
+    return { actor, restrictTo: token.projectIds ?? [] };
+  }
   return null;
 }
 
@@ -103,15 +124,19 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
   const list = apiRoute(listSpec, async ({ ctx, query }) => {
     const org = ctx.org;
     if (org === null) throw new TypeError('route requires an organization context');
-    const actor = listActor(ctx);
-    if (actor === null) return { status: 200, body: { items: [], next: null } };
-    const result = await deps.lister.list(org, actor, {
+    const caller = listCaller(ctx);
+    if (caller === null) return { status: 200, body: { items: [], next: null } };
+    const result = await deps.lister.list(org, caller.actor, {
       limit: query.limit === undefined ? 50 : Number(query.limit),
       status: query.status ?? 'active',
       ...(query.after === undefined ? {} : { afterId: query.after }),
+      ...(caller.restrictTo === undefined ? {} : { restrictTo: caller.restrictTo }),
     });
     if (!result.ok) return { serviceError: result.error };
-    return { status: 200, body: { items: result.value.items, next: result.value.nextAfterId } };
+    const bound = caller.restrictTo === undefined ? null : new Set(caller.restrictTo);
+    const items =
+      bound === null ? result.value.items : result.value.items.filter(({ id }) => bound.has(id));
+    return { status: 200, body: { items, next: result.value.nextAfterId } };
   });
 
   const created = (
@@ -169,12 +194,12 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
       });
       if (settled.kind === 'mismatch') return { error: 'idempotency_mismatch' };
       if (settled.kind === 'result') return created(settled.result);
-      const stored = JSON.parse(settled.record.responseJson) as { slug?: unknown };
-      const winner =
-        typeof stored.slug === 'string' ? await deps.projects.getBySlug(org, stored.slug) : null;
-      if (winner === null) return { error: 'conflict' };
+      const stored = JSON.parse(settled.record.responseJson) as { id?: unknown; slug?: unknown };
+      if (typeof stored.id !== 'string' || !isUlid(stored.id) || typeof stored.slug !== 'string') {
+        return { error: 'conflict' };
+      }
       replayed.add(ctx);
-      return { status: 201, body: { id: winner.id, slug: winner.slug } };
+      return { status: 201, body: { id: stored.id, slug: stored.slug } };
     },
   );
 
@@ -228,7 +253,6 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
       );
       if (result.ok) return { status: 204 };
       if (result.error === 'conflict') return { error: 'precondition_failed' };
-      if (restore && result.error === 'forbidden') return { error: 'reauth_required' };
       return { serviceError: result.error };
     });
 

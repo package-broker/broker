@@ -32,7 +32,7 @@ import {
 import { holdsPermission, permissionRows, type ProtectedHolderProvider } from './access.js';
 import { liveSessionCondition } from './session-liveness.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
 interface RoleRow {
   readonly id: string;
@@ -188,13 +188,6 @@ function allHold(conditions: readonly Guard[]): Guard {
   return sql<SqlBool>`(${sql.join(conditions, sql` and `)})`;
 }
 
-function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
-  return record === undefined
-    ? sql<SqlBool>`0`
-    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
-        and principal_key = ${record.principalKey} and key = ${record.key})`;
-}
-
 function probesFor(
   ctx: OrgContext,
   authority: Guard,
@@ -210,7 +203,7 @@ function probesFor(
       ? {}
       : {
           conflict: probe(
-            sql<SqlBool>`(${idempotencyCollision(ctx, idempotency)} or ${
+            sql<SqlBool>`(${liveIdempotencyCollision(ctx, idempotency)} or ${
               revision === undefined
                 ? sql<SqlBool>`0`
                 : sql<SqlBool>`exists (select 1 from role where org_id = ${ctx.orgId} and id = ${revision.id} and revision <> ${revision.expected})`

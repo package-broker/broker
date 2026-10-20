@@ -1309,6 +1309,29 @@ describe('setOrder', () => {
     ).toEqual({ ok: false, reason: 'conflict' });
     expect(await readState()).toEqual(before);
   });
+  it('treats an expired idempotency row as free and replaces it', async () => {
+    await executor.batch([
+      stmt(
+        `INSERT INTO api_idempotency (org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, 204, 'null', ?, ?)`,
+        ORG_A,
+        idempotency.principalKey,
+        idempotency.key,
+        idempotency.route,
+        'b'.repeat(64),
+        '2026-10-17T00:00:00.000Z',
+        idempotency.createdAt,
+      ),
+    ]);
+    expect((await repository().setOrder(a, orderFence(), { ...input(), idempotency })).ok).toBe(
+      true,
+    );
+    const state = await readState();
+    expect(state.idempotency).toEqual([
+      expect.objectContaining({ key: 'ordering', request_hash: idempotency.requestHash }),
+    ]);
+    expect(state.audit).toHaveLength(1);
+  });
   it('rolls back precedence, revision, epoch, audit and idempotency after a later statement fails', async () => {
     const broken: SqlExecutor = {
       driver: executor.driver,

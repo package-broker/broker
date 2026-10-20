@@ -4,6 +4,8 @@ import type { AuthenticatedActor } from './fence.js';
 import type { Principal, RequestContext, RouteBoundary } from '../plugin.js';
 import { buildOrganizationActor } from './actor.js';
 import type { ActorAccessSnapshot, OrganizationActor } from './actor.js';
+import { projectBoundaryPermissions } from './project-actor.js';
+import type { ProjectActor } from './project-actor.js';
 
 export type AccessRouteClass = Exclude<RouteBoundary, 'package'>;
 
@@ -207,6 +209,30 @@ export function organizationActorOf(ctx: RequestContext): OrganizationActor | nu
   const actor = buildOrganizationActor('organization', snapshot.actor);
   if (actor === null) return null;
   return Object.freeze({ ...actor, permissions: readOnlyView(actor.permissions) });
+}
+
+export function projectActorOf(ctx: RequestContext): ProjectActor | null {
+  const snapshot = snapshots.get(ctx);
+  if (
+    snapshot?.actor == null ||
+    snapshot.boundary !== 'project' ||
+    snapshot.projectId === null ||
+    ctx.org === null
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    kind: 'project',
+    userId: snapshot.actor.user.id,
+    orgId: ctx.org.orgId,
+    projectId: snapshot.projectId,
+    permissions: readOnlyView(
+      projectBoundaryPermissions(
+        snapshot.actor.projectPermissions,
+        snapshot.actor.organizationPermissions,
+      ),
+    ),
+  });
 }
 
 export function authenticatedActorOf(ctx: RequestContext): AuthenticatedActor | null {

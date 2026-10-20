@@ -7,6 +7,7 @@ import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { BuildInfo } from '../../build-artifacts.js';
 import {
+  CREATE_SETTLE_MS,
   CloudflareApi,
   CloudflareError,
   cloudflareCredentials,
@@ -88,6 +89,7 @@ export interface ProvisionOptions {
   jurisdiction?: Jurisdiction;
   locationHint?: string;
   adoptResource?: readonly string[];
+  abandonIntent?: string;
   domain?: string;
   gradualProbe?: boolean;
   dryRun?: boolean;
@@ -508,6 +510,33 @@ function checkAdoptions(values: readonly string[]): Set<string> {
   }
   return set;
 }
+async function confirmedGone(
+  api: CloudflareApi,
+  spec: Specification,
+  id: string,
+): Promise<boolean> {
+  const paths =
+    spec.kind === 'r2'
+      ? ['eu', 'default'].map((j) => `/r2/buckets/${encodeURIComponent(id)}?jurisdiction=${j}`)
+      : [`${kindPath(spec.kind)}/${encodeURIComponent(id)}`];
+  for (const path of paths) {
+    try {
+      await api.request(path);
+      return false;
+    } catch (error) {
+      if (!(error instanceof CloudflareError && error.status === 404)) return false;
+    }
+  }
+  return true;
+}
+function localFailure(error: unknown): unknown {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return !(error instanceof CloudflareError) &&
+    typeof code === 'string' &&
+    /^E[A-Z0-9]+$/.test(code)
+    ? new CloudflareError('state_io_failure')
+    : error;
+}
 async function defaultPrompt(message: string): Promise<string> {
   const prompt = createInterface({ input: process.stdin, output: process.stderr });
   try {
@@ -713,6 +742,26 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       return { resources, worker, missing, queueConsumers };
     };
     let state = await inspect();
+    if (o.abandonIntent !== undefined) {
+      const target = journal.operations.find(
+        (op) =>
+          op.id === o.abandonIntent &&
+          (op.state === 'pending' || op.state === 'unknown') &&
+          specs.some((spec) => spec.name === op.name),
+      );
+      if (!target) throw new CloudflareError('invalid_input', 2);
+      output.checks.push({ name: 'abandon_intent', status: target.id });
+    }
+    for (const flag of adoptions) {
+      const [kind, id] = flag.split(':');
+      if (
+        kind === 'worker'
+          ? state.worker === null || id !== identity.script_name
+          : !specs.some((spec) => spec.kind === kind)
+      )
+        throw new CloudflareError('invalid_input', 2);
+    }
+    const abandoned: { operation: Operation; key: ResourceKey }[] = [];
     // Resolve every old intent before planning additional creates. Read-only runs never repair the journal.
     for (const spec of specs) {
       const pending = journal.operations.find(
@@ -720,7 +769,21 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       );
       if (!pending) continue;
       const remote = state.resources.get(spec.name)?.[0];
+      const abandoning = pending.id === o.abandonIntent;
+      if (abandoning && remote) throw new CloudflareError('ownership_conflict', 8);
       if (!remote) {
+        if (abandoning) {
+          if (now() - Date.parse(pending.started_at) <= CREATE_SETTLE_MS)
+            throw new CloudflareError('outcome_unknown', 6);
+          if (
+            pending.resolved_id !== null &&
+            !(await confirmedGone(api, spec, pending.resolved_id))
+          )
+            throw new CloudflareError('ownership_conflict', 8);
+          abandoned.push({ operation: pending, key: spec.key });
+          continue;
+        }
+        output.checks.push({ name: 'pending_intent', status: pending.id });
         if (!o.dryRun) {
           pending.state = 'unknown';
           await save();
@@ -728,11 +791,16 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
         throw new CloudflareError('outcome_unknown', 6);
       }
       if (!o.dryRun) {
+        const recorded = journal.resources[spec.key];
         pending.state = 'confirmed';
         pending.resolved_id = remote.id;
         journal.resources[spec.key] = receipt(
           remote,
-          adoptions.has(`${spec.kind}:${remote.id}`) ? 'adopted' : 'pending_create',
+          recorded?.state === 'complete' && recorded.id === remote.id && recorded.evidence
+            ? recorded.evidence.source
+            : adoptions.has(`${spec.kind}:${remote.id}`)
+              ? 'adopted'
+              : 'pending_create',
           now(),
           pending.id,
         );
@@ -765,6 +833,7 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
         if ((await (o.prompt ?? defaultPrompt)('Type yes to create these resources: ')) !== 'yes')
           throw new CloudflareError('confirmation_declined', 2);
       }
+      api.restartDeadline();
       const signature = JSON.stringify({
         resources: [...state.resources.entries()],
         worker: state.worker,
@@ -787,6 +856,23 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       )
         throw new CloudflareError('plan_changed', 8);
       state = confirmed;
+    }
+    const resolvedIds = [...state.resources.values()].flat();
+    for (const flag of adoptions) {
+      const [kind, id] = flag.split(':');
+      const matched =
+        kind === 'worker'
+          ? state.worker !== null && id === identity.script_name
+          : resolvedIds.some((remote) => remote.kind === kind && remote.id === id);
+      if (!matched) throw new CloudflareError('invalid_input', 2);
+    }
+    if (!o.dryRun && abandoned.length) {
+      for (const { operation, key } of abandoned) {
+        operation.state = 'failed';
+        const intended = journal.resources[key];
+        if (intended && intended.state !== 'complete') intended.state = 'planned';
+      }
+      await save();
     }
     if (!o.dryRun && state.worker && adoptions.has(`worker:${identity.script_name}`)) {
       journal.resources.worker = {
@@ -819,6 +905,7 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       // Observe exact absence at this boundary, after the acknowledged plan was checked.
       if ((await allResources(api, [spec])).get(spec.name)?.length)
         throw new CloudflareError('plan_changed', 8);
+      api.assertCreateBudget();
       const started = new Date(now()).toISOString();
       const operation: Operation = {
         id: randomUUID(),
@@ -840,6 +927,7 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       };
       await save();
       let returnedId: string | undefined;
+      let posted = false;
       try {
         const body =
           spec.kind === 'queue'
@@ -849,30 +937,37 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
                 ...(spec.kind === 'd1' ? { jurisdiction: spec.jurisdiction } : {}),
                 ...(identity.location_hint === null ? {} : { location: identity.location_hint }),
               };
-        const created = parseRemote(
-          spec.kind,
-          (await api.request(`${kindPath(spec.kind)}${jurisdictionQuery(spec)}`, 'POST', body))
-            .result,
+        const response = await api.request(
+          `${kindPath(spec.kind)}${jurisdictionQuery(spec)}`,
+          'POST',
+          body,
         );
-        verify(spec, created);
+        posted = true;
+        const created = parseRemote(spec.kind, response.result);
         returnedId = created.id;
-        // Save the returned exact ID before another request or create boundary.
-        journal.resources[spec.key] = receipt(created, 'created', now(), operation.id);
         operation.resolved_id = created.id;
+        await save();
+        verify(spec, created);
+        journal.resources[spec.key] = receipt(created, 'created', now(), operation.id);
         await save();
         remote = (await allResources(api, [spec])).get(spec.name)?.[0];
         if (!remote || remote.id !== returnedId) throw new CloudflareError('outcome_unknown', 6);
       } catch (error) {
-        if (
-          error instanceof CloudflareError &&
-          (error.code === 'jurisdiction_conflict' || error.code === 'configuration_conflict')
-        ) {
+        if (!(error instanceof CloudflareError)) throw error;
+        if (error.code === 'deadline_exceeded' && !posted) {
+          operation.state = 'failed';
+          const intended = journal.resources[spec.key];
+          if (intended && intended.state !== 'complete') intended.state = 'planned';
+          await save();
+          throw error;
+        }
+        if (error.code === 'jurisdiction_conflict' || error.code === 'configuration_conflict') {
           operation.state = 'unknown';
           await save();
           throw error;
         }
         if (
-          error instanceof CloudflareError &&
+          !posted &&
           error.status !== null &&
           error.status >= 400 &&
           error.status < 500 &&
@@ -955,7 +1050,7 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
         /* Preserve the original safe failure and journal. */
       }
     }
-    return failCommand(output, error);
+    return failCommand(output, localFailure(error));
   }
 }
 export async function runCloudflareProvision(o: ProvisionOptions): Promise<number> {

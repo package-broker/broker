@@ -795,7 +795,9 @@ export function createTokenRepository(
         params: [ctx.orgId, tokenId, opId],
       };
       const replay =
-        idempotency === undefined ? undefined : idempotencyInsertStatement(ctx, idempotency);
+        idempotency === undefined
+          ? undefined
+          : idempotencyInsertStatement(ctx, idempotency, false, performed);
       const live = sessionLive(ctx, fence, idleSeconds);
       const tokenLive = sql<boolean>`exists (
         select 1 from token where id = ${tokenId} and org_id = ${ctx.orgId} and revoked_at is null)`;
@@ -817,14 +819,7 @@ export function createTokenRepository(
               .returning('id'),
           ),
           auditPendingStatement(ctx, audit, performed),
-          ...(replay === undefined
-            ? []
-            : [
-                {
-                  sql: `${replay.sql.replace('VALUES (', 'SELECT * FROM (VALUES (')}) WHERE ${performed.sql}`,
-                  params: [...replay.params, ...performed.params],
-                },
-              ]),
+          ...(replay === undefined ? [] : [replay]),
         ],
         {},
       );

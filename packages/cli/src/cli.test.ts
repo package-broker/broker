@@ -1,5 +1,10 @@
 import { expect, it, vi } from 'vitest';
 import { run } from './cli.js';
+import { runCloudflareProvision } from './commands/cloudflare/provision.js';
+
+vi.mock('./commands/cloudflare/provision.js', () => ({
+  runCloudflareProvision: vi.fn(async () => 0),
+}));
 
 it('lists only working commands in --help', async () => {
   const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -27,5 +32,26 @@ it('lists only working commands in --help', async () => {
     expect(help).not.toContain('pb openapi');
   } finally {
     output.mockRestore();
+  }
+});
+
+it('accepts --abandon-intent only on provision and requires a value', async () => {
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    const provision = vi.mocked(runCloudflareProvision);
+    provision.mockClear();
+    expect(
+      await run(['cloudflare', 'provision', '--worker-name', 'broker', '--abandon-intent', 'op-1']),
+    ).toBe(0);
+    expect(provision).toHaveBeenCalledWith(expect.objectContaining({ abandonIntent: 'op-1' }));
+    expect(
+      await run(['cloudflare', 'provision', '--worker-name', 'broker', '--abandon-intent']),
+    ).toBe(2);
+    expect(
+      await run(['cloudflare', 'migrate', '--database-id', 'x', '--abandon-intent', 'op-1']),
+    ).toBe(2);
+    expect(provision).toHaveBeenCalledTimes(1);
+  } finally {
+    error.mockRestore();
   }
 });

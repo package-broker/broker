@@ -115,6 +115,17 @@ describe('apiRoute definition', () => {
   });
 });
 
+describe('apiRoute allowArchived', () => {
+  it('copies allowArchived only when the spec sets it', () => {
+    const plain = apiRoute(defineApi(spec()), () => Promise.resolve(ok));
+    expect(Object.hasOwn(plain, 'allowArchived')).toBe(false);
+    const flagged = apiRoute(defineApi(spec({ boundary: 'project', allowArchived: true })), () =>
+      Promise.resolve(ok),
+    );
+    expect(flagged).toMatchObject({ allowArchived: true });
+  });
+});
+
 describe('input validation', () => {
   it('rejects a wrong-typed param under /params', async () => {
     const response = await run({ params: { id: '123' }, headers: rev });

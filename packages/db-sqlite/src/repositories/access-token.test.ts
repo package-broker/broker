@@ -1251,6 +1251,21 @@ describe('lookupToken projectVisible', () => {
     expect(result?.projectVisible).toBe(false);
   });
 
+  it('resolves an archived project the principal has grants on only when allowArchived is set', async () => {
+    await seed(
+      project(a, '01J0PROJECT0000000000000P3', 'gone', { status: 'archived' }),
+      pat('pat-a'),
+    );
+
+    const hidden = await lookup('pat-a', { projectSlug: 'gone' });
+    const shown = await lookup('pat-a', { projectSlug: 'gone', allowArchived: true });
+
+    expect(hidden?.project).toBeNull();
+    expect(hidden?.projectVisible).toBe(false);
+    expect(shown?.project).toMatchObject({ slug: 'gone', status: 'archived' });
+    expect(shown?.projectVisible).toBe(true);
+  });
+
   it('is false for a project the principal reaches only through the token binding', async () => {
     await seedProjectOnlyUser();
     await seed(

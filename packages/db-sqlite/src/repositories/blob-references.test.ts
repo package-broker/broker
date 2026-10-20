@@ -140,6 +140,55 @@ describe('blob reference check', () => {
     expect(await reader.stillEligible(a, shaOf(one))).toBe(true);
   });
 
+  it.each(['direct', 'revision'])(
+    'excludes a %s reference with a missing release stamp until repaired',
+    async (kind) => {
+      const id = await blob(a, 1);
+      const versionId = await version(a, 'PKG1', kind === 'direct' ? id : null, 'tombstoned');
+      if (kind === 'revision') await revision(a, versionId, id);
+      await executor.all({ sql: 'PRAGMA ignore_check_constraints = ON', params: [] });
+      try {
+        await run('UPDATE version SET tombstoned_at = NULL WHERE org_id = ? AND id = ?', [
+          a.orgId,
+          versionId,
+        ]);
+      } finally {
+        await executor.all({ sql: 'PRAGMA ignore_check_constraints = OFF', params: [] });
+      }
+      expect(await shas()).toEqual([]);
+      await run(
+        "UPDATE version SET tombstoned_at = '2026-01-01T00:00:00.000Z' WHERE org_id = ? AND id = ?",
+        [a.orgId, versionId],
+      );
+      expect(await shas()).toEqual([digest(1)]);
+    },
+  );
+
+  it.each(['version', 'package'])(
+    'excludes a missing removed-upstream %s stamp even when another release stamp exists',
+    async (kind) => {
+      const id = await blob(a, 1);
+      const versionId = await version(a, 'PKG1', id, 'tombstoned');
+      if (kind === 'version') {
+        await executor.all({ sql: 'PRAGMA ignore_check_constraints = ON', params: [] });
+        try {
+          await run(
+            "UPDATE version SET status = 'removed_upstream', removed_upstream_at = NULL WHERE org_id = ? AND id = ?",
+            [a.orgId, versionId],
+          );
+        } finally {
+          await executor.all({ sql: 'PRAGMA ignore_check_constraints = OFF', params: [] });
+        }
+      } else {
+        await run(
+          "UPDATE package SET status = 'removed_upstream', removed_upstream_at = NULL WHERE org_id = ? AND id = 'PKG1'",
+          [a.orgId],
+        );
+      }
+      expect(await shas()).toEqual([]);
+    },
+  );
+
   it.each(['quarantined', 'yanked'])('a %s version keeps its blob', async (status) => {
     const id = await blob(a, 1);
     await version(a, 'PKG1', id, status);

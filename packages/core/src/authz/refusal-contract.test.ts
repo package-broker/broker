@@ -17,6 +17,7 @@ import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
 import { createAuthorizationEngine, patValidationGate } from './engine.js';
 import type { EngineSessionAccess, EngineTokenAccess } from './engine.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.test';
 const ORG = 'org-1';
@@ -211,11 +212,11 @@ async function kernelFor(state: State) {
     resolveOrg: () => Promise.resolve(orgContext(ORG)),
     health: () => Promise.resolve(true),
     log: () => undefined,
-    coreRoutes: [
+    coreRoutes: documented([
       projectRoute('GET', 'project:read'),
       projectRoute('POST', 'project:read'),
       settingsRoute,
-    ],
+    ]),
     authorization: engine(state),
   });
 }

@@ -2,7 +2,7 @@ import { sha256Hex } from '../auth/primitives.js';
 import type { OrgContext } from '../db/port.js';
 import type { SourceRepository } from '../db/source.js';
 import type { PurgeGeneration, Sha256 } from '../platform/blob.js';
-import type { BlobLifecycleMetadataPort } from '../platform/blob-lifecycle.js';
+import type { BlobLifecycleMetadataPort, BlobPurgeOutcome } from '../platform/blob-lifecycle.js';
 import {
   canonicalPayload,
   defineJob,
@@ -45,11 +45,8 @@ export interface PurgeLifecycle extends Pick<
   BlobLifecycleMetadataPort,
   'claimPurge' | 'cancelPurge' | 'listDue'
 > {
-  removeBytes(
-    ctx: OrgContext,
-    key: Sha256,
-    generation: PurgeGeneration,
-  ): Promise<'queued' | 'removed' | 'refused'>;
+  /** Must carry the lifecycle service's `purgeBytes` outcome; its `removeBytes` reports timeouts as `refused`. */
+  removeBytes(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<BlobPurgeOutcome>;
 }
 
 export interface RetentionLifecycle
@@ -259,16 +256,20 @@ export function createSourcePollJob(deps: {
       for (const source of await deps.sources.listDue(ctx, PAGE)) {
         if (job.signal.aborted) return;
         if (source.nextPollAt === null) continue;
-        await jobsOf(job).enqueue(
-          ctx,
-          SOURCE_SYNC,
-          { sourceId: source.id, reason: 'poll' },
-          {
-            idempotencyKey: await digest(['poll', source.id, source.nextPollAt]),
-            resourceKey: `source:${source.id}`,
-          },
-        );
-        await deps.sources.deferPoll(ctx, source.id, source.nextPollAt);
+        try {
+          await jobsOf(job).enqueue(
+            ctx,
+            SOURCE_SYNC,
+            { sourceId: source.id, reason: 'poll' },
+            {
+              idempotencyKey: await digest(['poll', source.id, source.nextPollAt]),
+              resourceKey: `source:${source.id}`,
+            },
+          );
+          await deps.sources.deferPoll(ctx, source.id, source.nextPollAt);
+        } catch {
+          job.observability.counter('pb.source.poll_failure', undefined, 1);
+        }
       }
     },
   });

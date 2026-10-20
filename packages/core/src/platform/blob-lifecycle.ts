@@ -39,6 +39,14 @@ export interface BlobLifecycleMetadataPort {
   scheduleOrphan(ctx: OrgContext, key: Sha256): Promise<boolean>;
 }
 
+/**
+ * Only `refused` may be followed by `cancelPurge`: the recheck found a stale generation or an
+ * ineligible row before any removal started. Every other non-final outcome keeps the purge lease
+ * until it expires, because a started removal may still land.
+ */
+export type BlobPurgeOutcome =
+  'queued' | 'removed' | 'refused' | 'short-lease' | 'timeout' | 'error' | 'stale';
+
 export interface BlobLifecycleOptions {
   readonly jobs?: Jobs;
   readonly metadata: BlobLifecycleMetadataPort;
@@ -68,6 +76,11 @@ export function createBlobLifecycle({
       key: Sha256,
       generation: PurgeGeneration,
     ): Promise<'queued' | 'removed' | 'refused'>;
+    purgeBytes(
+      ctx: OrgContext,
+      key: Sha256,
+      generation: PurgeGeneration,
+    ): Promise<BlobPurgeOutcome>;
   } {
   if (!Number.isInteger(leaseMs) || leaseMs <= 0) throw new TypeError('invalid leaseMs');
   if (
@@ -78,7 +91,60 @@ export function createBlobLifecycle({
     throw new TypeError('invalid deleteTimeoutMs');
   }
 
+  const recheck = async (ctx: OrgContext, key: Sha256, generation: PurgeGeneration) => {
+    if (await metadata.canStartRemove(ctx, key, generation, 2 * deleteTimeoutMs)) return true;
+    observability.counter('pb.blob.purge', { outcome: 'refused' });
+    return false;
+  };
+
+  const attemptRemove = async (
+    ctx: OrgContext,
+    key: Sha256,
+  ): Promise<'removed' | 'timeout' | 'error'> => {
+    const storageKey = blobStorageKey(ctx.orgId, key);
+    const startedAt = performance.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let outcome: 'removed' | 'timeout' | 'error';
+    try {
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), deleteTimeoutMs);
+      });
+      // Promise.race also handles a removal rejection arriving after the timeout.
+      outcome = await Promise.race([
+        store.remove(storageKey).then(() => 'removed' as const),
+        timeout,
+      ]);
+    } catch {
+      outcome = 'error';
+    } finally {
+      clearTimeout(timer);
+    }
+    observability.counter('pb.blob.purge', { outcome });
+    observability.histogram('pb.blob.purge_remove_ms', performance.now() - startedAt);
+    return outcome;
+  };
+
   return {
+    async purgeBytes(ctx, key, generation) {
+      parseSha256(key);
+      validateGeneration(generation);
+      if (!(await recheck(ctx, key, generation))) {
+        // Only the remaining lease differs between the two reads when the row is otherwise current.
+        return (await metadata.canStartRemove(ctx, key, generation, 0)) ? 'short-lease' : 'refused';
+      }
+      if (jobs) {
+        await jobs.enqueue(
+          ctx,
+          'blob-remove',
+          { sha256: key, generation },
+          { idempotencyKey: `blob-remove:${key}:${generation}`, resourceKey: key },
+        );
+        return 'queued';
+      }
+      const removal = await attemptRemove(ctx, key);
+      if (removal !== 'removed') return removal;
+      return (await metadata.markDeleted(ctx, key, generation)) ? 'removed' : 'stale';
+    },
     async removeBytes(ctx, key, generation) {
       parseSha256(key);
       validateGeneration(generation);
@@ -144,32 +210,8 @@ export function createBlobLifecycle({
     async recheckAndRemove(ctx, key, generation) {
       parseSha256(key);
       validateGeneration(generation);
-      if (!(await metadata.canStartRemove(ctx, key, generation, 2 * deleteTimeoutMs))) {
-        observability.counter('pb.blob.purge', { outcome: 'refused' });
-        return false;
-      }
-
-      const storageKey = blobStorageKey(ctx.orgId, key);
-      const startedAt = performance.now();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let outcome: 'removed' | 'timeout' | 'error';
-      try {
-        const timeout = new Promise<'timeout'>((resolve) => {
-          timer = setTimeout(() => resolve('timeout'), deleteTimeoutMs);
-        });
-        // Promise.race also handles a removal rejection arriving after the timeout.
-        outcome = await Promise.race([
-          store.remove(storageKey).then(() => 'removed' as const),
-          timeout,
-        ]);
-      } catch {
-        outcome = 'error';
-      } finally {
-        clearTimeout(timer);
-      }
-      observability.counter('pb.blob.purge', { outcome });
-      observability.histogram('pb.blob.purge_remove_ms', performance.now() - startedAt);
-      return outcome === 'removed';
+      if (!(await recheck(ctx, key, generation))) return false;
+      return (await attemptRemove(ctx, key)) === 'removed';
     },
   };
 }

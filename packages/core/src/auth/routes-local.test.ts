@@ -6,6 +6,7 @@ import { sha256Hex } from './primitives.js';
 import { createLocalRoutes } from './routes-local.js';
 import { createSessionService } from './session.js';
 import type { SessionService } from './session.js';
+import { weakPasswordErrorResponse } from '../api/auth-schemas.js';
 import { DbError } from '../db/errors.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
@@ -13,6 +14,7 @@ import { fixedClock } from '../ids.js';
 import { createKernel } from '../kernel/kernel.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { PluginPorts } from '../plugin.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.example.test';
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -116,13 +118,15 @@ async function harness(options: Options = {}): Promise<Harness> {
     resolveOrg: () => Promise.resolve(ORG),
     health: () => Promise.resolve(true),
     log,
-    coreRoutes: createLocalRoutes({
-      local: { login, reauth } as unknown as LocalLoginService,
-      setup: { start, finish } as unknown as LocalSetupService,
-      sessions,
-      publicOrigin: ORIGIN,
-      log,
-    }),
+    coreRoutes: documented(
+      createLocalRoutes({
+        local: { login, reauth } as unknown as LocalLoginService,
+        setup: { start, finish } as unknown as LocalSetupService,
+        sessions,
+        publicOrigin: ORIGIN,
+        log,
+      }),
+    ),
   });
   return {
     fetch: (request) => kernel.fetch(request),
@@ -201,6 +205,55 @@ describe('createLocalRoutes', () => {
     ).toThrow(TypeError);
   });
 
+  it.each([
+    [START, { token: SENTINEL.token }],
+    [FINISH, { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code }],
+    [LOGIN, loginBody],
+    [REAUTH, { password: SENTINEL.password, code: SENTINEL.code }],
+  ])(
+    '%s validates fields before credential or session work without echoing input',
+    async (path, body) => {
+      const h = await harness();
+      const field = Object.keys(body)[0]!;
+      const cases = [
+        [{ ...body, [SENTINEL.password]: SENTINEL.email }, '/body', 'unrecognized_keys'],
+        [
+          Object.fromEntries(Object.entries(body).filter(([key]) => key !== field)),
+          `/body/${field}`,
+          'invalid_type',
+        ],
+        [
+          { ...body, [field]: { [SENTINEL.secret]: SENTINEL.password } },
+          `/body/${field}`,
+          'invalid_type',
+        ],
+        [{ ...body, [field]: 'x'.repeat(1025) }, `/body/${field}`, 'too_big'],
+      ] as const;
+      for (const [invalid, pointer, code] of cases) {
+        const response = await h.fetch(post(path, invalid, sessionHeaders));
+        expect(response.status).toBe(400);
+        expect(setCookies(response)).toEqual([]);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        const error = await errorOf(response);
+        expect(error).toEqual({
+          code: 'invalid_request',
+          message: 'Invalid request',
+          requestId: response.headers.get('x-request-id'),
+          details: [{ path: pointer, code }],
+        });
+        for (const value of Object.values(SENTINEL)) {
+          expect(JSON.stringify(error)).not.toContain(value);
+        }
+      }
+      expect(h.serviceCalls()).toBe(0);
+      expect(h.findActive).not.toHaveBeenCalled();
+      for (const value of Object.values(SENTINEL)) {
+        expect(JSON.stringify(h.entries)).not.toContain(value);
+      }
+      expect(h.entries.some((entry) => String(entry['event']).startsWith('auth.'))).toBe(false);
+    },
+  );
+
   describe('login', () => {
     it('answers 204 with both cookies and no-store on success', async () => {
       const h = await harness();
@@ -217,15 +270,17 @@ describe('createLocalRoutes', () => {
       expect(calls[0]?.[2]).toMatchObject({ userAgent: 'ua-test', previousSecretHash: null });
     });
 
-    it('answers every failure with one 401 invalid_credentials body', async () => {
+    it('answers schema-valid credential failures with one 401 invalid_credentials body', async () => {
       const refused = await harness({ loginResult: REFUSED });
-      const serviceRefusal = await refused.fetch(post(LOGIN, loginBody));
-      const malformed = await refused.fetch(post(LOGIN, { ...loginBody, password: 7 }));
-      const missing = await refused.fetch(post(LOGIN, { email: 'a@example.test' }));
-      const tooLong = await refused.fetch(post(LOGIN, { ...loginBody, code: 'x'.repeat(1025) }));
-
       const bodies: Record<string, unknown>[] = [];
-      for (const response of [serviceRefusal, malformed, missing, tooLong]) {
+      for (const body of [
+        loginBody,
+        { ...loginBody, email: 'unknown@example.test' },
+        { ...loginBody, password: 'wrong' },
+        { ...loginBody, code: '000000' },
+        { email: '', password: '', code: '' },
+      ]) {
+        const response = await refused.fetch(post(LOGIN, body));
         expect(response.status).toBe(401);
         expect(setCookies(response)).toEqual([]);
         expect(response.headers.get('cache-control')).toBe('no-store');
@@ -233,9 +288,9 @@ describe('createLocalRoutes', () => {
         delete error['requestId'];
         bodies.push(error);
       }
-      expect(bodies[0]).toMatchObject({ code: 'invalid_credentials' });
+      expect(bodies[0]).toEqual({ code: 'invalid_credentials', message: 'Invalid credentials' });
       expect(new Set(bodies.map((body) => JSON.stringify(body))).size).toBe(1);
-      expect(refused.login).toHaveBeenCalledTimes(1);
+      expect(refused.login).toHaveBeenCalledTimes(5);
     });
 
     it.each([
@@ -243,12 +298,16 @@ describe('createLocalRoutes', () => {
       ['null', 'null'],
       ['number', '7'],
       ['string', '"x"'],
-    ])('refuses a %s body with the uniform refusal', async (_name, raw) => {
+    ])('refuses a %s body with validation details', async (_name, raw) => {
       const h = await harness();
 
       const response = await h.fetch(post(LOGIN, raw));
 
-      expect(response.status).toBe(401);
+      expect(response.status).toBe(400);
+      expect(await errorOf(response)).toMatchObject({
+        code: 'invalid_request',
+        details: [{ path: '/body', code: 'invalid_type' }],
+      });
       expect(h.serviceCalls()).toBe(0);
     });
 
@@ -261,8 +320,11 @@ describe('createLocalRoutes', () => {
 
       const response = await h.fetch(post(LOGIN, body));
 
-      expect(response.status).toBe(401);
-      expect(await errorOf(response)).toMatchObject({ code: 'invalid_credentials' });
+      expect(response.status).toBe(400);
+      expect(await errorOf(response)).toMatchObject({
+        code: 'invalid_request',
+        details: [{ path: `/body/${_name}`, code: 'invalid_type' }],
+      });
       expect(h.serviceCalls()).toBe(0);
     });
 
@@ -345,10 +407,10 @@ describe('createLocalRoutes', () => {
 
     it('accepts a body of exactly 8 KiB', async () => {
       const h = await harness();
-      const base = JSON.stringify({ ...loginBody, padding: '' });
-      const padding = 'x'.repeat(8192 - base.length);
+      const base = JSON.stringify(loginBody);
+      const padding = ' '.repeat(8192 - base.length);
 
-      const response = await h.fetch(post(LOGIN, JSON.stringify({ ...loginBody, padding })));
+      const response = await h.fetch(post(LOGIN, base + padding));
 
       expect(response.status).toBe(204);
     });
@@ -487,16 +549,21 @@ describe('createLocalRoutes', () => {
       expect(h.start).toHaveBeenCalledWith(ORG, SENTINEL.token);
     });
 
-    it('start answers 401 invalid_credentials for a refusal and for a non-string token', async () => {
+    it('start distinguishes credential refusals from invalid fields', async () => {
       const h = await harness({ startResult: Object.freeze({ ok: false as const }) });
 
       const refusal = await h.fetch(post(START, { token: SENTINEL.token }));
       const malformed = await h.fetch(post(START, { token: 5 }));
       const missing = await h.fetch(post(START, {}));
 
-      for (const response of [refusal, malformed, missing]) {
-        expect(response.status).toBe(401);
-        expect(await errorOf(response)).toMatchObject({ code: 'invalid_credentials' });
+      expect(refusal.status).toBe(401);
+      expect(await errorOf(refusal)).toMatchObject({ code: 'invalid_credentials' });
+      for (const response of [malformed, missing]) {
+        expect(response.status).toBe(400);
+        expect(await errorOf(response)).toMatchObject({
+          code: 'invalid_request',
+          details: [{ path: '/body/token', code: 'invalid_type' }],
+        });
       }
       expect(h.start).toHaveBeenCalledTimes(1);
     });
@@ -581,14 +648,16 @@ describe('createLocalRoutes', () => {
       );
 
       expect(response.status).toBe(400);
-      expect(await errorOf(response)).toMatchObject({
+      const error = await errorOf(response);
+      expect(weakPasswordErrorResponse.safeParse({ error }).success).toBe(true);
+      expect(error).toMatchObject({
         code: 'weak_password',
         problems: ['too_short', 'equals_email'],
       });
       expect(setCookies(response)).toEqual([]);
     });
 
-    it('finish answers 401 invalid_credentials otherwise and for non-string fields', async () => {
+    it('finish distinguishes credential refusals from invalid fields', async () => {
       const h = await harness({ finishResult: Object.freeze({ ok: false as const }) });
       const body = { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code };
 
@@ -597,9 +666,18 @@ describe('createLocalRoutes', () => {
       const badPassword = await h.fetch(post(FINISH, { ...body, password: null }));
       const badCode = await h.fetch(post(FINISH, { ...body, code: 1 }));
 
-      for (const response of [refusal, badToken, badPassword, badCode]) {
-        expect(response.status).toBe(401);
-        expect(await errorOf(response)).toMatchObject({ code: 'invalid_credentials' });
+      expect(refusal.status).toBe(401);
+      expect(await errorOf(refusal)).toMatchObject({ code: 'invalid_credentials' });
+      for (const [response, field] of [
+        [badToken, 'token'],
+        [badPassword, 'password'],
+        [badCode, 'code'],
+      ] as const) {
+        expect(response.status).toBe(400);
+        expect(await errorOf(response)).toMatchObject({
+          code: 'invalid_request',
+          details: [{ path: `/body/${field}`, code: 'invalid_type' }],
+        });
       }
       expect(h.finish).toHaveBeenCalledTimes(1);
     });
@@ -677,16 +755,19 @@ describe('createLocalRoutes', () => {
       expect(h.reauth).not.toHaveBeenCalled();
     });
 
-    it('answers 401 invalid_credentials when the service refuses or a field is not a string', async () => {
+    it('reauth distinguishes credential refusals from invalid fields', async () => {
       const h = await harness({ reauthResult: Object.freeze({ ok: false }) });
 
       const refused = await h.fetch(post(REAUTH, body, sessionHeaders));
       const malformed = await h.fetch(post(REAUTH, { ...body, code: 12 }, sessionHeaders));
 
-      for (const response of [refused, malformed]) {
-        expect(response.status).toBe(401);
-        expect(await errorOf(response)).toMatchObject({ code: 'invalid_credentials' });
-      }
+      expect(refused.status).toBe(401);
+      expect(await errorOf(refused)).toMatchObject({ code: 'invalid_credentials' });
+      expect(malformed.status).toBe(400);
+      expect(await errorOf(malformed)).toMatchObject({
+        code: 'invalid_request',
+        details: [{ path: '/body/code', code: 'invalid_type' }],
+      });
       expect(h.reauth).toHaveBeenCalledTimes(1);
     });
 

@@ -1,5 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import type { SqlExecutor } from '@package-broker/core/db/port';
+import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
+import {
+  completeVersionListing,
+  type CompleteVersionListing,
+} from '@package-broker/core/catalogue/version-rules';
+import { compile, db } from '../kysely.js';
 import { seedTwoOrganizations, type TwoOrganizations } from '../contract/two-organizations.js';
 import {
   openNodeSqliteExecutor,
@@ -30,6 +35,29 @@ function migratedTemplate(): Promise<Uint8Array | undefined> {
     }
   })();
   return template;
+}
+
+export interface FixtureVersionListings {
+  complete(ctx: OrgContext, packageId: string, stamp: string): Promise<CompleteVersionListing>;
+}
+
+/** Test fixtures only: complete a nonempty listing from its marked database rows. */
+export function createFixtureVersionListings(executor: SqlExecutor): FixtureVersionListings {
+  return {
+    async complete(ctx, packageId, stamp) {
+      const [row] = await executor.all<{ count: number }>(
+        compile(
+          db
+            .selectFrom('version')
+            .select(db.fn.countAll<number>().as('count'))
+            .where('org_id', '=', ctx.orgId)
+            .where('package_id', '=', packageId)
+            .where('listing_seen_stamp', '=', stamp),
+        ),
+      );
+      return completeVersionListing({ packageId, stamp, count: row?.count ?? 0 });
+    },
+  };
 }
 
 export interface MigratedDatabaseOptions {

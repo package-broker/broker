@@ -287,8 +287,10 @@ export function routeBoundaryProblems(
 const API_EXEMPT_PATHS: ReadonlySet<string> = new Set([
   '/_pb/ui',
   '/_pb/ui/assets/:file',
+  '/_pb/ui/:file',
   '/_pb/mcp',
   '/_pb/openapi.json',
+  '/_pb/hooks/github/:credentialId',
 ]);
 
 export function routeApiProblems(
@@ -298,7 +300,9 @@ export function routeApiProblems(
 ): string[] {
   const underApi = typeof route.path === 'string' && route.path.startsWith('/_pb/');
   if (route.api === undefined) {
-    return underApi && options.requireApi === true ? [`${label}: api is required under /_pb/`] : [];
+    return underApi && options.requireApi === true && !API_EXEMPT_PATHS.has(route.path as string)
+      ? [`${label}: api is required under /_pb/`]
+      : [];
   }
   if (!underApi) return [`${label}: api is only allowed under /_pb/`];
   if (typeof route.api !== 'object' || route.api === null || Array.isArray(route.api)) {
@@ -346,8 +350,8 @@ export function routeApiProblems(
     if (!keys.every((key) => /^[1-5][0-9]{2}$/.test(key))) {
       fail('api response keys must be integers from 100 to 599');
     }
-    if (!keys.some((key) => /^2[0-9]{2}$/.test(key))) {
-      fail('api responses must include a 2xx response');
+    if (!keys.some((key) => /^[23][0-9]{2}$/.test(key))) {
+      fail('api responses must include a 2xx or 3xx response');
     }
   }
   if (slot.mcp === true && route.method !== 'GET') fail('api mcp true requires GET');

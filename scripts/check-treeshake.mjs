@@ -1,11 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, relative, resolve } from 'node:path';
 
 const PLUGIN_PATH = /(^|\/)packages\/plugin-|node_modules\/@package-broker\/plugin-/;
 const WORKERS_INPUT_DENY =
   /node_modules\/(\.pnpm\/)?(better-sqlite3|miniflare|@hono\/node-server)|db-sqlite\/(src|dist)\/(contract|testing)\//;
 const NODE_INPUT_DENY = /miniflare|db-sqlite\/(src|dist)\/(contract|testing)\//;
+const UI_INPUT_DENY =
+  /(?:packages|@package-broker)\/(?:ui-assets|ui)\/|(?:^|\/)(?:react|react-dom|scheduler|clsx|class-variance-authority|tailwind-merge|esbuild|typescript|tailwindcss|openapi-typescript)(?:\/|@)/;
+const UI_RUNTIME_DENY =
+  /(?:packages|@package-broker)\/(?:ui-assets|ui)\/(?:src|dist)\/|createUiAssetsProvider|MANIFEST_SPECIFIER|createRequire|import\.meta\.resolve|require\.resolve|node:module|react-dom|tailwindcss|openapi-typescript/;
 const OPENAPI_INPUT = /core\/(src|dist)\/api\/openapi\.(?:js|ts)$/;
 const DYNAMIC_IMPORT = /(?:^|[^\w$.])import\s*\(/g;
 const REQUIRE_CALL = /(?:^|[^\w$.])(?:__)?require\s*\(/g;
@@ -13,6 +18,10 @@ const FROM_SPECIFIER = /\bfrom\s*/g;
 const STATIC_IMPORT = /(?:^|[^\w$.])import\s+/g;
 const CLOUDFLARE_ALLOWED_NODE = new Set(['node:async_hooks', 'node:buffer', 'node:zlib']);
 const FIXTURE = process.env.PB_CHECK_TREESHAKE_FIXTURE;
+const BUILD_PATHS = [process.cwd(), homedir()].flatMap((path) => [
+  path,
+  JSON.stringify(path).slice(1, -1),
+]);
 
 function skipSpace(text, start) {
   let cursor = start;
@@ -101,9 +110,22 @@ async function bundle(config, target, out) {
   for (const [key, output] of Object.entries(metafile.outputs)) {
     for (const imported of output.imports ?? [])
       if (imported.external) externalImports.push(imported.path);
-    if (target === 'cloudflare' && key.endsWith('.js')) bundleFiles.push(resolve(outputBase, key));
+    if (key.endsWith('.js')) bundleFiles.push(resolve(outputBase, key));
   }
-  return { inputs, externalImports, bundleFiles };
+  const buildPathFiles = [];
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const file = resolve(entry.parentPath, entry.name);
+    const contents = await readText(file);
+    if (BUILD_PATHS.some((path) => contents.includes(path)))
+      buildPathFiles.push(relative(dir, file));
+  }
+  return {
+    inputs,
+    externalImports,
+    bundleFiles,
+    buildPathFiles,
+  };
 }
 
 if (FIXTURE) {
@@ -154,12 +176,37 @@ for (const target of ['cloudflare', 'node']) {
         `${label}/${target}: OpenAPI generator in bundle without the OpenAPI route:\n${openapi.join('\n')}`,
       );
     }
-    const forbidden = inputs.filter((input) => inputDeny.test(input));
+    const forbidden = inputs.filter((input) => inputDeny.test(input) || UI_INPUT_DENY.test(input));
     if (forbidden.length > 0) {
       failed = true;
       console.error(
         `${label}/${target}: forbidden modules in bundle (metafile: every bundled input path):\n${forbidden.join('\n')}`,
       );
+    }
+  }
+
+  for (const [label, { bundleFiles, externalImports, buildPathFiles }] of [
+    ['minimal', minimal],
+    ['default', full],
+  ]) {
+    if (buildPathFiles.length > 0) {
+      failed = true;
+      console.error(
+        `${label}/${target}: build-machine path in deployment output:\n${buildPathFiles.join('\n')}`,
+      );
+    }
+    for (const specifier of externalImports) {
+      if (UI_RUNTIME_DENY.test(specifier) || UI_INPUT_DENY.test(`${specifier}/`)) {
+        failed = true;
+        console.error(`${label}/${target}: build-time runtime import: ${specifier}`);
+      }
+    }
+    for (const file of bundleFiles) {
+      const code = await readText(file);
+      if (UI_RUNTIME_DENY.test(code) || code.includes(process.cwd())) {
+        failed = true;
+        console.error(`${label}/${target}: provider, resolver or build-machine path in ${file}`);
+      }
     }
   }
 

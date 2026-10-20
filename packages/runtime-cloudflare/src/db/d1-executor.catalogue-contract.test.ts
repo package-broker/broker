@@ -71,6 +71,6 @@ const wrap = (executor: SqlExecutor): SqlExecutor => ({
   batch: (statements) => executor.batch(statements),
 });
 
-describeCatalogueReadContract('d1', openPair, wrap);
+describeCatalogueReadContract('d1', openPair, wrap, { d1: true });
 describeCatalogueWriteContract('d1', openPair);
 describeCatalogueRaceContract('d1', openPair);

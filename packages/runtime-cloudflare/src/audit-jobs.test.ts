@@ -186,6 +186,7 @@ describe.each([
         ['core:import-rollback:v1', undefined],
         ['core:pat-offboarding:v1', undefined],
         ['core:pat-offboarding-sweep:v1', { everySeconds: 86400 }],
+        ['core:package-sync:v1', undefined],
       ]);
       await executor.batch(
         [a, b].map((org) => ({

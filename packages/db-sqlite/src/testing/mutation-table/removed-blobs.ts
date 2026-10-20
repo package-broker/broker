@@ -10,8 +10,20 @@ function foreignCase(table: 'blob' | 'version' | 'package', operation: boolean):
       const { own, foreign } = orgOf(context);
       const seed = seeder(context.executor);
       await seedSource(seed, 'S', own.orgId, 'composer_repository');
-      await seedPackage(seed, 'P', table === 'package' ? foreign.orgId : own.orgId, 'S', 'pkg');
-      await seedVersion(seed, 'V', table === 'version' ? foreign.orgId : own.orgId, 'P', '1.0.0');
+      await seedPackage(
+        seed.forged,
+        'P',
+        table === 'package' ? foreign.orgId : own.orgId,
+        'S',
+        'pkg',
+      );
+      await seedVersion(
+        seed.forged,
+        'V',
+        table === 'version' ? foreign.orgId : own.orgId,
+        'P',
+        '1.0.0',
+      );
       await seed(
         `INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, refetchable)
          VALUES ('B', ?, ?, 1, 'blob', 1)`,

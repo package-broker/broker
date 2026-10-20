@@ -7,6 +7,7 @@ import {
   createBlobReferenceReader,
   RETENTION_CANDIDATE_LIMIT,
 } from './blob-references.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 let database: MigratedDatabase;
 let a: OrgContext;
@@ -72,6 +73,11 @@ async function blob(org: OrgContext, n: number, extra = ''): Promise<string> {
   return blobId(n);
 }
 
+const forgedSeed =
+  <A extends unknown[], R>(seed: (...args: A) => Promise<R>) =>
+  (...args: A): Promise<R> =>
+    withForeignKeysOff(executor, () => seed(...args));
+
 async function version(
   org: OrgContext,
   packageId: string,
@@ -97,6 +103,8 @@ VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00.000Z', 'upstream', '{}', ?, ?, ?, ?)
   );
   return id;
 }
+
+const versionForged = forgedSeed(version);
 
 async function revision(org: OrgContext, versionId: string, blob: string, n = 2) {
   await run(
@@ -268,7 +276,7 @@ describe('blob reference check', () => {
     await source(b, 'SRCB');
     await pkg(b, 'PKGB', 'SRCB');
     const id = await blob(a, 1);
-    await version(a, 'PKGB', id, 'removed_upstream');
+    await versionForged(a, 'PKGB', id, 'removed_upstream');
     expect(await shas()).toEqual([]);
   });
 

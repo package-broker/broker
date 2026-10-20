@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { ApiCall } from '../api/idempotency.js';
 import type { AuthenticatedSession } from '../auth/session.js';
 import { orgContext } from '../db/port.js';
 import type { Organization } from '../db/organization.js';
@@ -152,6 +153,7 @@ function rig(
     log: (entry) => logs.push({ ...entry }),
   });
   return {
+    service,
     tokens,
     logs,
     inputs,
@@ -365,4 +367,57 @@ describe('service token rotation', () => {
       expect(r.logs.some((entry) => entry['event'] === 'token.rotated')).toBe(false);
     },
   );
+});
+
+describe('rotation request context', () => {
+  it('passes request audit data and a plaintext-free replay record into the rotation batch', async () => {
+    const r = rig();
+    const call: ApiCall = {
+      audit: {
+        opId: '01K00000000000000000000001',
+        requestId: '01K00000000000000000000002',
+        sourceIp: '203.0.113.7',
+        tokenSelector: null,
+      },
+      idempotency: {
+        principalKey: 'user:user-1',
+        key: 'rotate-once',
+        route: 'POST /_pb/projects/:project/tokens/:token/rotate',
+        requestHash: 'hash',
+        status: 201,
+        responseJson: '{}',
+        createdAt: NOW,
+        expiresAt: inDays(1),
+      },
+    };
+    const result = await r.service.rotate(
+      ctx,
+      session(),
+      actor(),
+      fence(),
+      {
+        tokenId: old.id,
+        routeProjectId: 'project-1',
+        overlapDays: 7,
+      },
+      call,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('rotation failed');
+    const input = r.inputs[0]!;
+    expect(input.idempotency).toEqual({
+      ...call.idempotency,
+      responseJson: JSON.stringify({ code: 'already_issued', id: result.value.id }),
+    });
+    for (const audit of [input.audit, input.rotationAudit]) {
+      expect(audit.sourceIp).toBe(call.audit.sourceIp);
+      expect(JSON.parse(audit.payloadJson)).toMatchObject({
+        op_id: call.audit.opId,
+        request_id: call.audit.requestId,
+      });
+    }
+    expect(JSON.stringify([input.audit, input.rotationAudit, input.idempotency])).not.toContain(
+      result.value.plaintext,
+    );
+  });
 });

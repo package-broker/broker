@@ -194,6 +194,7 @@ export interface ServiceTokenService {
     actor: ActorContext,
     fence: MutationFence,
     input: ServiceTokenRotateInput,
+    call?: ApiCall,
   ): Promise<ServiceTokenRotateResult>;
   /**
    * CSRF is asserted by the HTTP boundary before this call. Only a user session issues: a token
@@ -554,7 +555,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
 
   return {
     issue,
-    async rotate(ctx, authenticated, actor, fence, request) {
+    async rotate(ctx, authenticated, actor, fence, request, call) {
       const { session, principal } = authenticated;
       if (typeof fence !== 'object' || fence === null)
         throw new TypeError('rotate requires a mutation fence');
@@ -591,7 +592,13 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
           ? fail('not_found')
           : deny(ctx, session.userId);
       }
-      const auditId = ids.ulid();
+      let rotationCall = call;
+      if (rotationCall === undefined) {
+        const auditId = ids.ulid();
+        rotationCall = {
+          audit: { opId: auditId, requestId: auditId, sourceIp: null, tokenSelector: null },
+        };
+      }
       const result = await issue(
         ctx,
         authenticated,
@@ -610,7 +617,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
             ? { lifetimeDays: request.lifetimeDays as number }
             : {}),
         },
-        { audit: { opId: auditId, requestId: auditId, sourceIp: null, tokenSelector: null } },
+        rotationCall,
         { old, overlapDays: request.overlapDays },
       );
       if (!result.ok) return result;

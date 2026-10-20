@@ -18,9 +18,13 @@ afterAll(async () => {
   await mf.dispose();
 });
 
-describeCatalogueContract('Miniflare D1', async () => {
-  const binding = bindings[next++];
-  if (binding === undefined) throw new Error('out of D1 bindings');
-  const database = (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
-  return { executor: createD1Executor(database), close: async () => {} };
-});
+describeCatalogueContract(
+  'Miniflare D1',
+  async () => {
+    const binding = bindings[next++];
+    if (binding === undefined) throw new Error('out of D1 bindings');
+    const database = (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
+    return { executor: createD1Executor(database), close: async () => {} };
+  },
+  { d1: true },
+);

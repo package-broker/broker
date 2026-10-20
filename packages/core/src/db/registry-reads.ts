@@ -14,3 +14,8 @@ export interface RegistryReads {
     ref: { readonly packageId: string; readonly versionId: string },
   ): Promise<VersionIdentity | null>;
 }
+
+export interface PackageIdReads {
+  /** The package row id for the source and key; any status, null when absent or foreign. */
+  packageId(ctx: OrgContext, sourceId: string, key: string): Promise<string | null>;
+}

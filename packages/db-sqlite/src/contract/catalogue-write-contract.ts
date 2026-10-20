@@ -574,22 +574,31 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
           const present = kind === 'source' ? ['widget', 'other'] : ['1.0.0', '1.0.1'];
           for (const key of present)
             await w.writer.markListing(w.org, w.guard, { scope, stamp, present: [key] });
-          const finalize = () =>
+          const finalize = (count: number) =>
             w.writer.finalizeListing(
               w.org,
               w.guard,
               kind === 'source'
-                ? completeSourceListing({ sourceId: 'source', stamp, count: 2 })
-                : completeVersionListing({ packageId, stamp, count: 2 }),
-              { attemptedCandidates: 2, successfulCandidates: 2, definitiveAbsent: 0 },
+                ? completeSourceListing({ sourceId: 'source', stamp, count })
+                : completeVersionListing({ packageId, stamp, count }),
+              { attemptedCandidates: count, successfulCandidates: count, definitiveAbsent: 0 },
             );
-          if (kind === 'source') {
-            await expect(finalize()).rejects.toBeInstanceOf(DbError);
-            const untouched = await w.rows('SELECT status FROM package WHERE org_id = ?');
-            expect(untouched.every((row) => row['status'] === 'active')).toBe(true);
-            return;
-          }
-          expect(await finalize()).toMatchObject({ removed: 1, restored: 0 });
+          await expect(finalize(2)).rejects.toBeInstanceOf(DbError);
+          const untouched = await w.rows(`SELECT status FROM ${table} WHERE org_id = ?`);
+          expect(untouched.every((row) => row['status'] === 'active')).toBe(true);
+          if (kind === 'source') return;
+          await w.executor.batch([
+            st(
+              "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, updated_at) VALUES ('listing-version-extra', ?, ?, '1.0.9', '1.0.9', ?, 'release_date', '{}', ?)",
+              w.org.orgId,
+              packageId,
+              HISTORY,
+              HISTORY,
+            ),
+          ]);
+          present.push('1.0.9');
+          await w.writer.markListing(w.org, w.guard, { scope, stamp, present: ['1.0.9'] });
+          expect(await finalize(3)).toMatchObject({ removed: 1, restored: 0 });
           const key = 'version_normalized';
           const rows = await w.rows(
             `SELECT ${key} AS key, status FROM ${table} WHERE org_id = ? ORDER BY ${key}`,

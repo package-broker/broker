@@ -12,7 +12,7 @@ const coveredByForeignName: ContractCase = {
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
     await seedSource(seed, 'S1', own.orgId, 'vcs');
-    await seed(
+    await seed.forged(
       'INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, ?, ?)',
       'R-FOREIGN',
       foreign.orgId,
@@ -63,7 +63,7 @@ function activatableCase(foreignRow: 'source' | 'name'): ContractCase {
       const seed = seeder(context.executor);
       const { own, foreign } = orgOf(context);
       await seedSource(seed, 'S1', foreignRow === 'source' ? foreign.orgId : own.orgId, 'vcs');
-      await seed(
+      await seed.forged(
         'INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, ?, ?)',
         'R1',
         foreign.orgId,

@@ -74,11 +74,71 @@ export interface IssueServiceTokenCall {
   readonly mint: () => MintedServiceToken | Promise<MintedServiceToken>;
 }
 
+export interface ServiceTokenRecord {
+  readonly id: string;
+  readonly servicePrincipalId: string;
+  readonly projectId: string | null;
+  readonly scope: ScopeLevel;
+  readonly readOnly: boolean;
+  readonly name: string;
+  readonly expiresAt: string;
+  readonly revokedAt: string | null;
+}
+
+export interface ServiceTokenRotateInput {
+  readonly tokenId: string;
+  readonly routeProjectId: string | null;
+  readonly overlapDays: 0 | 1 | 7;
+  readonly name?: string;
+  readonly expiresAt?: string;
+  readonly lifetimeDays?: number;
+}
+
+export interface ServiceTokenRotateStoreInput extends ServiceTokenStoreInput {
+  readonly tokenId: string;
+  readonly overlapDays: 0 | 1 | 7;
+  readonly rotationAudit: AuditEvent;
+}
+
+export type ServiceTokenRotateOutcome =
+  | {
+      readonly status: 'rotated';
+      readonly id: string;
+      readonly plaintext: string;
+      readonly replacedExpiresAt: string;
+    }
+  | Exclude<ServiceTokenIssueOutcome, { readonly status: 'issued' }>;
+
+export type ServiceTokenRotateError = ServiceTokenError | 'invalid_overlap';
+
+export type ServiceTokenRotateResult =
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly id: string;
+        readonly plaintext: string;
+        readonly replacedTokenId: string;
+        readonly replacedExpiresAt: string;
+      };
+    }
+  | { readonly ok: false; readonly error: ServiceTokenRotateError };
+
+export interface ServiceTokenRotationStore {
+  getService(ctx: OrgContext, tokenId: string): Promise<ServiceTokenRecord | null>;
+  rotateService(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: ServiceTokenRotateStoreInput,
+    mint: () => MintedServiceToken | Promise<MintedServiceToken>,
+  ): Promise<ServiceTokenRotateOutcome>;
+}
+
 /**
  * The guarded batch rechecks session, user, reauth freshness, principal status and revision, project
  * status and token_max_scope, and the issuer authority on database time.
  */
-export interface ServiceTokenStore {
+/** Issuance-only adapters may omit rotation; runtimes supply the complete repository. */
+export interface ServiceTokenStore extends Partial<ServiceTokenRotationStore> {
   issueService(
     ctx: OrgContext,
     fence: MutationFence,
@@ -128,6 +188,13 @@ export interface ServiceTokenServiceDeps {
 }
 
 export interface ServiceTokenService {
+  rotate(
+    ctx: OrgContext,
+    authenticated: AuthenticatedSession,
+    actor: ActorContext,
+    fence: MutationFence,
+    input: ServiceTokenRotateInput,
+  ): Promise<ServiceTokenRotateResult>;
   /**
    * CSRF is asserted by the HTTP boundary before this call. Only a user session issues: a token
    * credential has no session, so no service credential can mint a sibling.
@@ -157,7 +224,9 @@ const LEVEL_ANCHOR: Readonly<Record<ScopeLevel, string | null>> = {
   full: null,
 };
 
-function fail(error: ServiceTokenError): ServiceTokenResult {
+function fail<E extends ServiceTokenRotateError>(
+  error: E,
+): { readonly ok: false; readonly error: E } {
   return { ok: false, error };
 }
 
@@ -209,6 +278,30 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
 
   const maxDays = (deps.lifetime ?? resolveTokenLifetimePolicy(undefined)).service.maxDays;
 
+  function requestedExpiry(
+    request: Pick<ServiceTokenIssueInput, 'expiresAt' | 'lifetimeDays'>,
+    nowMs: number,
+  ):
+    | { readonly ok: true; readonly expiresMs: number | null; readonly defaulted: boolean }
+    | { readonly ok: false; readonly error: 'invalid_expiry' } {
+    const expiryProvided = Object.hasOwn(request, 'expiresAt');
+    const lifetimeProvided = Object.hasOwn(request, 'lifetimeDays');
+    if (expiryProvided && lifetimeProvided) return fail('invalid_expiry');
+    const defaulted = !expiryProvided && !lifetimeProvided;
+    const expiresMs = expiryProvided
+      ? canonicalTimestampMs(request.expiresAt)
+      : lifetimeProvided
+        ? lifetimeExpiry(nowMs, maxDays, request.lifetimeDays as number)
+        : null;
+    if (
+      !defaulted &&
+      (expiresMs === null || expiresMs <= nowMs || expiresMs > nowMs + maxDays * DAY_MS)
+    ) {
+      return fail('invalid_expiry');
+    }
+    return { ok: true, expiresMs, defaulted };
+  }
+
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
       deps.log({ level: 'info', ...entry });
@@ -217,7 +310,10 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
     }
   }
 
-  function deny(ctx: OrgContext, actorUserId: string | null): ServiceTokenResult {
+  function deny(
+    ctx: OrgContext,
+    actorUserId: string | null,
+  ): { readonly ok: false; readonly error: 'forbidden' } {
     emit({ event: 'token.issue_denied', kind: 'svc', orgId: ctx.orgId, actorUserId });
     return fail('forbidden');
   }
@@ -238,23 +334,230 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
     };
   }
 
-  return {
-    async issue(ctx, authenticated, actor, fence, request, call) {
-      const input = {
-        servicePrincipalId: request.servicePrincipalId,
-        routeProjectId: request.routeProjectId,
-        name: request.name,
-        scope: request.scope,
-        readOnly: request.readOnly,
-        expiresAt: request.expiresAt,
-        lifetimeDays: request.lifetimeDays,
-        expiryProvided: Object.hasOwn(request, 'expiresAt'),
-        lifetimeProvided: Object.hasOwn(request, 'lifetimeDays'),
+  async function issue(
+    ctx: OrgContext,
+    authenticated: AuthenticatedSession,
+    actor: ActorContext,
+    fence: MutationFence,
+    request: ServiceTokenIssueInput,
+    call: ApiCall,
+    rotation?: { old: ServiceTokenRecord; overlapDays: 0 | 1 | 7 },
+  ): Promise<ServiceTokenResult | Extract<ServiceTokenRotateResult, { ok: true }>> {
+    const input = {
+      servicePrincipalId: request.servicePrincipalId,
+      routeProjectId: request.routeProjectId,
+      name: request.name,
+      scope: request.scope,
+      readOnly: request.readOnly,
+    };
+    const { session, principal } = authenticated;
+    if (typeof fence !== 'object' || fence === null) {
+      throw new TypeError('issue requires a mutation fence');
+    }
+    if (fence.userId !== session.userId || fence.sessionId !== session.id) {
+      throw new TypeError('the mutation fence must belong to the issuing session');
+    }
+    if (
+      (principal as { kind?: unknown } | null)?.kind !== 'user' ||
+      principal.id !== session.userId ||
+      (actor as { kind?: unknown } | null)?.kind !== 'organization' ||
+      actor.userId !== session.userId
+    ) {
+      return deny(ctx, null);
+    }
+    if (
+      input.routeProjectId !== null &&
+      (typeof input.routeProjectId !== 'string' || input.routeProjectId === '')
+    ) {
+      throw new TypeError('routeProjectId must be null or a non-empty string');
+    }
+    if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
+    if (!isValidName(input.name)) return fail('invalid_name');
+    const scope = parseScopeLevel(input.scope);
+    if (!scope.ok) return fail('invalid_scope');
+    const readOnly = scope.level === 'read';
+    if (input.readOnly !== undefined && input.readOnly !== readOnly) {
+      return fail('scope_conflict');
+    }
+
+    const nowMs = clock.now().getTime();
+    const expiry = requestedExpiry(request, nowMs);
+    if (!expiry.ok) return expiry;
+    const { defaulted } = expiry;
+    let { expiresMs } = expiry;
+    const organization = await organizations.get(ctx);
+    if (organization === null) return deny(ctx, session.userId);
+    const configured = organization.settings.tokenDefaultExpiryDays;
+    if (!Number.isSafeInteger(configured) || configured <= 0) return deny(ctx, session.userId);
+    if (defaulted) expiresMs = defaultExpiry(nowMs, maxDays, configured);
+    if (expiresMs === null) return deny(ctx, session.userId);
+    const expiresAt = new Date(expiresMs).toISOString();
+
+    const principalId = input.servicePrincipalId;
+    const target =
+      typeof principalId === 'string' && principalId !== ''
+        ? await principals.get(ctx, principalId)
+        : null;
+    if (target === null || target.projectId !== input.routeProjectId) {
+      const live = await authority.livePermissions(ctx, fence, null);
+      return live.has(PROJECT_ISSUE) || live.has(ORG_ISSUE)
+        ? fail('not_found')
+        : deny(ctx, session.userId);
+    }
+    if (target.status !== 'active') return deny(ctx, session.userId);
+    const requirement = requirementFor(target.projectId);
+    if (requirement.organizationAdmin && actor.isOrganizationAdmin !== true) {
+      return deny(ctx, session.userId);
+    }
+    const covers = conferred(target, scope.level);
+    if (covers === null) return deny(ctx, session.userId);
+    const live = await authority.livePermissions(ctx, fence, target.projectId);
+    if (
+      !live.has(requirement.permission) ||
+      !covers.every((name) => live.has(name)) ||
+      (rotation !== undefined &&
+        !live.has(target.projectId === null ? 'org:tokens:revoke' : 'project:tokens:revoke'))
+    ) {
+      return deny(ctx, session.userId);
+    }
+
+    if (
+      rotation !== undefined &&
+      (rotation.old.revokedAt !== null || Date.parse(rotation.old.expiresAt) <= nowMs)
+    ) {
+      return fail('conflict');
+    }
+    const providerAnchors = await providers.anchors(ctx);
+    const storeNow = clock.now();
+    if (expiresMs <= storeNow.getTime()) return fail('invalid_expiry');
+
+    const id = ids.ulid();
+    const audit = auditEvent({
+      id: ids.ulid(),
+      now: isoTimestamp(storeNow),
+      action: 'token.issue',
+      actor: { type: 'user', id: actor.userId },
+      context: call.audit,
+      target: { type: 'token', id },
+      projectId: target.projectId,
+      changes: {
+        kind: { new: 'svc' },
+        name: { new: input.name },
+        scope: { new: scope.level },
+        expires_at: { new: expiresAt },
+        project_mode: { new: target.projectId === null ? 'all' : 'selected' },
+        project_count: { new: target.projectId === null ? 0 : 1 },
+      },
+    });
+    if (!audit.ok) throw new TypeError('Invalid token issue audit event');
+    const storeInput: ServiceTokenStoreInput = {
+      id,
+      name: input.name,
+      servicePrincipalId: target.id,
+      projectId: target.projectId,
+      principalRevision: target.revision,
+      scope: scope.level,
+      readOnly,
+      expiresAt,
+      maxLifetimeDays: maxDays,
+      now: isoTimestamp(storeNow),
+      authority: { ...requirement, covers },
+      providerAnchors,
+      audit: audit.event,
+      ...(call.idempotency === undefined
+        ? {}
+        : {
+            idempotency: {
+              ...call.idempotency,
+              responseJson: JSON.stringify({ code: 'already_issued', id }),
+            },
+          }),
+    };
+    let outcome: ServiceTokenIssueOutcome | ServiceTokenRotateOutcome;
+    if (rotation === undefined) {
+      outcome = await tokens.issueService(ctx, fence, storeInput, mint);
+    } else {
+      if (tokens.rotateService === undefined) throw new TypeError('rotation store is required');
+      const rotationAudit = auditEvent({
+        id: ids.ulid(),
+        now: storeInput.now,
+        action: 'token.rotate',
+        actor: { type: 'user', id: actor.userId },
+        context: call.audit,
+        target: { type: 'token', id: rotation.old.id },
+        projectId: target.projectId,
+      });
+      if (!rotationAudit.ok) throw new TypeError('Invalid token rotation audit event');
+      outcome = await tokens.rotateService(
+        ctx,
+        fence,
+        {
+          ...storeInput,
+          tokenId: rotation.old.id,
+          overlapDays: rotation.overlapDays,
+          rotationAudit: rotationAudit.event,
+        },
+        mint,
+      );
+    }
+    if (outcome.status === 'rotated' && rotation !== undefined) {
+      emit({
+        event: 'token.rotated',
+        orgId: ctx.orgId,
+        tokenId: rotation.old.id,
+        replacementId: outcome.id,
+        projectId: target.projectId,
+        overlapDays: rotation.overlapDays,
+        actorUserId: session.userId,
+        replacedExpiresAt: outcome.replacedExpiresAt,
+        expiresAt,
+      });
+      return {
+        ok: true,
+        value: {
+          id: outcome.id,
+          plaintext: outcome.plaintext,
+          replacedTokenId: rotation.old.id,
+          replacedExpiresAt: outcome.replacedExpiresAt,
+        },
       };
+    }
+    if (outcome.status === 'issued') {
+      emit({
+        event: 'token.issued',
+        expiresAt,
+        defaulted,
+        kind: 'svc',
+        orgId: ctx.orgId,
+        tokenId: outcome.id,
+        servicePrincipalId: target.id,
+        projectId: target.projectId,
+        actorUserId: session.userId,
+        scope: scope.level,
+      });
+      return { ok: true, value: { id: outcome.id, plaintext: outcome.plaintext } };
+    }
+    if (outcome.status === 'indeterminate') return fail('indeterminate');
+    if (outcome.status === 'rotated') throw new Error('unexpected rotation outcome');
+    switch (outcome.reason) {
+      case 'authority':
+        if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
+        return deny(ctx, session.userId);
+      case 'conflict':
+      case 'id_conflict':
+      case 'selector_collision':
+        return fail('conflict');
+      default:
+        throw new Error('service token issue answered unclassified');
+    }
+  }
+
+  return {
+    issue,
+    async rotate(ctx, authenticated, actor, fence, request) {
       const { session, principal } = authenticated;
-      if (typeof fence !== 'object' || fence === null) {
-        throw new TypeError('issue requires a mutation fence');
-      }
+      if (typeof fence !== 'object' || fence === null)
+        throw new TypeError('rotate requires a mutation fence');
       if (fence.userId !== session.userId || fence.sessionId !== session.id) {
         throw new TypeError('the mutation fence must belong to the issuing session');
       }
@@ -267,144 +570,52 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
         return deny(ctx, null);
       }
       if (
-        input.routeProjectId !== null &&
-        (typeof input.routeProjectId !== 'string' || input.routeProjectId === '')
+        request.routeProjectId !== null &&
+        (typeof request.routeProjectId !== 'string' || request.routeProjectId === '')
       ) {
         throw new TypeError('routeProjectId must be null or a non-empty string');
       }
       if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
-      if (!isValidName(input.name)) return fail('invalid_name');
-      const scope = parseScopeLevel(input.scope);
-      if (!scope.ok) return fail('invalid_scope');
-      const readOnly = scope.level === 'read';
-      if (input.readOnly !== undefined && input.readOnly !== readOnly) {
-        return fail('scope_conflict');
-      }
-
-      const nowMs = clock.now().getTime();
-      if (input.expiryProvided && input.lifetimeProvided) return fail('invalid_expiry');
-      const defaulted = !input.expiryProvided && !input.lifetimeProvided;
-      let expiresMs = input.expiryProvided
-        ? canonicalTimestampMs(input.expiresAt)
-        : input.lifetimeProvided
-          ? lifetimeExpiry(nowMs, maxDays, input.lifetimeDays as number)
+      if (![0, 1, 7].includes(request.overlapDays)) return fail('invalid_overlap');
+      if (Object.hasOwn(request, 'name') && !isValidName(request.name)) return fail('invalid_name');
+      const expiry = requestedExpiry(request, clock.now().getTime());
+      if (!expiry.ok) return expiry;
+      if (tokens.getService === undefined) throw new TypeError('rotation store is required');
+      const old =
+        typeof request.tokenId === 'string' && request.tokenId !== ''
+          ? await tokens.getService(ctx, request.tokenId)
           : null;
-      if (
-        !defaulted &&
-        (expiresMs === null || expiresMs <= nowMs || expiresMs > nowMs + maxDays * DAY_MS)
-      ) {
-        return fail('invalid_expiry');
-      }
-      const organization = await organizations.get(ctx);
-      if (organization === null) return deny(ctx, session.userId);
-      const configured = organization.settings.tokenDefaultExpiryDays;
-      if (!Number.isSafeInteger(configured) || configured <= 0) return deny(ctx, session.userId);
-      if (defaulted) expiresMs = defaultExpiry(nowMs, maxDays, configured);
-      if (expiresMs === null) return deny(ctx, session.userId);
-      const expiresAt = new Date(expiresMs).toISOString();
-
-      const principalId = input.servicePrincipalId;
-      const target =
-        typeof principalId === 'string' && principalId !== ''
-          ? await principals.get(ctx, principalId)
-          : null;
-      if (target === null || target.projectId !== input.routeProjectId) {
+      if (old === null || old.projectId !== request.routeProjectId) {
         const live = await authority.livePermissions(ctx, fence, null);
         return live.has(PROJECT_ISSUE) || live.has(ORG_ISSUE)
           ? fail('not_found')
           : deny(ctx, session.userId);
       }
-      if (target.status !== 'active') return deny(ctx, session.userId);
-      const requirement = requirementFor(target.projectId);
-      if (requirement.organizationAdmin && actor.isOrganizationAdmin !== true) {
-        return deny(ctx, session.userId);
-      }
-      const covers = conferred(target, scope.level);
-      if (covers === null) return deny(ctx, session.userId);
-      const live = await authority.livePermissions(ctx, fence, target.projectId);
-      if (!live.has(requirement.permission) || !covers.every((name) => live.has(name))) {
-        return deny(ctx, session.userId);
-      }
-
-      const providerAnchors = await providers.anchors(ctx);
-      const storeNow = clock.now();
-      if (expiresMs <= storeNow.getTime()) return fail('invalid_expiry');
-
-      const id = ids.ulid();
-      const audit = auditEvent({
-        id: ids.ulid(),
-        now: isoTimestamp(storeNow),
-        action: 'token.issue',
-        actor: { type: 'user', id: actor.userId },
-        context: call.audit,
-        target: { type: 'token', id },
-        projectId: target.projectId,
-        changes: {
-          kind: { new: 'svc' },
-          name: { new: input.name },
-          scope: { new: scope.level },
-          expires_at: { new: expiresAt },
-          project_mode: { new: target.projectId === null ? 'all' : 'selected' },
-          project_count: { new: target.projectId === null ? 0 : 1 },
-        },
-      });
-      if (!audit.ok) throw new TypeError('Invalid token issue audit event');
-      const outcome = await tokens.issueService(
+      const auditId = ids.ulid();
+      const result = await issue(
         ctx,
+        authenticated,
+        actor,
         fence,
         {
-          id,
-          name: input.name,
-          servicePrincipalId: target.id,
-          projectId: target.projectId,
-          principalRevision: target.revision,
-          scope: scope.level,
-          readOnly,
-          expiresAt,
-          maxLifetimeDays: maxDays,
-          now: isoTimestamp(storeNow),
-          authority: { ...requirement, covers },
-          providerAnchors,
-          audit: audit.event,
-          ...(call.idempotency === undefined
-            ? {}
-            : {
-                idempotency: {
-                  ...call.idempotency,
-                  responseJson: JSON.stringify({ code: 'already_issued', id }),
-                },
-              }),
+          servicePrincipalId: old.servicePrincipalId,
+          routeProjectId: request.routeProjectId,
+          name: request.name === undefined ? old.name : request.name,
+          scope: old.scope,
+          readOnly: old.readOnly,
+          ...(Object.hasOwn(request, 'expiresAt')
+            ? { expiresAt: request.expiresAt as string }
+            : {}),
+          ...(Object.hasOwn(request, 'lifetimeDays')
+            ? { lifetimeDays: request.lifetimeDays as number }
+            : {}),
         },
-        mint,
+        { audit: { opId: auditId, requestId: auditId, sourceIp: null, tokenSelector: null } },
+        { old, overlapDays: request.overlapDays },
       );
-
-      if (outcome.status === 'issued') {
-        emit({
-          event: 'token.issued',
-          expiresAt,
-          defaulted,
-          kind: 'svc',
-          orgId: ctx.orgId,
-          tokenId: outcome.id,
-          servicePrincipalId: target.id,
-          projectId: target.projectId,
-          actorUserId: session.userId,
-          scope: scope.level,
-        });
-        return { ok: true, value: { id: outcome.id, plaintext: outcome.plaintext } };
-      }
-      if (outcome.status === 'indeterminate') return fail('indeterminate');
-      switch (outcome.reason) {
-        case 'authority':
-          if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
-          return deny(ctx, session.userId);
-        case 'conflict':
-        case 'id_conflict':
-        case 'selector_collision':
-          return fail('conflict');
-        default:
-          throw new Error('service token issue answered unclassified');
-      }
+      if (!result.ok) return result;
+      if (!('replacedTokenId' in result.value)) throw new Error('unexpected issue outcome');
+      return { ok: true, value: result.value };
     },
   };
 }

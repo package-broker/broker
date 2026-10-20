@@ -15,7 +15,7 @@ export async function visiblePackage(
     "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
     own.orgId,
   );
-  await seed(
+  await seed.forged(
     "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'explicit')",
     foreignMembership ? foreign.orgId : own.orgId,
   );

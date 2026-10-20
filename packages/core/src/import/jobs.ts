@@ -7,6 +7,7 @@ import {
   type ImportRollbackPayload,
 } from './rollback.js';
 import type { ImportRunJobPayload } from './run-service.js';
+import { runImportVerification, type ImportVerificationDeps } from './verification.js';
 
 function exactUlids<K extends string>(input: unknown, keys: readonly K[]): Record<K, string> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {
@@ -48,6 +49,21 @@ export function importRollbackJob(deps: ImportRollbackDeps): JobDefinition<Impor
       const { fences } = context;
       if (fences === undefined) throw new JobError('handler_error');
       await runImportRollback(deps, context.org, payload, (a, r, e) => fences.delegated(a, r, e));
+    },
+  };
+}
+
+export function importVerificationJob(
+  deps: ImportVerificationDeps,
+): JobDefinition<ImportRunJobPayload> {
+  return {
+    name: 'import-verify',
+    version: 1,
+    validate: (input) => exactUlids(input, ['runId']),
+    async handler(payload, context) {
+      const { fences } = context;
+      if (fences === undefined) throw new JobError('handler_error');
+      await runImportVerification(deps, context.org, payload, () => fences.verifier());
     },
   };
 }

@@ -39,5 +39,5 @@ async function firstCoreMigration() {
   return first;
 }
 
-describeMigrationContract('d1', openPair, firstCoreMigration);
+describeMigrationContract('d1', openPair, firstCoreMigration, { d1: true });
 describeMigrationLockContract('d1', openPair, firstCoreMigration);

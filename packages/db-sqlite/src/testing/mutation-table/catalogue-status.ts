@@ -29,7 +29,7 @@ function releaseCase(foreignRow: 'version' | 'blob'): ContractCase {
       await seedSource(seed, 'S', own.orgId, 'npm_registry', 'npm');
       await seedPackage(seed, 'K', own.orgId, 'S', 'widget', 'npm');
       await seedVersion(
-        seed,
+        seed.forged,
         'V',
         foreignRow === 'version' ? foreign.orgId : own.orgId,
         'K',

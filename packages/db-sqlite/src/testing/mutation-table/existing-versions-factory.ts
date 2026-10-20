@@ -12,7 +12,7 @@ const foreignRow: ContractCase = {
     const seed = seeder(context.executor);
     await seedSource(seed, 'S', own.orgId, 'npm_registry', 'npm');
     await seedPackage(seed, 'K', own.orgId, 'S', 'widget', 'npm');
-    await seedVersion(seed, 'V', foreign.orgId, 'K', '1.0.0');
+    await seedVersion(seed.forged, 'V', foreign.orgId, 'K', '1.0.0');
     expect(
       await createExistingVersionsReader(executing(context)).existingVersions(own, {
         packageId: 'K',

@@ -33,7 +33,7 @@ function distProbe(probe: DistProbe): ContractCase {
       const { own, foreign } = orgOf(context);
       await seedSource(seed, 'S-DIST', own.orgId, 'npm_registry', 'npm');
       await seedPackage(
-        seed,
+        seed.forged,
         'K-DIST',
         probe === 'package advance' ? foreign.orgId : own.orgId,
         'S-DIST',
@@ -41,7 +41,7 @@ function distProbe(probe: DistProbe): ContractCase {
         'npm',
       );
       await seedVersion(
-        seed,
+        seed.forged,
         'V-DIST',
         probe.startsWith('version') ? foreign.orgId : own.orgId,
         'K-DIST',

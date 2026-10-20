@@ -11,7 +11,7 @@ const foreignAttachment: ContractCase = {
     const seed = seeder(context.executor);
     await seedProject(seed, 'P', own.orgId);
     await seedSource(seed, 'S', own.orgId, 'vcs');
-    await seed(
+    await seed.forged(
       "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
       foreign.orgId,
     );

@@ -712,9 +712,9 @@ describe('bounded edge pages', () => {
       expect(details).toContain('MATERIALIZE key_page');
       expect(details).toContain('package_by_name (org_id=? AND ecosystem=? AND name=?)');
       expect(details).toContain('MATERIALIZE edge_page');
-      expect(details).toContain('SEARCH v USING INDEX sqlite_autoindex_version_1 (id=?)');
+      expect(details).toContain('SEARCH v USING INDEX version_org_id (id=? AND org_id=?)');
       expect(details.indexOf('MATERIALIZE key_page')).toBeLessThan(
-        details.lastIndexOf('SEARCH v USING INDEX sqlite_autoindex_version_1 (id=?)'),
+        details.lastIndexOf('SEARCH v USING INDEX version_org_id (id=? AND org_id=?)'),
       );
       await database.executor.all({
         sql: `CREATE TEMP VIEW version AS SELECT id, org_id, package_id, version, status,

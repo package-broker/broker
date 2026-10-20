@@ -13,6 +13,7 @@ import { fixedClock } from '../ids.js';
 import { parseManifest, planHash } from './manifest.js';
 import {
   IMPORT_RUN_JOB,
+  IMPORT_VERIFICATION_JOB,
   validImportApprovalTimestamp,
   createImportRunService,
   type ImportRun,
@@ -54,6 +55,7 @@ function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
     createRun: vi.fn<ImportRunStore['createRun']>().mockResolvedValue({ ok: true, results: [] }),
     approveRun: write(),
     requestApply: write(),
+    requestVerify: write(),
     cancelRun: write(),
     acceptRun: write(),
     requestRollback: write(),
@@ -64,6 +66,7 @@ function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
 const methods = [
   'approveRun',
   'requestApply',
+  'requestVerify',
   'cancelRun',
   'acceptRun',
   'requestRollback',
@@ -159,7 +162,12 @@ describe('import run service', () => {
     expect(await service.approveRun(ctx, fence, input)).toEqual({ ok: false, error: 'forbidden' });
   });
   for (const method of methods) {
-    const state = method === 'acceptRun' || method === 'requestRollback' ? 'verified' : 'planned';
+    const state =
+      method === 'requestVerify'
+        ? 'applied'
+        : method === 'acceptRun' || method === 'requestRollback'
+          ? 'verified'
+          : 'planned';
     const approvedAt = method === 'approveRun' ? null : now;
     it(`${method} passes audit and idempotency once on success`, async () => {
       const { service, store } = setup({ state, approvedAt });
@@ -341,6 +349,7 @@ describe('import job definition', () => {
     const literals = [
       IMPORT_RUN_JOB.apply,
       IMPORT_RUN_JOB.rollback,
+      IMPORT_VERIFICATION_JOB.type,
       '`' + IMPORT_RUN_JOB.resourceKey('') + '${',
     ];
     for (const file of roots.flatMap(files)) {
@@ -353,5 +362,35 @@ describe('import job definition', () => {
     }
     expect(IMPORT_RUN_JOB.payload('run')).toEqual({ runId: 'run' });
     expect(IMPORT_RUN_JOB.resourceKey('run')).toBe(IMPORT_RUN_JOB.resourceKey('') + 'run');
+  });
+});
+
+describe('verification requests', () => {
+  it.each(['applied', 'verifying'] as const)(
+    'compares %s state and immutable expiry in the store write',
+    async (state) => {
+      const { service, store, run } = setup({ state });
+      expect(await service.requestVerify(ctx, fence, input)).toEqual({ ok: true, value: null });
+      expect(store.requestVerify).toHaveBeenCalledWith(ctx, fence, { ...input, expected: run });
+    },
+  );
+  it.each(['planned', 'applying', 'failed', 'verified', 'rolled_back', 'cancelled'] as const)(
+    'refuses verification from %s',
+    async (state) => {
+      const { service, store } = setup({ state });
+      expect(await service.requestVerify(ctx, fence, input)).toEqual({
+        ok: false,
+        error: 'conflict',
+      });
+      expect(store.requestVerify).not.toHaveBeenCalled();
+    },
+  );
+  it('refuses a new verification after expiry was set', async () => {
+    const { service, store } = setup({ state: 'applied', beforeImageExpiresAt: now });
+    expect(await service.requestVerify(ctx, fence, input)).toEqual({
+      ok: false,
+      error: 'conflict',
+    });
+    expect(store.requestVerify).not.toHaveBeenCalled();
   });
 });

@@ -34,9 +34,9 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
           await seedPackage(seed, `${prefix}K`, org.orgId, `${prefix}S`, 'parent');
         for (const key of ['present', 'missing', 'returned']) {
           if (kind === 'source') {
-            await seedPackage(seed, `${prefix}-${key}`, org.orgId, 'OS', key);
+            await seedPackage(seed.forged, `${prefix}-${key}`, org.orgId, 'OS', key);
             await seedVersion(
-              seed,
+              seed.forged,
               `V-${prefix}-${key}`,
               org.orgId,
               `O-${key}`,
@@ -44,7 +44,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
             );
           } else {
             await seedVersion(
-              seed,
+              seed.forged,
               `${prefix}-${key}`,
               org.orgId,
               'OK',

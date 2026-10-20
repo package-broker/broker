@@ -57,7 +57,18 @@ const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const ACCOUNT_ID_SHAPE = /^[0-9a-f]{32}$/;
 const TOKEN_SHAPE = /^[\x21-\x7e]+$/;
 const LOCK_TTL_SECONDS = 600;
+const MIGRATION_TIMEOUT_MS = 300_000;
 const RESPONSE_READ_FAILED = 'd1 http response read failed';
+
+function migrationTimeoutMs(env: Env): number {
+  const configured = env.PB_D1_MIGRATION_TIMEOUT_MS;
+  if (configured === undefined) return MIGRATION_TIMEOUT_MS;
+  const timeout = Number(configured);
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 600_000) {
+    throw new CloudflareError('invalid_input', 2, false, 'migrate');
+  }
+  return timeout;
+}
 
 function outcomeUnknown(error: unknown): boolean {
   let current: unknown = error;
@@ -107,11 +118,13 @@ function credentials(
 function executorFor(
   o: CloudflareOptions,
   credentials: { apiToken: string; accountId: string },
+  timeoutMs?: number,
 ): ReturnType<typeof createD1HttpExecutor> {
   return createD1HttpExecutor({
     accountId: credentials.accountId,
     databaseId: o.databaseId,
     apiToken: credentials.apiToken,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(o.fetch === undefined ? {} : { fetch: o.fetch }),
   });
 }
@@ -283,10 +296,11 @@ export async function migrateCloudflare(
       }
     };
     const holder = ulid();
+    const executor = executorFor(execution, auth, migrationTimeoutMs(o.env));
     if (!o.dryRun) emit(`lock holder ${holder}`);
     const contractAllowlist = o.allowContract ?? (store !== undefined || o.json ? [] : undefined);
     if (!o.dryRun && contractAllowlist !== undefined) {
-      const plan = await migrate(executorFor(execution, auth), sources, { holder, dryRun: true });
+      const plan = await migrate(executor, sources, { holder, dryRun: true });
       if (
         sources.some(
           (s) =>
@@ -297,7 +311,7 @@ export async function migrateCloudflare(
       )
         throw new CloudflareError('configuration_conflict', 11, false, 'migrate');
     }
-    const result = await migrate(executorFor(execution, auth), sources, {
+    const result = await migrate(executor, sources, {
       holder,
       dryRun: o.dryRun,
       lockTtlSeconds: LOCK_TTL_SECONDS,

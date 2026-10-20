@@ -307,3 +307,68 @@ it.each([{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { limit: 5, after: 'A'.re
     expect(f.metadata.listDue).not.toHaveBeenCalled();
   },
 );
+it.each([
+  ['removed', true, true, 'none', true, 'removed'],
+  ['referenced or stale recheck', false, false, 'none', true, 'refused'],
+  ['short lease', false, true, 'none', true, 'short-lease'],
+  ['byte store throw', true, true, 'reject', true, 'error'],
+  ['stale tombstone after removal', true, true, 'none', false, 'stale'],
+] as const)('purgeBytes classifies %s', async (_name, recheck, probe, store, marked, expected) => {
+  f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValueOnce(probe);
+  if (store === 'reject') f.remove.mockRejectedValue(new Error('private storage failure'));
+  f.metadata.markDeleted.mockResolvedValue(marked);
+  await expect(f.service.purgeBytes(ctx, key, generation)).resolves.toBe(expected);
+  expect(f.metadata.canStartRemove.mock.calls).toEqual(
+    recheck
+      ? [[ctx, key, generation, 2000]]
+      : [
+          [ctx, key, generation, 2000],
+          [ctx, key, generation, 0],
+        ],
+  );
+  expect(f.remove).toHaveBeenCalledTimes(recheck ? 1 : 0);
+  expect(f.metadata.markDeleted).toHaveBeenCalledTimes(recheck && store === 'none' ? 1 : 0);
+  expect(f.metadata.cancelPurge).not.toHaveBeenCalled();
+});
+it('purgeBytes reports a stalled removal as timeout and ignores its late completion', async () => {
+  let finish!: () => void;
+  f.remove.mockReturnValue(
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const result = f.service.purgeBytes(ctx, key, generation);
+  await vi.advanceTimersByTimeAsync(1000);
+  await expect(result).resolves.toBe('timeout');
+  finish();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.observability.counter).toHaveBeenCalledWith('pb.blob.purge', { outcome: 'timeout' });
+  expect(f.metadata.markDeleted).not.toHaveBeenCalled();
+  expect(f.metadata.cancelPurge).not.toHaveBeenCalled();
+  expect(f.metadata.canStartRemove).toHaveBeenCalledOnce();
+});
+it.each([
+  [true, true, 'queued'],
+  [false, true, 'short-lease'],
+  [false, false, 'refused'],
+] as const)(
+  'purgeBytes with queue admission, recheck %s and probe %s: %s',
+  async (recheck, probe, expected) => {
+    const enqueue = vi.fn<Jobs['enqueue']>(async () => ({ id: 'job', created: true }));
+    const service = createBlobLifecycle({ ...f.options, jobs: { enqueue, get: vi.fn() } });
+    f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValueOnce(probe);
+    await expect(service.purgeBytes(ctx, key, generation)).resolves.toBe(expected);
+    expect(enqueue).toHaveBeenCalledTimes(expected === 'queued' ? 1 : 0);
+    expect(f.remove).not.toHaveBeenCalled();
+  },
+);
+it.each([
+  ['malformed', generation],
+  [key, '' as PurgeGeneration],
+])('purgeBytes validates %s before any port call', async (digest, g) => {
+  await expect(async () => f.service.purgeBytes(ctx, digest as Sha256, g)).rejects.toThrow(
+    'invalid blob input',
+  );
+  for (const port of Object.values(f.metadata)) expect(port).not.toHaveBeenCalled();
+  expect(f.remove).not.toHaveBeenCalled();
+});

@@ -1,4 +1,6 @@
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
+import { packageSyncJob } from '@package-broker/core/ingest/package-sync-job';
+import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
 import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
@@ -68,6 +70,7 @@ import {
 import {
   createRegistryModule,
   type RegistryModule,
+  type RegistryModuleDeps,
   type SourceCredential,
 } from '@package-broker/core/registry/module';
 import {
@@ -184,6 +187,7 @@ import {
   createIngestSessionWriteGuard,
 } from '@package-broker/db-sqlite/repositories/ingest-session';
 import { createRegistryReads } from '@package-broker/db-sqlite/repositories/registry-reads';
+import { createPackageIdReads } from '@package-broker/db-sqlite/repositories/package-id';
 import { createRepresentationClock } from '@package-broker/db-sqlite/repositories/representation-clock';
 import { createSourceRepository } from '@package-broker/db-sqlite/repositories/source';
 import { createUpstreamStateRepository } from '@package-broker/db-sqlite/repositories/upstream-state';
@@ -625,6 +629,7 @@ function buildRegistryModule(input: {
   readonly reads: ReturnType<typeof buildPackageReads>;
   readonly keyring: Keyring;
   readonly platformServices: PlatformServices;
+  readonly registration: Registration;
   readonly observability: Observability;
   readonly deploymentId: string;
   readonly registry: RegistryConfig;
@@ -647,12 +652,18 @@ function buildRegistryModule(input: {
     now: () => Date.now(),
     onError: () => undefined,
   });
-  const module = createRegistryModule({
+  const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
     ports: {
       blob: platformServices.blob,
       cache: platformServices.cache,
       observability,
+      jobs: createRepositoryJobs({
+        store: platformServices.jobStore,
+        jobs: input.registration.jobs,
+        clock: systemClock,
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null }),
     },
     clock: systemClock,
     codecs: workersCodecs,
@@ -689,6 +700,12 @@ function buildRegistryModule(input: {
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential: openSourceCredential(executor, input.keyring),
     },
+    sync: {
+      packageId: createPackageIdReads(executor).packageId,
+      upstreamState: createUpstreamStateRepository(executor),
+      executor,
+      writeGuard: (ctx, session, job) => createIngestSessionWriteGuard(ctx, session, job),
+    },
     dist: {
       leases: createFetchLeases(executor),
       leaseKey,
@@ -697,8 +714,33 @@ function buildRegistryModule(input: {
       blobReplacer: createBlobReplacer(executor),
       recorder,
     },
-  });
-  return { module, recorder };
+  };
+  const module = createRegistryModule(dependencies);
+  const job = module.packageSyncJob;
+  return {
+    module:
+      job === undefined
+        ? module
+        : Object.freeze({
+            ...module,
+            packageSyncJob: Object.freeze({
+              ...job,
+              handler: (payload, context) => {
+                const scoped = createRegistryModule({
+                  ...dependencies,
+                  ports: { ...dependencies.ports, observability: context.observability },
+                  ingest: {
+                    ...dependencies.ingest,
+                    apply: { ...dependencies.ingest.apply, observability: context.observability },
+                  },
+                }).packageSyncJob;
+                if (scoped === undefined) throw new PlatformUnavailableError();
+                return scoped.handler(payload, context);
+              },
+            } satisfies JobDefinition),
+          }),
+    recorder,
+  };
 }
 
 const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
@@ -1291,29 +1333,40 @@ export function createWorker(
       }
     };
 
-    function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+    const coreJobBindings: {
+      services: ReturnType<typeof buildPlatform> | undefined;
+      registry: ReturnType<typeof buildRegistryModule> | undefined;
+    } = { services: undefined, registry: undefined };
+
+    function registerObservedJob<P>(
+      definition: JobDefinition<P>,
+      registry: ObsRegistry = {
+        events: AUDIT_EVENTS,
+        reasonCodes: new Set(),
+        routeTemplates: new Set(),
+      },
+    ): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
-        handler: (payload, context) =>
-          definition.handler(definition.validate(payload), {
+        handler: async (payload, context) => {
+          const services = coreJobBindings.services;
+          if (services === undefined) throw new PlatformUnavailableError();
+          return definition.handler(definition.validate(payload), {
             ...context,
             observability: createObservability(
-              services!.sink,
+              services.sink,
               {
-                deploymentId: services!.deploymentId,
+                deploymentId: services.deploymentId,
                 runtime: 'cloudflare',
                 requestId: null,
                 plugin: 'core',
                 jobId: context.jobId,
                 attempt: context.attempt,
               },
-              {
-                events: AUDIT_EVENTS,
-                reasonCodes: new Set(),
-                routeTemplates: new Set(),
-              },
+              registry,
             ),
-          }),
+          });
+        },
       });
     }
     const importJobs = createImportJobHolder();
@@ -1325,12 +1378,35 @@ export function createWorker(
           config === null
             ? []
             : [
-                registerAuditJob(auditSealJob(createAuditSealRepository(executor as SqlExecutor))),
-                registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor))),
+                registerObservedJob(
+                  auditSealJob(createAuditSealRepository(executor as SqlExecutor)),
+                ),
+                registerObservedJob(
+                  auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor)),
+                ),
                 ...(db === undefined ? [] : importJobRegistrations(importJobs)),
                 ...(db === undefined
                   ? []
                   : patOffboardingRegistrations(executor as SqlExecutor, patJobs, log)),
+                ...(db === undefined || registryConfig === undefined
+                  ? []
+                  : [
+                      registerObservedJob(
+                        {
+                          ...packageSyncJob,
+                          handler: (payload, context) => {
+                            const job = coreJobBindings.registry?.module.packageSyncJob;
+                            if (job === undefined) throw new PlatformUnavailableError();
+                            return job.handler(payload, context);
+                          },
+                        },
+                        {
+                          events: INGEST_EVENTS,
+                          reasonCodes: INGEST_REASON_CODES,
+                          routeTemplates: new Set(),
+                        },
+                      ),
+                    ]),
               ],
       });
     const built =
@@ -1351,6 +1427,7 @@ export function createWorker(
       config === null || bound === null
         ? undefined
         : buildPlatform(config, bound, executor as SqlExecutor, registration, resolveOrg);
+    coreJobBindings.services = services;
     if (built !== undefined && services !== undefined) {
       importJobs.set({
         verificationStore: createImportVerificationStore({
@@ -1391,12 +1468,14 @@ export function createWorker(
             reads,
             keyring: built.keyring,
             platformServices: services.platformServices,
+            registration,
             observability: services.observability,
             deploymentId: services.deploymentId,
             registry: registryConfig,
             publicUrl,
             dispatch,
           });
+    coreJobBindings.registry = registryModule;
 
     const ports: PluginPorts = {
       organizations: Object.freeze({ get: (ctx: OrgContext) => organizations.get(ctx) }),

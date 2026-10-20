@@ -53,27 +53,27 @@ const organizationListQuery = z.strictObject({
 });
 
 const lifetimeKind = z.strictObject({ maxDays: z.number().int(), defaultDays: z.number().int() });
+const tokenResponse = z.strictObject({
+  id: z.string(),
+  kind: z.enum(['pat', 'svc']),
+  name: z.string(),
+  scope,
+  readOnly: z.boolean(),
+  status,
+  projectMode: z.enum(['all', 'selected']).nullable(),
+  projectCount: z.number().int(),
+  projectId: z.string().nullable(),
+  userId: z.string().nullable(),
+  createdByUserId: z.string().nullable(),
+  servicePrincipalId: z.string().nullable(),
+  createdAt: timestamp,
+  expiresAt: timestamp.nullable(),
+  lastUsedAt: timestamp.nullable(),
+  revokedAt: timestamp.nullable(),
+});
+
 const listResponse = z.strictObject({
-  items: z.array(
-    z.strictObject({
-      id: z.string(),
-      kind: z.enum(['pat', 'svc']),
-      name: z.string(),
-      scope,
-      readOnly: z.boolean(),
-      status,
-      projectMode: z.enum(['all', 'selected']).nullable(),
-      projectCount: z.number().int(),
-      projectId: z.string().nullable(),
-      userId: z.string().nullable(),
-      createdByUserId: z.string().nullable(),
-      servicePrincipalId: z.string().nullable(),
-      createdAt: timestamp,
-      expiresAt: timestamp.nullable(),
-      lastUsedAt: timestamp.nullable(),
-      revokedAt: timestamp.nullable(),
-    }),
-  ),
+  items: z.array(tokenResponse),
   next: z.string().nullable(),
   lifetime: z.strictObject({ personal: lifetimeKind, service: lifetimeKind }),
 });
@@ -212,6 +212,92 @@ export const revokeTokenSpec = {
   },
 } as const satisfies ApiRouteSpec;
 
+const rotateBody = z.strictObject({
+  overlapDays: z.union([z.literal(0), z.literal(1), z.literal(7)]),
+  name: z.string().optional(),
+  ...expiry,
+});
+const rotatedResponse = z.strictObject({
+  id: z.string(),
+  token: z.string(),
+  replacedTokenId: z.string(),
+  replacedExpiresAt: timestamp,
+});
+
+export const getMyTokenSpec = {
+  method: 'GET',
+  path: '/_pb/me/tokens/:token',
+  boundary: 'self',
+  permission: null,
+  api: {
+    operationId: 'getMyToken',
+    summary: 'Get a personal access token',
+    tags: ['tokens'],
+    params: tokenParams,
+    responses: { 200: tokenResponse },
+  },
+} as const satisfies ApiRouteSpec;
+
+export const getProjectTokenSpec = {
+  method: 'GET',
+  path: '/_pb/projects/:project/tokens/:token',
+  boundary: 'project',
+  permission: 'project:tokens:read',
+  api: {
+    operationId: 'getProjectToken',
+    summary: 'Get a project token',
+    tags: ['tokens'],
+    params: projectTokenParams,
+    responses: { 200: tokenResponse },
+  },
+} as const satisfies ApiRouteSpec;
+
+export const getTokenSpec = {
+  method: 'GET',
+  path: '/_pb/tokens/:token',
+  boundary: 'organization',
+  permission: 'org:tokens:read',
+  api: {
+    operationId: 'getToken',
+    summary: 'Get an organization token',
+    tags: ['tokens'],
+    params: tokenParams,
+    responses: { 200: tokenResponse },
+  },
+} as const satisfies ApiRouteSpec;
+
+export const rotateProjectTokenSpec = {
+  method: 'POST',
+  path: '/_pb/projects/:project/tokens/:token/rotate',
+  boundary: 'project',
+  permission: 'project:tokens:create',
+  service: 'ServiceTokenError',
+  api: {
+    operationId: 'rotateProjectToken',
+    summary: 'Rotate a project service token',
+    tags: ['tokens'],
+    params: projectTokenParams,
+    body: rotateBody,
+    responses: { 201: rotatedResponse, 409: null, 422: null },
+  },
+} as const satisfies ApiRouteSpec;
+
+export const rotateTokenSpec = {
+  method: 'POST',
+  path: '/_pb/tokens/:token/rotate',
+  boundary: 'organization',
+  permission: 'org:service-principals:write',
+  service: 'ServiceTokenError',
+  api: {
+    operationId: 'rotateToken',
+    summary: 'Rotate an organization service token',
+    tags: ['tokens'],
+    params: tokenParams,
+    body: rotateBody,
+    responses: { 201: rotatedResponse, 409: null, 422: null },
+  },
+} as const satisfies ApiRouteSpec;
+
 export const TOKEN_API_SPECS = [
   createPersonalTokenSpec,
   createProjectTokenSpec,
@@ -222,4 +308,12 @@ export const TOKEN_API_SPECS = [
   revokeMyTokenSpec,
   revokeProjectTokenSpec,
   revokeTokenSpec,
+] as const;
+
+export const TOKEN_DETAIL_API_SPECS = [
+  getMyTokenSpec,
+  getProjectTokenSpec,
+  getTokenSpec,
+  rotateProjectTokenSpec,
+  rotateTokenSpec,
 ] as const;

@@ -11,6 +11,7 @@ import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { createServer, type Server } from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { getRequestListener } from '@hono/node-server';
 import { createAuthModule, type AuthModule } from '@package-broker/core/auth/module';
 import type { SessionService } from '@package-broker/core/auth/session';
@@ -158,6 +159,7 @@ import {
   createIngestSessions,
   createIngestSessionWriteGuard,
 } from '@package-broker/db-sqlite/repositories/ingest-session';
+import { createPackageIdReads } from '@package-broker/db-sqlite/repositories/package-id';
 import { createRegistryReads } from '@package-broker/db-sqlite/repositories/registry-reads';
 import { createRepresentationClock } from '@package-broker/db-sqlite/repositories/representation-clock';
 import { createSourceRepository } from '@package-broker/db-sqlite/repositories/source';
@@ -537,6 +539,7 @@ function assembleRegistry(input: {
   readonly observability: Observability;
   readonly deploymentId: string;
   readonly findOrganization: () => Promise<OrganizationIdentity | null>;
+  readonly ingestScope: AsyncLocalStorage<Observability>;
 }): RegistryAssembly {
   const { options, seams, executor, auth, platform, observability } = input;
   const { config } = options;
@@ -634,10 +637,18 @@ function assembleRegistry(input: {
         sessions,
         existing: createExistingVersionsReader(executor),
         finalizer: createIngestFinalizer(executor),
-        observability,
+        observability: {
+          log: (record) => (input.ingestScope.getStore() ?? observability).log(record),
+        },
       },
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential: credentials.forSource,
+    },
+    sync: {
+      packageId: createPackageIdReads(executor).packageId,
+      upstreamState: createUpstreamStateRepository(executor),
+      executor,
+      writeGuard: (ctx, session, job) => createIngestSessionWriteGuard(ctx, session, job),
     },
     dist: {
       leases: createFetchLeases(executor),
@@ -712,6 +723,7 @@ export function createNodeServer(
   const importJobs = createImportJobHolder();
   const patJobs = createPatJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;
+  const ingestScope = new AsyncLocalStorage<Observability>();
   const application = (async () => {
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
@@ -740,6 +752,36 @@ export function createNodeServer(
               },
             ),
           }),
+      });
+    }
+    function registerIngestJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+      return registerCoreJob({
+        ...definition,
+        handler: (payload, context) => {
+          const observability = createObservability(
+            options.observability?.sink ?? {
+              emit: (record) => {
+                if (record.kind === 'log') log({ ...record.record });
+              },
+            },
+            {
+              deploymentId: options.observability?.deploymentId ?? 'unconfigured',
+              runtime: 'node',
+              requestId: null,
+              plugin: 'core',
+              jobId: context.jobId,
+              attempt: context.attempt,
+            },
+            {
+              events: new Set([...INGEST_EVENTS]),
+              reasonCodes: INGEST_REASON_CODES,
+              routeTemplates: new Set(),
+            },
+          );
+          return ingestScope.run(observability, () =>
+            definition.handler(definition.validate(payload), { ...context, observability }),
+          );
+        },
       });
     }
     const reads = options.executor === undefined ? undefined : buildPackageReads(executor);
@@ -773,6 +815,7 @@ export function createNodeServer(
             ),
             deploymentId,
             findOrganization: bootstrap.findSingleton,
+            ingestScope,
           });
     drainRegistry = registry?.drain;
     const packageResolver = registry?.module.visibilityPort ?? reads?.resolver;
@@ -784,6 +827,9 @@ export function createNodeServer(
           : [
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+              ...(registry?.module.packageSyncJob === undefined
+                ? []
+                : [registerIngestJob(registry.module.packageSyncJob)]),
               ...(auth === undefined ? [] : importJobRegistrations(importJobs)),
               ...(auth === undefined ? [] : patOffboardingRegistrations(executor, patJobs, log)),
             ],

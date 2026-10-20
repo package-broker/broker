@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { CatalogueReader, EdgeRow } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { createCatalogueReader } from '../repositories/catalogue.js';
+import { forgedItFor, withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { seedTwoOrganizations } from './two-organizations.js';
 
 export interface OpenedCatalogueDatabase {
@@ -175,6 +176,10 @@ async function write(executor: SqlExecutor, statements: readonly Statement[]): P
   for (let i = 0; i < statements.length; i += 50) {
     await executor.batch(statements.slice(i, i + 50));
   }
+}
+
+async function writeForged(executor: SqlExecutor, statements: readonly Statement[]): Promise<void> {
+  await withForeignKeysOff(executor, () => write(executor, statements));
 }
 
 function seedStatements(a: string, b: string): Statement[] {
@@ -490,14 +495,14 @@ const isolationBetweenProjects: Case = (open, wrap) =>
 
 const forgedProjectPackage: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
-    await write(world.executor, forgeStatements(world.a.orgId).rows);
+    await writeForged(world.executor, forgeStatements(world.a.orgId).rows);
     await expectPrivateToB(world);
   });
 
 const forgedProjectSource: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
     const forged = forgeStatements(world.a.orgId);
-    await write(world.executor, [...forged.rows, ...forged.sources.slice(0, 1)]);
+    await writeForged(world.executor, [...forged.rows, ...forged.sources.slice(0, 1)]);
     await expectPrivateToB(world);
     const edgesForPb = await world.reader.pageEdges(world.a, { ...scope('PA'), limit: 200 });
     expect(edgesForPb.rows.map((row) => row.requirerKey)).not.toContain('m02-secret-b');
@@ -521,8 +526,8 @@ const forgedEcosystem: Case = (open, wrap) =>
 const otherOrganization: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
     const forged = forgeStatements(world.a.orgId);
-    await write(world.executor, [...forged.rows, ...forged.sources]);
-    await write(world.executor, [
+    await writeForged(world.executor, [...forged.rows, ...forged.sources]);
+    await writeForged(world.executor, [
       link(world.a.orgId, 'PO', 'K-m01'),
       attach(world.a.orgId, 'PO', 'S-O'),
     ]);
@@ -548,7 +553,7 @@ const otherOrganization: Case = (open, wrap) =>
     const listedA = await collections(world, world.a, 'PA');
     expect(listedA.listing.keys).toEqual([...VISIBLE_A]);
 
-    await write(world.executor, [
+    await writeForged(world.executor, [
       st(
         "UPDATE project_package SET org_id = ? WHERE project_id = 'PA' AND package_id = 'K-m01'",
         world.b.orgId,
@@ -583,7 +588,7 @@ const otherOrganization: Case = (open, wrap) =>
 
 const digestOnlyViaB: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
-    await write(world.executor, forgeStatements(world.a.orgId).rows);
+    await writeForged(world.executor, forgeStatements(world.a.orgId).rows);
     await write(world.executor, [attach(world.a.orgId, 'PA', 'S-PB')]);
     const seen: unknown[] = [await collections(world, world.a, 'PA')];
     for (const key of [...VISIBLE_A, ...FORGED_INTO_A]) {
@@ -626,7 +631,7 @@ const digestOnlyViaB: Case = (open, wrap) =>
 const forgedPackageOrganization: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
     const key = 'm08-org-b-package';
-    await write(world.executor, [
+    await writeForged(world.executor, [
       packageRow(world.b.orgId, 'K-org-b', 'S-O', key, { description: 'org-b-description' }),
       versionRow(world.a.orgId, 'V-org-b-package', 'K-org-b', '1.0.0', 2),
       tagRow(world.a.orgId, 'K-org-b', 'latest', 'V-org-b-package'),
@@ -657,7 +662,7 @@ const forgedPackageOrganization: Case = (open, wrap) =>
 
 const forgedVersionOrganization: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
-    await write(world.executor, [
+    await writeForged(world.executor, [
       versionRow(world.b.orgId, 'V-org-b-version', 'K-m01', '8.8.8', 7, {
         meta: '{"dependencies":{"org-b-dependency":"^1"}}',
       }),
@@ -713,7 +718,7 @@ const forgedBlobOrganization: Case = (open, wrap) =>
 
 const forgedDistTagOrganization: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
-    await write(world.executor, [tagRow(world.b.orgId, 'K-m01', 'org-b-tag', 'V-m01-100')]);
+    await writeForged(world.executor, [tagRow(world.b.orgId, 'K-m01', 'org-b-tag', 'V-m01-100')]);
     const q = ref('PA', 'm01-shared-lib');
     expect(await world.reader.lookupTag(world.a, { ...q, tag: 'org-b-tag' })).toBeNull();
     expect((await world.reader.distTags(world.a, q))?.tags).toEqual({ latest: '1.0.0' });
@@ -1215,7 +1220,7 @@ const historicalDistAfterStatusChange: Case = (open, wrap) =>
 
 const hiddenCursorAndDescriptionOracles: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
-    await write(world.executor, forgeStatements(world.a.orgId).rows);
+    await writeForged(world.executor, forgeStatements(world.a.orgId).rows);
     const r = world.reader;
     const hidden = 'm02-secret-b';
     const nonexistent = 'm02-secret-c';
@@ -1245,7 +1250,7 @@ const hiddenCursorAndDescriptionOracles: Case = (open, wrap) =>
 
 const uniformAbsence: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
-    await write(world.executor, forgeStatements(world.a.orgId).rows);
+    await writeForged(world.executor, forgeStatements(world.a.orgId).rows);
     const reference = json(await surface(world, world.a, 'PA', ABSENT_KEY));
     const hiddenKeys = [
       'm02-secret-b',
@@ -1326,7 +1331,13 @@ export const catalogueReadContractCases = {
 
 const TIMEOUT = 60_000;
 
-export function describeCatalogueReadContract(name: string, open: Open, wrap?: Wrap): void {
+export function describeCatalogueReadContract(
+  name: string,
+  open: Open,
+  wrap?: Wrap,
+  options: { readonly d1?: boolean } = {},
+): void {
+  const forgedIt = forgedItFor(options.d1 === true);
   const c = catalogueReadContractCases;
   describe(`catalogue read contract: ${name}`, () => {
     it(
@@ -1334,12 +1345,12 @@ export function describeCatalogueReadContract(name: string, open: Open, wrap?: W
       () => c.isolationBetweenProjects(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '2. a forged project_package row does not expose another project private package',
       () => c.forgedProjectPackage(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '3. forged project_package and project_source rows do not expose it either',
       () => c.forgedProjectSource(open, wrap),
       TIMEOUT,
@@ -1349,12 +1360,12 @@ export function describeCatalogueReadContract(name: string, open: Open, wrap?: W
       () => c.forgedEcosystem(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '5. another organization sees nothing, including through forged cross-organization rows',
       () => c.otherOrganization(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '6. a digest reachable only through project B appears nowhere for project A',
       () => c.digestOnlyViaB(open, wrap),
       TIMEOUT,
@@ -1404,7 +1415,7 @@ export function describeCatalogueReadContract(name: string, open: Open, wrap?: W
       () => c.versionStatuses(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '16. hidden, absent and unparseable keys produce identical results',
       () => c.uniformAbsence(open, wrap),
       TIMEOUT,
@@ -1414,12 +1425,12 @@ export function describeCatalogueReadContract(name: string, open: Open, wrap?: W
       () => c.missingSetupFails(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '18. an org-B package on an org-A source stays absent despite an org-A link and version',
       () => c.forgedPackageOrganization(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '19. an org-B version under an org-A package stays absent on every read surface',
       () => c.forgedVersionOrganization(open, wrap),
       TIMEOUT,
@@ -1429,7 +1440,7 @@ export function describeCatalogueReadContract(name: string, open: Open, wrap?: W
       () => c.forgedBlobOrganization(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '21. an org-B dist tag on an org-A package stays absent',
       () => c.forgedDistTagOrganization(open, wrap),
       TIMEOUT,
@@ -1444,7 +1455,7 @@ export function describeCatalogueReadContract(name: string, open: Open, wrap?: W
       () => c.historicalDistAfterStatusChange(open, wrap),
       TIMEOUT,
     );
-    it(
+    forgedIt(
       '24. hidden cursors and description-only search reveal no private package',
       () => c.hiddenCursorAndDescriptionOracles(open, wrap),
       TIMEOUT,

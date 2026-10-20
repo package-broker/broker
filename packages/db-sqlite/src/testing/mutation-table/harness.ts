@@ -1,6 +1,7 @@
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { TwoOrganizations } from '../../contract/two-organizations.js';
 import { openMigratedDatabase } from '../migrated-database.js';
+import { withForeignKeysOff } from '../foreign-keys-off.js';
 
 export interface CaseContext {
   readonly executor: SqlExecutor;
@@ -123,16 +124,21 @@ async function runCase(
   mutate: Mutator,
   mutateBatch: (statements: readonly Statement[]) => readonly Statement[] = (statements) =>
     statements,
+  foreignKeys = true,
 ): Promise<void> {
   const database = await openMigratedDatabase({ twoOrganizations: true });
   try {
     if (database.orgs === null) throw new Error('organizations were not seeded');
-    await contractCase.run({
-      executor: database.executor,
-      orgs: database.orgs,
-      mutate,
-      mutateBatch: (statements) => mutateBatch(statements.map((statement) => mutate(statement))),
-    });
+    const { executor, orgs } = database;
+    const run = () =>
+      contractCase.run({
+        executor,
+        orgs,
+        mutate,
+        mutateBatch: (statements) => mutateBatch(statements.map((statement) => mutate(statement))),
+      });
+    if (foreignKeys) await run();
+    else await withForeignKeysOff(executor, run);
   } finally {
     await database.close();
   }
@@ -171,6 +177,11 @@ export async function judge(
   } catch (error) {
     return { verdict: 'baseline-failed', detail: describeError(error) };
   }
+  try {
+    await runCase(contractCase, (statement) => statement, undefined, false);
+  } catch (error) {
+    return { verdict: 'baseline-failed', detail: `without foreign keys: ${describeError(error)}` };
+  }
   const total = countMatches(executed, predicate);
   if (total === 0 || options.strip === false) {
     return { verdict: 'not-reached', detail: 'the locator matched no executed statement' };
@@ -191,7 +202,7 @@ export async function judge(
     };
     const label = `copy ${String(copy + 1)} of ${String(total)}`;
     try {
-      await runCase(contractCase, mutate);
+      await runCase(contractCase, mutate, undefined, false);
     } catch (error) {
       if (isAssertion(error)) continue;
       return { verdict: 'errored', detail: `${label}: ${describeError(error)}` };
@@ -270,12 +281,18 @@ export function plantRepeatedDecision(
 
 export interface Seed {
   (sql: string, ...params: (string | number | null)[]): Promise<void>;
+  readonly forged: Seed;
 }
 
 export function seeder(executor: SqlExecutor): Seed {
-  return async (sql, ...params) => {
+  const insert = async (sql: string, ...params: (string | number | null)[]): Promise<void> => {
     await executor.batch([{ sql, params }]);
   };
+  const forged = (async (sql: string, ...params: (string | number | null)[]): Promise<void> => {
+    await withForeignKeysOff(executor, () => insert(sql, ...params));
+  }) as Seed;
+  (forged as { forged: Seed }).forged = forged;
+  return Object.assign(insert, { forged }) as Seed;
 }
 
 export function orgOf(context: CaseContext): {

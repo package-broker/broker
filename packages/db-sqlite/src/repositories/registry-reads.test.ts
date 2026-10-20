@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createRegistryReads } from './registry-reads.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 let database: MigratedDatabase;
 let ctx: OrgContext;
@@ -40,6 +41,11 @@ async function source(
   );
 }
 
+const forgedSeed =
+  <A extends unknown[], R>(seed: (...args: A) => Promise<R>) =>
+  (...args: A): Promise<R> =>
+    withForeignKeysOff(database.executor, () => seed(...args));
+
 async function name(
   id: string,
   sourceId: string,
@@ -51,6 +57,8 @@ async function name(
     [id, (options.org ?? ctx).orgId, sourceId, options.ecosystem ?? 'composer', pattern],
   );
 }
+
+const nameForged = forgedSeed(name);
 
 async function pkg(id: string, sourceId: string, packageName: string, org = ctx): Promise<void> {
   await exec(
@@ -192,7 +200,7 @@ describe('covers', () => {
 
   it('ignores a registered name of another organization on the same source id', async () => {
     await source('S1');
-    await name('RF', 'S1', 'acme/*', { org: other });
+    await nameForged('RF', 'S1', 'acme/*', { org: other });
     expect(await reads().covers(ctx, 'S1', 'acme/a')).toBe(false);
   });
 

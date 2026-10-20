@@ -15,7 +15,7 @@ const foreignName: ContractCase = {
       "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
       own.orgId,
     );
-    await seed(
+    await seed.forged(
       "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('R', ?, 'S', 'npm', '@acme/*')",
       foreign.orgId,
     );

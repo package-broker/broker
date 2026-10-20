@@ -5,6 +5,7 @@ import type { Sha256 } from '@package-broker/core/platform/blob';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
 import { distAttachStatements } from './catalogue-write-dist.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 const JOB_ID = '01J0JOB00000000000000000D1';
 const OWNER = '01J0WWWWWWWWWWWWWWWWWW0D01';
@@ -28,6 +29,9 @@ let guard: CatalogueWriteGuard;
 function stmt(sql: string, ...params: (string | number | null)[]): Statement {
   return { sql, params };
 }
+
+const batchForged = (statements: readonly Statement[]) =>
+  withForeignKeysOff(database.executor, () => database.executor.batch(statements));
 
 beforeEach(async () => {
   database = await openMigratedDatabase({ twoOrganizations: true });
@@ -359,9 +363,7 @@ describe('distAttachStatements', () => {
   });
 
   it('does not advance a foreign package referenced by an own version', async () => {
-    await database.executor.batch([
-      stmt('UPDATE package SET org_id = ? WHERE id = ?', other.orgId, PACKAGE),
-    ]);
+    await batchForged([stmt('UPDATE package SET org_id = ? WHERE id = ?', other.orgId, PACKAGE)]);
     const before = await state();
     expect((await attach()).changed).toBe(true);
     expect((await state()).rev).toBe(before.rev);

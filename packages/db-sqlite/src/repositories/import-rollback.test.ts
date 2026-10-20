@@ -1029,10 +1029,14 @@ describe('import rollback store', () => {
     for (const entity of Object.values(ROLLBACK_ENTITIES).filter((e) => e.deletable)) {
       const declared = new Set(entity.dependents.map(([table, column]) => `${table}.${column}`));
       for (const { name } of tables) {
-        for (const fk of await rows<{ table: string; from: string }>(
-          `SELECT "table", "from" FROM pragma_foreign_key_list('${name}')`,
-        )) {
+        const keys = await rows<{ id: number; table: string; from: string }>(
+          `SELECT "id", "table", "from" FROM pragma_foreign_key_list('${name}')`,
+        );
+        for (const fk of keys) {
           if (fk.table !== entity.table) continue;
+          if (fk.from === 'org_id' && keys.some((other) => other.id === fk.id && other !== fk)) {
+            continue;
+          }
           const key = `${name}.${fk.from}`;
           expect(declared.has(key) || owned.has(key), `${entity.table} <- ${key}`).toBe(true);
         }

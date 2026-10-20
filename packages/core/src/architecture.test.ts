@@ -1149,3 +1149,50 @@ describe('core-only access context', () => {
     });
   }
 });
+
+describe('db-sqlite testing and contract kits', () => {
+  const KIT = /^packages\/db-sqlite\/src\/(testing|contract)\//;
+  const KIT_TARGET = /^packages\/db-sqlite\/src\/(testing|contract)\//;
+
+  function testingImports(file: string, text: string): string[] {
+    if (KIT.test(file) || file.endsWith('.test.ts')) return [];
+    const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+    return collectSpecifiers(sourceFile).flatMap(({ specifier, position }) => {
+      const line = sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+      const resolved = specifier.startsWith('.')
+        ? path.posix.join(path.posix.dirname(file), specifier)
+        : specifier;
+      const viaPackage = /^@package-broker\/db-sqlite\/(testing|contract)\//.test(specifier);
+      return KIT_TARGET.test(resolved) || viaPackage ? [`${file}:${line}: ${specifier}`] : [];
+    });
+  }
+
+  it('flags a production file that imports from src/testing or src/contract', () => {
+    const text = "import { withForeignKeysOff } from './testing/foreign-keys-off.js';";
+    expect(testingImports('packages/db-sqlite/src/a.ts', text)).toEqual([
+      'packages/db-sqlite/src/a.ts:1: ./testing/foreign-keys-off.js',
+    ]);
+    expect(testingImports('packages/db-sqlite/src/repositories/a.ts', text)).toEqual([]);
+    expect(
+      testingImports(
+        'packages/db-sqlite/src/repositories/a.ts',
+        "import { x } from '../testing/foreign-keys-off.js';",
+      ),
+    ).toHaveLength(1);
+    expect(
+      testingImports(
+        'packages/db-sqlite/src/b.ts',
+        "export * from './contract/org-key-contract.js';",
+      ),
+    ).toEqual(['packages/db-sqlite/src/b.ts:1: ./contract/org-key-contract.js']);
+    expect(testingImports('packages/db-sqlite/src/contract/a.ts', text)).toEqual([]);
+    expect(testingImports('packages/db-sqlite/src/a.test.ts', text)).toEqual([]);
+  });
+
+  it('db-sqlite production files do not import from src/testing or src/contract', () => {
+    const violations = sourceFiles('db-sqlite').flatMap((file) =>
+      testingImports(file, readFileSync(path.join(REPO_ROOT, file), 'utf8')),
+    );
+    expect(violations).toEqual([]);
+  });
+});

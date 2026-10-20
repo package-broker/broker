@@ -15,6 +15,7 @@ import { migrate, MigrationApplyError, MigrationChecksumError } from '../migrati
 import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
 import { countCalls } from './count-calls.js';
 import type { OpenedExecutor } from './executor-contract.js';
+import { describeOrgKeyContract } from './org-key-contract.js';
 
 export interface OpenedPair extends OpenedExecutor {
   second(): Promise<ScalarSqlExecutor>;
@@ -737,6 +738,7 @@ export function describeMigrationContract(
   name: string,
   open: () => Promise<OpenedPair>,
   core0001: () => Promise<MigrationSource>,
+  options: { readonly d1?: boolean } = {},
 ): void {
   describe(`migration contract: ${name}`, () => {
     it('1. applies the real 0001_init.sql: 37 tables, one bookkeeping row, lock free', async () => {
@@ -1414,4 +1416,6 @@ export function describeMigrationContract(
       });
     });
   });
+
+  describeOrgKeyContract(name, open, options);
 }

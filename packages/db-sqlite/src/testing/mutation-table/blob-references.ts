@@ -33,8 +33,14 @@ async function seedBlobRow(seed: Seed, id: string, orgId: string, sha: string): 
 
 async function seedBlobRef(seed: Seed, blobId: string, key: string, ref: BlobRef): Promise<void> {
   await seedSource(seed, `S-${key}`, ref.sourceOrg, 'vcs');
-  await seedPackage(seed, `K-${key}`, ref.packageOrg, `S-${key}`, `acme/${key.toLowerCase()}`);
-  await seed(
+  await seedPackage(
+    seed.forged,
+    `K-${key}`,
+    ref.packageOrg,
+    `S-${key}`,
+    `acme/${key.toLowerCase()}`,
+  );
+  await seed.forged(
     `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, tombstoned_at)
       VALUES (?, ?, ?, '1.0.0', '1.0.0', ?, 'upstream', '{}', ?, 'tombstoned', ?)`,
     `V-${key}`,
@@ -117,7 +123,7 @@ const blobsEligibleForRetention: ContractCase = {
       OLD,
       OLD,
     );
-    await seedPackage(seed, 'K-UP', foreign.orgId, 'S-ING', 'acme/up');
+    await seedPackage(seed.forged, 'K-UP', foreign.orgId, 'S-ING', 'acme/up');
     await seed(
       `INSERT INTO upstream_state (org_id, package_id, form, content_sha256, checked_at, fresh_until)
         VALUES (?, 'K-UP', 'composer-p2', ?, ?, ?)`,

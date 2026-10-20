@@ -16,6 +16,7 @@ If you are changing something in the first column, read its role in the second f
 | `packages/runtime-node`       | Node runtime: HTTP entry                                                         |
 | `packages/cli`                | The `pb` command: build composition, migrations, bootstrap and admin tooling     |
 | `packages/ui`                 | Static UI assets                                                                 |
+| `packages/ui-assets`          | Build-time bridge that hands the UI assets to `pb build`                         |
 | `packages/plugin-github`      | GitHub source plugin (stub)                                                      |
 | `packages/plugin-sso-oidc`    | Generic OIDC single sign-on plugin (stub)                                        |
 | `broker.config.ts`            | Root build configuration consumed by `pnpm bundle`                               |

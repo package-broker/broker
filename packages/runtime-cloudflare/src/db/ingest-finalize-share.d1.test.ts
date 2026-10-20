@@ -160,8 +160,11 @@ async function versionSession(executor: SqlExecutor, marked: number, total: numb
   return { ctx, handle };
 }
 
-const activeVersions = (executor: SqlExecutor) =>
-  executor.all({ sql: "SELECT count(*) AS n FROM version WHERE status = 'active'", params: [] });
+const activeVersions = (executor: SqlExecutor, orgId: string) =>
+  executor.all({
+    sql: "SELECT count(*) AS n FROM version WHERE status = 'active' AND org_id = ?",
+    params: [orgId],
+  });
 
 describe('D1 version finalize mass-removal share', () => {
   it('refuses an above-share version listing even when the evidence understates it', async () => {
@@ -171,7 +174,7 @@ describe('D1 version finalize mass-removal share', () => {
       status: 'refused',
       reason: 'mass_absence',
     });
-    expect(await activeVersions(executor)).toEqual([{ n: 10 }]);
+    expect(await activeVersions(executor, ctx.orgId)).toEqual([{ n: 10 }]);
   }, 120_000);
 
   it('completes at exactly 25 percent unseen and removes only those', async () => {
@@ -180,6 +183,6 @@ describe('D1 version finalize mass-removal share', () => {
     expect(await createIngestFinalizer(executor).finalize(ctx, handle, input(3))).toMatchObject({
       status: 'complete',
     });
-    expect(await activeVersions(executor)).toEqual([{ n: 3 }]);
+    expect(await activeVersions(executor, ctx.orgId)).toEqual([{ n: 3 }]);
   }, 120_000);
 });

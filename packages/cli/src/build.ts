@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
 import { brokerObservabilityProblems } from '@package-broker/core/config';
 import { validatePlatformPorts } from '@package-broker/core/platform/port-config';
@@ -14,6 +14,7 @@ import {
 import type { PackageVisibilityPort } from '@package-broker/core/db/catalogue';
 import type { Platform, PluginDefinition } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
+import { AssetProblemsError, prepareAssets, stageAssets } from './build-assets.js';
 import {
   credentialProblems,
   describePlatformPorts,
@@ -30,7 +31,13 @@ import {
   renderManifestJson,
   validatePluginShape,
 } from './manifest.js';
-import { collectMigrations, defaultResolvePackageDir } from './migrations-collect.js';
+import {
+  collectMigrations,
+  defaultResolvePackageDir,
+  type ResolvePackageDir,
+} from './migrations-collect.js';
+
+const DB_SQLITE_PACKAGE = '@package-broker/db-sqlite';
 
 export interface BuildOptions {
   configPath: string;
@@ -75,9 +82,10 @@ export class BuildConfigError extends Error {
 }
 
 async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig> {
-  const scratch = path.join(cwd, '.pb', 'config');
   const outfile = path.join(
-    scratch,
+    cwd,
+    '.pb',
+    'config',
     `${createHash('sha256').update(configPath).digest('hex').slice(0, 12)}.mjs`,
   );
   await esbuild({
@@ -86,8 +94,24 @@ async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig
     bundle: true,
     format: 'esm',
     platform: 'node',
-    packages: 'external',
     logLevel: 'silent',
+    plugins: [
+      {
+        name: 'config-dir-externals',
+        setup(pluginBuild) {
+          pluginBuild.onResolve({ filter: /^[^./]/ }, async (args) => {
+            if (args.pluginData === 'config-dir') return undefined;
+            const resolved = await pluginBuild.resolve(args.path, {
+              kind: args.kind,
+              resolveDir: args.resolveDir,
+              pluginData: 'config-dir',
+            });
+            if (resolved.errors.length > 0) return { errors: resolved.errors };
+            return { path: resolved.external ? args.path : resolved.path, external: true };
+          });
+        },
+      },
+    ],
   });
   try {
     const loaded = (await import(`${pathToFileURL(outfile).href}`)) as { default?: BrokerConfig };
@@ -98,11 +122,8 @@ async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig
   }
 }
 
-async function readVersion(packageName: string, cwd: string): Promise<string> {
-  const require = createRequire(path.join(cwd, 'package.json'));
-  const pkg = JSON.parse(
-    await readFile(require.resolve(`${packageName}/package.json`), 'utf8'),
-  ) as {
+async function readPackageVersion(packageDir: string): Promise<string> {
+  const pkg = JSON.parse(await readFile(path.join(packageDir, 'package.json'), 'utf8')) as {
     version: string;
   };
   return pkg.version;
@@ -171,7 +192,38 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       `warning: no platformPorts stanza for ${target}; blob, cache, jobs and observability ports are disabled`,
     );
   }
-  const sources = await collectMigrations(plugins, defaultResolvePackageDir(cwd));
+  const configDir = path.dirname(configPath);
+  const resolveFromConfig = defaultResolvePackageDir(configDir);
+  const resolveFromCli = defaultResolvePackageDir(path.dirname(fileURLToPath(import.meta.url)));
+  const resolvePackageDir: ResolvePackageDir = (packageName) => {
+    if (packageName === DB_SQLITE_PACKAGE) return resolveFromCli(packageName);
+    try {
+      return resolveFromConfig(packageName);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'MODULE_NOT_FOUND' && code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+      const owners = plugins
+        .filter((plugin) => plugin.package === packageName)
+        .map((plugin) => `plugin "${plugin.id}": `)
+        .join('');
+      throw new BuildDiagnosticsError([
+        `${owners}package "${packageName}" could not be resolved from the config location`,
+      ]);
+    }
+  };
+  const versions = new Map<string, string>();
+  for (const plugin of plugins) {
+    versions.set(plugin.package, await readPackageVersion(resolvePackageDir(plugin.package)));
+  }
+  const coreVersion = await readPackageVersion(resolveFromCli('@package-broker/core'));
+  const sources = await collectMigrations(plugins, resolvePackageDir);
+  let assets;
+  try {
+    assets = await prepareAssets({ config, configPath, target });
+  } catch (error) {
+    if (error instanceof AssetProblemsError) throw new BuildDiagnosticsError(error.problems);
+    throw error;
+  }
 
   const outDir = path.resolve(cwd, options.outDir ?? path.join('.pb', target));
   const generated = path.join(outDir, 'generated');
@@ -185,10 +237,6 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     await mkdir(ownerDir, { recursive: true });
     await writeFile(path.join(ownerDir, `${source.name}.sql`), source.sql);
   }
-
-  const versions = new Map<string, string>();
-  for (const plugin of plugins)
-    versions.set(plugin.package, await readVersion(plugin.package, cwd));
 
   const manifestTs = path.join(generated, 'manifest.ts');
   const manifestJson = path.join(generated, 'manifest.json');
@@ -237,7 +285,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     renderBuildInfo({
       schemaVersion: 1,
       target,
-      core: await readVersion('@package-broker/core', cwd),
+      core: coreVersion,
       plugins: Object.fromEntries(versions),
       lockfileSha256,
       gitSha: process.env.GITHUB_SHA ?? null,
@@ -266,6 +314,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     logLevel: 'silent',
   });
   await writeFile(path.join(outDir, 'metafile.json'), JSON.stringify(result.metafile));
+  try {
+    await stageAssets(outDir, assets);
+  } catch (error) {
+    if (error instanceof AssetProblemsError) throw new BuildDiagnosticsError(error.problems);
+    throw error;
+  }
 
   return {
     outDir,

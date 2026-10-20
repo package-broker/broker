@@ -976,7 +976,7 @@ describe('package sync: provider faults never remove and never drop the job', ()
     }
   });
 
-  it.fails.each(faults.filter(([name]) => silent.has(name)))(
+  it.each(faults.filter(([name]) => silent.has(name)))(
     '%s retries or continues instead of ending the job silently',
     async (...fault) => {
       const kept = await run(fault);

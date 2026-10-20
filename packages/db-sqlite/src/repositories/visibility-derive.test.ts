@@ -11,6 +11,7 @@ import {
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { admissionCondition, col } from './catalogue-predicates.js';
 import { rederiveStatements, type DeriveScope } from './visibility-derive.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 interface Row {
   readonly orgId: string;
@@ -182,6 +183,8 @@ describe('rederiveStatements invariants', () => {
   async function exec(text: string, params: (string | number | null)[] = []): Promise<void> {
     await database.executor.batch([{ sql: text, params }]);
   }
+  const execForged = (text: string, params: (string | number | null)[] = []) =>
+    withForeignKeysOff(database.executor, () => exec(text, params));
 
   async function setup(orgId: string, suffix: string, status = 'active'): Promise<void> {
     await exec('INSERT INTO project (id, org_id, slug, name, status) VALUES (?, ?, ?, ?, ?)', [
@@ -374,9 +377,10 @@ describe('rederiveStatements invariants', () => {
       "INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, 'P1', 'S1', 100)",
       [ctx.orgId],
     );
-    await exec(
+    const foreignOrgId = database.orgs.b.orgId;
+    await execForged(
       "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('M', ?, 'P1', 'S1', 'acme/*', 'include')",
-      [database.orgs.b.orgId],
+      [foreignOrgId],
     );
     await rederive(database, ctx, { kind: 'package', packageId: 'K-1' });
     expect(await rows(database)).toEqual([

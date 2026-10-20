@@ -32,7 +32,7 @@ const proxyShadowedByForeignPackage: ContractCase = {
     await seedSource(seed, 'S-PROXY', own.orgId, 'packagist_proxy');
     await seedSource(seed, 'S-FOREIGN', own.orgId, 'vcs');
     await seedPackage(seed, 'K-PROXY', own.orgId, 'S-PROXY', 'acme/a');
-    await seedPackage(seed, 'K-FOREIGN', foreign.orgId, 'S-FOREIGN', 'acme/a');
+    await seedPackage(seed.forged, 'K-FOREIGN', foreign.orgId, 'S-FOREIGN', 'acme/a');
     expect(
       await ids(
         context,
@@ -52,7 +52,7 @@ const proxyShadowedByForeignSource: ContractCase = {
     await seedSource(seed, 'S-PROXY', own.orgId, 'packagist_proxy');
     await seedSource(seed, 'S-FOREIGN', foreign.orgId, 'vcs');
     await seedPackage(seed, 'K-PROXY', own.orgId, 'S-PROXY', 'acme/a');
-    await seedPackage(seed, 'K-ODD', own.orgId, 'S-FOREIGN', 'acme/a');
+    await seedPackage(seed.forged, 'K-ODD', own.orgId, 'S-FOREIGN', 'acme/a');
     expect(
       await ids(
         context,
@@ -76,7 +76,7 @@ function admissionCase(alias: (typeof admissionAliases)[number]): ContractCase {
       await seedSource(seed, 'S1', own.orgId, 'vcs');
       await seedPackage(seed, 'K1', own.orgId, 'S1', 'acme/a');
       const pattern = async (id: string, orgId: string, text: string, effect: string) => {
-        await seed(
+        await seed.forged(
           'INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES (?, ?, ?, ?, ?, ?)',
           id,
           orgId,
@@ -160,7 +160,7 @@ function attachedCase(mismatched: 'attachment' | 'source' | 'project'): Contract
       const { own, foreign } = orgOf(context);
       await seedProject(seed, 'P1', mismatched === 'project' ? foreign.orgId : own.orgId);
       await seedSource(seed, 'S1', mismatched === 'source' ? foreign.orgId : own.orgId, 'vcs');
-      await seed(
+      await seed.forged(
         'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
         mismatched === 'attachment' ? foreign.orgId : own.orgId,
         'P1',
@@ -212,7 +212,7 @@ function visibleRowsCase(mismatched: 'pp' | 'pkg' | 'src' | 'ps'): ContractCase 
       await seedSource(seed, 'S-GUARD', own.orgId, 'vcs');
       await seedSource(seed, 'S-OUTER', mismatched === 'src' ? foreign.orgId : own.orgId, 'vcs');
       await seedPackage(
-        seed,
+        seed.forged,
         'K1',
         mismatched === 'pkg' ? foreign.orgId : own.orgId,
         'S-GUARD',
@@ -224,13 +224,13 @@ function visibleRowsCase(mismatched: 'pp' | 'pkg' | 'src' | 'ps'): ContractCase 
         'P1',
         'S-GUARD',
       );
-      await seed(
+      await seed.forged(
         'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
         mismatched === 'ps' ? foreign.orgId : own.orgId,
         'P1',
         'S-OUTER',
       );
-      await seed(
+      await seed.forged(
         "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
         mismatched === 'pp' ? foreign.orgId : own.orgId,
         'P1',

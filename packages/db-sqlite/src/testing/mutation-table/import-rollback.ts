@@ -506,7 +506,7 @@ const bump: ContractCase = {
     await seedAuthority(seed, own);
     await seedRun(seed, own, RUN);
     await seedEntities(seed, foreign, 'foreign');
-    await seed(
+    await seed.forged(
       "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json) VALUES ('own-version', ?, 'foreign-package', '2.0.0', '2.0.0', ?, 'source_release', '{}')",
       own.orgId,
       NOW,

@@ -175,6 +175,92 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+it.each([
+  [undefined, 300_000],
+  ['480000', 480_000],
+] as const)(
+  'uses the migration timeout %s for requests and recovery reads',
+  async (configured, expected) => {
+    await writeBuiltInit(outDir, await realInit());
+    const { harness, close } = await createHarness();
+    const budgets = new WeakMap<AbortSignal, number>();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const signal = new AbortController().signal;
+      budgets.set(signal, ms);
+      return signal;
+    });
+    const requests: {
+      body: { sql?: string; batch?: ScalarStatement[] };
+      timeout: number | undefined;
+      recovery: boolean;
+    }[] = [];
+    let lost = false;
+    const send: typeof fetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { sql?: string; batch?: ScalarStatement[] };
+      requests.push({ body, timeout: budgets.get(init!.signal!), recovery: lost });
+      const response = await harness.fetch(input, init);
+      if (!lost && body.batch?.some((s) => s.sql.includes('CREATE TABLE organization'))) {
+        lost = true;
+        throw new TypeError('connection closed after commit');
+      }
+      return response;
+    };
+    const env = {
+      ...ENV,
+      ...(configured === undefined ? {} : { PB_D1_MIGRATION_TIMEOUT_MS: configured }),
+    };
+    try {
+      const result = await migrateCloudflare({
+        databaseId: DATABASE_ID,
+        outDir,
+        dryRun: false,
+        env,
+        fetch: send,
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(lost).toBe(true);
+      expect(requests.some((r) => r.body.batch !== undefined)).toBe(true);
+      expect(requests.some((r) => r.recovery && r.body.sql?.includes('schema_migration'))).toBe(
+        true,
+      );
+      expect(requests.map((r) => r.timeout)).toEqual(requests.map(() => expected));
+
+      requests.length = 0;
+      const bootstrapResult = await bootstrapCloudflare({
+        databaseId: DATABASE_ID,
+        slug: 'demo',
+        name: 'Demo',
+        env,
+        fetch: send,
+      });
+      expect(bootstrapResult.exitCode).toBe(0);
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.map((r) => r.timeout)).toEqual(requests.map(() => 35_000));
+    } finally {
+      await close();
+    }
+  },
+);
+
+it.each(['0', '-1', '1.5', '600001', 'NaN', 'Infinity', 'bad', ''])(
+  'rejects invalid migration timeout %j before sending requests',
+  async (timeout) => {
+    await writeBuiltInit(outDir, await realInit());
+    const send = vi.fn();
+    const result = await migrateCloudflare({
+      databaseId: DATABASE_ID,
+      outDir,
+      dryRun: false,
+      env: { ...ENV, PB_D1_MIGRATION_TIMEOUT_MS: timeout },
+      fetch: send,
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(send).not.toHaveBeenCalled();
+  },
+);
+
 it('1. applies core:0001_init once and skips it on the second run', async () => {
   await writeBuiltInit(outDir, await realInit());
   const { harness, close } = await createHarness();

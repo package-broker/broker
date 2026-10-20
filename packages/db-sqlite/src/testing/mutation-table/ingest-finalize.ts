@@ -34,14 +34,14 @@ async function fixture(context: CaseContext, foreignTable?: 'blob' | 'version' |
   const seed = seeder(context.executor);
   await seedSource(seed, 'S-FINAL', own.orgId, 'composer_repository');
   await seedPackage(
-    seed,
+    seed.forged,
     'P-FINAL',
     foreignTable === 'package' ? foreign.orgId : own.orgId,
     'S-FINAL',
     'acme/one',
   );
   await seedVersion(
-    seed,
+    seed.forged,
     'V-FINAL',
     foreignTable === 'version' ? foreign.orgId : own.orgId,
     'P-FINAL',

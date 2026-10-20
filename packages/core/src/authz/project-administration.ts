@@ -124,10 +124,7 @@ export interface ProjectAdministrationDeps {
   readonly onCreatorOffboarded?: AdministrationDeps['onCreatorOffboarded'];
   readonly onUserOffboarded?: AdministrationDeps['onUserOffboarded'];
   /** Runs after `onUserOffboarded` for the user a project revoke left without that project's access. */
-  readonly onProjectAccessLost?: (
-    ctx: OrgContext,
-    input: { readonly userId: string; readonly at: string },
-  ) => Promise<void> | void;
+  readonly onProjectAccessLost?: AdministrationDeps['onProjectAccessLost'];
   readonly grants: ProjectGrantStore;
   readonly providers: Pick<ReadonlyMap<string, unknown>, 'has'>;
   readonly providerAnchors: readonly ProviderAnchor[];

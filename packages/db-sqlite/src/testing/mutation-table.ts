@@ -1,3 +1,5 @@
+import { entries as selectedPatInvalidationEntries } from './mutation-table/selected-pat-invalidation.js';
+import { entries as accessLossEntries } from './mutation-table/access-loss.js';
 import { entries as identityBlockEntries } from './mutation-table/identity-block.js';
 import { entries as loginEntries } from './mutation-table/login.js';
 import { entries as localLoginSuccessEntries } from './mutation-table/local-login-success.js';
@@ -94,6 +96,8 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...selectedPatInvalidationEntries,
+  ...accessLossEntries,
   ...identityBlockEntries,
   ...loginEntries,
   ...localLoginSuccessEntries,

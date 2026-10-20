@@ -306,7 +306,7 @@ async function assembleAccess(
   const ids = { ulid };
 
   const module = createAuthModule({
-    repositories: createAuthRepositories(executor),
+    repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
     keyring: auth.keyring,
     clock: systemClock,
     ids,
@@ -357,7 +357,10 @@ async function assembleAccess(
     sessions: module.sessions,
     projects: createProjectService({ projects: projectRepository, ...common }),
     projectGrants: createProjectAdministration({
-      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      grants: wired(
+        'project grant repository',
+        createProjectGrantRepository(executor, { ...tokens.offboarding, log }),
+      ),
       providers,
       providerAnchors: anchorList,
       ...tokens.offboarding,

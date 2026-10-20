@@ -408,7 +408,7 @@ async function buildAuth(
   const ids = { ulid };
   await verifyMasterKey(keyring, executor, env, log);
   const auth = createAuthModule({
-    repositories: createAuthRepositories(executor),
+    repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
     keyring,
     clock: systemClock,
     ids,
@@ -459,7 +459,10 @@ async function buildAuth(
     sessions: auth.sessions,
     projects: createProjectService({ projects: projectRepository, ...common }),
     projectGrants: createProjectAdministration({
-      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      grants: wired(
+        'project grant repository',
+        createProjectGrantRepository(executor, { ...tokens.offboarding, log }),
+      ),
       providers,
       providerAnchors: anchorList,
       ...tokens.offboarding,

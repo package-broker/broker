@@ -534,7 +534,8 @@ async function attempts(
  * shared across packages through `documents`. A lazy provider is read only for names in the
  * source selection. Versions are kept by the object's own `name`, as Composer does, and nothing is
  * yielded before the digest is known. Without a lazy lookup, an unlisted name is definitive only
- * in a complete, non-empty index; names outside the source selection are a caller decision.
+ * in a complete, non-empty index. Names outside the source selection are non-definitive, and
+ * callers filter unselected names before planning.
  */
 export async function describeComposerV1(
   fetch: PolicyFetch,
@@ -575,7 +576,7 @@ export async function describeComposerV1(
       return parsed === undefined || parsed === null ? parsed : found(key, parsed);
     }, signal);
   }
-  if (!isSelected(key, options.selection)) return { kind: 'not_found', definitive: true };
+  if (!isSelected(key, options.selection)) return { kind: 'not_found', definitive: false };
   if (root.providersLazyUrl === undefined) {
     return { kind: 'not_found', definitive: index?.complete === true && index.entries.size > 0 };
   }

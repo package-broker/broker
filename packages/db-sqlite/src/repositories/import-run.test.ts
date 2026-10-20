@@ -538,7 +538,11 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
                   type:
                     operation === 'requestApply' ? IMPORT_RUN_JOB.apply : IMPORT_RUN_JOB.rollback,
                   resource_key: IMPORT_RUN_JOB.resourceKey('run'),
-                  payload_json: JSON.stringify(IMPORT_RUN_JOB.payload('run')),
+                  payload_json: JSON.stringify(
+                    operation === 'requestApply'
+                      ? IMPORT_RUN_JOB.payload('run')
+                      : { ...IMPORT_RUN_JOB.payload('run'), requestedBy: fence.userId },
+                  ),
                 },
               ]
             : [],
@@ -632,6 +636,31 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
       expect(await lifecycleRow()).toEqual(before);
       expect(await jobs()).toEqual([]);
     }
+  });
+
+  it('enqueues the rollback job with the requesting user and the apply job with the run only', async () => {
+    await seedLifecycle('applied', now);
+    expect(await store.requestRollback(ctx, fence, audited(await write()))).toMatchObject({
+      ok: true,
+    });
+    expect(await jobs()).toEqual([
+      {
+        type: IMPORT_RUN_JOB.rollback,
+        resource_key: IMPORT_RUN_JOB.resourceKey('run'),
+        payload_json: JSON.stringify({ runId: 'run', requestedBy: fence.userId }),
+      },
+    ]);
+    await seedLifecycle('planned', now);
+    expect(await store.requestApply(ctx, fence, audited(await write()))).toMatchObject({
+      ok: true,
+    });
+    expect(await jobs()).toEqual([
+      {
+        type: IMPORT_RUN_JOB.apply,
+        resource_key: IMPORT_RUN_JOB.resourceKey('run'),
+        payload_json: JSON.stringify({ runId: 'run' }),
+      },
+    ]);
   });
 
   it('rejects malformed approvals at the store boundary and refuses them as apply evidence', async () => {

@@ -11,6 +11,8 @@ import type { OrganizationActor } from '../../authz/actor.js';
 import type { OrgContext } from '../../db/port.js';
 import type { OrganizationRepository } from '../../db/organization.js';
 import { isoTimestamp } from '../../ids.js';
+import { errorEnvelope, type ErrorEnvelope } from '../../envelope.js';
+import { jsonResponse } from '../response.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
 import {
   buildIdempotencyRecord,
@@ -29,6 +31,11 @@ import {
   createOrganizationTokenSpec,
   createPersonalTokenSpec,
   createProjectTokenSpec,
+  getMyTokenSpec,
+  getProjectTokenSpec,
+  getTokenSpec,
+  rotateProjectTokenSpec,
+  rotateTokenSpec,
   listMyTokensSpec,
   listProjectTokensSpec,
   listTokensSpec,
@@ -62,7 +69,9 @@ export interface TokenRouteDeps extends ApiRouteDeps {
 type IssueSpec =
   | typeof createPersonalTokenSpec
   | typeof createProjectTokenSpec
-  | typeof createOrganizationTokenSpec;
+  | typeof createOrganizationTokenSpec
+  | typeof rotateProjectTokenSpec
+  | typeof rotateTokenSpec;
 
 type ListQuery = {
   readonly limit?: string | undefined;
@@ -100,7 +109,7 @@ function listItem(item: TokenListItem) {
 }
 
 export function tokenRoutes(deps: TokenRouteDeps): readonly RouteDefinition[] {
-  const replays = new WeakMap<RequestContext, Response>();
+  const responses = new WeakMap<RequestContext, Response>();
 
   function selfContext(ctx: RequestContext): {
     readonly org: OrgContext;
@@ -145,7 +154,7 @@ export function tokenRoutes(deps: TokenRouteDeps): readonly RouteDefinition[] {
     const existing = await find();
     const decision = decideReplay(existing, hash, now);
     const replay = (record: IdempotencyRecord): { readonly outcome: ApiOutcome } => {
-      replays.set(ctx, replayResponse(record, ctx.requestId));
+      responses.set(ctx, replayResponse(record, ctx.requestId));
       return { outcome: { error: 'already_issued' } };
     };
     if (decision === 'replay' && existing !== null) return replay(existing);
@@ -249,6 +258,66 @@ export function tokenRoutes(deps: TokenRouteDeps): readonly RouteDefinition[] {
     return result.ok ? created(result.value) : { serviceError: result.error };
   }
 
+  function invalidRotation(
+    ctx: RequestContext,
+    code: 'invalid_overlap' | 'invalid_expiry' | 'invalid_name',
+  ): ApiOutcome {
+    const messages = {
+      invalid_overlap: 'Invalid overlap',
+      invalid_expiry: 'Invalid expiry',
+      invalid_name: 'Invalid name',
+    };
+    responses.set(ctx, jsonResponse(422, errorEnvelope(code, messages[code], ctx.requestId)));
+    return { error: 'invalid_request' };
+  }
+
+  async function rotateService(
+    spec: typeof rotateProjectTokenSpec | typeof rotateTokenSpec,
+    ctx: RequestContext,
+    tokenId: string,
+    routeProjectId: string | null,
+    context: ReturnType<typeof callContext>,
+    body: z.output<typeof rotateTokenSpec.api.body>,
+  ) {
+    const authenticated = await sessionOf(context.org, ctx, context.fence);
+    if (authenticated === null) return { error: 'unauthorized' } as const;
+    const settled = await settledIssue(spec, ctx, context.org, body, context.call, (call) =>
+      deps.tokens.service.rotate(
+        context.org,
+        authenticated,
+        context.actor,
+        context.fence,
+        { ...present(body), tokenId, routeProjectId },
+        call,
+      ),
+    );
+    if ('outcome' in settled) return settled.outcome;
+    const { result } = settled;
+    if (!result.ok) {
+      if (
+        result.error === 'invalid_overlap' ||
+        result.error === 'invalid_expiry' ||
+        result.error === 'invalid_name'
+      ) {
+        return invalidRotation(ctx, result.error);
+      }
+      return { serviceError: result.error };
+    }
+    return {
+      status: 201,
+      body: {
+        id: result.value.id,
+        token: result.value.plaintext,
+        replacedTokenId: result.value.replacedTokenId,
+        replacedExpiresAt: result.value.replacedExpiresAt,
+      },
+    };
+  }
+
+  function metadata(item: TokenListItem | null): ApiOutcome {
+    return item === null ? { error: 'not_found' } : { status: 200, body: listItem(item) };
+  }
+
   async function revoke(
     ctx: RequestContext,
     context: {
@@ -326,6 +395,50 @@ export function tokenRoutes(deps: TokenRouteDeps): readonly RouteDefinition[] {
         }),
       );
     }),
+    apiRoute(getMyTokenSpec, async ({ ctx, params }) => {
+      const context = selfContext(ctx);
+      if (context === null) return { error: 'unauthorized' };
+      return metadata(
+        await deps.reader.getOwn(
+          context.org,
+          context.userId,
+          params.token,
+          isoTimestamp(deps.clock.now()),
+        ),
+      );
+    }),
+    apiRoute(getProjectTokenSpec, async ({ ctx, params }) => {
+      if (ctx.org === null || ctx.projectId === null)
+        throw new TypeError('route requires a project context');
+      return metadata(
+        await deps.reader.getProject(
+          ctx.org,
+          ctx.projectId,
+          params.token,
+          isoTimestamp(deps.clock.now()),
+        ),
+      );
+    }),
+    apiRoute(getTokenSpec, async ({ ctx, params }) => {
+      if (ctx.org === null) throw new TypeError('route requires an organization context');
+      return metadata(
+        await deps.reader.getOrganization(ctx.org, params.token, isoTimestamp(deps.clock.now())),
+      );
+    }),
+    apiRoute(rotateProjectTokenSpec, ({ ctx, params, body }) => {
+      const context = projectSessionCallContext(ctx, deps);
+      return rotateService(
+        rotateProjectTokenSpec,
+        ctx,
+        params.token,
+        context.projectId,
+        context,
+        body,
+      );
+    }),
+    apiRoute(rotateTokenSpec, ({ ctx, params, body }) =>
+      rotateService(rotateTokenSpec, ctx, params.token, null, callContext(ctx, deps), body),
+    ),
     apiRoute(revokeMyTokenSpec, async ({ ctx, params }) => {
       const context = selfContext(ctx);
       if (context === null) return { error: 'unauthorized' };
@@ -356,11 +469,27 @@ export function tokenRoutes(deps: TokenRouteDeps): readonly RouteDefinition[] {
     ...route,
     handler: async (ctx) => {
       const response = await route.handler(ctx);
-      const replay = replays.get(ctx);
-      if (replay === undefined) return response;
-      replays.delete(ctx);
-      replay.headers.set('x-request-id', ctx.requestId);
-      return replay;
+      if (
+        response.status === 400 &&
+        route.method === 'POST' &&
+        (route.path === rotateProjectTokenSpec.path || route.path === rotateTokenSpec.path)
+      ) {
+        const body = (await response.clone().json()) as ErrorEnvelope;
+        if (body.error.details?.some((detail) => detail.path === '/body/overlapDays')) {
+          invalidRotation(ctx, 'invalid_overlap');
+        } else if (
+          body.error.details?.some(
+            (detail) => detail.path === '/body/expiresAt' || detail.path === '/body/lifetimeDays',
+          )
+        ) {
+          invalidRotation(ctx, 'invalid_expiry');
+        }
+      }
+      const custom = responses.get(ctx);
+      if (custom === undefined) return response;
+      responses.delete(ctx);
+      custom.headers.set('x-request-id', ctx.requestId);
+      return custom;
     },
   }));
 }

@@ -1367,30 +1367,41 @@ export function createWorker(
     });
     const authorization = options.authorization ?? auth?.authorization;
 
-    let assets: ReturnType<typeof createWorkersAssets> | undefined;
-    const uiAssets = () =>
-      (assets ??= createWorkersAssets(
+    type UiAssets = Awaited<ReturnType<typeof createWorkersAssets>>;
+    let assets: Promise<UiAssets | null> | undefined;
+    const uiAssets = () => {
+      if (assets !== undefined) return assets;
+      const pending: Promise<UiAssets | null> = createWorkersAssets(
         env?.ASSETS ?? { fetch: async () => new Response(null, { status: 404 }) },
-      ));
+      ).catch(() => {
+        if (assets === pending) assets = undefined;
+        log({ level: 'warn', event: 'ui.manifest_invalid' });
+        return null;
+      });
+      return (assets = pending);
+    };
     const ui = createUiRoutes(
       {
-        manifest: async () => (await uiAssets()).manifest(),
-        read: async (name) => (await uiAssets()).read(name),
+        manifest: async () => (await uiAssets())?.manifest() ?? null,
+        read: async (name) => (await uiAssets())?.read(name) ?? null,
       },
       { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
     );
-    const uiRoutes = [
-      ...ui,
-      {
-        method: 'GET' as const,
-        path: '/_pb/ui/manifest.json',
-        permission: null,
-        handler: async () =>
-          Response.json(await (await uiAssets()).manifest(), {
-            headers: { 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
-          }),
+    const uiRoutes = ui.map((route) => ({
+      ...route,
+      path: route.path.replace('/assets/:file', '/:file'),
+      handler: async (context: Parameters<typeof route.handler>[0]) => {
+        const manifest =
+          context.params['file'] === 'manifest.json' ? await (await uiAssets())?.manifest() : null;
+        return manifest
+          ? Response.json(manifest, {
+              headers: { 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
+            })
+          : route.handler(context);
       },
-    ].map((route) => ({ ...route, boundary: 'authenticated' as const, needsOrg: true }));
+      boundary: 'authenticated' as const,
+      needsOrg: true,
+    }));
     try {
       const kernel = await createKernel({
         platform: 'cloudflare',
@@ -1562,6 +1573,15 @@ export function createWorker(
       return inScope(application, ctx, async () => {
         try {
           const url = new URL(request.url);
+          if (url.pathname === '/_pb/ui') {
+            const response = await application.kernel.fetch(request, ctx);
+            if (response.status !== 200) return response;
+            url.pathname = '/_pb/ui/';
+            return new Response(null, {
+              status: 303,
+              headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
+            });
+          }
           if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request, ctx);
           url.pathname = '/_pb/ui';
           return await application.kernel.fetch(new Request(url, request), ctx);

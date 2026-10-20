@@ -139,6 +139,16 @@ describe('Node assets', () => {
     },
   );
 
+  it('reports a missing assets directory distinctly from an invalid manifest', async () => {
+    await expect(createNodeAssets(join(directory, 'absent'))).rejects.toMatchObject({
+      code: 'UI_ASSETS_ABSENT',
+    });
+    await fs.rm(join(root, 'manifest.json'));
+    const invalid = await createNodeAssets(root).catch((error: unknown) => error);
+    expect(invalid).toMatchObject({ message: 'UI manifest is invalid' });
+    expect(invalid).not.toHaveProperty('code', 'UI_ASSETS_ABSENT');
+  });
+
   it('refuses an unlisted manifest entry at startup', async () => {
     await writeManifest({ ...manifest, entry: 'missing.html' });
     await expect(createNodeAssets(root)).rejects.toThrow('UI manifest is invalid');

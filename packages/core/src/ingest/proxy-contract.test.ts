@@ -765,10 +765,10 @@ describe('composer proxy: busy upstream', () => {
     const { f, response } = await busyRequest();
     for (const url of COMPOSER.urls) expect(f.upstream.count(url)).toBe(1);
     expect(f.catalogue.filled.size).toBe(0);
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(503);
   });
 
-  it.fails('answers 503 unavailable carrying the upstream Retry-After', async () => {
+  it('answers 503 unavailable carrying the upstream Retry-After', async () => {
     const { response } = await busyRequest();
     expect(response.status).toBe(503);
     expect(response.headers.get('Retry-After')).toBe('5');

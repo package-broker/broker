@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fenceKind } from '@package-broker/core/authz/fence';
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid, type Clock } from '@package-broker/core/ids';
 import type { RegisteredJob } from '@package-broker/core/kernel/registry';
@@ -846,5 +847,49 @@ describe('createJobLoop', () => {
         },
       }),
     ).toThrow(RangeError);
+  });
+
+  it('hands the handler a fence issuer bound to the claimed job lease', async () => {
+    const h = await harness();
+    let seen:
+      | { fence: ReturnType<NonNullable<JobContext['fences']>['delegated']>; row: unknown }
+      | undefined;
+    const registered = job('fenced', async (_payload, context) => {
+      const rows = await h.executor.all<{ lease_owner: string; fence: number }>({
+        sql: 'SELECT lease_owner, fence FROM job WHERE id = ?',
+        params: [context.jobId],
+      });
+      seen = { fence: context.fences!.delegated('user-1', 'run-1', { a: 1 }), row: rows[0] };
+    });
+    const id = await h.enqueue(registered.qualifiedName, 'one');
+    h.loop([registered]).start();
+    await vi.waitFor(async () => expect((await h.status(id))?.state).toBe('succeeded'), WAIT);
+    const row = seen?.row as { lease_owner: string; fence: number };
+    expect(fenceKind(seen!.fence)).toBe('delegated');
+    expect(seen!.fence.job).toEqual({ id, owner: row.lease_owner, fence: row.fence });
+    expect(seen!.fence.approverUserId).toBe('user-1');
+    expect(seen!.fence.runId).toBe('run-1');
+  });
+
+  it('gives a plugin job no fence issuer', async () => {
+    const h = await harness();
+    let seen: JobContext | undefined;
+    const core = job('work', () => Promise.resolve());
+    const plugin: RegisteredJob = {
+      plugin: 'acme',
+      qualifiedName: 'acme:work:v1',
+      definition: {
+        ...core.definition,
+        handler: (_payload, context) => {
+          seen = context;
+          return Promise.resolve();
+        },
+      },
+    };
+    const id = await h.enqueue(plugin.qualifiedName, 'one');
+    h.loop([plugin]).start();
+    await vi.waitFor(async () => expect((await h.status(id))?.state).toBe('succeeded'), WAIT);
+    expect(seen).toBeDefined();
+    expect(seen?.fences).toBeUndefined();
   });
 });

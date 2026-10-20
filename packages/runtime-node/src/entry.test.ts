@@ -1,15 +1,24 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import type { Server } from 'node:http';
+import { createRequire } from 'node:module';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { SecretsConfigError } from '@package-broker/core/secrets/master-key';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EntryRuntime } from './entry.js';
 import { createShutdown, describeError, isMainEntry, parsePort, runEntry } from './entry.js';
 import type { NodeBroker } from './index.js';
-import { StartupConfigError } from './startup.js';
+import { startNode, StartupConfigError } from './startup.js';
+import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
 const manifest: Promise<{ plugins: []; migrations: [] }> = Promise.resolve({
   plugins: [],
@@ -51,7 +60,7 @@ interface Harness {
   readonly signals: Map<string, () => void>;
 }
 
-function harness(start: () => Promise<NodeBroker>): Harness {
+function harness(start: EntryRuntime['start']): Harness {
   const signals = new Map<string, () => void>();
   const error = vi.fn();
   const exit = vi.fn();
@@ -141,6 +150,74 @@ describe('createShutdown', () => {
 });
 
 describe('runEntry', () => {
+  it('writes migration events from a temporary database start to stdout as JSON lines', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'pb-entry-'));
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let broker: NodeBroker | undefined;
+    const masterKey = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+    const privateData = 'postgres://user:password@host/db\naccount@example.test';
+    try {
+      const require = createRequire(import.meta.url);
+      const migrationsDirectory = join(
+        dirname(require.resolve('@package-broker/db-sqlite/package.json')),
+        'migrations',
+      );
+      const migrations = await Promise.all(
+        readdirSync(migrationsDirectory)
+          .filter((name) => name.endsWith('.sql'))
+          .sort()
+          .map((name) =>
+            loadMigrationSource(
+              'core',
+              name,
+              readFileSync(join(migrationsDirectory, name), 'utf8'),
+            ),
+          ),
+      );
+      const test = harness(async (options) => {
+        broker = await startNode(options);
+        vi.spyOn(broker.server, 'listen').mockReturnValue(broker.server);
+        return broker;
+      });
+      await runEntry(
+        Promise.resolve({ plugins: [], migrations }),
+        {
+          PB_SQLITE_PATH: join(directory, 'broker.sqlite'),
+          PB_MASTER_KEY: masterKey,
+          PB_PUBLIC_URL: 'http://127.0.0.1',
+          PRIVATE_DATA: privateData,
+        },
+        test.runtime,
+      );
+      expect(test.error).not.toHaveBeenCalled();
+      expect(test.exit).not.toHaveBeenCalled();
+      expect(broker?.server.listen).toHaveBeenCalledExactlyOnceWith(8787);
+      const records = stdout.mock.calls.map((call) => {
+        const line: unknown = call[0];
+        expect(typeof line).toBe('string');
+        expect(line).not.toContain('\n');
+        return JSON.parse(line as string) as Record<string, unknown>;
+      });
+      const applied = records.filter((record) => record['id'] !== undefined);
+      expect(applied.map((record) => record['id'])).toEqual(migrations.map(({ id }) => id));
+      const holder = applied[0]?.['holder'];
+      expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
+      for (const { id } of migrations) {
+        expect(applied).toContainEqual({ level: 'info', message: `applied ${id}`, id, holder });
+      }
+      expect(records).toContainEqual({ level: 'info', message: 'migration lock acquired', holder });
+      expect(records).toContainEqual({ level: 'info', message: 'migration lock released', holder });
+      const output = JSON.stringify(stdout.mock.calls);
+      for (const value of [masterKey, 'password', 'account@example.test', privateData]) {
+        expect(output).not.toContain(value);
+      }
+    } finally {
+      await broker?.close();
+      stdout.mockRestore();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('never prints a hostile PORT value to stderr', async () => {
     const sentinel = 'PORT-SENTINEL\npostgres://user:password@host/db\naccount@example.test';
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -218,6 +295,7 @@ describe('runEntry', () => {
       plugins: [],
       migrations: [],
       env: {},
+      log: expect.any(Function),
       ...(observability === undefined ? {} : { observability }),
     });
     const options = vi.mocked(test.runtime.start).mock.calls[0]?.[0];
@@ -403,6 +481,7 @@ describe('entry platform ports and failure handling', () => {
       plugins: [],
       migrations: [],
       env: {},
+      log: expect.any(Function),
       platformPorts,
     });
     const options = vi.mocked(test.runtime.start).mock.calls[0]?.[0];
@@ -417,7 +496,12 @@ describe('entry platform ports and failure handling', () => {
         ? { plugins: [], migrations: [] }
         : { plugins: [], migrations: [], platformPorts: ports };
     await runEntry(Promise.resolve(input), {}, test.runtime);
-    expect(test.runtime.start).toHaveBeenCalledWith({ plugins: [], migrations: [], env: {} });
+    expect(test.runtime.start).toHaveBeenCalledWith({
+      plugins: [],
+      migrations: [],
+      env: {},
+      log: expect.any(Function),
+    });
   });
 
   it('sanitizes a rejected start before exiting', async () => {

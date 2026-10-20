@@ -4,4 +4,4 @@ sidebar_position: 1
 description: Mirror vendor repositories through Package Broker.
 ---
 
-Coming in 2.0: mirroring vendor repositories.
+Planned for 2.0: mirroring vendor repositories with per-project credentials.

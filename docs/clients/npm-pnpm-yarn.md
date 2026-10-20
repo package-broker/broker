@@ -4,4 +4,4 @@ sidebar_position: 2
 description: Configure npm, pnpm and yarn to use Package Broker.
 ---
 
-Coming in 2.0: configuring npm, pnpm and yarn.
+Planned for 2.0: npm registry routes and `.npmrc` setup for npm, pnpm and yarn. The current `main` does not serve npm metadata yet.

@@ -1,7 +1,13 @@
-import { delegatedMutationFence, type DelegatedMutationFence } from '../authz/fence.js';
+import {
+  delegatedMutationFence,
+  systemMutationFence,
+  type DelegatedMutationFence,
+  type SystemMutationFence,
+} from '../authz/fence.js';
 import type { JobGuard } from './job-repository.js';
 
 export interface JobFences {
+  verifier(): SystemMutationFence;
   delegated(
     approverUserId: string,
     runId: string,
@@ -14,6 +20,7 @@ const leases = new WeakMap<JobFences, JobGuard>();
 export function jobFences(guard: JobGuard): JobFences {
   const lease = Object.freeze({ id: guard.id, owner: guard.owner, fence: guard.fence });
   const fences: JobFences = Object.freeze({
+    verifier: () => systemMutationFence('verifier', lease, {}),
     delegated: (
       approverUserId: string,
       runId: string,

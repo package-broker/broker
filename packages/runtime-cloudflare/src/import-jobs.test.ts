@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fenceKind, type DelegatedMutationFence } from '@package-broker/core/authz/fence';
+import {
+  fenceKind,
+  type DelegatedMutationFence,
+  type SystemMutationFence,
+} from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlValue, Statement } from '@package-broker/core/db/port';
 import type { ImportApplyStore } from '@package-broker/core/import/apply';
 import type { ImportRollbackStore } from '@package-broker/core/import/rollback';
-import { IMPORT_RUN_JOB } from '@package-broker/core/import/run-service';
+import { IMPORT_RUN_JOB, IMPORT_VERIFICATION_JOB } from '@package-broker/core/import/run-service';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
@@ -61,9 +65,14 @@ function claimOf(type: string, payload: unknown, fence: number): JobClaim {
 }
 
 function stores() {
-  const fences: { apply: DelegatedMutationFence[]; rollback: DelegatedMutationFence[] } = {
+  const fences: {
+    apply: DelegatedMutationFence[];
+    rollback: DelegatedMutationFence[];
+    verify: SystemMutationFence[];
+  } = {
     apply: [],
     rollback: [],
+    verify: [],
   };
   const applyStore = {
     loadRun: async (_ctx: unknown, runId: string) => ({
@@ -89,7 +98,29 @@ function stores() {
       fences.rollback.push(fence);
     },
   } as unknown as ImportRollbackStore;
-  return { fences, applyStore, rollbackStore, blobs: { get: async () => null } };
+  return {
+    fences,
+    applyStore,
+    rollbackStore,
+    verificationStore: {
+      loadRun: async (_ctx, runId) => ({
+        id: runId,
+        state: 'verifying',
+        planHash: null,
+        approvedAt: null,
+        approvedByUserId: null,
+        manifestBlobSha256: null,
+      }),
+      verify: async () => {
+        throw new Error('unexpected verification');
+      },
+      fail: async (_ctx, fence) => {
+        fences.verify.push(fence);
+        return { ok: true, results: [] };
+      },
+    } satisfies import('@package-broker/core/import/verification').ImportVerificationStore,
+    blobs: { get: async () => null },
+  };
 }
 
 async function deliver(
@@ -134,9 +165,9 @@ describe('import job holder', () => {
     expect(() => holder.set(set)).toThrow();
   });
 
-  it('registers both core job types under their queue names', () => {
+  it('registers all core import job types under their queue names', () => {
     expect(importJobRegistrations(createImportJobHolder()).map((job) => job.qualifiedName)).toEqual(
-      [IMPORT_RUN_JOB.apply, IMPORT_RUN_JOB.rollback],
+      [IMPORT_VERIFICATION_JOB.type, IMPORT_RUN_JOB.apply, IMPORT_RUN_JOB.rollback],
     );
   });
 });
@@ -144,6 +175,7 @@ describe('import job holder', () => {
 describe('import jobs on the queue consumer', () => {
   it.each([
     [IMPORT_RUN_JOB.apply, { runId: ulid() }],
+    [IMPORT_VERIFICATION_JOB.type, { runId: ulid() }],
     [IMPORT_RUN_JOB.rollback, { runId: ulid(), requestedBy: REQUESTER }],
   ] as const)(
     'fails a %s claim made before the holder is set as a retryable handler_error',
@@ -188,6 +220,22 @@ describe('import jobs on the queue consumer', () => {
     });
   });
 
+  it('hands verification the system fence captured by the queue claim', async () => {
+    const holder = createImportJobHolder();
+    const set = stores();
+    holder.set(set);
+    const claim = claimOf(IMPORT_VERIFICATION_JOB.type, { runId: ulid() }, 7);
+    expect(await deliver(holder, claim)).toHaveBeenCalledWith(org, expect.anything(), {
+      outcome: 'succeeded',
+    });
+    expect(set.fences.verify).toHaveLength(1);
+    expect(fenceKind(set.fences.verify[0]!)).toBe('system');
+    expect(set.fences.verify[0]).toMatchObject({
+      writer: 'verifier',
+      job: { id: claim.id, owner: claim.owner, fence: 7 },
+    });
+  });
+
   it('refuses a rollback payload without requestedBy as invalid_payload', async () => {
     const holder = createImportJobHolder();
     holder.set(stores());
@@ -222,7 +270,7 @@ async function localBinding() {
 }
 
 describe('import jobs in the Worker assembly', () => {
-  it('registers both jobs with real stores and completes a claim for an unknown run', async () => {
+  it('registers all import jobs with real stores and completes a claim for an unknown run', async () => {
     const { db, close } = await localBinding();
     try {
       const executor = createD1Executor(db);
@@ -270,6 +318,7 @@ describe('import jobs in the Worker assembly', () => {
         });
       for (const [type, payload] of [
         [IMPORT_RUN_JOB.apply, { runId: ulid() }],
+        [IMPORT_VERIFICATION_JOB.type, { runId: ulid() }],
         [IMPORT_RUN_JOB.rollback, { runId: ulid(), requestedBy: REQUESTER }],
       ] as const) {
         const job = await enqueue(type, payload);

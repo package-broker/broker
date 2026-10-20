@@ -35,6 +35,18 @@ describe('jobFences', () => {
   });
 });
 
+it('issues a verifier system fence from the captured lease only', () => {
+  const mutable = { ...guard };
+  const fences = jobFences(mutable);
+  mutable.fence = 999;
+  const fence = fences.verifier();
+  expect(fenceKind(fence)).toBe('system');
+  expect(fence.writer).toBe('verifier');
+  expect(fence.job).toEqual(guard);
+  expect(fence.expected).toEqual({});
+  expect(fences.verifier.length).toBe(0);
+});
+
 describe('jobLeaseOf', () => {
   it('returns the frozen lease given to jobFences', () => {
     const lease = jobLeaseOf({ fences: jobFences(guard) });
@@ -55,6 +67,9 @@ describe('jobLeaseOf', () => {
 
   it('returns null for a hand-built object that has the delegated method', () => {
     const forged = Object.freeze({
+      verifier: () => {
+        throw new Error('unused');
+      },
       delegated: () => {
         throw new Error('unused');
       },

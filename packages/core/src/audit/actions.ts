@@ -60,6 +60,7 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 const GRANT_FIELDS = ['subject_kind', 'role_id'] as const;
 const IMPORT_RUN_FIELDS = ['state', 'plan_hash', 'count', 'external_ref_count'] as const;
+const IMPORT_ROLLBACK_FIELDS = [...IMPORT_RUN_FIELDS, 'restored', 'conflict', 'expired'] as const;
 const ATTACH_FIELDS = ['project_id', 'position'] as const;
 const REGISTERED_NAME_FIELDS = ['pattern'] as const;
 
@@ -109,7 +110,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.apply': IMPORT_RUN_FIELDS,
   'import_run.fail': IMPORT_RUN_FIELDS,
   'import_run.verify': IMPORT_RUN_FIELDS,
-  'import_run.rollback': IMPORT_RUN_FIELDS,
+  'import_run.rollback': IMPORT_ROLLBACK_FIELDS,
   'import_run.accept': IMPORT_RUN_FIELDS,
   'import_run.cancel': IMPORT_RUN_FIELDS,
   'import_run.credential_set': ['external_ref'],

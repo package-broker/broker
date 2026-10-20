@@ -1,12 +1,23 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import type { ScalarStatement, StatementResult } from '@package-broker/core/db/port';
 import { loadMigrationSource, sha256Hex } from '@package-broker/db-sqlite/migrations/source';
 import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { run } from '../cli.js';
-import { runCloudflareBootstrap, runCloudflareMigrate } from './cloudflare.js';
+import {
+  InventoryStore,
+  InventoryTransaction,
+  emptyInventory,
+  installIdentity,
+} from './cloudflare/inventory.js';
+import {
+  runCloudflareBootstrap,
+  runCloudflareMigrate,
+  migrateCloudflare,
+  bootstrapCloudflare,
+} from './cloudflare.js';
 
 const ACCOUNT_ID = '0f3e9b7c2d14a6e85b1c9d07a3f24e68';
 const DATABASE_ID = '5c1a77e2-9f40-4b8d-a3c6-1e2f7d90b4a5';
@@ -563,4 +574,555 @@ it('warns and migrates when the manifest has no route table', async () => {
   } finally {
     await close();
   }
+});
+
+it('returns typed migrate and org results without console output', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  const { harness, close } = await createHarness();
+  try {
+    const result = await migrateCloudflare({
+      databaseId: DATABASE_ID,
+      outDir,
+      dryRun: false,
+      env: ENV,
+      fetch: harness.fetch,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.value?.applied).toContain('core:0001_init');
+    expect(result.output.migrations_applied).toEqual(result.value?.applied);
+    const organization = await bootstrapCloudflare({
+      databaseId: DATABASE_ID,
+      slug: 'demo',
+      name: 'Demo',
+      env: ENV,
+      fetch: harness.fetch,
+    });
+    expect(organization.value).toMatchObject({ created: true, slug: 'demo' });
+    const mismatch = await bootstrapCloudflare({
+      databaseId: DATABASE_ID,
+      slug: 'other',
+      name: 'Other',
+      env: ENV,
+      fetch: harness.fetch,
+    });
+    expect(mismatch.exitCode).toBe(5);
+    expect(mismatch.output.error).toMatchObject({
+      code: 'organization_slug_mismatch',
+      stage: 'org_bootstrap',
+    });
+    expect(console.log).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  } finally {
+    await close();
+  }
+});
+
+it('keeps provider lock-release warnings out of typed results and diagnostic callbacks', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  const { harness, close } = await createHarness();
+  const sentinels = [
+    'person@example.com',
+    'https://user:password@example.com/private',
+    'PROVIDER_BODY_SENTINEL',
+    API_TOKEN,
+    ACCOUNT_ID,
+  ];
+  const send = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { sql?: string };
+    if (body.sql?.startsWith('UPDATE migration_lock SET holder = NULL'))
+      return d1Failure(sentinels.join(' '));
+    return harness.fetch(input, init);
+  });
+  const diagnostic = vi.fn();
+  try {
+    const result = await migrateCloudflare({
+      databaseId: DATABASE_ID,
+      outDir,
+      dryRun: false,
+      env: ENV,
+      fetch: send,
+      diagnostic,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.value?.applied).toContain('core:0001_init');
+    expect(result.diagnostics).toContain(
+      'warn: migration warning; inspect migration state and lock expiry before continuing',
+    );
+    expect(diagnostic.mock.calls.flat()).toEqual(result.diagnostics);
+    for (const sentinel of sentinels) {
+      expect(JSON.stringify(result)).not.toContain(sentinel);
+      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain(sentinel);
+    }
+    expect(console.log).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  } finally {
+    await close();
+  }
+});
+
+it('loads cwd-relative migration output with a configuration in another directory', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  const { harness, close } = await createHarness();
+  try {
+    const result = await migrateCloudflare({
+      databaseId: DATABASE_ID,
+      configPath: join(dir, 'fixtures/minimal.config.ts'),
+      outDir: relative(process.cwd(), outDir),
+      dryRun: true,
+      env: ENV,
+      fetch: harness.fetch,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.value?.pending).toContain('core:0001_init');
+    expect(harness.requests.length).toBeGreaterThan(0);
+  } finally {
+    await close();
+  }
+});
+
+it('attributes missing migration credentials to the migrate stage', async () => {
+  const fetch = vi.fn();
+  const result = await migrateCloudflare({
+    workerName: 'broker',
+    outDir,
+    dryRun: false,
+    env: {},
+    fetch,
+  });
+  expect(result).toMatchObject({
+    exitCode: 2,
+    output: { command: 'migrate', error: { code: 'invalid_input', stage: 'migrate' } },
+  });
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('refuses a completed D1 receipt with unknown jurisdiction before any migration request', async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-jurisdiction-test-'));
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    const identity = installIdentity({ accountId: ACCOUNT_ID, workerName: 'broker' });
+    const store = await InventoryStore.create({ project, outDir: output, identity });
+    const inventory = emptyInventory(identity, Date.now());
+    inventory.resources.d1 = {
+      name: 'broker-production-db',
+      id: DATABASE_ID,
+      jurisdiction: null,
+      state: 'complete',
+      evidence: { source: 'adopted', operation_id: null, verified_at: new Date().toISOString() },
+    };
+    await mkdir(store.directory, { recursive: true });
+    await writeFile(store.path, JSON.stringify(inventory));
+    const before = await readFile(store.path);
+    const fetch = vi.fn();
+    const onBeforeApply = vi.fn();
+    const result = await migrateCloudflare({
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: false,
+      env: ENV,
+      fetch,
+      onBeforeApply,
+    });
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: { command: 'migrate', error: { code: 'invalid_inventory', stage: 'migrate' } },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onBeforeApply).not.toHaveBeenCalled();
+    expect(await readFile(store.path)).toEqual(before);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+it('emits the common JSON migrate envelope on success and error without provider data', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  const { harness, close } = await createHarness();
+  try {
+    expect(
+      await runCloudflareMigrate({
+        databaseId: DATABASE_ID,
+        outDir,
+        dryRun: true,
+        env: ENV,
+        fetch: harness.fetch,
+        json: true,
+      }),
+    ).toBe(0);
+    expect(console.log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toMatchObject({
+      schema_version: 1,
+      command: 'migrate',
+      status: 'planned',
+      database_id: DATABASE_ID,
+    });
+    vi.mocked(console.log).mockClear();
+    expect(
+      await runCloudflareMigrate({
+        databaseId: DATABASE_ID,
+        outDir,
+        dryRun: false,
+        env: ENV,
+        fetch: unreadableBody(),
+        json: true,
+      }),
+    ).toBe(6);
+    expect(console.log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toMatchObject({
+      status: 'error',
+      error: { code: 'outcome_unknown', stage: 'migrate' },
+    });
+    expect(console.error).not.toHaveBeenCalled();
+  } finally {
+    await close();
+  }
+});
+
+it('plans an absent inventory DB without requests, locks or state writes', async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-test-'));
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    const fetch = vi.fn();
+    const result = await migrateCloudflare({
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: true,
+      env: ENV,
+      fetch,
+    });
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: { status: 'planned', remote_state: 'absent', database_id: null },
+    });
+    expect(result.value?.pending).toContain('core:0001_init');
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(
+      readFile(join(project, '.pb/state/cloudflare/inventory.broker.production.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+it('returns one JSON usage envelope for invalid new command invocations', async () => {
+  for (const args of [
+    ['cloudflare', 'provision', '--json'],
+    ['cloudflare', 'provision', '--json', '--bad'],
+    ['cloudflare', 'migrate', '--json'],
+    ['cloudflare', 'migrate', '--json', '--bad'],
+    ['cloudflare', 'migrate', '--json', '--database-id', DATABASE_ID, '--jurisdiction', 'invalid'],
+  ]) {
+    vi.mocked(console.log).mockClear();
+    expect(await run(args)).toBe(2);
+    expect(console.log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toMatchObject({
+      schema_version: 1,
+      status: 'error',
+      command: args[1],
+      error: { code: 'invalid_input', stage: args[1] },
+    });
+  }
+});
+
+it('keeps route validation sentinels out of typed results and diagnostic callbacks', async () => {
+  await writeBuiltInit(outDir, await realInit());
+  const sentinels = [
+    API_TOKEN,
+    ACCOUNT_ID,
+    'person@example.com',
+    'https://user:password@example.com/private',
+  ];
+  await addManifestRoutes(outDir, [
+    {
+      method: 'GET',
+      path: `/${sentinels.join('/')}`,
+      plugin: sentinels.join(' '),
+      permission: 'org:typo',
+      boundary: 'organization',
+    },
+  ]);
+  const diagnostic = vi.fn();
+  const fetch = vi.fn();
+  const result = await migrateCloudflare({
+    databaseId: DATABASE_ID,
+    outDir,
+    dryRun: false,
+    env: ENV,
+    fetch,
+    diagnostic,
+  });
+  expect(result).toMatchObject({ exitCode: 2, output: { error: { stage: 'migrate' } } });
+  expect(result.diagnostics).toContain(
+    'error: manifest route validation failed; run pb build again',
+  );
+  expect(diagnostic.mock.calls.flat()).toEqual(result.diagnostics);
+  for (const sentinel of sentinels) {
+    expect(JSON.stringify(result)).not.toContain(sentinel);
+    expect(JSON.stringify(diagnostic.mock.calls)).not.toContain(sentinel);
+  }
+  expect(fetch).not.toHaveBeenCalled();
+  expect(console.log).not.toHaveBeenCalled();
+  expect(console.error).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['success', 'throws'],
+  ['failure', 'throws'],
+  ['success', 'rejects'],
+  ['failure', 'rejects'],
+])(
+  'releases the install lock during migration %s when a diagnostic callback %s',
+  async (outcome, callback) => {
+    await mkdir(resolve('.pb'), { recursive: true });
+    const project = await mkdtemp(resolve('.pb/migrate-diagnostic-test-'));
+    const { harness, close } = await createHarness();
+    try {
+      const output = join(project, '.pb/cloudflare');
+      await writeBuiltInit(output, await realInit());
+      await addManifestRoutes(output, []);
+      const identity = installIdentity({ accountId: ACCOUNT_ID, workerName: 'broker' });
+      const store = await InventoryStore.create({ project, outDir: output, identity });
+      const inventory = emptyInventory(identity, Date.now());
+      inventory.resources.d1 = {
+        name: 'broker-production-db',
+        id: DATABASE_ID,
+        jurisdiction: 'eu',
+        state: 'complete',
+        evidence: { source: 'adopted', operation_id: null, verified_at: new Date().toISOString() },
+      };
+      await store.write(inventory);
+      const rejectedDeliveries: ReturnType<typeof vi.fn>[] = [];
+      const diagnostic = vi.fn(() => {
+        if (callback === 'rejects') {
+          const delivery = Promise.reject(new Error('DIAGNOSTIC_CALLBACK_SENTINEL'));
+          // Observe rejection even on regression so the assertion identifies the missing handler.
+          void delivery.catch(() => undefined);
+          rejectedDeliveries.push(vi.spyOn(delivery, 'catch'));
+          return delivery;
+        }
+        throw new Error('DIAGNOSTIC_CALLBACK_SENTINEL');
+      });
+      const fetch =
+        outcome === 'success' ? harness.fetch : vi.fn(async () => d1Failure('provider failure'));
+      const result = await migrateCloudflare({
+        workerName: 'broker',
+        configPath: join(project, 'broker.config.ts'),
+        outDir: output,
+        dryRun: false,
+        env: ENV,
+        fetch,
+        diagnostic,
+        allowContract: ['core:0006_ports'],
+      });
+      expect(result.exitCode).toBe(outcome === 'success' ? 0 : 1);
+      expect(diagnostic).toHaveBeenCalledWith(expect.stringMatching(/^lock holder /));
+      if (callback === 'rejects') {
+        expect(rejectedDeliveries.length).toBeGreaterThan(0);
+        for (const handled of rejectedDeliveries) expect(handled).toHaveBeenCalled();
+      }
+      expect(JSON.stringify(result)).not.toContain('DIAGNOSTIC_CALLBACK_SENTINEL');
+      await expect(readFile(store.lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const release = await store.lock(Date.now());
+      await release();
+    } finally {
+      await close();
+      await rm(project, { recursive: true, force: true });
+    }
+  },
+);
+
+it('preserves applied migration IDs across retries under one lease and resets for a new lease', async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-retry-test-'));
+  const { harness, close } = await createHarness();
+  let transaction: InventoryTransaction | undefined;
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    const identity = installIdentity({ accountId: ACCOUNT_ID, workerName: 'broker' });
+    const store = await InventoryStore.create({ project, outDir: output, identity });
+    const inventory = emptyInventory(identity, Date.now());
+    inventory.resources.d1 = {
+      name: 'broker-production-db',
+      id: DATABASE_ID,
+      jurisdiction: 'eu',
+      state: 'complete',
+      evidence: { source: 'adopted', operation_id: null, verified_at: new Date().toISOString() },
+    };
+    await store.write(inventory);
+    const options = {
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: false,
+      env: ENV,
+      fetch: harness.fetch,
+      allowContract: ['core:0006_ports'],
+    };
+    transaction = await InventoryTransaction.begin(store, Date.now());
+    const first = await migrateCloudflare({ ...options, transaction });
+    expect(first.exitCode).toBe(0);
+    expect(first.value?.applied).toContain('core:0001_init');
+    expect((await store.read())?.migrations.applied_this_transaction).toEqual(first.value?.applied);
+    const retry = await migrateCloudflare({ ...options, transaction });
+    expect(retry.exitCode).toBe(0);
+    expect(retry.value?.applied).toEqual([]);
+    expect(retry.value?.skipped).toEqual(first.value?.applied);
+    expect((await store.read())?.migrations.applied_this_transaction).toEqual(first.value?.applied);
+    await transaction.close();
+
+    transaction = await InventoryTransaction.begin(store, Date.now());
+    expect((await migrateCloudflare({ ...options, transaction })).exitCode).toBe(0);
+    expect((await store.read())?.migrations.applied_this_transaction).toEqual([]);
+    expect((await store.read())?.migrations.ledger.map((entry) => entry.id)).toEqual(
+      first.value?.applied,
+    );
+  } finally {
+    await transaction?.close();
+    await close();
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+it('uses inventory DB identity, journals contract boundaries before apply, and rejects unacknowledged contracts', async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-state-test-'));
+  const { harness, close } = await createHarness();
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    const sql = '-- pb:phase contract\nCREATE TABLE contract_widget (id INTEGER);\n';
+    await writeFile(join(output, 'migrations/core/0007_contract.sql'), sql);
+    const manifestPath = join(output, 'generated/manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.migrations.push({
+      id: 'core:0007_contract',
+      name: '0007_contract.sql',
+      checksum: await sha256Hex(sql),
+      phase: 'contract',
+    });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const identity = installIdentity({ accountId: ACCOUNT_ID, workerName: 'broker' });
+    const store = await InventoryStore.create({ project, outDir: output, identity });
+    const inventory = emptyInventory(identity, Date.now());
+    inventory.resources.d1 = {
+      name: 'broker-production-db',
+      id: DATABASE_ID,
+      jurisdiction: 'eu',
+      state: 'complete',
+      evidence: { source: 'adopted', operation_id: null, verified_at: new Date().toISOString() },
+    };
+    await store.write(inventory);
+    const options = {
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: false,
+      env: ENV,
+      fetch: harness.fetch,
+    };
+    const rejected = await migrateCloudflare(options);
+    expect(rejected.exitCode).toBe(11);
+    expect(harness.requests).toHaveLength(1);
+    expect((harness.requests[0] as { sql: string }).sql).toMatch(/^\s*SELECT/);
+    let boundaryObserved = false;
+    const applied = await migrateCloudflare({
+      ...options,
+      allowContract: ['core:0006_ports', 'core:0007_contract'],
+      onBeforeApply: async (source) => {
+        if (source.phase === 'contract') {
+          const journal = await store.read();
+          expect(journal?.migrations.rollback_compatible).toBe(false);
+          expect(journal?.migrations.contract_ids).toContain(source.id);
+          boundaryObserved = true;
+        }
+      },
+    });
+    expect(applied.exitCode).toBe(0);
+    expect(applied.output.database_id).toBe(DATABASE_ID);
+    expect(boundaryObserved).toBe(true);
+    expect((await store.read())?.migrations.ledger.map((entry) => entry.id)).toContain(
+      'core:0007_contract',
+    );
+    const before = await readFile(store.path, 'utf8');
+    expect((await migrateCloudflare({ ...options, dryRun: true })).exitCode).toBe(0);
+    expect(await readFile(store.path, 'utf8')).toBe(before);
+    const count = harness.requests.length;
+    expect(
+      (await migrateCloudflare({ ...options, databaseId: '11111111-1111-4111-8111-111111111111' }))
+        .exitCode,
+    ).toBe(8);
+    expect(harness.requests).toHaveLength(count);
+  } finally {
+    await close();
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+it.each(
+  [
+    [
+      {
+        method: 'GET',
+        path: '/widgets',
+        plugin: 'widgets',
+        permission: 'org:typo',
+        boundary: 'organization',
+      },
+    ],
+    'malformed-route-table',
+  ].map((routes) => [routes]),
+)('rejects invalid routes before planning an absent inventory DB: %j', async (routes) => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-test-'));
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    await addManifestRoutes(output, routes);
+    const fetch = vi.fn();
+    const result = await migrateCloudflare({
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: true,
+      env: ENV,
+      fetch,
+    });
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: { status: 'error', error: { code: 'invalid_input', stage: 'migrate' } },
+    });
+    expect(result.value).toBeNull();
+    expect(result.output.plan).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(
+      readFile(join(project, '.pb/state/cloudflare/inventory.broker.production.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+it('redacts the complete token before sanitizing overlapping email text in legacy diagnostics', async () => {
+  const token = 'prefix:person@example.com:suffix';
+  const send = vi.fn();
+  const code = await runCloudflareBootstrap({
+    databaseId: DATABASE_ID,
+    slug: token,
+    name: 'Demo',
+    env: { ...ENV, CLOUDFLARE_API_TOKEN: token },
+    fetch: send,
+  });
+  expect(code).toBe(2);
+  expect(send).not.toHaveBeenCalled();
+  const diagnostics = JSON.stringify(vi.mocked(console.error).mock.calls);
+  expect(diagnostics).toContain('[redacted]');
+  for (const fragment of [token, 'prefix:', ':suffix', 'person@example.com'])
+    expect(diagnostics).not.toContain(fragment);
 });

@@ -119,7 +119,11 @@ function scopeExists(ctx: OrgContext, scope: ListingScope): RawBuilder<boolean> 
     : sql<boolean>`EXISTS (SELECT 1 FROM package WHERE package.id = ${id} AND package.org_id = ${ctx.orgId})`;
 }
 
-function openMatches(ctx: OrgContext, scope: ListingScope, stamp: string): RawBuilder<boolean> {
+export function openMatches(
+  ctx: OrgContext,
+  scope: ListingScope,
+  stamp: string,
+): RawBuilder<boolean> {
   const table = scope.kind === 'source' ? sql`source` : sql`package`;
   return sql<boolean>`EXISTS (SELECT 1 FROM ${table}
     WHERE id = ${scopeId(scope)} AND org_id = ${ctx.orgId} AND listing_open_stamp = ${stamp})`;

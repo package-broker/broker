@@ -546,7 +546,11 @@ describe('import run repository on the D1 executor', () => {
                   type:
                     operation === 'requestApply' ? IMPORT_RUN_JOB.apply : IMPORT_RUN_JOB.rollback,
                   resource_key: IMPORT_RUN_JOB.resourceKey('run'),
-                  payload_json: JSON.stringify(IMPORT_RUN_JOB.payload('run')),
+                  payload_json: JSON.stringify(
+                    operation === 'requestApply'
+                      ? IMPORT_RUN_JOB.payload('run')
+                      : { ...IMPORT_RUN_JOB.payload('run'), requestedBy: fence.userId },
+                  ),
                 },
               ]
             : [],

@@ -100,18 +100,12 @@ describe('Worker UI mount', () => {
     await worker.services(env);
     const fetchUi = (request: Request) => worker.fetch(request, env);
     try {
-      for (const path of [
-        '/_pb/ui/',
-        '/_pb/ui',
-        '/_pb/ui/manifest.json',
-        '/_pb/ui/assets/index.html',
-      ]) {
+      for (const path of ['/_pb/ui/', '/_pb/ui', '/_pb/ui/manifest.json', '/_pb/ui/index.html']) {
         const anonymous = await fetchUi(new Request(`https://broker.test${path}`));
         expect(anonymous.status, `anonymous ${path}`).toBe(401);
       }
       for (const [path, expected] of [
         ['/_pb/ui/', document],
-        ['/_pb/ui', document],
         ['/_pb/ui/manifest.json', JSON.stringify(manifest)],
       ]) {
         const response = await fetchUi(
@@ -122,6 +116,14 @@ describe('Worker UI mount', () => {
         expect(response.status, path).toBe(200);
         expect(await response.text()).toBe(expected);
       }
+      const redirect = await fetchUi(
+        new Request('https://broker.test/_pb/ui?view=packages', {
+          headers: { cookie: 'test-session=valid' },
+        }),
+      );
+      expect(redirect.status).toBe(303);
+      expect(redirect.headers.get('location')).toBe('/_pb/ui/?view=packages');
+      expect(redirect.headers.get('cache-control')).toBe('no-store');
       expect(
         (
           await fetchUi(
@@ -149,8 +151,7 @@ describe('Worker UI mount', () => {
           })),
       ).toEqual([
         { method: 'GET', path: '/_pb/ui', boundary: 'authenticated', needsOrg: true },
-        { method: 'GET', path: '/_pb/ui/assets/:file', boundary: 'authenticated', needsOrg: true },
-        { method: 'GET', path: '/_pb/ui/manifest.json', boundary: 'authenticated', needsOrg: true },
+        { method: 'GET', path: '/_pb/ui/:file', boundary: 'authenticated', needsOrg: true },
       ]);
       expect(baseline.some((route) => route.path === '/_pb/session')).toBe(true);
       const otherDocument = document.replace('Broker', 'Server');
@@ -171,6 +172,165 @@ describe('Worker UI mount', () => {
       );
       expect(other.status).toBe(200);
       expect(await other.text()).toBe(otherDocument);
+    } finally {
+      vi.clearAllMocks();
+    }
+  });
+});
+
+describe('Worker UI mount from the ASSETS binding', () => {
+  const session = { cookie: 'test-session=valid' };
+  const script = 'console.log("Package Broker");';
+  const style = 'body{margin:0}';
+  const html =
+    '<!doctype html><title>Package Broker</title>' +
+    '<link rel="stylesheet" href="app.0123456789ab.css"><script src="app.0123456789ab.js"></script>';
+  const staged: Record<string, [string, string]> = {
+    'index.html': ['text/html', html],
+    'app.0123456789ab.js': ['text/javascript', script],
+    'app.0123456789ab.css': ['text/css', style],
+  };
+  const stagedManifest = {
+    version: 1,
+    entry: 'index.html',
+    files: Object.fromEntries(
+      Object.entries(staged).map(([name, [contentType, body]]) => [
+        name,
+        { contentType, bytes: new TextEncoder().encode(body).byteLength },
+      ]),
+    ),
+  };
+  const bindingFor = (manifestBody: string) => ({
+    fetch: async (input: Request | string) => {
+      const name = new URL(typeof input === 'string' ? input : input.url).pathname.slice(1);
+      if (name === 'manifest.json') return new Response(manifestBody);
+      const file = staged[name];
+      return file === undefined ? new Response('missing', { status: 404 }) : new Response(file[1]);
+    },
+  });
+  const authEnv: Env = {
+    DB: keyringOnlyD1(),
+    PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+    PB_PUBLIC_URL: 'https://broker.test',
+  };
+
+  it('serves every script and stylesheet the document references at the document-relative URL', async () => {
+    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const env = { ...authEnv, ASSETS: bindingFor(JSON.stringify(stagedManifest)) };
+    const fetchUi = (request: Request) => worker.fetch(request, env);
+    try {
+      const entry = await fetchUi(new Request('https://broker.test/_pb/ui', { headers: session }));
+      expect(entry.status).toBe(303);
+      const documentUrl = new URL(entry.headers.get('location')!, 'https://broker.test');
+      const page = await fetchUi(new Request(documentUrl, { headers: session }));
+      expect(page.status).toBe(200);
+      const text = await page.text();
+      const urls = [
+        ...[...text.matchAll(/<script[^>]+src="([^"]+)"/g)].map((match) => match[1]!),
+        ...[...text.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map(
+          (match) => match[1]!,
+        ),
+      ].map((reference) => new URL(reference, documentUrl));
+      expect(urls.map((url) => url.pathname).sort()).toEqual([
+        '/_pb/ui/app.0123456789ab.css',
+        '/_pb/ui/app.0123456789ab.js',
+      ]);
+      for (const url of urls) {
+        const name = url.pathname.split('/').at(-1)!;
+        const declared = stagedManifest.files[name as keyof typeof stagedManifest.files]!;
+        expect((await fetchUi(new Request(url))).status, `anonymous ${name}`).toBe(401);
+        const response = await fetchUi(new Request(url, { headers: session }));
+        expect(response.status, name).toBe(200);
+        expect(response.headers.get('content-type')).toBe(declared.contentType);
+        expect(response.headers.get('content-length')).toBe(String(declared.bytes));
+        expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+        expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+        expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
+        expect(await response.text()).toBe(staged[name]![1]);
+      }
+      for (const path of [
+        '/_pb/ui/index.html',
+        '/_pb/ui/unknown.js',
+        '/_pb/ui/..%2Fx',
+        '/_pb/ui/%252e%252e%252fsecret.txt',
+        '/_pb/ui/..%5Csecret.txt',
+        '/_pb/ui/%2Fetc%2Fpasswd',
+        '/_pb/ui/secret.txt%00.js',
+      ]) {
+        const missing = await fetchUi(
+          new Request(`https://broker.test${path}`, { headers: session }),
+        );
+        expect(missing.status, path).toBe(404);
+        expect(await missing.json()).toEqual({
+          error: { code: 'not_found', message: 'Route not found', requestId: expect.any(String) },
+        });
+      }
+      const manifest = await fetchUi(
+        new Request('https://broker.test/_pb/ui/manifest.json', { headers: session }),
+      );
+      expect(manifest.headers.get('cache-control')).toBe('no-cache');
+      expect(manifest.headers.get('x-content-type-options')).toBe('nosniff');
+    } finally {
+      vi.clearAllMocks();
+    }
+  });
+
+  it('answers 404, not 500, when the binding holds an invalid manifest', async () => {
+    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const env = { ...authEnv, ASSETS: bindingFor('{"version":1,"entry":"../x","files":{}}') };
+    try {
+      for (const path of ['/_pb/ui/', '/_pb/ui', '/_pb/ui/manifest.json', '/_pb/ui/index.html']) {
+        const response = await worker.fetch(
+          new Request(`https://broker.test${path}`, { headers: session }),
+          env,
+        );
+        expect(response.status, path).toBe(404);
+        expect(await response.json()).toMatchObject({ error: { code: 'not_found' } });
+      }
+    } finally {
+      vi.clearAllMocks();
+    }
+  });
+
+  it('logs a fixed warning for an invalid manifest and retries on the next request', async () => {
+    const entries: Record<string, unknown>[] = [];
+    const worker = createWorker([], {
+      authorization: engine,
+      log: (entry) => entries.push({ ...entry }),
+    });
+    let body = '{"version":1,"entry":"../x","files":{}}';
+    const env = {
+      ...authEnv,
+      ASSETS: {
+        fetch: (input: Request | string) => bindingFor(body).fetch(input),
+      },
+    };
+    const get = () =>
+      worker.fetch(new Request('https://broker.test/_pb/ui/', { headers: session }), env);
+    try {
+      expect((await get()).status).toBe(404);
+      expect(entries).toContainEqual({ level: 'warn', event: 'ui.manifest_invalid' });
+      body = JSON.stringify(stagedManifest);
+      expect((await get()).status).toBe(200);
+    } finally {
+      vi.clearAllMocks();
+    }
+  });
+
+  it('mounts no UI routes without the binding', async () => {
+    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    try {
+      await worker.services(authEnv);
+      expect(
+        (captured.options.at(-1)?.coreRoutes ?? []).filter((route) =>
+          route.path.startsWith('/_pb/ui'),
+        ),
+      ).toEqual([]);
+      const response = await worker.fetch(
+        new Request('https://broker.test/_pb/ui/', { headers: session }),
+        authEnv,
+      );
+      expect(response.status).toBe(404);
     } finally {
       vi.clearAllMocks();
     }

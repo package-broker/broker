@@ -28,9 +28,16 @@ export async function createNodeAssets(rootDir: string): Promise<StaticAssets> {
     }
   }
 
-  let manifest;
   try {
     root = await realpath(rootDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw Object.assign(new Error('UI assets directory is absent'), { code: 'UI_ASSETS_ABSENT' });
+    }
+    throw new Error('UI manifest is invalid', { cause: error });
+  }
+  let manifest;
+  try {
     const body = await readContained('manifest.json');
     if (body === null) throw new Error();
     manifest = parseUiManifest(new TextDecoder().decode(body));

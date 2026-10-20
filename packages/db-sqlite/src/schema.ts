@@ -651,6 +651,11 @@ export interface ApiIdempotencyTable {
 }
 
 export interface Database {
+  vulnerability_result: VulnerabilityResultTable;
+  vulnerability_match: VulnerabilityMatchTable;
+  vulnerability_advisory: VulnerabilityAdvisoryTable;
+  vulnerability_refresh: VulnerabilityRefreshTable;
+  vulnerability_sync_state: VulnerabilitySyncStateTable;
   audit_pending: AuditPendingTable;
   api_idempotency: ApiIdempotencyTable;
   import_run: ImportRunTable;
@@ -694,4 +699,71 @@ export interface Database {
   upstream_state: UpstreamStateTable;
   fetch_lease: FetchLeaseTable;
   representation_clock: RepresentationClockTable;
+}
+
+export interface VulnerabilityResultTable {
+  org_id: string;
+  version_id: string;
+  source: 'osv';
+  package_id: string;
+  ecosystem: Ecosystem;
+  package_key: string;
+  version: string;
+  query_version: string;
+  mapping_version: number;
+  assessment: 'affected' | 'not_affected' | null;
+  fetched_at: string | null;
+  attempted_at: string;
+  next_attempt_at: string;
+  failure_count: Generated<number>;
+  last_error_code: 'unavailable' | 'protocol' | 'config' | 'limit' | null;
+  generation: number;
+  refresh_id: string | null;
+}
+export interface VulnerabilityMatchTable {
+  org_id: string;
+  version_id: string;
+  source: 'osv';
+  advisory_id: string;
+  advisory_modified_at: string | null;
+}
+export interface VulnerabilityAdvisoryTable {
+  org_id: string;
+  source: 'osv';
+  advisory_id: string;
+  detail_json: string | null;
+  summary: string | null;
+  severity_json: string | null;
+  modified_at: string | null;
+  fetched_at: string | null;
+  next_attempt_at: string;
+  failure_count: Generated<number>;
+  last_error_code: 'unavailable' | 'protocol' | 'config' | 'limit' | null;
+}
+export interface VulnerabilityRefreshTable {
+  org_id: string;
+  refresh_id: string;
+  version_id: string;
+  source: 'osv';
+  generation: number;
+  mapping_version: number;
+  query_version: string;
+  continuation_token: string;
+  page_count: number;
+  accumulated_ids_json: string;
+  started_at: string;
+  next_attempt_at: string;
+}
+export interface VulnerabilitySyncStateTable {
+  write_token: string | null;
+  prune_cursor: Generated<string>;
+  selection_cursor: Generated<string>;
+  org_id: string;
+  source: 'osv';
+  fence: Generated<number>;
+  lease_owner: string | null;
+  lease_until: string | null;
+  next_request_at: string;
+  consecutive_failures: Generated<number>;
+  blocked_until: string | null;
 }

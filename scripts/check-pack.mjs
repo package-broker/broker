@@ -455,6 +455,10 @@ function uiPayloadProblems(dir, files) {
       problems.push(`"${UI_MANIFEST}" lists unsafe file name "${name}"`);
     } else if (!present.has(`dist/assets/${name}`)) {
       problems.push(`manifest-listed UI file "dist/assets/${name}" is missing from the tarball`);
+    } else if (
+      readFileSync(join(dir, 'dist/assets', name)).length !== manifest.files[name]?.bytes
+    ) {
+      problems.push(`manifest-listed UI file "${name}" has a different byte count`);
     }
   }
   return problems;
@@ -549,6 +553,29 @@ for (const pkg of packages) {
 
 const packedCoreVersion =
   outcomes.find(({ pkg }) => pkg === 'core')?.result.pkgJson?.version ?? CORE_VERSION;
+const packedByName = new Map(
+  outcomes
+    .filter(({ result }) => result.pkgJson)
+    .map(({ result }) => [result.pkgJson.name, result.pkgJson]),
+);
+for (const root of ['cli', 'runtime-node', 'runtime-cloudflare']) {
+  const outcome = outcomes.find(({ pkg }) => pkg === root);
+  const visited = new Set();
+  const walk = (name, chain) => {
+    if (name === UI_PACKAGE || name === '@package-broker/ui-assets')
+      outcome.result.problems.push(`UI dependency through ${chain.join(' -> ')}`);
+    if (visited.has(name)) return;
+    visited.add(name);
+    const pkg = packedByName.get(name);
+    for (const dependency of Object.keys({
+      ...pkg?.dependencies,
+      ...pkg?.optionalDependencies,
+      ...pkg?.peerDependencies,
+    }))
+      walk(dependency, [...chain, dependency]);
+  };
+  walk(`@package-broker/${root}`, [root]);
+}
 const packedUiVersion =
   outcomes.find(({ pkg }) => pkg === 'ui')?.result.pkgJson?.version ??
   readPackageJson('ui').json?.version ??

@@ -13,8 +13,20 @@ function statusCase(layer: 'revision' | 'version' | 'package'): ContractCase {
       const { own, foreign } = orgOf(context);
       const seed = seeder(context.executor);
       await seedSource(seed, 'S', own.orgId, 'vcs');
-      await seedPackage(seed, 'K', layer === 'package' ? foreign.orgId : own.orgId, 'S', 'acme/a');
-      await seedVersion(seed, 'V', layer === 'package' ? own.orgId : foreign.orgId, 'K', '1.0.0');
+      await seedPackage(
+        seed.forged,
+        'K',
+        layer === 'package' ? foreign.orgId : own.orgId,
+        'S',
+        'acme/a',
+      );
+      await seedVersion(
+        seed.forged,
+        'V',
+        layer === 'package' ? own.orgId : foreign.orgId,
+        'K',
+        '1.0.0',
+      );
       const plan = versionStatusStatements(own, {
         versionId: 'V',
         to: 'quarantined',
@@ -60,7 +72,13 @@ function epochCase(layer: 'epoch' | 'version'): ContractCase {
       const seed = seeder(context.executor);
       await seedSource(seed, 'S', own.orgId, 'vcs');
       await seedPackage(seed, 'K', own.orgId, 'S', 'acme/a');
-      await seedVersion(seed, 'V', layer === 'version' ? foreign.orgId : own.orgId, 'K', '1.0.0');
+      await seedVersion(
+        seed.forged,
+        'V',
+        layer === 'version' ? foreign.orgId : own.orgId,
+        'K',
+        '1.0.0',
+      );
       await seed("UPDATE version SET last_op_id = 'op' WHERE id = 'V'");
       for (const org of [own, foreign])
         await seed("UPDATE cache_epoch SET version = 'before' WHERE org_id = ?", org.orgId);

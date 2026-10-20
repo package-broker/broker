@@ -12,7 +12,7 @@ function deriveCase(kind: 'remove' | 'retag' | 'stay' | 'insert'): ContractCase 
       await seedProject(seed, 'P', own.orgId);
       await seedSource(seed, 'S', own.orgId, 'vcs');
       await seedPackage(
-        seed,
+        seed.forged,
         'K',
         kind === 'stay' || kind === 'insert' ? foreign.orgId : own.orgId,
         'S',
@@ -30,7 +30,7 @@ function deriveCase(kind: 'remove' | 'retag' | 'stay' | 'insert'): ContractCase 
           own.orgId,
         );
       if (kind !== 'insert')
-        await seed(
+        await seed.forged(
           "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'subscription')",
           kind === 'remove' || kind === 'retag' ? foreign.orgId : own.orgId,
         );
@@ -63,7 +63,7 @@ function foreignOriginCase(existing: boolean): ContractCase {
         "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
         own.orgId,
       );
-      await seed(
+      await seed.forged(
         "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('I', ?, 'P', 'S', 'acme/*', 'include')",
         foreign.orgId,
       );

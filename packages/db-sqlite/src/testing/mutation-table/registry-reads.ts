@@ -26,7 +26,7 @@ function coversCase(name: string, sourceOrg: Org, nameOrg: Org): ContractCase {
       const seed = seeder(context.executor);
       const orgs = orgOf(context);
       await seedSource(seed, 'S1', orgs[sourceOrg].orgId, 'vcs');
-      await seed(
+      await seed.forged(
         "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('R1', ?, 'S1', 'composer', 'acme/*')",
         orgs[nameOrg].orgId,
       );
@@ -53,8 +53,8 @@ function versionCase(name: string, rows: { source: Org; pkg: Org; version: Org }
       const seed = seeder(context.executor);
       const orgs = orgOf(context);
       await seedSource(seed, 'S1', orgs[rows.source].orgId, 'vcs');
-      await seedPackage(seed, 'K1', orgs[rows.pkg].orgId, 'S1', 'acme/a');
-      await seedVersion(seed, 'V1', orgs[rows.version].orgId, 'K1', '1.0.0');
+      await seedPackage(seed.forged, 'K1', orgs[rows.pkg].orgId, 'S1', 'acme/a');
+      await seedVersion(seed.forged, 'V1', orgs[rows.version].orgId, 'K1', '1.0.0');
       const result = await context.executor.all(
         context.mutate(versionByIdStatement(orgs.own, 'K1', 'V1')),
       );

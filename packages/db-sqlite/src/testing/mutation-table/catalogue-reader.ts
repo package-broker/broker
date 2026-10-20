@@ -65,7 +65,7 @@ async function seedCatalogue(context: CaseContext, foreignMembership = false): P
       `P-${suffix}`,
       `S-${suffix}`,
     );
-    await seed(
+    await seed.forged(
       "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
       foreignMembership && suffix === 'O' ? foreign.orgId : ctx.orgId,
       `P-${suffix}`,

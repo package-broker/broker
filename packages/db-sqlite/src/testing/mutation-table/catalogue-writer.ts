@@ -62,9 +62,9 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
           await seedPackage(seed, `${prefix}K`, org.orgId, `${prefix}S`, 'parent');
         for (const key of ['present', 'missing', 'returned']) {
           if (kind === 'source') {
-            await seedPackage(seed, `${prefix}-${key}`, org.orgId, 'OS', key);
+            await seedPackage(seed.forged, `${prefix}-${key}`, org.orgId, 'OS', key);
             await seedVersion(
-              seed,
+              seed.forged,
               `V-${prefix}-${key}`,
               org.orgId,
               `O-${key}`,
@@ -72,7 +72,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
             );
           } else {
             await seedVersion(
-              seed,
+              seed.forged,
               `${prefix}-${key}`,
               org.orgId,
               'OK',
@@ -238,7 +238,7 @@ const syncCase: ContractCase = {
     await seedWriter(context);
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
-    await seed(
+    await seed.forged(
       "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K-O', 'foreign', 'V-O')",
       foreign.orgId,
     );
@@ -275,7 +275,7 @@ const syncTagCollisionCase: ContractCase = {
     const { own, foreign } = orgOf(context);
     const seed = seeder(context.executor);
     await seedVersion(seed, 'V-NEXT', own.orgId, 'K-O', '1.0.1');
-    await seed(
+    await seed.forged(
       "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K-O', 'latest', 'V-O')",
       foreign.orgId,
     );
@@ -337,7 +337,7 @@ const lookupCase: ContractCase = {
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
     await seedSource(seed, 'S-LOOKUP', own.orgId, 'npm_registry', 'npm');
-    await seedPackage(seed, 'K-LOOKUP', foreign.orgId, 'S-LOOKUP', 'widget', 'npm');
+    await seedPackage(seed.forged, 'K-LOOKUP', foreign.orgId, 'S-LOOKUP', 'widget', 'npm');
     const before = await foreignSnapshot(context);
     const result = await createCatalogueWriter(executorOf(context)).syncPackage(
       own,
@@ -365,7 +365,7 @@ const tombstoneCase: ContractCase = {
     await seedWriter(context);
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
-    await seedVersion(seed, 'V-TOMB', foreign.orgId, 'K-O', '1.0.1');
+    await seedVersion(seed.forged, 'V-TOMB', foreign.orgId, 'K-O', '1.0.1');
     await seed(
       "UPDATE version SET status = 'tombstoned', tombstoned_at = ?, tombstone_reason = 'admin_tombstone' WHERE id = 'V-TOMB'",
       OLD,
@@ -411,7 +411,7 @@ function foreignPackageCase(admin: boolean): ContractCase {
       if (!admin) await seedWriter(context);
       const seed = seeder(context.executor);
       await seed("UPDATE version SET version_normalized = '9.0.0' WHERE id = 'V-F'");
-      await seed("UPDATE version SET package_id = 'K-F' WHERE id = 'V-O'");
+      await seed.forged("UPDATE version SET package_id = 'K-F' WHERE id = 'V-O'");
       const before = await foreignSnapshot(context);
       const { own } = orgOf(context);
       if (fence !== undefined)
@@ -582,12 +582,12 @@ function foreignSubsetCase(method: 'removePattern' | 'removeExplicit'): Contract
       const { own, foreign } = orgOf(context);
       if (method === 'removePattern') {
         await seed("DELETE FROM project_package_pattern WHERE id = 'PAT-O'");
-        await seed(
+        await seed.forged(
           "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('PAT-X', ?, 'P-O', 'S-O', 'widget*', 'include')",
           foreign.orgId,
         );
       } else {
-        await seed(
+        await seed.forged(
           "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P-O', 'K-O', 'explicit') ON CONFLICT(project_id, package_id) DO UPDATE SET org_id = excluded.org_id",
           foreign.orgId,
         );
@@ -610,7 +610,7 @@ const patternLimitCase: ContractCase = {
     const seed = seeder(context.executor);
     const { own, foreign } = orgOf(context);
     for (let i = 0; i < MAX_PATTERNS_PER_RULE; i++) {
-      await seed(
+      await seed.forged(
         "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES (?, ?, 'P-O', 'S-O', ?, 'include')",
         `FOREIGN-${i}`,
         foreign.orgId,

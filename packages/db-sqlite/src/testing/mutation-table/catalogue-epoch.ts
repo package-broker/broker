@@ -11,7 +11,7 @@ function scopedRead(layer: 'epoch' | 'package'): ContractCase {
       const { own, foreign } = orgOf(context);
       const seed = seeder(context.executor);
       await seedSource(seed, 'S', foreign.orgId, 'vcs');
-      await seedPackage(seed, 'K', foreign.orgId, 'S', 'acme/widget');
+      await seedPackage(seed.forged, 'K', foreign.orgId, 'S', 'acme/widget');
       await seed('UPDATE cache_epoch SET version = ? WHERE org_id = ?', 'A'.repeat(32), own.orgId);
       await seed(
         'UPDATE cache_epoch SET version = ? WHERE org_id = ?',

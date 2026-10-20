@@ -21,6 +21,8 @@ import type {
   ServiceTokenIssueOutcome,
   ServiceTokenStore,
   ServiceTokenStoreInput,
+  ServiceTokenRotationStore,
+  ServiceTokenRecord,
 } from '@package-broker/core/authz/service-token-service';
 import {
   adminEligibility,
@@ -113,7 +115,7 @@ export type RevokeTokenResult =
   | { readonly status: 'refused'; readonly reason: FailureReason }
   | { readonly status: 'indeterminate' };
 
-export interface TokenRepository {
+export interface TokenRepository extends ServiceTokenRotationStore {
   /**
    * Inserts the token and its bindings in one guarded batch; `mint` is called again for a fresh
    * pair after a selector collision, at most three times in all. The plaintext of the stored
@@ -641,6 +643,39 @@ function principalUnchanged(ctx: OrgContext, input: IssueServiceTokenInput): Gua
       and current_principal.revision = ${input.principalRevision})`;
 }
 
+function serviceInsert(
+  ctx: OrgContext,
+  fence: MutationFence,
+  input: IssueServiceTokenInput,
+  minted: MintedToken,
+  opId: string,
+): Statement {
+  return compile(
+    db.insertInto('token').values({
+      id: input.id,
+      org_id: ctx.orgId,
+      kind: 'svc',
+      selector: minted.selector,
+      hash: minted.hash,
+      pepper_version: minted.pepperVersion,
+      name: input.name,
+      scopes_json: JSON.stringify([input.scope]),
+      read_only: input.readOnly ? 1 : 0,
+      user_id: null,
+      service_principal_id: input.servicePrincipalId,
+      customer_id: null,
+      project_id: input.projectId,
+      created_by_user_id: fence.userId,
+      expires_at: input.expiresAt,
+      project_mode: input.projectId === null ? 'all' : 'selected',
+      validation_kind: null,
+      validation_identity_id: null,
+      last_op_id: opId,
+      created_at: input.now,
+    }),
+  );
+}
+
 function serviceStatements(
   ctx: OrgContext,
   fence: MutationFence,
@@ -651,30 +686,7 @@ function serviceStatements(
 ): Statement[] {
   return [
     ...checks.flatMap((check) => assertCheck(check)),
-    compile(
-      db.insertInto('token').values({
-        id: input.id,
-        org_id: ctx.orgId,
-        kind: 'svc',
-        selector: minted.selector,
-        hash: minted.hash,
-        pepper_version: minted.pepperVersion,
-        name: input.name,
-        scopes_json: JSON.stringify([input.scope]),
-        read_only: input.readOnly ? 1 : 0,
-        user_id: null,
-        service_principal_id: input.servicePrincipalId,
-        customer_id: null,
-        project_id: input.projectId,
-        created_by_user_id: fence.userId,
-        expires_at: input.expiresAt,
-        project_mode: input.projectId === null ? 'all' : 'selected',
-        validation_kind: null,
-        validation_identity_id: null,
-        last_op_id: opId,
-        created_at: input.now,
-      }),
-    ),
+    serviceInsert(ctx, fence, input, minted, opId),
     auditPendingStatement(ctx, input.audit),
     ...(input.idempotency === undefined
       ? []
@@ -782,6 +794,190 @@ export function createTokenRepository(
         if (outcome.reason === 'collision') return { status: 'refused', reason: 'unclassified' };
         if (outcome.reason === 'conflict') return { status: 'refused', reason: 'id_conflict' };
         return { status: 'refused', reason: 'unclassified' };
+      }
+      return { status: 'refused', reason: 'selector_collision' };
+    },
+
+    async getService(ctx, tokenId) {
+      nonEmpty('tokenId', tokenId);
+      const rows = await executor.all<{
+        id: string;
+        service_principal_id: string;
+        project_id: string | null;
+        scopes_json: string;
+        read_only: number;
+        name: string;
+        expires_at: string;
+        revoked_at: string | null;
+      }>(
+        compile(
+          db
+            .selectFrom('token')
+            .select([
+              'id',
+              'service_principal_id',
+              'project_id',
+              'scopes_json',
+              'read_only',
+              'name',
+              'expires_at',
+              'revoked_at',
+            ])
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', tokenId)
+            .where('kind', '=', 'svc'),
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined) return null;
+      const scopes: unknown = JSON.parse(row.scopes_json);
+      const scope = Array.isArray(scopes) && scopes.length === 1 ? scopes[0] : undefined;
+      if (scope !== 'read' && scope !== 'write' && scope !== 'full') return null;
+      return {
+        id: row.id,
+        servicePrincipalId: row.service_principal_id,
+        projectId: row.project_id,
+        scope,
+        readOnly: row.read_only === 1,
+        name: row.name,
+        expiresAt: row.expires_at,
+        revokedAt: row.revoked_at,
+      } satisfies ServiceTokenRecord;
+    },
+
+    async rotateService(ctx, fence, input, mint) {
+      validateServiceInput(input);
+      nonEmpty('tokenId', input.tokenId);
+      if (![0, 1, 7].includes(input.overlapDays)) throw new TypeError('invalid overlap');
+      if (input.id === input.tokenId) throw new TypeError('replacement requires a new id');
+      const issuance = serviceIssuance(ctx, fence, input, idleSeconds);
+      const unchanged = principalUnchanged(ctx, input);
+      const guard = servicePrincipalAuthorityGuard(ctx, fence, {
+        ...input.authority,
+        projectId: input.projectId,
+        providerAnchors: input.providerAnchors,
+      });
+      const revokeGuard = servicePrincipalAuthorityGuard(ctx, fence, {
+        permission: input.projectId === null ? 'org:tokens:revoke' : 'project:tokens:revoke',
+        organizationAdmin: input.projectId === null,
+        covers: [],
+        projectId: input.projectId,
+        providerAnchors: input.providerAnchors,
+      });
+      const bound =
+        input.projectId === null ? sql`project_id is null` : sql`project_id = ${input.projectId}`;
+      const oldLive = sql<boolean>`exists (select 1 from token where org_id = ${ctx.orgId}
+        and id = ${input.tokenId} and kind = 'svc' and service_principal_id = ${input.servicePrincipalId}
+        and ${bound} and revoked_at is null
+        and unixepoch(expires_at, 'subsec') > unixepoch('now', 'subsec')
+        and scopes_json = ${JSON.stringify([input.scope])} and read_only = ${input.readOnly ? 1 : 0})`;
+      for (let attempt = 1; attempt <= MAX_SELECTOR_ATTEMPTS; attempt += 1) {
+        const minted = await mint();
+        validateMinted(minted, SERVICE_PLAINTEXT, SERVICE_PLAINTEXT_PREFIX);
+        const opId = newOpId();
+        const performed = {
+          sql: 'exists (select 1 from token where org_id = ? and id = ? and last_op_id = ?)',
+          params: [ctx.orgId, input.tokenId, opId],
+        };
+        const expiry = input.overlapDays === 0 ? sql<string>`revoked_at` : sql<string>`expires_at`;
+        const rotationAudit = {
+          ...input.rotationAudit,
+          payloadJson: JSON.stringify({
+            ...JSON.parse(input.rotationAudit.payloadJson),
+            changes: {
+              replacement_id: { new: input.id },
+              overlap_days: { new: input.overlapDays },
+            },
+          }),
+        };
+        const observed = watchIssue(executor);
+        const outcome = await runOrgFenced(
+          observed.executor,
+          ctx,
+          fence,
+          guard,
+          [
+            ...revokeGuard.slice(0, 1),
+            ...assertCheck(issuance),
+            ...assertCheck(unchanged),
+            ...assertCheck(oldLive),
+            serviceInsert(ctx, fence, input, minted, opId),
+            compile(
+              db
+                .updateTable('token')
+                .set(
+                  input.overlapDays === 0
+                    ? { revoked_at: input.now, last_op_id: opId }
+                    : {
+                        expires_at: sql<string>`min(expires_at, strftime('%Y-%m-%dT%H:%M:%fZ', ${input.now}, ${`+${input.overlapDays} days`}), ${input.expiresAt})`,
+                        last_op_id: opId,
+                      },
+                )
+                .where('org_id', '=', ctx.orgId)
+                .where('id', '=', input.tokenId),
+            ),
+            ...assertCheck(sql<boolean>`exists (select 1 from token where org_id = ${ctx.orgId}
+            and id = ${input.tokenId} and last_op_id = ${opId})`),
+            auditPendingStatement(ctx, input.audit),
+            auditPendingStatement(ctx, rotationAudit, performed),
+            compile(
+              db
+                .updateTable('audit_pending')
+                .set({
+                  payload_json: sql<string>`json_set(payload_json,
+              '$.changes.expires_at', json_object('new', (select ${expiry} from token
+                where org_id = ${ctx.orgId} and id = ${input.tokenId} and last_op_id = ${opId})))`,
+                })
+                .where('org_id', '=', ctx.orgId)
+                .where('id', '=', rotationAudit.id),
+            ),
+            compile(
+              db
+                .selectFrom('token')
+                .select(expiry.as('replacedExpiresAt'))
+                .where('org_id', '=', ctx.orgId)
+                .where('id', '=', input.tokenId)
+                .where('last_op_id', '=', opId),
+            ),
+          ],
+          {
+            conflict: compile(
+              db.selectNoFrom(
+                sql`exists (select 1 from token where org_id = ${ctx.orgId} and id = ${input.id})`.as(
+                  'conflict',
+                ),
+              ),
+            ),
+            collision: compile(
+              db.selectNoFrom(
+                sql`exists (select 1 from token where org_id = ${ctx.orgId} and selector = ${minted.selector})`.as(
+                  'collision',
+                ),
+              ),
+            ),
+          },
+        );
+        if (outcome.ok) {
+          const replacedExpiresAt = outcome.results.at(-1)?.rows[0]?.['replacedExpiresAt'];
+          if (typeof replacedExpiresAt !== 'string') return { status: 'indeterminate' };
+          return {
+            status: 'rotated',
+            id: input.id,
+            plaintext: minted.plaintext,
+            replacedExpiresAt,
+          };
+        }
+        if (outcome.reason === 'indeterminate') return { status: 'indeterminate' };
+        if (
+          (await headGuardLost(executor, guard)) ||
+          (await headGuardLost(executor, revokeGuard)) ||
+          (await anyLost(executor, [issuance]))
+        )
+          return { status: 'refused', reason: 'authority' };
+        if (await anyLost(executor, [unchanged, oldLive]))
+          return { status: 'refused', reason: 'conflict' };
+        if (observed.selectorCollision()) continue;
+        return { status: 'refused', reason: 'conflict' };
       }
       return { status: 'refused', reason: 'selector_collision' };
     },

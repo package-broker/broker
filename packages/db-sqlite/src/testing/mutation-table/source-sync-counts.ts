@@ -29,7 +29,7 @@ async function openedListing(context: CaseContext) {
     ['f', foreign],
   ] as const) {
     for (const key of ['a', 'b', 'c']) {
-      await seed(
+      await seed.forged(
         "INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at) VALUES (?, ?, 'S', 'composer', ?, ?)",
         `${prefix}-${key}`,
         org.orgId,

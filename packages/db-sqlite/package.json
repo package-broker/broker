@@ -126,6 +126,10 @@
       "types": "./dist/contract/two-organizations.d.ts",
       "default": "./dist/contract/two-organizations.js"
     },
+    "./testing/foreign-keys-off": {
+      "types": "./dist/testing/foreign-keys-off.d.ts",
+      "default": "./dist/testing/foreign-keys-off.js"
+    },
     "./testing/migrated-database": {
       "types": "./dist/testing/migrated-database.d.ts",
       "default": "./dist/testing/migrated-database.js"

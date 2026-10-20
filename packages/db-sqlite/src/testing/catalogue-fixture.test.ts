@@ -2,7 +2,7 @@ import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import { isUlid } from '@package-broker/core/ids';
 import { isValidPattern, matchesPattern } from '@package-broker/core/catalogue/patterns';
@@ -108,6 +108,93 @@ function normalized(config: CatalogueConfig): CatalogueConfig {
 }
 
 describe('catalogue fixture', () => {
+  it.each<[string, (config: CatalogueConfig) => CatalogueConfig]>([
+    [
+      'project organization',
+      (c) => ({ ...c, projects: c.projects.map((p) => ({ ...p, orgId: 'missing' })) }),
+    ],
+    [
+      'source project',
+      (c) => ({ ...c, sources: c.sources.map((s) => ({ ...s, projectId: 'missing' })) }),
+    ],
+    [
+      'attachment project',
+      (c) => ({
+        ...c,
+        attachments: [...c.attachments, { ...c.attachments[0]!, projectId: 'missing' }],
+      }),
+    ],
+    [
+      'attachment source',
+      (c) => ({
+        ...c,
+        attachments: [...c.attachments, { ...c.attachments[0]!, sourceId: 'missing' }],
+      }),
+    ],
+    [
+      'pattern project',
+      (c) => ({ ...c, patterns: c.patterns.map((p) => ({ ...p, projectId: 'missing' })) }),
+    ],
+    [
+      'pattern source',
+      (c) => ({ ...c, patterns: c.patterns.map((p) => ({ ...p, sourceId: 'missing' })) }),
+    ],
+    [
+      'package source',
+      (c) => ({ ...c, packages: c.packages.map((p) => ({ ...p, sourceId: 'missing' })) }),
+    ],
+    [
+      'explicit project',
+      (c) => ({
+        ...c,
+        explicit: [
+          ...c.explicit,
+          { orgId: c.projects[0]!.orgId, projectId: 'missing', packageId: c.packages[0]!.id },
+        ],
+      }),
+    ],
+    [
+      'explicit package',
+      (c) => ({
+        ...c,
+        explicit: [
+          ...c.explicit,
+          { orgId: c.projects[0]!.orgId, projectId: c.projects[0]!.id, packageId: 'missing' },
+        ],
+      }),
+    ],
+    [
+      'registered name source',
+      (c) => ({
+        ...c,
+        registeredNames: c.registeredNames.map((r) => ({ ...r, sourceId: 'missing' })),
+      }),
+    ],
+    [
+      'version package',
+      (c) => ({ ...c, versions: c.versions.map((v) => ({ ...v, packageId: 'missing' })) }),
+    ],
+  ])(
+    'rejects an orphan %s before any database operation, even alongside forged rows',
+    async (_name, orphan) => {
+      const database = await openMigratedDatabase();
+      try {
+        const config = randomCatalogueConfig(3, 6, { forged: true });
+        const batch = vi.spyOn(database.executor, 'batch');
+        const all = vi.spyOn(database.executor, 'all');
+
+        await expect(seedCatalogue(database.executor, orphan(config))).rejects.toThrow(
+          'missing parent',
+        );
+
+        expect(batch).not.toHaveBeenCalled();
+        expect(all).not.toHaveBeenCalled();
+      } finally {
+        await database.close();
+      }
+    },
+  );
+
   it('1: the same seed yields identical configurations and different seeds differ', () => {
     expect(randomCatalogueConfig(7, 6)).toEqual(randomCatalogueConfig(7, 6));
     expect(randomCatalogueConfig(7, 6)).not.toEqual(randomCatalogueConfig(8, 6));

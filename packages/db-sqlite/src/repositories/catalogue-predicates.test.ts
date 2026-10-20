@@ -16,6 +16,7 @@ import {
   readTimeCondition,
   winnerOrder,
 } from './catalogue-predicates.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 let database: MigratedDatabase;
 let ctx: OrgContext;
@@ -54,6 +55,14 @@ async function source(
     ],
   );
 }
+
+const forgedSeed =
+  <A extends unknown[], R>(seed: (...args: A) => Promise<R>) =>
+  (...args: A): Promise<R> =>
+    withForeignKeysOff(database.executor, () => seed(...args));
+const pkgForged = forgedSeed(pkg);
+const attachForged = forgedSeed(attach);
+const patternForged = forgedSeed(pattern);
 
 async function pkg(
   id: string,
@@ -228,7 +237,7 @@ describe('attachedSourceCondition', () => {
     await source('S-FOREIGN', other.orgId, 'vcs');
     await pkg('K-LOOSE', ctx.orgId, 'S-LOOSE', 'acme/a');
     await pkg('K-FOREIGN', other.orgId, 'S-FOREIGN', 'acme/b');
-    await attach(ctx.orgId, 'P1', 'S-FOREIGN');
+    await attachForged(ctx.orgId, 'P1', 'S-FOREIGN');
     expect(await ids(attached('P1'))).toEqual([]);
   });
 
@@ -237,8 +246,8 @@ describe('attachedSourceCondition', () => {
     await project('P-OTHER', other.orgId);
     await source('S-ORG', ctx.orgId, 'vcs');
     await pkg('K-A', ctx.orgId, 'S-ORG', 'acme/a');
-    await attach(ctx.orgId, 'P-OTHER', 'S-ORG');
-    await attach(other.orgId, 'P1', 'S-ORG');
+    await attachForged(ctx.orgId, 'P-OTHER', 'S-ORG');
+    await attachForged(other.orgId, 'P1', 'S-ORG');
     expect(await ids(attached('P-OTHER'))).toEqual([]);
     expect(await ids(attached('P1'))).toEqual([]);
   });
@@ -300,10 +309,11 @@ describe('proxyEligibleCondition', () => {
         'INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, ?, ?)',
         [id, orgId, 'S-VCS', ecosystem, text],
       );
+    const registerForged = forgedSeed(register);
     await register('R1', ctx.orgId, 'composer', 'acme/*');
     await register('R2', ctx.orgId, 'composer', 'exact/name');
     await register('R3', ctx.orgId, 'npm', 'other/*');
-    await register('R4', other.orgId, 'composer', 'other/*');
+    await registerForged('R4', other.orgId, 'composer', 'other/*');
     expect(await ids(eligible())).toEqual(['K-OPEN']);
   });
 
@@ -336,7 +346,7 @@ describe('proxyEligibleCondition', () => {
     await source('S-PROXY', ctx.orgId, 'packagist_proxy');
     await source('S-FOREIGN', other.orgId, 'vcs');
     await pkg('K-PROXY', ctx.orgId, 'S-PROXY', 'acme/a');
-    await pkg('K-MISMATCH', ctx.orgId, 'S-FOREIGN', 'acme/a');
+    await pkgForged('K-MISMATCH', ctx.orgId, 'S-FOREIGN', 'acme/a');
     expect(await ids(eligible())).toEqual(['K-MISMATCH', 'K-PROXY']);
   });
 
@@ -744,34 +754,35 @@ describe('admissionCondition org consistency', () => {
   });
 
   it('a mismatched-org exclude pattern does not exclude', async () => {
-    await pattern('P1', 'S1', 'acme/*', 'exclude', other.orgId);
+    await patternForged('P1', 'S1', 'acme/*', 'exclude', other.orgId);
     expect(await ids(admitted())).toEqual(['K-A']);
   });
 
   it('a mismatched-org include pattern does not restrict', async () => {
-    await pattern('P1', 'S1', 'zzz/*', 'include', other.orgId);
+    await patternForged('P1', 'S1', 'zzz/*', 'include', other.orgId);
     expect(await ids(admitted())).toEqual(['K-A']);
   });
 
   it('a mismatched-org include pattern does not admit', async () => {
     await pattern('P1', 'S1', 'zzz/*', 'include');
-    await pattern('P1', 'S1', 'acme/*', 'include', other.orgId);
+    await patternForged('P1', 'S1', 'acme/*', 'include', other.orgId);
     expect(await ids(admitted())).toEqual([]);
   });
 
   it('a mismatched-org invalid pattern does not fail the pair closed', async () => {
-    await pattern('P1', 'S1', 'acme/?', 'exclude', other.orgId);
+    await patternForged('P1', 'S1', 'acme/?', 'exclude', other.orgId);
     expect(await ids(admitted())).toEqual(['K-A']);
   });
 
   it('mismatched-org includes do not count toward the include limit', async () => {
     for (let i = 0; i < 65; i += 1)
-      await pattern('P1', 'S1', `acme/a*${i}`, 'include', other.orgId);
+      await patternForged('P1', 'S1', `acme/a*${i}`, 'include', other.orgId);
     expect(await ids(admitted())).toEqual(['K-A']);
   });
 
   it('mismatched-org excludes do not count toward the exclude limit', async () => {
-    for (let i = 0; i < 65; i += 1) await pattern('P1', 'S1', `zzz/${i}`, 'exclude', other.orgId);
+    for (let i = 0; i < 65; i += 1)
+      await patternForged('P1', 'S1', `zzz/${i}`, 'exclude', other.orgId);
     expect(await ids(admitted())).toEqual(['K-A']);
   });
 });

@@ -177,6 +177,8 @@ describe.each([
           definition.schedule,
         ]),
       ).toEqual([
+        ['core:retention-scan:v1', { everySeconds: 86400 }],
+        ['core:blob-purge:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400 }],
         ['core:import-apply:v1', undefined],

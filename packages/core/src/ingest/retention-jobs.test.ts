@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import type { SourceRecord } from '../db/source.js';
-import type { PurgeGeneration, Sha256 } from '../platform/blob.js';
+import {
+  BlobBusyError,
+  type ByteStore,
+  type PurgeGeneration,
+  type Sha256,
+} from '../platform/blob.js';
+import { createBlobLifecycle } from '../platform/blob-lifecycle.js';
 import { JobError, type JobContext } from '../platform/jobs.js';
 import { registerCoreJob } from '../runtime/core-jobs.js';
 import {
@@ -266,6 +272,187 @@ describe('blob purge', () => {
     const job = createBlobPurgeJob({ lifecycle: f.lifecycle });
     await job.handler(job.validate({}), context({ signal: controller.signal }).job);
     expect(f.lifecycle.claimPurge).not.toHaveBeenCalled();
+  });
+});
+
+describe('purge outcomes', () => {
+  const outcomes = ['removed', 'queued', 'refused', 'short-lease', 'timeout', 'error', 'stale'];
+
+  it.each(outcomes)('blob purge cancels the lease only for a refused recheck: %s', async (o) => {
+    const f = scanFixture();
+    f.lifecycle.listDue.mockResolvedValue([sha(1)]);
+    f.lifecycle.removeBytes.mockResolvedValue(o as never);
+    const job = createBlobPurgeJob({ lifecycle: f.lifecycle });
+    await job.handler(job.validate({}), context().job);
+    expect(f.lifecycle.removeBytes).toHaveBeenCalledExactlyOnceWith(org, sha(1), gen);
+    expect(f.lifecycle.cancelPurge.mock.calls).toEqual(o === 'refused' ? [[org, sha(1), gen]] : []);
+  });
+
+  it.each(outcomes)(
+    'orphan removal cancels the lease only for a refused recheck: %s',
+    async (o) => {
+      const f = scanFixture();
+      f.reader.candidates.mockResolvedValue([candidate(1, { orphan: true })]);
+      f.lifecycle.removeBytes.mockResolvedValue(o as never);
+      await f.job.handler(f.job.validate({}), context().job);
+      expect(f.lifecycle.cancelPurge.mock.calls).toEqual(
+        o === 'refused' ? [[org, sha(1), gen]] : [],
+      );
+    },
+  );
+});
+
+describe('blob purge with the lifecycle service', () => {
+  const other = 'd'.repeat(32) as PurgeGeneration;
+
+  function model() {
+    const row = {
+      generation: null as PurgeGeneration | null,
+      leased: false,
+      deleted: false,
+      referenced: false,
+      shortLease: false,
+      bytes: new Uint8Array([1]) as Uint8Array | undefined,
+    };
+    let afterClaim: (() => void) | undefined;
+    const metadata = {
+      softDelete: vi.fn(async () => true),
+      scheduleOrphan: vi.fn(async () => true),
+      unschedule: vi.fn(async () => true),
+      listDue: vi.fn(async (): Promise<Sha256[]> => (row.deleted ? [] : [sha(1)])),
+      claimPurge: vi.fn(async (): Promise<PurgeGeneration | null> => {
+        if (row.leased || row.deleted) return null;
+        row.leased = true;
+        row.generation = gen;
+        afterClaim?.();
+        return gen;
+      }),
+      canStartRemove: vi.fn(
+        async (_c: unknown, _k: unknown, g: PurgeGeneration, marginMs: number) =>
+          row.leased &&
+          !row.deleted &&
+          g === row.generation &&
+          !row.referenced &&
+          (marginMs === 0 || !row.shortLease),
+      ),
+      markDeleted: vi.fn(async (_c: unknown, _k: unknown, g: PurgeGeneration) => {
+        if (!row.leased || g !== row.generation) return false;
+        row.deleted = true;
+        row.leased = false;
+        return true;
+      }),
+      cancelPurge: vi.fn(async (_c: unknown, _k: unknown, g: PurgeGeneration) => {
+        if (!row.leased || g !== row.generation) return false;
+        row.leased = false;
+        return true;
+      }),
+    };
+    const remove = vi.fn<ByteStore['remove']>(async () => {
+      row.bytes = undefined;
+    });
+    const service = createBlobLifecycle({
+      metadata,
+      store: { remove } as unknown as ByteStore,
+      deleteTimeoutMs: 1000,
+      leaseMs: 10_000,
+      observability: { counter: vi.fn(), histogram: vi.fn(), log: vi.fn() },
+    });
+    const job = createBlobPurgeJob({
+      lifecycle: { ...metadata, removeBytes: (c, k, g) => service.purgeBytes(c, k, g) },
+    });
+    const republish = (bytes: Uint8Array) => {
+      if (row.leased) throw new BlobBusyError();
+      row.generation = other;
+      row.deleted = false;
+      row.bytes = bytes;
+    };
+    return {
+      row,
+      metadata,
+      remove,
+      republish,
+      afterClaim: (hook: () => void) => {
+        afterClaim = hook;
+      },
+      run: () => job.handler(job.validate({}), context().job),
+    };
+  }
+
+  it('keeps the lease after a removal stalls past the timeout, so a republish cannot proceed', async () => {
+    const m = model();
+    const original = m.row.bytes;
+    let finish!: () => void;
+    m.remove.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = () => {
+            m.row.bytes = undefined;
+            resolve();
+          };
+        }),
+    );
+    await m.run();
+    expect(m.metadata.cancelPurge).not.toHaveBeenCalled();
+    expect(m.metadata.markDeleted).not.toHaveBeenCalled();
+    expect(m.row).toMatchObject({ leased: true, generation: gen, deleted: false });
+    const fresh = new Uint8Array([2]);
+    expect(() => m.republish(fresh)).toThrow(BlobBusyError);
+    expect(m.row.bytes).toBe(original);
+
+    finish();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(m.row).toMatchObject({ leased: true, generation: gen, deleted: false });
+    expect(m.metadata.cancelPurge).not.toHaveBeenCalled();
+
+    m.row.leased = false;
+    await m.run();
+    expect(m.row).toMatchObject({ deleted: true, leased: false });
+    m.republish(fresh);
+    expect(m.row.bytes).toBe(fresh);
+    expect(m.remove).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it('keeps the lease after the byte store throws', async () => {
+    const m = model();
+    m.remove.mockRejectedValueOnce(new Error('storage down'));
+    await m.run();
+    expect(m.metadata.cancelPurge).not.toHaveBeenCalled();
+    expect(m.row).toMatchObject({ leased: true, generation: gen, deleted: false });
+    expect(() => m.republish(new Uint8Array([2]))).toThrow(BlobBusyError);
+  });
+
+  it('leaves a short lease to expire without removing or cancelling', async () => {
+    const m = model();
+    m.row.shortLease = true;
+    await m.run();
+    expect(m.remove).not.toHaveBeenCalled();
+    expect(m.metadata.cancelPurge).not.toHaveBeenCalled();
+    expect(m.row).toMatchObject({ leased: true, generation: gen });
+  });
+
+  it('cancels the lease of a row referenced after the claim', async () => {
+    const m = model();
+    m.afterClaim(() => {
+      m.row.referenced = true;
+    });
+    await m.run();
+    expect(m.remove).not.toHaveBeenCalled();
+    expect(m.metadata.cancelPurge).toHaveBeenCalledExactlyOnceWith(org, sha(1), gen);
+    expect(m.row).toMatchObject({ leased: false, deleted: false, bytes: new Uint8Array([1]) });
+  });
+
+  it('cancels with a stale generation as a no-op that leaves the newer generation alone', async () => {
+    const m = model();
+    m.afterClaim(() => {
+      m.row.leased = false;
+      m.republish(new Uint8Array([3]));
+      m.row.leased = true;
+    });
+    await m.run();
+    expect(m.remove).not.toHaveBeenCalled();
+    expect(m.metadata.cancelPurge).toHaveBeenCalledExactlyOnceWith(org, sha(1), gen);
+    await expect(m.metadata.cancelPurge.mock.results[0]!.value).resolves.toBe(false);
+    expect(m.row).toMatchObject({ leased: true, generation: other, bytes: new Uint8Array([3]) });
   });
 });
 

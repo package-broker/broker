@@ -1,5 +1,5 @@
 import type { OrgContext } from '../db/port.js';
-import { isUlid } from '../ids.js';
+import { idBefore, isUlid } from '../ids.js';
 import { isPermissionView } from './actor.js';
 import type { ActorContext } from './administration.js';
 import type { ProjectStatus } from './project-service.js';
@@ -103,20 +103,6 @@ export interface ProjectListerDeps {
   readonly access?: ProjectReadAccess;
   /** Lists project-grant readable projects for a caller lacking organization `project:read`. */
   readonly readable?: ReadableProjectSource;
-}
-
-const ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-
-/** The greatest id of the same length that sorts strictly below `id`, or null when none exists. */
-function idBefore(id: string): string | null {
-  for (let i = id.length - 1; i >= 0; i -= 1) {
-    const at = ID_ALPHABET.indexOf(id[i] as string);
-    if (at > 0) {
-      return id.slice(0, i) + (ID_ALPHABET[at - 1] as string) + 'Z'.repeat(id.length - i - 1);
-    }
-    if (at < 0) return null;
-  }
-  return null;
 }
 
 function fail(error: ProjectListError): ProjectListResult {

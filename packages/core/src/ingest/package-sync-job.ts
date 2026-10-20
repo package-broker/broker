@@ -2,8 +2,16 @@ import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../db/errors.js';
 import type { OrgContext, SqlExecutor, Statement } from '../db/port.js';
 import type { UpstreamForm, UpstreamStateRepository } from '../db/upstream-state.js';
+import type { Clock } from '../ids.js';
+import { jobLeaseOf } from '../platform/job-fences.js';
+import { JobRelease } from '../platform/job-release.js';
+import {
+  JOB_HANDLER_BUDGET_SECONDS,
+  JOB_RELEASE_DELAY_SECONDS,
+} from '../platform/job-repository.js';
+import type { JobGuard } from '../platform/job-repository.js';
 import { canonicalPayload, defineJob, JobError } from '../platform/jobs.js';
-import type { EnqueueInput, JobContext, Jobs } from '../platform/jobs.js';
+import type { EnqueueInput, Jobs } from '../platform/jobs.js';
 import type { SourceType } from '../sources/config.js';
 import { assertDescribeResult } from '../sources/provider.js';
 import { applyChunk, type ApplyDeps } from './apply-description.js';
@@ -20,7 +28,9 @@ import { parsePendingValidators } from './validators.js';
 
 export const PACKAGE_SYNC_JOB_TYPE = 'core:package-sync:v1';
 const NOT_FOUND_TTL_SECONDS = 30;
-const DEFAULT_LEASE_SECONDS = 60;
+const MAX_ATTEMPTS = 25;
+const ABANDONED_RESYNC_DELAY_MS = 60_000;
+const ABANDONED_RESYNC_WINDOW_MS = 3_600_000;
 const MAX_TEXT = 512;
 
 export interface PackageSyncDeps {
@@ -52,8 +62,9 @@ export interface PackageSyncDeps {
   readonly writeGuard: (
     ctx: OrgContext,
     session: IngestSessionHandle,
-    job: JobContext,
+    job: JobGuard,
   ) => CatalogueWriteGuard;
+  readonly clock: Clock;
   readonly leaseSeconds?: number;
 }
 
@@ -118,6 +129,7 @@ const retry = () => new JobError('handler_error');
 export const packageSyncJob = defineJob<unknown>({
   name: 'package-sync',
   version: 1,
+  maxAttempts: MAX_ATTEMPTS,
   validate,
   async handler(_payload, context) {
     if (context.signal.aborted) return;
@@ -131,6 +143,8 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
     validate,
     async handler(input: unknown, context) {
       if (context.signal.aborted) return;
+      const lease = jobLeaseOf(context);
+      if (lease === null) throw new JobError('invalid_definition');
       const payload = validate(input);
       const { sourceId, key } = payload;
       const ctx = context.org;
@@ -139,10 +153,10 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
       const handle = await deps.sessions.acquire(
         ctx,
         { scope: 'package', sourceId, packageKey: key },
-        context.jobId,
-        deps.leaseSeconds ?? DEFAULT_LEASE_SECONDS,
+        lease.owner,
+        deps.leaseSeconds ?? JOB_HANDLER_BUDGET_SECONDS,
       );
-      if (handle === 'held') throw retry();
+      if (handle === 'held') throw new JobRelease(JOB_RELEASE_DELAY_SECONDS);
       let session = handle;
       let open = true;
       const end = async (abandon: boolean) => {
@@ -162,7 +176,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
       };
       const guarded = (statements: readonly Statement[]) =>
         leaseChecked(() =>
-          deps.executor.batch([...deps.writeGuard(ctx, session, context), ...statements]),
+          deps.executor.batch([...deps.writeGuard(ctx, session, lease), ...statements]),
         );
       try {
         if (
@@ -206,7 +220,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
               ),
             );
             await leaseChecked(() =>
-              deps.apply.writer.markPackageAbsent(ctx, deps.writeGuard(ctx, session, context), {
+              deps.apply.writer.markPackageAbsent(ctx, deps.writeGuard(ctx, session, lease), {
                 packageId,
               }),
             );
@@ -235,25 +249,31 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
             },
           },
         };
-        const applied = await applyChunk(ctx, apply, {
-          ...plan,
-          description: described.description,
-          session,
-          guard: deps.writeGuard(ctx, session, context),
-        });
+        const applied = await leaseChecked(() =>
+          applyChunk(ctx, apply, {
+            ...plan,
+            description: described.description,
+            session,
+            guard: deps.writeGuard(ctx, session, lease),
+          }),
+        );
         session = applied.session;
         if (applied.status === 'abandoned') {
           open = false;
           const fresh: PackageSyncPayload = { sourceId, key };
-          await deps.jobs.enqueue(
-            ctx,
-            PACKAGE_SYNC_JOB_TYPE,
-            fresh,
-            await packageSyncEnqueueInput(
+          const now = deps.clock.now().getTime();
+          await deps.jobs.enqueue(ctx, PACKAGE_SYNC_JOB_TYPE, fresh, {
+            ...(await packageSyncEnqueueInput(
               fresh,
-              await sha256Hex(['abandoned', session.id, session.generation]),
-            ),
-          );
+              await sha256Hex([
+                'abandoned',
+                sourceId,
+                key,
+                Math.floor(now / ABANDONED_RESYNC_WINDOW_MS),
+              ]),
+            )),
+            runAt: new Date(now + ABANDONED_RESYNC_DELAY_MS).toISOString(),
+          });
           return;
         }
         if (applied.status === 'superseded') {

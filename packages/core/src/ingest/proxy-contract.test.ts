@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setAccessContext } from '../authz/access-context.js';
+import { jobFences } from '../platform/job-fences.js';
 import { PACKAGES_READ } from '../catalogue/package-access.js';
 import type { CatalogueReader, CatalogueWriteGuard } from '../db/catalogue.js';
 import { orgContext } from '../db/port.js';
@@ -973,6 +974,7 @@ describe('revalidation job', () => {
       }),
       findPackageId: async () => `pk-${target.name}`,
       writeGuard: () => [] as unknown as CatalogueWriteGuard,
+      clock: systemClock,
     });
     const context = {
       org,
@@ -980,6 +982,7 @@ describe('revalidation job', () => {
       idempotencyKey: 'k',
       attempt: 1,
       fence: 1,
+      fences: jobFences({ id: 'job-1', owner: 'owner', fence: 1 }),
       signal: new AbortController().signal,
       ports: {},
       observability: { log: vi.fn() },

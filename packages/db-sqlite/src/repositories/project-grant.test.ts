@@ -1605,6 +1605,29 @@ describe('project grant mutation audit and idempotency', () => {
     expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
     expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
   });
+  it('a duplicate grant stays duplicate with an expired record for the key', async () => {
+    await rows(
+      `INSERT INTO api_idempotency (org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, 200, '{}', '2000-01-01T00:00:00.000Z', '2000-01-02T00:00:00.000Z')`,
+      a.orgId,
+      record().principalKey,
+      record().key,
+      record().route,
+      'c'.repeat(64),
+    );
+    expect(
+      await repository.create(
+        a,
+        actorFence(),
+        createInput({
+          id: G_TARGET,
+          audit: mutationAudit('project_grant.create', G_TARGET),
+          idempotency: record(),
+        }),
+      ),
+    ).toBe('duplicate');
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+  });
 });
 
 describe('project grant delete stamps pat_invalid_before', () => {

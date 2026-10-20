@@ -534,9 +534,17 @@ describe('archive and restore', () => {
   it('refuses restore without recent reauth and changes nothing', async () => {
     await archive(1);
     const before = await snapshot();
-    expect(await restore(2, S1)).toBe('authority');
+    expect(await restore(2, S1)).toBe('reauth_required');
     await rows(`UPDATE session SET reauth_at = ${at(-601)} WHERE id = ?`, S_FRESH);
-    expect(await restore(2)).toBe('authority');
+    expect(await restore(2)).toBe('reauth_required');
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('keeps authority for a restore the actor could not make with any reauth', async () => {
+    await archive(1);
+    const before = await snapshot();
+    expect(await restore(2, S_OTHER, P1, U2)).toBe('authority');
+    expect(await restore(2, S_REVOKED, P1, U1)).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
 
@@ -931,9 +939,9 @@ describe('authority before existence', () => {
     },
   );
 
-  it('restore answers authority without a fresh reauth even for a missing id', async () => {
+  it('restore answers reauth_required without a fresh reauth even for a missing id', async () => {
     await prepare('restore');
-    expect(await methods.restore(fence({ project: 2 }, U1, S1), MISSING)).toBe('authority');
+    expect(await methods.restore(fence({ project: 2 }, U1, S1), MISSING)).toBe('reauth_required');
   });
 
   it.each([
@@ -1305,6 +1313,23 @@ describe('project mutation audit and idempotency', () => {
     ).toBe('duplicate');
     expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
     expect(await rows('SELECT key FROM api_idempotency')).toEqual([]);
+  });
+
+  it('a duplicate slug stays duplicate with an expired record for the key', async () => {
+    await prepare('update');
+    await rows(
+      `INSERT INTO api_idempotency (org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, 200, '{}', '2000-01-01T00:00:00.000Z', '2000-01-02T00:00:00.000Z')`,
+      a.orgId,
+      record().principalKey,
+      record().key,
+      record().route,
+      'c'.repeat(64),
+    );
+    expect(
+      await create({ id: P2, audit: mutationAudit('project.create', P2), idempotency: record() }),
+    ).toBe('duplicate');
+    expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
   });
 
   it('an unchanged update writes nothing', async () => {

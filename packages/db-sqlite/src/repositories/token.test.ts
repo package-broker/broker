@@ -1734,7 +1734,7 @@ function mutationAudit(action: AuditAction = 'token.issue', target = TOKEN) {
 
 function mutationIdempotency(key = 'issue'): IdempotencyRecord {
   return {
-    principalKey: USER,
+    principalKey: `user:${USER}`,
     key,
     route: 'POST /tokens',
     requestHash: 'a'.repeat(64),
@@ -2007,7 +2007,7 @@ describe('atomic token audit', () => {
         insert(
           "INSERT INTO api_idempotency (org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at) VALUES (?, ?, 'issue', 'POST /tokens', ?, 201, '{}', ?, ?)",
           a.orgId,
-          USER,
+          `user:${USER}`,
           'a'.repeat(64),
           iso(0),
           iso(86_400_000),

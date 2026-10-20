@@ -48,6 +48,7 @@ const INNER_ALIASES = new Set([
   'bref_ru',
   'bref_ing',
   'bref_up',
+  'bref_rel',
 ]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const NOW = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
@@ -103,6 +104,22 @@ export function blobOrphanCondition(_ctx: OrgContext, blobRef: string): Eligible
     AND NOT EXISTS (
       SELECT 1 FROM upstream_state bref_up
       WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256))`,
+    params: [],
+  };
+}
+
+const NEVER = '9999-12-31T23:59:59.999Z';
+
+export function blobPrematureCondition(_ctx: OrgContext, blobRef: string): EligibleCondition {
+  checkedAlias(blobRef);
+  const stamp = (status: string, column: string) =>
+    `CASE WHEN ${status} THEN COALESCE(${column}, '${NEVER}') ELSE '' END`;
+  const release = `max(${stamp(`bref_v.status = 'tombstoned'`, 'bref_v.tombstoned_at')}, ${stamp(`bref_v.status = 'removed_upstream'`, 'bref_v.removed_upstream_at')}, ${stamp(`bref_p.status = 'removed_upstream'`, 'bref_p.removed_upstream_at')})`;
+  const columns = `${release} AS rel, COALESCE(bref_s.retention_days_override, 0) AS ov`;
+  return {
+    sql: `EXISTS (SELECT 1 FROM (${references(blobRef, columns, () => '')}) bref_rel
+    WHERE bref_rel.rel <> ''
+    AND ${blobRef}.purge_after < COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', bref_rel.rel, '+' || max((SELECT o.retention_removed_upstream_days FROM organization o WHERE o.id = ${blobRef}.org_id), bref_rel.ov) || ' days'), '${NEVER}'))`,
     params: [],
   };
 }
@@ -193,13 +210,14 @@ LIMIT ?`,
     async scheduledIneligible(ctx, page) {
       validPage(page);
       const eligible = blobEligibleCondition(ctx, 'b');
+      const premature = blobPrematureCondition(ctx, 'b');
       const cursor = cursorClause(page);
       const rows = await executor.all<Row>({
         sql: `SELECT b.id, b.sha256, b.created_at FROM blob b
-WHERE b.org_id = ? AND b.purge_after IS NOT NULL AND b.deleted_at IS NULL AND NOT ${eligible.sql} ${cursor.sql}
+WHERE b.org_id = ? AND b.purge_after IS NOT NULL AND b.deleted_at IS NULL AND (NOT ${eligible.sql} OR ${premature.sql}) ${cursor.sql}
 ORDER BY b.created_at, b.id
 LIMIT ?`,
-        params: [ctx.orgId, ...eligible.params, ...cursor.params, page.limit],
+        params: [ctx.orgId, ...eligible.params, ...premature.params, ...cursor.params, page.limit],
       } satisfies ScalarStatement);
       return rows.map(blob);
     },

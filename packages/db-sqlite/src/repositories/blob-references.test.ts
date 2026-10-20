@@ -344,7 +344,7 @@ VALUES ('REF1', ?, 'RUN1', 'version', 'VERX', 'ext', 'update', ?)`,
   });
 
   describe('scheduledIneligible', () => {
-    const scheduled = "purge_after = '2026-02-01T00:00:00.000Z'";
+    const scheduled = "purge_after = '2028-01-01T00:00:00.000Z'";
 
     it('lists scheduled blobs that became referenced again', async () => {
       const id = await blob(a, 1, scheduled);

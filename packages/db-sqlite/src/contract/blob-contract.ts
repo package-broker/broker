@@ -64,7 +64,9 @@ export type BlobReferenceStatus =
  * the context's organization point at the blob with the given status; `setVersionStatus` sets that
  * status on every version of the blob in the organization. `removeCalls` counts `ByteStore.remove`
  * calls; `stallNextRemove` makes the next one never settle and `failNextRemove` makes it reject.
- * Each of the two affects only the next call.
+ * Each of the two affects only the next call. `leaseMarginMs` is the remaining lease the removal
+ * requires; `shortenLease` sets a live lease to end the given number of milliseconds from the
+ * database clock.
  */
 export interface BlobLifecycleFixture extends BlobContractFixture {
   readonly lifecycle: BlobLifecycle;
@@ -79,6 +81,8 @@ export interface BlobLifecycleFixture extends BlobContractFixture {
     key: Sha256,
     status: BlobReferenceStatus,
   ) => Promise<void>;
+  readonly leaseMarginMs: () => number;
+  readonly shortenLease: (ctx: OrgContext, key: Sha256, remainingMs: number) => Promise<void>;
   readonly removeCalls: () => number;
   readonly stallNextRemove: () => void;
   readonly failNextRemove: () => void;
@@ -156,6 +160,8 @@ const LIFECYCLE_FIXTURE_HOOKS = [
   'makeEligible',
   'addReference',
   'setVersionStatus',
+  'leaseMarginMs',
+  'shortenLease',
   'removeCalls',
   'stallNextRemove',
   'failNextRemove',
@@ -971,6 +977,230 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.cancelPurge(org, key, generation)).toBe(true);
       expect(await readText(f.store, org, key)).toBe('claim cancelled');
       expect((await f.store.head(org, key))?.purgeAfter).toBeNull();
+    });
+
+    async function withOtherOrg(f: BlobLifecycleFixture, data: Uint8Array, label: string) {
+      const other = await f.seed(nextOrg());
+      const key = await put(f.store, other, data);
+      await f.lifecycle.softDelete(other, key, { removedAt: await f.now() });
+      await f.makeEligible(other, key);
+      await f.expireRetention(other, key);
+      const generation = await f.generationOf(other, key);
+      return {
+        other,
+        async expectUntouched() {
+          expect(await f.generationOf(other, key)).toBe(generation);
+          expect(await readText(f.store, other, key)).toBe(label);
+          expect((await f.store.head(other, key))?.purgeAfter).not.toBeNull();
+        },
+      };
+    }
+
+    async function claimedWithReference(
+      f: BlobLifecycleFixture,
+      label: string,
+      status: BlobReferenceStatus,
+    ) {
+      const { org, data, key } = await scheduled(f, label);
+      await f.addReference(org, key, status);
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      return { org, data, key };
+    }
+
+    it('lifecycle 1: a referenced blob with an active version cannot be claimed', async () => {
+      const f = await readyLifecycle(make);
+      const label = 'referenced and active';
+      const { org, key } = await claimedWithReference(f, label, 'active');
+      const second = await withOtherOrg(f, bytes(label), label);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+      expect(await f.store.head(org, key)).not.toBeNull();
+      expect(await readText(f.store, org, key)).toBe(label);
+      expect(f.removeCalls()).toBe(0);
+      await second.expectUntouched();
+    });
+
+    it('lifecycle 1 negative: with the reference removed the same flow claims and removes', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await claimedWithReference(f, 'reference dropped', 'active');
+      await f.setVersionStatus(org, key, 'removed_upstream');
+      await f.expireRetention(org, key);
+      const generation = await f.lifecycle.claimPurge(org, key);
+      expect(generation).not.toBeNull();
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+    });
+
+    it('lifecycle 2: a reference added after the claim stops the removal and the purge is cancelled', async () => {
+      const f = await readyLifecycle(make);
+      const label = 'referenced after the claim';
+      const { org, key } = await scheduled(f, label);
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const second = await withOtherOrg(f, bytes(label), label);
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      expect(generation).not.toBeNull();
+      await f.addReference(org, key, 'active');
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect(f.removeCalls()).toBe(0);
+      expect(await f.lifecycle.cancelPurge(org, key, generation)).toBe(true);
+      expect(await readText(f.store, org, key)).toBe(label);
+      expect(await f.store.head(org, key)).not.toBeNull();
+      await second.expectUntouched();
+    });
+
+    it('lifecycle 2 negative: after the late reference is removed the same claim removes', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await scheduled(f, 'late reference removed');
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      expect(generation).not.toBeNull();
+      await f.addReference(org, key, 'active');
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect(f.removeCalls()).toBe(0);
+      await f.setVersionStatus(org, key, 'removed_upstream');
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+    });
+
+    it('lifecycle 3: a reactivation after the claim behaves like a late reference', async () => {
+      const f = await readyLifecycle(make);
+      const label = 'reactivated after the claim';
+      const { org, key } = await claimedWithReference(f, label, 'removed_upstream');
+      const second = await withOtherOrg(f, bytes(label), label);
+      const generation = await f.lifecycle.claimPurge(org, key);
+      expect(generation).not.toBeNull();
+      await f.setVersionStatus(org, key, 'active');
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(false);
+      expect(f.removeCalls()).toBe(0);
+      expect(await f.lifecycle.cancelPurge(org, key, generation!)).toBe(true);
+      expect(await readText(f.store, org, key)).toBe(label);
+      await second.expectUntouched();
+    });
+
+    it('lifecycle 3 negative: a version that stays removed upstream does not stop the removal', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await claimedWithReference(f, 'stays removed', 'removed_upstream');
+      const generation = await f.lifecycle.claimPurge(org, key);
+      expect(generation).not.toBeNull();
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+    });
+
+    it('lifecycle 4: a lease with less than the margin left refuses the removal', async () => {
+      const f = await readyLifecycle(make);
+      const label = 'lease nearly over';
+      const { org, key } = await scheduled(f, label);
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const second = await withOtherOrg(f, bytes(label), label);
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      await f.shortenLease(org, key, f.leaseMarginMs() * 0.75);
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect(f.removeCalls()).toBe(0);
+      await second.expectUntouched();
+    });
+
+    it('lifecycle 4 negative: a lease with more than the margin left removes', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await scheduled(f, 'lease with room');
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      await f.shortenLease(org, key, f.leaseMarginMs() + 5_000);
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+    });
+
+    it('lifecycle 5: a generation bump makes the old claim remove and mark nothing', async () => {
+      const f = await readyLifecycle(make);
+      const label = 'generation bumped';
+      const { org, data, key } = await scheduled(f, label);
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const second = await withOtherOrg(f, bytes(label), label);
+      const stale = (await f.lifecycle.claimPurge(org, key))!;
+      await f.expireLease(org, key);
+      await put(f.store, org, data);
+      expect(await f.generationOf(org, key)).not.toBe(stale);
+      expect(await f.lifecycle.recheckAndRemove(org, key, stale)).toBe(false);
+      expect(f.removeCalls()).toBe(0);
+      expect(await f.lifecycle.markDeleted(org, key, stale)).toBe(false);
+      expect(await readText(f.store, org, key)).toBe(label);
+      await second.expectUntouched();
+    });
+
+    it('lifecycle 5: an old claim stays refused while a newer claim holds a live lease', async () => {
+      const f = await readyLifecycle(make);
+      const { org, data, key } = await scheduled(f, 'newer claim live');
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const stale = (await f.lifecycle.claimPurge(org, key))!;
+      await f.expireLease(org, key);
+      await put(f.store, org, data);
+      await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const current = (await f.lifecycle.claimPurge(org, key))!;
+      expect(current).not.toBe(stale);
+      expect(await f.lifecycle.recheckAndRemove(org, key, stale)).toBe(false);
+      expect(f.removeCalls()).toBe(0);
+      expect(await f.lifecycle.markDeleted(org, key, stale)).toBe(false);
+      expect(await f.lifecycle.cancelPurge(org, key, stale)).toBe(false);
+      expect(await f.generationOf(org, key)).toBe(current);
+    });
+
+    it('lifecycle 5 negative: the current generation of the same blob removes', async () => {
+      const f = await readyLifecycle(make);
+      const { org, data, key } = await scheduled(f, 'current generation');
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      await f.lifecycle.claimPurge(org, key);
+      await f.expireLease(org, key);
+      await put(f.store, org, data);
+      await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const current = (await f.lifecycle.claimPurge(org, key))!;
+      expect(await f.lifecycle.recheckAndRemove(org, key, current)).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+    });
+
+    it('lifecycle 6: a crash after the remove recovers on the next claim and a repeat marks nothing', async () => {
+      const f = await readyLifecycle(make);
+      const label = 'crashed after remove';
+      const { org, data, key } = await scheduled(f, label);
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const second = await withOtherOrg(f, bytes(label), label);
+      const first = (await f.lifecycle.claimPurge(org, key))!;
+      await f.removeBytes(org, key);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+      await f.expireLease(org, key);
+      const recovered = (await f.lifecycle.claimPurge(org, key))!;
+      expect(recovered).not.toBeNull();
+      expect(recovered).not.toBe(first);
+      expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+      expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
+      expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
+      expect(await f.store.head(org, key)).toBeNull();
+      await put(f.store, org, data);
+      expect(await readText(f.store, org, key)).toBe(label);
+      await second.expectUntouched();
+    });
+
+    it('lifecycle 6 negative: a removal after markDeleted is refused and removes nothing more', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await scheduled(f, 'removed once');
+      await f.makeEligible(org, key);
+      await f.expireRetention(org, key);
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+      expect(await f.lifecycle.markDeleted(org, key, generation)).toBe(true);
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect(f.removeCalls()).toBe(1);
     });
   });
 }

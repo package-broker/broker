@@ -320,7 +320,6 @@ async function startBundle(source) {
   step = 'copying the bundle';
   copy = await realpath(await mkdtemp(join(tmpdir(), 'pb-node-smoke-')));
   await cp(join(source, '.'), copy, { recursive: true });
-  await cp(join(REPO_ROOT, 'packages/ui/dist/assets'), join(copy, 'assets'), { recursive: true });
   console.log(`smoke:node copied ${source} to ${copy}`);
 
   if (process.env['SMOKE_OFFLINE'] === '1') {
@@ -511,8 +510,25 @@ async function run() {
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
 
   step = 'checking the authenticated UI mount';
-  const uiManifest = JSON.parse(await readFile(join(copy, 'assets/manifest.json'), 'utf8'));
-  for (const path of ['/_pb/ui/', '/_pb/ui/manifest.json']) {
+  const assetsDir = join(copy, 'assets');
+  const uiManifest = JSON.parse(await readFile(join(assetsDir, 'manifest.json'), 'utf8'));
+  const uiDocument = await readFile(join(assetsDir, uiManifest.entry), 'utf8');
+  const referenced = [...uiDocument.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(referenced.length > 0, 'the UI document references no assets');
+  for (const name of referenced) {
+    assert.ok(
+      name in uiManifest.files,
+      `the document references ${name}, absent from the manifest`,
+    );
+  }
+  const uiPaths = [
+    '/_pb/ui/',
+    '/_pb/ui/manifest.json',
+    ...Object.keys(uiManifest.files)
+      .filter((name) => name !== uiManifest.entry)
+      .map((name) => `/_pb/ui/${name}`),
+  ];
+  for (const path of uiPaths) {
     const anonymousUi = await fetch(`${base}${path}`, {
       redirect: 'manual',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -523,14 +539,30 @@ async function run() {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     await expectStatus(authenticatedUi, 200, `GET ${path} with a session`);
-    if (path.endsWith('.json')) assert.deepEqual(await authenticatedUi.json(), uiManifest);
-    else
-      assert.equal(
-        await authenticatedUi.text(),
-        await readFile(join(copy, 'assets', uiManifest.entry), 'utf8'),
+    const name = path === '/_pb/ui/' ? uiManifest.entry : path.slice('/_pb/ui/'.length);
+    if (name === 'manifest.json') {
+      assert.deepEqual(await authenticatedUi.json(), uiManifest);
+    } else {
+      assert.deepEqual(
+        Buffer.from(await authenticatedUi.arrayBuffer()),
+        await readFile(join(assetsDir, name)),
+        `${path} differs from the staged file`,
       );
+    }
   }
-  console.log('smoke:node UI document and manifest require a session');
+  for (const name of ['index.html', 'manifest.json', ...referenced]) {
+    for (const headers of [{}, { cookie }]) {
+      const raw = await fetch(`${base}/${name}`, {
+        headers,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      assert.equal(raw.status, 404, `GET /${name} must not serve a UI asset`);
+    }
+  }
+  console.log(
+    `smoke:node UI document, manifest and ${uiPaths.length - 2} assets require a session and match the staged output`,
+  );
 
   step = 'checking audit jobs';
   await checkAuditJobs(env['PB_SQLITE_PATH']);

@@ -1,7 +1,10 @@
 import { orgOf, seeder, type ContractCase, type Seed, type MutationEntry } from './harness.js';
 import { expect } from 'vitest';
 import type { Statement } from '@package-broker/core/db/port';
-import { blobEligibleCondition } from '../../repositories/blob-references.js';
+import {
+  blobEligibleCondition,
+  blobPrematureCondition,
+} from '../../repositories/blob-references.js';
 import { createBlobRepository } from '../../repositories/blob.js';
 import type { Sha256 } from '@package-broker/core/platform/blob';
 import { seedSource, seedPackage, FUTURE, NOT_NULL, ALWAYS } from './fixtures.js';
@@ -319,4 +322,166 @@ const orphanEntry: MutationEntry = {
   ],
 };
 
-export const entries: readonly MutationEntry[] = [blobEntry, orphanEntry];
+type ReleaseKind = 'tombstoned' | 'version' | 'package';
+
+interface PrematureOptions {
+  readonly purgeAfter?: string;
+  readonly override?: number;
+  readonly status?: 'active';
+}
+
+function prematureCase(
+  kind: ReleaseKind,
+  releasedAt: string,
+  premature: boolean,
+  options: PrematureOptions = {},
+): ContractCase {
+  const purgeAfter = options.purgeAfter ?? '2026-10-02T00:00:00.000Z';
+  const label = [
+    options.override === undefined ? '' : ` with a source override of ${String(options.override)}`,
+    options.status === undefined ? '' : ' on an active version',
+  ].join('');
+  return {
+    name: `a ${kind} release at ${releasedAt}${label} makes a schedule at ${purgeAfter.slice(0, 10)} ${premature ? '' : 'not '}premature`,
+    async run(context) {
+      const seed = seeder(context.executor);
+      const { own, foreign } = orgOf(context);
+      for (const [id, sha] of [
+        ['B', '1'],
+        ['BR', '2'],
+      ] as const) {
+        await seedBlobRow(seed, id, own.orgId, sha.repeat(64));
+      }
+      await seed('UPDATE blob SET purge_after = ?', purgeAfter);
+      await seed(
+        'UPDATE organization SET retention_removed_upstream_days = 1 WHERE id = ?',
+        foreign.orgId,
+      );
+      await seedSource(seed, 'S', foreign.orgId, 'vcs');
+      if (options.override !== undefined) {
+        await seed('UPDATE source SET retention_days_override = ?', options.override);
+      }
+      await seedPackage(seed, 'K', foreign.orgId, 'S', 'acme/pkg');
+      const [status, tombstoned, removed] =
+        options.status === 'active'
+          ? ['active', null, null]
+          : kind === 'tombstoned'
+            ? ['tombstoned', releasedAt, null]
+            : kind === 'version'
+              ? ['removed_upstream', null, releasedAt]
+              : ['tombstoned', OLD, null];
+      for (const [id, direct] of [
+        ['V', 'B'],
+        ['VR', null],
+      ] as const) {
+        await seed(
+          `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, tombstoned_at, removed_upstream_at)
+            VALUES (?, ?, 'K', ?, ?, ?, 'upstream', '{}', ?, ?, ?, ?)`,
+          id,
+          foreign.orgId,
+          id,
+          id,
+          OLD,
+          direct,
+          status,
+          tombstoned,
+          removed,
+        );
+      }
+      await seed(
+        "INSERT INTO version_revision (id, org_id, version_id, revision, blob_id, metadata_json, reason) VALUES ('REV', ?, 'VR', 1, 'BR', '{}', 'test')",
+        foreign.orgId,
+      );
+      if (kind === 'package') {
+        await seed(
+          "UPDATE package SET status = 'removed_upstream', removed_upstream_at = ? WHERE id = 'K'",
+          releasedAt,
+        );
+      }
+      const condition = blobPrematureCondition(own, 'b');
+      const rows = await context.executor.all(
+        context.mutate({
+          sql: `SELECT b.id FROM blob b WHERE ${condition.sql} ORDER BY b.id`,
+          params: condition.params,
+        }),
+      );
+      expect(rows).toEqual(premature ? [{ id: 'B' }, { id: 'BR' }] : []);
+    },
+  };
+}
+
+const RELEASED = '2026-10-01T00:00:00.000Z';
+const prematureCases = [
+  ...(['tombstoned', 'version', 'package'] as const).map((kind) =>
+    prematureCase(kind, RELEASED, true),
+  ),
+  prematureCase('tombstoned', OLD, false),
+  prematureCase('tombstoned', OLD, true, { purgeAfter: '2021-06-01T00:00:00.000Z', override: 730 }),
+  prematureCase('tombstoned', OLD, false, { purgeAfter: '2021-06-01T00:00:00.000Z' }),
+  prematureCase('tombstoned', OLD, false, { status: 'active' }),
+];
+const overrideCase = prematureCases[4] as ContractCase;
+const activeCase = prematureCases[6] as ContractCase;
+const prematureCaseOf = (kind: ReleaseKind) =>
+  prematureCases.find((found) => found.name.includes(`a ${kind} release at ${RELEASED}`)) ??
+  prematureCases[0]!;
+
+const prematureEntry: MutationEntry = {
+  builder: 'blobPrematureCondition',
+  file: 'repositories/blob-references.ts',
+  cases: prematureCases,
+  predicates: [],
+  sqlDecisions: [
+    {
+      name: 'the schedule is compared with the release time, not the other way round',
+      pattern: /\.purge_after < COALESCE\(strftime/,
+      replacement: '.purge_after > COALESCE(strftime',
+      expected: 1,
+      case: prematureCaseOf('tombstoned'),
+    },
+    {
+      name: 'the organization retention is added to the release time',
+      pattern: /'\+' \|\|/,
+      replacement: "'-' ||",
+      expected: 1,
+      case: prematureCaseOf('tombstoned'),
+    },
+    {
+      name: 'a tombstoned version counts at its tombstone time',
+      pattern: /bref_v\.status = 'tombstoned'/,
+      replacement: "bref_v.status = 'none'",
+      expected: 2,
+      case: prematureCaseOf('tombstoned'),
+    },
+    {
+      name: 'a removed version counts at its removal time',
+      pattern: /bref_v\.status = 'removed_upstream'/,
+      replacement: "bref_v.status = 'none'",
+      expected: 2,
+      case: prematureCaseOf('version'),
+    },
+    {
+      name: 'the source override can extend the retention of a reference',
+      pattern: /COALESCE\(bref_s\.retention_days_override, 0\)/,
+      replacement: '0',
+      expected: 2,
+      case: overrideCase,
+    },
+    {
+      name: 'a version that is not released has no release time',
+      pattern: /bref_rel\.rel <> ''/,
+      replacement: '1 = 1',
+      expected: 1,
+      case: activeCase,
+    },
+    {
+      name: 'a removed package counts at its removal time',
+      pattern: /bref_p\.status = 'removed_upstream'/,
+      replacement: "bref_p.status = 'none'",
+      expected: 2,
+      case: prematureCaseOf('package'),
+    },
+  ],
+};
+
+export const entries: readonly MutationEntry[] = [blobEntry, orphanEntry, prematureEntry];

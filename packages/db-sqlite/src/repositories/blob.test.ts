@@ -1221,3 +1221,354 @@ describe('scheduleOrphan', () => {
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
   });
 });
+
+describe('softDelete retentionDays', () => {
+  async function daysUntilDeadline(org = a): Promise<number> {
+    const [r] = await rows<{ days: number }>(
+      'SELECT julianday(purge_after) - julianday(?) AS days FROM blob WHERE org_id = ?',
+      new Date().toISOString(),
+      org.orgId,
+    );
+    return r?.days ?? Number.NaN;
+  }
+
+  async function orgDays(days: number): Promise<void> {
+    await exec(
+      'UPDATE organization SET retention_removed_upstream_days = ? WHERE id = ?',
+      days,
+      a.orgId,
+    );
+  }
+
+  const removedAt = '2020-01-01T00:00:00.000Z';
+
+  it('honours a source override longer than the organization retention', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await orgDays(30);
+    expect(await repo.softDelete(a, D1, { removedAt, retentionDays: 90 })).toBe(true);
+    expect(await daysUntilDeadline()).toBeGreaterThan(89.9);
+    expect(await daysUntilDeadline()).toBeLessThan(90.1);
+  });
+
+  it('never shortens the deadline below the organization retention', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await orgDays(30);
+    expect(await repo.softDelete(a, D1, { removedAt, retentionDays: 5 })).toBe(true);
+    expect(await daysUntilDeadline()).toBeGreaterThan(29.9);
+    expect(await daysUntilDeadline()).toBeLessThan(30.1);
+  });
+
+  it('applies the organization retention when the override is omitted or zero', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await publish(repo, a, { sha256: D2 });
+    await orgDays(30);
+    expect(await repo.softDelete(a, D1, { removedAt })).toBe(true);
+    expect(await repo.softDelete(a, D2, { removedAt, retentionDays: 0 })).toBe(true);
+    const found = await rows<{ days: number }>(
+      'SELECT julianday(purge_after) - julianday(?) AS days FROM blob ORDER BY sha256',
+      new Date().toISOString(),
+    );
+    expect(found.map((r) => Math.round(r.days))).toEqual([30, 30]);
+  });
+
+  it('keeps the first deadline when repeated with a longer override', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await orgDays(30);
+    await repo.softDelete(a, D1, { removedAt });
+    await repo.softDelete(a, D1, { removedAt, retentionDays: 400 });
+    expect(await daysUntilDeadline()).toBeLessThan(30.1);
+  });
+
+  it('refuses a malformed override without I/O', async () => {
+    const counted = countCalls(executor);
+    const repo = createBlobRepository(counted.executor);
+    for (const retentionDays of [-1, 1.5, Number.NaN, Infinity, '5', null, 100_000]) {
+      await expect(
+        repo.softDelete(a, D1, { removedAt, retentionDays: retentionDays as number }),
+      ).rejects.toBeInstanceOf(BlobValidationError);
+    }
+    expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+  });
+});
+
+describe('listDue', () => {
+  const shas = ['1', '2', '3', '4'].map((c) => c.repeat(64) as Sha256);
+
+  async function seedDue(org: OrgContext, sha: Sha256): Promise<void> {
+    await publish(createBlobRepository(executor), org, { sha256: sha });
+    await due(org, sha);
+  }
+
+  it('returns only keys, in digest order, of due live blobs of the organization', async () => {
+    const repo = createBlobRepository(executor);
+    for (const sha of [shas[2], shas[0]] as Sha256[]) await seedDue(a, sha);
+    await seedDue(b, shas[1] as Sha256);
+    expect(await repo.listDue(a, { limit: 100 })).toEqual([shas[0], shas[2]]);
+    expect(await repo.listDue(b, { limit: 100 })).toEqual([shas[1]]);
+  });
+
+  it('skips unscheduled, future, deleted and live-leased blobs and keeps expired leases', async () => {
+    const repo = createBlobRepository(executor);
+    for (const sha of shas) await seedDue(a, sha);
+    await exec(
+      'UPDATE blob SET purge_after = NULL WHERE org_id = ? AND sha256 = ?',
+      a.orgId,
+      shas[0] as string,
+    );
+    await exec(
+      "UPDATE blob SET purge_after = strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 days') WHERE org_id = ? AND sha256 = ?",
+      a.orgId,
+      shas[1] as string,
+    );
+    await exec(
+      "UPDATE blob SET deleted_at = '2020-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
+      a.orgId,
+      shas[2] as string,
+    );
+    expect(await repo.listDue(a, { limit: 100 })).toEqual([shas[3]]);
+    await exec(
+      "UPDATE blob SET purge_lease_until = strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 hours') WHERE org_id = ? AND sha256 = ?",
+      a.orgId,
+      shas[3] as string,
+    );
+    expect(await repo.listDue(a, { limit: 100 })).toEqual([]);
+    await expireLease(a, shas[3] as Sha256);
+    expect(await repo.listDue(a, { limit: 100 })).toEqual([shas[3]]);
+  });
+
+  it('pages with the after cursor and the limit', async () => {
+    const repo = createBlobRepository(executor);
+    for (const sha of shas) await seedDue(a, sha);
+    expect(await repo.listDue(a, { limit: 2 })).toEqual([shas[0], shas[1]]);
+    expect(await repo.listDue(a, { limit: 2, after: shas[1] as Sha256 })).toEqual([
+      shas[2],
+      shas[3],
+    ]);
+    expect(await repo.listDue(a, { limit: 2, after: shas[3] as Sha256 })).toEqual([]);
+  });
+
+  it('writes nothing', async () => {
+    const repo = createBlobRepository(executor);
+    await seedDue(a, D1);
+    const before = await rowOf(a, D1);
+    await repo.listDue(a, { limit: 10 });
+    expect(await rowOf(a, D1)).toEqual(before);
+  });
+
+  it('validates the page and cursor before any statement runs', async () => {
+    const counted = createBlobRepository(countCalls(executor).executor);
+    for (const page of [
+      { limit: 0 },
+      { limit: 101 },
+      { limit: 1.5 },
+      { limit: 10, after: 'bad' as Sha256 },
+    ]) {
+      await expect(counted.listDue(a, page)).rejects.toBeInstanceOf(BlobValidationError);
+    }
+  });
+});
+
+describe('release time guard', () => {
+  async function scheduledOrphan() {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await exec(
+      "UPDATE blob SET published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-8 days') WHERE sha256 = ?",
+      D1,
+    );
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    return repo;
+  }
+
+  async function release(
+    daysAgo: number,
+    kind: 'tombstoned' | 'version' | 'package' = 'tombstoned',
+  ) {
+    await reference('npmjs_proxy', 'tombstoned');
+    const at = `strftime('%Y-%m-%dT%H:%M:%fZ','now','-${String(daysAgo)} days')`;
+    if (kind === 'tombstoned') await exec(`UPDATE version SET tombstoned_at = ${at}`);
+    if (kind === 'version') {
+      await exec(
+        `UPDATE version SET status = 'removed_upstream', removed_upstream_at = ${at}, tombstoned_at = NULL`,
+      );
+    }
+    if (kind === 'package') {
+      await exec(`UPDATE package SET status = 'removed_upstream', removed_upstream_at = ${at}`);
+    }
+  }
+
+  it.each(['tombstoned', 'version', 'package'] as const)(
+    'refuses the claim of an orphan-scheduled blob whose %s release is inside the retention',
+    async (kind) => {
+      const repo = await scheduledOrphan();
+      await release(1, kind);
+      const before = await rowOf(a, D1);
+      expect(await repo.claimPurge(a, D1)).toBeNull();
+      expect(await rowOf(a, D1)).toEqual(before);
+    },
+  );
+
+  it('clears the schedule, after which the normal soft delete sets release-independent retention', async () => {
+    const repo = await scheduledOrphan();
+    await release(1);
+    expect(await repo.unschedule(a, D1)).toBe(true);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+    expect(await repo.softDelete(a, D1, { removedAt: '2020-01-01T00:00:00.000Z' })).toBe(true);
+    const found = await rows<{ days: number }>(
+      'SELECT julianday(purge_after) - julianday(?) AS days FROM blob',
+      new Date().toISOString(),
+    );
+    expect(found[0]?.days).toBeGreaterThan(364.9);
+  });
+
+  it('claims once the release time plus the retention has passed, and then keeps the schedule', async () => {
+    const repo = await scheduledOrphan();
+    await exec(
+      'UPDATE organization SET retention_removed_upstream_days = 30 WHERE id = ?',
+      a.orgId,
+    );
+    await release(29);
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+    await exec(
+      "UPDATE version SET tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-31 days')",
+    );
+    expect(await repo.unschedule(a, D1)).toBe(false);
+    expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+  });
+
+  it('uses the latest release of several references', async () => {
+    const repo = await scheduledOrphan();
+    await release(400);
+    await exec(
+      "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, tombstoned_at) SELECT 'V2', org_id, 'P', '2.0.0', '2.0.0', created_at, 'upstream', '{}', id, 'tombstoned', strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 days') FROM blob",
+    );
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+  });
+
+  it.each([
+    ['one millisecond before', '2026-01-30T23:59:59.999Z', true],
+    ['exactly at', '2026-01-31T00:00:00.000Z', false],
+    ['one millisecond after', '2026-01-31T00:00:00.001Z', false],
+  ])(
+    'treats a schedule %s release plus retention as premature: %s',
+    async (_label, at, refused) => {
+      const repo = await scheduledOrphan();
+      await exec(
+        'UPDATE organization SET retention_removed_upstream_days = 30 WHERE id = ?',
+        a.orgId,
+      );
+      await release(1);
+      await exec("UPDATE version SET tombstoned_at = '2026-01-01T00:00:00.000Z'");
+      await exec('UPDATE blob SET purge_after = ?', at);
+      expect(await repo.unschedule(a, D1)).toBe(refused);
+      if (!refused) expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+    },
+  );
+
+  it('never marks a normal soft delete premature, with or without a longer override', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await publish(repo, a, { sha256: D2 });
+    await reference('npmjs_proxy', 'tombstoned');
+    await exec(
+      "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, tombstoned_at) SELECT 'V2', org_id, 'P', '2.0.0', '2.0.0', created_at, 'upstream', '{}', id, 'tombstoned', strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM blob WHERE sha256 = ?",
+      D2,
+    );
+    await exec(
+      "UPDATE version SET tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 'V'",
+    );
+    expect(await repo.softDelete(a, D1, { removedAt: '2020-01-01T00:00:00.000Z' })).toBe(true);
+    expect(
+      await repo.softDelete(a, D2, { removedAt: '2020-01-01T00:00:00.000Z', retentionDays: 500 }),
+    ).toBe(true);
+    expect(await repo.unschedule(a, D1)).toBe(false);
+    expect(await repo.unschedule(a, D2)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).not.toBeNull();
+    expect((await rowOf(a, D2))?.purge_after).not.toBeNull();
+  });
+
+  it('uses the retention of the blob organization', async () => {
+    const repo = await scheduledOrphan();
+    await exec('UPDATE organization SET retention_removed_upstream_days = 1 WHERE id = ?', b.orgId);
+    await release(10);
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+  });
+});
+
+describe('release time guard with source override and malformed stamps', () => {
+  const ago = (days: number) => `strftime('%Y-%m-%dT%H:%M:%fZ','now','-${String(days)} days')`;
+
+  async function tombstonedAt(days: number, override: number | null) {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await reference('npmjs_proxy', 'tombstoned');
+    await exec(`UPDATE version SET tombstoned_at = ${ago(days)}`);
+    if (override !== null) await exec('UPDATE source SET retention_days_override = ?', override);
+    return repo;
+  }
+
+  async function scheduleAt(daysAgo: number): Promise<void> {
+    await exec(`UPDATE blob SET purge_after = ${ago(daysAgo)}`);
+  }
+
+  it('refuses a claim until the later release plus the source override', async () => {
+    const repo = await tombstonedAt(1000, 730);
+    await scheduleAt(270);
+    expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+    await exec('UPDATE blob SET purge_generation = NULL, purge_lease_until = NULL');
+    await exec(
+      `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, tombstoned_at) SELECT 'V2', org_id, 'P', '2.0.0', '2.0.0', created_at, 'upstream', '{}', id, 'tombstoned', ${ago(700)} FROM blob`,
+    );
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+    await exec(`UPDATE version SET tombstoned_at = ${ago(1001)} WHERE id = 'V2'`);
+    expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+  });
+
+  it('refuses a claim when the override is raised after the schedule was set', async () => {
+    const repo = await tombstonedAt(500, null);
+    await scheduleAt(135);
+    await exec('UPDATE source SET retention_days_override = 730');
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+    expect(await repo.unschedule(a, D1)).toBe(true);
+  });
+
+  it('keeps a shorter override from lowering the organization retention', async () => {
+    const repo = await tombstonedAt(500, 10);
+    await scheduleAt(135);
+    expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+  });
+
+  it('fails closed on a removed package without a removal stamp', async () => {
+    const repo = await tombstonedAt(1000, null);
+    await exec("UPDATE package SET status = 'removed_upstream', removed_upstream_at = NULL");
+    await scheduleAt(1);
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+    expect(await repo.unschedule(a, D1)).toBe(true);
+  });
+
+  it('fails closed on an unparseable release stamp', async () => {
+    const repo = await tombstonedAt(1000, null);
+    await exec("UPDATE version SET tombstoned_at = 'not a time'");
+    await scheduleAt(1);
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+  });
+
+  it('does not start the removal when a release is recorded after the claim', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo);
+    await exec(
+      "UPDATE blob SET published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-8 days') WHERE sha256 = ?",
+      D1,
+    );
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    const generation = (await repo.claimPurge(a, D1)) as PurgeGeneration;
+    expect(await repo.canStartRemove(a, D1, generation, 2000)).toBe(true);
+    await reference('npmjs_proxy', 'tombstoned');
+    await exec(`UPDATE version SET tombstoned_at = ${ago(0)}`);
+    expect(await repo.canStartRemove(a, D1, generation, 2000)).toBe(false);
+  });
+});

@@ -18,6 +18,7 @@ A package registry broker for Composer and npm that runs on Cloudflare Workers o
 | `@package-broker/runtime-node`       | Node HTTP entry                                     |
 | `@package-broker/cli`                | `pb` command: `build`, `version`                    |
 | `@package-broker/ui`                 | Static UI assets                                    |
+| `@package-broker/ui-assets`          | Build-time bridge that hands the UI to `pb build`   |
 | `@package-broker/plugin-*`           | First-party plugins (`sso-oidc`, `github`)          |
 
 ## Develop
@@ -37,6 +38,21 @@ pnpm pb build --config broker.config.ts --target cloudflare   # or --target node
 ```
 
 `pb build` validates the plugin set, writes `.pb/<target>/generated/manifest.ts` and `manifest.json`, and bundles the runtime entry for the target to `.pb/<target>/worker.js` (Cloudflare) or `.pb/<target>/server.js` (Node) with `metafile.json`.
+
+`broker.config.ts` selects the UI with `assets: [defineAssets({ kind: 'ui', provider: '@package-broker/ui-assets' })]`. The declaration is inert: `pb build` resolves the provider, checks the UI manifest and stages the files into `<out>/assets` beside the bundle, with the deployment descriptor in `<out>/assets.json`. A config without `assets` builds a headless broker. Run `pnpm build` before `pnpm bundle` so the UI output exists.
+
+The Worker serves the staged files through the `ASSETS` binding, with the Worker running first so every request passes the runtime:
+
+```toml
+[assets]
+binding = "ASSETS"
+directory = "../../.pb/cloudflare/assets"
+run_worker_first = true
+html_handling = "none"
+not_found_handling = "none"
+```
+
+With a custom output directory (`pb build --out <dir>`), point `directory` at `<dir>/assets`. On Node, `server.js` reads the `assets` directory next to it, so deploy the whole output directory.
 
 Plugin code may import only the `@package-broker/core` root and `@package-broker/core/plugin`. Every other `@package-broker/core/*` subpath is internal and may change in any release; an architecture test enforces this for the first-party plugins.
 

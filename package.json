@@ -30,6 +30,7 @@
     "@package-broker/plugin-sso-oidc": "workspace:^",
     "@package-broker/runtime-cloudflare": "workspace:^",
     "@package-broker/runtime-node": "workspace:^",
+    "@package-broker/ui-assets": "workspace:^",
     "@types/node": "catalog:",
     "eslint": "catalog:",
     "globals": "catalog:",

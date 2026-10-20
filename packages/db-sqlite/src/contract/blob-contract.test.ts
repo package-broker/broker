@@ -26,6 +26,7 @@ import {
 } from './blob-contract.js';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
+const DELETE_TIMEOUT_MS = 1000;
 const ORG_A = '01J0LIFECYCLE00000000000A';
 const ORG_B = '01J0LIFECYCLE00000000000B';
 const open: MigratedDatabase[] = [];
@@ -193,7 +194,7 @@ async function sqliteFixture(): Promise<SqliteFixture> {
       },
     }),
     store: byteStore,
-    deleteTimeoutMs: 1000,
+    deleteTimeoutMs: DELETE_TIMEOUT_MS,
     leaseMs: 900_000,
     observability: quietObservability,
   });
@@ -265,7 +266,7 @@ async function sqliteFixture(): Promise<SqliteFixture> {
         },
         {
           sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, removed_upstream_at, tombstoned_at)
-VALUES (?, ?, ?, '1.0.0', '00001', strftime('${FORMAT}', 'now'), 'upstream', '{}', ?, ?, CASE WHEN ? = 'removed_upstream' THEN strftime('${FORMAT}', 'now') END, CASE WHEN ? = 'tombstoned' THEN strftime('${FORMAT}', 'now') END)`,
+VALUES (?, ?, ?, '1.0.0', '00001', strftime('${FORMAT}', 'now'), 'upstream', '{}', ?, ?, CASE WHEN ? = 'removed_upstream' THEN '2000-01-01T00:00:00.000Z' END, CASE WHEN ? = 'tombstoned' THEN '2000-01-01T00:00:00.000Z' END)`,
           params: [id, ctx.orgId, id, blobs[0].id, status, status, status],
         },
       ]);
@@ -273,13 +274,22 @@ VALUES (?, ?, ?, '1.0.0', '00001', strftime('${FORMAT}', 'now'), 'upstream', '{}
     async setVersionStatus(ctx, key, status) {
       await exec(
         `UPDATE version SET status = ?,
-  removed_upstream_at = CASE WHEN ? = 'removed_upstream' THEN COALESCE(removed_upstream_at, strftime('${FORMAT}', 'now')) END,
-  tombstoned_at = CASE WHEN ? = 'tombstoned' THEN COALESCE(tombstoned_at, strftime('${FORMAT}', 'now')) END
+  removed_upstream_at = CASE WHEN ? = 'removed_upstream' THEN COALESCE(removed_upstream_at, '2000-01-01T00:00:00.000Z') END,
+  tombstoned_at = CASE WHEN ? = 'tombstoned' THEN COALESCE(tombstoned_at, '2000-01-01T00:00:00.000Z') END
 WHERE org_id = ? AND blob_id IN (SELECT id FROM blob WHERE org_id = ? AND sha256 = ?)`,
         status,
         status,
         status,
         ctx.orgId,
+        ctx.orgId,
+        key,
+      );
+    },
+    leaseMarginMs: () => 2 * DELETE_TIMEOUT_MS,
+    async shortenLease(ctx, key, remainingMs) {
+      await exec(
+        `UPDATE blob SET purge_lease_until = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ? AND purge_lease_until IS NOT NULL`,
+        `+${remainingMs / 1000} seconds`,
         ctx.orgId,
         key,
       );

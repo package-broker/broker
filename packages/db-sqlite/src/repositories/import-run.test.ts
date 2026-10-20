@@ -8,6 +8,7 @@ import {
 } from '@package-broker/core/authz/fence';
 import {
   IMPORT_RUN_JOB,
+  IMPORT_VERIFICATION_JOB,
   type ImportRunState,
   type ImportRunCreateWrite,
   type ImportRunStore,
@@ -461,7 +462,7 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
     requestApply: ['planned'],
     cancelRun: ['planned'],
     acceptRun: ['verified'],
-    requestRollback: ['failed', 'applied', 'verified'],
+    requestRollback: ['failed', 'applied', 'verifying', 'verified'],
   };
   async function seedLifecycle(state: ImportRunState, approvedAt: string | null = null) {
     await executor.batch([
@@ -733,17 +734,24 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
     }
   });
 
-  it('refuses a second queued or running job without writing audit or state', async () => {
-    for (const operation of ['requestApply', 'requestRollback'] as const) {
+  it.each([
+    ['requestApply', 'planned'],
+    ['requestRollback', 'applied'],
+    ['requestRollback', 'verifying'],
+  ] as const)('refuses %s from %s while a job is queued or running', async (operation, state) => {
+    for (const resourceKey of [
+      IMPORT_RUN_JOB.resourceKey('run'),
+      IMPORT_VERIFICATION_JOB.resourceKey('run'),
+    ]) {
       for (const jobState of ['queued', 'running']) {
-        await seedLifecycle(operation === 'requestApply' ? 'planned' : 'applied', now);
+        await seedLifecycle(state, now);
         await executor.batch([
           stmt(
             'INSERT INTO job (id, org_id, type, resource_key, payload_json, state, lease_owner, lease_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             'existing',
             ctx.orgId,
             IMPORT_RUN_JOB.apply,
-            IMPORT_RUN_JOB.resourceKey('run'),
+            resourceKey,
             JSON.stringify(IMPORT_RUN_JOB.payload('run')),
             jobState,
             'worker',

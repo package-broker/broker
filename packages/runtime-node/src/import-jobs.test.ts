@@ -3,7 +3,7 @@ import { fenceKind, type DelegatedMutationFence } from '@package-broker/core/aut
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import type { ImportApplyStore } from '@package-broker/core/import/apply';
 import type { ImportRollbackStore } from '@package-broker/core/import/rollback';
-import { IMPORT_RUN_JOB } from '@package-broker/core/import/run-service';
+import { IMPORT_RUN_JOB, IMPORT_VERIFICATION_JOB } from '@package-broker/core/import/run-service';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -85,7 +85,14 @@ function spies() {
       fences.rollback.push(fence);
     },
   } as unknown as ImportRollbackStore;
-  return { fences, applyStore, rollbackStore };
+  return {
+    fences,
+    applyStore,
+    rollbackStore,
+    verificationStore: {
+      loadRun: async () => null,
+    } as unknown as import('@package-broker/core/import/verification').ImportVerificationStore,
+  };
 }
 
 function loopOf(executor: SqlExecutor, jobs: ReturnType<typeof importJobRegistrations>): JobLoop {
@@ -116,15 +123,21 @@ function loopOf(executor: SqlExecutor, jobs: ReturnType<typeof importJobRegistra
 describe('import job holder', () => {
   it('accepts exactly one set', () => {
     const holder = createImportJobHolder();
-    const { applyStore, rollbackStore } = spies();
-    const stores = { applyStore, rollbackStore, blobs: { get: async () => null } };
+    const { applyStore, rollbackStore, verificationStore } = spies();
+    const stores = {
+      applyStore,
+      rollbackStore,
+      verificationStore,
+      blobs: { get: async () => null },
+    };
     holder.set(stores);
     expect(() => holder.set(stores)).toThrow();
   });
 
-  it('registers both core job types under their queue names', () => {
+  it('registers all core import job types under their queue names', () => {
     const jobs = importJobRegistrations(createImportJobHolder());
     expect(jobs.map((job) => job.qualifiedName)).toEqual([
+      IMPORT_VERIFICATION_JOB.type,
       IMPORT_RUN_JOB.apply,
       IMPORT_RUN_JOB.rollback,
     ]);
@@ -157,8 +170,8 @@ describe('import jobs on the Node job loop', () => {
   it('hands the claim fence to the apply and rollback stores once the holder is set', async () => {
     const executor = await database();
     const holder = createImportJobHolder();
-    const { fences, applyStore, rollbackStore } = spies();
-    holder.set({ applyStore, rollbackStore, blobs: { get: async () => null } });
+    const { fences, applyStore, rollbackStore, verificationStore } = spies();
+    holder.set({ applyStore, rollbackStore, verificationStore, blobs: { get: async () => null } });
     const runId = ulid();
     const apply = await enqueue(executor, IMPORT_RUN_JOB.apply, { runId }, 'apply');
     const rollback = await enqueue(
@@ -190,8 +203,8 @@ describe('import jobs on the Node job loop', () => {
   it('rejects a rollback payload without requestedBy as invalid_payload', async () => {
     const executor = await database();
     const holder = createImportJobHolder();
-    const { applyStore, rollbackStore } = spies();
-    holder.set({ applyStore, rollbackStore, blobs: { get: async () => null } });
+    const { applyStore, rollbackStore, verificationStore } = spies();
+    holder.set({ applyStore, rollbackStore, verificationStore, blobs: { get: async () => null } });
     const job = await enqueue(executor, IMPORT_RUN_JOB.rollback, { runId: ulid() }, 'legacy');
     loopOf(executor, importJobRegistrations(holder)).start();
     await vi.waitFor(async () => {
@@ -204,7 +217,7 @@ describe('import jobs on the Node job loop', () => {
 });
 
 describe('import jobs in the Node server assembly', () => {
-  it('registers both jobs with real stores and completes a claim for an unknown run', async () => {
+  it('registers all import jobs with real stores and completes a claim for an unknown run', async () => {
     const executor = await database();
     const broker = createNodeServer([], {
       executor,

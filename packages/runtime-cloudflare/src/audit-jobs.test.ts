@@ -181,6 +181,7 @@ describe.each([
         ['core:blob-purge:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400 }],
+        ['core:import-verify:v1', undefined],
         ['core:import-apply:v1', undefined],
         ['core:import-rollback:v1', undefined],
         ['core:pat-offboarding:v1', undefined],

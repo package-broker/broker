@@ -262,7 +262,7 @@ describe('Worker retention jobs', () => {
     },
   );
 
-  it('registers daily scan and hourly purge, excluding the deferred source poll', async () => {
+  it('registers daily scan, hourly purge and the minute source poll', async () => {
     const h = await boot();
     expect(
       h.kernel.registration.jobs
@@ -273,8 +273,10 @@ describe('Worker retention jobs', () => {
       ['core:blob-purge:v1', { everySeconds: 3600 }],
     ]);
     expect(
-      h.kernel.registration.jobs.some((job) => job.qualifiedName.includes('source-poll')),
-    ).toBe(false);
+      h.kernel.registration.jobs
+        .filter((job) => job.qualifiedName.includes('source-poll'))
+        .map((job) => job.definition.schedule),
+    ).toEqual([{ everySeconds: 60 }]);
   });
 
   it('claims a scan and removes only the old orphan in its organization in the same pass', async () => {

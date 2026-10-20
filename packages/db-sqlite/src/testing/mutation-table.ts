@@ -82,6 +82,7 @@ import { entries as patOffboardingEntries } from './mutation-table/pat-offboardi
 import { entries as importRollbackEntries } from './mutation-table/import-rollback.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
 import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
+import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -176,6 +177,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sessionEntries,
   ...patOffboardingEntries,
   ...importRollbackEntries,
+  ...sourceSyncCountsEntries,
 ];
 
 export function checkCompleteness(

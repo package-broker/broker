@@ -483,3 +483,40 @@ describe('enqueueProjectRemovedPatOffboarding', () => {
     );
   });
 });
+
+describe('durable selected-PAT invalidation payload', () => {
+  it('accepts a token captured by the access-loss batch', () => {
+    const payload = {
+      userId: USER,
+      cause: 'project_removed',
+      cutoff: CUTOFF,
+      invalidatedTokenId: USER,
+    };
+    expect(harness({}).job.definition.validate(payload)).toEqual(payload);
+  });
+
+  it.each(['suspended', 'membership_removed', 'erased'])(
+    'refuses a token snapshot for %s',
+    (cause) => {
+      expect(() =>
+        harness({}).job.definition.validate({
+          userId: USER,
+          cause,
+          cutoff: CUTOFF,
+          invalidatedTokenId: USER,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'invalid_payload' }));
+    },
+  );
+
+  it('refuses a malformed captured token id', () => {
+    expect(() =>
+      harness({}).job.definition.validate({
+        userId: USER,
+        cause: 'project_removed',
+        cutoff: CUTOFF,
+        invalidatedTokenId: 'invalid',
+      }),
+    ).toThrow(expect.objectContaining({ code: 'invalid_payload' }));
+  });
+});

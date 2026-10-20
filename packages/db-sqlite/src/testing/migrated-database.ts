@@ -8,6 +8,7 @@ import { compile, db } from '../kysely.js';
 import { seedTwoOrganizations, type TwoOrganizations } from '../contract/two-organizations.js';
 import {
   openNodeSqliteExecutor,
+  supportsNodeSqliteSnapshots,
   type NodeSqliteExecutorOptions,
   type OpenedExecutor,
 } from './node-sqlite-executor.js';
@@ -16,6 +17,25 @@ import { loadMigrationSource, type MigrationSource } from '../migrations/source.
 
 const migrationsUrl = new URL('../../migrations/', import.meta.url);
 const HOLDER = 'testing-migrated-database';
+let template: Promise<Uint8Array | undefined> | undefined;
+
+function migratedTemplate(): Promise<Uint8Array | undefined> {
+  template ??= (async () => {
+    try {
+      const opened = openNodeSqliteExecutor();
+      try {
+        await migrate(opened.executor, await discoveredMigrations(), { holder: HOLDER });
+        return opened.snapshot();
+      } finally {
+        await opened.close();
+      }
+    } catch (error) {
+      template = undefined;
+      throw error;
+    }
+  })();
+  return template;
+}
 
 export interface FixtureVersionListings {
   complete(ctx: OrgContext, packageId: string, stamp: string): Promise<CompleteVersionListing>;
@@ -78,13 +98,20 @@ export async function openMigratedDatabase(
   const executorOptions: NodeSqliteExecutorOptions = {
     d1PatternLimit: options.d1PatternLimit === true,
   };
-  const opened = openNodeSqliteExecutor(file, executorOptions);
+  const snapshot =
+    file === undefined && supportsNodeSqliteSnapshots() ? await migratedTemplate() : undefined;
+  const opened = openNodeSqliteExecutor(file, {
+    ...executorOptions,
+    ...(snapshot === undefined ? {} : { snapshot }),
+  });
   const connections: OpenedExecutor[] = [opened];
   let closed = false;
 
   try {
-    const sources = await discoveredMigrations();
-    await migrate(opened.executor, sources, { holder: HOLDER });
+    if (snapshot === undefined) {
+      const sources = await discoveredMigrations();
+      await migrate(opened.executor, sources, { holder: HOLDER });
+    }
     const orgs =
       options.twoOrganizations === true ? await seedTwoOrganizations(opened.executor) : null;
 

@@ -1,3 +1,5 @@
+import { entries as selectedPatInvalidationEntries } from './mutation-table/selected-pat-invalidation.js';
+import { entries as accessLossEntries } from './mutation-table/access-loss.js';
 import { entries as importVerificationEntries } from './mutation-table/import-verification.js';
 import { entries as fixtureVersionListingsEntries } from './mutation-table/fixture-version-listings.js';
 import { entries as identityBlockEntries } from './mutation-table/identity-block.js';
@@ -85,6 +87,7 @@ import { entries as patOffboardingEntries } from './mutation-table/pat-offboardi
 import { entries as importRollbackEntries } from './mutation-table/import-rollback.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
 import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
+import { entries as sourceSyncReadsEntries } from './mutation-table/source-sync-reads.js';
 import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
 import {
   checkCompleteness as checkInventory,
@@ -97,6 +100,8 @@ export { builderAllowlist, exportedBuilders, builderNames } from './mutation-tab
 
 export const mutationTable: readonly MutationEntry[] = [
   ...fixtureVersionListingsEntries,
+  ...selectedPatInvalidationEntries,
+  ...accessLossEntries,
   ...identityBlockEntries,
   ...loginEntries,
   ...localLoginSuccessEntries,
@@ -184,6 +189,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...importRollbackEntries,
   ...importVerificationEntries,
   ...sourceSyncCountsEntries,
+  ...sourceSyncReadsEntries,
 ];
 
 export function checkCompleteness(

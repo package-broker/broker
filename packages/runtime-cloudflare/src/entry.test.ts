@@ -5,6 +5,7 @@ const state = vi.hoisted(() => ({
     plugins: [];
     platformPorts: null;
     observability?: { trustInboundTraceparent: boolean };
+    tokens?: { maxLifetimeDays: { personal: number; service: number } };
     registry?: { timers: { metadataTtlSeconds: number } };
   },
   createWorker: vi.fn(() => ({ fetch: vi.fn() })),
@@ -18,6 +19,9 @@ vi.mock('#pb-manifest', () => ({
   },
   get observability() {
     return state.manifest.observability;
+  },
+  get tokens() {
+    return state.manifest.tokens;
   },
   get registry() {
     return state.manifest.registry;
@@ -64,5 +68,23 @@ describe('Worker entry registry', () => {
     await import('./entry.js');
     const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
     expect(options).not.toHaveProperty('registry');
+  });
+});
+
+describe('Worker entry tokens', () => {
+  it('forwards tokens', async () => {
+    const tokens = { maxLifetimeDays: { personal: 30, service: 60 } };
+    state.manifest = { plugins: [], platformPorts: null, tokens };
+    await import('./entry.js');
+    const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1] as
+      { tokens?: unknown } | undefined;
+    expect(options?.tokens).toBe(tokens);
+  });
+
+  it('omits tokens when the manifest has none', async () => {
+    state.manifest = { plugins: [], platformPorts: null };
+    await import('./entry.js');
+    const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
+    expect(options).not.toHaveProperty('tokens');
   });
 });

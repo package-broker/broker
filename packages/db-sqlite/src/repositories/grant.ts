@@ -27,6 +27,7 @@ import {
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { patInvalidationStatement } from './pat-offboarding.js';
+import { selectedPatInvalidationStatement } from './access-loss.js';
 import { revokeAllForUserStatement } from './session.js';
 import { liveSessionCondition } from './session-liveness.js';
 import { auditPendingStatement } from './audit-pending.js';
@@ -630,6 +631,7 @@ export function createGrantRepository(
           ...assertCheck(revision),
           ...assertCheck(lastHolder),
           offboarded,
+          selectedPatInvalidationStatement(ctx, { grantId: id, at: audit.occurredAt, opId }),
           patInvalidationStatement(ctx, id, {
             sql: "removed.scope = 'organization' AND removed.revision = ?",
             params: [expected],
@@ -653,7 +655,7 @@ export function createGrantRepository(
         if ((deleted?.rows.length ?? 0) === 0) {
           throw new Error('grant delete matched no row after its guards held');
         }
-        const row = outcome.results.at(idempotency === undefined ? -4 : -5)?.rows[0] as
+        const row = outcome.results.at(idempotency === undefined ? -5 : -6)?.rows[0] as
           { offboarded_user_id: string | null } | undefined;
         return { outcome: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };
       }

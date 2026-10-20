@@ -11,6 +11,11 @@ import {
   type Guard,
 } from '../kysely.js';
 import { revokePreviousStatement, sessionInsertStatement } from './session.js';
+import {
+  notifyProjectAccessLost,
+  selectedPatInvalidationStatement,
+  type AccessLossOptions,
+} from './access-loss.js';
 
 const MAX_GROUPS = 1000;
 const MAX_GROUP_NAME = 256;
@@ -316,7 +321,13 @@ function deleteGroupsStatement(
     .deleteFrom('user_group')
     .where('user_group.org_id', '=', ctx.orgId)
     .where('user_group.user_id', '=', plan.userId)
-    .where('user_group.provider', '=', plan.provider);
+    .where('user_group.provider', '=', plan.provider)
+    .where(
+      'user_group.group_name',
+      'not in',
+      sql<string>`(select value from json_each(${JSON.stringify(plan.groups)}))`,
+    )
+    .returning('user_id');
   for (const guard of guards) query = query.where(guard);
   return compile(query) as ScalarStatement;
 }
@@ -346,7 +357,13 @@ function insertGroupsStatement(
     db
       .insertInto('user_group')
       .columns(['org_id', 'user_id', 'provider', 'group_name', 'refreshed_at'])
-      .expression(select),
+      .expression(select)
+      .onConflict((conflict) =>
+        conflict
+          .columns(['user_id', 'provider', 'group_name'])
+          .doUpdateSet({ refreshed_at: evidenceTime })
+          .where('user_group.org_id', '=', ctx.orgId),
+      ),
   ) as ScalarStatement;
 }
 
@@ -386,7 +403,10 @@ function touchUserStatement(
   return compile(query) as ScalarStatement;
 }
 
-export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
+export function createLoginWriter(
+  executor: ScalarSqlExecutor,
+  options: AccessLossOptions = {},
+): LoginWriter {
   return {
     async commit(ctx: OrgContext, plan: LoginPlan): Promise<'created' | 'refused'> {
       const now = timestamp('now', plan.now);
@@ -437,6 +457,18 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
         statements.push(createUserStatement(ctx, plan, creationGuards, now, displayName));
       }
       statements.push(identityStatement(ctx, plan, identityGuards, now, evidenceTime));
+      let eligibility = db.selectNoFrom(sql<number>`1`.as('allowed'));
+      for (const guard of groupGuards) eligibility = eligibility.where(guard);
+      statements.push(
+        selectedPatInvalidationStatement(ctx, {
+          userId: plan.userId,
+          at: now,
+          opId: plan.session.id,
+          membership: { provider: plan.provider, groups },
+          when: compile(eligibility) as ScalarStatement,
+        }),
+      );
+      const groupsIndex = statements.length;
       statements.push(deleteGroupsStatement(ctx, plan, groupGuards));
       if (groups.length > 0) {
         statements.push(insertGroupsStatement(ctx, plan, groups, groupGuards, evidenceTime));
@@ -454,7 +486,11 @@ export function createLoginWriter(executor: ScalarSqlExecutor): LoginWriter {
       statements.push(touchUserStatement(ctx, plan, guards, now, displayName));
 
       const results = await executor.batch(statements);
-      return (results[sessionIndex]?.rows.length ?? 0) > 0 ? 'created' : 'refused';
+      if ((results[sessionIndex]?.rows.length ?? 0) === 0) return 'refused';
+      if ((results[groupsIndex]?.rows.length ?? 0) > 0) {
+        await notifyProjectAccessLost(options, ctx, [plan.userId], now);
+      }
+      return 'created';
     },
   };
 }

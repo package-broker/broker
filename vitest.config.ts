@@ -20,6 +20,7 @@ const packages = [
   'runtime-node',
   'cli',
   'ui',
+  'ui-assets',
   'plugin-sso-oidc',
   'plugin-github',
 ];

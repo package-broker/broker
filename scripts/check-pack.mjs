@@ -6,7 +6,15 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const REQUIRED_PACKAGES = ['core', 'cli', 'db-sqlite', 'runtime-cloudflare', 'runtime-node', 'ui'];
+const REQUIRED_PACKAGES = [
+  'core',
+  'cli',
+  'db-sqlite',
+  'runtime-cloudflare',
+  'runtime-node',
+  'ui',
+  'ui-assets',
+];
 const DEPENDENCY_FIELDS = [
   'dependencies',
   'devDependencies',
@@ -15,7 +23,7 @@ const DEPENDENCY_FIELDS = [
 ];
 const UNRESOLVED_RANGE = /^(?:workspace|catalog|link|file):/;
 const CORE_PACKAGE = '@package-broker/core';
-const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc']);
+const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc', 'ui-assets']);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const STATIC_REQUIRED_FILES = {
@@ -408,7 +416,47 @@ function checkCorePeer(pkg, pkgJson, coreVersion) {
   return [];
 }
 
-function checkPackedPackage(pkg, pkgJson, files) {
+const UI_MANIFEST = 'dist/assets/manifest.json';
+const UI_PACKAGE = '@package-broker/ui';
+
+function uiPayloadProblems(dir, files) {
+  if (!files.includes(UI_MANIFEST)) return [`"${UI_MANIFEST}" is missing from the tarball`];
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(dir, UI_MANIFEST), 'utf8'));
+  } catch (error) {
+    return [`"${UI_MANIFEST}" is unreadable or invalid: ${error.message}`];
+  }
+  if (!manifest || typeof manifest.files !== 'object' || manifest.files === null)
+    return [`"${UI_MANIFEST}" has no "files" map`];
+  const problems = [];
+  const present = new Set(files);
+  const names = [manifest.entry, ...Object.keys(manifest.files)];
+  if (typeof manifest.entry !== 'string') problems.push(`"${UI_MANIFEST}" has no "entry" file`);
+  if (Object.keys(manifest.files).length === 0) problems.push(`"${UI_MANIFEST}" lists no files`);
+  for (const name of new Set(names)) {
+    if (typeof name !== 'string') continue;
+    const segments = name.split('/');
+    if (name === '' || segments.includes('..') || segments.includes('.') || name.startsWith('/')) {
+      problems.push(`"${UI_MANIFEST}" lists unsafe file name "${name}"`);
+    } else if (!present.has(`dist/assets/${name}`)) {
+      problems.push(`manifest-listed UI file "dist/assets/${name}" is missing from the tarball`);
+    }
+  }
+  return problems;
+}
+
+function bridgeProblems(pkgJson, files) {
+  const problems = [];
+  for (const required of ['dist/index.js', 'dist/index.d.ts'])
+    if (!files.includes(required)) problems.push(`"${required}" is missing from the tarball`);
+  const range = pkgJson.dependencies?.[UI_PACKAGE];
+  if (typeof range !== 'string')
+    problems.push(`dependencies.${UI_PACKAGE} is missing: the bridge must install UI`);
+  return problems;
+}
+
+function checkPackedPackage(pkg, pkgJson, files, dir) {
   const { problems, targets } = checkExports(pkg, pkgJson, files);
   const entry = checkEntryFields(pkgJson, files);
   problems.push(...entry.problems);
@@ -431,6 +479,9 @@ function checkPackedPackage(pkg, pkgJson, files) {
     if (!files.includes(required)) problems.push(`"${required}" is missing from the tarball`);
   }
 
+  if (pkg === 'ui') problems.push(...uiPayloadProblems(dir, files));
+  if (pkg === 'ui-assets') problems.push(...bridgeProblems(pkgJson, files));
+
   return { problems, targets: targets.length + entry.count, files: files.length };
 }
 
@@ -452,7 +503,7 @@ function inspect(pkg) {
     const dir = join(extract, 'package');
     const files = listFiles(dir);
     const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    const result = checkPackedPackage(pkg, pkgJson, files);
+    const result = checkPackedPackage(pkg, pkgJson, files, dir);
     if (pkg === 'core') result.problems.push(...checkCorePackageContext(dir, pkgJson, files));
     return { ...result, pkgJson };
   } finally {

@@ -151,6 +151,17 @@ function overrideSql(blob: string): string {
   return `(SELECT max(o) FROM (${references(blob, columns, (c) => `AND ${c}`)}))`;
 }
 
+function missingReleaseStampSql(blob: string): string {
+  return `EXISTS (${references(
+    blob,
+    '1',
+    (c) => `AND ${c} AND (
+    (bref_v.status = 'tombstoned' AND bref_v.tombstoned_at IS NULL)
+    OR (bref_v.status = 'removed_upstream' AND bref_v.removed_upstream_at IS NULL)
+    OR (bref_p.status = 'removed_upstream' AND bref_p.removed_upstream_at IS NULL))`,
+  )})`;
+}
+
 function validPage(page: RetentionPage): void {
   const after = page?.after;
   if (
@@ -195,7 +206,7 @@ export function createBlobReferenceReader(executor: ScalarSqlExecutor): BlobRefe
       const rows = await executor.all<Row>({
         sql: `SELECT b.id, b.sha256, b.created_at, ${overrideSql('b')} AS override_days, ${orphanSql('b')} AS orphan
 FROM blob b
-WHERE ${eligible.sql} AND b.purge_after IS NULL AND b.deleted_at IS NULL ${cursor.sql}
+WHERE ${eligible.sql} AND NOT ${missingReleaseStampSql('b')} AND b.purge_after IS NULL AND b.deleted_at IS NULL ${cursor.sql}
 ORDER BY b.created_at, b.id
 LIMIT ?`,
         params: [...eligible.params, ...cursor.params, page.limit],

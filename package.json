@@ -17,6 +17,7 @@
     "pb": "node packages/cli/dist/bin.js",
     "bundle": "pnpm pb build --config broker.config.ts --target cloudflare && pnpm pb build --config broker.config.ts --target node",
     "check:pack": "node scripts/check-pack.mjs",
+    "check:ui-assets-install": "node scripts/check-ui-assets-install.mjs",
     "check:treeshake": "node scripts/check-treeshake.mjs",
     "client-matrix": "node scripts/client-matrix.mjs",
     "smoke:cloudflare": "pnpm --filter @package-broker/runtime-cloudflare exec node scripts/worker-smoke.mjs",

@@ -547,15 +547,43 @@ describe('source poll', () => {
     ]);
   });
 
-  it('does not defer a source whose enqueue failed', async () => {
+  it('counts an enqueue failure without exposing the error and continues with the next source', async () => {
     const sources = {
-      listDue: vi.fn(async () => [due('s1', 'a')]),
+      listDue: vi.fn(async () => [due('s1', 'a'), due('s2', 'b')]),
       deferPoll: vi.fn(async () => true),
     };
     const poll = createSourcePollJob({ sources });
     const { job, enqueue } = context();
-    enqueue.mockRejectedValue(new Error('down'));
-    await expect(poll.handler(poll.validate({}), job)).rejects.toThrow('down');
-    expect(sources.deferPoll).not.toHaveBeenCalled();
+    enqueue.mockRejectedValueOnce(new Error('private upstream details'));
+    await poll.handler(poll.validate({}), job);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue.mock.calls[1]?.[2]).toEqual({ sourceId: 's2', reason: 'poll' });
+    expect(sources.deferPoll).toHaveBeenCalledExactlyOnceWith(org, 's2', 'b');
+    expect(job.observability.counter).toHaveBeenCalledExactlyOnceWith(
+      'pb.source.poll_failure',
+      undefined,
+      1,
+    );
+    expect(job.observability.log).not.toHaveBeenCalled();
+  });
+
+  it('counts a defer failure and continues with the next source', async () => {
+    const sources = {
+      listDue: vi.fn(async () => [due('s1', 'a'), due('s2', 'b')]),
+      deferPoll: vi.fn(async () => true).mockRejectedValueOnce(new Error('down')),
+    };
+    const poll = createSourcePollJob({ sources });
+    const { job, enqueue } = context();
+    await poll.handler(poll.validate({}), job);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(sources.deferPoll.mock.calls).toEqual([
+      [org, 's1', 'a'],
+      [org, 's2', 'b'],
+    ]);
+    expect(job.observability.counter).toHaveBeenCalledExactlyOnceWith(
+      'pb.source.poll_failure',
+      undefined,
+      1,
+    );
   });
 });

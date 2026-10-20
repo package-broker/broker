@@ -346,19 +346,37 @@ function registeredRoutes(kernel: Kernel, ecosystemRoutes: readonly RouteDefinit
 async function sweep(h: Harness) {
   const seen = new Set<string>();
   const statuses = new Set<number>();
+  const authBodies: Record<string, unknown> = {
+    '/_pb/auth/sso/:provider/start': { purpose: 'login', returnTo: '/' },
+    '/_pb/auth/local/setup/start': { token: 'T'.repeat(43) },
+    '/_pb/auth/local/setup/finish': {
+      token: 'T'.repeat(43),
+      password: 'Strong passphrase 123!',
+      code: '123456',
+    },
+    '/_pb/auth/local/login': {
+      email: 'fixture@example.test',
+      password: 'Strong passphrase 123!',
+      code: '123456',
+    },
+    '/_pb/auth/local/reauth': { password: 'Strong passphrase 123!', code: '123456' },
+    '/_pb/auth/logout': {},
+  };
   for (const route of registeredRoutes(h.kernel, h.ecosystemRoutes)) {
     const path = samplePath(route.path);
     for (const malformed of [false, true]) {
       const body = malformed
         ? '{'
-        : JSON.stringify({
-            token: 'T'.repeat(43),
-            email: 'fixture@example.test',
-            password: 'Strong passphrase 123!',
-            code: '123456',
-            purpose: 'login',
-            returnTo: '/',
-          });
+        : JSON.stringify(
+            authBodies[route.path] ?? {
+              token: 'T'.repeat(43),
+              email: 'fixture@example.test',
+              password: 'Strong passphrase 123!',
+              code: '123456',
+              purpose: 'login',
+              returnTo: '/',
+            },
+          );
       const request = new Request(
         `${ORIGIN}${path}${malformed && route.path.includes('/audit') ? '?limit=0' : ''}`,
         {

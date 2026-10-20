@@ -79,6 +79,7 @@ const ATTEMPTS = 3;
 const RETRY_DELAY_MS = 100;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_DEADLINE_MS = 60_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const DEFAULT_MAX_VERSIONS = 10_000;
 const MAX_MEMBER_BYTES = 1024 * 1024;
 const KEY_BYTES = 64 * 1024;
@@ -89,6 +90,7 @@ interface Budget {
   bytes: number;
   readonly deadline: number;
   readonly signal: AbortSignal | undefined;
+  expired?: AbortSignal;
 }
 
 interface Parsed {
@@ -226,6 +228,7 @@ async function upstream<T>(budget: Budget, step: () => Promise<T>): Promise<T> {
     return await step();
   } catch (error) {
     budget.signal?.throwIfAborted();
+    if (budget.expired?.aborted === true) throw new ComposerV1PackageError('deadline');
     if (error instanceof UpstreamError) {
       if (error.code === 'too_large') throw new ComposerV1PackageError('too_large');
       if (error.code === 'timeout' && Date.now() >= budget.deadline) {
@@ -254,8 +257,16 @@ async function open(
 ): Promise<ReadableStream<Uint8Array> | null> {
   const { source, signal } = options;
   const remaining = budget.deadline - Date.now();
-  if (remaining <= 0) throw new ComposerV1PackageError('deadline');
+  if (remaining <= 0 || budget.expired?.aborted === true) {
+    throw new ComposerV1PackageError('deadline');
+  }
   if (budget.bytes <= 0) throw new ComposerV1PackageError('too_large');
+  // A timer and Date.now() disagree by up to a millisecond (more under clock slew), so a fetch
+  // timeout capped at the remaining time cannot tell the deadline apart by reading the clock.
+  if (budget.expired === undefined && remaining <= MAX_TIMER_MS) {
+    budget.expired = AbortSignal.timeout(remaining);
+  }
+  const abort = [signal, budget.expired].filter((s): s is AbortSignal => s !== undefined);
   const response = await upstream(budget, () =>
     fetch({
       url,
@@ -265,8 +276,10 @@ async function open(
       destinations: originsOf(options),
       purpose: 'metadata',
       maxBytes: budget.bytes,
-      timeoutMs: Math.min(source.timeoutMs ?? DEFAULT_TIMEOUT_MS, remaining),
-      ...(signal === undefined ? {} : { signal }),
+      timeoutMs: Math.min(source.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMER_MS),
+      ...(abort.length === 0
+        ? {}
+        : { signal: abort.length === 1 ? abort[0] : AbortSignal.any(abort) }),
     }),
   );
   if (response.status !== 200 || response.body === null) {

@@ -498,11 +498,98 @@ const runs: ContractCase = {
   },
 };
 
+const bump: ContractCase = {
+  name: 'a version restore never bumps a package of another organization',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seedAuthority(seed, own);
+    await seedRun(seed, own, RUN);
+    await seedEntities(seed, foreign, 'foreign');
+    await seed(
+      "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json) VALUES ('own-version', ?, 'foreign-package', '2.0.0', '2.0.0', ?, 'source_release', '{}')",
+      own.orgId,
+      NOW,
+    );
+    await seedRef(seed, own, 'restore', RUN, 'version', 'own-version', 'update');
+    const result = await storeFor(context).applyChunk(own, fenceFor(RUN, { 'own-version': 1 }), {
+      runId: RUN,
+      approvedByUserId: 'actor',
+      now: NOW,
+      actions: [
+        {
+          kind: 'restore',
+          refId: 'restore',
+          entityType: 'version',
+          entityId: 'own-version',
+          guard: { kind: 'revision', revision: 1 },
+          domain: { published_at: PAST, published_at_basis: 'source_release' },
+          audit: auditFor('version', 'own-version'),
+        },
+      ],
+    });
+    expect(result).toEqual({ ok: true, outcomes: ['restored'] });
+    expect(
+      await context.executor.all({
+        sql: "SELECT rev FROM package WHERE id = 'foreign-package'",
+        params: [],
+      }),
+    ).toEqual([{ rev: 1 }]);
+  },
+};
+
+const protectedRole: ContractCase = {
+  name: 'a protected role of another organization never blocks a grant removal',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seedAuthority(seed, own);
+    await seedRun(seed, own, RUN);
+    await seed(
+      "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('foreign-role', ?, 'foreign-role', 'R', 'organization', 1)",
+      foreign.orgId,
+    );
+    await seed(
+      "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES ('own-grant', ?, 'email', 'holder@example.test', 'organization', 'foreign-role')",
+      own.orgId,
+    );
+    await seedRef(seed, own, 'remove', RUN, 'access_grant', 'own-grant');
+    const store = storeFor(context);
+    const [state] = await store.liveStates(own, [
+      { entityType: 'access_grant', entityId: 'own-grant' },
+    ]);
+    if (state?.guard === null || state?.guard === undefined) throw new Error('missing guard');
+    const result = await store.applyChunk(own, fenceFor(RUN, { 'own-grant': 1 }), {
+      runId: RUN,
+      approvedByUserId: 'actor',
+      now: NOW,
+      actions: [
+        {
+          kind: 'delete',
+          refId: 'remove',
+          entityType: 'access_grant',
+          entityId: 'own-grant',
+          guard: state.guard,
+          requireUnreferenced: true,
+          audit: auditFor('access_grant', 'own-grant'),
+        },
+      ],
+    });
+    expect(result).toEqual({ ok: true, outcomes: ['restored'] });
+    expect(
+      await context.executor.all({
+        sql: "SELECT id FROM access_grant WHERE id = 'own-grant'",
+        params: [],
+      }),
+    ).toEqual([]);
+  },
+};
+
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createImportRollbackStore',
     file: 'repositories/import-rollback.ts',
-    cases: [live, permissions, refs, entities, blobs, runs],
+    cases: [live, permissions, refs, entities, blobs, runs, bump, protectedRole],
     predicates: [
       {
         name: 'live reads are organization scoped',
@@ -522,7 +609,7 @@ export const entries: readonly MutationEntry[] = [
         neutral: NOT_NULL,
         caseName: refs.name,
         waivedCopies: {
-          3: 'The expiry UPDATE also joins its run on rbexp.org_id = rbmark.org_id; the run of the case is own-organization, so either predicate alone keeps a foreign ref unmarked.',
+          3: 'The expiry UPDATE binds the ref to the organization twice, with rbmark.org_id = ? and through rbexp.org_id = rbmark.org_id; the two are mutually redundant, so stripping either alone leaves the other binding the ref and no case can fail on it.',
         },
       },
       {
@@ -543,6 +630,18 @@ export const entries: readonly MutationEntry[] = [
         neutral: NOT_NULL,
         caseName: runs.name,
       },
+      {
+        name: 'a package bumped by a restore belongs to the organization',
+        locate: /"package"\."org_id" = \?/,
+        neutral: NOT_NULL,
+        caseName: bump.name,
+      },
+      {
+        name: 'a protecting role belongs to the grant organization',
+        locate: /rbprotected\.org_id = rbent\.org_id/,
+        neutral: '1 = 1',
+        caseName: protectedRole.name,
+      },
     ],
     waivers: [
       permissionRowsWaiver,
@@ -561,13 +660,18 @@ export const entries: readonly MutationEntry[] = [
         reason: 'The shared blobLeaseNotLive registration tests the purge lease.',
       },
       {
+        locate: /(?<=DELETE FROM role_permission WHERE )org_id = \?/,
+        reason:
+          'role_permission rows are deleted by ON DELETE CASCADE from the role in the same batch, keyed on role_id alone, so every permission row of the role goes whatever its organization and the explicit DELETE cannot be told apart.',
+      },
+      {
         locate:
-          /(?<=WHERE )org_id = \?(?= AND \w+ = \?(?: AND \w+ = \?)* AND EXISTS \(SELECT 1 FROM import_ref AS rbdone)/,
+          /(?<=WHERE )org_id = \?(?! AND role_id = \?)(?= AND \w+ = \?(?: AND \w+ = \?)* AND EXISTS \(SELECT 1 FROM import_ref AS rbdone)/,
         reason:
           'Mutation targets sit behind the organization-scoped journal marker of the same batch, which binds the entity type and id; a row of another organization cannot share the id.',
       },
       {
-        locate: /(?<=WHERE )org_id = \?(?= AND \()/,
+        locate: /(?<=WHERE )org_id = \?(?= AND \(\s*email IN)/,
         reason: 'The shared patInvalidationStatement registration tests the grant removal.',
       },
       {
@@ -586,14 +690,14 @@ export const entries: readonly MutationEntry[] = [
           'The version_revision snapshot is gated by the done check of the organization-scoped marker, and version.id is a global primary key.',
       },
       {
-        locate: /"(?:version|package)"\."org_id" = \?/,
+        locate: /"version"\."org_id" = \?/,
         reason:
-          'The package bump resolves its package through the version the organization-scoped marker restored; version.id and package.id are global primary keys.',
+          'The package bump resolves its package through the version the organization-scoped marker restored; version.id is a global primary key, so the lookup cannot reach a version of another organization.',
       },
       {
         locate: /rbexp\.org_id = rbmark\.org_id/,
         reason:
-          'The expiry check joins the run to the marked ref; rbmark.org_id = ? in the same statement is registered and binds the ref, and import_run.id is a global primary key.',
+          'The expiry UPDATE binds the ref to the organization twice, with rbmark.org_id = ? and through this join of the run to the marked ref; the two are mutually redundant, so stripping either alone leaves the other binding the ref and no case can fail on it.',
       },
       {
         locate: /(?<!rb)job\.org_id = \?/,
@@ -602,7 +706,7 @@ export const entries: readonly MutationEntry[] = [
       {
         locate: /rbjob\.org_id = \?/,
         reason:
-          'The authority join repeats the binding jobLeaseGuard enforces in the same batch for the same globally unique job id; stripping it leaves the batch refused.',
+          'The shared jobLeaseGuard in the same batch binds the same job id to the organization with job.org_id; the two are mutually redundant, so stripping either alone leaves the other refusing a job of another organization and no case can fail on it.',
       },
       {
         locate: /(?<!\.)"org_id" = \?/,

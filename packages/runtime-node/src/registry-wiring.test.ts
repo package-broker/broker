@@ -25,9 +25,10 @@ import {
 } from '@package-broker/db-sqlite/testing/migrated-database';
 import { openFilesystemByteStore } from './blob/filesystem.js';
 import { createLruCache } from './cache/lru.js';
-import { createNodeServer, type NodeBroker } from './index.js';
+import { type NodeBroker } from './index.js';
 import { DnsGuardError } from './sources/dns-guard.js';
 import { StartupConfigError, startNode } from './startup.js';
+import { createNodeServerWithSeams, type RegistrySeams } from './testing/node-server.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const OTHER_KEY = 'pbmk_v1_HxwdHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA';
@@ -117,8 +118,6 @@ function upstream(): Upstream {
   };
   return { urls, headers, transport };
 }
-
-type NodeSeams = NonNullable<Parameters<typeof createNodeServer>[2]>;
 
 function spied(executor: SqlExecutor, statements: string[]): SqlExecutor {
   return {
@@ -248,11 +247,12 @@ describe('node registry wiring', () => {
       jobs?: Jobs;
       executor?: SqlExecutor;
       closeDatabase?: () => Promise<void>;
-      observeCredentials?: NodeSeams['observeCredentials'];
+      observeCredentials?: RegistrySeams['observeCredentials'];
+      shutdownDeadlineMs?: number;
     } = {},
   ): Promise<NodeBroker> {
     const byteStore = await openFilesystemByteStore({ root: join(directory, 'blobs') });
-    broker = createNodeServer(
+    broker = createNodeServerWithSeams(
       [],
       {
         executor: extra.executor ?? db.executor,
@@ -280,6 +280,9 @@ describe('node registry wiring', () => {
         ...(extra.observeCredentials === undefined
           ? {}
           : { observeCredentials: extra.observeCredentials }),
+        ...(extra.shutdownDeadlineMs === undefined
+          ? {}
+          : { shutdownDeadlineMs: extra.shutdownDeadlineMs }),
       },
     );
     await broker.ready();
@@ -475,7 +478,7 @@ describe('node registry wiring', () => {
 
     it('treats a source with a malformed url as unavailable without opening its credential', async () => {
       const statements: string[] = [];
-      let access: Parameters<NonNullable<NodeSeams['observeCredentials']>>[0] | undefined;
+      let access: Parameters<NonNullable<RegistrySeams['observeCredentials']>>[0] | undefined;
       await boot(upstream().transport, {
         executor: spied(db.executor, statements),
         observeCredentials: (opened) => {
@@ -567,6 +570,88 @@ describe('node registry wiring', () => {
       expect(closed).toBe(true);
       expect(touches.before).toBeGreaterThan(0);
       expect(touches.after).toBe(0);
+    });
+
+    it('closes within the deadline when an access touch never resolves, and still closes the database', async () => {
+      const remote = upstream();
+      const statements: string[] = [];
+      let closed = false;
+      const executor = spied(db.executor, statements);
+      const hung: SqlExecutor = {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        batch: (batch) =>
+          batch.some((statement) => statement.sql.includes('set "last_accessed_at"'))
+            ? new Promise(() => undefined)
+            : executor.batch(batch),
+      };
+      await boot(remote.transport, {
+        executor: hung,
+        shutdownDeadlineMs: 150,
+        closeDatabase: async () => {
+          closed = true;
+        },
+      });
+      const metadata = (await (await get('/alpha/p2/acme/lib.json')).json()) as {
+        packages: Record<string, { dist: { url: string } }[]>;
+      };
+      const dist = brokerPath(metadata.packages['acme/lib']![0]!.dist.url);
+      expect((await get(dist)).status).toBe(200);
+
+      const started = Date.now();
+      await broker!.close();
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(closed).toBe(true);
+    });
+
+    it('closes within the deadline when kernel background work never settles', async () => {
+      const remote = upstream();
+      const enqueue = vi.fn(() => new Promise<{ id: string; created: boolean }>(() => undefined));
+      let closed = false;
+      await boot(remote.transport, {
+        jobs: { enqueue, get: async () => null },
+        shutdownDeadlineMs: 150,
+        closeDatabase: async () => {
+          closed = true;
+        },
+      });
+      expect((await get('/alpha/p2/acme/lib.json')).status).toBe(200);
+      await sql("UPDATE upstream_state SET fresh_until = '2000-01-01T00:00:00.000Z'");
+      const kernel = await broker!.ready();
+      const response = await kernel.fetch(
+        new Request(`${ORIGIN}/alpha/p2/acme/lib.json`, { headers: { cookie } }),
+      );
+      expect(response.status).toBe(200);
+      await vi.waitFor(() => expect(enqueue).toHaveBeenCalled());
+
+      const started = Date.now();
+      await broker!.close();
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(closed).toBe(true);
+    });
+
+    it('logs a fixed warn event when the drain deadline is hit', async () => {
+      const remote = upstream();
+      const hung: SqlExecutor = {
+        driver: db.executor.driver,
+        all: (statement) => db.executor.all(statement),
+        batch: (batch) =>
+          batch.some((statement) => statement.sql.includes('set "last_accessed_at"'))
+            ? new Promise(() => undefined)
+            : db.executor.batch(batch),
+      };
+      await boot(remote.transport, { executor: hung, shutdownDeadlineMs: 100 });
+      const metadata = (await (await get('/alpha/p2/acme/lib.json')).json()) as {
+        packages: Record<string, { dist: { url: string } }[]>;
+      };
+      expect((await get(brokerPath(metadata.packages['acme/lib']![0]!.dist.url))).status).toBe(200);
+      await broker!.close();
+      expect(
+        logged.some((line) => line.includes('"event":"shutdown.registry_drain_timeout"')),
+      ).toBe(true);
+      expect(logged.find((line) => line.includes('registry_drain_timeout'))).toBe(
+        JSON.stringify({ level: 'warn', event: 'shutdown.registry_drain_timeout' }),
+      );
     });
 
     it('tracks the npm stale-while-revalidate background work through the execution port', async () => {

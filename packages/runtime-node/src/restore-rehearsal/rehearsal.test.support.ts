@@ -81,9 +81,15 @@ export interface BackupManifest {
   configuration: { publicUrl: string; storage: string };
 }
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const candidatePackages = ['core', 'db-sqlite', 'runtime-node', 'runtime-cloudflare'];
+export function rehearsalBuildAvailable(repositoryRoot = repository): boolean {
+  return candidatePackages.every((pkg) =>
+    existsSync(join(repositoryRoot, 'packages', pkg, 'dist', 'index.js')),
+  );
+}
 export async function candidateIdentity(): Promise<string> {
   const hash = createHash('sha256');
-  for (const pkg of ['core', 'db-sqlite', 'runtime-node', 'runtime-cloudflare']) {
+  for (const pkg of candidatePackages) {
     const root = join(repository, 'packages', pkg, 'dist');
     const files = (await readdir(root, { recursive: true }))
       .filter(

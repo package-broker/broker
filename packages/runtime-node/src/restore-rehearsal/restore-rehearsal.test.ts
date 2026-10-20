@@ -16,6 +16,7 @@ import {
   backupDeployment,
   deploymentPaths,
   destroyDeployment,
+  rehearsalBuildAvailable,
   restoreDeployment,
   seedDeployment,
   startDeployment,
@@ -27,7 +28,7 @@ import {
 
 const MASTER_KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 
-describe('restore rehearsal on the Node runtime', () => {
+describe.skipIf(!rehearsalBuildAvailable())('Node restore (requires pnpm rehearsal)', () => {
   let workspace: string;
   let backupDirectory: string;
   let seeded: SeededDeployment;

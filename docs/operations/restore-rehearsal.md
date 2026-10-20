@@ -11,6 +11,14 @@ Fixtures use deterministic local gzip/tar bytes, the repository's two-organizati
 From the repository root, with dependencies already installed:
 
 ```sh
+pnpm rehearsal
+```
+
+This builds the packages and both runtime bundles, then runs exactly the rehearsal test files for Node and Cloudflare. Node HTTP and Miniflare tests need local listener permission. A plain `pnpm test` without built artifacts visibly skips the candidate-dependent Node inventory, Node restore, Node HTTP and Cloudflare restore suites; each suite name directs the operator to `pnpm rehearsal`. All four candidate `dist/index.js` files (core, db-sqlite and both runtimes) must exist. Pure snapshot, fixture-clock and build-prerequisite tests, the Cloudflare logical inventory tests and the source-only Miniflare D1 snapshot tests still run without a build. Skipped suites do not establish restore acceptance.
+
+Individual development checks:
+
+```sh
 pnpm typecheck
 pnpm lint
 pnpm build

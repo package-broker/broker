@@ -11,6 +11,7 @@ import {
   destroyDeployment,
   installWorkerStreams,
   inventory,
+  rehearsalBuildAvailable,
   restoreDeployment,
   RestoreTargetNotEmptyError,
   seedDeployment,
@@ -20,7 +21,7 @@ import {
 } from './rehearsal.test.support.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
-describe('restore rehearsal on Cloudflare Miniflare D1/R2', () => {
+describe.skipIf(!rehearsalBuildAvailable())('Cloudflare restore (requires pnpm rehearsal)', () => {
   let root: string;
   let backup: string;
   let seeded: SeededDeployment;

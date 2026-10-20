@@ -10,12 +10,13 @@ import {
   checkInventory,
   deploymentPaths,
   destroyDeployment,
+  rehearsalBuildAvailable,
   restoreDeployment,
 } from './rehearsal.test.support.js';
 import { archive, digest } from './fixture.test.support.js';
 
 // This independent fixture leaves committed bytes in WAL while the backup is taken.
-describe('listener-free backup inventory and preservation', () => {
+describe.skipIf(!rehearsalBuildAvailable())('Node inventory (requires pnpm rehearsal)', () => {
   let root: string;
   let backup: string;
   const bytes = archive();

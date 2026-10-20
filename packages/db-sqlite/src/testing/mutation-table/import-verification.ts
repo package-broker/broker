@@ -133,7 +133,7 @@ const source = isolated('foreign source cannot make an own name visible', async 
     "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('source', ?, 'source', 'npm', 'npmjs_proxy')",
     f.foreign.orgId,
   );
-  await f.seed(
+  await f.seed.forged(
     "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('name', ?, 'source', 'npm', 'pkg')",
     f.own.orgId,
   );
@@ -164,11 +164,11 @@ function versionTarget(foreignPackage: boolean): ContractCase {
         "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('source', ?, 'source', 'npm', 'npmjs_proxy')",
         f.foreign.orgId,
       );
-      await f.seed(
+      await f.seed.forged(
         "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('package', ?, 'source', 'npm', 'pkg')",
         foreignPackage ? f.foreign.orgId : f.own.orgId,
       );
-      await f.seed(
+      await f.seed.forged(
         "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json) VALUES ('version', ?, 'package', '1.0.0', '1.0.0', '2026-01-01T00:00:00.000Z', 'source_release', '{}')",
         f.own.orgId,
       );

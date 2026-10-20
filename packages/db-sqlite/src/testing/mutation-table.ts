@@ -1,4 +1,6 @@
 import { entries as vulnerabilityEntries } from './mutation-table/vulnerability.js';
+import { entries as selectedPatInvalidationEntries } from './mutation-table/selected-pat-invalidation.js';
+import { entries as accessLossEntries } from './mutation-table/access-loss.js';
 import { entries as importVerificationEntries } from './mutation-table/import-verification.js';
 import { entries as identityBlockEntries } from './mutation-table/identity-block.js';
 import { entries as loginEntries } from './mutation-table/login.js';
@@ -98,6 +100,8 @@ export { builderAllowlist, exportedBuilders, builderNames } from './mutation-tab
 
 export const mutationTable: readonly MutationEntry[] = [
   ...vulnerabilityEntries,
+  ...selectedPatInvalidationEntries,
+  ...accessLossEntries,
   ...identityBlockEntries,
   ...loginEntries,
   ...localLoginSuccessEntries,

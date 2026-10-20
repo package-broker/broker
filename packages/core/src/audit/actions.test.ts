@@ -1169,3 +1169,23 @@ describe('manifest audit string bounds', () => {
     });
   });
 });
+
+describe('import rollback audit counts', () => {
+  const target = { type: 'import_run', id: '01J0IMPORT0000000000000000' };
+
+  it('accepts restored, conflict and expired counts on import_run.rollback', () => {
+    const result = build(
+      'import_run.rollback',
+      { restored: { new: 3 }, conflict: { new: 1 }, expired: { new: 0 } },
+      { target },
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it.each(['restored', 'conflict', 'expired'])('refuses %s on import_run.apply', (field) => {
+    expect(build('import_run.apply', { [field]: { new: 1 } }, { target })).toEqual({
+      ok: false,
+      reason: 'unknown_field',
+    });
+  });
+});

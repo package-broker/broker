@@ -34,7 +34,7 @@ export interface MigrationLockTable {
   expires_at: string | null;
 }
 
-/** Mirrors `user_account` in `migrations/0001_init.sql`. */
+/** Mirrors `user_account` in `migrations/0001_init.sql` and `migrations/0018_pat_invalid_before.sql`. */
 export interface UserAccountTable {
   id: string;
   org_id: string;
@@ -45,6 +45,7 @@ export interface UserAccountTable {
   idp_validated_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+  pat_invalid_before: string | null;
 }
 
 /** Mirrors `identity` in `migrations/0001_init.sql` and `migrations/0002_local_login.sql`. */

@@ -34,7 +34,7 @@ const mf = new Miniflare(
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
     compatibilityDate: '2026-10-01',
-    d1Databases: ['TOKEN_A', 'TOKEN_B'],
+    d1Databases: ['TOKEN_A', 'TOKEN_B', 'TOKEN_C', 'TOKEN_D'],
   } as Parameters<typeof convertV4MiniflareOptions>[0]),
 );
 
@@ -67,12 +67,12 @@ function iso(offsetMs: number): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
 
-function mint(): MintedToken {
+function mint(selector = SELECTOR, prefix = 'pb_pat'): MintedToken {
   return {
-    selector: SELECTOR,
+    selector,
     hash: 'a'.repeat(64),
     pepperVersion: 1,
-    plaintext: `pb_pat_${SELECTOR}_${'x'.repeat(43)}`,
+    plaintext: `${prefix}_${selector}_${'x'.repeat(43)}`,
   };
 }
 
@@ -158,6 +158,7 @@ function input(ids: string[]) {
     name: 'laptop',
     scope: 'read' as const,
     expiresAt: iso(86_400_000),
+    maxLifetimeDays: 365,
     now: iso(0),
     validation: { kind: 'local' as const },
     projectMode: 'selected' as const,
@@ -225,6 +226,121 @@ describe('d1 token issuance', () => {
     expect(result).toEqual({ status: 'refused', reason: 'unclassified' });
     expect(await count(executor, 'token')).toBe(0);
     expect(await count(executor, 'token_project')).toBe(0);
+  }, 120_000);
+});
+
+describe('d1 token lifetime maximum', () => {
+  const DAY = 86_400_000;
+  const PRINCIPAL = '01J0SERVICE000000000000001';
+  const SELECTORS = ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc', 'dddddddddddd'] as const;
+
+  async function shortenOrganizationColumns(executor: SqlExecutor, orgId: string) {
+    await executor.batch([
+      st(
+        'UPDATE organization SET token_default_expiry_days = 1, token_ci_readonly_expiry_days = 1 WHERE id = ?',
+        orgId,
+      ),
+    ]);
+  }
+
+  it('issues personal tokens against maxLifetimeDays and not the organization columns', async () => {
+    const { executor, a } = await seeded('TOKEN_C', 0);
+    const repository = createTokenRepository(executor);
+    const issue = (id: string, selector: string, expiresInMs: number, days: number) =>
+      repository.issuePersonal(
+        a,
+        fence(),
+        {
+          ...input([]),
+          id,
+          projectMode: 'all' as const,
+          maxLifetimeDays: days,
+          expiresAt: iso(expiresInMs),
+        },
+        () => mint(selector),
+      );
+
+    expect(
+      (await issue('01J0TOKEN0000000000000000A', SELECTORS[0], 30 * DAY - 1000, 30)).status,
+    ).toBe('issued');
+    expect(await issue('01J0TOKEN0000000000000000B', SELECTORS[1], 30 * DAY + 1000, 30)).toEqual({
+      status: 'refused',
+      reason: 'authority',
+    });
+    expect(await count(executor, 'token')).toBe(1);
+    expect(await count(executor, 'audit_pending')).toBe(1);
+    expect(await count(executor, 'token_project')).toBe(0);
+
+    await shortenOrganizationColumns(executor, a.orgId);
+    expect((await issue('01J0TOKEN0000000000000000C', SELECTORS[2], 300 * DAY, 365)).status).toBe(
+      'issued',
+    );
+    expect(await count(executor, 'token')).toBe(2);
+  }, 120_000);
+
+  it('issues service tokens against maxLifetimeDays and not the organization columns', async () => {
+    const { executor, a } = await seeded('TOKEN_D', 0);
+    await executor.batch([
+      st(
+        "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, '01J0ROLE000000000000000001', 'org:service-principals:write'), (?, '01J0ROLE000000000000000001', 'project:read')",
+        a.orgId,
+        a.orgId,
+      ),
+      st(
+        "INSERT INTO service_principal (id, org_id, name, project_id, created_by_user_id) VALUES (?, ?, 'wide', NULL, ?)",
+        PRINCIPAL,
+        a.orgId,
+        USER,
+      ),
+      st(
+        "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, 'project:read')",
+        a.orgId,
+        PRINCIPAL,
+      ),
+    ]);
+    const repository = createTokenRepository(executor);
+    const issue = (id: string, selector: string, expiresInMs: number, days: number) =>
+      repository.issueService(
+        a,
+        fence(),
+        {
+          audit: mutationAudit(),
+          id,
+          name: 'deploy',
+          servicePrincipalId: PRINCIPAL,
+          projectId: null,
+          principalRevision: 1,
+          scope: 'full',
+          readOnly: false,
+          expiresAt: iso(expiresInMs),
+          maxLifetimeDays: days,
+          now: iso(0),
+          authority: {
+            permission: 'org:service-principals:write',
+            organizationAdmin: true,
+            covers: ['project:read'],
+          },
+          providerAnchors: [],
+        },
+        () => mint(selector, 'pb_svc'),
+      );
+
+    expect(
+      (await issue('01J0TOKEN0000000000000000A', SELECTORS[0], 30 * DAY - 1000, 30)).status,
+    ).toBe('issued');
+    expect(await issue('01J0TOKEN0000000000000000B', SELECTORS[1], 30 * DAY + 1000, 30)).toEqual({
+      status: 'refused',
+      reason: 'authority',
+    });
+    expect(await count(executor, 'token')).toBe(1);
+    expect(await count(executor, 'audit_pending')).toBe(1);
+    expect(await count(executor, 'token_project')).toBe(0);
+
+    await shortenOrganizationColumns(executor, a.orgId);
+    expect((await issue('01J0TOKEN0000000000000000C', SELECTORS[2], 300 * DAY, 365)).status).toBe(
+      'issued',
+    );
+    expect(await count(executor, 'token')).toBe(2);
   }, 120_000);
 });
 

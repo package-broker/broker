@@ -110,6 +110,7 @@ function baseInput(overrides: Record<string, unknown> = {}) {
     name: 'laptop',
     scope: 'read' as const,
     expiresAt: iso(86_400_000),
+    maxLifetimeDays: 365,
     now: iso(0),
     validation: { kind: 'local' as const },
     projectMode: 'all' as const,
@@ -877,34 +878,113 @@ describe('issuance policy', () => {
     });
   });
 
-  it('refuses an expiry beyond the organization default, capped at 90 days', async () => {
-    const { mint } = minter('abcdefghijkl');
-    const tooLong = await repository.issuePersonal(
-      a,
-      fence(),
-      baseInput({ expiresAt: iso(91 * 86_400_000) }),
-      mint,
-    );
-    const atCap = await repository.issuePersonal(
-      a,
-      fence(),
-      baseInput({ expiresAt: iso(89 * 86_400_000) }),
-      mint,
-    );
-    await executor.all({
-      sql: 'UPDATE organization SET token_default_expiry_days = 7 WHERE id = ?',
-      params: [a.orgId],
-    });
-    const orgCap = await repository.issuePersonal(
-      a,
-      fence(),
-      baseInput({ id: '01J0TOKEN0000000000000000B', expiresAt: iso(8 * 86_400_000) }),
-      minter('mnopqrstuvwx').mint,
-    );
+  describe('lifetime maximum from the caller on database time', () => {
+    const DAY = 86_400_000;
+    const SCOPES = ['read', 'write', 'full'] as const;
 
-    expect(tooLong).toEqual({ status: 'refused', reason: 'authority' });
-    expect(atCap.status).toBe('issued');
-    expect(orgCap).toEqual({ status: 'refused', reason: 'authority' });
+    async function auditRows(): Promise<number> {
+      return (await one<{ n: number }>('SELECT count(*) AS n FROM audit_pending'))?.n ?? -1;
+    }
+
+    it.each(SCOPES)('issues a %s token one second inside maxLifetimeDays', async (scope) => {
+      const result = await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ scope, maxLifetimeDays: 10, expiresAt: iso(10 * DAY - 1000) }),
+        minter('abcdefghijkl').mint,
+      );
+
+      expect(result.status).toBe('issued');
+      expect(await tokenCount()).toBe(1);
+    });
+
+    it.each(SCOPES)('refuses a %s token one second past maxLifetimeDays', async (scope) => {
+      const result = await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ scope, maxLifetimeDays: 10, expiresAt: iso(10 * DAY + 1000) }),
+        minter('abcdefghijkl').mint,
+      );
+
+      expect(result).toEqual({ status: 'refused', reason: 'authority' });
+      expect(await tokenCount()).toBe(0);
+      expect(await bindingCount()).toBe(0);
+      expect(await auditRows()).toBe(0);
+    });
+
+    it.each(SCOPES)('ignores the organization expiry columns for a %s token', async (scope) => {
+      await executor.all({
+        sql: 'UPDATE organization SET token_default_expiry_days = 1, token_ci_readonly_expiry_days = 1 WHERE id = ?',
+        params: [a.orgId],
+      });
+      const result = await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ scope, maxLifetimeDays: 365, expiresAt: iso(300 * DAY) }),
+        minter('abcdefghijkl').mint,
+      );
+
+      expect(result.status).toBe('issued');
+    });
+
+    it.each([1, 3650])('accepts maxLifetimeDays %i', async (days) => {
+      const result = await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ maxLifetimeDays: days, expiresAt: iso(days * DAY - 1000) }),
+        minter('abcdefghijkl').mint,
+      );
+
+      expect(result.status).toBe('issued');
+    });
+
+    it('does not let another organization column widen the bound', async () => {
+      await executor.all({
+        sql: 'UPDATE organization SET token_default_expiry_days = 365 WHERE id = ?',
+        params: [b.orgId],
+      });
+      const result = await repository.issuePersonal(
+        a,
+        fence(),
+        baseInput({ maxLifetimeDays: 30, expiresAt: iso(31 * DAY) }),
+        minter('abcdefghijkl').mint,
+      );
+
+      expect(result).toEqual({ status: 'refused', reason: 'authority' });
+    });
+
+    it.each([
+      ['0', 0],
+      ['3651', 3651],
+      ['1.5', 1.5],
+      ['NaN', Number.NaN],
+    ])('throws RangeError before any statement for maxLifetimeDays %s', async (_label, days) => {
+      const seen: Statement[] = [];
+      const spy: SqlExecutor = {
+        ...executor,
+        driver: executor.driver,
+        all: (statement) => {
+          seen.push(statement);
+          return executor.all(statement);
+        },
+        batch: (statements) => {
+          seen.push(...statements);
+          return executor.batch(statements);
+        },
+      };
+      const { mint, calls } = minter('abcdefghijkl');
+
+      await expect(
+        createTokenRepository(spy).issuePersonal(
+          a,
+          fence(),
+          baseInput({ maxLifetimeDays: days }),
+          mint,
+        ),
+      ).rejects.toThrow(RangeError);
+      expect(seen).toHaveLength(0);
+      expect(calls()).toBe(0);
+    });
   });
 
   it('refuses an expiry that the database clock already considers past', async () => {

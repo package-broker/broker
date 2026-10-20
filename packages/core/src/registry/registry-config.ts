@@ -387,7 +387,11 @@ export function resolveRegistryConfig(
       waitBudgetMs: num(t, 'waitBudgetMs', d.timers.waitBudgetMs),
     },
     caps: {
-      metadataBytes: num(c, 'metadataBytes', d.caps.metadataBytes),
+      metadataBytes: num(
+        c,
+        'metadataBytes',
+        target === 'cloudflare' ? 8 * 1024 * 1024 : d.caps.metadataBytes,
+      ),
       archiveBytes: num(c, 'archiveBytes', d.caps.archiveBytes),
     },
   };

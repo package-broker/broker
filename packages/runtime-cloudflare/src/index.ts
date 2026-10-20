@@ -117,6 +117,18 @@ import {
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import {
+  resolveTokenLifetimePolicy,
+  TokenConfigError,
+  type TokenLifetimePolicy,
+} from '@package-broker/core/authz/token-lifetime';
+import {
+  createPatJobHolder,
+  patOffboardingRegistrations,
+  tokenWiring,
+  type TokenWiring,
+} from './token-jobs.js';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
@@ -273,6 +285,7 @@ export interface WorkerOptions {
   readonly platformPorts?: PlatformPortConfig | null;
   /** Registry settings; an invalid value fails startup. Dist URLs use the origin of PB_PUBLIC_URL only, so a path-prefixed public URL is unsupported. */
   readonly registry?: RegistryConfigInput;
+  readonly tokens?: BrokerConfig['tokens'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -366,6 +379,7 @@ async function buildAuth(
   log: KernelLog,
   dispatch: (run: () => Promise<void>) => void,
   collectRegistration: () => Registration,
+  tokens: TokenWiring,
 ): Promise<{
   auth: AuthModule;
   registration: Registration;
@@ -448,6 +462,7 @@ async function buildAuth(
       grants: wired('project grant repository', createProjectGrantRepository(executor)),
       providers,
       providerAnchors: anchorList,
+      ...tokens.offboarding,
       ...common,
     }),
     projectList: createProjectLister({
@@ -463,6 +478,7 @@ async function buildAuth(
       organizations,
       providers: providerAnchors,
       keyring,
+      lifetime: tokens.lifetime,
       ...common,
     }),
     servicePrincipals: createServicePrincipalService({
@@ -480,6 +496,7 @@ async function buildAuth(
       organizations,
       providers: providerAnchors,
       keyring,
+      lifetime: tokens.lifetime,
       ...common,
     }),
     tokenRevoke: createTokenRevokeService({
@@ -586,6 +603,15 @@ function resolveRegistry(
     if (error instanceof RegistryConfigError) {
       throw new KernelConfigError(error.problems.map((problem) => `registry: ${problem}`));
     }
+    throw error;
+  }
+}
+
+function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolicy {
+  try {
+    return resolveTokenLifetimePolicy(input);
+  } catch (error) {
+    if (error instanceof TokenConfigError) throw new KernelConfigError(error.problems);
     throw error;
   }
 }
@@ -1227,6 +1253,8 @@ export function createWorker(
       ...(options.observability === undefined ? {} : { observability: options.observability }),
     });
     if (observabilityProblems.length > 0) throw new KernelConfigError(observabilityProblems);
+    const lifetime = resolveTokenLifetime(options.tokens);
+    const patJobs = createPatJobHolder();
     const config = stanza;
     const bound = config === null ? null : resolveBindings(config, env ?? {}, cacheStorage);
     const db = bound?.db ?? env?.DB;
@@ -1296,6 +1324,9 @@ export function createWorker(
                 registerAuditJob(auditSealJob(createAuditSealRepository(executor as SqlExecutor))),
                 registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor))),
                 ...(db === undefined ? [] : importJobRegistrations(importJobs)),
+                ...(db === undefined
+                  ? []
+                  : patOffboardingRegistrations(executor as SqlExecutor, patJobs, log)),
               ],
       });
     const built =
@@ -1308,6 +1339,7 @@ export function createWorker(
             log,
             dispatch,
             collectRegistration,
+            tokenWiring(lifetime, patJobs, config !== null),
           );
     const registration = built?.registration ?? collectRegistration();
     const auth = built?.auth;
@@ -1327,6 +1359,16 @@ export function createWorker(
         }),
         blobs: services.platformServices.blob,
       });
+    }
+    if (services !== undefined && built !== undefined) {
+      patJobs.set(
+        createRepositoryJobs({
+          store: services.platformServices.jobStore,
+          jobs: registration.jobs,
+          clock: systemClock,
+          ids: { ulid },
+        })('core', { projectId: null, tokenId: null }),
+      );
     }
 
     const registryModule =

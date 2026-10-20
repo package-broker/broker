@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createPolicyFetch } from '../sources/policy-fetch.js';
 import { defineConfig } from '../config.js';
 import { classifyUrl, createOutboundPolicy } from '../sources/url-policy.js';
 import {
@@ -159,16 +160,28 @@ describe('validateRegistryConfig', () => {
 });
 
 describe('resolveRegistryConfig', () => {
-  it('yields the defaults for a missing config', () => {
+  it.each([
+    ['node', 33554432],
+    ['cloudflare', 8388608],
+  ] as const)('yields the defaults on %s for a missing config', (target, metadataBytes) => {
     const expected = {
       outbound: { allowPrivateHosts: [], selfOrigins: [PUBLIC_URL] },
       userAgent: { default: 'PackageBroker/2', composerStyle: 'Composer/2.8.0' },
       upstreamContact: 'https://github.com/package-broker/broker',
       timers: { metadataTtlSeconds: 300, negativeTtlSeconds: 30, waitBudgetMs: 8000 },
-      caps: { metadataBytes: 33554432, archiveBytes: 67108864 },
+      caps: { metadataBytes, archiveBytes: 67108864 },
     };
-    expect(resolveRegistryConfig(undefined, 'node', PUBLIC_URL)).toEqual(expected);
-    expect(resolveRegistryConfig({}, 'cloudflare', PUBLIC_URL)).toEqual(expected);
+    expect(resolveRegistryConfig(undefined, target, PUBLIC_URL)).toEqual(expected);
+    expect(resolveRegistryConfig({}, target, PUBLIC_URL)).toEqual(expected);
+  });
+
+  it.each(['cloudflare', 'node'] as const)('honors an explicit metadata cap on %s', (target) => {
+    const resolved = resolveRegistryConfig(
+      { caps: { metadataBytes: 16777216 } },
+      target,
+      PUBLIC_URL,
+    );
+    expect(resolved.caps.metadataBytes).toBe(16777216);
   });
 
   it('exposes deep-frozen input defaults without an outbound section', () => {
@@ -260,6 +273,33 @@ describe('resolveRegistryConfig', () => {
     expect(() => resolveRegistryConfig(undefined, 'node', 'https://u@broker.example.com')).toThrow(
       RegistryConfigError,
     );
+  });
+
+  it('denies an explicitly configured workers.dev alias on Cloudflare, including redirects', async () => {
+    const alias = 'https://package-broker.my-account.workers.dev';
+    const resolved = resolveRegistryConfig(
+      { outbound: { extraSelfOrigins: [alias] } },
+      'cloudflare',
+      PUBLIC_URL,
+    );
+    const policy = createOutboundPolicy({ runtime: 'cloudflare', ...resolved.outbound });
+    expect(classifyUrl(`${alias}/pkg`, policy)).toEqual({ ok: false, reason: 'self_origin' });
+    const fetchImpl = vi.fn(
+      async () => new Response(null, { status: 302, headers: { location: `${alias}/pkg` } }),
+    );
+    const fetch = createPolicyFetch({ policy, fetchImpl, userAgent: 'PackageBroker/2' });
+    await expect(
+      fetch({
+        url: 'https://upstream.example.com/pkg',
+        method: 'GET',
+        headers: {},
+        destinations: ['https://upstream.example.com', alias],
+        purpose: 'metadata',
+        maxBytes: 1024,
+        timeoutMs: 1000,
+      }),
+    ).rejects.toMatchObject({ code: 'refused', reason: 'self_origin' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('adds normalized extra self origins and refuses allowlisting them', () => {

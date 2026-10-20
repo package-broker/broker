@@ -14,6 +14,7 @@ import type { SourceType } from '../sources/config.js';
 import type { DescribeOptions, DescribeResult, DocumentValidators } from '../sources/provider.js';
 import { applyChunk, type ApplyDeps, type ApplyInput } from './apply-description.js';
 import { createCoalescer, type CoalesceFill, type DoneState } from './coalesce.js';
+import { PackagistBusyError } from './composer/packagist-proxy.js';
 import {
   describeOptions,
   isSnapshotGone,
@@ -73,7 +74,7 @@ export interface OnDemandRequest {
 }
 export type OnDemandResult =
   | { readonly kind: 'not_found' | 'filled' | 'upstream_error' }
-  | { readonly kind: 'busy'; readonly retryAfterSeconds: 10 }
+  | { readonly kind: 'busy'; readonly retryAfterSeconds: number }
   | { readonly kind: 'serve'; readonly stale: boolean; readonly background?: () => Promise<void> };
 export interface OnDemandFill {
   ensure(actor: ProjectActor, request: OnDemandRequest): Promise<OnDemandResult>;
@@ -84,6 +85,10 @@ interface OnDemandService {
     request: OnDemandRequest,
     startedAt?: number,
   ): Promise<OnDemandResult>;
+}
+function busyRetryAfter(seconds: number | null): number {
+  if (seconds === null || !Number.isFinite(seconds)) return 10;
+  return Math.max(1, Math.min(60, Math.round(seconds)));
 }
 export class UpstreamFillError extends Error {
   override readonly name = 'UpstreamFillError';
@@ -308,6 +313,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
                 described = await plan.describe({}, fillSignal);
             } catch (error) {
               if (fillSignal.aborted) throw fillSignal.reason;
+              if (error instanceof PackagistBusyError) throw error;
               if (isSnapshotGone(error)) {
                 await deps.sessions.abandon(ctx, session);
                 return 'pending';
@@ -440,6 +446,11 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
           return await hold();
         return mapped(result);
       } catch (error) {
+        if (error instanceof PackagistBusyError)
+          return {
+            kind: 'busy',
+            retryAfterSeconds: busyRetryAfter(error.retryAfterSeconds),
+          };
         return error instanceof UpstreamFillError ? { kind: 'upstream_error' } : BUSY;
       } finally {
         flight.users -= 1;

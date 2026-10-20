@@ -77,10 +77,10 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         all: (statement) => executor.all(context.mutate(statement)),
         batch: (statements) => executor.batch(context.mutateBatch(statements)),
       };
-      const reconciler = createCatalogueReconciler(
-        mutating,
-        kind === 'source' ? { countUnseen: true, maxAbsenceShare: 0.5 } : {},
-      );
+      const reconciler = createCatalogueReconciler(mutating, {
+        countUnseen: true,
+        maxAbsenceShare: 0.5,
+      });
       const guard = createCatalogueWriteGuard(own, { id: 'J', owner: 'worker', fence: 3 });
       if (kind === 'absent') {
         await seed(
@@ -127,7 +127,7 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         ).resolves.toMatchObject({
           removed: 1,
           restored: 1,
-          statements: kind === 'source' ? 12 : 15,
+          statements: kind === 'source' ? 12 : 16,
         });
       }
       expect(await snapshot()).toEqual(before);
@@ -184,6 +184,14 @@ export const entries: readonly MutationEntry[] = [
         neutral: NOT_NULL,
         copies: 2,
         caseName: reconcileCase('source').name,
+      },
+      {
+        name: 'version unseen count includes only own versions',
+        locate:
+          /version\.org_id = \?(?=\s+AND version\.package_id = \?\s+AND version\.status = 'active' AND version\.updated_at < \()/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: reconcileCase('package').name,
       },
       {
         name: 'source sweep updates only own packages',

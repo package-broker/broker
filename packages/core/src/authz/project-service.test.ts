@@ -714,3 +714,31 @@ it('a create idempotency conflict is returned without logging a change', async (
   });
   expect(log).not.toHaveBeenCalled();
 });
+
+describe('restore refused for a stale reauthentication', () => {
+  it('answers reauth_required and emits admin.denied with a reason', async () => {
+    const { service, log } = setup({ restore: 'reauth_required' });
+    const fence = fenceOf('actor-1', { project: 2 });
+    expect(await service.restoreProject(ctx, actor, fence, ID, call)).toEqual({
+      ok: false,
+      error: 'reauth_required',
+    });
+    const denied = log.mock.calls.map(([entry]) => entry).filter((e) => e.event === 'admin.denied');
+    expect(denied).toEqual([
+      expect.objectContaining({
+        action: 'project.restore',
+        reason: 'reauth_required',
+        actorUserId: actor.userId,
+      }),
+    ]);
+    expect(log.mock.calls.some(([entry]) => entry.event === 'project.changed')).toBe(false);
+  });
+
+  it('keeps a lost-authority refusal reasonless', async () => {
+    const { service, log } = setup({ restore: 'authority' });
+    await service.restoreProject(ctx, actor, fenceOf('actor-1', { project: 2 }), ID, call);
+    const denied = log.mock.calls.map(([entry]) => entry).filter((e) => e.event === 'admin.denied');
+    expect(denied).toHaveLength(1);
+    expect(denied[0]).not.toHaveProperty('reason');
+  });
+});

@@ -175,7 +175,15 @@ export function unseenSourcePackages(ctx: OrgContext, sourceId: string): RawBuil
   const boundary = sweepBoundary(ctx, { kind: 'source', sourceId });
   return sql<number>`(SELECT count(*) FROM package
     WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}
-      AND ${sourceUnseenPredicate(ctx, boundary)})`;
+      AND package.updated_at < ${boundary} AND package.status = 'active')`;
+}
+
+export function unseenPackageVersions(ctx: OrgContext, packageId: string): RawBuilder<number> {
+  requireId('package scope id', packageId);
+  const boundary = sweepBoundary(ctx, { kind: 'package', packageId });
+  return sql<number>`(SELECT count(*) FROM version
+    WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${packageId}
+      AND version.status = 'active' AND version.updated_at < ${boundary})`;
 }
 
 /** Needs `seen >= 1`: an empty listing never reaches the unseen count. */
@@ -260,7 +268,7 @@ function transitionStatements(
 }
 
 export interface FinalizeStatementOptions extends FinalizeGuardOptions {
-  /** Source listings: count the unseen packages and apply the absence share inside the batch. */
+  /** Count the unseen packages (source) or versions (package) and apply the absence share inside the batch. */
   readonly countUnseen?: boolean;
 }
 
@@ -381,7 +389,18 @@ export function finalizeListingStatements(
     'listing_present',
     revivable,
   );
-  const statements = [...preconditions];
+  const statements = [
+    ...preconditions,
+    ...(options.countUnseen === true
+      ? checkOf(
+          withinAbsenceShare(
+            unseenPackageVersions(ctx, id),
+            count,
+            options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
+          ),
+        )
+      : []),
+  ];
   statements.push(removal.revision);
   const removalIndex = statements.length;
   statements.push(removal.update, removedBlobs(ctx, { opId }));

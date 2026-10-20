@@ -30,6 +30,73 @@ import {
 
 const SOURCE_PROVIDERS_API_VERSION = 3;
 
+const MAX_SNAPSHOT_ARRAY = 1024;
+
+class RouteSnapshotRefusal extends Error {}
+
+function snapshotValue(value: unknown, ancestors: Set<object>): unknown {
+  if (typeof value !== 'object' || value === null) return value;
+  if (ancestors.has(value)) throw new RouteSnapshotRefusal('circular reference');
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const length = value.length;
+      if (length > MAX_SNAPSHOT_ARRAY) {
+        throw new RouteSnapshotRefusal(`arrays are limited to ${MAX_SNAPSHOT_ARRAY} elements`);
+      }
+      const items: unknown[] = [];
+      for (let i = 0; i < length; i++) {
+        items.push(snapshotValue((value as unknown[])[i], ancestors));
+      }
+      return Object.freeze(items);
+    }
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      throw new RouteSnapshotRefusal('only plain objects and arrays are allowed');
+    }
+    return Object.freeze(ownEntries(value, (v) => snapshotValue(v, ancestors)));
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function ownEntries(
+  source: object,
+  convert: (value: unknown, key: string) => unknown,
+): Record<string, unknown> {
+  const keys = Object.keys(source);
+  if (keys.includes('__proto__')) throw new RouteSnapshotRefusal('__proto__ key is not allowed');
+  return Object.fromEntries(
+    keys.map((key) => [key, convert((source as Record<string, unknown>)[key], key)]),
+  );
+}
+
+function snapshotRoute(route: RouteDefinition): RouteDefinition {
+  if (typeof route !== 'object' || route === null) {
+    throw new RouteSnapshotRefusal('route must be an object');
+  }
+  const snapshot = ownEntries(route, (value, key) => {
+    if (key === 'package' || key === 'api') return snapshotValue(value, new Set());
+    if (
+      typeof value === 'function' ? key !== 'handler' : typeof value === 'object' && value !== null
+    ) {
+      throw new RouteSnapshotRefusal(
+        key === 'boundary'
+          ? 'unknown boundary: boundary must be a string'
+          : 'route fields must be primitive values',
+      );
+    }
+    return value;
+  });
+  if (typeof snapshot.method !== 'string' || typeof snapshot.path !== 'string') {
+    throw new RouteSnapshotRefusal('method and path must be strings');
+  }
+  if (typeof snapshot.handler !== 'function') {
+    throw new RouteSnapshotRefusal('handler must be a function');
+  }
+  return Object.freeze(snapshot) as unknown as RouteDefinition;
+}
+
 type RegisteredRoute = RouteDefinition & { readonly plugin: string };
 
 export interface RegisteredJob {
@@ -240,7 +307,12 @@ export function collectRegistrations(
       const returned: unknown = plugin.register({
         route: (route) => {
           assertOpen();
-          own.push(route);
+          try {
+            own.push(snapshotRoute(route));
+          } catch (error) {
+            if (!(error instanceof RouteSnapshotRefusal)) throw error;
+            problems.push(`plugin "${id}" route is invalid: ${error.message}`);
+          }
         },
         hook: (name, handler) => {
           assertOpen();
@@ -318,11 +390,7 @@ export function collectRegistrations(
         boundaryProblems.length === 0 &&
         apiProblems.length === 0
       ) {
-        routes.push({
-          ...route,
-          ...(route.package === undefined ? {} : { package: Object.freeze({ ...route.package }) }),
-          plugin: id,
-        });
+        routes.push(Object.freeze({ ...route, plugin: id }));
       }
     }
   }

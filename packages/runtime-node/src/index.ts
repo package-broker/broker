@@ -58,7 +58,40 @@ import {
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import type { ActorContext } from '@package-broker/core/authz/administration';
 import type { ProjectActor } from '@package-broker/core/authz/project-actor';
+import {
+  createRegistryModule,
+  type RegistryModule,
+  type SourceCredential,
+} from '@package-broker/core/registry/module';
+import { createAccessRecorder } from '@package-broker/core/registry/access-recorder';
+import type { RegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
+import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
+import { createRepositoryJobs, type JobsFactory } from '@package-broker/core/platform/jobs-port';
+import type { Jobs } from '@package-broker/core/platform/jobs';
+import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
+import type { FetchLike } from '@package-broker/core/platform/tracing';
+import type { Observability, ObsRecord } from '@package-broker/core/platform/observability';
+import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
+import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
+import {
+  bindCredential,
+  CredentialError,
+  credentialEchoProbe,
+  parseCredentialMaterial,
+  type CredentialKind,
+  type CredentialMaterial,
+  type SshKeyMaterial,
+} from '@package-broker/core/sources/credentials';
+import type { SourceRecord } from '@package-broker/core/db/source';
+import type { OrganizationIdentity } from '@package-broker/core/db/organization';
+import type { SourceProvider } from '@package-broker/core/sources/provider';
+import { orgContext, type OrgContext } from '@package-broker/core/db/port';
+import { createSecretCipher, SecretDecryptError } from '@package-broker/core/secrets/cipher';
+import {
+  createCredentialStore,
+  CredentialNotFoundError,
+} from '@package-broker/core/secrets/credential-store';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import {
   providerAnchorsOf,
@@ -74,6 +107,11 @@ import { createKernel } from '@package-broker/core/kernel/kernel';
 import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
+import { nodeCodecs } from './codec/node-codec.js';
+import { createDnsGuard, type Resolver } from './sources/dns-guard.js';
+import { createGuardedFetch } from './sources/guarded-fetch.js';
+import { createFilesystemArchiveStore } from './sources/ssh-archive-store.js';
+import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provider.js';
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
@@ -82,9 +120,29 @@ import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
+import type { UpstreamCredential } from '@package-broker/core/sources/policy-fetch';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
+import { createBlobAccessRepository } from '@package-broker/db-sqlite/repositories/blob-access';
+import { createBlobReplacer } from '@package-broker/db-sqlite/repositories/blob-replacer';
+import { createCacheEpochRepository } from '@package-broker/db-sqlite/repositories/cache-epoch';
 import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue';
+import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import { createExistingVersionsReader } from '@package-broker/db-sqlite/repositories/existing-versions';
+import {
+  createFetchLeases,
+  createFetchLeaseWriteGuard,
+  leaseKey,
+} from '@package-broker/db-sqlite/repositories/fetch-lease';
+import { createIngestFinalizer } from '@package-broker/db-sqlite/repositories/ingest-finalize';
+import {
+  createIngestSessions,
+  createIngestSessionWriteGuard,
+} from '@package-broker/db-sqlite/repositories/ingest-session';
+import { createRegistryReads } from '@package-broker/db-sqlite/repositories/registry-reads';
+import { createRepresentationClock } from '@package-broker/db-sqlite/repositories/representation-clock';
+import { createSourceRepository } from '@package-broker/db-sqlite/repositories/source';
+import { createUpstreamStateRepository } from '@package-broker/db-sqlite/repositories/upstream-state';
 import {
   createCatalogueWriter,
   createVisibilityStore,
@@ -119,6 +177,19 @@ export interface NodeServerOptions {
   readonly authorization?: AuthorizationEngine;
   /** Resolves true once the broker may serve; a falsy answer refuses everything except liveness. */
   readonly servingGate?: () => Promise<boolean>;
+  /** Registry routes need the database, auth, platform services and this input together. */
+  readonly registry?: NodeRegistryOptions;
+}
+
+export interface NodeRegistryOptions {
+  readonly config: RegistryConfig;
+  /** Registers the SSH git provider with archives kept under this directory. */
+  readonly sshArchiveRoot?: string;
+}
+
+export interface NodeRegistryServices {
+  /** The transport every registry request leaves through. */
+  readonly outboundFetch: FetchLike;
 }
 
 /** The step 5 domain services; PB-32 resolves each one from here. */
@@ -155,6 +226,8 @@ export interface NodeServices {
   readonly access: NodeAccessServices | null;
   /** Null without a database or auth options. */
   readonly packages: NodeCatalogueServices | null;
+  /** Present when the registry is wired. */
+  readonly registry?: NodeRegistryServices;
 }
 
 export interface NodeBroker {
@@ -323,6 +396,235 @@ function buildPackageReads(executor: SqlExecutor) {
   return { reader, packageAccess, resolver };
 }
 
+interface RegistrySeams {
+  readonly transport?: FetchLike;
+  readonly resolver?: Resolver;
+  readonly jobs?: Jobs;
+  readonly observeCredentials?: (access: CredentialAccess) => void;
+}
+
+type CredentialAccess = ReturnType<typeof credentialAccess>;
+
+const SHUTDOWN_IDLE_MS = 10_000;
+
+const INERT_CREDENTIAL: UpstreamCredential = Object.freeze({
+  origins: Object.freeze([]),
+  queryParams: Object.freeze([]),
+  apply: (headers: Headers, url: URL) => ({ headers, url }),
+});
+
+function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveStore {
+  let opened: Promise<SshArchiveStore> | undefined;
+  const open = (): Promise<SshArchiveStore> => {
+    opened ??= createFilesystemArchiveStore(root, { maxZipBytes }).catch((error: unknown) => {
+      opened = undefined;
+      throw error;
+    });
+    return opened;
+  };
+  return {
+    find: async (...args) => (await open()).find(...args),
+    store: async (...args) => (await open()).store(...args),
+  };
+}
+
+function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
+  const repository = createCredentialRepository(executor);
+  const store = createCredentialStore({
+    repository,
+    cipher: createSecretCipher(keyring, 'credential-encryption'),
+    ids: { ulid },
+    clock: systemClock,
+  });
+
+  async function material(ctx: OrgContext, id: string): Promise<CredentialMaterial> {
+    const row = await repository.get(ctx, id);
+    if (row === null) throw new CredentialNotFoundError();
+    const plaintext = await store.read(ctx, id);
+    try {
+      return parseCredentialMaterial(row.kind as CredentialKind, plaintext);
+    } finally {
+      plaintext.fill(0);
+    }
+  }
+
+  return {
+    async forSource(ctx: OrgContext, record: SourceRecord): Promise<SourceCredential | null> {
+      if (record.credentialId === null || record.url === null || !URL.canParse(record.url)) {
+        return null;
+      }
+      try {
+        const opened = await material(ctx, record.credentialId);
+        const probe = credentialEchoProbe(opened);
+        return {
+          credential:
+            opened.kind === 'ssh_key'
+              ? INERT_CREDENTIAL
+              : bindCredential(opened, [new URL(record.url).origin]),
+          probe,
+        };
+      } catch (error) {
+        if (
+          error instanceof CredentialError ||
+          error instanceof SecretDecryptError ||
+          error instanceof CredentialNotFoundError
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    },
+
+    async sshKey(ctx: OrgContext, credentialId: string | null): Promise<SshKeyMaterial> {
+      if (credentialId === null) throw new CredentialNotFoundError();
+      const opened = await material(ctx, credentialId);
+      if (opened.kind !== 'ssh_key') throw new CredentialError('invalid', 'kind');
+      return opened;
+    },
+  };
+}
+
+interface RegistryAssembly {
+  readonly module: RegistryModule;
+  readonly services: NodeRegistryServices;
+  bindJobs(factory: JobsFactory): void;
+  drain(): Promise<void>;
+}
+
+function assembleRegistry(input: {
+  readonly options: NodeRegistryOptions;
+  readonly seams: RegistrySeams;
+  readonly executor: SqlExecutor;
+  readonly auth: NodeAuthOptions;
+  readonly platform: PlatformServices;
+  readonly reader: CatalogueReader;
+  readonly observability: Observability;
+  readonly deploymentId: string;
+  readonly findOrganization: () => Promise<OrganizationIdentity | null>;
+}): RegistryAssembly {
+  const { options, seams, executor, auth, platform, observability } = input;
+  const { config } = options;
+  const policy = createOutboundPolicy({
+    allowPrivateHosts: config.outbound.allowPrivateHosts,
+    runtime: 'node',
+    selfOrigins: config.outbound.selfOrigins,
+  });
+  const guardOptions = seams.resolver === undefined ? {} : { resolver: seams.resolver };
+  const outboundFetch = seams.transport ?? createGuardedFetch(policy, guardOptions);
+
+  const credentials = credentialAccess(executor, auth.keyring);
+  seams.observeCredentials?.(credentials);
+  const sources = createSourceRepository(executor);
+  const reads = createRegistryReads(executor);
+  const writer = createCatalogueWriter(executor);
+  const sessions = createIngestSessions(executor);
+  const blobAccess = createBlobAccessRepository(executor);
+  const inFlight = new Set<Promise<void>>();
+  const background = (thunk: () => Promise<void>): void => {
+    const run: Promise<void> = Promise.resolve()
+      .then(thunk)
+      .catch(() => undefined)
+      .finally(() => inFlight.delete(run));
+    inFlight.add(run);
+  };
+
+  let jobsFactory: JobsFactory | undefined;
+  const unattended = { projectId: null, tokenId: null };
+  const coreJobs = (): Jobs => {
+    if (jobsFactory === undefined) throw new PlatformUnavailableError();
+    return jobsFactory('core', unattended);
+  };
+  const jobs: Jobs = seams.jobs ?? {
+    enqueue: (ctx, type, payload, enqueueInput) =>
+      coreJobs().enqueue(ctx, type, payload, enqueueInput),
+    get: (ctx, id) => coreJobs().get(ctx, id),
+  };
+
+  const providers: SourceProvider[] = [];
+  if (options.sshArchiveRoot !== undefined) {
+    providers.push(
+      createSshGitProvider({
+        dnsGuard: createDnsGuard(policy, guardOptions),
+        archives: lazyArchiveStore(options.sshArchiveRoot, config.caps.archiveBytes),
+        sshKey: async (source) => {
+          const organization = await input.findOrganization();
+          if (organization === null) throw new CredentialNotFoundError();
+          const ctx = orgContext(organization.id);
+          const record = await sources.get(ctx, source.id);
+          return credentials.sshKey(ctx, record?.credentialId ?? null);
+        },
+      }),
+    );
+  }
+
+  const recorder = createAccessRecorder({
+    touch: (ctx, ids) => blobAccess.touch(ctx, ids),
+    defer: background,
+    now: () => Date.now(),
+    onError: () => undefined,
+  });
+
+  const module = createRegistryModule({
+    runtime: 'node',
+    ports: {
+      blob: platform.blob,
+      cache: platform.cache,
+      jobs,
+      observability,
+    },
+    clock: systemClock,
+    codecs: nodeCodecs,
+    publicUrl: auth.publicOrigin,
+    registry: config,
+    outboundPolicy: policy,
+    policyFetch: (userAgent) =>
+      createPolicyFetch({ fetchImpl: outboundFetch, policy, userAgent, observability }),
+    deploymentId: input.deploymentId,
+    providers,
+    catalogue: {
+      reader: input.reader,
+      scopedAdmission: createScopedAdmission(executor),
+      epoch: createCacheEpochRepository(executor),
+      representationClock: createRepresentationClock(executor),
+      upstreamState: createUpstreamStateRepository(executor),
+      sources,
+      covers: reads.covers,
+      versionById: reads.versionById,
+    },
+    ingest: {
+      sessions,
+      apply: {
+        writer,
+        sessions,
+        existing: createExistingVersionsReader(executor),
+        finalizer: createIngestFinalizer(executor),
+        observability,
+      },
+      writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
+      credential: credentials.forSource,
+    },
+    dist: {
+      leases: createFetchLeases(executor),
+      leaseKey,
+      writeGuard: (ctx, handle) => createFetchLeaseWriteGuard(ctx, handle),
+      writer,
+      blobReplacer: createBlobReplacer(executor),
+      recorder,
+    },
+  });
+  return {
+    module,
+    services: Object.freeze({ outboundFetch }),
+    bindJobs: (factory) => {
+      jobsFactory = factory;
+    },
+    drain: async () => {
+      while (inFlight.size > 0) await Promise.all([...inFlight]);
+      await recorder.flush();
+    },
+  };
+}
+
 function buildCatalogue(
   executor: SqlExecutor,
   reads: ReturnType<typeof buildPackageReads>,
@@ -345,6 +647,7 @@ function buildCatalogue(
 export function createNodeServer(
   plugins: readonly PluginDefinition[],
   options: NodeServerOptions = {},
+  seams: RegistrySeams = {},
 ): NodeBroker {
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
@@ -359,6 +662,7 @@ export function createNodeServer(
   });
 
   const { auth } = options;
+  let drainRegistry: (() => Promise<void>) | undefined;
   const application = (async () => {
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
@@ -390,8 +694,41 @@ export function createNodeServer(
       });
     }
     const reads = options.executor === undefined ? undefined : buildPackageReads(executor);
+    const obsSink = options.observability?.sink ?? {
+      emit: (record: ObsRecord) => {
+        if (record.kind === 'log') log({ ...record.record });
+      },
+    };
+    const deploymentId = options.observability?.deploymentId ?? 'unconfigured';
+    const registry =
+      options.registry === undefined ||
+      reads === undefined ||
+      auth === undefined ||
+      options.platformServices === undefined
+        ? undefined
+        : assembleRegistry({
+            options: options.registry,
+            seams,
+            executor,
+            auth,
+            platform: options.platformServices,
+            reader: reads.reader,
+            observability: createObservability(
+              obsSink,
+              { deploymentId, runtime: 'node', requestId: null, plugin: 'core' },
+              {
+                events: new Set([...AUDIT_EVENTS, ...INGEST_EVENTS]),
+                reasonCodes: INGEST_REASON_CODES,
+                routeTemplates: new Set(),
+              },
+            ),
+            deploymentId,
+            findOrganization: bootstrap.findSingleton,
+          });
+    drainRegistry = registry?.drain;
+    const packageResolver = registry?.module.visibilityPort ?? reads?.resolver;
     const registration = collectRegistrations(plugins, {
-      ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
+      ...(packageResolver === undefined ? {} : { packageResolver }),
       coreJobs:
         options.platformServices === undefined
           ? []
@@ -400,6 +737,16 @@ export function createNodeServer(
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
             ],
     });
+    if (registry !== undefined && options.platformServices !== undefined) {
+      registry.bindJobs(
+        createRepositoryJobs({
+          store: options.platformServices.jobStore,
+          jobs: registration.jobs,
+          clock: systemClock,
+          ids: { ulid },
+        }),
+      );
+    }
     const access =
       auth === undefined
         ? undefined
@@ -433,7 +780,8 @@ export function createNodeServer(
     }));
     const kernel = await createKernel({
       platform: 'node',
-      ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
+      ...(packageResolver === undefined ? {} : { packageResolver }),
+      ...(registry === undefined ? {} : { ecosystemRoutes: registry.module.ecosystemRoutes }),
       plugins,
       publicOrigin: auth?.publicOrigin,
       registration,
@@ -454,6 +802,7 @@ export function createNodeServer(
       catalogue: createCatalogueReader(executor),
       packages,
       access: access?.services ?? null,
+      ...(registry === undefined ? {} : { registry: registry.services }),
     });
     return { kernel, services };
   })();
@@ -516,6 +865,11 @@ export function createNodeServer(
           server.closeIdleConnections();
           await closing;
         }
+        await kernel.then(
+          (ready) => ready.idle(SHUTDOWN_IDLE_MS),
+          () => undefined,
+        );
+        await drainRegistry?.();
       } finally {
         await options.closeDatabase?.();
       }

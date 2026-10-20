@@ -39,6 +39,7 @@ export const SOURCE_ERROR_CODES = [
   'rate_limited',
   'not_found',
   'invalid_response',
+  'mass_absence',
   'too_large',
   'policy_denied',
   'credential_unavailable',

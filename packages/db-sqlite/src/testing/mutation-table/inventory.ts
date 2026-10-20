@@ -162,6 +162,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'DEFERRED: local login setup writes need foreign user and credential fixtures; owner T782n follow-up',
   'repositories/user.ts#createUserRepository':
     'DEFERRED: user factory methods beyond the auth getIdentity case need separate fixtures; owner T782n follow-up',
+  'repositories/webhook-delivery.ts#createWebhookDeliveryRepository':
+    'DEFERRED: the factory only sequences the four registered webhook delivery statements and maps their rows; the cases run record, settle and sourcesFor through it; owner T414',
   'repositories/cache-epoch.ts#createCacheEpochRepository':
     'DEFERRED: epoch repository adapter exceeds epochReadStatement registration; owner T782n follow-up',
 

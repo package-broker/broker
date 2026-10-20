@@ -46,6 +46,7 @@ import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import { entries as registryReadsEntries } from './mutation-table/registry-reads.js';
 import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
+import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -97,6 +98,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...auditVerifyEntries,
   ...auditQueryEntries,
   ...catalogueReblobEntries,
+  ...webhookDeliveryEntries,
   ...blobLeaseEntries,
   ...fetchLeaseEntries,
   ...jobLeaseEntries,

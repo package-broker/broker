@@ -130,6 +130,28 @@ describe('upstream state repository', () => {
     });
   });
 
+  it('reset clears the 404 evidence of every form and nothing else', async () => {
+    await database.executor.batch(repo.publishStatements(ctx, PACKAGE, FORM, validators, 300));
+    await database.executor.batch(repo.notFoundStatements(ctx, PACKAGE, FORM, 30));
+    await database.executor.batch(repo.notFoundStatements(ctx, PACKAGE, 'composer-p2-dev', 30));
+    await database.executor.batch(repo.resetNotFoundStatements(ctx, PACKAGE));
+    for (const form of [FORM, 'composer-p2-dev'] as const) {
+      expect(await repo.get(ctx, PACKAGE, form)).toMatchObject({
+        notFoundCount: 0,
+        firstNotFoundAt: null,
+      });
+    }
+    expect(await repo.get(ctx, PACKAGE, FORM)).toMatchObject(validators);
+  });
+
+  it('reset never touches another organization or creates rows', async () => {
+    await database.executor.batch(repo.resetNotFoundStatements(ctx, PACKAGE));
+    expect(await repo.get(ctx, PACKAGE, FORM)).toBeNull();
+    await database.executor.batch(repo.notFoundStatements(ctx, PACKAGE, FORM, 30));
+    await database.executor.batch(repo.resetNotFoundStatements(other, PACKAGE));
+    expect(await repo.get(ctx, PACKAGE, FORM)).toMatchObject({ notFoundCount: 1 });
+  });
+
   it('forms are independent rows', async () => {
     await database.executor.batch(repo.publishStatements(ctx, PACKAGE, FORM, validators, 300));
     expect(await repo.get(ctx, PACKAGE, 'npm-packument')).toBeNull();

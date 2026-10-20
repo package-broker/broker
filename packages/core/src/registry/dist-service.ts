@@ -61,8 +61,17 @@ export interface DistServiceDeps {
   readonly coalesce?: Pick<CoalesceOptions, 'waitBudgetMs' | 'pollMs'>;
 }
 
+export interface DistServeOptions {
+  /** Aborting cancels the coalesced wait and, for the lease holder, the upstream fetch. */
+  readonly signal?: AbortSignal;
+}
+
 export interface DistService {
-  serve(actor: ProjectActor, request: DistServeRequest): Promise<DistServeResult>;
+  serve(
+    actor: ProjectActor,
+    request: DistServeRequest,
+    options?: DistServeOptions,
+  ): Promise<DistServeResult>;
 }
 
 const NOT_FOUND: DistServeResult = Object.freeze({ kind: 'not_found' });
@@ -178,7 +187,9 @@ export function createDistService(deps: DistServiceDeps): DistService {
   }
 
   return {
-    async serve(actor, request) {
+    async serve(actor, request, options) {
+      const signal = options?.signal;
+      signal?.throwIfAborted();
       const revision = parseRevision(request.revision);
       if (revision === null || typeof request.versionId !== 'string') return NOT_FOUND;
       if (!SEGMENT.test(request.versionId)) return NOT_FOUND;
@@ -216,7 +227,7 @@ export function createDistService(deps: DistServiceDeps): DistService {
         key,
         (signal) =>
           latest === null ? Promise.resolve('negative') : fill(ctx, latest, key, signal, isDone),
-        { ...deps.coalesce, isDone },
+        { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
       );
 
       if (outcome === 'busy') {

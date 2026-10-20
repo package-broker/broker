@@ -99,13 +99,13 @@ function bound(query: Statement): Guard {
 function check(query: Statement): readonly Statement[] {
   return assertCheck(bound(query));
 }
-function instant(value: string): number {
+export function instant(value: string): number {
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value)
     throw new TypeError('invalid import timestamp');
   return time;
 }
-async function hash(
+export async function hash(
   domain: Readonly<Record<string, SqlValue | readonly string[]>>,
 ): Promise<string> {
   const sorted = Object.fromEntries(
@@ -119,7 +119,7 @@ async function hash(
   );
   return Array.from(new Uint8Array(bytes), (v) => v.toString(16).padStart(2, '0')).join('');
 }
-function withinBatchBudget(statements: readonly Statement[]): boolean {
+export function withinBatchBudget(statements: readonly Statement[]): boolean {
   if (statements.length > MAX_BATCH_STATEMENTS) return false;
   let bytes = 0;
   for (const statement of statements) {
@@ -308,6 +308,7 @@ export function createImportJournalStore(options: {
         let table: string = ENTITY[item.type];
         let domain: Row;
         let before: Row | null = null;
+        let beforeImage: Row | null = null;
         let versionRevision: SqlValue | undefined;
         const additional: Statement[] = [];
         switch (item.type) {
@@ -441,7 +442,7 @@ export function createImportJournalStore(options: {
             const owner = await source(item.source);
             const row = await read(
               statement(
-                'SELECT v.id, v.revision, v.blob_id, v.published_at, v.status, v.metadata_json FROM version v JOIN package p ON p.id = v.package_id AND p.org_id = v.org_id WHERE v.org_id = ? AND p.source_id = ? AND p.name = ? AND v.version = ?',
+                'SELECT v.id, v.revision, v.blob_id, v.published_at, v.status, v.metadata_json, v.published_at_basis FROM version v JOIN package p ON p.id = v.package_id AND p.org_id = v.org_id WHERE v.org_id = ? AND p.source_id = ? AND p.name = ? AND v.version = ?',
                 ctx.orgId,
                 owner.id!,
                 item.package,
@@ -451,6 +452,7 @@ export function createImportJournalStore(options: {
             entityId = row.id!;
             versionRevision = row.revision;
             before = Object.fromEntries(VERSION_DOMAIN.map((column) => [column, row[column]!]));
+            beforeImage = { ...before, published_at_basis: row.published_at_basis! };
             domain = { ...before, published_at: item.published_at };
             table = 'version';
             const expected = fence.expected[String(entityId)];
@@ -493,7 +495,7 @@ export function createImportJournalStore(options: {
             entityId,
             item.external_ref,
             before === null ? 'create' : 'update',
-            before === null ? null : JSON.stringify(before),
+            beforeImage === null ? null : JSON.stringify(beforeImage),
             await hash(
               item.type === 'role'
                 ? { ...domain, permissions: [...new Set(item.permissions)].sort() }

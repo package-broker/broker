@@ -569,7 +569,7 @@ export interface RepresentationClockTable {
   package_id: Generated<string>;
 }
 
-/** Mirrors `import_run` in `migrations/0001_init.sql` and `migrations/0012_import.sql`. */
+/** Mirrors `import_run` in `migrations/0001_init.sql`, `migrations/0012_import.sql` and `migrations/0019_import_rollback_counts.sql`. */
 export interface ImportRunTable {
   id: string;
   org_id: string;
@@ -596,11 +596,14 @@ export interface ImportRunTable {
   before_image_expires_at: string | null;
   accepted_at: string | null;
   last_error: string | null;
+  rollback_restored_count: Generated<number>;
+  rollback_conflict_count: Generated<number>;
+  rollback_expired_count: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
 
-/** Mirrors `import_ref` in `migrations/0001_init.sql` and `migrations/0012_import.sql`. */
+/** Mirrors `import_ref` in `migrations/0001_init.sql`, `migrations/0012_import.sql` and `migrations/0019_import_rollback_counts.sql`. */
 export interface ImportRefTable {
   id: string;
   org_id: string;
@@ -614,6 +617,7 @@ export interface ImportRefTable {
   conflict_state: Generated<'none' | 'changed_after_import' | 'resolved'>;
   published_at_basis: 'source_release' | 'packagist_added' | 'import_time' | null;
   rolled_back_at: string | null;
+  expired_at: string | null;
   created_at: Generated<string>;
 }
 

@@ -79,6 +79,7 @@ import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js'
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import { entries as registryReadsEntries } from './mutation-table/registry-reads.js';
 import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
+import { entries as importRollbackEntries } from './mutation-table/import-rollback.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
 import {
   checkCompleteness as checkInventory,
@@ -172,6 +173,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...epochEntries,
   ...sessionEntries,
   ...patOffboardingEntries,
+  ...importRollbackEntries,
 ];
 
 export function checkCompleteness(

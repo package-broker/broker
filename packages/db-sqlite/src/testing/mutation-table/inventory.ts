@@ -93,6 +93,8 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/package-id.ts#createPackageIdReads':
+    'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of packageIdStatement, registered separately in package-id.ts.',
   'repositories/registry-reads.ts#createRegistryReads':
     'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of coversStatement and versionByIdStatement, both registered separately in registry-reads.ts.',
   'repositories/organization.ts#createOrganizationBootstrap':

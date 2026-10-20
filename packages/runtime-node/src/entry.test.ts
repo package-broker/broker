@@ -229,6 +229,23 @@ describe('runEntry', () => {
     expect(test.exit).not.toHaveBeenCalled();
   });
 
+  it('forwards registry', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    const registry = { timers: { metadataTtlSeconds: 120 } };
+    await runEntry(Promise.resolve({ plugins: [], migrations: [], registry }), {}, test.runtime);
+    const options = vi.mocked(test.runtime.start).mock.calls[0]?.[0];
+    expect(options?.registry).toBe(registry);
+    expect(test.exit).not.toHaveBeenCalled();
+  });
+
+  it('omits registry when the manifest has none', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    await runEntry(Promise.resolve({ plugins: [], migrations: [] }), {}, test.runtime);
+    expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('registry');
+  });
+
   it('listens on the default port and registers both signals', async () => {
     const { broker, listen } = fakeBroker();
     const test = harness(() => Promise.resolve(broker));

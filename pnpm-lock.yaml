@@ -436,6 +436,16 @@ importers:
         specifier: 'catalog:'
         version: 4.3.3
 
+  packages/ui-assets:
+    dependencies:
+      '@package-broker/ui':
+        specifier: workspace:^
+        version: link:../ui
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
+
 packages:
 
   '@babel/code-frame@7.29.7':

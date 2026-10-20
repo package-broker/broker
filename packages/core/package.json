@@ -80,6 +80,10 @@
       "types": "./dist/api/*.d.ts",
       "default": "./dist/api/*.js"
     },
+    "./mcp/*": {
+      "types": "./dist/mcp/*.d.ts",
+      "default": "./dist/mcp/*.js"
+    },
     "./registry/*": {
       "types": "./dist/registry/*.d.ts",
       "default": "./dist/registry/*.js"

@@ -297,6 +297,23 @@ describe('node registry wiring', () => {
     return kernel.fetch(new Request(`${ORIGIN}${path}`, { headers }));
   }
 
+  async function sealed(key: string): Promise<string> {
+    const store = createCredentialStore({
+      repository: createCredentialRepository(db.executor),
+      cipher: createSecretCipher(
+        createKeyring([parseMasterKey(key, 'PB_MASTER_KEY')]),
+        'credential-encryption',
+      ),
+      ids: { ulid },
+      clock: systemClock,
+    });
+    return store.put(orgContext(orgId), {
+      kind: 'bearer',
+      projectId: null,
+      plaintext: new TextEncoder().encode(JSON.stringify({ token: 'tok-registry-secret-1' })),
+    });
+  }
+
   const brokerPath = (url: string): string => new URL(url).pathname;
 
   describe('built output', () => {
@@ -428,23 +445,6 @@ describe('node registry wiring', () => {
       ]);
     }
 
-    async function sealed(key: string): Promise<string> {
-      const store = createCredentialStore({
-        repository: createCredentialRepository(db.executor),
-        cipher: createSecretCipher(
-          createKeyring([parseMasterKey(key, 'PB_MASTER_KEY')]),
-          'credential-encryption',
-        ),
-        ids: { ulid },
-        clock: systemClock,
-      });
-      return store.put(orgContext(orgId), {
-        kind: 'bearer',
-        projectId: null,
-        plaintext: new TextEncoder().encode(JSON.stringify({ token: 'tok-registry-secret-1' })),
-      });
-    }
-
     it('opens the stored credential and binds it to the source origin only', async () => {
       const remote = upstream();
       await scopedSource(await sealed(KEY));
@@ -501,6 +501,57 @@ describe('node registry wiring', () => {
       } as never);
       expect(valid).not.toBeNull();
       expect(statements.filter((statement) => /ciphertext/.test(statement))).not.toEqual([]);
+    });
+  });
+
+  describe('packagist proxy credential', () => {
+    async function credentialedPackagist(): Promise<void> {
+      await sql('UPDATE source SET credential_id = ?, config_json = ? WHERE id = ?', [
+        await sealed(KEY),
+        JSON.stringify({ githubToken: true }),
+        sources.composer,
+      ]);
+    }
+
+    async function fillAndDownload(remote: Upstream): Promise<void> {
+      await credentialedPackagist();
+      await boot(remote.transport);
+      const metadata = (await (await get('/alpha/p2/acme/lib.json')).json()) as {
+        packages: Record<string, { dist: { url: string } }[]>;
+      };
+      expect((await get(brokerPath(metadata.packages['acme/lib']![0]!.dist.url))).status).toBe(200);
+    }
+
+    it('sends the token to the GitHub dist origin', async () => {
+      const remote = upstream();
+      await fillAndDownload(remote);
+
+      const github = [...remote.headers].filter(([url]) =>
+        /^https:\/\/(api|codeload)\.github\.com\//.test(url),
+      );
+      expect(github.length).toBeGreaterThan(0);
+      for (const [, headers] of github) {
+        expect(headers.get('authorization')).toBe('Bearer tok-registry-secret-1');
+      }
+    });
+
+    it('never sends the token to repo.packagist.org', async () => {
+      const remote = upstream();
+      await fillAndDownload(remote);
+
+      const packagist = [...remote.headers].filter(([url]) =>
+        url.startsWith('https://repo.packagist.org/'),
+      );
+      expect(packagist.length).toBeGreaterThan(0);
+      for (const [, headers] of packagist) {
+        expect(headers.get('authorization')).toBeNull();
+      }
+    });
+
+    it('never logs the token', async () => {
+      await fillAndDownload(upstream());
+
+      expect(logged.join('\n')).not.toContain('tok-registry-secret-1');
     });
   });
 

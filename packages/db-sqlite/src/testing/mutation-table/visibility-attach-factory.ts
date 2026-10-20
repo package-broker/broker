@@ -2,6 +2,7 @@ import { expect } from 'vitest';
 import { createVisibilityAttachRepository } from '../../repositories/visibility-attach.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { ANCHORS, fenceOf, seedProject, seedSource } from './fixtures.js';
+import { visibilityAudit } from '../visibility-audit.js';
 import { executing, factoryEntry } from './factory-cases.js';
 const foreignAttachment: ContractCase = {
   name: 'precedence updates reject a foreign attachment child of an own project and source',
@@ -18,6 +19,7 @@ const foreignAttachment: ContractCase = {
       await createVisibilityAttachRepository(executing(context), {
         providerAnchors: ANCHORS,
       }).setPrecedence(own, fenceOf({ userId: 'U', sessionId: 'S' }), {
+        audit: visibilityAudit(),
         projectId: 'P',
         sourceId: 'S',
         precedence: 2,

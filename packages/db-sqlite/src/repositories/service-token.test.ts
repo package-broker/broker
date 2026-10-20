@@ -396,47 +396,11 @@ describe('issueService', () => {
         () => seed(stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", USER)),
         () => ({}),
       ],
-      [
-        'a read token past min(CI setting, 365) days',
-        () =>
-          seed(
-            stmt(
-              'UPDATE organization SET token_ci_readonly_expiry_days = 400 WHERE id = ?',
-              a.orgId,
-            ),
-          ),
-        () => ({ expiresAt: iso(365 * DAY + 60_000) }),
-      ],
-      [
-        'a read token past a lower CI setting',
-        () =>
-          seed(
-            stmt(
-              'UPDATE organization SET token_ci_readonly_expiry_days = 30 WHERE id = ?',
-              a.orgId,
-            ),
-          ),
-        () => ({ expiresAt: iso(30 * DAY + 60_000) }),
-      ],
     ];
 
     it.each(cases)('%s', async (_name, arrange, overrides) => {
       await arrange();
       expect(await issue(overrides())).toEqual({ status: 'refused', reason: 'authority' });
-      expect(await count('token')).toBe(0);
-    });
-
-    it('a write token past 90 days even with a longer default setting', async () => {
-      await seed(
-        stmt('UPDATE organization SET token_default_expiry_days = 365 WHERE id = ?', a.orgId),
-      );
-      const result = await repository.issueService(
-        a,
-        fence(),
-        writeInput({ expiresAt: iso(90 * DAY + 60_000) }),
-        minter('aaaaaaaaaaaa').mint,
-      );
-      expect(result).toEqual({ status: 'refused', reason: 'authority' });
       expect(await count('token')).toBe(0);
     });
 
@@ -563,34 +527,80 @@ describe('issueService', () => {
     });
   });
 
-  describe('expiry at one-second precision on database time', () => {
-    beforeEach(() =>
-      seed(
-        stmt(
-          'UPDATE organization SET token_ci_readonly_expiry_days = 400, token_default_expiry_days = 365 WHERE id = ?',
-          a.orgId,
-        ),
-      ),
-    );
+  describe('lifetime maximum from the caller on database time', () => {
+    const SCOPES = ['read', 'write', 'full'] as const;
 
-    it('a read token one second inside 365 days is issued, one second past is refused', async () => {
-      expect(await issue({ expiresAt: iso(365 * DAY + 1000) })).toEqual({
-        status: 'refused',
-        reason: 'authority',
-      });
-      expect((await issue({ expiresAt: iso(365 * DAY - 1000) })).status).toBe('issued');
+    const byScope = (scope: (typeof SCOPES)[number], overrides: Partial<IssueServiceTokenInput>) =>
+      scope === 'read'
+        ? input({ maxLifetimeDays: 10, ...overrides })
+        : scope === 'write'
+          ? writeInput({ maxLifetimeDays: 10, ...overrides })
+          : wideInput({ maxLifetimeDays: 10, ...overrides });
+
+    const attempt = (scope: (typeof SCOPES)[number], offset: number) =>
+      repository.issueService(
+        a,
+        fence(),
+        byScope(scope, { expiresAt: iso(10 * DAY + offset) }),
+        minter('aaaaaaaaaaaa').mint,
+      );
+
+    it.each(SCOPES)('issues a %s token one second inside maxLifetimeDays', async (scope) => {
+      expect((await attempt(scope, -1000)).status).toBe('issued');
+      expect(await count('token')).toBe(1);
     });
 
-    it('a write token one second inside 90 days is issued, one second past is refused', async () => {
-      const at = (offset: number) =>
-        repository.issueService(
+    it.each(SCOPES)('refuses a %s token one second past maxLifetimeDays', async (scope) => {
+      expect(await attempt(scope, 1000)).toEqual({ status: 'refused', reason: 'authority' });
+      expect(await count('token')).toBe(0);
+      expect(await count('audit_pending')).toBe(0);
+    });
+
+    it('ignores the organization expiry columns for a full token', async () => {
+      await seed(
+        stmt(
+          'UPDATE organization SET token_default_expiry_days = 1, token_ci_readonly_expiry_days = 1 WHERE id = ?',
+          a.orgId,
+        ),
+      );
+      const result = await repository.issueService(
+        a,
+        fence(),
+        wideInput({ maxLifetimeDays: 365, expiresAt: iso(300 * DAY) }),
+        minter('aaaaaaaaaaaa').mint,
+      );
+      expect(result.status).toBe('issued');
+    });
+
+    it.each([
+      ['0', 0],
+      ['3651', 3651],
+      ['1.5', 1.5],
+    ])('throws RangeError before any statement for maxLifetimeDays %s', async (_label, days) => {
+      const seen: Statement[] = [];
+      const spy: SqlExecutor = {
+        ...executor,
+        driver: executor.driver,
+        all: (statement) => {
+          seen.push(statement);
+          return executor.all(statement);
+        },
+        batch: (statements) => {
+          seen.push(...statements);
+          return executor.batch(statements);
+        },
+      };
+      const mint = minter('aaaaaaaaaaaa');
+      await expect(
+        createTokenRepository(spy).issueService(
           a,
           fence(),
-          writeInput({ expiresAt: iso(90 * DAY + offset) }),
-          minter('aaaaaaaaaaaa').mint,
-        );
-      expect(await at(1000)).toEqual({ status: 'refused', reason: 'authority' });
-      expect((await at(-1000)).status).toBe('issued');
+          input({ maxLifetimeDays: days }),
+          mint.mint,
+        ),
+      ).rejects.toThrow(RangeError);
+      expect(seen).toHaveLength(0);
+      expect(mint.calls()).toBe(0);
     });
 
     it('refuses an expiry past the ceiling by less than one second within the same second', async () => {
@@ -634,23 +644,6 @@ describe('issueService', () => {
       expect(await issue()).toEqual({ status: 'refused', reason: 'authority' });
       expect(await count('access_mutation_guard')).toBe(0);
     });
-  });
-
-  it('accepts a read token at the 365-day CI limit and a write token at 90 days', async () => {
-    await seed(
-      stmt(
-        'UPDATE organization SET token_ci_readonly_expiry_days = 400, token_default_expiry_days = 365 WHERE id = ?',
-        a.orgId,
-      ),
-    );
-    expect((await issue({ expiresAt: iso(365 * DAY - 60_000) })).status).toBe('issued');
-    const write = await repository.issueService(
-      a,
-      fence(),
-      writeInput({ id: '01J0TOKEN0000000000000000B', expiresAt: iso(90 * DAY - 60_000) }),
-      minter('bbbbbbbbbbbb').mint,
-    );
-    expect(write.status).toBe('issued');
   });
 
   it('refuses as conflict when the principal revision moved', async () => {

@@ -10,6 +10,7 @@ import type {
   IngestSessionHandle,
   IngestSessionLatest,
   IngestSessionMaintenance,
+  IngestSessionRelease,
   IngestSessions,
 } from '@package-broker/core/ingest/session';
 import { assertCheck, compile, db } from '../kysely.js';
@@ -174,7 +175,7 @@ function validatorsOf(value: unknown): string | null {
   return json;
 }
 
-export function createIngestSessions(executor: SqlExecutor): IngestSessions {
+export function createIngestSessions(executor: SqlExecutor): IngestSessions & IngestSessionRelease {
   async function changed(statement: Statement): Promise<boolean> {
     const [result] = await executor.batch([statement]);
     return (result?.changes ?? 0) === 1;
@@ -399,6 +400,17 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions {
             seenCount: row.seen_count,
             pagesSoFar: row.pages_so_far,
           };
+    },
+
+    release(ctx, guard) {
+      return changed(
+        compile(
+          db
+            .updateTable('ingest_session')
+            .set({ lease_until: NOW as never, updated_at: NOW as never })
+            .where(holds(ctx, guard)),
+        ),
+      );
     },
 
     abandon(ctx, guard) {

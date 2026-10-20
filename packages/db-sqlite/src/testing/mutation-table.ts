@@ -33,6 +33,8 @@ import { entries as catalogueDistEntries } from './mutation-table/catalogue-dist
 import { entries as sourceFactoryEntries } from './mutation-table/source-factory.js';
 import { entries as upstreamStateEntries } from './mutation-table/upstream-state.js';
 import { entries as ingestSessionFactoriesEntries } from './mutation-table/ingest-session-factories.js';
+import { entries as visibilityAttachRepositoryEntries } from './mutation-table/visibility-attach-repository.js';
+import { entries as visibilityAuditEntries } from './mutation-table/visibility-audit.js';
 import { entries as importJournalEntries } from './mutation-table/import-journal.js';
 import { entries as idempotencyEntries } from './mutation-table/idempotency.js';
 import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.js';
@@ -75,6 +77,7 @@ import { entries as auditPendingEntries } from './mutation-table/audit-pending.j
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
 import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
+import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
 import { entries as catalogueReblobEntries } from './mutation-table/catalogue-reblob.js';
 import {
   checkCompleteness as checkInventory,
@@ -121,7 +124,8 @@ export const mutationTable: readonly MutationEntry[] = [
   ...userFactoryEntries,
   ...existingVersionsFactoryEntries,
   ...localLoginFactoryEntries,
-
+  ...visibilityAuditEntries,
+  ...visibilityAttachRepositoryEntries,
   ...idempotencyEntries,
   ...removedBlobsEntries,
   ...catalogueWriterEntries,
@@ -165,6 +169,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...kyselyEntries,
   ...epochEntries,
   ...sessionEntries,
+  ...patOffboardingEntries,
 ];
 
 export function checkCompleteness(

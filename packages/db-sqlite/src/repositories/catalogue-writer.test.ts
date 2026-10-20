@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import type {
@@ -528,9 +529,15 @@ describe('epoch contract', () => {
     async (method, mutation) => {
       const { packageId } = await sync([input(0)]);
       const id = await versionId();
-      await store.attachSource(org, fence(), { projectId: 'project', sourceId: 'source' });
+      if (method !== 'attachSource')
+        await store.attachSource(org, fence(), {
+          audit: visibilityAudit(),
+          projectId: 'project',
+          sourceId: 'source',
+        });
       if (method === 'removePattern')
         await store.addPattern(org, fence(), {
+          audit: visibilityAudit(),
           projectId: 'project',
           sourceId: 'source',
           pattern: '*',
@@ -544,11 +551,20 @@ describe('epoch contract', () => {
       batches.length = 0;
       const calls = {
         attachSource: () =>
-          store.attachSource(org, fence(), { projectId: 'project', sourceId: 'source' }),
+          store.attachSource(org, fence(), {
+            audit: visibilityAudit(),
+            projectId: 'project',
+            sourceId: 'source',
+          }),
         detachSource: () =>
-          store.detachSource(org, fence(), { projectId: 'project', sourceId: 'source' }),
+          store.detachSource(org, fence(), {
+            audit: visibilityAudit(),
+            projectId: 'project',
+            sourceId: 'source',
+          }),
         setPrecedence: () =>
           store.setPrecedence(org, fence(), {
+            audit: visibilityAudit(),
             projectId: 'project',
             sourceId: 'source',
             precedence: 42,
@@ -557,6 +573,7 @@ describe('epoch contract', () => {
           store.setPackageFlag(org, fence(), { packageId, visibleToNewProjects: false }),
         addPattern: () =>
           store.addPattern(org, fence(), {
+            audit: visibilityAudit(),
             projectId: 'project',
             sourceId: 'source',
             pattern: '*',
@@ -564,6 +581,7 @@ describe('epoch contract', () => {
           }),
         removePattern: () =>
           store.removePattern(org, fence(), {
+            audit: visibilityAudit(),
             projectId: 'project',
             sourceId: 'source',
             pattern: '*',
@@ -822,7 +840,11 @@ it('rejects credential-bearing metadata at normalization and blob replacement at
 });
 it('denies a project actor organization authority, hidden explicit admission and foreign ids', async () => {
   const { packageId } = await sync([input(0)]);
-  await store.attachSource(org, fence(), { projectId: 'project', sourceId: 'source' });
+  await store.attachSource(org, fence(), {
+    audit: visibilityAudit(),
+    projectId: 'project',
+    sourceId: 'source',
+  });
   await store.setPackageFlag(org, fence(), { packageId, visibleToNewProjects: false });
   await database.executor.batch([
     stmt(
@@ -836,7 +858,11 @@ it('denies a project actor organization authority, hidden explicit admission and
     stmt("UPDATE role SET scope = 'project' WHERE org_id = ?", org.orgId),
   ]);
   expect(
-    await store.attachSource(org, fence(), { projectId: 'project', sourceId: 'source' }),
+    await store.attachSource(org, fence(), {
+      audit: visibilityAudit(),
+      projectId: 'project',
+      sourceId: 'source',
+    }),
   ).toMatchObject({ ok: false });
   expect(await store.addExplicit(org, fence(), { projectId: 'project', packageId })).toEqual({
     ok: false,
@@ -854,9 +880,14 @@ it('denies a project actor organization authority, hidden explicit admission and
 });
 it('keeps explicit rows after exclusion and flag narrowing, and removes them on detach', async () => {
   const { packageId } = await sync([input(0)]);
-  await store.attachSource(org, fence(), { projectId: 'project', sourceId: 'source' });
+  await store.attachSource(org, fence(), {
+    audit: visibilityAudit(),
+    projectId: 'project',
+    sourceId: 'source',
+  });
   await store.addExplicit(org, fence(), { projectId: 'project', packageId });
   await store.addPattern(org, fence(), {
+    audit: visibilityAudit(),
     projectId: 'project',
     sourceId: 'source',
     pattern: '*',
@@ -866,7 +897,11 @@ it('keeps explicit rows after exclusion and flag narrowing, and removes them on 
   expect(
     await scalar('SELECT origin AS value FROM project_package WHERE org_id = ?', org.orgId),
   ).toBe('explicit');
-  await store.detachSource(org, fence(), { projectId: 'project', sourceId: 'source' });
+  await store.detachSource(org, fence(), {
+    audit: visibilityAudit(),
+    projectId: 'project',
+    sourceId: 'source',
+  });
   expect(
     await scalar('SELECT count(*) AS value FROM project_package WHERE org_id = ?', org.orgId),
   ).toBe(0);

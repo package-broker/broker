@@ -5,6 +5,8 @@ export interface ExistingVersionsQuery {
   readonly after: string | null;
   readonly withMetadata: boolean;
   readonly limit: number;
+  /** Restrict the read to these candidate keys (at most 1000). */
+  readonly keys?: readonly string[];
 }
 
 export interface ExistingVersion {
@@ -15,6 +17,7 @@ export interface ExistingVersion {
   readonly npmIntegrity: string | null;
   readonly composerShasum: string | null;
   readonly metadataJson?: string;
+  readonly deprecatedMessage?: string | null;
 }
 
 export interface ExistingVersionsPage {

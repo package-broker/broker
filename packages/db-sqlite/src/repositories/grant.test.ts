@@ -1177,6 +1177,148 @@ describe('deleteOrganization reports the user it offboards', () => {
   });
 });
 
+describe('pat_invalid_before stamp', () => {
+  const CANONICAL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  async function stampOf(userId: string): Promise<string | null | undefined> {
+    const found = await executor.all<{ pat_invalid_before: string | null }>(
+      stmt('SELECT pat_invalid_before FROM user_account WHERE id = ?', userId),
+    );
+    return found[0]?.pat_invalid_before;
+  }
+
+  it('is null for a user that was never offboarded', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
+
+    expect(await stampOf(U1)).toBeNull();
+  });
+
+  it('a suspension stamps that user on database time', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+    const before = Date.now();
+
+    expect(await grants.suspendUser(a, U2, LATER)).toBe('suspended');
+
+    const stamp = await stampOf(U2);
+    expect(stamp).toMatch(CANONICAL);
+    expect(Date.parse(stamp as string)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(stamp as string)).toBeLessThanOrEqual(Date.now() + 1000);
+    expect(await stampOf(U1)).toBeNull();
+    expect(await stampOf(UB)).toBeNull();
+  });
+
+  it('a refused suspension leaves the stamp empty', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+
+    expect(await grants.suspendUser(a, U1, LATER)).toBe('last_holder');
+
+    expect(await stampOf(U1)).toBeNull();
+  });
+
+  it('suspending a suspended user and reactivating keep the first stamp', async () => {
+    expect(await grants.suspendUser(a, U2, LATER)).toBe('suspended');
+    const first = await stampOf(U2);
+    expect(first).toMatch(CANONICAL);
+
+    expect(await grants.suspendUser(a, U2, LATER)).toBe('unchanged');
+    expect(await stampOf(U2)).toBe(first);
+    expect(await grants.reactivateUser(a, U2, LATER)).toBe('reactivated');
+    expect(await stampOf(U2)).toBe(first);
+  });
+
+  it('revoking the last organization grant of a user stamps that user', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', AUDITOR)]);
+
+    expect(await grants.revoke(a, G1)).toEqual({ outcome: 'deleted', offboardedUserId: U1 });
+
+    expect(await stampOf(U1)).toMatch(CANONICAL);
+    expect(await stampOf(U2)).toBeNull();
+  });
+
+  it('revoking a grant while a group grant still reaches the user does not stamp', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      groupGrant(a, G2, 'oidc', 'auditors', AUDITOR),
+      membership(a, U1, 'oidc', 'auditors'),
+    ]);
+
+    expect(await grants.revoke(a, G1)).toEqual({ outcome: 'deleted', offboardedUserId: null });
+
+    expect(await stampOf(U1)).toBeNull();
+  });
+
+  it('revoking the organization grant while a project grant remains does not stamp', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      emailGrant(a, G2, 'u1@example.test', PROJECT_ROLE, PROJECT),
+    ]);
+
+    expect(await grants.revoke(a, G1)).toEqual({ outcome: 'deleted', offboardedUserId: U1 });
+
+    expect(await stampOf(U1)).toBeNull();
+  });
+
+  it('revoking the organization grant while a project group grant still reaches the user does not stamp', async () => {
+    await seed([
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+      groupGrant(a, G2, 'oidc', 'builders', PROJECT_ROLE),
+      stmt("UPDATE access_grant SET scope = 'project', project_id = ? WHERE id = ?", PROJECT, G2),
+      membership(a, U1, 'oidc', 'builders'),
+    ]);
+
+    await grants.revoke(a, G1);
+
+    expect(await stampOf(U1)).toBeNull();
+  });
+
+  it('revoking a group grant that was a member last grant stamps that member', async () => {
+    await seed([
+      groupGrant(a, G2, 'oidc', 'auditors', AUDITOR),
+      membership(a, U1, 'oidc', 'auditors'),
+      membership(a, U2, 'oidc', 'auditors'),
+      emailGrant(a, G1, 'u2@example.test', AUDITOR),
+    ]);
+
+    expect(await grants.revoke(a, G2)).toEqual({ outcome: 'deleted', offboardedUserId: null });
+
+    expect(await stampOf(U1)).toMatch(CANONICAL);
+    expect(await stampOf(U2)).toBeNull();
+    expect(await stampOf(U3)).toBeNull();
+  });
+
+  it('revoking a group grant does not stamp a member of another group of the same name and provider elsewhere', async () => {
+    await seed([
+      groupGrant(a, G2, 'oidc', 'auditors', AUDITOR),
+      membership(a, U1, 'oidc', 'other-group'),
+      membership(a, U3, 'ldap', 'auditors'),
+    ]);
+
+    await grants.revoke(a, G2);
+
+    expect(await stampOf(U1)).toBeNull();
+    expect(await stampOf(U3)).toBeNull();
+  });
+
+  it('a refused revoke does not stamp', async () => {
+    await seed([emailGrant(a, G1, 'u1@example.test', ADMIN)]);
+
+    expect(await grants.revoke(a, G1)).toBe('last_holder');
+
+    expect(await stampOf(U1)).toBeNull();
+  });
+
+  it('another organization with the same e-mail is not stamped', async () => {
+    await seed([
+      user(b, '01J0USER0000000000000000B2', 'u1@example.test'),
+      emailGrant(a, G1, 'u1@example.test', AUDITOR),
+    ]);
+
+    expect(await grants.revoke(a, G1)).toEqual({ outcome: 'deleted', offboardedUserId: U1 });
+
+    expect(await stampOf('01J0USER0000000000000000B2')).toBeNull();
+  });
+});
+
 describe('changeRole', () => {
   it('moves a grant between protected roles, and from an unprotected to a protected role', async () => {
     await seed([

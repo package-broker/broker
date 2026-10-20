@@ -1,9 +1,18 @@
+import { entries as storeEntries } from './catalogue-writer.js';
 import { expect } from 'vitest';
 import { createVisibilitySubsetRepository } from '../../repositories/visibility-subset.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { ANCHORS, fenceOf, seedBindings, seedSubject } from './fixtures.js';
 import { executing, factoryEntry } from './factory-cases.js';
 import { visiblePackage } from './catalogue-factory-fixture.js';
+const store = storeEntries.find((entry) => entry.builder === 'createVisibilityStore')!;
+const methods = ['addPattern', 'removePattern', 'addExplicit', 'removeExplicit'];
+const storeCases = store.cases.filter(
+  (test) =>
+    methods.some((method) => test.name.startsWith(method)) ||
+    test.name.includes('foreign patterns'),
+);
+
 const foreignMembership: ContractCase = {
   name: 'explicit visibility removal preserves a foreign membership child of an own project',
   async run(context) {
@@ -65,4 +74,13 @@ export const entries: readonly MutationEntry[] = [
       },
     ],
   ),
+  {
+    ...store,
+    file: 'repositories/visibility-subset.ts',
+    builder: 'createVisibilitySubsetRepository',
+    cases: storeCases,
+    predicates: store.predicates.filter((predicate) =>
+      storeCases.some((test) => test.name === predicate.caseName),
+    ),
+  },
 ];

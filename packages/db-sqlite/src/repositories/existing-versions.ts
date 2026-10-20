@@ -10,7 +10,7 @@ import type {
   SqlValue,
   Statement,
 } from '@package-broker/core/db/port';
-import type { Compilable } from 'kysely';
+import { sql, type Compilable } from 'kysely';
 import { compile, db } from '../kysely.js';
 
 export const EXISTING_VERSIONS_KEY_ROWS = 1000;
@@ -32,6 +32,7 @@ interface Row {
   readonly npm_integrity: string | null;
   readonly composer_shasum: string | null;
   readonly metadata_json?: string;
+  readonly deprecated_message?: string | null;
 }
 
 function validate(query: ExistingVersionsQuery): number {
@@ -42,7 +43,11 @@ function validate(query: ExistingVersionsQuery): number {
     typeof query.withMetadata !== 'boolean' ||
     !Number.isSafeInteger(query.limit) ||
     query.limit < 1 ||
-    query.limit > EXISTING_VERSIONS_KEY_ROWS
+    query.limit > EXISTING_VERSIONS_KEY_ROWS ||
+    (query.keys !== undefined &&
+      (!Array.isArray(query.keys) ||
+        query.keys.length > EXISTING_VERSIONS_KEY_ROWS ||
+        query.keys.some((key) => typeof key !== 'string' || key === '')))
   ) {
     throw new TypeError('invalid existing versions query');
   }
@@ -58,7 +63,13 @@ function toVersion(row: Row): ExistingVersion {
     npmIntegrity: row.npm_integrity,
     composerShasum: row.composer_shasum,
   };
-  return row.metadata_json === undefined ? base : { ...base, metadataJson: row.metadata_json };
+  return row.metadata_json === undefined
+    ? base
+    : {
+        ...base,
+        metadataJson: row.metadata_json,
+        deprecatedMessage: row.deprecated_message ?? null,
+      };
 }
 
 const KEY_COLUMNS = `version_normalized, id, revision, status, npm_integrity, composer_shasum`;
@@ -72,17 +83,20 @@ function sizedStatement(ctx: OrgContext, query: ExistingVersionsQuery, limit: nu
   const cursor = query.after === null ? '' : 'AND version_normalized > ?';
   const params: SqlValue[] = [limit, EXISTING_VERSIONS_METADATA_BYTES, ctx.orgId, query.packageId];
   if (query.after !== null) params.push(query.after);
+  const candidates =
+    query.keys === undefined ? '' : 'AND version_normalized IN (SELECT value FROM json_each(?))';
+  if (query.keys !== undefined) params.push(JSON.stringify(query.keys));
   params.push(limit + 1);
   return {
-    sql: `SELECT ${KEY_COLUMNS},
+    sql: `SELECT ${KEY_COLUMNS}, deprecated_message,
   CASE WHEN rn <= ? AND (rn = 1 OR cumulative <= ?) THEN metadata_json END AS metadata_json
 FROM (
-  SELECT ${KEY_COLUMNS}, metadata_json,
+  SELECT ${KEY_COLUMNS}, deprecated_message, metadata_json,
     row_number() OVER (ORDER BY version_normalized) AS rn,
     sum(length(CAST(metadata_json AS BLOB))) OVER (ORDER BY version_normalized) AS cumulative
   FROM (
-    SELECT ${KEY_COLUMNS}, metadata_json FROM version
-    WHERE org_id = ? AND package_id = ? ${cursor}
+    SELECT ${KEY_COLUMNS}, deprecated_message, metadata_json FROM version
+    WHERE org_id = ? AND package_id = ? ${cursor} ${candidates}
     ORDER BY version_normalized LIMIT ?
   )
 )
@@ -109,6 +123,11 @@ export function createExistingVersionsReader(executor: ScalarSqlExecutor): Exist
         .where('package_id', '=', query.packageId)
         .$if(query.after !== null, (qb) =>
           qb.where('version_normalized', '>', query.after as string),
+        )
+        .$if(query.keys !== undefined, (qb) =>
+          qb.where(
+            sql<boolean>`version_normalized IN (SELECT value FROM json_each(${JSON.stringify(query.keys)}))`,
+          ),
         )
         .orderBy('version_normalized')
         .limit(limit + 1);

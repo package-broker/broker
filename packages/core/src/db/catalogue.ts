@@ -314,6 +314,8 @@ export interface SyncPackageInput {
   readonly description: string | null;
   readonly versions: readonly VersionInput[];
   readonly tags?: Readonly<Record<string, string>>;
+  /** Full snapshot tag names to retain while applying a slice of tags. */
+  readonly tagNames?: readonly string[];
 }
 
 export type SyncRefusal = 'invalid' | 'too_large' | 'tombstoned';
@@ -442,22 +444,35 @@ export type VisibilityWriteResult =
         | 'not_eligible';
     };
 
+export interface VisibilityAudit {
+  readonly audit: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
+}
+
 /** Every method checks the fence actor's authority inside its own batch. */
 export interface VisibilityStore {
   attachSource(
     ctx: OrgContext,
     fence: MutationFence,
-    input: { readonly projectId: string; readonly sourceId: string; readonly precedence?: number },
+    input: VisibilityAudit & {
+      readonly projectId: string;
+      readonly sourceId: string;
+      readonly precedence?: number;
+    },
   ): Promise<VisibilityWriteResult>;
   detachSource(
     ctx: OrgContext,
     fence: MutationFence,
-    input: { readonly projectId: string; readonly sourceId: string },
+    input: VisibilityAudit & { readonly projectId: string; readonly sourceId: string },
   ): Promise<VisibilityWriteResult>;
   setPrecedence(
     ctx: OrgContext,
     fence: MutationFence,
-    input: { readonly projectId: string; readonly sourceId: string; readonly precedence: number },
+    input: VisibilityAudit & {
+      readonly projectId: string;
+      readonly sourceId: string;
+      readonly precedence: number;
+    },
   ): Promise<VisibilityWriteResult>;
   setOrder(
     ctx: OrgContext,
@@ -477,7 +492,7 @@ export interface VisibilityStore {
   addPattern(
     ctx: OrgContext,
     fence: MutationFence,
-    input: {
+    input: VisibilityAudit & {
       readonly projectId: string;
       readonly sourceId: string;
       readonly pattern: string;
@@ -487,7 +502,11 @@ export interface VisibilityStore {
   removePattern(
     ctx: OrgContext,
     fence: MutationFence,
-    input: { readonly projectId: string; readonly sourceId: string; readonly pattern: string },
+    input: VisibilityAudit & {
+      readonly projectId: string;
+      readonly sourceId: string;
+      readonly pattern: string;
+    },
   ): Promise<VisibilityWriteResult>;
   addExplicit(
     ctx: OrgContext,

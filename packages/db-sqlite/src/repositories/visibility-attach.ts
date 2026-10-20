@@ -12,9 +12,8 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
-import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
 import { actorHolds } from './actor-authority.js';
+import { visibilityAuditStatements } from './visibility-audit.js';
 import { rederiveStatements } from './visibility-derive.js';
 
 const PROXY_TYPES = sql`('packagist_proxy', 'npmjs_proxy')`;
@@ -175,10 +174,11 @@ export function createVisibilityAttachRepository(
     authority: Guard,
     state: Guard,
     mutations: readonly Statement[],
+    changed?: Guard,
   ): Promise<VisibilityWriteResult> {
     const probes: FailureProbes = { authority: probe(authority), conflict: probe(state) };
     const opId = newOpId();
-    const guard = assertGuard(allOf(authority, state), ctx);
+    const guard = assertGuard(allOf(authority, state), ctx, changed);
     const outcome = await runOrgFenced(executor, ctx, fence, guard, mutations, probes);
     return outcome.ok ? { ok: true, opId } : { ok: false, reason: outcome.reason };
   }
@@ -227,12 +227,17 @@ export function createVisibilityAttachRepository(
         sourceServes(ctx, input.sourceId, found.owner, input.projectId),
         [
           compile(insert),
+          ...visibilityAuditStatements(ctx, input),
           ...rederiveStatements(ctx, {
             kind: 'projectSource',
             projectId: input.projectId,
             sourceId: input.sourceId,
           }),
         ],
+        sql<SqlBool>`not ${isAttached(ctx, input.projectId, input.sourceId)} or exists (
+          select 1 from project_source where org_id = ${ctx.orgId}
+          and project_id = ${input.projectId} and source_id = ${input.sourceId}
+          and ${precedence === undefined ? sql<SqlBool>`0` : sql<SqlBool>`precedence is not ${precedence}`})`,
       );
       return found.owner === null && !result.ok && result.reason === 'authority'
         ? notFound
@@ -274,7 +279,12 @@ export function createVisibilityAttachRepository(
           sourceServes(ctx, sourceId, found.owner, projectId),
           isAttached(ctx, projectId, sourceId),
         ),
-        [compile(rows), compile(patterns), compile(attachment)],
+        [
+          compile(rows),
+          compile(patterns),
+          compile(attachment),
+          ...visibilityAuditStatements(ctx, input),
+        ],
       );
     },
 
@@ -299,7 +309,10 @@ export function createVisibilityAttachRepository(
           sourceServes(ctx, input.sourceId, found.owner, input.projectId),
           isAttached(ctx, input.projectId, input.sourceId),
         ),
-        [compile(update)],
+        [compile(update), ...visibilityAuditStatements(ctx, input)],
+        sql<SqlBool>`exists (select 1 from project_source where org_id = ${ctx.orgId}
+          and project_id = ${input.projectId} and source_id = ${input.sourceId}
+          and precedence is not ${precedence})`,
       );
     },
 
@@ -386,14 +399,14 @@ export function createVisibilityAttachRepository(
           .where('project_id', '=', projectId)
           .where('precedence', 'is not', precedence),
       );
-      return run(ctx, fence, authority, state, [
-        revision,
-        update,
-        auditPendingStatement(ctx, input.audit),
-        ...(input.idempotency === undefined
-          ? []
-          : [idempotencyInsertStatement(ctx, input.idempotency)]),
-      ]);
+      return run(
+        ctx,
+        fence,
+        authority,
+        state,
+        [revision, update, ...visibilityAuditStatements(ctx, input)],
+        changed,
+      );
     },
 
     async setPackageFlag(ctx, fence, input) {

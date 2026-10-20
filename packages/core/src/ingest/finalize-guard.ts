@@ -7,10 +7,14 @@ export const DEFAULT_MAX_ABSENCE_SHARE = 0.25;
 export const INGEST_EVENTS: ReadonlySet<string> = new Set([
   'ingest.mass_absence',
   'ingest.version_skipped',
+  'ingest.snapshot_corrupt',
+  'ingest.budget_exhausted',
 ]);
 export const INGEST_REASON_CODES: ReadonlySet<string> = new Set([
   'mass_absence',
   'member_too_large',
+  'snapshot_corrupt',
+  'budget_exhausted',
 ]);
 
 export interface FinalizeGuardOptions {

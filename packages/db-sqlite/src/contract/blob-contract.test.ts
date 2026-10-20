@@ -26,6 +26,7 @@ import {
 } from './blob-contract.js';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
+const DELETE_TIMEOUT_MS = 1000;
 const ORG_A = '01J0LIFECYCLE00000000000A';
 const ORG_B = '01J0LIFECYCLE00000000000B';
 const open: MigratedDatabase[] = [];
@@ -193,7 +194,7 @@ async function sqliteFixture(): Promise<SqliteFixture> {
       },
     }),
     store: byteStore,
-    deleteTimeoutMs: 1000,
+    deleteTimeoutMs: DELETE_TIMEOUT_MS,
     leaseMs: 900_000,
     observability: quietObservability,
   });
@@ -280,6 +281,15 @@ WHERE org_id = ? AND blob_id IN (SELECT id FROM blob WHERE org_id = ? AND sha256
         status,
         status,
         ctx.orgId,
+        ctx.orgId,
+        key,
+      );
+    },
+    leaseMarginMs: () => 2 * DELETE_TIMEOUT_MS,
+    async shortenLease(ctx, key, remainingMs) {
+      await exec(
+        `UPDATE blob SET purge_lease_until = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ? AND purge_lease_until IS NOT NULL`,
+        `+${remainingMs / 1000} seconds`,
         ctx.orgId,
         key,
       );

@@ -1,4 +1,5 @@
 import { entries as importVerificationEntries } from './mutation-table/import-verification.js';
+import { entries as fixtureVersionListingsEntries } from './mutation-table/fixture-version-listings.js';
 import { entries as identityBlockEntries } from './mutation-table/identity-block.js';
 import { entries as loginEntries } from './mutation-table/login.js';
 import { entries as localLoginSuccessEntries } from './mutation-table/local-login-success.js';
@@ -95,6 +96,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...fixtureVersionListingsEntries,
   ...identityBlockEntries,
   ...loginEntries,
   ...localLoginSuccessEntries,

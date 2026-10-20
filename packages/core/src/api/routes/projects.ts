@@ -62,6 +62,13 @@ interface ListCaller {
   readonly restrictTo?: readonly string[];
 }
 
+function readOnlyView(names: ReadonlySet<Permission>): ReadonlySet<Permission> {
+  return Object.freeze({
+    has: (name: Permission) => names.has(name),
+    [Symbol.iterator]: () => names[Symbol.iterator](),
+  }) as unknown as ReadonlySet<Permission>;
+}
+
 function listCaller(ctx: RequestContext): ListCaller | null {
   const access = accessContextOf(ctx);
   if (access === null) return null;
@@ -74,7 +81,9 @@ function listCaller(ctx: RequestContext): ListCaller | null {
   const actor: ActorContext = Object.freeze({
     kind: 'organization',
     userId: principal.id,
-    permissions: new Set<Permission>(token.projectReadInherited === true ? ['project:read'] : []),
+    permissions: readOnlyView(
+      new Set<Permission>(token.projectReadInherited === true ? ['project:read'] : []),
+    ),
     isOrganizationAdmin: token.projectMode === 'all' && token.organizationAdmin === true,
   });
   if (token.projectMode === 'all') return { actor };
@@ -195,11 +204,15 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
       if (settled.kind === 'mismatch') return { error: 'idempotency_mismatch' };
       if (settled.kind === 'result') return created(settled.result);
       const stored = JSON.parse(settled.record.responseJson) as { id?: unknown; slug?: unknown };
-      if (typeof stored.id !== 'string' || !isUlid(stored.id) || typeof stored.slug !== 'string') {
-        return { error: 'conflict' };
+      if (typeof stored.slug !== 'string') return { error: 'conflict' };
+      let id = stored.id;
+      if (id === undefined) {
+        const project = await deps.projects.getBySlug(org, stored.slug);
+        id = project?.id;
       }
+      if (typeof id !== 'string' || !isUlid(id)) return { error: 'conflict' };
       replayed.add(ctx);
-      return { status: 201, body: { id: stored.id, slug: stored.slug } };
+      return { status: 201, body: { id, slug: stored.slug } };
     },
   );
 

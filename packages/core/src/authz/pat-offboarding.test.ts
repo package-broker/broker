@@ -6,6 +6,7 @@ import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
 import {
   createPatOffboardingJob,
   enqueuePatOffboarding,
+  enqueueProjectRemovedPatOffboarding,
   PAT_OFFBOARDING_JOB_TYPE,
   type PatOffboardingCause,
   type PatOffboardingStore,
@@ -406,5 +407,79 @@ describe('enqueuePatOffboarding', () => {
       enqueuePatOffboarding(port)(ctx, { userId: USER, cause: 'suspended', at: 'yesterday' }),
     ).rejects.toMatchObject({ code: 'invalid_payload' });
     expect(enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe('core:pat-offboarding:v1 project_removed', () => {
+  it('accepts the cause', () => {
+    const job = harness({}).job;
+    expect(
+      job.definition.validate({ userId: USER, cause: 'project_removed', cutoff: CUTOFF }),
+    ).toEqual({ userId: USER, cause: 'project_removed', cutoff: CUTOFF });
+  });
+
+  it('asks only for selected tokens and never consults the organization-wide grant check', async () => {
+    const h = harness({ held: true, pages: [[tokenId(1)]] });
+    await run(h, 'project_removed');
+
+    expect(h.holds).not.toHaveBeenCalled();
+    expect(h.candidates).toHaveBeenCalledWith(ctx, {
+      userId: USER,
+      cutoff: CUTOFF,
+      limit: 25,
+      selectedOnly: true,
+    });
+    expect(h.revokePage.mock.calls[0]?.[1]).toMatchObject({
+      userId: USER,
+      cutoff: CUTOFF,
+      ids: [tokenId(1)],
+      selectedOnly: true,
+    });
+  });
+
+  it('stamps the audit and the log with the cause', async () => {
+    const h = harness({ pages: [[tokenId(1)]] });
+    await run(h, 'project_removed');
+
+    const input = h.revokePage.mock.calls[0]?.[1] as { audits: AuditEvent[] };
+    const payload = JSON.parse(input.audits[0]?.payloadJson ?? '{}') as Record<string, unknown>;
+    expect(payload).toMatchObject({ changes: { cause: { new: 'project_removed' } } });
+    expect(events(h, 'token.revoked')).toHaveLength(1);
+    expect(events(h, 'token.revoked')[0]).toMatchObject({ cause: 'project_removed', kind: 'pat' });
+    expect(events(h, 'token.offboarding_done')[0]).toMatchObject({
+      cause: 'project_removed',
+      revoked: 1,
+    });
+  });
+
+  it.each(['suspended', 'membership_removed', 'erased'] as const)(
+    'does not narrow the %s cause to selected tokens',
+    async (cause) => {
+      const h = harness({ pages: [[tokenId(1)]] });
+      await run(h, cause);
+
+      expect(h.candidates).toHaveBeenCalledWith(ctx, { userId: USER, cutoff: CUTOFF, limit: 25 });
+      expect(h.revokePage.mock.calls[0]?.[1]).not.toHaveProperty('selectedOnly');
+    },
+  );
+});
+
+describe('enqueueProjectRemovedPatOffboarding', () => {
+  it('enqueues the project_removed job keyed by user and instant', async () => {
+    const enqueue = vi.fn(() => Promise.resolve({ id: 'job', created: true }));
+    await enqueueProjectRemovedPatOffboarding({ enqueue } as Pick<Jobs, 'enqueue'>)(ctx, {
+      userId: USER,
+      at: CUTOFF,
+    });
+
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      'core:pat-offboarding:v1',
+      { userId: USER, cause: 'project_removed', cutoff: CUTOFF },
+      {
+        idempotencyKey: `pat-offboarding:${USER}:project_removed:${CUTOFF}`,
+        resourceKey: `user:${USER}`,
+      },
+    );
   });
 });

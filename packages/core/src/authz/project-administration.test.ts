@@ -849,3 +849,96 @@ describe('project grant mutation audit', () => {
     expect(service).toBeDefined();
   });
 });
+
+describe('revoke project access trigger', () => {
+  const lost = { delete: { status: 'deleted', offboardedUserId: 'member-1' } } as const;
+
+  it('reports the user who lost the project once, with the write instant', async () => {
+    const onProjectAccessLost = vi.fn();
+    const { service } = setup(lost, { onProjectAccessLost });
+    expect(
+      await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call),
+    ).toEqual({ ok: true, value: null });
+    expect(onProjectAccessLost).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'member-1',
+      at: NOW,
+    });
+  });
+
+  it('does not report a revoke that offboarded nobody', async () => {
+    const onProjectAccessLost = vi.fn();
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: null } },
+      { onProjectAccessLost },
+    );
+    await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call);
+    expect(onProjectAccessLost).not.toHaveBeenCalled();
+  });
+
+  it('does not report a refused revoke', async () => {
+    const onProjectAccessLost = vi.fn();
+    const { service } = setup({ delete: 'conflict' }, { onProjectAccessLost });
+    await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call);
+    expect(onProjectAccessLost).not.toHaveBeenCalled();
+  });
+
+  it('runs after the user trigger', async () => {
+    const order: string[] = [];
+    const { service } = setup(lost, {
+      onUserOffboarded: () => {
+        order.push('user');
+      },
+      onProjectAccessLost: () => {
+        order.push('project');
+      },
+    });
+    await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call);
+    expect(order).toEqual(['user', 'project']);
+  });
+
+  it('logs a throwing trigger by error name only and keeps success', async () => {
+    const { service, log } = setup(lost, {
+      onProjectAccessLost: async () => {
+        throw new TypeError('private detail');
+      },
+    });
+    expect(
+      await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call),
+    ).toEqual({ ok: true, value: null });
+    expect(log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'user.pat_offboarding_enqueue_failed',
+      orgId: ctx.orgId,
+      userId: 'member-1',
+      cause: 'project_removed',
+      error: 'TypeError',
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private detail');
+  });
+
+  it('keeps success when the trigger and the logger both throw', async () => {
+    const { service } = setup(lost, {
+      onProjectAccessLost: () => {
+        throw new Error('private detail');
+      },
+      log: () => {
+        throw new Error('sink unavailable');
+      },
+    });
+    expect(
+      await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call),
+    ).toEqual({ ok: true, value: null });
+  });
+
+  it('still runs after the user trigger throws', async () => {
+    const onProjectAccessLost = vi.fn();
+    const { service } = setup(lost, {
+      onUserOffboarded: () => {
+        throw new Error('down');
+      },
+      onProjectAccessLost,
+    });
+    await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call);
+    expect(onProjectAccessLost).toHaveBeenCalledOnce();
+  });
+});

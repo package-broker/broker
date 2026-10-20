@@ -79,7 +79,6 @@ const all = <R>(sql: string, ...params: (string | number)[]) => executor.all<R>(
 
 interface Hooks {
   onDescribe?: () => Promise<void>;
-  onMember?: () => Promise<void>;
   afterBatch?: (index: number) => Promise<void>;
 }
 
@@ -99,7 +98,7 @@ function build(hooks: Hooks, result: () => DescribeResult, guards?: unknown[]) {
   return createPackageSyncJob({
     sessions,
     apply: {
-      writer: createCatalogueWriter(executor),
+      writer: createCatalogueWriter(watched),
       sessions,
       existing: createExistingVersionsReader(executor),
       finalizer: createIngestFinalizer(executor),
@@ -291,7 +290,7 @@ describe.each(['job', 'session'] as const)('a write after the %s fence advanced'
 
   it('applies no chunk and fails lease_lost', async () => {
     const claim = await enqueueAndClaim();
-    const job = build({ onMember: () => takeovers[kind](claim) }, () => ({
+    const job = build({}, () => ({
       kind: 'found',
       description: describeUpstream(() => takeovers[kind](claim)),
     }));
@@ -350,7 +349,9 @@ async function openFresh() {
   await beforeEachBody();
 }
 
-async function fill(takeover: boolean) {
+type TakeoverPhase = 'describe' | 'apply';
+
+async function fill(takeover?: TakeoverPhase) {
   const jobs = createJobRepository(executor);
   const job = build({}, () => ({ kind: 'found', description: describeUpstream() }));
   const settleRun = async (claim: JobClaim) => {
@@ -364,18 +365,48 @@ async function fill(takeover: boolean) {
   const afterFirst = await rev();
   if (takeover) {
     const stale = (await next())!;
+    const beforeCount = await versionCount();
+    const progress = () =>
+      all(
+        'SELECT cursor, seen_count, pages_so_far FROM ingest_session WHERE org_id = ?',
+        org.orgId,
+      );
+    const beforeProgress = await progress();
     let taken: JobClaim | undefined;
+    let stagedCount = 0;
+    let stagedRev = afterFirst;
+    const take = async () => {
+      taken = await reclaim(stale);
+      await expireSession();
+    };
     const staleJob = build(
       {
-        onDescribe: async () => {
-          taken = await reclaim(stale);
-          await expireSession();
-        },
+        ...(takeover === 'describe'
+          ? { onDescribe: take }
+          : {
+              afterBatch: async () => {
+                if (taken !== undefined) return;
+                const count = await versionCount();
+                if (count <= beforeCount) return;
+                stagedCount = count;
+                stagedRev = await rev();
+                await take();
+              },
+            }),
       },
       () => ({ kind: 'found', description: describeUpstream() }),
     );
     await expect(handle(staleJob, stale)).rejects.toMatchObject({ code: 'lease_lost' });
-    expect(await rev()).toBe(afterFirst);
+    expect(taken).toBeDefined();
+    if (takeover === 'apply') {
+      expect(stagedCount).toBeGreaterThan(beforeCount);
+      expect(stagedCount).toBeLessThan(VERSIONS);
+      expect(await versionCount()).toBe(stagedCount);
+    } else {
+      expect(await versionCount()).toBe(beforeCount);
+    }
+    expect(await rev()).toBe(stagedRev);
+    expect(await progress()).toEqual(beforeProgress);
     await settleRun(taken!);
   }
   let runs = takeover ? 2 : 1;
@@ -392,6 +423,16 @@ async function fill(takeover: boolean) {
     runs,
     rev: await rev(),
     versions: versions.map((row) => row.version),
+    catalogue: {
+      packages: await all(
+        'SELECT ecosystem, name, description, status, last_synced_at IS NOT NULL AS listing_complete FROM package WHERE org_id = ?',
+        org.orgId,
+      ),
+      versions: await all(
+        'SELECT version, version_normalized, metadata_json, status, revision, published_at, published_at_basis FROM version WHERE org_id = ? ORDER BY version_normalized',
+        org.orgId,
+      ),
+    },
     sessions: await all(
       'SELECT state, generation, seen_count FROM ingest_session ORDER BY generation',
     ),
@@ -400,14 +441,25 @@ async function fill(takeover: boolean) {
 
 describe('takeover of a continuation', () => {
   it('lets the second claim finish one complete generation', async () => {
-    const reference = await fill(false);
+    const reference = await fill();
     expect(reference.runs).toBeGreaterThan(2);
     await openFresh();
-    const taken = await fill(true);
+    const taken = await fill('describe');
     expect(taken.versions).toEqual(reference.versions);
     expect([...taken.versions].sort()).toEqual([...upstream].sort());
     expect(taken.rev).toBe(reference.rev);
     expect(taken.runs).toBe(reference.runs);
+    expect(taken.sessions).toEqual([{ state: 'complete', generation: 1, seen_count: VERSIONS }]);
+  }, 120_000);
+
+  it('rejects a partially written chunk and lets the new owner finish the same catalogue', async () => {
+    const reference = await fill();
+    await openFresh();
+    const taken = await fill('apply');
+    expect(taken.catalogue).toEqual(reference.catalogue);
+    expect(taken.versions).toEqual(reference.versions);
+    expect([...taken.versions].sort()).toEqual([...upstream].sort());
+    expect(taken.sessions).toEqual(reference.sessions);
     expect(taken.sessions).toEqual([{ state: 'complete', generation: 1, seen_count: VERSIONS }]);
   }, 120_000);
 });

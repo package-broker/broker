@@ -16,6 +16,7 @@ import type { AccessCheckInput } from '../plugin.js';
 import type { ScopeLevel } from './scope.js';
 import { createAuthorizationEngine, engineGrantOf, patValidationGate } from './engine.js';
 import type { AuthorizationEngineDeps, EngineSessionAccess, EngineTokenAccess } from './engine.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.test';
 const keyring = createKeyring([
@@ -896,7 +897,7 @@ describe('engine grants', () => {
             return decision;
           },
         },
-        coreRoutes: [
+        coreRoutes: documented([
           {
             method: 'GET',
             path: '/_pb/projects/:project',
@@ -908,7 +909,7 @@ describe('engine grants', () => {
               return Response.json({ ok: true });
             },
           },
-        ],
+        ]),
       });
       const response = await kernel.fetch(
         new Request(`${ORIGIN}/_pb/projects/demo`, {
@@ -1368,7 +1369,7 @@ describe('authenticated boundary through the kernel', () => {
       health: () => Promise.resolve(true),
       log: () => undefined,
       authorization: createAuthorizationEngine(deps(state, overrides)),
-      coreRoutes: [
+      coreRoutes: documented([
         {
           method: 'GET',
           path: '/_pb/organization',
@@ -1392,7 +1393,7 @@ describe('authenticated boundary through the kernel', () => {
           permission: null,
           handler: () => Response.json({ open: true }),
         },
-      ],
+      ]),
     });
   }
 
@@ -1594,7 +1595,7 @@ describe('self boundary', () => {
       health: () => Promise.resolve(true),
       log: () => undefined,
       authorization: createAuthorizationEngine(deps(state, overrides)),
-      coreRoutes: [
+      coreRoutes: documented([
         {
           method: 'GET',
           path: '/_pb/organization',
@@ -1635,7 +1636,7 @@ describe('self boundary', () => {
             return Response.json({ ok: true });
           },
         },
-      ],
+      ]),
     });
   }
 

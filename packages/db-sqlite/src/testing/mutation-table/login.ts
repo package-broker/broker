@@ -64,6 +64,11 @@ const foreignGroup: ContractCase = {
 export const entries: readonly MutationEntry[] = [
   factoryEntry('login', 'createLoginWriter', foreignGroup, /"user_group"\."org_id" = \?/, [
     {
+      locate: /(?:owner|token|lost|removed|member|bound|reach|via)\.org_id = /,
+      reason:
+        'Selected PAT invalidation scopes are covered by selectedPatInvalidationStatement and its membership-removal case.',
+    },
+    {
       locate:
         /"(?:identity|identity_block|identity_provider_binding|user_account|session|guard_\w+)"\."org_id" = /,
       reason:

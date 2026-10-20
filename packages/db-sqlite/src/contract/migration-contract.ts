@@ -1,3 +1,4 @@
+import { discoveredMigrations } from '../testing/migrated-database.js';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
@@ -1418,4 +1419,83 @@ export function describeMigrationContract(
   });
 
   describeOrgKeyContract(name, open, options);
+}
+
+/** Both production drivers exercise a fresh schema and the populated 0021 -> 0022 boundary. */
+export function describeVulnerabilityMigrationContract(
+  name: string,
+  open: () => Promise<OpenedPair>,
+): void {
+  describe(`vulnerability migration: ${name}`, () => {
+    for (const populated of [false, true]) {
+      it(
+        populated
+          ? 'upgrades populated 0021 without changing catalogue rows'
+          : 'creates all five tables and org composite foreign keys',
+        async () => {
+          await withPair(open, async ({ executor }) => {
+            const all = await discoveredMigrations();
+            const before = all.filter((s) => s.sequence <= 21);
+            if (populated) {
+              await migrate(executor, before, { holder: 'vulnerability-upgrade' });
+              await executor.batch([
+                {
+                  sql: "INSERT INTO organization (id,slug,name) VALUES ('vulnerability-org','vulnerability','Vulnerability')",
+                  params: [],
+                },
+                {
+                  sql: "INSERT INTO source (id,org_id,name,ecosystem,type,url) VALUES ('vulnerability-source','vulnerability-org','proxy','npm','npmjs_proxy','https://registry.npmjs.org')",
+                  params: [],
+                },
+                {
+                  sql: "INSERT INTO package (id,org_id,source_id,ecosystem,name) VALUES ('vulnerability-package','vulnerability-org','vulnerability-source','npm','public-control')",
+                  params: [],
+                },
+                {
+                  sql: "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json) VALUES ('vulnerability-version','vulnerability-org','vulnerability-package','1.2.3','1.2.3','2026-10-20T12:00:00.000Z','upstream','{}')",
+                  params: [],
+                },
+              ]);
+            }
+            const previous = populated
+              ? await executor.all({ sql: 'SELECT * FROM version', params: [] })
+              : [];
+            const migrated = await migrate(executor, all, { holder: 'vulnerability-migration' });
+            expect(migrated.applied).toContain('core:0022_vulnerability_status');
+            if (populated)
+              expect(await executor.all({ sql: 'SELECT * FROM version', params: [] })).toEqual(
+                previous,
+              );
+            expect(
+              await executor.all({
+                sql: "SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,14) = 'vulnerability_' ORDER BY name",
+                params: [],
+              }),
+            ).toEqual(
+              ['advisory', 'match', 'refresh', 'result', 'sync_state'].map((s) => ({
+                name: `vulnerability_${s}`,
+              })),
+            );
+            const fks = await executor.all<{
+              id: number;
+              seq: number;
+              from: string;
+              to: string;
+              table: string;
+            }>({ sql: "PRAGMA foreign_key_list('vulnerability_result')", params: [] });
+            for (const parent of ['version', 'package']) {
+              const links = fks.filter((f) => f.table === parent);
+              expect(links.map((f) => [f.from, f.to]).sort()).toEqual(
+                [
+                  ['org_id', 'org_id'],
+                  [`${parent}_id`, 'id'],
+                ].sort(),
+              );
+            }
+            expect(await executor.all({ sql: 'PRAGMA foreign_key_check', params: [] })).toEqual([]);
+          });
+        },
+      );
+    }
+  });
 }

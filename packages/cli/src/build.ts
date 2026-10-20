@@ -243,7 +243,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   await writeFile(
     manifestTs,
     renderBuildManifest(
-      configPath,
+      `./${path.relative(generated, configPath)}`,
       plugins.map((plugin) => plugin.id),
       target === 'node' ? sources : undefined,
       process.platform,

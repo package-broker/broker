@@ -239,6 +239,22 @@ describe('runEntry', () => {
     expect(test.exit).not.toHaveBeenCalled();
   });
 
+  it('forwards tokens', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    const tokens = { maxLifetimeDays: { personal: 30, service: 60 } };
+    await runEntry(Promise.resolve({ plugins: [], migrations: [], tokens }), {}, test.runtime);
+    expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0].tokens).toBe(tokens);
+    expect(test.exit).not.toHaveBeenCalled();
+  });
+
+  it('omits tokens when the manifest has none', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    await runEntry(Promise.resolve({ plugins: [], migrations: [] }), {}, test.runtime);
+    expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('tokens');
+  });
+
   it('omits registry when the manifest has none', async () => {
     const { broker } = fakeBroker();
     const test = harness(() => Promise.resolve(broker));

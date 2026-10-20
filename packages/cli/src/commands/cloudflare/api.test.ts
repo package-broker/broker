@@ -233,3 +233,35 @@ it('refuses a POST when the scheduler sleep overshoots the command deadline', as
   });
   expect(transport).toHaveBeenCalledTimes(1);
 });
+
+it.each([
+  [50_500, 'deadline_exceeded'],
+  [51_000, null],
+])('checks the create budget after the scheduler wait: deadline %i', async (deadline, code) => {
+  let time = 0;
+  const transport = vi.fn(async () => json({}));
+  const api = new CloudflareApi({
+    accountId,
+    apiToken,
+    fetch: transport,
+    now: () => time,
+    deadline,
+    sleep: async (ms) => {
+      time += ms;
+    },
+  });
+  await api.request('/queues');
+  const post = api.request('/queues', 'POST', {});
+  if (code === null) await expect(post).resolves.toBeDefined();
+  else await expect(post).rejects.toMatchObject({ code });
+  expect(transport).toHaveBeenCalledTimes(code === null ? 2 : 1);
+});
+
+it('keeps an injected deadline when the budget is restarted', () => {
+  const injected = new CloudflareApi({ accountId, apiToken, now: () => 5, deadline: 99 });
+  injected.restartDeadline();
+  expect(injected.deadline).toBe(99);
+  const restarted = new CloudflareApi({ accountId, apiToken, now: () => 5 });
+  restarted.restartDeadline();
+  expect(restarted.deadline).toBe(600_005);
+});

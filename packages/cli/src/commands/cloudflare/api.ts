@@ -4,10 +4,12 @@ export type ErrorCode =
   | 'invalid_input'
   | 'unsafe_path'
   | 'invalid_inventory'
+  | 'state_io_failure'
   | 'install_locked'
   | 'confirmation_required'
   | 'confirmation_declined'
   | 'plan_changed'
+  | 'deadline_exceeded'
   | 'ownership_conflict'
   | 'jurisdiction_conflict'
   | 'configuration_conflict'
@@ -31,11 +33,15 @@ const MESSAGES: Record<ErrorCode, string> = {
     'Invalid input or incomplete Cloudflare build; build the selected configuration first.',
   unsafe_path: 'State must be ignored, contained, regular and separate from build output.',
   invalid_inventory: 'Inventory identity or journal is invalid; restore trusted private state.',
+  state_io_failure:
+    'Local inventory or lock I/O failed; check permissions and free space of .pb/state/cloudflare and keep the journal. Rerunning reads provider state before any further create.',
   install_locked:
-    'Install lock exists; stop all writers and inspect the owner before explicit recovery.',
+    'Install lock exists. Stop all writers, read the lock file in .pb/state/cloudflare for its host, pid and started_at, and only if that process is gone remove that one file by hand, then rerun.',
   confirmation_required: 'Review the create plan and supply --yes for noninteractive creates.',
   confirmation_declined: 'Creation declined; literal yes is required.',
   plan_changed: 'The acknowledged plan changed; inspect provider state and rerun.',
+  deadline_exceeded:
+    'The time budget for safe creates is exhausted; no further create was sent. Rerun to continue.',
   ownership_conflict:
     'Exact ownership is unresolved; inspect resources and explicitly adopt the exact ID if appropriate. Nothing is deleted.',
   jurisdiction_conflict:
@@ -43,7 +49,7 @@ const MESSAGES: Record<ErrorCode, string> = {
   configuration_conflict:
     'Existing resource configuration differs; inspect and resolve it explicitly.',
   outcome_unknown:
-    'The create outcome is unknown. Retain private inventory, reconcile or explicitly adopt the exact ID; do not blindly repeat creation.',
+    'The create outcome is unknown. Retain private inventory, reconcile or explicitly adopt the exact ID; for a provision create whose resource is authoritatively absent, rerun provision with --abandon-intent <operation id> from the pending_intent check. Do not blindly repeat creation.',
   provider_failure: 'Provider request failed; no raw provider diagnostic is displayed.',
   permission_denied: GUIDANCE,
   capacity_exceeded: GUIDANCE,
@@ -72,6 +78,14 @@ export class CloudflareError extends Error {
   ) {
     super(MESSAGES[code]);
     this.name = 'CloudflareError';
+  }
+}
+
+export class GitWorktreeRequiredError extends CloudflareError {
+  constructor() {
+    super('unsafe_path', 2);
+    this.message =
+      'State must live in a git work tree that ignores it; run from the project checkout or initialise one.';
   }
 }
 
@@ -162,6 +176,10 @@ export function cloudflareCredentials(env: Readonly<Record<string, string | unde
 
 // Endpoint families are provisional until T830 verifies the provider wire contract.
 // This client never infers capabilities from provider prose or retries a mutation.
+const BUDGET_MS = 600_000;
+const REQUEST_TIMEOUT_MS = 35_000;
+const RECONCILIATION_MS = 15_000;
+export const CREATE_SETTLE_MS = REQUEST_TIMEOUT_MS + RECONCILIATION_MS;
 interface Scheduler {
   next: number;
   tail: Promise<unknown>;
@@ -170,7 +188,8 @@ const schedulers = new WeakMap<typeof fetch, Map<string, Scheduler>>();
 export class CloudflareApi {
   readonly now: () => number;
   readonly sleep: (ms: number) => Promise<void>;
-  readonly deadline: number;
+  private budgetEnd: number;
+  private readonly fixedDeadline: boolean;
   private readonly scheduler: Scheduler;
   constructor(private readonly options: ApiOptions) {
     cloudflareCredentials({
@@ -191,7 +210,18 @@ export class CloudflareApi {
     this.scheduler = scheduler;
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.deadline = options.deadline ?? this.now() + 600_000;
+    this.fixedDeadline = options.deadline !== undefined;
+    this.budgetEnd = options.deadline ?? this.now() + BUDGET_MS;
+  }
+  get deadline(): number {
+    return this.budgetEnd;
+  }
+  restartDeadline(): void {
+    if (!this.fixedDeadline) this.budgetEnd = this.now() + BUDGET_MS;
+  }
+  assertCreateBudget(): void {
+    if (this.deadline - this.now() < CREATE_SETTLE_MS)
+      throw new CloudflareError('deadline_exceeded', 1, true);
   }
   async pause(ms: number): Promise<void> {
     if (this.now() + ms >= this.deadline) throw new CloudflareError('provider_failure', 1, true);
@@ -213,11 +243,12 @@ export class CloudflareApi {
       throw new CloudflareError('invalid_input', 2);
     for (let attempt = 0; attempt < (method === 'GET' ? 5 : 1); attempt++) {
       await this.pause(Math.max(0, this.scheduler.next - this.now()));
+      if (method === 'POST') this.assertCreateBudget();
       this.scheduler.next = this.now() + 1000;
       const controller = new AbortController();
       const timer = setTimeout(
         () => controller.abort(),
-        Math.min(35_000, Math.max(1, this.deadline - this.now())),
+        Math.min(REQUEST_TIMEOUT_MS, Math.max(1, this.deadline - this.now())),
       );
       const aborted = new Promise<never>((_, reject) =>
         controller.signal.addEventListener('abort', () => reject(new Error()), { once: true }),

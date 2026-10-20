@@ -1,5 +1,7 @@
 import { InventoryStore, InventoryTransaction, emptyInventory } from './inventory.js';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
@@ -850,4 +852,331 @@ it('waits for create Retry-After before provision reconciliation without duplica
   expect(reconciliationAt).toBeDefined();
   expect(reconciliationAt! - limitedAt!).toBeGreaterThanOrEqual(60_000);
   expect(h.creates()).toBe(4);
+});
+
+it('starts the ten-minute budget after the confirmation prompt', async () => {
+  const h = harness();
+  const prompt = vi.fn(async () => {
+    await h.sleep(900_000);
+    return 'yes';
+  });
+  const result = await provision(options(h, { yes: false, interactive: true, prompt }));
+  expect(result.exitCode).toBe(0);
+  expect(h.creates()).toBe(4);
+});
+
+it('sends no POST once the remaining budget cannot cover a request and its reconciliation', async () => {
+  const h = harness();
+  let jumped = false;
+  h.hook = (_path, method) => {
+    if (method === 'GET' && h.creates() === 1 && !jumped) {
+      jumped = true;
+      void h.sleep(560_000);
+    }
+    return undefined;
+  };
+  const result = await provision(options(h));
+  expect(result).toMatchObject({ exitCode: 1, output: { error: { code: 'deadline_exceeded' } } });
+  expect(h.creates()).toBe(1);
+  const saved = await journal();
+  expect(saved.operations).toHaveLength(1);
+  expect(saved.operations[0]?.state).toBe('confirmed');
+  expect(saved.resources.r2).toBeUndefined();
+});
+
+it('keeps creating while the remaining budget covers a request and its reconciliation', async () => {
+  const h = harness();
+  let jumped = false;
+  h.hook = (_path, method) => {
+    if (method === 'GET' && h.creates() === 1 && !jumped) {
+      jumped = true;
+      void h.sleep(500_000);
+    }
+    return undefined;
+  };
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect(h.creates()).toBe(4);
+});
+
+it('re-reads exact absence immediately before each create', async () => {
+  const h = harness();
+  let listings = 0;
+  h.hook = (path, method) => {
+    if (method === 'GET' && path === '/d1/database') {
+      listings++;
+      if (listings === 3)
+        h.resources.d1!.push({ uuid: DB, name: 'broker-production-db', jurisdiction: 'eu' });
+    }
+    return undefined;
+  };
+  const result = await provision(options(h));
+  expect(result).toMatchObject({ exitCode: 8, output: { error: { code: 'plan_changed' } } });
+  expect(h.creates()).toBe(0);
+});
+
+it.each([
+  [{ type: 'd1', name: 'DB', id: '22222222-2222-4222-8222-222222222222' }],
+  [{ type: 'r2_bucket', name: 'STORAGE', bucket_name: 'foreign-blobs' }],
+  [{ type: 'queue', name: 'JOBS', queue_name: 'foreign-jobs' }],
+])('refuses an owned Worker binding %j that points at a different resource', async (wrong) => {
+  const h = harness();
+  expect((await provision(options(h))).exitCode).toBe(0);
+  await rm(join(project, '.pb/state'), { recursive: true });
+  const right = [
+    { type: 'd1', name: 'DB', id: DB },
+    { type: 'r2_bucket', name: 'STORAGE', bucket_name: 'broker-production-blobs' },
+    { type: 'queue', name: 'JOBS', queue_name: 'broker-production-jobs' },
+  ];
+  h.worker = {
+    tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`],
+    bindings: right.map((binding) => (binding.name === wrong.name ? wrong : binding)),
+  };
+  const result = await provision(
+    options(h, {
+      adoptResource: [
+        `d1:${DB}`,
+        'r2:broker-production-blobs',
+        `queue:${IDS[2]}`,
+        `queue:${IDS[3]}`,
+      ],
+    }),
+  );
+  expect(result).toMatchObject({ exitCode: 8, output: { error: { code: 'ownership_conflict' } } });
+  expect(h.creates()).toBe(4);
+  await expect(stat(statePath())).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('refuses a DLQ that has a consumer of its own', async () => {
+  const h = harness();
+  expect((await provision(options(h))).exitCode).toBe(0);
+  h.hook = (path) =>
+    path === `/queues/${IDS[2]}/consumers`
+      ? ok([{ type: 'worker', script_name: identity.script_name }], { total_pages: 1 })
+      : undefined;
+  const before = await readFile(statePath(), 'utf8');
+  const result = await provision(options(h));
+  expect(result).toMatchObject({
+    exitCode: 8,
+    output: { error: { code: 'configuration_conflict' } },
+  });
+  expect(await readFile(statePath(), 'utf8')).toBe(before);
+  expect(h.creates()).toBe(4);
+});
+
+it('abandons a pending intent only after complete authoritative absence and still confirms the plan', async () => {
+  const h = harness();
+  h.loseCreate = 1;
+  h.loseMode = 'absent';
+  expect((await provision(options(h))).exitCode).toBe(6);
+  const intent = (await journal()).operations[0]!;
+  expect(intent.state).toBe('unknown');
+  const state = async () => (await journal()).operations.map((op) => op.state);
+
+  const fresh = await provision(options(h, { abandonIntent: intent.id }));
+  expect(fresh).toMatchObject({ exitCode: 6, output: { error: { code: 'outcome_unknown' } } });
+  expect(await state()).toEqual(['unknown']);
+  await h.sleep(60_000);
+
+  expect((await provision(options(h, { abandonIntent: randomUUID() }))).exitCode).toBe(2);
+  expect(await state()).toEqual(['unknown']);
+
+  h.hook = (path, method) => (method === 'GET' && path === '/d1/database' ? ok([], {}) : undefined);
+  const incomplete = await provision(options(h, { abandonIntent: intent.id }));
+  expect(incomplete.output.error?.code).toBe('capability_unknown');
+  expect(await state()).toEqual(['unknown']);
+  h.hook = undefined;
+
+  h.resources.d1!.push({
+    uuid: DB,
+    name: 'broker-production-db',
+    jurisdiction: 'eu',
+    created_at: new Date(h.now()).toISOString(),
+  });
+  const present = await provision(options(h, { abandonIntent: intent.id }));
+  expect(present).toMatchObject({ exitCode: 8, output: { error: { code: 'ownership_conflict' } } });
+  expect(await state()).toEqual(['unknown']);
+  h.resources.d1!.length = 0;
+
+  const planned = await provision(options(h, { abandonIntent: intent.id, dryRun: true }));
+  expect(planned.exitCode).toBe(0);
+  expect(planned.output.checks).toContainEqual({ name: 'abandon_intent', status: intent.id });
+  expect(await state()).toEqual(['unknown']);
+
+  const unconfirmed = await provision(options(h, { abandonIntent: intent.id, yes: false }));
+  expect(unconfirmed.output.error?.code).toBe('confirmation_required');
+  expect(await state()).toEqual(['unknown']);
+  expect(h.creates()).toBe(1);
+
+  const abandoned = await provision(options(h, { abandonIntent: intent.id }));
+  expect(abandoned.exitCode).toBe(0);
+  expect(abandoned.output.checks).toContainEqual({ name: 'abandon_intent', status: intent.id });
+  expect(h.creates()).toBe(5);
+  const saved = await journal();
+  expect(saved.operations.find((op) => op.id === intent.id)?.state).toBe('failed');
+  expect(saved.operations.filter((op) => op.state === 'confirmed')).toHaveLength(4);
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect(h.creates()).toBe(5);
+});
+
+it('marks an intent failed only for a 4xx answer to the create itself', async () => {
+  const h = harness();
+  h.hook = (path, method) =>
+    method === 'POST' && path === '/d1/database' ? new Response('', { status: 400 }) : undefined;
+  expect((await provision(options(h))).exitCode).toBe(1);
+  expect((await journal()).operations.map((op) => op.state)).toEqual(['failed']);
+  h.hook = undefined;
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect(h.creates()).toBe(4);
+});
+
+it('keeps an intent unresolved when a 4xx follows a successful create', async () => {
+  const h = harness();
+  h.hook = (path, method) =>
+    path === `/d1/database/${DB}` && method === 'GET'
+      ? new Response('', { status: 403 })
+      : undefined;
+  expect((await provision(options(h))).exitCode).not.toBe(0);
+  expect((await journal()).operations.map((op) => op.state)).toEqual(['unknown']);
+  h.hook = undefined;
+  expect((await provision(options(h))).exitCode).toBe(0);
+  const saved = await journal();
+  expect(saved.operations[0]?.state).toBe('confirmed');
+  expect(saved.resources.d1?.evidence?.source).toBe('created');
+  expect(h.creates()).toBe(4);
+});
+
+it('records the returned ID before a jurisdiction mismatch is raised', async () => {
+  const h = harness();
+  h.hook = (path, method) =>
+    method === 'POST' && path === '/d1/database'
+      ? ok({ uuid: DB, name: 'broker-production-db', jurisdiction: 'default' })
+      : undefined;
+  const result = await provision(options(h));
+  expect(result).toMatchObject({
+    exitCode: 8,
+    output: { error: { code: 'jurisdiction_conflict' } },
+  });
+  expect((await journal()).operations[0]).toMatchObject({ state: 'unknown', resolved_id: DB });
+});
+
+it.each([[`d1:${DB}`], ['worker:broker-production'], [`queue:${'e'.repeat(32)}`]])(
+  'refuses the unmatched adoption flag %s with exit 2 before any create',
+  async (flag) => {
+    const h = harness();
+    const result = await provision(options(h, { adoptResource: [flag] }));
+    expect(result).toMatchObject({ exitCode: 2, output: { error: { code: 'invalid_input' } } });
+    expect(h.creates()).toBe(0);
+    await expect(stat(statePath())).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
+
+it('tells the operator how to recover a held install lock', async () => {
+  const h = harness();
+  const store = await InventoryStore.create({ project, outDir: '.pb/cloudflare', identity });
+  const transaction = await InventoryTransaction.begin(store, h.now());
+  try {
+    const result = await provision(options(h));
+    expect(result).toMatchObject({ exitCode: 4, output: { error: { code: 'install_locked' } } });
+    expect(result.output.error?.message).toMatch(/pid/);
+    expect(result.output.error?.message).toMatch(/remove that one file/);
+  } finally {
+    await transaction.close();
+  }
+});
+
+it('names a missing git work tree instead of an unsafe path', async () => {
+  const outside = await mkdtemp(join(tmpdir(), 'pb-no-git-'));
+  const inside = project;
+  try {
+    project = outside;
+    await build();
+    const h = harness();
+    const result = await provision(options(h));
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: { error: { code: 'unsafe_path', message: expect.stringMatching(/git work tree/) } },
+    });
+    expect(h.trace).toEqual([]);
+  } finally {
+    project = inside;
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+it.skipIf(process.getuid?.() === 0)(
+  'maps a local state file failure to a state I/O code and releases the lock',
+  async () => {
+    const h = harness();
+    expect((await provision(options(h))).exitCode).toBe(0);
+    await chmod(statePath(), 0o000);
+    try {
+      const result = await provision(options(h));
+      expect(result).toMatchObject({
+        exitCode: 1,
+        output: { error: { code: 'state_io_failure' } },
+      });
+      await expect(
+        stat(join(project, '.pb/state/cloudflare/lock.broker.production.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await chmod(statePath(), 0o600);
+    }
+  },
+);
+
+it.each(['exists', 'gone'] as const)(
+  'abandons an intent that holds a returned ID only if that exact ID is confirmed gone: %s',
+  async (remote) => {
+    const h = harness();
+    h.hook = (path, method) =>
+      method === 'POST' && path === '/r2/buckets'
+        ? ok({ name: 'broker-production-blobs', jurisdiction: 'default' })
+        : undefined;
+    expect((await provision(options(h))).output.error?.code).toBe('jurisdiction_conflict');
+    const intent = (await journal()).operations.find((op) => op.kind === 'r2')!;
+    expect(intent).toMatchObject({ state: 'unknown', resolved_id: 'broker-production-blobs' });
+    await h.sleep(60_000);
+    h.hook =
+      remote === 'exists'
+        ? (path, method) =>
+            method === 'GET' && path === '/r2/buckets/broker-production-blobs'
+              ? ok({ name: 'broker-production-blobs', jurisdiction: 'default' })
+              : undefined
+        : undefined;
+    const before = await readFile(statePath(), 'utf8');
+    const result = await provision(options(h, { abandonIntent: intent.id }));
+    if (remote === 'exists') {
+      expect(result).toMatchObject({
+        exitCode: 8,
+        output: { error: { code: 'ownership_conflict' } },
+      });
+      expect(await readFile(statePath(), 'utf8')).toBe(before);
+    } else expect(result.exitCode).toBe(0);
+  },
+);
+
+it('rejects an unmatched Worker adoption flag before the confirmation prompt', async () => {
+  const h = harness();
+  const prompt = vi.fn(async () => 'yes');
+  const result = await provision(
+    options(h, {
+      yes: false,
+      interactive: true,
+      prompt,
+      adoptResource: ['worker:broker-production'],
+    }),
+  );
+  expect(result).toMatchObject({ exitCode: 2, output: { error: { code: 'invalid_input' } } });
+  expect(prompt).not.toHaveBeenCalled();
+});
+
+it('keeps the generic unsafe path message when git itself is unavailable', async () => {
+  vi.stubEnv('PATH', '');
+  try {
+    const result = await provision(options(harness()));
+    expect(result.output.error?.code).toBe('unsafe_path');
+    expect(result.output.error?.message).not.toMatch(/git work tree/);
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });

@@ -4,6 +4,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
   vi.doUnmock('./cli.js');
+  vi.doUnmock('node:fs/promises');
+  vi.unstubAllEnvs();
 });
 
 it('prints only the error name for an unexpected error', async () => {
@@ -70,3 +72,49 @@ it('attributes a real migrate JSON usage failure to migrate with exit 2', async 
     process.argv = previous;
   }
 });
+
+it('keeps a missing worker name as a separate deploy usage failure', async () => {
+  await deployJsonFailure([]);
+});
+
+it.each(
+  [
+    ['--secrets-file', 'secret.json'],
+    ['--rollout', '0'],
+    ['--rollout', '1e2'],
+    ['--secret', 'PB_MASTER_KEY=value'],
+  ].map((flags) => ({ flags: ['--worker-name', 'broker', ...flags] })),
+)('keeps deploy JSON failures safe and attributed to deploy: $flags', async ({ flags }) => {
+  await deployJsonFailure(flags);
+});
+
+async function deployJsonFailure(flags: string[]) {
+  vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'a'.repeat(32));
+  vi.stubEnv('CLOUDFLARE_API_TOKEN', 'TEST_TOKEN');
+  const realpath = vi.fn(async () => {
+    throw new Error('downstream artifact validation reached');
+  });
+  vi.doMock('node:fs/promises', async (original) => ({
+    ...(await original<typeof import('node:fs/promises')>()),
+    realpath,
+  }));
+  const previous = process.argv;
+  process.argv = ['node', 'pb', 'cloudflare', 'deploy', '--json', ...flags];
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  try {
+    await import('./bin.js');
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(2));
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      command: 'deploy',
+      status: 'error',
+      error: { code: 'invalid_input', stage: 'deploy' },
+    });
+    expect(error).not.toHaveBeenCalled();
+    expect(realpath).not.toHaveBeenCalled();
+  } finally {
+    process.argv = previous;
+  }
+}

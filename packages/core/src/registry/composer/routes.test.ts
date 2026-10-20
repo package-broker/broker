@@ -652,3 +652,36 @@ describe('GET /:project/dist/:vendor/:name/:file', () => {
     expect(h.serve).not.toHaveBeenCalled();
   });
 });
+
+describe('dist refusal', () => {
+  const FILE = `${VERSION_ID}.2.zip`;
+
+  it('answers 502 with the fixed bad_gateway message when the dist was refused', async () => {
+    const h = harness();
+    h.serve.mockResolvedValue({ kind: 'refused' });
+    const response = await h.find(DIST).handler(dist(FILE));
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error).toMatchObject({ code: 'bad_gateway', message: 'Bad gateway' });
+  });
+
+  it('keeps the uniform 404 for a plain not_found', async () => {
+    const h = harness();
+    h.serve.mockResolvedValue({ kind: 'not_found' });
+    const response = await h.find(DIST).handler(dist(FILE));
+    expect(response.status).toBe(404);
+  });
+
+  it('answers the uniform 404 without reaching the service for a package the caller cannot see', async () => {
+    const h = harness();
+    h.serve.mockResolvedValue({ kind: 'refused' });
+    const ctx = context(
+      `https://broker.test/demo/dist/acme/lib/${FILE}`,
+      { project: 'demo', vendor: 'acme', name: 'lib', file: FILE },
+      null,
+    );
+    const response = await h.find(DIST).handler(ctx);
+    expect(response.status).toBe(404);
+    expect(h.serve).not.toHaveBeenCalled();
+  });
+});

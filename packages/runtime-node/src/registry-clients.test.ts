@@ -665,7 +665,7 @@ describe('registry clients against the Node runtime', { timeout: TEST_TIMEOUT_MS
       const box = await prepare('npm-bad');
       const installed = await run('npm', ['install', NPM_NAME], box.project, box.env);
       expect(installed.code).not.toBe(0);
-      expect(installed.output).toContain('E404');
+      expect(installed.output).toContain('E502');
       expect(installed.output).toContain(
         `${origin}/alpha/npm/${NPM_NAME}/-/${NPM_NAME}-${VERSION}.tgz`,
       );

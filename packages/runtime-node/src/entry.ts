@@ -16,6 +16,7 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8000;
 export interface EntryManifest {
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
+  readonly tokens?: BrokerConfig['tokens'];
   readonly plugins: readonly PluginDefinition[];
   readonly migrations: readonly MigrationSource[];
   readonly platformPorts?: PlatformPortConfig | null;
@@ -103,7 +104,7 @@ export async function runEntry(
   let port: number;
   let timeoutMs: number;
   try {
-    const { plugins, migrations, platformPorts, observability, registry } = await manifest;
+    const { plugins, migrations, platformPorts, observability, registry, tokens } = await manifest;
     try {
       port = parsePort(env['PORT']);
       timeoutMs = parseShutdownTimeout(env['PB_SHUTDOWN_TIMEOUT_MS']);
@@ -119,6 +120,7 @@ export async function runEntry(
       ...(platformPorts == null ? {} : { platformPorts }),
       ...(observability === undefined ? {} : { observability }),
       ...(registry === undefined ? {} : { registry }),
+      ...(tokens === undefined ? {} : { tokens }),
     });
   } catch (error) {
     runtime.error(failureRecord('startup.failed', error));

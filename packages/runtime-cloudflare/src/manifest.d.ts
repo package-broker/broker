@@ -3,5 +3,6 @@ declare module '#pb-manifest' {
   import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
   export const plugins: readonly PluginDefinition[];
   export const platformPorts: PlatformPortConfig | null;
+  export const tokens: import('@package-broker/core/config').BrokerConfig['tokens'];
   export const registry: import('@package-broker/core/config').BrokerConfig['registry'];
 }

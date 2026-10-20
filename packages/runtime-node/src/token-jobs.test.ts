@@ -1,3 +1,5 @@
+import * as personalTokens from '@package-broker/core/authz/pat-service';
+import * as serviceTokens from '@package-broker/core/authz/service-token-service';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor } from '@package-broker/core/authz/fence';
@@ -150,6 +152,12 @@ async function boot(): Promise<{ database: MigratedDatabase; broker: NodeBroker 
     ),
     grant(G_ACTOR, 'actor@example.test'),
     grant(G_TARGET, 'target@example.test'),
+    stmt(
+      "INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, 'ci', ?)",
+      '01J0PRINCIPAL00000000000001',
+      org.orgId,
+      TARGET,
+    ),
   ]);
   const broker = createNodeServer([plugin], {
     executor,
@@ -176,6 +184,98 @@ async function boot(): Promise<{ database: MigratedDatabase; broker: NodeBroker 
 }
 
 describe('Node personal-token offboarding wiring', () => {
+  it('exposes the same resolved lifetime policy used by both token services', async () => {
+    const personal = vi.spyOn(personalTokens, 'createPersonalTokenService');
+    const service = vi.spyOn(serviceTokens, 'createServiceTokenService');
+    try {
+      const { broker } = await boot();
+      const access = (await broker.services()).access!;
+      expect(access.lifetime).toEqual({ personal: { maxDays: 365 }, service: { maxDays: 365 } });
+      expect(personal.mock.calls.at(-1)?.[0].lifetime).toBe(access.lifetime);
+      expect(service.mock.calls.at(-1)?.[0].lifetime).toBe(access.lifetime);
+    } finally {
+      personal.mockRestore();
+      service.mockRestore();
+    }
+  }, 60_000);
+
+  it.each(['suspend', 'revoke'] as const)(
+    'offboards the creator and queues PAT cleanup after organization %s',
+    async (action) => {
+      const { database, broker } = await boot();
+      const { executor } = database;
+      const org = database.orgs!.a;
+      const access = (await broker.services()).access!;
+      const roleId = '01J0ORGROLE000000000000001';
+      await executor.batch([
+        stmt(
+          "INSERT INTO role (id, org_id, key, name, scope) VALUES (?, ?, 'manager', 'Manager', 'organization')",
+          roleId,
+          org.orgId,
+        ),
+        ...['org:users:write', 'org:grants:write'].map((permission) =>
+          stmt(
+            'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+            org.orgId,
+            roleId,
+            permission,
+          ),
+        ),
+        stmt(
+          "UPDATE access_grant SET scope = 'organization', project_id = NULL, role_id = ? WHERE org_id = ? AND id IN (?, ?)",
+          roleId,
+          org.orgId,
+          G_ACTOR,
+          G_TARGET,
+        ),
+      ]);
+      const actor = {
+        kind: 'organization' as const,
+        userId: ACTOR,
+        permissions: new Set(['org:users:write', 'org:grants:write']),
+        isOrganizationAdmin: false,
+      };
+      const fence = mutationFence(
+        { userId: ACTOR, sessionId: SESSION } as unknown as AuthenticatedActor,
+        { grant: 1 },
+      );
+      const call = {
+        audit: { opId: ulid(), requestId: ulid(), sourceIp: null, tokenSelector: null },
+      };
+      const result =
+        action === 'suspend'
+          ? await access.administration.suspendUser(org, actor, fence, TARGET, call)
+          : await access.administration.revokeOrganizationGrant(org, actor, fence, G_TARGET, call);
+      expect(result).toEqual({ ok: true, value: null });
+      const cause = action === 'suspend' ? 'suspended' : 'membership_removed';
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          event: 'service_principal.creator_offboarded',
+          orgId: org.orgId,
+          userId: TARGET,
+          cause,
+        }),
+      );
+      const queued = await executor.all<{ org_id: string; payload_json: string }>(
+        stmt(
+          "SELECT org_id, payload_json FROM job WHERE org_id = ? AND type = 'core:pat-offboarding:v1'",
+          org.orgId,
+        ),
+      );
+      expect(queued).toHaveLength(1);
+      expect(queued[0]?.org_id).toBe(org.orgId);
+      expect(JSON.parse(queued[0]!.payload_json)).toEqual({
+        userId: TARGET,
+        cause,
+        cutoff: expect.any(String),
+      });
+      expect(logs).not.toContainEqual(
+        expect.objectContaining({ event: 'user.pat_offboarding_enqueue_failed' }),
+      );
+    },
+    60_000,
+  );
+
   it('registers the offboarding and the sweep job as core jobs', async () => {
     const { broker } = await boot();
     const kernel = await broker.ready();
@@ -220,6 +320,13 @@ describe('Node personal-token offboarding wiring', () => {
       },
     );
     expect(result).toEqual({ ok: true, value: null });
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: 'service_principal.creator_offboarded',
+        userId: TARGET,
+        cause: 'membership_removed',
+      }),
+    );
     expect(logs).not.toContainEqual(
       expect.objectContaining({ event: 'user.pat_offboarding_enqueue_failed' }),
     );

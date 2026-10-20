@@ -170,6 +170,7 @@ describe('renderBuildManifest', () => {
         'export const platformPorts = null;',
         'export const observability = config.observability;',
         'export const registry = config.registry;',
+        'export const tokens = config.tokens;',
         '',
       ].join('\n'),
     );
@@ -192,6 +193,7 @@ describe('renderBuildManifest', () => {
         'export const platformPorts = null;',
         'export const observability = config.observability;',
         'export const registry = config.registry;',
+        'export const tokens = config.tokens;',
         '',
       ].join('\n'),
     );
@@ -216,6 +218,7 @@ describe('renderBuildManifest', () => {
         'export const platformPorts = null;',
         'export const observability = config.observability;',
         'export const registry = config.registry;',
+        'export const tokens = config.tokens;',
         '',
       ].join('\n'),
     );
@@ -620,6 +623,27 @@ describe('built plugin order round trip', () => {
       });
       const loaded = await loadBundle(result.bundle);
       expect(loaded.plugins.map(({ id }) => id)).toEqual(['a', 'b']);
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
+    'carries configured tokens into the %s bundle',
+    async (target) => {
+      const configPath = path.join(project, 'tokens.config.ts');
+      const tokens = { maxLifetimeDays: { personal: 30, service: 60 } };
+      await writeFile(
+        configPath,
+        `export default ${JSON.stringify({ platform: target, plugins: [], tokens })};`,
+      );
+      await writeFile(runtimeEntry, "export { tokens } from '#pb-manifest';\n");
+      const result = await build({
+        configPath,
+        target,
+        outDir: path.join(project, target),
+        runtimeEntry,
+      });
+      const loaded = (await import(pathToFileURL(result.bundle).href)) as { tokens: unknown };
+      expect(loaded.tokens).toEqual(tokens);
     },
   );
 

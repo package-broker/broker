@@ -89,3 +89,17 @@ describe('clock', () => {
     expect(api.systemClock.now()).toBeInstanceOf(Date);
   });
 });
+
+describe('idBefore', () => {
+  it('returns the greatest same-length id below the given one', () => {
+    expect(api.idBefore('0001')).toBe('0000');
+    expect(api.idBefore('0010')).toBe('000Z');
+    expect(api.idBefore('1000')).toBe('0ZZZ');
+  });
+
+  it('returns null at the floor and for characters outside the alphabet', () => {
+    expect(api.idBefore('0000')).toBeNull();
+    expect(api.idBefore('')).toBeNull();
+    expect(api.idBefore('00U0')).toBeNull();
+  });
+});

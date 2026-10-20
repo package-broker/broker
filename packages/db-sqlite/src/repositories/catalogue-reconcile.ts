@@ -163,11 +163,9 @@ function seenRows(
           AND version.listing_seen_stamp = ${stamp})`;
 }
 
-function sourceUnseenPredicate(ctx: OrgContext, boundary: RawBuilder<string>): RawBuilder<boolean> {
+function sourceUnseenPredicate(boundary: RawBuilder<string>): RawBuilder<boolean> {
   return sql<boolean>`package.updated_at < ${boundary}
-      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing'
-        OR EXISTS (SELECT 1 FROM version WHERE version.package_id = package.id
-          AND version.org_id = ${ctx.orgId} AND version.status = 'active'))`;
+      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing')`;
 }
 
 export function unseenSourcePackages(ctx: OrgContext, sourceId: string): RawBuilder<number> {
@@ -307,7 +305,7 @@ export function finalizeListingStatements(
   ];
 
   if (scope.kind === 'source') {
-    const unseen = sourceUnseenPredicate(ctx, boundary);
+    const unseen = sourceUnseenPredicate(boundary);
     const returned = sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'`;
     const rows = (predicate: RawBuilder<boolean>) =>
       sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}`;
@@ -327,8 +325,10 @@ export function finalizeListingStatements(
     statements.push(
       statementOf(
         sql`UPDATE package SET status = 'removed_upstream', removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),
-          removal_cause = 'source_listing', last_op_id = ${opId},
-          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}`,
+          removal_cause = 'source_listing',
+          last_op_id = CASE WHEN status = 'active' THEN ${opId} ELSE last_op_id END,
+          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}
+          RETURNING package.last_op_id = ${opId} AS newly_removed`,
       ),
     );
     const restoration = statements.length;
@@ -440,6 +440,14 @@ export function finalizeListingStatements(
   return { statements, removalIndex, restorationIndex: revivalIndex, leaseHeldBackIndex };
 }
 
+function removedCount(result: { rows: Record<string, unknown>[]; changes: number } | undefined) {
+  if (result === undefined) return 0;
+  const [first] = result.rows;
+  return first !== undefined && 'newly_removed' in first
+    ? result.rows.filter((row) => Number(row['newly_removed']) === 1).length
+    : result.changes;
+}
+
 export function createCatalogueReconciler(
   executor: SqlExecutor,
   options: FinalizeStatementOptions = {},
@@ -502,7 +510,7 @@ export function createCatalogueReconciler(
           ? 0
           : Number(results[leaseHeldBackIndex]?.rows[0]?.['held'] ?? 0);
       return {
-        removed: results[removalIndex]?.changes ?? 0,
+        removed: removedCount(results[removalIndex]),
         restored: results[restorationIndex]?.changes ?? 0,
         statements: statements.length,
         leaseHeldBack,

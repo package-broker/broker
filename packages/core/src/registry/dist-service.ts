@@ -41,6 +41,7 @@ export type DistServeResult =
       readonly body: ReadableStream<Uint8Array>;
     }
   | { readonly kind: 'not_found' }
+  | { readonly kind: 'refused' }
   | { readonly kind: 'busy'; readonly retryAfterSeconds: number };
 
 export interface DistFetchPlan {
@@ -75,6 +76,7 @@ export interface DistService {
 }
 
 const NOT_FOUND: DistServeResult = Object.freeze({ kind: 'not_found' });
+const REFUSED: DistServeResult = Object.freeze({ kind: 'refused' });
 
 function parseRevision(value: unknown): number | null {
   if (typeof value === 'number') {
@@ -160,6 +162,7 @@ export function createDistService(deps: DistServiceDeps): DistService {
     key: string,
     signal: AbortSignal,
     isDone: () => Promise<DoneState>,
+    onRefused: () => void,
   ): Promise<DoneState> {
     const handle = handles.get(scoped(ctx, key));
     if (handle === undefined) return 'pending';
@@ -182,7 +185,10 @@ export function createDistService(deps: DistServiceDeps): DistService {
           target.blob === null ? null : { id: target.blob.id, sha256: target.blob.sha256 },
       },
     );
-    if (outcome === 'quarantined') return 'negative';
+    if (outcome === 'quarantined') {
+      onRefused();
+      return 'negative';
+    }
     return outcome === 'stale' ? isDone() : 'filled';
   }
 
@@ -209,6 +215,7 @@ export function createDistService(deps: DistServiceDeps): DistService {
       }
 
       const key = await deps.leaseKey([ctx.orgId, 'dist', versionId, String(revision)]);
+      let refused = false;
       let latest: DistTarget | null = null;
       const isDone = async (): Promise<DoneState> => {
         latest = await resolve(actor, request, versionId, revision);
@@ -226,14 +233,18 @@ export function createDistService(deps: DistServiceDeps): DistService {
         ctx,
         key,
         (signal) =>
-          latest === null ? Promise.resolve('negative') : fill(ctx, latest, key, signal, isDone),
+          latest === null
+            ? Promise.resolve('negative')
+            : fill(ctx, latest, key, signal, isDone, () => {
+                refused = true;
+              }),
         { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
       );
 
       if (outcome === 'busy') {
         return { kind: 'busy', retryAfterSeconds: DIST_BUSY_RETRY_AFTER_SECONDS };
       }
-      if (outcome === 'negative') return NOT_FOUND;
+      if (outcome === 'negative') return refused ? REFUSED : NOT_FOUND;
       return serveStored(ctx, await resolve(actor, request, versionId, revision));
     },
   };

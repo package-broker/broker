@@ -375,12 +375,12 @@ describe('build with platformPorts', () => {
     60_000,
   );
 
-  it('leaves only cloudflare:* and node:async_hooks external for the cloudflare target', async () => {
+  it('leaves only cloudflare:*, node:async_hooks, node:buffer and node:zlib external for the cloudflare target', async () => {
     const config = await writeConfig('cloudflare', { cloudflare: CLOUDFLARE_PORTS });
     const entry = path.join(project, 'scoped-entry.ts');
     await writeFile(
       entry,
-      "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { env } from 'cloudflare:workers';\nexport default { AsyncLocalStorage, env };\n",
+      "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { Buffer } from 'node:buffer';\nimport { gunzipSync } from 'node:zlib';\nimport { env } from 'cloudflare:workers';\nexport default { AsyncLocalStorage, Buffer, gunzipSync, env };\n",
     );
     const result = await build({
       configPath: config,
@@ -393,7 +393,12 @@ describe('build with platformPorts', () => {
       .filter((imported) => imported.external)
       .map((imported) => imported.path)
       .sort();
-    expect(external).toEqual(['cloudflare:workers', 'node:async_hooks']);
+    expect(external).toEqual([
+      'cloudflare:workers',
+      'node:async_hooks',
+      'node:buffer',
+      'node:zlib',
+    ]);
   }, 60_000);
 
   it.each(['node:fs', 'node:crypto'])(

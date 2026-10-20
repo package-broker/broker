@@ -193,6 +193,33 @@ describe('source listing reconciliation', () => {
     expect(await scalar('SELECT rev AS v FROM package WHERE id = ?', PACKAGE)).toBe(2);
   });
 
+  it('counts only packages that go from active to removed, not relabels', async () => {
+    await run(
+      stmt(
+        `INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at)
+          VALUES ('K03', ?, ?, 'composer', 'acme/three', ?)`,
+        org.orgId,
+        SOURCE,
+        OLD,
+      ),
+      stmt(
+        "UPDATE package SET status = 'removed_upstream', removed_upstream_at = ?, removal_cause = 'document_absent' WHERE id = ?",
+        OLD,
+        PACKAGE,
+      ),
+    );
+    const listing = await sourceListing(['acme/three']);
+    const result = await reconciler.finalizeListing(org, guard, listing, {
+      attemptedCandidates: 1,
+      successfulCandidates: 1,
+      definitiveAbsent: 0,
+    });
+    expect(result).toMatchObject({ removed: 1, restored: 0 });
+    expect(await scalar('SELECT removal_cause AS v FROM package WHERE id = ?', PACKAGE)).toBe(
+      'source_listing',
+    );
+  });
+
   it('2: without a finalize nothing is removed', async () => {
     await sourceListing(['acme/one']);
     expect((await statuses('package')).every((row) => row.status === 'active')).toBe(true);

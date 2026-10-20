@@ -66,9 +66,12 @@ import {
 import { createAccessRecorder } from '@package-broker/core/registry/access-recorder';
 import type { RegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
+import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { createRepositoryJobs, type JobsFactory } from '@package-broker/core/platform/jobs-port';
 import type { Jobs } from '@package-broker/core/platform/jobs';
+import { SEAMS_KEY } from './internal/seams-key.js';
+import type { RegistrySeams } from './testing/node-server.js';
 import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
 import type { Observability, ObsRecord } from '@package-broker/core/platform/observability';
@@ -108,7 +111,7 @@ import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
 import { nodeCodecs } from './codec/node-codec.js';
-import { createDnsGuard, type Resolver } from './sources/dns-guard.js';
+import { createDnsGuard } from './sources/dns-guard.js';
 import { createGuardedFetch } from './sources/guarded-fetch.js';
 import { createFilesystemArchiveStore } from './sources/ssh-archive-store.js';
 import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provider.js';
@@ -396,16 +399,19 @@ function buildPackageReads(executor: SqlExecutor) {
   return { reader, packageAccess, resolver };
 }
 
-interface RegistrySeams {
-  readonly transport?: FetchLike;
-  readonly resolver?: Resolver;
-  readonly jobs?: Jobs;
-  readonly observeCredentials?: (access: CredentialAccess) => void;
-}
-
-type CredentialAccess = ReturnType<typeof credentialAccess>;
-
 const SHUTDOWN_IDLE_MS = 10_000;
+
+async function settlesWithin(work: Promise<unknown>, deadlineMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), deadlineMs);
+  });
+  try {
+    return await Promise.race([work.then(() => true), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const INERT_CREDENTIAL: UpstreamCredential = Object.freeze({
   origins: Object.freeze([]),
@@ -426,6 +432,11 @@ function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveStore {
     find: async (...args) => (await open()).find(...args),
     store: async (...args) => (await open()).store(...args),
   };
+}
+
+function credentialOrigins(record: SourceRecord): readonly string[] {
+  if (record.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
+  return [new URL(record.url!).origin];
 }
 
 function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
@@ -460,7 +471,7 @@ function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
           credential:
             opened.kind === 'ssh_key'
               ? INERT_CREDENTIAL
-              : bindCredential(opened, [new URL(record.url).origin]),
+              : bindCredential(opened, credentialOrigins(record)),
           probe,
         };
       } catch (error) {
@@ -647,8 +658,9 @@ function buildCatalogue(
 export function createNodeServer(
   plugins: readonly PluginDefinition[],
   options: NodeServerOptions = {},
-  seams: RegistrySeams = {},
 ): NodeBroker {
+  const seams: RegistrySeams = (options as { [SEAMS_KEY]?: RegistrySeams })[SEAMS_KEY] ?? {};
+  const shutdownMs = seams.shutdownDeadlineMs ?? SHUTDOWN_IDLE_MS;
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
 
@@ -865,11 +877,15 @@ export function createNodeServer(
           server.closeIdleConnections();
           await closing;
         }
+        const deadline = Date.now() + shutdownMs;
         await kernel.then(
-          (ready) => ready.idle(SHUTDOWN_IDLE_MS),
+          (ready) => ready.idle(shutdownMs),
           () => undefined,
         );
-        await drainRegistry?.();
+        if (drainRegistry !== undefined) {
+          const drained = await settlesWithin(drainRegistry(), Math.max(0, deadline - Date.now()));
+          if (!drained) log({ level: 'warn', event: 'shutdown.registry_drain_timeout' });
+        }
       } finally {
         await options.closeDatabase?.();
       }

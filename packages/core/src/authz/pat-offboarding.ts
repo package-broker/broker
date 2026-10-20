@@ -5,7 +5,7 @@ import { JobError, type Jobs } from '../platform/jobs.js';
 import { registerCoreJob, type RegisteredCoreJob } from '../runtime/core-jobs.js';
 import type { AdminLog } from './administration.js';
 
-export type PatOffboardingCause = 'suspended' | 'membership_removed' | 'erased';
+export type PatOffboardingCause = 'suspended' | 'membership_removed' | 'erased' | 'project_removed';
 
 export interface PatOffboardingPayload {
   readonly userId: string;
@@ -22,7 +22,13 @@ export interface PatOffboardingStore {
   /** Ids of the user's live personal tokens created at or before `cutoff`, ordered by id. */
   candidates(
     ctx: OrgContext,
-    input: { readonly userId: string; readonly cutoff: string; readonly limit: number },
+    input: {
+      readonly userId: string;
+      readonly cutoff: string;
+      readonly limit: number;
+      /** Only tokens bound to selected projects of which the user holds none. */
+      readonly selectedOnly?: true;
+    },
   ): Promise<readonly string[]>;
   /**
    * One batch that revokes the ids still live, stages `audits[i]` only for the id it carries,
@@ -39,6 +45,7 @@ export interface PatOffboardingStore {
       readonly opId: string;
       readonly lease: { readonly jobId: string; readonly fence: number };
       readonly audits: readonly AuditEvent[];
+      readonly selectedOnly?: true;
     },
   ): Promise<RevokePageOutcome>;
 }
@@ -57,6 +64,7 @@ const CAUSES: ReadonlySet<unknown> = new Set<PatOffboardingCause>([
   'suspended',
   'membership_removed',
   'erased',
+  'project_removed',
 ]);
 const CUTOFF = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -141,6 +149,7 @@ export function createPatOffboardingJob(deps: PatOffboardingDeps): RegisteredCor
         return;
       }
 
+      const narrowing = cause === 'project_removed' ? ({ selectedOnly: true } as const) : {};
       const submitted = new Set<string>();
       let revoked = 0;
       for (;;) {
@@ -149,6 +158,7 @@ export function createPatOffboardingJob(deps: PatOffboardingDeps): RegisteredCor
           userId,
           cutoff,
           limit: PAT_OFFBOARDING_PAGE_SIZE,
+          ...narrowing,
         });
         if (page.length === 0) break;
         if (
@@ -170,6 +180,7 @@ export function createPatOffboardingJob(deps: PatOffboardingDeps): RegisteredCor
           opId,
           lease: { jobId: context.jobId, fence: context.fence },
           audits: auditsFor(page, cause, now, opId),
+          ...narrowing,
         });
         if (outcome === 'lease_lost') throw new JobError('lease_lost');
         if (outcome === 'indeterminate') throw new JobError('handler_error');
@@ -209,4 +220,11 @@ export function enqueuePatOffboarding(
       resourceKey: `user:${userId}`,
     });
   };
+}
+
+export function enqueueProjectRemovedPatOffboarding(
+  jobs: Pick<Jobs, 'enqueue'>,
+): (ctx: OrgContext, input: { readonly userId: string; readonly at: string }) => Promise<void> {
+  const enqueue = enqueuePatOffboarding(jobs);
+  return (ctx, { userId, at }) => enqueue(ctx, { userId, cause: 'project_removed', at });
 }

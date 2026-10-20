@@ -1,5 +1,6 @@
 import type { OrgContext } from '../db/port.js';
 import type { PluginPorts } from '../plugin.js';
+import type { JobFences } from './job-fences.js';
 import type { Observability } from './observability.js';
 
 export const MAX_PAYLOAD_BYTES = 16 * 1024;
@@ -94,6 +95,7 @@ export interface JobContext {
   readonly signal: AbortSignal;
   readonly ports: PluginPorts;
   readonly observability: Observability;
+  readonly fences?: JobFences;
 }
 
 export interface JobDefinition<P = unknown> {

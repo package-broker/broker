@@ -57,6 +57,37 @@ import type {
   PackageVisibilityPort,
 } from '@package-broker/core/db/catalogue';
 import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
+import {
+  createAccessRecorder,
+  type AccessRecorder,
+} from '@package-broker/core/registry/access-recorder';
+import {
+  createRegistryModule,
+  type RegistryModule,
+  type SourceCredential,
+} from '@package-broker/core/registry/module';
+import {
+  RegistryConfigError,
+  resolveRegistryConfig,
+  type RegistryConfig,
+  type RegistryConfigInput,
+} from '@package-broker/core/registry/registry-config';
+import type { SourceRecord } from '@package-broker/core/db/source';
+import {
+  bindCredential,
+  CredentialError,
+  credentialEchoProbe,
+  parseCredentialMaterial,
+  type CredentialKind,
+} from '@package-broker/core/sources/credentials';
+import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
+import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
+import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
+import { SecretDecryptError, createSecretCipher } from '@package-broker/core/secrets/cipher';
+import {
+  CredentialNotFoundError,
+  createCredentialStore,
+} from '@package-broker/core/secrets/credential-store';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
@@ -121,6 +152,25 @@ import {
   createVisibilityStore,
 } from '@package-broker/db-sqlite/repositories/catalogue-writer';
 import { createScopedAdmission } from '@package-broker/db-sqlite/repositories/scoped-admission';
+import { createBlobAccessRepository } from '@package-broker/db-sqlite/repositories/blob-access';
+import { createBlobReplacer } from '@package-broker/db-sqlite/repositories/blob-replacer';
+import { createCacheEpochRepository } from '@package-broker/db-sqlite/repositories/cache-epoch';
+import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import { createExistingVersionsReader } from '@package-broker/db-sqlite/repositories/existing-versions';
+import {
+  createFetchLeases,
+  createFetchLeaseWriteGuard,
+  leaseKey,
+} from '@package-broker/db-sqlite/repositories/fetch-lease';
+import { createIngestFinalizer } from '@package-broker/db-sqlite/repositories/ingest-finalize';
+import {
+  createIngestSessions,
+  createIngestSessionWriteGuard,
+} from '@package-broker/db-sqlite/repositories/ingest-session';
+import { createRegistryReads } from '@package-broker/db-sqlite/repositories/registry-reads';
+import { createRepresentationClock } from '@package-broker/db-sqlite/repositories/representation-clock';
+import { createSourceRepository } from '@package-broker/db-sqlite/repositories/source';
+import { createUpstreamStateRepository } from '@package-broker/db-sqlite/repositories/upstream-state';
 import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import {
   createOrganizationBootstrap,
@@ -134,6 +184,7 @@ import { createServicePrincipalAuthority } from '@package-broker/db-sqlite/repos
 import { createTokenRepository } from '@package-broker/db-sqlite/repositories/token';
 import { createTokenReader } from '@package-broker/db-sqlite/repositories/token-read';
 import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
+import { workersCodecs } from './codec/workers-codec.js';
 import { createR2ByteStore } from './blob/r2.js';
 import type { R2BucketLike } from './blob/r2.js';
 import { createCacheApiAdapter, DEFAULT_CACHE_NAMESPACE } from './cache/cache-api.js';
@@ -217,6 +268,8 @@ export interface WorkerOptions {
   readonly authorization?: AuthorizationEngine;
   /** The cloudflare stanza of `platformPorts`; null or absent leaves platform services disabled. */
   readonly platformPorts?: PlatformPortConfig | null;
+  /** Registry settings; an invalid value fails startup. Dist URLs use the origin of PB_PUBLIC_URL only, so a path-prefixed public URL is unsupported. */
+  readonly registry?: RegistryConfigInput;
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -316,6 +369,7 @@ async function buildAuth(
   providerAnchors: ProviderAnchorReader;
   anchors: readonly ConfiguredProviderAnchor[];
   access: WorkerAccessServices;
+  keyring: Keyring;
 }> {
   const keyring = createKeyring(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
@@ -435,7 +489,7 @@ async function buildAuth(
     }),
     tokenList: wired('token reader', createTokenReader(executor)),
   });
-  return { auth, registration, providerAnchors, anchors: anchorList, access };
+  return { auth, registration, providerAnchors, anchors: anchorList, access, keyring };
 }
 
 function buildPackageReads(executor: SqlExecutor) {
@@ -465,6 +519,153 @@ function buildCatalogue(
     closureReport: (actor, organizationPermissions, ecosystem) =>
       buildClosureReport(reads.reader, actor, organizationPermissions, ecosystem, systemClock),
   });
+}
+
+function credentialOrigins(source: SourceRecord): readonly string[] | null {
+  if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
+  if (
+    (source.type === 'npm_registry' || source.type === 'composer_repository') &&
+    source.url !== null
+  ) {
+    try {
+      return [new URL(source.url).origin];
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function openSourceCredential(executor: SqlExecutor, keyring: Keyring) {
+  const repository = createCredentialRepository(executor);
+  const store = createCredentialStore({
+    repository,
+    cipher: createSecretCipher(keyring, 'credential-encryption'),
+    ids: { ulid },
+    clock: systemClock,
+  });
+  return async (ctx: OrgContext, source: SourceRecord): Promise<SourceCredential | null> => {
+    const origins = credentialOrigins(source);
+    if (source.credentialId === null || origins === null) return null;
+    try {
+      const row = await repository.get(ctx, source.credentialId);
+      if (row === null) return null;
+      const plaintext = await store.read(ctx, row.id);
+      try {
+        const material = parseCredentialMaterial(row.kind as CredentialKind, plaintext);
+        return {
+          credential: bindCredential(material, origins),
+          probe: credentialEchoProbe(material),
+        };
+      } finally {
+        plaintext.fill(0);
+      }
+    } catch (error) {
+      if (
+        error instanceof CredentialError ||
+        error instanceof SecretDecryptError ||
+        error instanceof CredentialNotFoundError
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  };
+}
+
+function resolveRegistry(
+  input: RegistryConfigInput | undefined,
+  publicUrl: string,
+): RegistryConfig {
+  try {
+    return resolveRegistryConfig(input, 'cloudflare', publicUrl);
+  } catch (error) {
+    if (error instanceof RegistryConfigError) {
+      throw new KernelConfigError(error.problems.map((problem) => `registry: ${problem}`));
+    }
+    throw error;
+  }
+}
+
+function buildRegistryModule(input: {
+  readonly executor: SqlExecutor;
+  readonly reads: ReturnType<typeof buildPackageReads>;
+  readonly keyring: Keyring;
+  readonly platformServices: PlatformServices;
+  readonly observability: Observability;
+  readonly deploymentId: string;
+  readonly registry: RegistryConfig;
+  readonly publicUrl: string;
+  readonly dispatch: (run: () => Promise<void>) => void;
+}): { readonly module: RegistryModule; readonly recorder: AccessRecorder } {
+  const { executor, reads, platformServices, observability, registry, dispatch } = input;
+  const outboundPolicy = createOutboundPolicy({
+    allowPrivateHosts: [],
+    runtime: 'cloudflare',
+    selfOrigins: registry.outbound.selfOrigins,
+  });
+  const writer = createCatalogueWriter(executor);
+  const sessions = createIngestSessions(executor);
+  const registryReads = createRegistryReads(executor);
+  const blobAccess = createBlobAccessRepository(executor);
+  const recorder = createAccessRecorder({
+    touch: (ctx, ids) => blobAccess.touch(ctx, ids),
+    defer: dispatch,
+    now: () => Date.now(),
+    onError: () => undefined,
+  });
+  const module = createRegistryModule({
+    runtime: 'cloudflare',
+    ports: {
+      blob: platformServices.blob,
+      cache: platformServices.cache,
+      observability,
+    },
+    clock: systemClock,
+    codecs: workersCodecs,
+    publicUrl: input.publicUrl,
+    registry,
+    outboundPolicy,
+    policyFetch: (userAgent) =>
+      createPolicyFetch({
+        fetchImpl: (...args) => globalThis.fetch(...args),
+        policy: outboundPolicy,
+        userAgent,
+        observability,
+      }),
+    deploymentId: input.deploymentId,
+    catalogue: {
+      reader: reads.reader,
+      scopedAdmission: createScopedAdmission(executor),
+      epoch: createCacheEpochRepository(executor),
+      representationClock: createRepresentationClock(executor),
+      upstreamState: createUpstreamStateRepository(executor),
+      sources: createSourceRepository(executor),
+      covers: registryReads.covers,
+      versionById: registryReads.versionById,
+    },
+    ingest: {
+      sessions,
+      apply: {
+        writer,
+        sessions,
+        existing: createExistingVersionsReader(executor),
+        finalizer: createIngestFinalizer(executor),
+        observability,
+      },
+      writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
+      credential: openSourceCredential(executor, input.keyring),
+    },
+    dist: {
+      leases: createFetchLeases(executor),
+      leaseKey,
+      writeGuard: createFetchLeaseWriteGuard,
+      writer,
+      blobReplacer: createBlobReplacer(executor),
+      recorder,
+    },
+  });
+  return { module, recorder };
 }
 
 const NO_ANCHORS: ProviderAnchorReader = Object.freeze({
@@ -1005,7 +1206,15 @@ export function createWorker(
       }
     }
 
-    return { platformServices, sink, deploymentId: bound.deploymentId, attach, failed, track };
+    return {
+      platformServices,
+      observability,
+      sink,
+      deploymentId: bound.deploymentId,
+      attach,
+      failed,
+      track,
+    };
   }
 
   async function build(env: Env | undefined): Promise<Application> {
@@ -1018,6 +1227,13 @@ export function createWorker(
     const config = stanza;
     const bound = config === null ? null : resolveBindings(config, env ?? {}, cacheStorage);
     const db = bound?.db ?? env?.DB;
+    const publicUrl =
+      config === null || db === undefined ? undefined : publicOriginOf(env?.PB_PUBLIC_URL);
+    if (options.registry !== undefined && (config === null || db === undefined)) {
+      throw new KernelConfigError(['registry: requires platformPorts and DB']);
+    }
+    const registryConfig =
+      publicUrl === undefined ? undefined : resolveRegistry(options.registry, publicUrl);
     const executor: SqlExecutor | ScalarSqlExecutor =
       db === undefined ? unboundExecutor() : createD1Executor(db);
     const bootstrap = createOrganizationBootstrap(executor);
@@ -1095,6 +1311,25 @@ export function createWorker(
         ? undefined
         : buildPlatform(config, bound, executor as SqlExecutor, registration, resolveOrg);
 
+    const registryModule =
+      built === undefined ||
+      reads === undefined ||
+      services === undefined ||
+      registryConfig === undefined ||
+      publicUrl === undefined
+        ? undefined
+        : buildRegistryModule({
+            executor: executor as SqlExecutor,
+            reads,
+            keyring: built.keyring,
+            platformServices: services.platformServices,
+            observability: services.observability,
+            deploymentId: services.deploymentId,
+            registry: registryConfig,
+            publicUrl,
+            dispatch,
+          });
+
     const ports: PluginPorts = {
       organizations: Object.freeze({ get: (ctx: OrgContext) => organizations.get(ctx) }),
       clock: systemClock,
@@ -1152,7 +1387,14 @@ export function createWorker(
         health: async () => (await bootstrap.findSingleton()) !== null,
         coreRoutes: [...(auth?.coreRoutes ?? []), ...(env?.ASSETS === undefined ? [] : uiRoutes)],
         ...(authorization === undefined ? {} : { authorization }),
-        ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
+        ...(registryModule === undefined
+          ? reads === undefined
+            ? {}
+            : { packageResolver: reads.resolver }
+          : {
+              packageResolver: registryModule.module.visibilityPort,
+              ecosystemRoutes: registryModule.module.ecosystemRoutes,
+            }),
         ...(services === undefined
           ? { log }
           : {
@@ -1170,7 +1412,19 @@ export function createWorker(
           flush: () => Promise.resolve(),
           fail: (event, error) => logJobFailure(log, event, error),
         };
-      return { kernel, services: applicationServices, ...services.attach(kernel) };
+      const attached = services.attach(kernel);
+      return {
+        kernel,
+        services: applicationServices,
+        ...attached,
+        flush: async () => {
+          try {
+            await registryModule?.recorder.flush();
+          } finally {
+            await attached.flush();
+          }
+        },
+      };
     } catch (error) {
       services?.failed(error);
       throw error;
@@ -1290,9 +1544,9 @@ export function createWorker(
       return inScope(application, ctx, async () => {
         try {
           const url = new URL(request.url);
-          if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request);
+          if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request, ctx);
           url.pathname = '/_pb/ui';
-          return await application.kernel.fetch(new Request(url, request));
+          return await application.kernel.fetch(new Request(url, request), ctx);
         } catch (error) {
           return withoutBodyForHead(request, errorResponse(error, requestId, log));
         }

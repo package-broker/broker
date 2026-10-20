@@ -192,6 +192,48 @@ const candidatesOrg: ContractCase = {
   },
 };
 
+const sweepUserOrg: ContractCase = {
+  name: 'suspendedUsersWithLivePats lists only users of the context organization',
+  async run(context) {
+    const { own, foreign, token } = await base(context);
+    await context.executor.batch([
+      { sql: "UPDATE user_account SET status = 'suspended' WHERE id = ?", params: [USER] },
+    ]);
+    await token(own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.suspendedUsersWithLivePats(foreign, '', 100)).toEqual([]);
+  },
+};
+
+const sweepTokenOrg: ContractCase = {
+  name: 'suspendedUsersWithLivePats counts only personal tokens of the context organization',
+  async run(context) {
+    const { own, foreign, token } = await base(context);
+    await context.executor.batch([
+      { sql: "UPDATE user_account SET status = 'suspended' WHERE id = ?", params: [USER] },
+    ]);
+    await token(foreign);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.suspendedUsersWithLivePats(own, '', 100)).toEqual([]);
+  },
+};
+
+const sweepCursor: ContractCase = {
+  name: 'suspendedUsersWithLivePats returns only users above the cursor',
+  async run(context) {
+    const { own, token } = await base(context);
+    await context.executor.batch([
+      { sql: "UPDATE user_account SET status = 'suspended' WHERE id = ?", params: [USER] },
+    ]);
+    await token(own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.suspendedUsersWithLivePats(own, USER, 100)).toEqual([]);
+  },
+};
+
 const revokeOrg: ContractCase = {
   name: 'revokePage revokes only tokens of the context organization',
   async run(context) {
@@ -344,6 +386,168 @@ const stampGroupMemberOrg: ContractCase = {
   },
 };
 
+const SELECTED_AT = '2026-10-20T11:30:00.000Z';
+const PROJECT_OWN = 'project-own';
+const PROJECT_FOREIGN = 'project-foreign';
+
+async function selectedBase(context: CaseContext) {
+  const set = await base(context);
+  const { own, foreign, seed } = set;
+  for (const [id, org] of [
+    [PROJECT_OWN, own],
+    [PROJECT_FOREIGN, foreign],
+  ] as const) {
+    await seed(
+      'INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)',
+      id,
+      org.orgId,
+      id,
+      id,
+    );
+  }
+  const selected = async (
+    org: { orgId: string },
+    projectId: string,
+    boundOrg: { orgId: string } = org,
+  ): Promise<string> => {
+    const id = await set.token(org);
+    await seed("UPDATE token SET project_mode = 'selected' WHERE id = ?", id);
+    await seed(
+      'INSERT INTO token_project (org_id, token_id, project_id) VALUES (?, ?, ?)',
+      boundOrg.orgId,
+      id,
+      projectId,
+    );
+    return id;
+  };
+  const projectGrant = (id: string, org: { orgId: string }, projectId: string | null) =>
+    seed(
+      `INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, project_id, role_id, created_at)
+       VALUES (?, ?, 'email', ?, ?, ?, ?, ?)`,
+      id,
+      org.orgId,
+      EMAIL,
+      projectId === null ? 'organization' : 'project',
+      projectId,
+      org === own ? 'role-own' : 'role-foreign',
+      BEFORE,
+    );
+  return { ...set, selected, projectGrant };
+}
+
+function selectedPage(ids: readonly string[], jobId: string) {
+  return { ...page(ids, jobId), cutoff: SELECTED_AT, selectedOnly: true as const };
+}
+
+const selectedList = {
+  userId: USER,
+  cutoff: SELECTED_AT,
+  limit: 25,
+  selectedOnly: true as const,
+};
+
+const selectedCandidatesOrg: ContractCase = {
+  name: 'selectedOnly candidates lists only tokens of the context organization',
+  async run(context) {
+    const { own, foreign, selected } = await selectedBase(context);
+    const mine = await selected(own, PROJECT_OWN);
+    await selected(foreign, PROJECT_FOREIGN);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.candidates(own, selectedList)).toEqual([mine]);
+  },
+};
+
+const selectedRevokeOrg: ContractCase = {
+  name: 'selectedOnly revokePage revokes only tokens of the context organization',
+  async run(context) {
+    const { own, foreign, selected, job } = await selectedBase(context);
+    const mine = await selected(own, PROJECT_OWN);
+    const theirs = await selected(foreign, PROJECT_FOREIGN);
+    await job('J', own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    const outcome = await repo.revokePage(own, selectedPage([theirs, mine].sort(), 'J'));
+
+    expect(outcome).toEqual({ status: 'ok', revoked: [mine] });
+  },
+};
+
+const selectedBoundOrg: ContractCase = {
+  name: 'selectedOnly ignores project bindings stored under another organization',
+  async run(context) {
+    const { own, foreign, selected, projectGrant, job } = await selectedBase(context);
+    const token = await selected(own, PROJECT_OWN, foreign);
+    await projectGrant('G1', own, PROJECT_OWN);
+    await job('J', own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.candidates(own, selectedList)).toEqual([token]);
+    expect(await repo.revokePage(own, selectedPage([token], 'J'))).toEqual({
+      status: 'ok',
+      revoked: [token],
+    });
+  },
+};
+
+const selectedOwnerOrg: ContractCase = {
+  name: 'selectedOnly resolves the token owner inside the token organization only',
+  async run(context) {
+    const { own, foreign, selected, projectGrant, job } = await selectedBase(context);
+    const token = await selected(foreign, PROJECT_FOREIGN);
+    await projectGrant('G1', own, null);
+    await job('J', foreign);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.candidates(foreign, selectedList)).toEqual([token]);
+    expect(await repo.revokePage(foreign, selectedPage([token], 'J'))).toEqual({
+      status: 'ok',
+      revoked: [token],
+    });
+  },
+};
+
+const selectedGrantOrg: ContractCase = {
+  name: 'selectedOnly ignores grants of another organization on the same e-mail',
+  async run(context) {
+    const { own, foreign, selected, projectGrant, job } = await selectedBase(context);
+    const token = await selected(own, PROJECT_OWN);
+    await context.executor.batch([
+      {
+        sql: "INSERT INTO user_account (id, org_id, email) VALUES ('mirror', ?, ?)",
+        params: [foreign.orgId, EMAIL],
+      },
+    ]);
+    await projectGrant('GF', foreign, null);
+    await job('J', own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.candidates(own, selectedList)).toEqual([token]);
+    expect(await repo.revokePage(own, selectedPage([token], 'J'))).toEqual({
+      status: 'ok',
+      revoked: [token],
+    });
+  },
+};
+
+const selectedMembershipOrg: ContractCase = {
+  name: 'selectedOnly ignores group memberships stored under another organization',
+  async run(context) {
+    const { own, foreign, selected, grant, membership, job } = await selectedBase(context);
+    const token = await selected(own, PROJECT_OWN);
+    await grant('GG', own, 'group', 'staff', 'oidc');
+    await membership(foreign);
+    await job('J', own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.candidates(own, selectedList)).toEqual([token]);
+    expect(await repo.revokePage(own, selectedPage([token], 'J'))).toEqual({
+      status: 'ok',
+      revoked: [token],
+    });
+  },
+};
+
 const NEUTRAL = '(? is not null)';
 
 export const entries: readonly MutationEntry[] = [
@@ -355,9 +559,18 @@ export const entries: readonly MutationEntry[] = [
       holdsGrantOrg,
       holdsMembershipOrg,
       candidatesOrg,
+      sweepUserOrg,
+      sweepTokenOrg,
+      sweepCursor,
       revokeOrg,
       auditOrg,
       leaseOrg,
+      selectedCandidatesOrg,
+      selectedRevokeOrg,
+      selectedBoundOrg,
+      selectedOwnerOrg,
+      selectedGrantOrg,
+      selectedMembershipOrg,
     ],
     predicates: [
       {
@@ -389,6 +602,27 @@ export const entries: readonly MutationEntry[] = [
         caseName: candidatesOrg.name,
       },
       {
+        name: 'sweep user organization',
+        locate: /u\.org_id = \?/,
+        neutral: NEUTRAL,
+        copies: 1,
+        caseName: sweepUserOrg.name,
+      },
+      {
+        name: 'sweep token organization',
+        locate: /t\.org_id = u\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: sweepTokenOrg.name,
+      },
+      {
+        name: 'sweep cursor',
+        locate: /u\.id > \?/,
+        neutral: NEUTRAL,
+        copies: 1,
+        caseName: sweepCursor.name,
+      },
+      {
         name: 'revoke update organization',
         locate: /org_id = \?(?= AND kind = 'pat' AND user_id = \?)/,
         neutral: NEUTRAL,
@@ -408,6 +642,48 @@ export const entries: readonly MutationEntry[] = [
         neutral: NEUTRAL,
         copies: 1,
         caseName: leaseOrg.name,
+      },
+      {
+        name: 'selectedOnly candidates organization',
+        locate: /token\.org_id = \?(?= AND token\.kind = 'pat')/,
+        neutral: NEUTRAL,
+        copies: 1,
+        caseName: selectedCandidatesOrg.name,
+      },
+      {
+        name: 'selectedOnly revoke organization',
+        locate: /token\.org_id = \?(?= AND token\.kind = 'pat')/,
+        neutral: NEUTRAL,
+        copies: 1,
+        caseName: selectedRevokeOrg.name,
+      },
+      {
+        name: 'selectedOnly bound project organization',
+        locate: /bound\.org_id = token\.org_id/,
+        neutral: '1',
+        copies: 2,
+        caseName: selectedBoundOrg.name,
+      },
+      {
+        name: 'selectedOnly owner organization',
+        locate: /owner\.org_id = token\.org_id/,
+        neutral: '1',
+        copies: 2,
+        caseName: selectedOwnerOrg.name,
+      },
+      {
+        name: 'selectedOnly reaching grant organization',
+        locate: /reach\.org_id = owner\.org_id/,
+        neutral: '1',
+        copies: 2,
+        caseName: selectedGrantOrg.name,
+      },
+      {
+        name: 'selectedOnly membership organization',
+        locate: /via\.org_id = owner\.org_id/,
+        neutral: '1',
+        copies: 2,
+        caseName: selectedMembershipOrg.name,
       },
     ],
   },

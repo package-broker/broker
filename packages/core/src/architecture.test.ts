@@ -1,4 +1,4 @@
-import { type Dirent, readdirSync, readFileSync } from 'node:fs';
+import { type Dirent, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -549,6 +549,17 @@ describe('classifier', () => {
     const text = "import { serve } from '@hono/node-server/vercel';";
     expect(findViolations('packages/runtime-node/src/a.ts', text)).toEqual([]);
     expect(findViolations('packages/runtime-cloudflare/src/a.ts', text)).toHaveLength(1);
+  });
+});
+
+describe('package coverage', () => {
+  it('has a boundary rule for every packages/* directory with a package.json', () => {
+    const uncovered = packageNames().filter(
+      (dir) =>
+        existsSync(path.join(REPO_ROOT, 'packages', dir, 'package.json')) &&
+        ruleFor(dir) === undefined,
+    );
+    expect(uncovered).toEqual([]);
   });
 });
 

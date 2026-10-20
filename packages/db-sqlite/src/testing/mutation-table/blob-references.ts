@@ -2,6 +2,8 @@ import { orgOf, seeder, type ContractCase, type Seed, type MutationEntry } from 
 import { expect } from 'vitest';
 import type { Statement } from '@package-broker/core/db/port';
 import { blobEligibleCondition } from '../../repositories/blob-references.js';
+import { createBlobRepository } from '../../repositories/blob.js';
+import type { Sha256 } from '@package-broker/core/platform/blob';
 import { seedSource, seedPackage, FUTURE, NOT_NULL, ALWAYS } from './fixtures.js';
 
 const EXISTS_COPY =
@@ -9,6 +11,9 @@ const EXISTS_COPY =
 
 const HOSTED_COPY =
   'an inconsistent reference already blocks eligibility through the released check';
+
+const UNRELATED_COPY =
+  'no foreign ingest/upstream row exists for this digest, so the neutralised scope cannot change the outcome';
 
 interface BlobRef {
   readonly via: 'version' | 'revision';
@@ -228,4 +233,96 @@ const blobEntry: MutationEntry = {
   ],
 };
 
-export const entries: readonly MutationEntry[] = [blobEntry];
+const orphansScheduledWithinOrganization: ContractCase = {
+  name: 'only the own orphan is scheduled, whatever other organizations hold or reference',
+  async run(context) {
+    const seed = seeder(context.executor);
+    const { own, foreign } = orgOf(context);
+    const mutated = {
+      all: (statement: Statement) => context.executor.all(context.mutate(statement)),
+      batch: (statements: readonly Statement[]) =>
+        context.executor.batch(context.mutateBatch(statements)),
+    };
+    const repo = createBlobRepository(mutated as typeof context.executor);
+    const shaOf = (n: number) => String(n).padStart(64, '0');
+    await seedBlobRow(seed, 'B-OWN', own.orgId, shaOf(1));
+    await seedBlobRow(seed, 'B-TWIN', foreign.orgId, shaOf(1));
+    await seedBlobRow(seed, 'B-TWIN-ING', foreign.orgId, shaOf(2));
+    await seedBlobRow(seed, 'B-TWIN-UP', foreign.orgId, shaOf(3));
+    await seedBlobRow(seed, 'B-ING', own.orgId, shaOf(2));
+    await seedBlobRow(seed, 'B-UP', own.orgId, shaOf(3));
+    await seedSource(seed, 'S-F', foreign.orgId, 'vcs');
+    await seedPackage(seed, 'K-F', foreign.orgId, 'S-F', 'acme/foreign');
+    await seed(
+      `INSERT INTO ingest_session (id, org_id, scope, scope_key, source_id, generation, owner, fence, lease_until, state, snapshot_blob_sha256, started_at, updated_at)
+        VALUES ('ING1', ?, 'source', ?, 'S-F', 1, 'o', 1, ?, 'running', ?, ?, ?)`,
+      foreign.orgId,
+      'a'.repeat(64),
+      FUTURE,
+      shaOf(2),
+      OLD,
+      OLD,
+    );
+    await seed(
+      `INSERT INTO upstream_state (org_id, package_id, form, content_sha256, checked_at, fresh_until)
+        VALUES (?, 'K-F', 'composer-p2', ?, ?, ?)`,
+      foreign.orgId,
+      shaOf(3),
+      OLD,
+      OLD,
+    );
+    const scheduled = [
+      await repo.scheduleOrphan(own, shaOf(1) as Sha256),
+      await repo.scheduleOrphan(own, shaOf(2) as Sha256),
+      await repo.scheduleOrphan(own, shaOf(3) as Sha256),
+    ];
+    const after = await context.executor.all<{ id: string; purge_after: string | null }>({
+      sql: 'SELECT id, purge_after FROM blob ORDER BY id',
+      params: [],
+    });
+    expect(scheduled).toEqual([true, true, true]);
+    expect(after.filter((row) => row.purge_after !== null).map((row) => row.id)).toEqual([
+      'B-ING',
+      'B-OWN',
+      'B-UP',
+    ]);
+  },
+};
+
+const orphanEntry: MutationEntry = {
+  builder: 'blobOrphanCondition',
+  file: 'repositories/blob-references.ts',
+  cases: [orphansScheduledWithinOrganization],
+  waivers: [
+    {
+      locate: /"org_id" = \?/,
+      reason:
+        'the appended eligibility condition repeats the organization predicate, so no case can tell this copy from its twin',
+    },
+    {
+      locate: /\(blob\.org_id = \?|\b(?:bref_\w+|blob)\.org_id = (?:blob|bref_\w+)\.org_id/,
+      reason:
+        'the appended eligibility condition is the blobEligibleCondition fragment, whose organization joins are judged by that entry',
+    },
+  ],
+  predicates: [
+    {
+      name: 'an ingest session is scoped to the blob organization',
+      locate: /bref_ing\.org_id = blob\.org_id/,
+      neutral: ALWAYS,
+      caseName: orphansScheduledWithinOrganization.name,
+      copies: 6,
+      waivedCopies: { 0: UNRELATED_COPY, 1: UNRELATED_COPY, 4: UNRELATED_COPY, 5: UNRELATED_COPY },
+    },
+    {
+      name: 'an upstream state is scoped to the blob organization',
+      locate: /bref_up\.org_id = blob\.org_id/,
+      neutral: ALWAYS,
+      caseName: orphansScheduledWithinOrganization.name,
+      copies: 6,
+      waivedCopies: { 0: UNRELATED_COPY, 1: UNRELATED_COPY, 2: UNRELATED_COPY, 3: UNRELATED_COPY },
+    },
+  ],
+};
+
+export const entries: readonly MutationEntry[] = [blobEntry, orphanEntry];

@@ -3,6 +3,7 @@ import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
   blobEligibleCondition,
+  blobOrphanCondition,
   createBlobReferenceReader,
   RETENTION_CANDIDATE_LIMIT,
 } from './blob-references.js';
@@ -598,5 +599,22 @@ VALUES ('REF1', ?, 'RUN1', 'version', 'VERX', 'ext', 'update', ?)`,
     const condition = blobEligibleCondition(a, 'b');
     expect(condition.params).toEqual([a.orgId]);
     expect(condition.sql).toContain("julianday('now', '-7 days')");
+  });
+});
+
+describe('blobOrphanCondition', () => {
+  it('is the fragment the eligibility condition embeds, with no parameters', () => {
+    const orphan = blobOrphanCondition(a, 'b');
+    expect(orphan.params).toEqual([]);
+    expect(blobEligibleCondition(a, 'b').sql).toContain(`OR ${orphan.sql})`);
+    expect(orphan.sql).toContain("julianday('now', '-7 days')");
+    expect(orphan.sql).toContain('b.refetchable = 1');
+  });
+
+  it('rejects an unsafe blob reference', () => {
+    expect(() => blobOrphanCondition(a, 'b; DROP TABLE blob')).toThrow(TypeError);
+    for (const alias of ['bref_v', 'BREF_V', 'Bref_Ru']) {
+      expect(() => blobOrphanCondition(a, alias)).toThrow(TypeError);
+    }
   });
 });

@@ -4,6 +4,9 @@ import { ABSENCE_MIN_NOT_FOUND, ABSENCE_MIN_SPAN_MS } from '../db/catalogue.js';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../db/errors.js';
 import type { OrgId, Statement } from '../db/port.js';
+import { jobFences, jobLeaseOf } from '../platform/job-fences.js';
+import { JobRelease, releaseDelayOf } from '../platform/job-release.js';
+import { JOB_HANDLER_BUDGET_SECONDS } from '../platform/job-repository.js';
 import { defineJob, JobError, type JobContext } from '../platform/jobs.js';
 import { registerCoreJob } from '../runtime/core-jobs.js';
 import { UpstreamError } from '../sources/policy-fetch.js';
@@ -27,6 +30,7 @@ vi.mock('./apply-description.js', async (original) => ({
 
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const org = { orgId: 'org' as OrgId };
+const lease = Object.freeze({ id: 'job-1', owner: 'claim-owner', fence: 3 });
 const guard = Object.freeze([{ sql: 'guard', params: [] }]) as unknown as CatalogueWriteGuard;
 const fresh: IngestSessionHandle = {
   id: 'session',
@@ -74,6 +78,7 @@ const outcome = (extra: Partial<ApplyOutcome>): ApplyOutcome => ({
 });
 
 function setup() {
+  let now = Date.UTC(2026, 9, 20, 10, 30);
   const events: string[] = [];
   let describeResult: DescribeResult = { kind: 'not_modified' };
   const describePackage = vi.fn(async () => describeResult);
@@ -134,12 +139,18 @@ function setup() {
       publishedValidators: { 'npm-full': { etag: '"old"' } },
     })),
     writeGuard: vi.fn(() => guard),
+    clock: { now: () => new Date(now) },
   } as unknown as PackageSyncDeps & {
     sessions: typeof sessions;
     jobs: { enqueue: ReturnType<typeof vi.fn> };
   };
   const job = createPackageSyncJob(deps);
-  const context = { org, jobId: 'job-1', signal: new AbortController().signal } as JobContext;
+  const context = {
+    org,
+    jobId: 'job-1',
+    signal: new AbortController().signal,
+    fences: jobFences(lease),
+  } as JobContext;
   const run = (payload: unknown = { sourceId: 'A', key: 'name' }) =>
     job.handler(job.validate(payload), context);
   return {
@@ -152,6 +163,9 @@ function setup() {
     batch,
     describePackage,
     sessions,
+    setNow: (value: number) => {
+      now = value;
+    },
     setDescribe: (result: DescribeResult) => {
       describeResult = result;
     },
@@ -220,6 +234,42 @@ describe('definition', () => {
   });
 });
 
+describe('job lease', () => {
+  it('fails closed before any read, acquire or write when the context carries no lease', async () => {
+    const h = setup();
+    const bare: { fences?: unknown } = { ...h.context };
+    delete bare.fences;
+    await expect(
+      h.job.handler(h.job.validate({ sourceId: 'A', key: 'name' }), bare as JobContext),
+    ).rejects.toMatchObject({ code: 'invalid_definition' });
+    expect(h.deps.planFill).not.toHaveBeenCalled();
+    expect(h.sessions.acquire).not.toHaveBeenCalled();
+    expect(h.describePackage).not.toHaveBeenCalled();
+    expect(h.batch).not.toHaveBeenCalled();
+    expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('hands the lease to every guard it builds', async () => {
+    const h = setup();
+    expect(jobLeaseOf(h.context)).toEqual(lease);
+    h.setDescribe({ kind: 'not_found', definitive: true });
+    await h.run();
+    h.setDescribe({ kind: 'not_modified' });
+    await h.run();
+    h.setDescribe({ kind: 'found', description: description() });
+    vi.mocked(applyChunk).mockResolvedValue(outcome({ done: true, status: 'complete' }));
+    await h.run();
+    const calls = vi.mocked(h.deps.writeGuard).mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of calls) expect(call[2]).toEqual(lease);
+  });
+
+  it('allows 25 attempts', () => {
+    expect(setup().job.maxAttempts).toBe(25);
+    expect(packageSyncJob.maxAttempts).toBe(25);
+  });
+});
+
 describe('describe and touch', () => {
   it('describes a new session with the published validators and touches on not_modified', async () => {
     const h = setup();
@@ -243,15 +293,23 @@ describe('describe and touch', () => {
     expect(h.markPackageAbsent).not.toHaveBeenCalled();
   });
 
-  it('acquires the package session with the job as owner', async () => {
+  it('acquires the package session as the claim owner for the handler budget', async () => {
     const h = setup();
     await h.run();
+    expect(JOB_HANDLER_BUDGET_SECONDS).toBe(240);
     expect(h.sessions.acquire).toHaveBeenCalledWith(
       org,
       { scope: 'package', sourceId: 'A', packageKey: 'name' },
-      expect.any(String),
-      60,
+      'claim-owner',
+      240,
     );
+  });
+
+  it('honours an explicit session lease length', async () => {
+    const h = setup();
+    Object.assign(h.deps, { leaseSeconds: 90 });
+    await h.run();
+    expect(h.sessions.acquire).toHaveBeenCalledWith(org, expect.anything(), 'claim-owner', 90);
   });
 
   it('does nothing when the source has no plan', async () => {
@@ -279,7 +337,7 @@ describe('apply', () => {
     h.setDescribe({ kind: 'found', description: description() });
     vi.mocked(applyChunk).mockResolvedValue(outcome({ done: true, status: 'complete' }));
     await h.run();
-    expect(h.deps.writeGuard).toHaveBeenCalledWith(org, fresh, h.context);
+    expect(h.deps.writeGuard).toHaveBeenCalledWith(org, fresh, lease);
     expect(vi.mocked(applyChunk).mock.calls[0]![2]).toMatchObject({ guard, session: fresh });
     expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
   });
@@ -338,10 +396,12 @@ describe('apply', () => {
     expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
   });
 
-  it('retries without writing when a request fill holds the session', async () => {
+  it('releases without writing when a request fill holds the session', async () => {
     const h = setup();
     h.sessions.acquire.mockResolvedValue('held');
-    await expect(h.run()).rejects.toThrow(JobError);
+    const error = await h.run().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(JobRelease);
+    expect(releaseDelayOf(error)).toBe(60);
     expect(h.describePackage).not.toHaveBeenCalled();
     expect(applyChunk).not.toHaveBeenCalled();
     expect(h.batch).not.toHaveBeenCalled();
@@ -433,6 +493,37 @@ describe('refused and incomplete chunks', () => {
     expect(h.deps.upstreamState.touchStatements).not.toHaveBeenCalled();
     expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
   });
+});
+
+describe('release only when held', () => {
+  it.each([
+    ['an upstream failure', new UpstreamError('http_status', 503)],
+    ['a snapshot loss', new SnapshotCorruptError()],
+    ['an unexpected error', new JobError('handler_error')],
+  ])('never releases on %s', async (_name, failure) => {
+    const h = setup();
+    h.describePackage.mockRejectedValue(failure);
+    const error = await h.run().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(JobError);
+    expect(error).not.toBeInstanceOf(JobRelease);
+    expect(releaseDelayOf(error)).toBeNull();
+  });
+
+  it.each(['refused', 'incomplete', 'superseded'] as const)(
+    'never releases on a %s chunk and on a non-definitive 404',
+    async (status) => {
+      const h = setup();
+      h.setDescribe({ kind: 'found', description: description() });
+      vi.mocked(applyChunk).mockResolvedValue(outcome({ status, done: true }));
+      const error = await h.run().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(JobError);
+      expect(error).not.toBeInstanceOf(JobRelease);
+      h.setDescribe({ kind: 'not_found', definitive: false });
+      const notFound = await h.run().catch((e: unknown) => e);
+      expect(notFound).toBeInstanceOf(JobError);
+      expect(notFound).not.toBeInstanceOf(JobRelease);
+    },
+  );
 });
 
 describe('upstream 404 rule', () => {
@@ -565,8 +656,43 @@ describe('fix round 1', () => {
       org,
       'core:package-sync:v1',
       { sourceId: 'A', key: 'name' },
-      { idempotencyKey: sha(['abandoned', 'gone', 3]), resourceKey: sha(['v1', 'A', 'name']) },
+      {
+        idempotencyKey: sha([
+          'abandoned',
+          'A',
+          'name',
+          Math.floor(Date.UTC(2026, 9, 20, 10, 30) / 3_600_000),
+        ]),
+        resourceKey: sha(['v1', 'A', 'name']),
+        runAt: new Date(Date.UTC(2026, 9, 20, 10, 30) + 60_000).toISOString(),
+      },
     );
+  });
+
+  it('enqueues the same abandoned key within an hour and a new one in the next hour', async () => {
+    const h = setup();
+    h.setDescribe({ kind: 'found', description: description() });
+    vi.mocked(applyChunk).mockImplementation(async () =>
+      outcome({ done: true, status: 'abandoned', session: { ...staged, id: `s${Math.random()}` } }),
+    );
+    const hour = Date.UTC(2026, 9, 20, 10);
+    h.setNow(hour + 60_000);
+    await h.run();
+    h.setNow(hour + 3_599_000);
+    await h.run();
+    h.setNow(hour + 3_600_000);
+    await h.run();
+    const calls = h.deps.jobs.enqueue.mock.calls as unknown as [
+      unknown,
+      unknown,
+      unknown,
+      { idempotencyKey: string; runAt: string },
+    ][];
+    expect(calls).toHaveLength(3);
+    expect(calls[1]![3].idempotencyKey).toBe(calls[0]![3].idempotencyKey);
+    expect(calls[2]![3].idempotencyKey).not.toBe(calls[0]![3].idempotencyKey);
+    expect(calls[2]![3].idempotencyKey).toBe(sha(['abandoned', 'A', 'name', hour / 3_600_000 + 1]));
+    expect(calls[2]![3].runAt).toBe(new Date(hour + 3_600_000 + 60_000).toISOString());
   });
 
   it('persists the validators before the finalizer runs', async () => {

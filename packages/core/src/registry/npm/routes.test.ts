@@ -703,3 +703,19 @@ describe('npm fix round 1', () => {
     expect(cancel).toHaveBeenCalled();
   });
 });
+
+describe('npm tarball refusal', () => {
+  it('answers 502 with the fixed bad_gateway message when the tarball was refused', async () => {
+    const { call } = await harness({ dist: { kind: 'refused' } });
+    const response = await call('/x/-/x-1.0.0.tgz');
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ code: 'bad_gateway', error: 'Bad gateway' });
+  });
+
+  it('keeps the uniform 404 for an unknown version even when the service would refuse', async () => {
+    const h = await harness({ dist: { kind: 'refused' } });
+    h.access.version.mockResolvedValue(null as never);
+    expect((await h.call('/x/-/x-9.9.9.tgz')).status).toBe(404);
+    expect(h.serve).not.toHaveBeenCalled();
+  });
+});

@@ -541,7 +541,17 @@ async function buildServices(
   const cache = createLruCache(
     ports.cache.maxBytes === undefined ? {} : { maxBytes: ports.cache.maxBytes },
   );
-  return { blob, cache, jobStore: createJobRepository(executor) };
+  const services = {
+    blob,
+    cache,
+    jobStore: createJobRepository(executor),
+    retention: {
+      store: byteStore,
+      deleteTimeoutMs: BLOB_DELETE_TIMEOUT_MS,
+      leaseMs: BLOB_PURGE_LEASE_SECONDS * 1000,
+    },
+  };
+  return services;
 }
 
 function startJobs(

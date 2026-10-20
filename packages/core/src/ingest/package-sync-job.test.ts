@@ -499,7 +499,6 @@ describe('release only when held', () => {
   it.each([
     ['an upstream failure', new UpstreamError('http_status', 503)],
     ['a snapshot loss', new SnapshotCorruptError()],
-    ['an unexpected error', new JobError('handler_error')],
   ])('never releases on %s', async (_name, failure) => {
     const h = setup();
     h.describePackage.mockRejectedValue(failure);
@@ -507,6 +506,19 @@ describe('release only when held', () => {
     expect(error).toBeInstanceOf(JobError);
     expect(error).not.toBeInstanceOf(JobRelease);
     expect(releaseDelayOf(error)).toBeNull();
+  });
+
+  it('propagates an unexpected error from a malformed describe result without releasing the job', async () => {
+    const h = setup();
+    h.setDescribe({ kind: 'found' } as DescribeResult);
+    const error = await h.run().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error).not.toBeInstanceOf(JobRelease);
+    expect(releaseDelayOf(error)).toBeNull();
+    expect(h.sessions.abandon).toHaveBeenCalledTimes(1);
+    expect(applyChunk).not.toHaveBeenCalled();
+    expect(h.batch).not.toHaveBeenCalled();
+    expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
   });
 
   it.each(['refused', 'incomplete', 'superseded'] as const)(
@@ -609,6 +621,25 @@ describe('upstream 404 rule', () => {
     );
     await expect(h.run()).rejects.toMatchObject({ code: 'lease_lost' });
   });
+});
+
+describe('lost lease cleanup', () => {
+  it.each([fresh, staged])(
+    'leaves session $stamp untouched after a guarded apply fails',
+    async (session) => {
+      const h = setup();
+      h.sessions.acquire.mockResolvedValue(session);
+      h.setDescribe({ kind: 'found', description: description() });
+      vi.mocked(applyChunk).mockRejectedValue(
+        new DbError('unique', 'guard', { constraint: ACCESS_MUTATION_GUARD_CONSTRAINT }),
+      );
+      await expect(h.run()).rejects.toMatchObject({ code: 'lease_lost' });
+      expect(h.sessions.release).not.toHaveBeenCalled();
+      expect(h.sessions.abandon).not.toHaveBeenCalled();
+      expect(h.sessions.setPendingValidators).not.toHaveBeenCalled();
+      expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('fix round 1', () => {

@@ -308,6 +308,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
         }
         open = false;
       } catch (error) {
+        if (error instanceof JobError && error.code === 'lease_lost') throw error;
         if (open) {
           await end(isSnapshotGone(error) || session.stamp === null).catch(() => undefined);
         }

@@ -1,6 +1,9 @@
 import { afterAll } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { describeMigrationContract } from '@package-broker/db-sqlite/contract/migration-contract';
+import {
+  describeMigrationContract,
+  describeVulnerabilityMigrationContract,
+} from '@package-broker/db-sqlite/contract/migration-contract';
 import { describeMigrationLockContract } from '@package-broker/db-sqlite/contract/migration-lock-contract';
 import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
@@ -41,3 +44,5 @@ async function firstCoreMigration() {
 
 describeMigrationContract('d1', openPair, firstCoreMigration, { d1: true });
 describeMigrationLockContract('d1', openPair, firstCoreMigration);
+
+describeVulnerabilityMigrationContract('d1', openPair);

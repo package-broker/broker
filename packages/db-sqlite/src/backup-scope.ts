@@ -50,6 +50,11 @@ export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   user_group: 'exclude',
   version: 'include',
   version_revision: 'include',
+  vulnerability_advisory: 'exclude',
+  vulnerability_match: 'exclude',
+  vulnerability_refresh: 'exclude',
+  vulnerability_result: 'exclude',
+  vulnerability_sync_state: 'exclude',
   webhook_delivery: 'exclude',
 };
 

@@ -256,16 +256,20 @@ export function createSourcePollJob(deps: {
       for (const source of await deps.sources.listDue(ctx, PAGE)) {
         if (job.signal.aborted) return;
         if (source.nextPollAt === null) continue;
-        await jobsOf(job).enqueue(
-          ctx,
-          SOURCE_SYNC,
-          { sourceId: source.id, reason: 'poll' },
-          {
-            idempotencyKey: await digest(['poll', source.id, source.nextPollAt]),
-            resourceKey: `source:${source.id}`,
-          },
-        );
-        await deps.sources.deferPoll(ctx, source.id, source.nextPollAt);
+        try {
+          await jobsOf(job).enqueue(
+            ctx,
+            SOURCE_SYNC,
+            { sourceId: source.id, reason: 'poll' },
+            {
+              idempotencyKey: await digest(['poll', source.id, source.nextPollAt]),
+              resourceKey: `source:${source.id}`,
+            },
+          );
+          await deps.sources.deferPoll(ctx, source.id, source.nextPollAt);
+        } catch {
+          job.observability.counter('pb.source.poll_failure', undefined, 1);
+        }
       }
     },
   });

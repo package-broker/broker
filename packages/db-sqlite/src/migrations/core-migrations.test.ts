@@ -174,7 +174,7 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 50 tables, expand phase for 0002', async () => {
+  it('1: a fresh database gets every core migration: 55 tables, expand phase for 0002', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
@@ -187,8 +187,8 @@ describe('core migrations', () => {
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none, 0007: 4; 0008, 0009 and 0010 add none; 0011 adds 2; 0012, 0013 and 0014 add none; 0015 adds 1
-    expect(await countTables()).toBe(50);
+    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none, 0007: 4; 0008, 0009 and 0010 add none; 0011 adds 2; 0012, 0013 and 0014 add none; 0015 adds 1; 0022 adds 5
+    expect(await countTables()).toBe(55);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -220,8 +220,8 @@ describe('core migrations', () => {
 
     expect(result.applied).toEqual(sources.slice(1).map((source) => source.id));
     expect(result.skipped).toEqual(['core:0001_init']);
-    // 0002, 0003, 0004, 0007, 0015_keyring_verifier and 0011 add 13 tables to the 37 of 0001
-    expect(await countTables()).toBe(50);
+    // 0002, 0003, 0004, 0007, 0015_keyring_verifier and 0011 add 13 tables to the 37 of 0001; 0022 adds 5 more
+    expect(await countTables()).toBe(55);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );

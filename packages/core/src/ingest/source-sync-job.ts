@@ -74,6 +74,8 @@ export interface SourceSyncDeps {
     job: JobContext,
   ) => CatalogueWriteGuard;
   readonly jobGuard: (job: JobContext) => JobGuard;
+  /** Rows of the source carrying this session's listing stamp; the finalize count never trusts a running counter. */
+  readonly markedCount: (ctx: OrgContext, sourceId: string, stamp: string) => Promise<number>;
   /** Rows of the source the stamp sweep would remove: not marked in this session's listing. */
   readonly unseenExistingCount: (
     ctx: OrgContext,
@@ -115,6 +117,7 @@ class SyncFailure extends Error {
 }
 
 const invalidListing = () => new SyncFailure('invalid_response', true, false, true);
+const massAbsence = () => new SyncFailure('mass_absence', true, false, true);
 const lostSession = () => new SyncFailure('internal', false, true, false);
 
 function digest(parts: readonly unknown[]): Promise<string> {
@@ -415,21 +418,23 @@ async function syncListing(
 
   if (cursor.x === 1) throw invalidListing();
   let unseen: number;
+  let marked: number;
   try {
+    marked = await deps.markedCount(ctx, record.id, session.stamp as string);
     unseen = await deps.unseenExistingCount(ctx, record.id, session.stamp as string);
   } catch {
     throw new SyncFailure('internal', true, true, false);
   }
-  if (!Number.isSafeInteger(unseen) || unseen < 0) {
+  if (!Number.isSafeInteger(unseen) || unseen < 0 || !Number.isSafeInteger(marked) || marked < 0) {
     throw new SyncFailure('internal', true, true, false);
   }
   const result = await deps.finalizer.finalize(
     ctx,
     session,
     {
-      expectedCount: session.seenCount,
-      attemptedCandidates: session.seenCount + unseen,
-      successfulCandidates: session.seenCount,
+      expectedCount: marked,
+      attemptedCandidates: marked + unseen,
+      successfulCandidates: marked,
       definitiveAbsent: unseen,
       upstreamComplete: true,
       validatorTtlSeconds: 0,
@@ -440,6 +445,7 @@ async function syncListing(
     if (result.reason === 'superseded' || result.reason === 'session_unavailable') {
       throw lostSession();
     }
+    if (result.reason === 'mass_absence') throw massAbsence();
     throw invalidListing();
   }
   run.session = null;

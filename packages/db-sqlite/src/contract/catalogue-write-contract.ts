@@ -1,3 +1,4 @@
+import { DbError } from '@package-broker/core/db/errors';
 import { settleIdempotent, replayResponse } from '@package-broker/core/api/idempotency';
 import { createIdempotencyRepository } from '../repositories/idempotency.js';
 import { visibilityAudit } from '../testing/visibility-audit.js';
@@ -573,17 +574,23 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
           const present = kind === 'source' ? ['widget', 'other'] : ['1.0.0', '1.0.1'];
           for (const key of present)
             await w.writer.markListing(w.org, w.guard, { scope, stamp, present: [key] });
-          expect(
-            await w.writer.finalizeListing(
+          const finalize = () =>
+            w.writer.finalizeListing(
               w.org,
               w.guard,
               kind === 'source'
                 ? completeSourceListing({ sourceId: 'source', stamp, count: 2 })
                 : completeVersionListing({ packageId, stamp, count: 2 }),
               { attemptedCandidates: 2, successfulCandidates: 2, definitiveAbsent: 0 },
-            ),
-          ).toMatchObject({ removed: 1, restored: 0 });
-          const key = kind === 'source' ? 'name' : 'version_normalized';
+            );
+          if (kind === 'source') {
+            await expect(finalize()).rejects.toBeInstanceOf(DbError);
+            const untouched = await w.rows('SELECT status FROM package WHERE org_id = ?');
+            expect(untouched.every((row) => row['status'] === 'active')).toBe(true);
+            return;
+          }
+          expect(await finalize()).toMatchObject({ removed: 1, restored: 0 });
+          const key = 'version_normalized';
           const rows = await w.rows(
             `SELECT ${key} AS key, status FROM ${table} WHERE org_id = ? ORDER BY ${key}`,
           );

@@ -105,7 +105,10 @@ function reconcileCase(kind: 'source' | 'package' | 'absent'): ContractCase {
         all: (statement) => executor.all(context.mutate(statement)),
         batch: (statements) => executor.batch(context.mutateBatch(statements)),
       };
-      const reconciler = createCatalogueWriter(mutating);
+      const reconciler = createCatalogueWriter(
+        mutating,
+        kind === 'source' ? { maxAbsenceShare: 0.5 } : {},
+      );
       const guard = createCatalogueWriteGuard(own, { id: 'J', owner: 'worker', fence: 3 });
       if (kind === 'absent') {
         await seed(

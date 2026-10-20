@@ -87,12 +87,19 @@ export interface ProjectStore {
       readonly idempotency?: IdempotencyRecord;
     },
   ): Promise<
-    'restored' | 'not_archived' | 'not_found' | 'conflict' | 'authority' | 'indeterminate'
+    | 'restored'
+    | 'not_archived'
+    | 'not_found'
+    | 'conflict'
+    | 'authority'
+    | 'reauth_required'
+    | 'indeterminate'
   >;
 }
 
 export type ProjectError =
   | 'forbidden'
+  | 'reauth_required'
   | 'invalid_name'
   | 'invalid_scope'
   | 'invalid_policy'
@@ -334,16 +341,25 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
       }
       const id = ids.ulid();
       const stamp = now();
+      const staged = mutationAudit(call, actor, 'project.create', id, stamp, {
+        slug: { new: input.slug },
+        name: { new: input.name },
+        token_max_scope: { new: input.tokenMaxScope ?? 'full' },
+        require_publish_approval: { new: input.requirePublishApproval ?? false },
+      });
       const answer = await projects.create(ctx, fence, {
         ...input,
         id,
         now: stamp,
-        ...mutationAudit(call, actor, 'project.create', id, stamp, {
-          slug: { new: input.slug },
-          name: { new: input.name },
-          token_max_scope: { new: input.tokenMaxScope ?? 'full' },
-          require_publish_approval: { new: input.requirePublishApproval ?? false },
-        }),
+        audit: staged.audit,
+        ...(staged.idempotency === undefined
+          ? {}
+          : {
+              idempotency: {
+                ...staged.idempotency,
+                responseJson: JSON.stringify({ id, slug: input.slug }),
+              },
+            }),
       });
       if (answer === 'created') {
         changed(ctx, actor, 'create', id);

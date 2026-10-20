@@ -359,8 +359,13 @@ describe('project access with real persistence', () => {
     await rows('UPDATE session SET reauth_at = NULL WHERE id = ?', SESSION);
     expect(
       await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED, call),
-    ).toEqual({ ok: false, error: 'forbidden' });
+    ).toEqual({ ok: false, error: 'reauth_required' });
     await rows('UPDATE session SET reauth_at = ? WHERE id = ?', new Date().toISOString(), SESSION);
+    await rows('DELETE FROM access_grant WHERE id = ?', id(23));
+    expect(
+      await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED, call),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    await database.executor.batch([grant(id(23), ORG_ROLE, null)]);
     expect(
       await service.restoreProject(org, organizationActor, fence({ project: 1 }), ARCHIVED, call),
     ).toEqual({ ok: true, value: null });

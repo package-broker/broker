@@ -1,6 +1,6 @@
-import { accessContextOf } from '../../authz/access-context.js';
+import { projectActorOf } from '../../authz/access-context.js';
 import type { MutationFence } from '../../authz/fence.js';
-import type { ProjectActor } from '../../authz/project-actor.js';
+import { accessGrantFenceKey, roleFenceKey, type ProjectActor } from '../../authz/project-actor.js';
 import type { ProjectAdministration } from '../../authz/project-administration.js';
 import type { OrgContext } from '../../db/port.js';
 import type { RoleRepository } from '../../db/roles.js';
@@ -23,42 +23,16 @@ interface ProjectGrantCall {
   readonly call: ApiCall;
 }
 
-function frozenView(source: ReadonlySet<string>): ReadonlySet<string> {
-  const values = new Set(source);
-  const view: ReadonlySet<string> = {
-    get size() {
-      return values.size;
-    },
-    has: (value) => values.has(value),
-    forEach: (callback, thisArg?: unknown) => {
-      values.forEach((value) => callback.call(thisArg, value, value, view));
-    },
-    entries: () => values.entries(),
-    keys: () => values.keys(),
-    values: () => values.values(),
-    [Symbol.iterator]: () => values.values(),
-  };
-  return Object.freeze(view);
-}
-
 function projectGrantCall(
   ctx: RequestContext,
   deps: ApiRouteDeps,
   expected: Readonly<Record<string, number>>,
 ): ProjectGrantCall {
   const { org, projectId, fence, call } = projectSessionCallContext(ctx, deps, expected);
-  const access = accessContextOf(ctx)!;
-  const permissions = new Set<string>(access.actor!.projectPermissions);
-  for (const name of access.actor!.organizationPermissions) {
-    if (name.startsWith('project:')) permissions.add(name);
+  const actor = projectActorOf(ctx);
+  if (actor === null || actor.userId !== fence.userId || actor.projectId !== projectId) {
+    throw new TypeError('route requires a project session context');
   }
-  const actor: ProjectActor = Object.freeze({
-    kind: 'project',
-    userId: fence.userId,
-    orgId: org.orgId,
-    projectId,
-    permissions: frozenView(permissions),
-  });
   return { org, projectId, actor, fence, call };
 }
 
@@ -75,13 +49,13 @@ export function projectAccessRoutes(deps: ProjectAccessRouteDeps): readonly Rout
         : { serviceError: result.error };
     }),
     apiRoute(change, async ({ ctx, params, body, expectedRevision }) => {
-      const grantKey = `access_grant:${params.grant}`;
+      const grantKey = accessGrantFenceKey(params.grant);
       const pending = projectGrantCall(ctx, deps, { [grantKey]: expectedRevision! });
       const role = await deps.roles.get(pending.org, body.roleId);
       if (role === null) return { serviceError: 'role_scope_mismatch' };
       const c = projectGrantCall(ctx, deps, {
         [grantKey]: expectedRevision!,
-        [`role:${body.roleId}`]: role.revision,
+        [roleFenceKey(body.roleId)]: role.revision,
       });
       const result = await service.changeRole(
         c.org,
@@ -96,7 +70,7 @@ export function projectAccessRoutes(deps: ProjectAccessRouteDeps): readonly Rout
     }),
     apiRoute(revoke, async ({ ctx, params, expectedRevision }) => {
       const c = projectGrantCall(ctx, deps, {
-        [`access_grant:${params.grant}`]: expectedRevision!,
+        [accessGrantFenceKey(params.grant)]: expectedRevision!,
       });
       const result = await service.revoke(
         c.org,

@@ -3,6 +3,7 @@ import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { sql, type Expression, type SqlBool } from 'kysely';
 import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
+import { accessGrantFenceKey, roleFenceKey } from '@package-broker/core/authz/project-actor';
 import type { GrantSubject } from '@package-broker/core/db/grants';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
@@ -114,13 +115,9 @@ export interface ProjectGrantRepository {
   >;
 }
 
-export function projectGrantKey(grantId: string): string {
-  return `access_grant:${grantId}`;
-}
-
-export function projectGrantRoleKey(roleId: string): string {
-  return `role:${roleId}`;
-}
+const projectGrantKey = accessGrantFenceKey;
+const projectGrantRoleKey = roleFenceKey;
+export { projectGrantKey, projectGrantRoleKey };
 
 function timestamp(value: string): string {
   const parsed = typeof value === 'string' ? new Date(value) : new Date(Number.NaN);

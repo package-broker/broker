@@ -7,6 +7,7 @@ import {
   accessContextOf,
   authenticatedActorOf,
   organizationActorOf,
+  projectActorOf,
   setAccessContext,
 } from './access-context.js';
 import type { AccessContextSnapshot } from './access-context.js';
@@ -587,4 +588,63 @@ describe('authenticated actor', () => {
       expect(authenticatedActorOf(ctx)).toBeNull();
     },
   );
+});
+
+describe('project actor', () => {
+  it('builds a frozen project actor over the union of project rows and project names of organization rows', () => {
+    const ctx = requestContext();
+    setAccessContext(
+      ctx,
+      snapshot({
+        actor: actor({
+          organizationPermissions: ['org:read', 'project:grants:write'],
+          projectPermissions: ['project:read'],
+        }),
+      }),
+    );
+    const built = projectActorOf(ctx)!;
+    expect(built).toMatchObject({
+      kind: 'project',
+      userId: 'user-1',
+      orgId: 'org-a',
+      projectId: 'project-1',
+    });
+    expect(Object.isFrozen(built)).toBe(true);
+    expect(Object.isFrozen(built.permissions)).toBe(true);
+    expect([...built.permissions].sort()).toEqual(['project:grants:write', 'project:read']);
+    expect(built.permissions.has('org:read')).toBe(false);
+    expect(built.permissions).not.toBeInstanceOf(Set);
+    expect('add' in built.permissions).toBe(false);
+    expect(projectActorOf(ctx)?.permissions).not.toBe(built.permissions);
+  });
+
+  it('takes the user from the session snapshot, not from a second source', () => {
+    const ctx = requestContext({ kind: 'user', id: 'user-2' });
+    setAccessContext(
+      ctx,
+      snapshot({
+        principal: { kind: 'user', id: 'user-2' },
+        actor: actor({ user: { id: 'user-2' }, session: { id: 'session-1', userId: 'user-2' } }),
+        rateKey: { ...userKey(), principalId: 'user-2' },
+      }),
+    );
+    expect(projectActorOf(ctx)?.userId).toBe('user-2');
+  });
+
+  it('builds nothing off the project boundary, for tokens, or without a snapshot', () => {
+    const org = requestContext(USER, null);
+    setAccessContext(org, organizationSnapshot());
+    expect(projectActorOf(org)).toBeNull();
+    const service = requestContext(SERVICE);
+    setAccessContext(service, serviceSnapshot());
+    expect(projectActorOf(service)).toBeNull();
+    expect(projectActorOf(requestContext())).toBeNull();
+  });
+
+  it('builds nothing without an organization on the context', () => {
+    const base = requestContext();
+    const ctx = Object.freeze({ ...base, org: null }) as unknown as RequestContext;
+    setAccessContext(ctx, snapshot());
+    expect(projectActorOf(ctx)).toBeNull();
+  });
 });

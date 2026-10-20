@@ -4,6 +4,7 @@ import type { ApiSlot, PluginDefinition, RouteDefinition } from '../plugin.js';
 import { KernelConfigError, collectRegistrations } from './registry.js';
 import { describe, expect, it } from 'vitest';
 import { routeDescriptors } from '../authz/catalogue.js';
+import { PERMISSIONS } from '../authz/permissions.js';
 import {
   routeApiProblems,
   routeBoundaryProblems,
@@ -343,5 +344,78 @@ describe('bearer-only route registration', () => {
       },
     };
     expect(() => collectRegistrations([plugin])).toThrow(/bearerOnly/);
+  });
+});
+
+describe('allowArchived route registration', () => {
+  const route = {
+    method: 'DELETE',
+    path: '/_pb/projects/:project/grants/:grant',
+    permission: 'project:grants:write',
+    boundary: 'project',
+    allowArchived: true,
+  };
+  const problems = (patch: Record<string, unknown> = {}, options = {}) =>
+    routeBoundaryProblems({ ...route, ...patch }, 'route', options);
+
+  it('accepts the flag on a project route', () => {
+    expect(problems()).toEqual([]);
+    expect(problems({}, { apiVersion: 3 })).toEqual([]);
+  });
+
+  it('accepts a route that leaves the flag out', () => {
+    const plain: Record<string, unknown> = { ...route };
+    delete plain['allowArchived'];
+    expect(routeBoundaryProblems(plain as never, 'route')).toEqual([]);
+  });
+
+  it.each([false, 'true', 1, null])('refuses the non-true value %j', (value) => {
+    expect(problems({ allowArchived: value }).join(' ')).toContain('allowArchived');
+  });
+
+  it('refuses the flag on an organization route', () => {
+    expect(
+      problems({
+        boundary: 'organization',
+        path: '/_pb/users',
+        permission: 'org:read',
+      }).join(' '),
+    ).toContain('allowArchived');
+  });
+
+  it('refuses the flag on a public route and on a route without a boundary', () => {
+    expect(problems({ boundary: undefined, permission: null }).join(' ')).toContain(
+      'allowArchived',
+    );
+    expect(problems({ boundary: 'none', permission: null }).join(' ')).toContain('allowArchived');
+  });
+
+  it('refuses the flag on a permission a token may hold', () => {
+    expect(problems({ permission: 'project:sources:read' }).join(' ')).toContain('allowArchived');
+    expect(problems({ permission: 'project:packages:read' }).join(' ')).toContain('allowArchived');
+  });
+
+  it('accepts the flag on every session-only project permission', () => {
+    for (const { name, scope, sessionOnly } of PERMISSIONS) {
+      if (scope !== 'project' || !sessionOnly || name.startsWith('project:packages:')) continue;
+      expect(problems({ permission: name }), name).toEqual([]);
+    }
+  });
+
+  it('refuses the flag on the package boundary', () => {
+    const resolver = { resolve: () => Promise.resolve(null) };
+    const found = routeBoundaryProblems(
+      {
+        method: 'GET',
+        path: '/:project/p/:package',
+        permission: 'project:packages:read',
+        boundary: 'package',
+        package: { ecosystem: 'composer', name: () => 'a/b' },
+        allowArchived: true,
+      },
+      'route',
+      { packageResolver: resolver as never },
+    );
+    expect(found.join(' ')).toContain('allowArchived');
   });
 });

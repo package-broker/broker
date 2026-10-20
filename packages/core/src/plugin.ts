@@ -139,6 +139,12 @@ export interface RouteDefinition {
   readonly package?: PackageRouteBinding;
   /** Default true; false requires permission null. */
   readonly needsOrg?: boolean;
+  /**
+   * Project boundary only. Lets the route resolve an archived project the caller already holds
+   * permissions on; the permission check is unchanged and every route without it answers 404 for
+   * an archived project.
+   */
+  readonly allowArchived?: true;
   readonly api?: ApiSlot | { exempt: string };
   readonly handler: (ctx: RequestContext) => Promise<Response> | Response;
 }

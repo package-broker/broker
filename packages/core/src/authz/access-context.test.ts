@@ -87,6 +87,84 @@ const organizationSnapshot = (
     ...overrides,
   });
 
+const patSnapshot = (token: Record<string, unknown>) =>
+  organizationSnapshot({
+    sessionId: null,
+    actor: null,
+    token: { kind: 'pat', scope: 'full', readOnly: false, ...token },
+    rateKey: userKey('organization', 'abcdefghijkl'),
+  });
+
+const PROJECT_A = '01JA0000000000000000000001';
+const PROJECT_B = '01JA0000000000000000000002';
+
+describe('access context token project binding', () => {
+  it('stores the selected binding frozen', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(
+      ctx,
+      patSnapshot({
+        projectMode: 'selected',
+        projectIds: [PROJECT_A, PROJECT_B],
+        organizationAdmin: false,
+        projectReadInherited: true,
+      }),
+    );
+    const token = accessContextOf(ctx)!.token!;
+    expect(token.projectMode).toBe('selected');
+    expect(token.projectIds).toEqual([PROJECT_A, PROJECT_B]);
+    expect(token.projectReadInherited).toBe(true);
+    expect(Object.isFrozen(token)).toBe(true);
+    expect(Object.isFrozen(token.projectIds)).toBe(true);
+  });
+
+  it('stores an all-mode binding with no project ids', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(
+      ctx,
+      patSnapshot({ projectMode: 'all', projectIds: [], organizationAdmin: true }),
+    );
+    expect(accessContextOf(ctx)!.token).toMatchObject({
+      projectMode: 'all',
+      projectIds: [],
+      organizationAdmin: true,
+    });
+  });
+
+  it('keeps a token snapshot without a binding free of binding fields', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(ctx, patSnapshot({}));
+    const token = accessContextOf(ctx)!.token!;
+    expect(token.projectMode).toBeUndefined();
+    expect(token.projectIds).toBeUndefined();
+  });
+
+  it('keeps an explicit null mode', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(ctx, patSnapshot({ projectMode: null, projectIds: [] }));
+    expect(accessContextOf(ctx)!.token).toMatchObject({ projectMode: null, projectIds: [] });
+  });
+
+  it.each([
+    ['an unknown mode', { projectMode: 'some', projectIds: [] }],
+    ['ids on an all-mode token', { projectMode: 'all', projectIds: [PROJECT_A] }],
+    ['ids on an unbound token', { projectMode: null, projectIds: [PROJECT_A] }],
+    ['an empty id', { projectMode: 'selected', projectIds: [''] }],
+    ['a non-string id', { projectMode: 'selected', projectIds: [7] }],
+    ['non-array ids', { projectMode: 'selected', projectIds: PROJECT_A }],
+    ['a duplicate id', { projectMode: 'selected', projectIds: [PROJECT_A, PROJECT_A] }],
+    ['a non-boolean admin flag', { projectMode: 'all', projectIds: [], organizationAdmin: 1 }],
+    [
+      'a non-boolean inheritance flag',
+      { projectMode: 'all', projectIds: [], projectReadInherited: 'yes' },
+    ],
+  ])('refuses %s', (_name, token) => {
+    const ctx = requestContext(USER, null);
+    expect(() => setAccessContext(ctx, patSnapshot(token))).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+});
+
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe('access context', () => {

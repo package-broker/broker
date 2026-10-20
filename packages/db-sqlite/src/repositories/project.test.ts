@@ -534,9 +534,17 @@ describe('archive and restore', () => {
   it('refuses restore without recent reauth and changes nothing', async () => {
     await archive(1);
     const before = await snapshot();
-    expect(await restore(2, S1)).toBe('authority');
+    expect(await restore(2, S1)).toBe('reauth_required');
     await rows(`UPDATE session SET reauth_at = ${at(-601)} WHERE id = ?`, S_FRESH);
-    expect(await restore(2)).toBe('authority');
+    expect(await restore(2)).toBe('reauth_required');
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('keeps authority for a restore the actor could not make with any reauth', async () => {
+    await archive(1);
+    const before = await snapshot();
+    expect(await restore(2, S_OTHER, P1, U2)).toBe('authority');
+    expect(await restore(2, S_REVOKED, P1, U1)).toBe('authority');
     expect(await snapshot()).toBe(before);
   });
 
@@ -931,9 +939,9 @@ describe('authority before existence', () => {
     },
   );
 
-  it('restore answers authority without a fresh reauth even for a missing id', async () => {
+  it('restore answers reauth_required without a fresh reauth even for a missing id', async () => {
     await prepare('restore');
-    expect(await methods.restore(fence({ project: 2 }, U1, S1), MISSING)).toBe('authority');
+    expect(await methods.restore(fence({ project: 2 }, U1, S1), MISSING)).toBe('reauth_required');
   });
 
   it.each([

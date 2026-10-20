@@ -913,7 +913,18 @@ describe('engine grants', () => {
         }),
       );
       expect(response.status).toBe(200);
-      const expected = kind === null ? null : { kind, scope, readOnly };
+      const expected =
+        kind === null
+          ? null
+          : {
+              kind,
+              scope,
+              readOnly,
+              projectMode: 'all',
+              projectIds: [],
+              projectReadInherited: false,
+              organizationAdmin: false,
+            };
       expect(grantToken).toEqual(expected);
       expect(Object.isFrozen(grantToken)).toBe(true);
       expect(snapshots).toHaveLength(1);
@@ -1001,7 +1012,15 @@ describe('engine grants', () => {
         sessionId: null,
         actor: null,
         tokenSelector: kind === 'pat' ? SELECTOR : 'mnopqrstuvwx',
-        token: { kind, scope: 'full', readOnly: false },
+        token: {
+          kind,
+          scope: 'full',
+          readOnly: false,
+          projectMode: 'all',
+          projectIds: [],
+          projectReadInherited: false,
+          organizationAdmin: false,
+        },
       });
     },
   );
@@ -1818,7 +1837,15 @@ describe('bearer-only authenticated MCP POST', () => {
       principal: { kind: 'user', id: 'user-1' },
       sessionId: null,
       tokenSelector: SELECTOR,
-      token: { kind: 'pat', scope: 'full', readOnly: false },
+      token: {
+        kind: 'pat',
+        scope: 'full',
+        readOnly: false,
+        projectMode: 'all',
+        projectIds: [],
+        projectReadInherited: false,
+        organizationAdmin: false,
+      },
     });
   });
 

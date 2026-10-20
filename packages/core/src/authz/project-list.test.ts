@@ -650,7 +650,7 @@ describe('restricted listing through the readable source', () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it('caps the reads per page and continues from a cursor to the later bound project', async () => {
+  it('skips ahead within one page to a far bound project, staying under the read cap', async () => {
     const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
     const validId = (n: number): string =>
       `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;

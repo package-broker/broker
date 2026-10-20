@@ -34,3 +34,15 @@ describe('jobFences', () => {
     expect(() => jobFences(guard).delegated('u', '', {})).toThrow(TypeError);
   });
 });
+
+it('issues a verifier system fence from the captured lease only', () => {
+  const mutable = { ...guard };
+  const fences = jobFences(mutable);
+  mutable.fence = 999;
+  const fence = fences.verifier();
+  expect(fenceKind(fence)).toBe('system');
+  expect(fence.writer).toBe('verifier');
+  expect(fence.job).toEqual(guard);
+  expect(fence.expected).toEqual({});
+  expect(fences.verifier.length).toBe(0);
+});

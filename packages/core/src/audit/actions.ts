@@ -108,7 +108,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.create': IMPORT_RUN_FIELDS,
   'import_run.approve': IMPORT_RUN_FIELDS,
   'import_run.apply': IMPORT_RUN_FIELDS,
-  'import_run.fail': IMPORT_RUN_FIELDS,
+  'import_run.fail': [...IMPORT_RUN_FIELDS, 'reason'],
   'import_run.verify': IMPORT_RUN_FIELDS,
   'import_run.rollback': IMPORT_ROLLBACK_FIELDS,
   'import_run.accept': IMPORT_RUN_FIELDS,

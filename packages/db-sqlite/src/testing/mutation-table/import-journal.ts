@@ -123,7 +123,13 @@ const verify: ContractCase = {
     expect(
       await storeFor(context).markVerified(own, fence, {
         runId: 'foreign-run',
-        verifiedAt: '2026-10-19T00:00:00.000Z',
+        verifiedAt: new Date().toISOString(),
+        expectedEpoch: (
+          await context.executor.all<{ version: string }>({
+            sql: 'SELECT version FROM cache_epoch WHERE org_id = ?',
+            params: [own.orgId],
+          })
+        )[0]!.version,
       }),
     ).toMatchObject({ ok: false });
   },
@@ -139,7 +145,13 @@ const verifyUpdate: ContractCase = {
     const fence = systemMutationFence('verifier', { id: 'job', owner: 'worker', fence: 1 }, {});
     await storeFor(context, true).markVerified(own, fence, {
       runId: 'foreign-run',
-      verifiedAt: '2026-10-19T00:00:00.000Z',
+      verifiedAt: new Date().toISOString(),
+      expectedEpoch: (
+        await context.executor.all<{ version: string }>({
+          sql: 'SELECT version FROM cache_epoch WHERE org_id = ?',
+          params: [own.orgId],
+        })
+      )[0]!.version,
     });
     expect(
       await context.executor.all({
@@ -169,6 +181,67 @@ function rollbackCase(mismatched: boolean): ContractCase {
     },
   };
 }
+async function verificationFixture(context: CaseContext) {
+  const { own, foreign } = orgOf(context);
+  const seed = seeder(context.executor);
+  await seed(
+    "INSERT INTO import_run (id, org_id, source_system, state) VALUES ('run', ?, 'test', 'verifying')",
+    own.orgId,
+  );
+  await seed(
+    "INSERT INTO job (id, org_id, type, resource_key, payload_json, state, lease_owner, lease_until, fence) VALUES ('verify-job', ?, ?, ?, ?, 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",
+    own.orgId,
+    IMPORT_VERIFICATION_JOB.type,
+    IMPORT_VERIFICATION_JOB.resourceKey('run'),
+    JSON.stringify({ runId: 'run' }),
+  );
+  return {
+    own,
+    foreign,
+    seed,
+    fence: systemMutationFence('verifier', { id: 'verify-job', owner: 'worker', fence: 1 }, {}),
+  };
+}
+const verificationEpoch: ContractCase = {
+  name: 'a foreign epoch cannot authorize a changed verification snapshot',
+  async run(context) {
+    const f = await verificationFixture(context);
+    await f.seed("UPDATE cache_epoch SET version = 'own' WHERE org_id = ?", f.own.orgId);
+    await f.seed("UPDATE cache_epoch SET version = 'expected' WHERE org_id = ?", f.foreign.orgId);
+    expect(
+      await storeFor(context).markVerified(f.own, f.fence, {
+        runId: 'run',
+        verifiedAt: new Date().toISOString(),
+        expectedEpoch: 'expected',
+      }),
+    ).toMatchObject({ ok: false });
+  },
+};
+const verificationBusy: ContractCase = {
+  name: 'a foreign rollback job cannot block verification completion',
+  async run(context) {
+    const f = await verificationFixture(context);
+    await f.seed(
+      "INSERT INTO job (id, org_id, type, resource_key, payload_json) VALUES ('foreign-rollback', ?, ?, ?, '{}')",
+      f.foreign.orgId,
+      IMPORT_RUN_JOB.rollback,
+      IMPORT_RUN_JOB.resourceKey('run'),
+    );
+    expect(
+      await storeFor(context).markVerified(f.own, f.fence, {
+        runId: 'run',
+        verifiedAt: new Date().toISOString(),
+        expectedEpoch: (
+          await context.executor.all<{ version: string }>({
+            sql: 'SELECT version FROM cache_epoch WHERE org_id = ?',
+            params: [f.own.orgId],
+          })
+        )[0]!.version,
+      }),
+    ).toMatchObject({ ok: true });
+  },
+};
+
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createImportJournalStore',
@@ -181,10 +254,24 @@ export const entries: readonly MutationEntry[] = [
       permission,
       verify,
       verifyUpdate,
+      verificationEpoch,
+      verificationBusy,
       rollbackCase(false),
       rollbackCase(true),
     ],
     predicates: [
+      {
+        name: 'verification epoch is scoped to its organization',
+        locate: /cache_epoch\.org_id = \?/,
+        neutral: NOT_NULL,
+        caseName: verificationEpoch.name,
+      },
+      {
+        name: 'verification excludes only own rollback jobs',
+        locate: /ijbusy\.org_id = \?/,
+        neutral: NOT_NULL,
+        caseName: verificationBusy.name,
+      },
       {
         name: 'apply run reads are organization scoped',
         locate: /ijload\.org_id = \?/,

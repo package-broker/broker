@@ -4,6 +4,7 @@ import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
 import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
 import { createImportRollbackStore } from '@package-broker/db-sqlite/repositories/import-rollback';
+import { createImportVerificationStore } from '@package-broker/db-sqlite/repositories/import-verification';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
@@ -770,6 +771,10 @@ export function createNodeServer(
         : await assembleAccess(registration, plugins, auth, executor, log);
     if (access !== undefined && options.platformServices !== undefined) {
       importJobs.set({
+        verificationStore: createImportVerificationStore({
+          executor,
+          providerAnchors: access.anchors,
+        }),
         applyStore: createImportJournalStore({ executor, providerAnchors: access.anchors }),
         rollbackStore: createImportRollbackStore({ executor, providerAnchors: access.anchors }),
         blobs: options.platformServices.blob,

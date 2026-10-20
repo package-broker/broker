@@ -4,6 +4,7 @@ import { PERMISSIONS } from '../authz/permissions.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import type { BlobStore, Sha256 } from '../platform/blob.js';
+import { JobError } from '../platform/jobs.js';
 import { MAX_MANIFEST_BYTES, parseManifest, planHash, type Manifest } from './manifest.js';
 import {
   validImportApprovalTimestamp,
@@ -99,7 +100,12 @@ const SESSION_ONLY: ReadonlySet<string> = new Set(
   PERMISSIONS.filter((permission) => permission.sessionOnly).map((permission) => permission.name),
 );
 
-async function readManifest(deps: ImportApplyDeps, ctx: OrgContext, key: Sha256 | null) {
+export async function readImportManifest(
+  deps: Pick<ImportApplyDeps, 'blobs'>,
+  ctx: OrgContext,
+  key: Sha256 | null,
+  options: { readonly retryReadErrors?: boolean } = {},
+) {
   if (key === null) return null;
   try {
     const blob = await deps.blobs.get(ctx, key);
@@ -121,9 +127,14 @@ async function readManifest(deps: ImportApplyDeps, ctx: OrgContext, key: Sha256 
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
-    const parsed = parseManifest(JSON.parse(text));
-    return parsed.ok ? parsed.data : null;
+    try {
+      const parsed = parseManifest(JSON.parse(text));
+      return parsed.ok ? parsed.data : null;
+    } catch {
+      return null;
+    }
   } catch {
+    if (options.retryReadErrors) throw new JobError('handler_error');
     return null;
   }
 }
@@ -243,7 +254,7 @@ export async function runImportApply(
     await finish({ failed: reason });
     return { status: 'failed', reason };
   };
-  const manifest = await readManifest(deps, ctx, run.manifestBlobSha256);
+  const manifest = await readImportManifest(deps, ctx, run.manifestBlobSha256);
   if (manifest === null) return fail('manifest_unavailable');
   if ((await planHash(manifest)) !== run.planHash) return fail('plan_hash_mismatch');
   const applied = new Set(await store.appliedRefs(ctx, run.id));

@@ -7,8 +7,10 @@ import {
   type TokenMutationFence,
 } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { ulid } from '@package-broker/core/ids';
 import {
   IMPORT_RUN_JOB,
+  IMPORT_VERIFICATION_JOB,
   validImportApprovalTimestamp,
   type ImportRun,
   type ImportRunOperation,
@@ -17,7 +19,6 @@ import {
   type ImportRunWriteOutcome,
 } from '@package-broker/core/import/run-service';
 import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
-import { ulid } from '@package-broker/core/ids';
 import {
   assertCheck,
   assertGuard,
@@ -82,7 +83,8 @@ export function createImportRunStore(options: {
       and unixepoch(irs.reauth_at, 'subsec') between ${CLOCK} - ${REAUTH_WINDOW_MS / 1000} and ${CLOCK})`;
   }
   function authority(ctx: OrgContext, fence: CreateFence, operation: ImportRunOperation): Guard {
-    if (operation === 'createRun') return importWriteAuthority(ctx, fence, anchors);
+    if (operation === 'createRun' || operation === 'requestVerify')
+      return importWriteAuthority(ctx, fence, anchors);
     if (fenceKind(fence) !== 'session') throw new TypeError('invalid import fence');
     return actorHolds(ctx, session(fence), {
       permission: 'org:import:approve',
@@ -157,12 +159,16 @@ export function createImportRunStore(options: {
         valid = sql<SqlBool>`${e.state === 'planned' ? 1 : 0} = 1`;
         update = { state: 'cancelled' };
         break;
+      case 'requestVerify':
+        valid = sql<SqlBool>`${['applied', 'verifying'].includes(e.state) && e.beforeImageExpiresAt === null ? 1 : 0} = 1`;
+        update = { state: 'verifying' };
+        break;
       case 'acceptRun':
         valid = sql<SqlBool>`${e.state === 'verified' && e.acceptedAt === null ? 1 : 0} = 1`;
         update = { accepted_at: input.now };
         break;
       case 'requestRollback':
-        valid = sql<SqlBool>`${['failed', 'applied', 'verified'].includes(e.state) ? 1 : 0} = 1
+        valid = sql<SqlBool>`${['failed', 'applied', 'verifying', 'verified'].includes(e.state) ? 1 : 0} = 1
           and (${e.beforeImageExpiresAt} is null or unixepoch(${e.beforeImageExpiresAt}, 'subsec') > ${CLOCK})`;
         break;
     }
@@ -172,18 +178,36 @@ export function createImportRunStore(options: {
       ...assertCheck(expected(ctx, input)),
       ...assertCheck(sql<SqlBool>`(${valid})`),
     );
-    if (operation === 'requestApply' || operation === 'requestRollback') {
-      const type = operation === 'requestApply' ? IMPORT_RUN_JOB.apply : IMPORT_RUN_JOB.rollback;
-      const resource = IMPORT_RUN_JOB.resourceKey(input.runId);
+    if (
+      operation === 'requestApply' ||
+      operation === 'requestRollback' ||
+      operation === 'requestVerify'
+    ) {
+      const type =
+        operation === 'requestVerify'
+          ? IMPORT_VERIFICATION_JOB.type
+          : operation === 'requestApply'
+            ? IMPORT_RUN_JOB.apply
+            : IMPORT_RUN_JOB.rollback;
+      const resource =
+        operation === 'requestVerify'
+          ? IMPORT_VERIFICATION_JOB.resourceKey(input.runId)
+          : IMPORT_RUN_JOB.resourceKey(input.runId);
       const payload =
-        operation === 'requestApply'
+        operation !== 'requestRollback'
           ? IMPORT_RUN_JOB.payload(input.runId)
           : { ...IMPORT_RUN_JOB.payload(input.runId), requestedBy: fence.userId };
       mutations.push(
         ...assertCheck(
-          sql<SqlBool>`not exists (select 1 from job irj where irj.org_id = ${ctx.orgId} and irj.resource_key = ${resource} and irj.state in ('queued', 'running'))`,
+          sql<SqlBool>`not exists (select 1 from job irj where irj.org_id = ${ctx.orgId} and irj.resource_key in (${IMPORT_RUN_JOB.resourceKey(input.runId)}, ${IMPORT_VERIFICATION_JOB.resourceKey(input.runId)}) and irj.state in ('queued', 'running'))`,
         ),
       );
+      const requestId =
+        operation === 'requestVerify'
+          ? (JSON.parse(String(input.audit.params[11])) as { request_id: string }).request_id
+          : null;
+      if (operation === 'requestVerify' && typeof requestId !== 'string')
+        throw new TypeError('import verification requires an audit request id');
       mutations.push(
         compile(
           db.insertInto('job').values({
@@ -192,6 +216,9 @@ export function createImportRunStore(options: {
             type,
             resource_key: resource,
             payload_json: JSON.stringify(payload),
+            ...(operation === 'requestVerify'
+              ? { idempotency_key: IMPORT_VERIFICATION_JOB.idempotencyKey(input.runId, requestId!) }
+              : {}),
             created_at: input.now,
             updated_at: input.now,
           }),
@@ -322,6 +349,7 @@ export function createImportRunStore(options: {
     },
     approveRun: (ctx, fence, input) => transition(ctx, fence, 'approveRun', input),
     requestApply: (ctx, fence, input) => transition(ctx, fence, 'requestApply', input),
+    requestVerify: (ctx, fence, input) => transition(ctx, fence, 'requestVerify', input),
     cancelRun: (ctx, fence, input) => transition(ctx, fence, 'cancelRun', input),
     acceptRun: (ctx, fence, input) => transition(ctx, fence, 'acceptRun', input),
     requestRollback: (ctx, fence, input) => transition(ctx, fence, 'requestRollback', input),

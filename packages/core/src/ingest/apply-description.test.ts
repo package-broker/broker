@@ -153,7 +153,7 @@ function fixture(): Fixture {
     markListing: (_ctx, _guard, input) => {
       f.calls.push('mark');
       f.marked.push(...input.present);
-      return Promise.resolve({ changed: true, statements: 5 });
+      return Promise.resolve({ changed: true, marked: input.present.length, statements: 5 });
     },
     finalizeListing: () => Promise.reject(new Error('apply finalizes through the finalizer')),
     quarantine: (_ctx, _guard, input) => {

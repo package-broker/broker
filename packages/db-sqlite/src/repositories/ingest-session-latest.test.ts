@@ -51,8 +51,8 @@ async function insertRow(
   const id = `01J0ROW${String(serial).padStart(19, '0')}`;
   await database.executor.batch([
     stmt(
-      `INSERT INTO ingest_session (id, org_id, scope, scope_key, source_id, package_key, generation, owner, fence, lease_until, state, started_at, updated_at)
-       VALUES (?, ?, 'package', ?, ?, 'widget', ?, 'o', 1, ?, ?, ?, ?)`,
+      `INSERT INTO ingest_session (id, org_id, scope, scope_key, source_id, package_key, generation, owner, fence, lease_until, state, started_at, updated_at, stamp)
+       VALUES (?, ?, 'package', ?, ?, 'widget', ?, 'o', 1, ?, ?, ?, ?, ?)`,
       id,
       orgId,
       scopeKey,
@@ -62,6 +62,7 @@ async function insertRow(
       state,
       PAST,
       PAST,
+      state === 'running' ? 'started' : null,
     ),
   ]);
   return id;
@@ -118,6 +119,7 @@ describe('ingest session latest', () => {
     await s.start(org, h, { snapshot: { id: 'e' }, stamp: STAMP });
     await s.advance(org, h, { cursor: 'c', addSeen: 4 });
     expect(await s.latest(org, pkg('widget'))).toEqual({
+      id: h.id,
       state: 'running',
       generation: 1,
       fence: 1,
@@ -241,6 +243,9 @@ describe('ingest session maintenance sweep', () => {
 
   it('3: keeps a latest finished session and a recently expired running one', async () => {
     const abandoned = await insertRow(org.orgId, key(1), 1, 'abandoned', PAST);
+    await database.executor.batch([
+      stmt("UPDATE ingest_session SET stamp = 'started' WHERE id = ?", abandoned),
+    ]);
     const fresh = await insertRow(org.orgId, key(2), 1, 'running', ago(1));
     const live = await insertRow(org.orgId, key(3), 1, 'running', '2999-01-01T00:00:00.000Z');
     expect(await maintenance().sweep(10)).toEqual({ abandoned: 0, deleted: 0 });
@@ -275,6 +280,7 @@ describe('ingest session maintenance sweep', () => {
     const h = await s.acquire(org, pkg('widget'), A, 60);
     if (h === 'held') throw new Error('unreachable');
     expect(h.generation).toBe(2);
+    await s.start(org, h, { snapshot: { id: 'e' }, stamp: STAMP });
     await database.executor.batch([
       stmt(
         "UPDATE ingest_session SET lease_until = ? WHERE org_id = ? AND state = 'running'",
@@ -290,6 +296,18 @@ describe('ingest session maintenance sweep', () => {
     const next = await s.acquire(org, pkg('widget'), A, 60);
     if (next === 'held') throw new Error('unreachable');
     expect(next.generation).toBe(3);
+  });
+
+  it('deletes a sole abandoned generation that never started', async () => {
+    const lone = await insertRow(org.orgId, key(1), 1, 'abandoned', PAST);
+    const started = await insertRow(org.orgId, key(2), 1, 'abandoned', PAST);
+    const finished = await insertRow(org.orgId, key(3), 1, 'complete', PAST);
+    await database.executor.batch([
+      stmt("UPDATE ingest_session SET stamp = 'started' WHERE id = ?", started),
+    ]);
+    expect(await maintenance().sweep(10)).toEqual({ abandoned: 0, deleted: 1 });
+    expect(await ids()).toEqual([started, finished].sort());
+    expect(await ids()).not.toContain(lone);
   });
 
   it('5: removes at most the requested number per run, oldest lease first', async () => {

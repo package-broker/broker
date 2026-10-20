@@ -1,14 +1,15 @@
 import { apiError } from '../../api/response.js';
-import type { ProjectActor } from '../../authz/project-actor.js';
 import { PACKAGES_READ, type PackageAccess } from '../../catalogue/package-access.js';
 import type { ScopedCache } from '../../platform/cache.js';
 import type { OnDemandFill } from '../../ingest/on-demand.js';
+import { contextPackageActorOf } from '../../internal/package-actor.js';
 import { resolvedPackageOf } from '../../internal/package-context.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
 import type { RepresentationClock } from '../conditional.js';
 import type { DistService } from '../dist-service.js';
 import { parseComposerDistPath } from './dist-url.js';
+import { deferOf } from '../defer.js';
 import { renderComposerP2, renderPackagesJson } from './render.js';
 
 export interface ComposerRouteDeps {
@@ -65,17 +66,6 @@ function unavailable(requestId: string, retryAfterSeconds: number): Response {
   return response;
 }
 
-function actorOf(ctx: RequestContext): ProjectActor | null {
-  if (ctx.org === null || ctx.principal === null || ctx.projectId === null) return null;
-  return Object.freeze({
-    kind: 'project',
-    userId: ctx.principal.id,
-    orgId: ctx.org.orgId,
-    projectId: ctx.projectId,
-    permissions: new Set([PACKAGES_READ]),
-  });
-}
-
 function p2File(file: string | undefined): { name: string; dev: boolean } | null {
   const match = file === undefined ? null : FILE.exec(file);
   return match?.[1] === undefined ? null : { name: match[1], dev: match[2] !== undefined };
@@ -91,7 +81,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
       if (COMPOSER_1.test(ctx.request.headers.get('User-Agent') ?? '')) {
         return apiError('not_acceptable', ctx.requestId);
       }
-      const actor = actorOf(ctx);
+      const actor = contextPackageActorOf(ctx);
       if (actor === null) return notFound(ctx.requestId);
       return quietOnAbort(
         ctx,
@@ -124,7 +114,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
       },
     },
     async handler(ctx) {
-      const actor = actorOf(ctx);
+      const actor = contextPackageActorOf(ctx);
       const resolved = resolvedPackageOf(ctx);
       const parsed = p2File(ctx.params['file']);
       if (actor === null || resolved === null || parsed === null) return notFound(ctx.requestId);
@@ -142,10 +132,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
           if (filled.kind === 'busy') return unavailable(ctx.requestId, filled.retryAfterSeconds);
           if (filled.kind === 'upstream_error') return apiError('bad_gateway', ctx.requestId);
           if (filled.kind === 'serve' && filled.background !== undefined) {
-            const background = filled.background;
-            void Promise.resolve()
-              .then(background)
-              .catch(() => undefined);
+            deferOf(ctx)(filled.background);
           }
           return document(
             await renderComposerP2({
@@ -182,7 +169,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
           : `${params['vendor']}/${params['name']}`,
     },
     async handler(ctx) {
-      const actor = actorOf(ctx);
+      const actor = contextPackageActorOf(ctx);
       const resolved = resolvedPackageOf(ctx);
       const ref = parseComposerDistPath(new URL(ctx.request.url).pathname);
       if (
@@ -197,12 +184,16 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
       return quietOnAbort(
         ctx,
         async () => {
-          const result = await deps.dist.serve(actor, {
-            ecosystem: 'composer',
-            key: resolved.pkg.key,
-            versionId: ref.versionId,
-            revision: ref.revision,
-          });
+          const result = await deps.dist.serve(
+            actor,
+            {
+              ecosystem: 'composer',
+              key: resolved.pkg.key,
+              versionId: ref.versionId,
+              revision: ref.revision,
+            },
+            { signal: ctx.request.signal },
+          );
           if (result.kind === 'busy') return unavailable(ctx.requestId, result.retryAfterSeconds);
           if (result.kind === 'not_found') return notFound(ctx.requestId);
           if (distExtension(result.headers) !== ref.type) {

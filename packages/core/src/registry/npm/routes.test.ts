@@ -90,6 +90,7 @@ interface Setup {
   dist?: DistServeResult;
   handle?: string | null;
   actor?: ProjectActor | null;
+  kernelActor?: boolean;
 }
 
 async function harness(setup: Setup = {}) {
@@ -122,10 +123,14 @@ async function harness(setup: Setup = {}) {
     access: access as unknown as PackageAccess,
     dist: { serve },
     onDemand: { ensure },
-    actorOf: () => (setup.actor === undefined ? actor : setup.actor),
+    ...(setup.kernelActor === true
+      ? {}
+      : {
+          actorOf: () => (setup.actor === undefined ? actor : setup.actor),
+          defer: () => undefined,
+        }),
     reresolve,
     handleOf: () => (setup.handle === undefined ? 'alice' : setup.handle),
-    defer: () => undefined,
     publicUrl: 'https://broker.test',
     codecs: { gunzip: () => new TransformStream() },
   };
@@ -199,7 +204,7 @@ async function harness(setup: Setup = {}) {
         headers: { authorization: `Bearer ${token}`, ...init.headers },
       }),
     );
-  return { call, access, ensure, reresolve, serve, resolve, deps };
+  return { call, access, ensure, reresolve, serve, resolve, deps, kernel };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -326,12 +331,16 @@ describe('npm tarballs', () => {
     const response = await call('/x/-/x-1.0.0.tgz');
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('tgz');
-    expect(serve).toHaveBeenCalledWith(actor, {
-      ecosystem: 'npm',
-      key: 'x',
-      versionId: 'ver1',
-      revision: 2,
-    });
+    expect(serve).toHaveBeenCalledWith(
+      actor,
+      {
+        ecosystem: 'npm',
+        key: 'x',
+        versionId: 'ver1',
+        revision: 2,
+      },
+      { signal: expect.any(AbortSignal) },
+    );
   });
 
   it('answers 404 for an unknown version and 503 while the dist is filling', async () => {
@@ -418,6 +427,35 @@ describe('npm on-demand fill', () => {
     const fresh = await (await harness()).call('/x');
     expect(fresh.headers.get('x-broker-stale')).toBeNull();
     expect(fresh.headers.get('cache-control')).toBe('private, no-cache');
+  });
+
+  it('uses the kernel actor and the kernel waitUntil when no overrides are injected', async () => {
+    const background = vi.fn(async () => undefined);
+    const { call, resolve, ensure, kernel } = await harness({
+      kernelActor: true,
+      ensure: { kind: 'serve', stale: true, background },
+    });
+    expect((await call('/x')).status).toBe(200);
+    expect((ensure.mock.calls as unknown[][])[0]![0]).toBe(resolve.mock.calls[0]![0]);
+    await kernel.idle();
+    expect(background).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the request signal to the dist service for a tarball', async () => {
+    const { call, serve } = await harness({ kernelActor: true });
+    expect((await call('/x/-/x-1.0.0.tgz')).status).toBe(200);
+    expect((serve.mock.calls as unknown[][])[0]![2]).toEqual({ signal: expect.any(AbortSignal) });
+  });
+
+  it('answers a tarball aborted by the client quietly instead of 500', async () => {
+    const { call, serve } = await harness({ kernelActor: true });
+    const controller = new AbortController();
+    serve.mockImplementation(async () => {
+      controller.abort(new Error('client gone'));
+      throw controller.signal.reason;
+    });
+    const response = await call('/x/-/x-1.0.0.tgz', { signal: controller.signal });
+    expect(response.status).toBe(499);
   });
 
   it('answers a fill upstream error with 502 bad_gateway', async () => {

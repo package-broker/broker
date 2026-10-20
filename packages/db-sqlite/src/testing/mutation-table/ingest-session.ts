@@ -7,7 +7,11 @@ import {
 } from './harness.js';
 import { entries as finalizeEntries } from './ingest-finalize.js';
 import { expect } from 'vitest';
-import { ingestSessionGuard, sweepStatements } from '../../repositories/ingest-session.js';
+import {
+  discardStatement,
+  ingestSessionGuard,
+  sweepStatements,
+} from '../../repositories/ingest-session.js';
 import {
   HASH,
   OWNER,
@@ -87,6 +91,23 @@ const sweepForeignGeneration: ContractCase = {
   },
 };
 
+const discardForeignHolder: ContractCase = {
+  name: 'a live ingest holder of another organization is not discarded',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    await seedSource(seeder(context.executor), 'S-INGEST', foreign.orgId, 'npm_registry', 'npm');
+    await seedIngest(context, ingestHandle.id, foreign.orgId, 1);
+    await seeder(context.executor)(
+      "UPDATE ingest_session SET state = 'running' WHERE id = ?",
+      ingestHandle.id,
+    );
+    await context.executor.batch([context.mutate(discardStatement(own, ingestHandle))]);
+    expect(
+      await context.executor.all({ sql: 'SELECT id FROM ingest_session', params: [] }),
+    ).toEqual([{ id: ingestHandle.id }]);
+  },
+};
+
 const ingestGuardEntry: MutationEntry = {
   builder: 'ingestSessionGuard',
   file: 'repositories/ingest-session.ts',
@@ -125,6 +146,12 @@ const sweepEntry: MutationEntry = {
   ],
   decisions: [
     {
+      name: 'a sole abandoned generation is deleted only when it never started',
+      pattern: /old\.stamp IS NULL/,
+      expected: 1,
+      build: () => sweepStatements(10, '2000-01-01T00:00:00.000Z', FUTURE),
+    },
+    {
       name: 'both sweep decisions are bounded',
       pattern: /limit \?/,
       expected: 2,
@@ -133,4 +160,32 @@ const sweepEntry: MutationEntry = {
   ],
 };
 
-export const entries: readonly MutationEntry[] = [ingestGuardEntry, sweepEntry, ...finalizeEntries];
+const discardEntry: MutationEntry = {
+  builder: 'discardStatement',
+  file: 'repositories/ingest-session.ts',
+  cases: [discardForeignHolder],
+  predicates: [
+    {
+      name: 'holder organization',
+      locate: ref('ingest_session', 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      caseName: discardForeignHolder.name,
+      copies: 1,
+    },
+  ],
+  decisions: [
+    {
+      name: 'only a never-started generation is deleted',
+      pattern: /stamp" is null/,
+      expected: 1,
+      build: () => [discardStatement(WRITE_ORG, ingestHandle)],
+    },
+  ],
+};
+
+export const entries: readonly MutationEntry[] = [
+  ingestGuardEntry,
+  sweepEntry,
+  discardEntry,
+  ...finalizeEntries,
+];

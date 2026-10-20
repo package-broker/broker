@@ -93,6 +93,8 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/registry-reads.ts#createRegistryReads':
+    'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of coversStatement and versionByIdStatement, both registered separately in registry-reads.ts.',
   'repositories/organization.ts#createOrganizationBootstrap':
     'REDUNDANT_BY_SCHEMA: 0001_init.sql organization_singleton UNIQUE (singleton), CHECK (singleton = 1); bootstrap selects the installation singleton rather than an organization context',
   'repositories/keyring-verifier.ts#createKeyringVerifierStore':

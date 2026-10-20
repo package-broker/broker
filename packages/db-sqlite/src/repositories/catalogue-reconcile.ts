@@ -7,6 +7,7 @@ import {
   type FinalizeResult,
   type FinalizeEvidence,
   type ListingScope,
+  type MarkListingEffect,
   type WriteEffect,
 } from '@package-broker/core/db/catalogue';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -18,6 +19,7 @@ import {
 } from '@package-broker/core/catalogue/version-rules';
 import {
   assertFinalizeAllowed,
+  DEFAULT_MAX_ABSENCE_SHARE,
   type FinalizeGuardOptions,
 } from '@package-broker/core/ingest/finalize-guard';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
@@ -57,7 +59,7 @@ export interface CatalogueReconciler {
       readonly stamp: string;
       readonly present: readonly string[];
     },
-  ): Promise<WriteEffect>;
+  ): Promise<MarkListingEffect>;
   finalizeListing(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
@@ -161,6 +163,31 @@ function seenRows(
           AND version.listing_seen_stamp = ${stamp})`;
 }
 
+function sourceUnseenPredicate(ctx: OrgContext, boundary: RawBuilder<string>): RawBuilder<boolean> {
+  return sql<boolean>`package.updated_at < ${boundary}
+      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing'
+        OR EXISTS (SELECT 1 FROM version WHERE version.package_id = package.id
+          AND version.org_id = ${ctx.orgId} AND version.status = 'active'))`;
+}
+
+export function unseenSourcePackages(ctx: OrgContext, sourceId: string): RawBuilder<number> {
+  requireId('source scope id', sourceId);
+  const boundary = sweepBoundary(ctx, { kind: 'source', sourceId });
+  return sql<number>`(SELECT count(*) FROM package
+    WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}
+      AND ${sourceUnseenPredicate(ctx, boundary)})`;
+}
+
+/** Needs `seen >= 1`: an empty listing never reaches the unseen count. */
+export function withinAbsenceShare(
+  unseen: RawBuilder<number>,
+  seen: number,
+  maxShare: number,
+): RawBuilder<boolean> {
+  return sql<boolean>`(SELECT CAST(counted.n AS REAL) / (${seen} + counted.n) <= ${maxShare}
+    FROM (SELECT ${unseen} AS n) AS counted)`;
+}
+
 function conditionalEpochBump(ctx: OrgContext, condition: RawBuilder<boolean>): Statement[] {
   return [
     statementOf(
@@ -232,6 +259,11 @@ function transitionStatements(
   };
 }
 
+export interface FinalizeStatementOptions extends FinalizeGuardOptions {
+  /** Source listings: count the unseen packages and apply the absence share inside the batch. */
+  readonly countUnseen?: boolean;
+}
+
 export interface FinalizeStatements {
   readonly statements: readonly Statement[];
   readonly removalIndex: number;
@@ -244,7 +276,7 @@ export function finalizeListingStatements(
   guard: CatalogueWriteGuard,
   listing: CompleteSourceListing | CompleteVersionListing,
   evidence: FinalizeEvidence,
-  options: FinalizeGuardOptions = {},
+  options: FinalizeStatementOptions = {},
 ): FinalizeStatements {
   assertCatalogueWriteGuard(ctx, guard);
   if (!isCompleteListing(listing)) {
@@ -267,14 +299,22 @@ export function finalizeListingStatements(
   ];
 
   if (scope.kind === 'source') {
-    const unseen = sql<boolean>`package.updated_at < ${boundary}
-      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing'
-        OR EXISTS (SELECT 1 FROM version WHERE version.package_id = package.id
-          AND version.org_id = ${ctx.orgId} AND version.status = 'active'))`;
+    const unseen = sourceUnseenPredicate(ctx, boundary);
     const returned = sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'`;
     const rows = (predicate: RawBuilder<boolean>) =>
       sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}`;
-    const statements = [...preconditions];
+    const statements = [
+      ...preconditions,
+      ...(options.countUnseen === true
+        ? checkOf(
+            withinAbsenceShare(
+              unseenSourcePackages(ctx, id),
+              count,
+              options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
+            ),
+          )
+        : []),
+    ];
     const removal = statements.length;
     statements.push(
       statementOf(
@@ -383,7 +423,7 @@ export function finalizeListingStatements(
 
 export function createCatalogueReconciler(
   executor: SqlExecutor,
-  options: FinalizeGuardOptions = {},
+  options: FinalizeStatementOptions = {},
 ): CatalogueReconciler {
   return {
     async openListing(ctx, guard, scope) {
@@ -431,7 +471,7 @@ export function createCatalogueReconciler(
       );
       const results = await executor.batch(statements);
       const changed = results[updateIndex]?.changes ?? 0;
-      return { changed: changed > 0, statements: statements.length };
+      return { changed: changed > 0, marked: changed, statements: statements.length };
     },
 
     async finalizeListing(ctx, guard, listing, evidence) {

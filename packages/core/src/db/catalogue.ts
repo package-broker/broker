@@ -336,6 +336,11 @@ export interface WriteEffect {
   readonly statements: number;
 }
 
+export interface MarkListingEffect extends WriteEffect {
+  /** Rows that carried another stamp before this call; a replay of the same keys marks none. */
+  readonly marked: number;
+}
+
 export type ListingScope =
   | { readonly kind: 'source'; readonly sourceId: string }
   | { readonly kind: 'package'; readonly packageId: string };
@@ -407,7 +412,7 @@ export interface CatalogueWriter {
       readonly stamp: string;
       readonly present: readonly string[];
     },
-  ): Promise<WriteEffect>;
+  ): Promise<MarkListingEffect>;
   /** Count upstream keys minus this run's refusals; use the current open's stamp. Empty documents use markPackageAbsent. */
   finalizeListing(
     ctx: OrgContext,

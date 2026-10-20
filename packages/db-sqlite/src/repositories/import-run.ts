@@ -175,6 +175,10 @@ export function createImportRunStore(options: {
     if (operation === 'requestApply' || operation === 'requestRollback') {
       const type = operation === 'requestApply' ? IMPORT_RUN_JOB.apply : IMPORT_RUN_JOB.rollback;
       const resource = IMPORT_RUN_JOB.resourceKey(input.runId);
+      const payload =
+        operation === 'requestApply'
+          ? IMPORT_RUN_JOB.payload(input.runId)
+          : { ...IMPORT_RUN_JOB.payload(input.runId), requestedBy: fence.userId };
       mutations.push(
         ...assertCheck(
           sql<SqlBool>`not exists (select 1 from job irj where irj.org_id = ${ctx.orgId} and irj.resource_key = ${resource} and irj.state in ('queued', 'running'))`,
@@ -187,7 +191,7 @@ export function createImportRunStore(options: {
             org_id: ctx.orgId,
             type,
             resource_key: resource,
-            payload_json: JSON.stringify(IMPORT_RUN_JOB.payload(input.runId)),
+            payload_json: JSON.stringify(payload),
             created_at: input.now,
             updated_at: input.now,
           }),

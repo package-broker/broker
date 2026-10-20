@@ -1,6 +1,9 @@
 import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import { createObservability } from '@package-broker/core/platform/observability';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
+import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
+import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
+import { createImportRollbackStore } from '@package-broker/db-sqlite/repositories/import-rollback';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
@@ -668,6 +671,7 @@ export function createNodeServer(
   });
 
   const { auth } = options;
+  const importJobs = createImportJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;
   const application = (async () => {
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
@@ -741,6 +745,7 @@ export function createNodeServer(
           : [
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+              ...(auth === undefined ? [] : importJobRegistrations(importJobs)),
             ],
     });
     if (registry !== undefined && options.platformServices !== undefined) {
@@ -757,6 +762,13 @@ export function createNodeServer(
       auth === undefined
         ? undefined
         : await assembleAccess(registration, plugins, auth, executor, log);
+    if (access !== undefined && options.platformServices !== undefined) {
+      importJobs.set({
+        applyStore: createImportJournalStore({ executor, providerAnchors: access.anchors }),
+        rollbackStore: createImportRollbackStore({ executor, providerAnchors: access.anchors }),
+        blobs: options.platformServices.blob,
+      });
+    }
     const packages =
       access === undefined || reads === undefined
         ? null

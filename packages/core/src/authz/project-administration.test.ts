@@ -500,6 +500,103 @@ describe('revoke', () => {
     });
   });
 
+  it('reports a deleted grant with an offboarded user once to the user trigger', async () => {
+    const onUserOffboarded = vi.fn();
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      { onUserOffboarded },
+    );
+    expect(
+      await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call),
+    ).toEqual({ ok: true, value: null });
+    expect(onUserOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'member-1',
+      cause: 'membership_removed',
+      at: NOW,
+    });
+  });
+
+  it('does not report a deleted grant without an offboarded user to the user trigger', async () => {
+    const onUserOffboarded = vi.fn();
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: null } },
+      { onUserOffboarded },
+    );
+    expect(
+      (await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call)).ok,
+    ).toBe(true);
+    expect(onUserOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('does not report a refused revoke to the user trigger', async () => {
+    const onUserOffboarded = vi.fn();
+    const { service } = setup({ delete: 'conflict' }, { onUserOffboarded });
+    expect(
+      (await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call)).ok,
+    ).toBe(false);
+    expect(onUserOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('logs a throwing user trigger by name, keeps success and still ran the creator callback', async () => {
+    const onCreatorOffboarded = vi.fn();
+    const { service, log } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      {
+        onCreatorOffboarded,
+        onUserOffboarded: async () => {
+          throw new TypeError('private detail');
+        },
+      },
+    );
+    expect(
+      await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call),
+    ).toEqual({ ok: true, value: null });
+    expect(onCreatorOffboarded).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'user.pat_offboarding_enqueue_failed',
+      orgId: ctx.orgId,
+      userId: 'member-1',
+      cause: 'membership_removed',
+      error: 'TypeError',
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private detail');
+  });
+
+  it('runs the creator callback before the user trigger', async () => {
+    const order: string[] = [];
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      {
+        onCreatorOffboarded: () => {
+          order.push('creator');
+        },
+        onUserOffboarded: () => {
+          order.push('user');
+        },
+      },
+    );
+    await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call);
+    expect(order).toEqual(['creator', 'user']);
+  });
+
+  it('still runs the user trigger when the creator callback throws', async () => {
+    const onUserOffboarded = vi.fn();
+    const { service } = setup(
+      { delete: { status: 'deleted', offboardedUserId: 'member-1' } },
+      {
+        onCreatorOffboarded: () => {
+          throw new Error('creator failure');
+        },
+        onUserOffboarded,
+      },
+    );
+    expect(
+      (await service.revoke(ctx, projectActor(), grantFence(), PROJECT_A, GRANT_ID, call)).ok,
+    ).toBe(true);
+    expect(onUserOffboarded).toHaveBeenCalledOnce();
+  });
+
   it('deletes under the fence with only write authority, never reading a role', async () => {
     const { service, store } = setup();
     const fence = fenceOf({ [`access_grant:${GRANT_ID}`]: 3 });

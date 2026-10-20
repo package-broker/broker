@@ -169,6 +169,7 @@ describe('renderBuildManifest', () => {
         ...manifestBody([]),
         'export const platformPorts = null;',
         'export const observability = config.observability;',
+        'export const registry = config.registry;',
         '',
       ].join('\n'),
     );
@@ -190,6 +191,7 @@ describe('renderBuildManifest', () => {
         '}',
         'export const platformPorts = null;',
         'export const observability = config.observability;',
+        'export const registry = config.registry;',
         '',
       ].join('\n'),
     );
@@ -213,6 +215,7 @@ describe('renderBuildManifest', () => {
         ...manifestBody([]),
         'export const platformPorts = null;',
         'export const observability = config.observability;',
+        'export const registry = config.registry;',
         '',
       ].join('\n'),
     );

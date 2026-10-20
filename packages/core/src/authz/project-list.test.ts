@@ -583,3 +583,228 @@ describe('capped fallback and readable source agree', () => {
     },
   );
 });
+
+describe('restricted listing through the read-access port', () => {
+  it('lists only bound projects the actor holds a live project:read grant on', async () => {
+    const w = world({ projects: range(6), projectPermissions: readable([1, 3, 5]) });
+    const { lister, permissionsFor } = setup(w);
+    const found = await ids(lister, actorOf(w), {
+      limit: 50,
+      restrictTo: [idOf(1), idOf(2), idOf(3), idOf(4)],
+    });
+    expect(found).toEqual([idOf(1), idOf(3)]);
+    expect(permissionsFor).toHaveBeenCalled();
+  });
+
+  it('lists nothing when the grants are gone, even for bound ids', async () => {
+    const w = world({ projects: range(3) });
+    const { lister } = setup(w);
+    expect(
+      await ids(lister, actorOf(w), { limit: 50, restrictTo: range(3).map((p) => p.id) }),
+    ).toEqual([]);
+  });
+
+  it('ignores a project:write grant', async () => {
+    const w = world({ projects: range(2), projectPermissions: { [idOf(1)]: ['project:write'] } });
+    const { lister } = setup(w);
+    expect(await ids(lister, actorOf(w), { limit: 50, restrictTo: [idOf(1)] })).toEqual([]);
+  });
+
+  it('ends with a null cursor when the last bound project fills the page exactly', async () => {
+    const w = world({ projects: range(4), projectPermissions: readable([1, 2, 3, 4]) });
+    const { lister } = setup(w);
+    const result = await lister.list(ctx, actorOf(w), {
+      limit: 2,
+      restrictTo: [idOf(1), idOf(2)],
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: { items: [entry(1), entry(2)], nextAfterId: null },
+    });
+  });
+
+  it('keeps a cursor while later bound ids remain', async () => {
+    const w = world({ projects: range(4), projectPermissions: readable([1, 2, 3]) });
+    const { lister } = setup(w);
+    const result = await lister.list(ctx, actorOf(w), {
+      limit: 2,
+      restrictTo: [idOf(1), idOf(2), idOf(3)],
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: { items: [entry(1), entry(2)], nextAfterId: idOf(2) },
+    });
+  });
+});
+
+describe('restricted listing through the readable source', () => {
+  it('reaches a bound project behind thousands of readable ones in one page', async () => {
+    const w = world({
+      projects: range(2_500),
+      projectPermissions: readable(range(2_500).map((_, i) => i + 1)),
+    });
+    const { lister, listReadableProjects, list } = readableSetup(w);
+    const result = await lister.list(ctx, actorOf(w), { limit: 10, restrictTo: [idOf(2_490)] });
+    expect(result).toEqual({ ok: true, value: { items: [entry(2_490)], nextAfterId: null } });
+    expect(listReadableProjects.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('caps the reads per page and continues from a cursor to the later bound project', async () => {
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+    const validId = (n: number): string =>
+      `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;
+    const total = 5_000;
+    const projects = Array.from({ length: total }, (_, i) => ({
+      id: validId(i + 1),
+      slug: `p${i + 1}`,
+      name: `Project ${i + 1}`,
+      status: 'active' as const,
+    }));
+    const w = world({
+      projects,
+      projectPermissions: Object.fromEntries(projects.map((p) => [p.id, ['project:read']])),
+    });
+    const { lister, listReadableProjects } = readableSetup(w);
+    const bound = [validId(1), validId(total)];
+    const found: string[] = [];
+    let afterId: string | undefined;
+    let pages = 0;
+    for (; pages < 10; pages += 1) {
+      listReadableProjects.mockClear();
+      const result = await lister.list(ctx, actorOf(w), {
+        limit: 10,
+        restrictTo: bound,
+        ...(afterId === undefined ? {} : { afterId }),
+      });
+      if (!result.ok) throw new Error(`refused: ${result.error}`);
+      expect(listReadableProjects.mock.calls.length).toBeLessThanOrEqual(10);
+      found.push(...result.value.items.map((p) => p.id));
+      if (result.value.nextAfterId === null) break;
+      afterId = result.value.nextAfterId;
+    }
+    expect(found).toEqual(bound);
+    expect(pages).toBe(0);
+  });
+
+  it('never hands out an unbound id as a cursor and reaches a far bound id behind a revoked one', async () => {
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+    const validId = (n: number): string =>
+      `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;
+    const total = 5_000;
+    const projects = Array.from({ length: total }, (_, i) => ({
+      id: validId(i + 1),
+      slug: `p${i + 1}`,
+      name: `Project ${i + 1}`,
+      status: 'active' as const,
+    }));
+    const revoked = validId(1);
+    const far = validId(total);
+    const w = world({
+      projects,
+      projectPermissions: Object.fromEntries(
+        projects.filter((p) => p.id !== revoked).map((p) => [p.id, ['project:read']]),
+      ),
+    });
+    const { lister, listReadableProjects } = readableSetup(w);
+    const bound = [revoked, far];
+    const found: string[] = [];
+    let afterId: string | undefined;
+    let sawCursor = false;
+    for (let pages = 0; pages < 10; pages += 1) {
+      listReadableProjects.mockClear();
+      const result = await lister.list(ctx, actorOf(w), {
+        limit: 10,
+        restrictTo: bound,
+        ...(afterId === undefined ? {} : { afterId }),
+      });
+      if (!result.ok) throw new Error(`refused: ${result.error}`);
+      expect(listReadableProjects.mock.calls.length).toBeLessThanOrEqual(10);
+      found.push(...result.value.items.map((p) => p.id));
+      const next = result.value.nextAfterId;
+      if (next === null) break;
+      sawCursor = true;
+      expect(bound).toContain(next);
+      expect(next > (afterId ?? '')).toBe(true);
+      afterId = next;
+    }
+    expect(found).toEqual([far]);
+    expect(sawCursor || found.length > 0).toBe(true);
+  });
+
+  it('hands out a bound id, never the last scanned unbound one, when the read cap is hit', async () => {
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+    const validId = (n: number): string =>
+      `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;
+    const rowsOf = (after: string | undefined): ProjectListEntry[] =>
+      Array.from({ length: 5_000 }, (_, i) => i + 1)
+        .map((n) => ({
+          id: validId(n),
+          slug: `p${n}`,
+          name: `Project ${n}`,
+          status: 'archived' as const,
+        }))
+        .filter((p) => after === undefined || p.id > after)
+        .slice(0, PROJECT_LIST_MAX_LIMIT);
+    const listReadableProjects = vi.fn<ReadableProjectSource['listReadableProjects']>(
+      async (_ctx, _actor, page) => rowsOf(page.afterId),
+    );
+    const w = world({ projects: [] });
+    const lister = createProjectLister({
+      source: setup(w).source,
+      readable: { listReadableProjects },
+    });
+    const bound = Array.from({ length: 2_500 }, (_, i) => validId(2 * i + 1));
+    const result = await lister.list(ctx, actorOf(w), { limit: 5, restrictTo: bound });
+    expect(listReadableProjects).toHaveBeenCalledTimes(10);
+    expect(result).toEqual({ ok: true, value: { items: [], nextAfterId: validId(1_999) } });
+  });
+
+  it('refuses a readable source that does not advance past the cursor', async () => {
+    const w = world({ projects: range(300), projectPermissions: readable([300]) });
+    const stuck = Array.from({ length: PROJECT_LIST_MAX_LIMIT }, (_, i) => entry(i + 1));
+    const listReadableProjects = vi.fn<ReadableProjectSource['listReadableProjects']>(
+      async () => stuck,
+    );
+    const lister = createProjectLister({
+      source: setup(w).source,
+      readable: { listReadableProjects },
+    });
+    const result = await lister.list(ctx, actorOf(w), {
+      limit: 5,
+      restrictTo: [idOf(300)],
+      afterId: idOf(250),
+    });
+    expect(result).toEqual({ ok: false, error: 'source_invalid' });
+  });
+
+  it('never lists a readable project outside the binding', async () => {
+    const w = world({ projects: range(5), projectPermissions: readable([1, 2, 3, 4, 5]) });
+    const { lister } = readableSetup(w);
+    expect(await ids(lister, actorOf(w), { limit: 50, restrictTo: [idOf(2), idOf(4)] })).toEqual([
+      idOf(2),
+      idOf(4),
+    ]);
+  });
+
+  it('does not list a bound project the actor cannot read', async () => {
+    const w = world({ projects: range(3), projectPermissions: readable([1]) });
+    const { lister } = readableSetup(w);
+    expect(await ids(lister, actorOf(w), { limit: 50, restrictTo: [idOf(1), idOf(2)] })).toEqual([
+      idOf(1),
+    ]);
+  });
+
+  it('ends with a null cursor when the last bound project fills the page exactly', async () => {
+    const w = world({ projects: range(4), projectPermissions: readable([1, 2, 3, 4]) });
+    const { lister } = readableSetup(w);
+    const result = await lister.list(ctx, actorOf(w), {
+      limit: 2,
+      restrictTo: [idOf(1), idOf(2)],
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: { items: [entry(1), entry(2)], nextAfterId: null },
+    });
+  });
+});

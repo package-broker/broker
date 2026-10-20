@@ -607,7 +607,7 @@ async function run() {
     await routeExecutor.batch(seed.map(([sql, params]) => ({ sql, params })));
 
     step = 'checking the package-boundary route';
-    const routePath = (name) => `/fixture/alpha/pkg/${name}`;
+    const routePath = (name) => `/fixture/pkg/alpha/${name}`;
     await expectStatus(
       'package route without credentials',
       await dispatch(routePath('visible'), limitMs),

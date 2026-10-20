@@ -4,7 +4,7 @@ import type { CatalogueReader, PackageVisibility, ResolvedPackage } from '../db/
 import { orgContext } from '../db/port.js';
 import { applyChunk, type ApplyDeps, type ApplyOutcome } from '../ingest/apply-description.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
-import { setContextPackageActor } from '../internal/package-actor.js';
+import { narrowPackageActor, setContextPackageActor } from '../internal/package-actor.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { systemClock } from '../ids.js';
 import type { PlatformPorts, RequestContext } from '../plugin.js';
@@ -233,7 +233,12 @@ function harness(options: { jobs?: boolean; ports?: Partial<PlatformPorts> } = {
 function context(
   url: string,
   params: Record<string, string>,
-  options: { snapshot?: boolean; outcome?: PackageVisibility; actor?: unknown } = {},
+  options: {
+    snapshot?: boolean;
+    outcome?: PackageVisibility;
+    actor?: unknown;
+    packageActor?: boolean;
+  } = {},
 ): RequestContext {
   const ctx = {
     request: new Request(url),
@@ -260,16 +265,25 @@ function context(
       },
     });
   }
-  if (options.snapshot !== false) {
+  if (options.snapshot !== false && options.packageActor !== false) {
+    const held = options.actor as
+      { organizationPermissions: string[]; projectPermissions: string[] } | undefined;
     setContextPackageActor(
       ctx,
-      Object.freeze({
-        kind: 'project',
-        userId: 'user-1',
-        orgId: org.orgId,
-        projectId: 'proj-1',
-        permissions: new Set([PACKAGES_READ]),
-      }),
+      narrowPackageActor(
+        {
+          kind: 'project',
+          userId: 'user-1',
+          orgId: org.orgId,
+          projectId: 'proj-1',
+          permissions: new Set(
+            held === undefined
+              ? [PACKAGES_READ]
+              : [...held.organizationPermissions, ...held.projectPermissions],
+          ),
+        } as never,
+        PACKAGES_READ,
+      ),
     );
   }
   if (options.outcome !== undefined && options.outcome.kind !== 'absent') {
@@ -627,6 +641,36 @@ describe('actor and re-resolution', () => {
     const response = await packument(h).handler(request(admitted));
     expect(response.status).toBe(404);
   });
+});
+
+describe('package actor requirement', () => {
+  it.each([
+    ['packument', 'https://broker.test/demo/npm/left-pad', '/:project/npm/:a'],
+    ['search', 'https://broker.test/demo/npm/-/v1/search?text=x', SEARCH],
+  ] as const)(
+    'refuses a %s request that has an access snapshot but no kernel package actor',
+    async (_label, url, route) => {
+      const h = harness();
+      const admitted: PackageVisibility = {
+        kind: 'proxy_admissible',
+        projectId: 'proj-1',
+        ecosystem: 'npm',
+        key: 'left-pad',
+        sourceIds: ['src-1'],
+      };
+      const ctx = context(
+        url,
+        { project: 'demo', a: 'left-pad' },
+        { outcome: admitted, packageActor: false },
+      );
+      const response = await routeOf(h.module().ecosystemRoutes, 'GET', route).handler(ctx);
+      expect([503, 404]).toContain(response.status);
+      expect(h.sessions.acquire).not.toHaveBeenCalled();
+      expect(h.policyFetch).not.toHaveBeenCalled();
+      expect(h.reader.resolveVersions).not.toHaveBeenCalled();
+      expect(h.reader.search).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('stale refresh', () => {

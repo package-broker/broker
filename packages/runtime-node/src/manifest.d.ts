@@ -5,4 +5,5 @@ declare module '#pb-manifest' {
   export const plugins: readonly PluginDefinition[];
   export const migrations: readonly MigrationSource[];
   export const platformPorts: PlatformPortConfig | null;
+  export const registry: import('@package-broker/core/config').BrokerConfig['registry'];
 }

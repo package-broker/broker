@@ -1,4 +1,5 @@
 import type { MutationEntry } from './harness.js';
+import { packetStatuses } from './packet-status.js';
 
 const BUILDER_RETURN =
   /\b(?:Guard|Statement|ScalarStatement|FenceGuard|LeaseGuardCondition|EligibleCondition|\w*Plan)\b|Expression<|SelectQueryBuilder|Statement\[\]/;
@@ -74,6 +75,10 @@ export function builderNames(
 
 const productionAccessFactories: ReadonlySet<string> = new Set([
   'repositories/project.ts#createProjectRepository',
+  'repositories/ingest-session.ts#createIngestSessions',
+  'repositories/upstream-state.ts#createUpstreamStateRepository',
+  'repositories/source.ts#createSourceRepository',
+  'repositories/catalogue-dist.ts#createDistResolver',
   'repositories/project-grant.ts#createProjectGrantRepository',
   'repositories/service-principal-authority.ts#createServicePrincipalAuthority',
   'repositories/unlink.ts#createUnlinkRepository',
@@ -86,103 +91,33 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
   'repositories/service-principal.ts#createServicePrincipalRepository',
 ]);
 
-/** Factories still awaiting semantic cases, and builders with no independent organization SQL. */
+/** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
-  'repositories/import-credential.ts#createImportCredentialRepository':
-    'DEFERRED: credential binding and window guards need independent import fixtures; owner T782n follow-up',
-  'repositories/import-authority.ts#importWriteAuthority':
-    'DEFERRED: session branch is actorHolds, registered in actor-authority.ts; token branch is covered by import-authority.test.ts until a token fixture exists; owner T782n follow-up',
-  'repositories/blob-access.ts#createBlobAccessRepository':
-    'DEFERRED: blob authorization read paths need independent child fixtures; owner T782n follow-up',
-  'repositories/fetch-lease.ts#createFetchLeases':
-    'DEFERRED: factory acquire, renew and release paths exceed the registered guard cases; owner T782n follow-up',
-  'repositories/blob.ts#createBlobRepository':
-    'DEFERRED: blob writes and lease lifecycle need independent child fixtures; owner T782n follow-up',
-  'repositories/credential.ts#createCredentialRepository':
-    'DEFERRED: credential lifecycle needs foreign user and credential fixtures; owner T782n follow-up',
-  'repositories/source.ts#createSourceRepository':
-    'DEFERRED: source factory reads and writes exceed the registered source guard case; owner T782n follow-up',
-  'repositories/ingest-session.ts#createIngestSessionWriteGuard':
-    'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
-  'repositories/ingest-session.ts#createIngestSessions':
-    'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
-  'repositories/ingest-session.ts#createIngestSessionMaintenance':
-    'DEFERRED: session lifecycle and maintenance exceed the registered statement cases; owner T782n follow-up',
-  'repositories/catalogue-reconcile.ts#finalizeListingStatements':
-    'DEFERRED: createCatalogueReconciler.finalizeListing wraps exactly these statements and is exercised by the registered reconcile cases; owner T782n follow-up',
-  'repositories/catalogue-lookup.ts#createCatalogueLookup':
-    'DEFERRED: lookup adapter needs executable foreign winner fixtures; owner T782n follow-up',
-  'repositories/registered-name.ts#createRegisteredNameRepository':
-    'DEFERRED: factory lookup paths exceed the registered name statements; owner T782n follow-up',
-  'repositories/upstream-state.ts#createUpstreamStateRepository':
-    'DEFERRED: upstream state transitions need foreign package fixtures; owner T782n follow-up',
-  'repositories/blob-references.ts#createBlobReferenceReader':
-    'DEFERRED: reference reader adapter exceeds the registered statement case; owner T782n follow-up',
-  'repositories/login.ts#createLoginWriter':
-    'DEFERRED: login writer needs foreign identity and user fixtures; owner T782n follow-up',
-  'repositories/closure-edges.ts#createClosureEdges':
-    'DEFERRED: closure edge lifecycle needs foreign project and package fixtures; owner T782n follow-up',
-  'repositories/representation-clock.ts#createRepresentationClock':
-    'DEFERRED: representation clock reads need foreign package fixtures; owner T782n follow-up',
   'repositories/registry-reads.ts#createRegistryReads':
-    'DEFERRED: factory only validates arguments and maps rows of the two registered statements; owner T782n follow-up',
-  'repositories/proxy-admission.ts#createProxyAdmission':
-    'DEFERRED: factory admission lifecycle exceeds admittedProxySources registration; owner T782n follow-up',
-  'repositories/scoped-admission.ts#createScopedAdmission':
-    'DEFERRED: scoped admission needs foreign lease and session fixtures; owner T782n follow-up',
-  'repositories/job-schedule.ts#createJobScheduleRepository':
-    'DEFERRED: job schedule writes need foreign source fixtures; owner T782n follow-up',
-  'repositories/catalogue-list.ts#createCatalogueList':
-    'DEFERRED: catalogue list readers need independent foreign winner fixtures; owner T782n follow-up',
-  'repositories/grant.ts#createGrantRepository':
-    'DEFERRED: organization grant lifecycle needs foreign role and subject fixtures; owner T782n follow-up',
-  'repositories/role.ts#createRoleRepository':
-    'DEFERRED: role factory writes exceed seedDefaultsStatements registration; owner T782n follow-up',
-  'repositories/session.ts#createSessionRepository':
-    'DEFERRED: session factory lifecycle exceeds the registered session statements; owner T782n follow-up',
-  'repositories/catalogue-dist.ts#createDistResolver':
-    'DEFERRED: dist resolver needs foreign version and blob fixtures; owner T782n follow-up',
-  'repositories/identity-block.ts#createIdentityBlockRepository':
-    'DEFERRED: identity blocking needs foreign subject and issuer fixtures; owner T782n follow-up',
-  'repositories/job.ts#createJobRepository':
-    'DEFERRED: job lifecycle needs foreign source and lease fixtures; owner T782n follow-up',
-  'repositories/local-login-success.ts#createLocalLoginSuccessWriter':
-    'DEFERRED: local login success writes need foreign user and credential fixtures; owner T782n follow-up',
-  'repositories/catalogue-read.ts#createCatalogueReader':
-    'DEFERRED: catalogue reader factory exceeds visibleWinner registration; owner T782n follow-up',
+    'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of coversStatement and versionByIdStatement, both registered separately in registry-reads.ts.',
   'repositories/organization.ts#createOrganizationBootstrap':
     'REDUNDANT_BY_SCHEMA: 0001_init.sql organization_singleton UNIQUE (singleton), CHECK (singleton = 1); bootstrap selects the installation singleton rather than an organization context',
   'repositories/keyring-verifier.ts#createKeyringVerifierStore':
     'REDUNDANT_BY_SCHEMA: 0015_keyring_verifier.sql keyring_verifier PRIMARY KEY (key_version); the verifier is installation-global and has no organization column',
-  'repositories/existing-versions.ts#createExistingVersionsReader':
-    'DEFERRED: existing version reader needs foreign package fixtures; owner T782n follow-up',
-  'repositories/local-login.ts#createLocalLoginReader':
-    'DEFERRED: local login reader needs foreign user and credential fixtures; owner T782n follow-up',
-  'repositories/local-login-setup.ts#createLocalLoginSetupWriter':
-    'DEFERRED: local login setup writes need foreign user and credential fixtures; owner T782n follow-up',
-  'repositories/user.ts#createUserRepository':
-    'DEFERRED: user factory methods beyond the auth getIdentity case need separate fixtures; owner T782n follow-up',
-  'repositories/cache-epoch.ts#createCacheEpochRepository':
-    'DEFERRED: epoch repository adapter exceeds epochReadStatement registration; owner T782n follow-up',
 
   'internal/lease-time.ts#until':
-    'DEFERRED: builds only a lease timestamp expression; no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: builds a lease timestamp expression without tables or organization predicates.',
   'repositories/catalogue-predicates.ts#winnerOrder':
-    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: returns ORDER BY expressions without selecting or changing rows.',
   'repositories/catalogue-status.ts#quarantineStatements':
-    'DEFERRED: adds no SQL or organization column of its own: concatenates the supplied guard, versionStatusStatements and conditionalEpochBumpStatement unchanged; their predicates are registered separately; owner T782n exemption review',
+    'NOT_A_MUTATION: adds no SQL; concatenates supplied guards, versionStatusStatements and conditionalEpochBumpStatement unchanged, all registered separately.',
   'repositories/session-liveness.ts#liveSessionCondition':
-    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: builds only revocation and time predicates for a supplied session alias; callers supply organization scoping.',
   'kysely.ts#compile':
-    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: compiles the supplied query unchanged without adding tables or predicates.',
   'kysely.ts#existsGuard':
-    'DEFERRED: wraps only the supplied query in EXISTS; it adds no table, column or organization predicate of its own; owner T782n exemption review',
+    'NOT_A_MUTATION: wraps a supplied query in EXISTS without adding tables or organization predicates.',
   'kysely.ts#assertCheck':
-    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: wraps a supplied predicate in a constraint check without adding organization SQL.',
   'internal/catalogue-write-guard.ts#registerCatalogueWriteGuard':
-    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: brands supplied statements and records their organization in a WeakMap without building SQL.',
   'internal/catalogue-write-guard.ts#assertCatalogueWriteGuard':
-    'DEFERRED: builds no organization-scoped read or write; owner T782n exemption review',
+    'NOT_A_MUTATION: checks the WeakMap brand and organization without building SQL.',
 };
 
 /** Problems between the exported builders of the given repository sources, the table and the allowlist. */
@@ -190,6 +125,7 @@ export function checkCompleteness(
   sources: Readonly<Record<string, string>>,
   table: readonly MutationEntry[],
   allowlist: Readonly<Record<string, string>> = builderAllowlist,
+  statuses: typeof packetStatuses = packetStatuses,
 ): string[] {
   const exported = new Set<string>();
   for (const file of Object.keys(sources)) {
@@ -212,10 +148,21 @@ export function checkCompleteness(
     }
     const reason = allowlist[key] ?? '';
     if (
+      !/^NOT_A_MUTATION: .+/.test(reason) &&
       !/^REDUNDANT_BY_SCHEMA: .*(?:FOREIGN KEY|PRIMARY KEY|UNIQUE|CHECK)/.test(reason) &&
       !/^DEFERRED: .+; owner T\d+\w*(?: .+)?$/.test(reason)
     ) {
-      problems.push(`${key} needs a schema constraint or a deferred reason and owner packet`);
+      problems.push(
+        `${key} needs a no-mutation reason, schema constraint or deferred reason and owner packet`,
+      );
+    }
+    if (reason.startsWith('DEFERRED:')) {
+      const owner = /; owner (T\d+\w*)(?: .+)?$/.exec(reason)?.[1];
+      if (owner !== undefined && statuses[owner] !== 'open') {
+        problems.push(
+          `${key} deferred owner ${owner} is ${statuses[owner] ?? 'unknown'}; an open packet is required`,
+        );
+      }
     }
   }
   return problems;

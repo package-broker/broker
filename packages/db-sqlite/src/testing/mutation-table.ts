@@ -77,6 +77,7 @@ import { entries as auditPendingEntries } from './mutation-table/audit-pending.j
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
 import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
 import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
+import { entries as packageIdEntries } from './mutation-table/package-id.js';
 import { entries as registryReadsEntries } from './mutation-table/registry-reads.js';
 import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
 import { entries as importRollbackEntries } from './mutation-table/import-rollback.js';
@@ -142,6 +143,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...visibilityAttachEntries,
   ...roleEntries,
   ...proxyAdmissionEntries,
+  ...packageIdEntries,
   ...registryReadsEntries,
   ...catalogueReadEntries,
   ...catalogueReaderEntries,

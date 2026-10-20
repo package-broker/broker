@@ -51,6 +51,11 @@
       "prerelease": true,
       "prerelease-type": "rc"
     },
+    "packages/ui-assets": {
+      "component": "ui-assets",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
     "packages/db-sqlite": {
       "component": "db-sqlite",
       "prerelease": true,

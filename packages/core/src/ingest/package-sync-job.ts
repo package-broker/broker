@@ -5,6 +5,7 @@ import type { UpstreamForm, UpstreamStateRepository } from '../db/upstream-state
 import { canonicalPayload, defineJob, JobError } from '../platform/jobs.js';
 import type { EnqueueInput, JobContext, Jobs } from '../platform/jobs.js';
 import type { SourceType } from '../sources/config.js';
+import { assertDescribeResult } from '../sources/provider.js';
 import { applyChunk, type ApplyDeps } from './apply-description.js';
 import {
   describeOptions,
@@ -175,11 +176,14 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
         const form = upstreamForm(metadata.type, metadata.form);
         const forms: UpstreamForm[] =
           form === 'composer-p2' ? ['composer-p2', 'composer-p2-dev'] : [form];
-        const described = await plan.describe(
-          describeOptions(session, plan.publishedValidators),
-          context.signal,
-        );
+        const describeInput = describeOptions(session, plan.publishedValidators);
+        const described = await plan.describe(describeInput, context.signal);
         context.signal.throwIfAborted();
+        try {
+          assertDescribeResult(describeInput, described);
+        } catch {
+          throw retry();
+        }
         if (described.kind === 'not_modified') {
           const packageId = await deps.findPackageId(ctx, sourceId, key);
           if (packageId !== null) {
@@ -276,6 +280,11 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
             await packageSyncEnqueueInput(next),
           );
           return;
+        }
+        if (applied.status === 'refused' || applied.status === 'incomplete') {
+          if (!applied.done) await end(true);
+          open = false;
+          throw retry();
         }
         open = false;
       } catch (error) {

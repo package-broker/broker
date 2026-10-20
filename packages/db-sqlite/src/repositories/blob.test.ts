@@ -1036,3 +1036,188 @@ describe('blob writer shared purge lease boundary', () => {
     }
   });
 });
+
+describe('scheduleOrphan', () => {
+  const DAYS_AGO = (days: number) =>
+    `UPDATE blob SET published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-${days} days')`;
+
+  async function orphan(days: number, org = a, sha = D1) {
+    const repo = createBlobRepository(executor);
+    await publish(repo, org, { sha256: sha });
+    await exec(`${DAYS_AGO(days)} WHERE org_id = ? AND sha256 = ?`, org.orgId, sha);
+    return repo;
+  }
+
+  async function ingestSnapshot(): Promise<void> {
+    await exec(
+      "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('S', ?, 's', 'npm', 'npmjs_proxy')",
+      a.orgId,
+    );
+    await exec(
+      `INSERT INTO ingest_session (id, org_id, scope, scope_key, source_id, generation, owner, fence, lease_until, state, snapshot_blob_sha256, started_at, updated_at)
+        VALUES ('ING1', ?, 'source', ?, 'S', 1, 'o', 1, '2099-01-01T00:00:00.000Z', 'running', ?, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')`,
+      a.orgId,
+      'c'.repeat(64),
+      D1,
+    );
+  }
+
+  async function upstreamHash(): Promise<void> {
+    await reference('npmjs_proxy', 'tombstoned');
+    await exec('DELETE FROM version WHERE org_id = ?', a.orgId);
+    await exec(
+      `INSERT INTO upstream_state (org_id, package_id, form, content_sha256, checked_at, fresh_until)
+        VALUES (?, 'P', 'composer-p2', ?, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')`,
+      a.orgId,
+      D1,
+    );
+  }
+
+  it('schedules a refetchable orphan past grace at database now, and the claim then succeeds', async () => {
+    const repo = await orphan(8);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+    const [clock] = await rows<{ now: string }>(
+      "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS now",
+    );
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    const purgeAfter = (await rowOf(a, D1))?.purge_after as string;
+    expect(purgeAfter >= (clock?.now as string)).toBe(true);
+    expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+  });
+
+  it('leaves an orphan inside the grace period unscheduled', async () => {
+    const repo = await orphan(6);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+  });
+
+  it.each([
+    ['an active version', () => reference('npmjs_proxy', 'active')],
+    ['a hosted-source reference', () => reference('hosted', 'tombstoned')],
+    ['an ingest snapshot', () => ingestSnapshot()],
+    ['an upstream_state hash', () => upstreamHash()],
+  ])('refuses a blob held by %s', async (_label, hold) => {
+    const repo = await orphan(8);
+    await hold();
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+  });
+
+  it('refuses a blob that only a revision references', async () => {
+    const repo = await orphan(8);
+    await reference('npmjs_proxy', 'tombstoned');
+    await exec(
+      "INSERT INTO version_revision (id, org_id, version_id, revision, blob_id, metadata_json, reason) SELECT 'VR', org_id, 'V', 1, id, '{}', 'test' FROM blob WHERE org_id = ?",
+      a.orgId,
+    );
+    await exec('UPDATE version SET blob_id = NULL WHERE org_id = ?', a.orgId);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+  });
+
+  it('never schedules a non-refetchable blob, and does once it is refetchable', async () => {
+    const repo = createBlobRepository(executor);
+    await publish(repo, a, { refetchable: false });
+    await exec(`${DAYS_AGO(400)} WHERE org_id = ?`, a.orgId);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+    await exec('UPDATE blob SET refetchable = 1 WHERE org_id = ?', a.orgId);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+  });
+
+  it('a re-put after scheduling refreshes the age so the claim returns null', async () => {
+    const repo = await orphan(8);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    await publish(repo);
+    await exec("UPDATE blob SET purge_after = '2000-01-01T00:00:00.000Z'");
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+    expect((await rowOf(a, D1))?.purge_lease_until).toBeNull();
+  });
+
+  it('a new reference after scheduling cancels the purge at claim time', async () => {
+    const repo = await orphan(8);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    await reference('npmjs_proxy', 'active');
+    expect(await repo.claimPurge(a, D1)).toBeNull();
+  });
+
+  it.each([
+    ['a live', '2999-01-01T00:00:00.000Z', false],
+    ['an expired', '2000-01-01T00:00:00.000Z', true],
+  ])('with %s import before-image schedules: %s', async (_label, expiresAt, schedules) => {
+    const repo = await orphan(8);
+    await exec(
+      "INSERT INTO import_run (id, org_id, source_system, before_image_expires_at) VALUES ('RUN1', ?, 'x', ?)",
+      a.orgId,
+      expiresAt,
+    );
+    await exec(
+      `INSERT INTO import_ref (id, org_id, import_run_id, entity_type, entity_id, external_ref, action, before_image_json)
+        SELECT 'REF1', org_id, 'RUN1', 'version', 'VERX', 'ext', 'update', json_object('blob_id', id) FROM blob WHERE org_id = ?`,
+      a.orgId,
+    );
+    expect(await repo.scheduleOrphan(a, D1)).toBe(schedules);
+    expect((await rowOf(a, D1))?.purge_after === null).toBe(!schedules);
+  });
+
+  it('schedules only the requested digest', async () => {
+    const repo = await orphan(8);
+    await publish(repo, a, { sha256: D2 });
+    await exec(`${DAYS_AGO(8)} WHERE org_id = ? AND sha256 = ?`, a.orgId, D2);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    expect((await rowOf(a, D1))?.purge_after).not.toBeNull();
+    expect((await rowOf(a, D2))?.purge_after).toBeNull();
+  });
+
+  it('without the re-put the forced deadline claims', async () => {
+    const repo = await orphan(8);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    await exec("UPDATE blob SET purge_after = '2000-01-01T00:00:00.000Z'");
+    expect(await repo.claimPurge(a, D1)).toMatch(GEN);
+  });
+
+  it('keeps the deadline of an already scheduled row', async () => {
+    const repo = await orphan(8);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+    await exec("UPDATE blob SET purge_after = '2001-01-01T00:00:00.000Z'");
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBe('2001-01-01T00:00:00.000Z');
+  });
+
+  it('refuses a leased row', async () => {
+    const repo = await orphan(8);
+    await exec(
+      "UPDATE blob SET purge_lease_until = strftime('%Y-%m-%dT%H:%M:%fZ','now','+600 seconds')",
+    );
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+    await expireLease(a, D1);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+  });
+
+  it('refuses a deleted row', async () => {
+    const repo = await orphan(8);
+    await exec("UPDATE blob SET deleted_at = '2000-01-01T00:00:00.000Z'");
+    expect(await repo.scheduleOrphan(a, D1)).toBe(false);
+    expect((await rowOf(a, D1))?.purge_after).toBeNull();
+  });
+
+  it('treats another organization as an absent key', async () => {
+    const repo = await orphan(8);
+    const before = await rowOf(a, D1);
+    expect(await repo.scheduleOrphan(b, D1)).toBe(await repo.scheduleOrphan(b, D2));
+    expect(await repo.scheduleOrphan(b, D1)).toBe(false);
+    expect(await rowOf(a, D1)).toEqual(before);
+    expect(await repo.scheduleOrphan(a, D1)).toBe(true);
+  });
+
+  it('validates the key before any statement runs', async () => {
+    const counted = countCalls(executor);
+    const repo = createBlobRepository(counted.executor);
+    await expect(repo.scheduleOrphan(a, 'bad' as Sha256)).rejects.toBeInstanceOf(
+      BlobValidationError,
+    );
+    expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+  });
+});

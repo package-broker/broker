@@ -419,6 +419,20 @@ function checkCorePeer(pkg, pkgJson, coreVersion) {
 const UI_MANIFEST = 'dist/assets/manifest.json';
 const UI_PACKAGE = '@package-broker/ui';
 
+function checkUiRange(pkg, pkgJson, uiVersion) {
+  if (pkg !== 'ui-assets') return [];
+  const range = pkgJson.dependencies?.[UI_PACKAGE];
+  if (typeof range !== 'string') return [`dependencies.${UI_PACKAGE} is missing or not a string`];
+  const satisfied = rangeSatisfiedBy(range, uiVersion);
+  if (satisfied === null)
+    return [
+      `dependencies.${UI_PACKAGE} range "${range}" is not a form this check can verify against ui ${uiVersion}`,
+    ];
+  if (!satisfied)
+    return [`dependencies.${UI_PACKAGE} range "${range}" does not accept ui ${uiVersion}`];
+  return [];
+}
+
 function uiPayloadProblems(dir, files) {
   if (!files.includes(UI_MANIFEST)) return [`"${UI_MANIFEST}" is missing from the tarball`];
   let manifest;
@@ -535,9 +549,15 @@ for (const pkg of packages) {
 
 const packedCoreVersion =
   outcomes.find(({ pkg }) => pkg === 'core')?.result.pkgJson?.version ?? CORE_VERSION;
+const packedUiVersion =
+  outcomes.find(({ pkg }) => pkg === 'ui')?.result.pkgJson?.version ??
+  readPackageJson('ui').json?.version ??
+  '0.0.0';
 for (const { pkg, result } of outcomes)
-  if (result.pkgJson)
+  if (result.pkgJson) {
     result.problems.push(...checkCorePeer(pkg, result.pkgJson, packedCoreVersion));
+    result.problems.push(...checkUiRange(pkg, result.pkgJson, packedUiVersion));
+  }
 
 const coreOutcome = outcomes.find(({ pkg }) => pkg === 'core');
 if (coreOutcome && coreOutcome.result.problems.length === 0) {

@@ -354,7 +354,7 @@ export function createImportRollbackStore(options: {
     const extra =
       (restore ? '' : dependentsAbsent(entity, 'rbent')) +
       (!restore && entity.table === 'access_grant'
-        ? ' AND NOT EXISTS (SELECT 1 FROM role AS rbprotected WHERE rbprotected.id = rbent.role_id AND rbprotected.protects_last_holder = 1)'
+        ? ' AND NOT EXISTS (SELECT 1 FROM role AS rbprotected WHERE rbprotected.id = rbent.role_id AND rbprotected.org_id = rbent.org_id AND rbprotected.protects_last_holder = 1)'
         : '') +
       (restore && entity.table === 'version'
         ? ' AND rbent.published_at_basis IS rbmark.published_at_basis'

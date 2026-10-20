@@ -146,6 +146,17 @@ describe('versionById', () => {
     expect(await reads().versionById(ctx, input)).toBeNull();
   });
 
+  it('hides an active version under a removed package unless the source flags removals', async () => {
+    await exec(
+      "UPDATE package SET status = 'removed_upstream', removed_upstream_at = ? WHERE id = 'K1'",
+      ['2020-01-01T00:00:00.000Z'],
+    );
+    const input = { packageId: 'K1', versionId: 'V1' };
+    expect(await reads().versionById(ctx, input)).not.toBeNull();
+    await exec("UPDATE source SET removal_policy = 'exclude' WHERE id = 'S1'");
+    expect(await reads().versionById(ctx, input)).toBeNull();
+  });
+
   it('binds at most 100 parameters', async () => {
     await reads().versionById(ctx, { packageId: 'K1', versionId: 'V1' });
     expect(seen.length).toBeGreaterThan(0);

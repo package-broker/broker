@@ -69,6 +69,7 @@ import {
 import { createAccessRecorder } from '@package-broker/core/registry/access-recorder';
 import type { RegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
+import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { createRepositoryJobs, type JobsFactory } from '@package-broker/core/platform/jobs-port';
 import type { Jobs } from '@package-broker/core/platform/jobs';
@@ -436,6 +437,11 @@ function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveStore {
   };
 }
 
+function credentialOrigins(record: SourceRecord): readonly string[] {
+  if (record.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
+  return [new URL(record.url!).origin];
+}
+
 function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
   const repository = createCredentialRepository(executor);
   const store = createCredentialStore({
@@ -468,7 +474,7 @@ function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
           credential:
             opened.kind === 'ssh_key'
               ? INERT_CREDENTIAL
-              : bindCredential(opened, [new URL(record.url).origin]),
+              : bindCredential(opened, credentialOrigins(record)),
           probe,
         };
       } catch (error) {

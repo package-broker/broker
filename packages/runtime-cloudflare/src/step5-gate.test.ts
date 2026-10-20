@@ -423,7 +423,9 @@ describe('step 5 release gate on Miniflare D1', () => {
     await assemble();
 
     expect(Object.keys(services ?? {}).sort()).toEqual([
+      'administration',
       'engine',
+      'lifetime',
       'personalTokens',
       'projectGrants',
       'projectList',

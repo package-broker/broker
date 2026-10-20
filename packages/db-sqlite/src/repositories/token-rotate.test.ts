@@ -5,6 +5,11 @@ import { mutationFence, type AuthenticatedActor } from '@package-broker/core/aut
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { auditEvent } from '@package-broker/core/audit/actions';
 import {
+  buildIdempotencyRecord,
+  replayResponse,
+  settleIdempotent,
+} from '@package-broker/core/api/idempotency';
+import {
   createServiceTokenService,
   type ServiceTokenRotateStoreInput,
 } from '@package-broker/core/authz/service-token-service';
@@ -16,6 +21,7 @@ import { migrate } from '../migrations/runner.js';
 import { seedTwoOrganizations } from '../contract/two-organizations.js';
 import { createAccessRepository } from './access.js';
 import { createTokenRepository, type MintedToken } from './token.js';
+import { createIdempotencyRepository } from './idempotency.js';
 const USER = '01J0USER000000000000000001';
 const OTHER_USER = '01J0USER000000000000000002';
 const SESSION = '01J0SESSION0000000000000001';
@@ -194,6 +200,17 @@ function input(extra: Partial<ServiceTokenRotateStoreInput> = {}): ServiceTokenR
     ...extra,
   };
 }
+function rotationRecord(request: ServiceTokenRotateStoreInput) {
+  return buildIdempotencyRecord({
+    principal: { kind: 'user', id: USER },
+    key: 'rotate-once',
+    route: '/_pb/projects/:project/tokens/:token/rotate',
+    hash: 'ab'.repeat(32),
+    status: 409,
+    response: { code: 'already_issued', id: request.id },
+    now: new Date(request.now),
+  });
+}
 async function oldToken(projectId: string | null = PROJECT, expiresAt = iso(30 * DAY)) {
   await executor.batch([
     stmt(
@@ -241,6 +258,97 @@ beforeEach(async () => {
 afterEach(async () => close());
 
 describe('service token rotation batch', () => {
+  it('persists the rotation replay record without plaintext in its organization', async () => {
+    await oldToken();
+    const request = input();
+    const record = rotationRecord(request);
+    const result = await rotate({ ...request, idempotency: record });
+    expect(result.status).toBe('rotated');
+    const replays = createIdempotencyRepository(executor);
+    expect(await replays.find(a, record.principalKey, record.key, request.now)).toEqual(record);
+    expect(await replays.find(b, record.principalKey, record.key, request.now)).toBeNull();
+    expect(await rows('api_idempotency')).toHaveLength(1);
+    expect(JSON.parse(record.responseJson)).toEqual({ code: 'already_issued', id: request.id });
+    expect(JSON.stringify(await rows('api_idempotency')).includes(mint().plaintext)).toBe(false);
+  });
+  it.each([7, 0] as const)(
+    'replays a repeated rotation with the same key for overlap %i without rotating again',
+    async (overlapDays) => {
+      await oldToken();
+      const request = input({ overlapDays });
+      const record = rotationRecord(request);
+      expect((await rotate({ ...request, idempotency: record })).status).toBe('rotated');
+      const tokens = await rows('token');
+      const audits = await rows('audit_pending');
+      const retry = input({
+        ...request,
+        id: ulid(),
+        audit: audit('token.issue'),
+        rotationAudit: audit('token.rotate'),
+      });
+      const replays = createIdempotencyRepository(executor);
+      const settlement = await settleIdempotent({
+        record: rotationRecord(retry),
+        hash: record.requestHash,
+        now: new Date(request.now),
+        find: () => replays.find(a, record.principalKey, record.key, request.now),
+        run: () =>
+          createTokenRepository(executor).rotateService(
+            a,
+            fence(),
+            { ...retry, idempotency: rotationRecord(retry) },
+            () => mint('cccccccccccc'),
+          ),
+        failed: (result) => result.status !== 'rotated',
+      });
+      expect(settlement.kind).toBe('replay');
+      if (settlement.kind !== 'replay') throw new Error('expected a rotation replay');
+      expect(settlement.record).toEqual(record);
+      const response = replayResponse(settlement.record, ulid());
+      expect(response.status).toBe(409);
+      expect(response.headers.get('Idempotent-Replayed')).toBe('true');
+      const body = await response.json();
+      expect(body).toEqual({
+        error: expect.objectContaining({ code: 'already_issued' }),
+        id: request.id,
+      });
+      expect(await rows('token')).toEqual(tokens);
+      expect(await rows('audit_pending')).toEqual(audits);
+      expect(await rows('api_idempotency')).toHaveLength(1);
+    },
+  );
+  it('leaves no rotation replay record when the old token is revoked between read and batch', async () => {
+    await oldToken();
+    const repository = createTokenRepository(executor);
+    expect(await repository.getService(a, TOKEN)).toMatchObject({ id: TOKEN, revokedAt: null });
+    const revokedAt = iso(0);
+    await executor.batch([
+      stmt(
+        'UPDATE token SET revoked_at = ? WHERE org_id = ? AND id = ?',
+        revokedAt,
+        a.orgId,
+        TOKEN,
+      ),
+    ]);
+    const old = await oldRow();
+    const request = input();
+    const record = rotationRecord(request);
+    expect(await rotate({ ...request, idempotency: record }, repository)).toEqual({
+      status: 'refused',
+      reason: 'conflict',
+    });
+    expect(await oldRow()).toEqual(old);
+    await nothingAdded();
+    expect(await rows('api_idempotency')).toHaveLength(0);
+    expect(
+      await createIdempotencyRepository(executor).find(
+        a,
+        record.principalKey,
+        record.key,
+        request.now,
+      ),
+    ).toBeNull();
+  });
   it('overlap 7 preserves binding and scope and lookup accepts the retiring token', async () => {
     await oldToken();
     const request = input();

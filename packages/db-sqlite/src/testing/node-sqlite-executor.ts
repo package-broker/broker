@@ -9,11 +9,13 @@ import type {
 
 export interface OpenedExecutor {
   readonly executor: SqlExecutor;
+  snapshot(): Uint8Array | undefined;
   close(): Promise<void>;
 }
 
 export interface NodeSqliteExecutorOptions {
   readonly d1PatternLimit?: boolean;
+  readonly snapshot?: Uint8Array;
 }
 
 export const D1_MAX_BOUND_PARAMETERS = 100;
@@ -70,6 +72,9 @@ function openDatabase(path: string, options: NodeSqliteExecutorOptions): Databas
         ...(options.d1PatternLimit === true ? { likePatternLength: D1_MAX_PATTERN_LENGTH } : {}),
       },
     });
+    if (path === ':memory:' && options.snapshot !== undefined) {
+      database.deserialize(options.snapshot);
+    }
     if (
       options.d1PatternLimit === true &&
       database.limits?.likePatternLength !== D1_MAX_PATTERN_LENGTH
@@ -89,6 +94,10 @@ function openDatabase(path: string, options: NodeSqliteExecutorOptions): Databas
     }
     throw classifySqliteError(error);
   }
+}
+
+export function supportsNodeSqliteSnapshots(): boolean {
+  return typeof DatabaseSync.prototype.serialize === 'function';
 }
 
 export function openNodeSqliteExecutor(
@@ -152,6 +161,8 @@ export function openNodeSqliteExecutor(
 
   return {
     executor,
+    snapshot: () =>
+      path === ':memory:' && supportsNodeSqliteSnapshots() ? database.serialize() : undefined,
     close: async () => {
       cache.clear();
       database.close();

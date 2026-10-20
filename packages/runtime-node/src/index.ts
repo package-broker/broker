@@ -1,3 +1,4 @@
+import { createOrganizationAdministration } from './organization-administration.js';
 import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import { createObservability } from '@package-broker/core/platform/observability';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
@@ -11,6 +12,7 @@ import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { createServer, type Server } from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { getRequestListener } from '@hono/node-server';
 import { createAuthModule, type AuthModule } from '@package-broker/core/auth/module';
 import type { SessionService } from '@package-broker/core/auth/session';
@@ -60,7 +62,7 @@ import {
   type DependencyClosureReport,
 } from '@package-broker/core/catalogue/closure-report';
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
-import type { ActorContext } from '@package-broker/core/authz/administration';
+import { type ActorContext, type Administration } from '@package-broker/core/authz/administration';
 import type { ProjectActor } from '@package-broker/core/authz/project-actor';
 import {
   createRegistryModule,
@@ -158,6 +160,7 @@ import {
   createIngestSessions,
   createIngestSessionWriteGuard,
 } from '@package-broker/db-sqlite/repositories/ingest-session';
+import { createPackageIdReads } from '@package-broker/db-sqlite/repositories/package-id';
 import { createRegistryReads } from '@package-broker/db-sqlite/repositories/registry-reads';
 import { createRepresentationClock } from '@package-broker/db-sqlite/repositories/representation-clock';
 import { createSourceRepository } from '@package-broker/db-sqlite/repositories/source';
@@ -218,6 +221,8 @@ export interface NodeAccessServices {
   readonly engine: AuthorizationEngine;
   readonly sessions: SessionService;
   readonly projects: ProjectService;
+  readonly administration: Administration;
+  readonly lifetime: TokenLifetimePolicy;
   readonly projectGrants: ProjectAdministration;
   readonly projectList: ProjectLister;
   readonly personalTokens: PersonalTokenService;
@@ -352,15 +357,33 @@ async function assembleAccess(
   );
   const organizations = wired('organization repository', createOrganizationRepository(executor));
   const common = { clock: systemClock, ids, log };
+  const servicePrincipals = createServicePrincipalService({
+    sessions: module.sessions,
+    principals: principalRepository,
+    authority,
+    directory: principalRepository,
+    ...common,
+  });
+  const onCreatorOffboarded = servicePrincipals.creatorOffboarded;
 
   const services: NodeAccessServices = Object.freeze({
     engine: module.authorization,
     sessions: module.sessions,
     projects: createProjectService({ projects: projectRepository, ...common }),
+    lifetime: tokens.lifetime,
+    administration: createOrganizationAdministration(executor, anchorList, {
+      providers,
+      onCreatorOffboarded,
+      ...(tokens.offboarding.onUserOffboarded === undefined
+        ? {}
+        : { onUserOffboarded: tokens.offboarding.onUserOffboarded }),
+      ...common,
+    }),
     projectGrants: createProjectAdministration({
       grants: wired('project grant repository', createProjectGrantRepository(executor)),
       providers,
       providerAnchors: anchorList,
+      onCreatorOffboarded,
       ...tokens.offboarding,
       ...common,
     }),
@@ -380,13 +403,7 @@ async function assembleAccess(
       lifetime: tokens.lifetime,
       ...common,
     }),
-    servicePrincipals: createServicePrincipalService({
-      sessions: module.sessions,
-      principals: principalRepository,
-      authority,
-      directory: principalRepository,
-      ...common,
-    }),
+    servicePrincipals,
     serviceTokens: createServiceTokenService({
       tokens: tokenRepository,
       principals: principalRepository,
@@ -534,6 +551,7 @@ function assembleRegistry(input: {
   readonly observability: Observability;
   readonly deploymentId: string;
   readonly findOrganization: () => Promise<OrganizationIdentity | null>;
+  readonly ingestScope: AsyncLocalStorage<Observability>;
 }): RegistryAssembly {
   const { options, seams, executor, auth, platform, observability } = input;
   const { config } = options;
@@ -631,10 +649,18 @@ function assembleRegistry(input: {
         sessions,
         existing: createExistingVersionsReader(executor),
         finalizer: createIngestFinalizer(executor),
-        observability,
+        observability: {
+          log: (record) => (input.ingestScope.getStore() ?? observability).log(record),
+        },
       },
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential: credentials.forSource,
+    },
+    sync: {
+      packageId: createPackageIdReads(executor).packageId,
+      upstreamState: createUpstreamStateRepository(executor),
+      executor,
+      writeGuard: (ctx, session, job) => createIngestSessionWriteGuard(ctx, session, job),
     },
     dist: {
       leases: createFetchLeases(executor),
@@ -709,6 +735,7 @@ export function createNodeServer(
   const importJobs = createImportJobHolder();
   const patJobs = createPatJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;
+  const ingestScope = new AsyncLocalStorage<Observability>();
   const application = (async () => {
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
@@ -737,6 +764,36 @@ export function createNodeServer(
               },
             ),
           }),
+      });
+    }
+    function registerIngestJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+      return registerCoreJob({
+        ...definition,
+        handler: (payload, context) => {
+          const observability = createObservability(
+            options.observability?.sink ?? {
+              emit: (record) => {
+                if (record.kind === 'log') log({ ...record.record });
+              },
+            },
+            {
+              deploymentId: options.observability?.deploymentId ?? 'unconfigured',
+              runtime: 'node',
+              requestId: null,
+              plugin: 'core',
+              jobId: context.jobId,
+              attempt: context.attempt,
+            },
+            {
+              events: new Set([...INGEST_EVENTS]),
+              reasonCodes: INGEST_REASON_CODES,
+              routeTemplates: new Set(),
+            },
+          );
+          return ingestScope.run(observability, () =>
+            definition.handler(definition.validate(payload), { ...context, observability }),
+          );
+        },
       });
     }
     const reads = options.executor === undefined ? undefined : buildPackageReads(executor);
@@ -770,6 +827,7 @@ export function createNodeServer(
             ),
             deploymentId,
             findOrganization: bootstrap.findSingleton,
+            ingestScope,
           });
     drainRegistry = registry?.drain;
     const packageResolver = registry?.module.visibilityPort ?? reads?.resolver;
@@ -781,6 +839,9 @@ export function createNodeServer(
           : [
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+              ...(registry?.module.packageSyncJob === undefined
+                ? []
+                : [registerIngestJob(registry.module.packageSyncJob)]),
               ...(auth === undefined ? [] : importJobRegistrations(importJobs)),
               ...(auth === undefined ? [] : patOffboardingRegistrations(executor, patJobs, log)),
             ],

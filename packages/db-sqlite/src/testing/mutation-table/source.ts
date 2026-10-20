@@ -1,7 +1,11 @@
 import type { MutationEntry } from './harness.js';
 import { orgOf, seeder, type ContractCase } from './harness.js';
 import { expect } from 'vitest';
-import { dueStatement, findByRepositoryStatement } from '../../repositories/source.js';
+import {
+  deferPollStatement,
+  dueStatement,
+  findByRepositoryStatement,
+} from '../../repositories/source.js';
 import { seedSource, NOT_NULL } from './fixtures.js';
 
 const dueSparesForeignSources: ContractCase = {
@@ -41,7 +45,38 @@ const repositorySparesForeignSources: ContractCase = {
   },
 };
 
+const deferSparesForeignSources: ContractCase = {
+  name: 'deferring a poll leaves a source of another organization untouched',
+  async run(context) {
+    const seed = seeder(context.executor);
+    const { own, foreign } = orgOf(context);
+    const due = '2000-01-01T00:00:00.000Z';
+    await seedSource(seed, 'S-FOREIGN', foreign.orgId, 'vcs');
+    await seed('UPDATE source SET next_poll_at = ? WHERE id = ?', due, 'S-FOREIGN');
+    await context.executor.batch([context.mutate(deferPollStatement(own, 'S-FOREIGN', due))]);
+    const rows = await context.executor.all<{ next_poll_at: string }>({
+      sql: 'SELECT next_poll_at FROM source WHERE id = ?',
+      params: ['S-FOREIGN'],
+    });
+    expect(rows).toEqual([{ next_poll_at: due }]);
+  },
+};
+
 export const entries: readonly MutationEntry[] = [
+  {
+    builder: 'deferPollStatement',
+    file: 'repositories/source.ts',
+    cases: [deferSparesForeignSources],
+    predicates: [
+      {
+        name: 'the deferred source row is scoped to the organization',
+        locate: /"org_id" = \?/,
+        copies: 1,
+        neutral: NOT_NULL,
+        caseName: deferSparesForeignSources.name,
+      },
+    ],
+  },
   {
     builder: 'findByRepositoryStatement',
     file: 'repositories/source.ts',

@@ -356,6 +356,17 @@ describe('GET /_pb/projects', () => {
     expect(request).not.toHaveProperty('restrictTo');
   });
 
+  it('hands the lister a read-only permissions view', async () => {
+    const f = await fixture({ inheritsProjectRead: true });
+    await f.request('GET', '/_pb/projects', { auth: 'token' });
+    const actor = vi.mocked(f.lister.list).mock.calls[0]![1];
+    expect(actor.permissions).not.toBeInstanceOf(Set);
+    expect(actor.permissions).not.toHaveProperty('add');
+    expect(actor.permissions).not.toHaveProperty('delete');
+    expect(actor.permissions.has('project:read')).toBe(true);
+    expect(actor.permissions.has('org:projects:archive')).toBe(false);
+  });
+
   it('gives an all-mode PAT the owner project:read inheritance only when the lookup says so', async () => {
     const f = await fixture({ inheritsProjectRead: true });
     await f.request('GET', '/_pb/projects', { auth: 'token' });
@@ -605,6 +616,52 @@ describe('POST /_pb/projects', () => {
       f.projects.getBySlug.mockResolvedValue({ ...PROJECT_ROW, id: STRAY, slug: body.slug });
       const second = await f.request('POST', '/_pb/projects', { body, headers });
       expect(await second.json()).toEqual(created);
+    });
+
+    it('replays a record from before ids were stored by resolving the slug', async () => {
+      const f = await fixture();
+      const first = await f.request('POST', '/_pb/projects', { body, headers });
+      const created = (await first.json()) as { id: string; slug: string };
+      const real = f.idempotencyPort.find.getMockImplementation()!;
+      f.idempotencyPort.find.mockImplementation(async (...args) => {
+        const record = await real(...args);
+        return record === null
+          ? null
+          : { ...record, responseJson: JSON.stringify({ slug: body.slug }) };
+      });
+      const second = await f.request('POST', '/_pb/projects', { body, headers });
+      expect(second.status).toBe(201);
+      expect(await second.json()).toEqual(created);
+      expect(second.headers.get('idempotent-replayed')).toBe('true');
+    });
+
+    it('answers a conflict for a legacy record whose slug no longer resolves', async () => {
+      const f = await fixture();
+      await f.request('POST', '/_pb/projects', { body, headers });
+      const real = f.idempotencyPort.find.getMockImplementation()!;
+      f.idempotencyPort.find.mockImplementation(async (...args) => {
+        const record = await real(...args);
+        return record === null
+          ? null
+          : { ...record, responseJson: JSON.stringify({ slug: body.slug }) };
+      });
+      f.projects.getBySlug.mockResolvedValue(null);
+      const second = await f.request('POST', '/_pb/projects', { body, headers });
+      expect(second.status).toBe(409);
+    });
+
+    it('does not fall back to the slug when a record carries a malformed id', async () => {
+      const f = await fixture();
+      await f.request('POST', '/_pb/projects', { body, headers });
+      const real = f.idempotencyPort.find.getMockImplementation()!;
+      f.idempotencyPort.find.mockImplementation(async (...args) => {
+        const record = await real(...args);
+        return record === null
+          ? null
+          : { ...record, responseJson: JSON.stringify({ id: 'nope', slug: body.slug }) };
+      });
+      const second = await f.request('POST', '/_pb/projects', { body, headers });
+      expect(second.status).toBe(409);
     });
 
     it('answers 409 idempotency_mismatch for the same key and another body', async () => {

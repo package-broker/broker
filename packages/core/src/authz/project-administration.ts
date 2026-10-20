@@ -123,6 +123,11 @@ export interface ProjectAdministration {
 export interface ProjectAdministrationDeps {
   readonly onCreatorOffboarded?: AdministrationDeps['onCreatorOffboarded'];
   readonly onUserOffboarded?: AdministrationDeps['onUserOffboarded'];
+  /** Runs after `onUserOffboarded` for the user a project revoke left without that project's access. */
+  readonly onProjectAccessLost?: (
+    ctx: OrgContext,
+    input: { readonly userId: string; readonly at: string },
+  ) => Promise<void> | void;
   readonly grants: ProjectGrantStore;
   readonly providers: Pick<ReadonlyMap<string, unknown>, 'has'>;
   readonly providerAnchors: readonly ProviderAnchor[];
@@ -397,6 +402,22 @@ export function createProjectAdministration(
               orgId: ctx.orgId,
               userId,
               cause,
+              error: error instanceof Error ? error.name : typeof error,
+            });
+          } catch {
+            // The grant is deleted; callback and sink failures must not change the result.
+          }
+        }
+        try {
+          await deps.onProjectAccessLost?.(ctx, { userId, at: stamp });
+        } catch (error) {
+          try {
+            deps.log({
+              level: 'warn',
+              event: 'user.pat_offboarding_enqueue_failed',
+              orgId: ctx.orgId,
+              userId,
+              cause: 'project_removed',
               error: error instanceof Error ? error.name : typeof error,
             });
           } catch {

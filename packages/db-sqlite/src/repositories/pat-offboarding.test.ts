@@ -979,3 +979,316 @@ describe('suspendedUsersWithLivePats', () => {
     });
   });
 });
+
+describe('project_removed against the repository', () => {
+  const PROJECT_2 = '01HZX3VQ7N5R8T2W4Y6A9B1C2J';
+  const PROJECT_3 = '01HZX3VQ7N5R8T2W4Y6A9B1C2K';
+  const AT = '2026-10-20T11:30:00.000Z';
+  const LATER = '2026-10-20T11:45:00.000Z';
+
+  beforeEach(async () => {
+    await run(
+      "INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'two', 'Two')",
+      PROJECT_2,
+      a.orgId,
+    );
+    await run(
+      "INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'three', 'Three')",
+      PROJECT_3,
+      a.orgId,
+    );
+  });
+
+  async function selected(projects: readonly string[], options: Seed = {}): Promise<string> {
+    const id = await seed(options);
+    await run("UPDATE token SET project_mode = 'selected' WHERE id = ?", id);
+    for (const project of projects) {
+      await run(
+        'INSERT INTO token_project (org_id, token_id, project_id) VALUES (?, ?, ?)',
+        (options.org ?? a).orgId,
+        id,
+        project,
+      );
+    }
+    return id;
+  }
+
+  async function holds(
+    project: string | null,
+    createdAt = BEFORE,
+    subject: { type: 'email' | 'group'; value: string; provider?: string } = {
+      type: 'email',
+      value: EMAIL,
+    },
+  ): Promise<void> {
+    counter += 1;
+    await run(
+      `INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `grant-${counter}`,
+      a.orgId,
+      subject.type,
+      subject.value,
+      subject.type === 'group' ? (subject.provider ?? 'oidc') : null,
+      project === null ? 'organization' : 'project',
+      project,
+      ROLE,
+      createdAt,
+    );
+  }
+
+  async function lost(cutoff = AT): Promise<string[]> {
+    return [
+      ...(await store.candidates(a, {
+        userId: USER,
+        cutoff,
+        limit: 25,
+        selectedOnly: true,
+      })),
+    ];
+  }
+
+  async function offboard(cutoff = AT): Promise<void> {
+    const job = createPatOffboardingJob({
+      store,
+      clock: fixedClock(NOW),
+      ids: { ulid },
+      log: () => undefined,
+    });
+    await job.definition.handler(
+      job.definition.validate({ userId: USER, cause: 'project_removed', cutoff }),
+      {
+        org: a,
+        jobId: JOB,
+        idempotencyKey: 'k',
+        attempt: 1,
+        fence: 1,
+        signal: new AbortController().signal,
+        ports: {} as JobContext['ports'],
+        observability: {} as JobContext['observability'],
+      },
+    );
+  }
+
+  async function revoked(id: string): Promise<boolean> {
+    return (await states()).get(id)?.revoked_at !== null;
+  }
+
+  it('revokes a selected token whose only project the user no longer holds', async () => {
+    const only = await selected([PROJECT]);
+
+    await offboard();
+
+    expect(await revoked(only)).toBe(true);
+    expect(await audited()).toEqual([only]);
+    const payload = await all<{ payload_json: string }>(
+      'SELECT payload_json FROM audit_pending WHERE target_id = ?',
+      only,
+    );
+    expect(payload[0]?.payload_json).toContain('"project_removed"');
+  });
+
+  it('keeps a selected token with two projects while the user holds one of them', async () => {
+    const both = await selected([PROJECT, PROJECT_2]);
+    await holds(PROJECT_2);
+
+    await offboard();
+
+    expect(await revoked(both)).toBe(false);
+    expect(await audited()).toEqual([]);
+  });
+
+  it('revokes a selected token when the user holds none of its two projects', async () => {
+    const both = await selected([PROJECT, PROJECT_2]);
+    await holds(PROJECT_3);
+
+    await offboard();
+
+    expect(await revoked(both)).toBe(true);
+  });
+
+  it('keeps an all-projects token', async () => {
+    const all = await seed();
+
+    await offboard();
+
+    expect(await revoked(all)).toBe(false);
+  });
+
+  it('keeps service and customer tokens, even bound to selected projects', async () => {
+    const service = await selected([PROJECT], { kind: 'svc' });
+    const customer = await selected([PROJECT], { kind: 'cst' });
+
+    expect(await lost()).toEqual([]);
+    await offboard();
+
+    expect(await revoked(service)).toBe(false);
+    expect(await revoked(customer)).toBe(false);
+  });
+
+  it('does not bring back a revoked token when the user is granted the project again', async () => {
+    const only = await selected([PROJECT]);
+    await offboard();
+    const stamp = (await states()).get(only)?.revoked_at;
+
+    await holds(PROJECT, LATER);
+    await offboard(LATER);
+
+    expect(stamp).toBe(NOW);
+    expect((await states()).get(only)?.revoked_at).toBe(NOW);
+    expect(await lost(LATER)).toEqual([]);
+  });
+
+  it('revokes when the project is granted again only after the removal instant', async () => {
+    const only = await selected([PROJECT]);
+    await holds(PROJECT, LATER);
+
+    await offboard();
+
+    expect(await revoked(only)).toBe(true);
+  });
+
+  it('keeps a token while a grant at or before the cutoff still reaches its project', async () => {
+    const only = await selected([PROJECT]);
+    await holds(PROJECT, AT);
+
+    expect(await lost()).toEqual([]);
+    await offboard();
+
+    expect(await revoked(only)).toBe(false);
+  });
+
+  it('treats an organization grant as holding every project', async () => {
+    const only = await selected([PROJECT]);
+    await holds(null);
+
+    await offboard();
+
+    expect(await revoked(only)).toBe(false);
+  });
+
+  it('counts a project grant to a group the user belongs to', async () => {
+    const only = await selected([PROJECT]);
+    await holds(PROJECT, BEFORE, { type: 'group', value: 'staff' });
+
+    expect(await lost()).toEqual([only]);
+    await run(
+      "INSERT INTO user_group (org_id, user_id, provider, group_name) VALUES (?, ?, 'oidc', 'staff')",
+      a.orgId,
+      USER,
+    );
+
+    expect(await lost()).toEqual([]);
+  });
+
+  it('does not count membership in a different group name', async () => {
+    const only = await selected([PROJECT]);
+    await holds(PROJECT, BEFORE, { type: 'group', value: 'staff' });
+    await run(
+      "INSERT INTO user_group (org_id, user_id, provider, group_name) VALUES (?, ?, 'oidc', 'visitors')",
+      a.orgId,
+      USER,
+    );
+
+    expect(await lost()).toEqual([only]);
+    await offboard();
+    expect(await revoked(only)).toBe(true);
+  });
+
+  it('does not count membership under a different provider', async () => {
+    const only = await selected([PROJECT]);
+    await holds(PROJECT, BEFORE, { type: 'group', value: 'staff', provider: 'oidc' });
+    await run(
+      "INSERT INTO user_group (org_id, user_id, provider, group_name) VALUES (?, ?, 'saml', 'staff')",
+      a.orgId,
+      USER,
+    );
+
+    expect(await lost()).toEqual([only]);
+    await offboard();
+    expect(await revoked(only)).toBe(true);
+  });
+
+  it('revokes a selected token that has no project bound', async () => {
+    const empty = await selected([]);
+
+    await offboard();
+
+    expect(await revoked(empty)).toBe(true);
+  });
+
+  it('leaves tokens of other users, newer tokens and already revoked tokens alone', async () => {
+    const other = await selected([PROJECT], { user: OTHER_USER });
+    const newer = await selected([PROJECT], { createdAt: LATER });
+    const gone = await selected([PROJECT], { revokedAt: '2026-10-01T00:00:00.000Z' });
+
+    expect(await lost()).toEqual([]);
+    await offboard();
+
+    expect(await revoked(other)).toBe(false);
+    expect(await revoked(newer)).toBe(false);
+    expect((await states()).get(gone)?.revoked_at).toBe('2026-10-01T00:00:00.000Z');
+  });
+
+  it('re-checks the held projects when it revokes, not only when it lists', async () => {
+    const held = await selected([PROJECT]);
+    await holds(PROJECT);
+
+    const outcome = await store.revokePage(a, {
+      ...page([held], { cutoff: AT }),
+      selectedOnly: true,
+    });
+
+    expect(outcome).toEqual({ status: 'ok', revoked: [] });
+    expect(await revoked(held)).toBe(false);
+    expect(await audited()).toEqual([]);
+  });
+
+  it('does not narrow a page that is not selectedOnly', async () => {
+    const held = await selected([PROJECT]);
+    await holds(PROJECT);
+
+    const outcome = await store.revokePage(a, page([held], { cutoff: AT }));
+
+    expect(outcome).toEqual({ status: 'ok', revoked: [held] });
+  });
+
+  it('binds a bounded number of parameters', async () => {
+    const seen: Statement[] = [];
+    const spy: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => {
+        seen.push(statement);
+        return executor.all(statement);
+      },
+      batch: (statements) => {
+        seen.push(...statements);
+        return executor.batch(statements);
+      },
+    };
+    const spied = createPatOffboardingRepository(spy);
+
+    await spied.candidates(a, { userId: USER, cutoff: AT, limit: 25, selectedOnly: true });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.params.length).toBeLessThanOrEqual(100);
+    expect(seen[0]?.sql).not.toMatch(/\bLIKE\b|\bGLOB\b/i);
+  });
+
+  it('ignores a token of another organization', async () => {
+    await run(
+      "INSERT INTO project (id, org_id, slug, name) VALUES ('proj-b', ?, 'b', 'B')",
+      b.orgId,
+    );
+    const mine = await selected([PROJECT]);
+    const theirs = await seed({ org: b });
+    await run("UPDATE token SET project_mode = 'selected' WHERE id = ?", theirs);
+    await run(
+      "INSERT INTO token_project (org_id, token_id, project_id) VALUES (?, ?, 'proj-b')",
+      b.orgId,
+      theirs,
+    );
+
+    expect(await lost()).toEqual([mine]);
+  });
+});

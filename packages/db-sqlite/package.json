@@ -110,6 +110,10 @@
       "types": "./dist/contract/registry-contract.d.ts",
       "default": "./dist/contract/registry-contract.js"
     },
+    "./contract/registry-race-contract": {
+      "types": "./dist/contract/registry-race-contract.d.ts",
+      "default": "./dist/contract/registry-race-contract.js"
+    },
     "./contract/service-principal-contract": {
       "types": "./dist/contract/service-principal-contract.d.ts",
       "default": "./dist/contract/service-principal-contract.js"

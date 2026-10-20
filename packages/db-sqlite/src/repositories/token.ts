@@ -931,6 +931,9 @@ export function createTokenRepository(
                 .where('org_id', '=', ctx.orgId)
                 .where('id', '=', rotationAudit.id),
             ),
+            ...(input.idempotency === undefined
+              ? []
+              : [idempotencyInsertStatement(ctx, input.idempotency)]),
             compile(
               db
                 .selectFrom('token')

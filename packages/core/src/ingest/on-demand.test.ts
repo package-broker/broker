@@ -18,6 +18,11 @@ import { ComposerV1PackageError } from './composer/v1-package.js';
 import { parseSha256 } from '../platform/blob.js';
 import { NpmPackumentError } from './npm/packument.js';
 import { SnapshotCorruptError } from './snapshot.js';
+import { createPolicyFetch } from '../sources/policy-fetch.js';
+import { createOutboundPolicy } from '../sources/url-policy.js';
+import { describeComposerV2 } from './composer/v2-package.js';
+import type { ComposerRoot } from './composer/root.js';
+import type { CatalogueWriter } from '../db/catalogue.js';
 
 vi.mock('./apply-description.js', async (original) => ({
   ...(await original<typeof import('./apply-description.js')>()),
@@ -1558,5 +1563,182 @@ describe('fix round 3 regressions', () => {
       expect.anything(),
       pendingValidators,
     );
+  });
+});
+
+describe('Composer fill that ends incomplete', () => {
+  const composer = { ...admitted, ecosystem: 'composer' } as const;
+
+  it('answers busy at once instead of holding the full request budget', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    vi.mocked(applyChunk).mockResolvedValue({ ...h.outcome, done: true, status: 'incomplete' });
+    let result: Awaited<ReturnType<typeof h.ensure>> | undefined;
+    const pending = h.ensure(composer, 'composer').then((value) => {
+      result = value;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(result).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    await pending;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not fetch upstream again inside the Retry-After window, then fetches once it passes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-20T10:00:00Z'));
+    const h = setup();
+    vi.mocked(applyChunk).mockResolvedValue({ ...h.outcome, done: true, status: 'incomplete' });
+    expect(await h.ensure(composer, 'composer')).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(await h.ensure(composer, 'composer')).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
+    expect(applyChunk).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1001);
+    await h.ensure(composer, 'composer');
+    expect(h.describePackage).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers every concurrent caller busy at once with one upstream fetch', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    vi.mocked(applyChunk).mockResolvedValue({ ...h.outcome, done: true, status: 'incomplete' });
+    const calls = Promise.all([1, 2, 3].map(() => h.ensure(composer, 'composer')));
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await calls).toEqual(Array(3).fill({ kind: 'busy', retryAfterSeconds: 10 }));
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not store the incomplete document as an empty listing or a negative', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    vi.mocked(applyChunk).mockResolvedValue({ ...h.outcome, done: true, status: 'incomplete' });
+    await h.ensure(composer, 'composer');
+    expect(h.cache.set).not.toHaveBeenCalled();
+    expect(h.deps.enqueueSync).not.toHaveBeenCalled();
+  });
+
+  it('keeps a cached negative answering 404 while the incomplete marker is live', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    vi.mocked(applyChunk).mockResolvedValue({ ...h.outcome, done: true, status: 'incomplete' });
+    expect(await h.ensure(composer, 'composer')).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    await h.cache.set(
+      { orgId: actor.orgId },
+      catalogueNegativeKey('project', 'A', 'composer', 'name'),
+      defaultEntry('negative', new Uint8Array(), new Date()),
+      { expectedVersion: 'epoch', origin: { status: 404, authenticated: true, authorized: true } },
+    );
+    expect(await h.ensure(composer, 'composer')).toEqual({ kind: 'not_found' });
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers a real ~dev.json that omits the package key with an immediate 503 and no refetch', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    const ORIGIN = 'https://repo.example.com';
+    const requested: string[] = [];
+    const fetch = createPolicyFetch({
+      policy: createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+      userAgent: 'pb-test/1',
+      fetchImpl: async (input) => {
+        const url = String(input instanceof Request ? input.url : input);
+        requested.push(url);
+        const body = url.endsWith('~dev.json')
+          ? JSON.stringify({ minified: 'composer/2.0', packages: {} })
+          : JSON.stringify({
+              minified: 'composer/2.0',
+              packages: {
+                'acme/widget': [
+                  {
+                    name: 'acme/widget',
+                    version: '1.0.0',
+                    dist: { type: 'zip', url: 'https://dl.example.com/w.zip', reference: 'abc' },
+                  },
+                ],
+              },
+            });
+        return new Response(body, {
+          status: 200,
+          headers: { etag: `"${url}"`, 'content-type': 'application/json' },
+        });
+      },
+    });
+    const root: ComposerRoot = {
+      mode: 'v2',
+      packagesJsonUrl: `${ORIGIN}/packages.json`,
+      metadataUrl: `${ORIGIN}/p2/%package%.json`,
+      inlineProviders: false,
+      partialPackages: false,
+      inlinePackages: false,
+      validator: { sha256: 'a'.repeat(64) },
+      messages: [],
+      mirrors: [],
+    };
+    h.plan.describe.mockImplementation(
+      async (_options, signal) =>
+        (await describeComposerV2(fetch, { root, allowedOrigins: [] }, 'acme/widget', {
+          path: 'request',
+          probe: { secrets: [], queryParams: [] },
+          clock: systemClock,
+          dev: true,
+          signal,
+        } as never)) as never,
+    );
+    const actual =
+      await vi.importActual<typeof import('./apply-description.js')>('./apply-description.js');
+    const writer = {
+      statementBudget: {
+        syncPackage: 500,
+        attachDist: 4,
+        openListing: 3,
+        markListing: 5,
+        finalizeListing: 13,
+        quarantine: 5,
+        markPackageAbsent: 8,
+      },
+      syncPackageCost: () => 1,
+      syncPayloadLimit: 4 * 1024 * 1024,
+      syncPayloadBytes: () => 1,
+      syncPackage: async () => ({
+        packageId: 'pkg',
+        inserted: 0,
+        updated: 0,
+        unchanged: 0,
+        conflicts: [],
+        refused: [],
+        skippedTags: [],
+        statements: 1,
+      }),
+      openListing: async () => ({ stamp: '2026-10-20T10:00:00.000Z' }),
+      markListing: async () => ({ changed: true, marked: 0, statements: 1 }),
+    } as unknown as CatalogueWriter;
+    Object.assign(h.deps.apply, {
+      writer,
+      existing: { existingVersions: async () => ({ rows: [], next: null }) },
+      finalizer: { finalize: vi.fn() },
+    });
+    (h.sessions.advance as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_ctx: unknown, held: { seenCount: number }, input: { addSeen: number }) => ({
+        seenCount: held.seenCount + input.addSeen,
+        pagesSoFar: 1,
+      }),
+    );
+    vi.mocked(applyChunk).mockImplementation(actual.applyChunk);
+
+    let result: Awaited<ReturnType<typeof h.ensure>> | undefined;
+    const pending = h.ensure(composer, 'composer').then((value) => (result = value));
+    const startedAt = Date.now();
+    await vi.waitFor(() => expect(result).toBeDefined(), { interval: 1 });
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(result).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    await pending;
+    const fetched = requested.length;
+    expect(fetched).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await h.ensure(composer, 'composer')).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    expect(requested).toHaveLength(fetched);
+    expect(h.cache.set).not.toHaveBeenCalled();
+    expect(h.deps.apply.finalizer.finalize).not.toHaveBeenCalled();
   });
 });

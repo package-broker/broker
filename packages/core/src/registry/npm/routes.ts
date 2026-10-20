@@ -238,6 +238,9 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       throw error;
     }
     if (served.kind === 'busy') return unavailable(ctx, served.retryAfterSeconds);
+    if (served.kind === 'refused') {
+      return fail(ctx, 502, 'bad_gateway', API_ERROR_CODES.bad_gateway.message);
+    }
     if (served.kind === 'not_found') return notFound(ctx);
     if (ctx.request.method === 'HEAD') {
       await served.body.cancel();

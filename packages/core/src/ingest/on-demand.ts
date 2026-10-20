@@ -92,6 +92,7 @@ export class UpstreamFillError extends Error {
   }
 }
 const BUSY = { kind: 'busy', retryAfterSeconds: 10 } as const;
+const INCOMPLETE_RETRY_MS = BUSY.retryAfterSeconds * 1000;
 const mapped = (state: DoneState): OnDemandResult =>
   state === 'filled' ? { kind: 'filled' } : state === 'negative' ? { kind: 'not_found' } : BUSY;
 
@@ -147,6 +148,14 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
     absentAt: string | null;
   }
   const flights = new Map<string, FlightRecord>();
+  const incompleteUntil = new Map<string, number>();
+  const incompleteSeen = (flightKey: string): boolean => {
+    const until = incompleteUntil.get(flightKey);
+    if (until === undefined) return false;
+    if (until > deps.clock.now().getTime()) return true;
+    incompleteUntil.delete(flightKey);
+    return false;
+  };
   const scopeOf = (key: string): IngestScopeRef => {
     const [, , sourceId, packageKey] = JSON.parse(key) as string[];
     return { scope: 'package', sourceId: sourceId!, packageKey: packageKey! };
@@ -278,6 +287,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
           const current = await isDone();
           if (current !== 'pending') return mapped(current);
         }
+        if (ecosystem === 'composer' && incompleteSeen(flightKey)) return BUSY;
         const result = await coalescer.run(
           ctx,
           coalescerKey,
@@ -373,6 +383,13 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
             }
             fillSignal.throwIfAborted();
             if (applied.done && applied.status === 'complete') return 'filled';
+            if (applied.status === 'incomplete' && ecosystem === 'composer') {
+              const now = deps.clock.now().getTime();
+              for (const [entry, until] of incompleteUntil)
+                if (until <= now) incompleteUntil.delete(entry);
+              incompleteUntil.set(flightKey, now + INCOMPLETE_RETRY_MS);
+              return 'pending';
+            }
             if (applied.status === 'progress' || applied.status === 'superseded') {
               resumable.add(session);
               // A progress result leaves the planner's reserved abandonment statement unused.
@@ -414,6 +431,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
           await storeNegative(sharedAbsence);
           return { kind: 'not_found' };
         }
+        if (ecosystem === 'composer' && incompleteSeen(flightKey)) return BUSY;
         if (
           result === 'busy' ||
           currentVisibility.kind !== 'proxy_admissible' ||

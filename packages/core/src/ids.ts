@@ -62,6 +62,18 @@ export function ulidTime(id: string): number {
   return time;
 }
 
+/** The greatest id of the same length that sorts strictly below `id`, or null when none exists. */
+export function idBefore(id: string): string | null {
+  for (let i = id.length - 1; i >= 0; i -= 1) {
+    const at = ENCODING.indexOf(id[i] as string);
+    if (at > 0) {
+      return id.slice(0, i) + (ENCODING[at - 1] as string) + 'Z'.repeat(id.length - i - 1);
+    }
+    if (at < 0) return null;
+  }
+  return null;
+}
+
 export interface Clock {
   now(): Date;
 }

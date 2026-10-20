@@ -570,10 +570,11 @@ describe('createDistService', () => {
     },
   );
 
-  it('quarantines on a digest mismatch, stores nothing and answers 404', async () => {
+  it('quarantines on a digest mismatch, stores nothing and answers refused', async () => {
     const r = rig({ initial: null, integrity: `sha512-${'A'.repeat(86)}==` });
-    expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'not_found' });
+    expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'refused' });
     expect(r.bytes.size).toBe(0);
+    expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'not_found' });
   });
 
   it('polls unreadable stored bytes with head without opening response streams', async () => {
@@ -594,5 +595,41 @@ describe('createDistService', () => {
       retryAfterSeconds: 5,
     });
     expect(r.state.opens).toBe(0);
+  });
+});
+
+describe('dist refusal on a digest mismatch', () => {
+  const WRONG = `sha512-${'A'.repeat(86)}==`;
+
+  it('answers refused to the request that detected it, then the plain 404', async () => {
+    const r = rig({ initial: null, integrity: WRONG });
+    expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'refused' });
+    expect(r.bytes.size).toBe(0);
+    expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'not_found' });
+    expect(r.state.opens).toBe(1);
+  });
+
+  it('answers refused to exactly the caller that ran the fetch, not to coalesced callers', async () => {
+    const r = rig({ initial: null, integrity: WRONG });
+    const open = r.hold();
+    const first = r.service.serve(owner, request(1));
+    const second = r.service.serve(owner, request(1));
+    await vi.waitFor(() => expect(r.state.opens).toBe(1));
+    open();
+    const kinds = (await Promise.all([first, second])).map((result) => result.kind);
+    expect(kinds.filter((kind) => kind === 'refused')).toHaveLength(1);
+    expect(kinds.filter((kind) => kind === 'not_found')).toHaveLength(1);
+    expect(r.state.opens).toBe(1);
+  });
+
+  it('keeps the plain 404 for a caller that cannot see the version', async () => {
+    const r = rig({ initial: null, integrity: WRONG });
+    expect(await r.service.serve(actor('project_b'), request(1))).toEqual({ kind: 'not_found' });
+    expect(r.state.opens).toBe(0);
+  });
+
+  it('does not refuse an unknown revision', async () => {
+    const r = rig({ initial: null });
+    expect(await r.service.serve(owner, request(9))).toEqual({ kind: 'not_found' });
   });
 });

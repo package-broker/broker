@@ -1390,3 +1390,134 @@ describe('lookupToken projectVisible', () => {
     expect(statement.params.length).toBeLessThanOrEqual(100);
   });
 });
+
+describe('lookupToken personal tokens created before the owner stamp', () => {
+  const STAMP = '2026-10-20T12:00:00.000Z';
+
+  async function stamp(userId: string, value: string | null = STAMP): Promise<void> {
+    await seed(stmt('UPDATE user_account SET pat_invalid_before = ? WHERE id = ?', value, userId));
+  }
+
+  async function createdAt(label: string, value: string): Promise<void> {
+    await seed(stmt('UPDATE token SET created_at = ? WHERE id = ?', value, `tok-${label}`));
+  }
+
+  it('resolves a token when the owner has no stamp', async () => {
+    await seed(pat('pat-free'));
+    await createdAt('pat-free', '2020-01-01T00:00:00.000Z');
+
+    const result = await lookup('pat-free');
+
+    expect(result?.token.revoked).toBe(false);
+    expect(result?.projectPermissions).toContain('project:packages:write');
+  });
+
+  it('keeps the envelope but grants nothing to a token created before the stamp', async () => {
+    await seed(pat('pat-old'));
+    await createdAt('pat-old', '2026-10-20T11:59:59.999Z');
+    await stamp(U1);
+
+    const result = await lookup('pat-old');
+
+    expect(result).not.toBeNull();
+    expect(result?.token.revoked).toBe(true);
+    expect(result?.token.bindingOk).toBe(true);
+    expect(result?.projectVisible).toBe(false);
+    expect(result?.projectPermissions).toEqual([]);
+    expect(result?.organizationPermissions).toEqual([]);
+    expect(
+      (await lookup('pat-old', { boundary: 'organization' }))?.organizationPermissions,
+    ).toEqual([]);
+  });
+
+  it('accepts a token created at the stamp instant and one created after it', async () => {
+    await seed(pat('pat-at'), pat('pat-new'));
+    await createdAt('pat-at', STAMP);
+    await createdAt('pat-new', '2026-10-20T12:00:00.001Z');
+    await stamp(U1);
+
+    expect((await lookup('pat-at'))?.token.revoked).toBe(false);
+    expect(await projectPermissions('pat-at')).toContain('project:packages:write');
+    expect((await lookup('pat-new'))?.token.revoked).toBe(false);
+    expect(await projectPermissions('pat-new')).toContain('project:packages:write');
+  });
+
+  it('does not revive an earlier token when the grants come back after the stamp', async () => {
+    await seed(pat('pat-before'));
+    await createdAt('pat-before', '2026-10-20T11:00:00.000Z');
+    await stamp(U1);
+    await seed(stmt('DELETE FROM access_grant WHERE org_id = ?', a.orgId));
+    await seed(grant(a, 'u1@example.test', ROLE_ORG), grant(a, 'u1@example.test', ROLE_DEV, P1));
+    await seed(pat('pat-after'));
+    await createdAt('pat-after', '2026-10-20T13:00:00.000Z');
+
+    expect(await projectPermissions('pat-before')).toEqual([]);
+    expect(await projectPermissions('pat-after')).toContain('project:packages:write');
+  });
+
+  it('compares instants, not text', async () => {
+    await seed(pat('pat-text'));
+    await createdAt('pat-text', '2026-10-20T11:59:59Z');
+    await stamp(U1, '2026-10-20T12:00:00.000Z');
+
+    expect((await lookup('pat-text'))?.token.revoked).toBe(true);
+  });
+
+  it('does not touch the tokens of another user', async () => {
+    await seed(user(a, '01J0USER0000000000000000X9', 'x9@example.test'));
+    await seed(pat('pat-mine'));
+    await createdAt('pat-mine', '2026-10-20T11:00:00.000Z');
+    await stamp('01J0USER0000000000000000X9');
+
+    expect((await lookup('pat-mine'))?.token.revoked).toBe(false);
+  });
+
+  it('leaves service tokens alone', async () => {
+    await seed(principal(SP1, 'svc-one', P1, U1), principalPermission(SP1, 'project:read'));
+    await seed(svc('svc-tok', SP1, { projectId: P1 }));
+    await seed(
+      stmt(
+        'UPDATE token SET created_at = ? WHERE id = ?',
+        '2020-01-01T00:00:00.000Z',
+        'tok-svc-tok',
+      ),
+    );
+    await stamp(U1);
+
+    expect((await lookup('svc-tok'))?.token.revoked).toBe(false);
+  });
+
+  it('does not refresh last_used_at of a token created before the stamp', async () => {
+    await seed(pat('pat-touch'));
+    await createdAt('pat-touch', '2026-10-20T11:00:00.000Z');
+    await stamp(U1);
+
+    expect(await createAccessRepository(executor).touchToken(a, 'tok-pat-touch', 'pat')).toBe(
+      false,
+    );
+    await stamp(U1, null);
+    expect(await createAccessRepository(executor).touchToken(a, 'tok-pat-touch', 'pat')).toBe(true);
+  });
+
+  it('keeps the other bound project working when the grant of one is removed, and restores it on re-grant', async () => {
+    await seed(
+      grant(a, 'u1@example.test', ROLE_DEV, P2),
+      pat('pat-two', { mode: 'selected' }),
+      bind('pat-two', P1),
+      bind('pat-two', P2),
+    );
+    await seed(stmt('DELETE FROM access_grant WHERE role_id = ? AND project_id = ?', ROLE_DEV, P1));
+    await seed(stmt('DELETE FROM access_grant WHERE role_id = ?', ROLE_ORG));
+
+    expect(await projectPermissions('pat-two', { projectSlug: 'alpha' })).toEqual([]);
+    expect(await projectPermissions('pat-two', { projectSlug: 'beta' })).toContain(
+      'project:packages:write',
+    );
+    expect((await lookup('pat-two'))?.token.revoked).toBe(false);
+
+    await seed(grant(a, 'u1@example.test', ROLE_DEV, P1));
+    expect(await projectPermissions('pat-two', { projectSlug: 'alpha' })).toContain(
+      'project:packages:write',
+    );
+  });
+});

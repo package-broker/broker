@@ -22,6 +22,7 @@ import {
 } from '../kysely.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement } from './idempotency.js';
+import { patInvalidationStatement } from './pat-offboarding.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
@@ -550,7 +551,7 @@ export function createProjectGrantRepository(
       const guard = assertGuard(allowed, ctx);
       const checks = [...assertCheck(valid), tombstone, ...assertCheck(owned)];
       const offboardedAt = guard.length + checks.length;
-      const changedAt = offboardedAt + 1;
+      const changedAt = offboardedAt + 2;
       const outcome = await runOrgFenced(
         executor,
         ctx,
@@ -559,6 +560,10 @@ export function createProjectGrantRepository(
         [
           ...checks,
           offboarded,
+          patInvalidationStatement(ctx, input.id, {
+            sql: 'removed.last_op_id = ?',
+            params: [opId],
+          }),
           remove,
           auditPendingStatement(ctx, input.audit),
           ...(input.idempotency === undefined

@@ -11,6 +11,8 @@ import {
   type AdminTarget,
 } from './commands/admin.js';
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
+import { runCloudflareProvision } from './commands/cloudflare/provision.js';
+import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runOpenApi } from './commands/openapi.js';
 import { runBootstrapSqlite, runMigrateSqlite } from './commands/sqlite.js';
 
@@ -18,6 +20,7 @@ const USAGE =
   'Usage: pb build [--config <file>] [--target cloudflare|node] [--out <dir>]\n' +
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
+  '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
   '       pb cloudflare migrate --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
@@ -53,6 +56,17 @@ function parseCliArgs(argv: string[]) {
         'token-file': { type: 'string' },
         'key-version': { type: 'string' },
         'dry-run': { type: 'boolean' },
+        'worker-name': { type: 'string' },
+        environment: { type: 'string' },
+        'deployment-id': { type: 'string' },
+        inventory: { type: 'string' },
+        jurisdiction: { type: 'string' },
+        'location-hint': { type: 'string' },
+        'adopt-resource': { type: 'string', multiple: true },
+        'allow-contract': { type: 'string', multiple: true },
+        domain: { type: 'string' },
+        yes: { type: 'boolean' },
+        json: { type: 'boolean' },
       },
     });
   } catch {
@@ -64,7 +78,34 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   build: ['config', 'target', 'out'],
   migrate: ['sqlite', 'out', 'dry-run'],
   bootstrap: ['sqlite', 'slug', 'name'],
-  'cloudflare migrate': ['database-id', 'out', 'dry-run'],
+  'cloudflare provision': [
+    'worker-name',
+    'config',
+    'environment',
+    'deployment-id',
+    'inventory',
+    'out',
+    'jurisdiction',
+    'location-hint',
+    'adopt-resource',
+    'domain',
+    'yes',
+    'json',
+    'dry-run',
+  ],
+  'cloudflare migrate': [
+    'database-id',
+    'out',
+    'dry-run',
+    'json',
+    'worker-name',
+    'config',
+    'environment',
+    'deployment-id',
+    'inventory',
+    'jurisdiction',
+    'allow-contract',
+  ],
   'cloudflare bootstrap': ['database-id', 'slug', 'name'],
   'secrets generate-master-key': ['key-version'],
   'admin bootstrap': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
@@ -109,29 +150,84 @@ export async function run(argv: readonly string[]): Promise<number> {
     return 0;
   }
   const parsed = parseCliArgs([...argv]);
-  if (parsed === null) {
-    console.error(USAGE);
+  const usageError = () => {
+    const cloudflareIndex = argv.findIndex(
+      (value, index) =>
+        value === 'cloudflare' && ['provision', 'migrate'].includes(argv[index + 1] ?? ''),
+    );
+    if (cloudflareIndex >= 0 && argv.includes('--json')) {
+      console.log(
+        JSON.stringify(
+          failCommand(
+            commandEnvelope(argv[cloudflareIndex + 1]!, argv.includes('--dry-run')),
+            new CloudflareError('invalid_input', 2, false, argv[cloudflareIndex + 1]!),
+          ).output,
+        ),
+      );
+    } else console.error(USAGE);
     return 2;
-  }
+  };
+  if (parsed === null) return usageError();
   const { positionals, values } = parsed;
   if (!acceptsInvocation(positionals, Object.keys(values))) {
-    console.error(USAGE);
-    return 2;
+    return usageError();
   }
   const [command, subcommand] = positionals;
 
   if (command === 'openapi') return runOpenApi(values.out);
 
-  if (command === 'cloudflare' && values['database-id']) {
-    if (subcommand === 'migrate') {
+  if (command === 'cloudflare' && subcommand === 'provision') {
+    if (
+      !values['worker-name'] ||
+      (values.jurisdiction !== undefined && !['eu', 'default'].includes(values.jurisdiction))
+    )
+      return usageError();
+    return runCloudflareProvision({
+      workerName: values['worker-name'],
+      env: process.env,
+      ...(values.config === undefined ? {} : { configPath: values.config }),
+      ...(values.out === undefined ? {} : { outDir: values.out }),
+      ...(values.environment === undefined ? {} : { environment: values.environment }),
+      ...(values['deployment-id'] === undefined ? {} : { deploymentId: values['deployment-id'] }),
+      ...(values.inventory === undefined ? {} : { inventory: values.inventory }),
+      ...(values.jurisdiction === undefined
+        ? {}
+        : { jurisdiction: values.jurisdiction as 'eu' | 'default' }),
+      ...(values['location-hint'] === undefined ? {} : { locationHint: values['location-hint'] }),
+      ...(values['adopt-resource'] === undefined
+        ? {}
+        : { adoptResource: values['adopt-resource'] }),
+      ...(values.domain === undefined ? {} : { domain: values.domain }),
+      yes: values.yes ?? false,
+      json: values.json ?? false,
+      dryRun: values['dry-run'] ?? false,
+    });
+  }
+
+  if (command === 'cloudflare') {
+    if (subcommand === 'migrate' && (values['database-id'] || values['worker-name'])) {
+      if (values.jurisdiction !== undefined && !['eu', 'default'].includes(values.jurisdiction))
+        return usageError();
       return runCloudflareMigrate({
-        databaseId: values['database-id'],
+        ...(values['database-id'] === undefined ? {} : { databaseId: values['database-id'] }),
+        ...(values['worker-name'] === undefined ? {} : { workerName: values['worker-name'] }),
+        ...(values.config === undefined ? {} : { configPath: values.config }),
+        ...(values.environment === undefined ? {} : { environment: values.environment }),
+        ...(values['deployment-id'] === undefined ? {} : { deploymentId: values['deployment-id'] }),
+        ...(values.inventory === undefined ? {} : { inventory: values.inventory }),
+        ...(values.jurisdiction === undefined
+          ? {}
+          : { jurisdiction: values.jurisdiction as 'eu' | 'default' }),
+        ...(values['allow-contract'] === undefined
+          ? {}
+          : { allowContract: values['allow-contract'] }),
+        json: values.json ?? false,
         outDir: values.out || '.pb/cloudflare',
         dryRun: values['dry-run'] ?? false,
         env: process.env,
       });
     }
-    if (subcommand === 'bootstrap' && values.slug && values.name) {
+    if (subcommand === 'bootstrap' && values['database-id'] && values.slug && values.name) {
       return runCloudflareBootstrap({
         databaseId: values['database-id'],
         slug: values.slug,
@@ -220,6 +316,5 @@ export async function run(argv: readonly string[]): Promise<number> {
     return 0;
   }
 
-  console.error(USAGE);
-  return 2;
+  return usageError();
 }

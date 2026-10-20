@@ -3,6 +3,7 @@ import { orgContext } from '../db/port.js';
 import { fixedClock } from '../ids.js';
 import {
   SUPPORTED_PLUGIN_API,
+  type ApiSlot,
   type PluginDefinition,
   type PluginPorts,
   type RouteDefinition,
@@ -37,10 +38,18 @@ function options(
   };
 }
 
+const fixtureApi: ApiSlot = {
+  operationId: 'fixture',
+  summary: 'Fixture',
+  tags: ['fixture'],
+  responses: { 200: null },
+};
+
 const ping: RouteDefinition = {
   method: 'GET',
   path: '/_pb/ping',
   permission: null,
+  api: fixtureApi,
   handler: () => Response.json({ pong: true }),
 };
 
@@ -54,7 +63,14 @@ async function problemsOf(coreRoutes: readonly RouteDefinition[]): Promise<reado
 }
 
 function route(path: string, extra: Partial<RouteDefinition> = {}): RouteDefinition {
-  return { method: 'GET', path, permission: null, handler: () => new Response('ok'), ...extra };
+  return {
+    method: 'GET',
+    path,
+    permission: null,
+    ...(path.startsWith('/_pb/') ? { api: fixtureApi } : {}),
+    handler: () => new Response('ok'),
+    ...extra,
+  };
 }
 
 describe('createKernel coreRoutes', () => {
@@ -412,7 +428,7 @@ describe('createKernel coreRoutes', () => {
     });
 
     it('reports a non-string path as a problem', async () => {
-      const bad = { ...ping, path: 42 } as unknown as RouteDefinition;
+      const bad = { ...ping, path: 42, api: undefined } as unknown as RouteDefinition;
 
       const problems = await problemsOf([bad]);
 

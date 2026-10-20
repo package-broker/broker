@@ -1,3 +1,4 @@
+import { createOrganizationAdministration } from './organization-administration.js';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { packageSyncJob } from '@package-broker/core/ingest/package-sync-job';
 import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
@@ -55,7 +56,7 @@ import {
   createVisibilityService,
   type VisibilityService,
 } from '@package-broker/core/catalogue/visibility-service';
-import type { ActorContext } from '@package-broker/core/authz/administration';
+import { type ActorContext, type Administration } from '@package-broker/core/authz/administration';
 import type { ProjectActor } from '@package-broker/core/authz/project-actor';
 import type {
   CatalogueReader,
@@ -251,6 +252,8 @@ export interface WorkerAccessServices {
   readonly engine: AuthorizationEngine;
   readonly sessions: SessionService;
   readonly projects: ProjectService;
+  readonly administration: Administration;
+  readonly lifetime: TokenLifetimePolicy;
   readonly projectGrants: ProjectAdministration;
   readonly projectList: ProjectLister;
   readonly personalTokens: PersonalTokenService;
@@ -458,15 +461,33 @@ async function buildAuth(
   );
   const organizations = wired('organization repository', createOrganizationRepository(executor));
   const common = { clock: systemClock, ids, log };
+  const servicePrincipals = createServicePrincipalService({
+    sessions: auth.sessions,
+    principals: principalRepository,
+    authority,
+    directory: principalRepository,
+    ...common,
+  });
+  const onCreatorOffboarded = servicePrincipals.creatorOffboarded;
 
   const access: WorkerAccessServices = Object.freeze({
     engine: auth.authorization,
     sessions: auth.sessions,
     projects: createProjectService({ projects: projectRepository, ...common }),
+    lifetime: tokens.lifetime,
+    administration: createOrganizationAdministration(executor, anchorList, {
+      providers,
+      onCreatorOffboarded,
+      ...(tokens.offboarding.onUserOffboarded === undefined
+        ? {}
+        : { onUserOffboarded: tokens.offboarding.onUserOffboarded }),
+      ...common,
+    }),
     projectGrants: createProjectAdministration({
       grants: wired('project grant repository', createProjectGrantRepository(executor)),
       providers,
       providerAnchors: anchorList,
+      onCreatorOffboarded,
       ...tokens.offboarding,
       ...common,
     }),
@@ -486,13 +507,7 @@ async function buildAuth(
       lifetime: tokens.lifetime,
       ...common,
     }),
-    servicePrincipals: createServicePrincipalService({
-      sessions: auth.sessions,
-      principals: principalRepository,
-      authority,
-      directory: principalRepository,
-      ...common,
-    }),
+    servicePrincipals,
     serviceTokens: createServiceTokenService({
       tokens: tokenRepository,
       principals: principalRepository,

@@ -99,6 +99,13 @@ function fileKind(relativePath: string): FileKind {
   const inPackage = rest.join('/');
   if (inPackage.endsWith('.test.ts')) return 'test';
   if (pkg === 'db-sqlite' && /^src\/(contract|testing)\//.test(inPackage)) return 'kit';
+  if (
+    /^packages\/runtime-(?:node|cloudflare)\/src\/restore-rehearsal\/[^/]+\.test\.support\.ts$/.test(
+      relativePath,
+    )
+  ) {
+    return 'script';
+  }
   if (inPackage.startsWith('scripts/') || (pkg === 'ui' && /^build\.[cm]?js$/.test(inPackage))) {
     return 'script';
   }
@@ -386,6 +393,33 @@ describe('classifier', () => {
     expect(findViolations('packages/runtime-cloudflare/scripts/a.mjs', text)).toEqual([]);
     expect(findViolations('packages/runtime-cloudflare/src/a.ts', text)).toHaveLength(2);
   });
+
+  it.each(['node', 'cloudflare'])(
+    'classifies only runtime-%s rehearsal support as host scripts',
+    (runtime) => {
+      const root = `packages/runtime-${runtime}/src`;
+      const support = `${root}/restore-rehearsal/fixture.test.support.ts`;
+      expect(fileKind(support)).toBe('script');
+      const hostImport = runtime === 'cloudflare' ? "import 'miniflare';" : "import 'node:fs';";
+      expect(findViolations(support, hostImport)).toEqual([]);
+      for (const file of [
+        `${root}/fixture.test.support.ts`,
+        `${root}/other/fixture.test.support.ts`,
+        `${root}/restore-rehearsal/nested/fixture.test.support.ts`,
+        `${root}/restore-rehearsal/fixture.support.ts`,
+        `${root}/restore-rehearsal/fixture.test.support.tsx`,
+        `${root}/restore-rehearsal/fixture.ts`,
+        'packages/core/src/restore-rehearsal/fixture.test.support.ts',
+        'packages/db-sqlite/src/restore-rehearsal/fixture.test.support.ts',
+        'packages/plugin-github/src/restore-rehearsal/fixture.test.support.ts',
+      ]) {
+        expect(fileKind(file), file).toBe('source');
+      }
+      expect(
+        findViolations(`${root}/other/fixture.test.support.ts`, "import 'vitest';"),
+      ).toHaveLength(1);
+    },
+  );
 
   it('allows the node import in exactly one runtime-cloudflare production file', () => {
     const text = "import { inflateSync } from 'node:zlib';";
@@ -793,6 +827,19 @@ function findMintViolations(
 
 describe('minting modules', () => {
   const leak = 'packages/core/src/catalogue/leak.ts';
+
+  it.each(['node', 'cloudflare'])(
+    'keeps proof minting restricted in runtime-%s host helpers',
+    (runtime) => {
+      const file = `packages/runtime-${runtime}/src/restore-rehearsal/fixture.test.support.ts`;
+      expect(
+        findMintViolations(
+          file,
+          "import { completeSourceListing, completeVersionListing } from '@package-broker/core/catalogue/version-rules';",
+        ),
+      ).toEqual([`${file}:1: completeSourceListing`, `${file}:1: completeVersionListing`]);
+    },
+  );
 
   it('flags named imports of a mint, also renamed and by package specifier', () => {
     expect(

@@ -6,6 +6,7 @@ import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { CloudflareError, GitWorktreeRequiredError } from './api.js';
+import type { BuildInfo } from '../../build-artifacts.js';
 
 export type Jurisdiction = 'eu' | 'default';
 export type ResourceKey = 'd1' | 'r2' | 'dlq' | 'jobs' | 'analytics' | 'worker';
@@ -64,8 +65,314 @@ export interface Inventory {
     rollback_compatible: boolean;
     contract_ids: string[];
   };
-  deployment: null;
+  deployment: DeploymentJournal | null;
   updated_at: string;
+}
+export interface EndpointPolicy {
+  enabled: boolean;
+  previews_enabled: boolean;
+}
+export interface QueueConsumer {
+  consumer_id: string | null;
+  script_name: string;
+  batch_size: number;
+  max_wait_time_ms: number;
+  max_retries: number;
+  max_concurrency: number;
+  dead_letter_queue: string;
+}
+export interface ManagedRoute {
+  id: string | null;
+  zone_id: string;
+  pattern: string;
+  script: string;
+}
+export interface ManagedDomain {
+  id: string | null;
+  zone_id: string;
+  hostname: string;
+  service: string;
+  environment: 'production';
+}
+export interface ManagedSettings {
+  endpoints: EndpointPolicy;
+  schedules: string[];
+  consumer: QueueConsumer | null;
+  routes: ManagedRoute[];
+  domain: ManagedDomain | null;
+}
+export interface Distribution {
+  version_id: string;
+  percentage: number;
+}
+export interface DeploymentAttempt {
+  operation_id: string;
+  artifact_sha256: string;
+  assets_sha256: string | null;
+  settings_sha256: string;
+  secret_names: string[];
+  build_info: BuildInfo;
+  version_id: string | null;
+  previous_version_id: string | null;
+  previous_deployment_id: string | null;
+  previous_distribution: Distribution[];
+  requested_rollout: number;
+  worker_url: string;
+  candidate_probe_url: string | null;
+  migration_ledger_sha256: string;
+  rollback_compatible: boolean;
+  contract_ids: string[];
+  phase:
+    | 'preparing_upload'
+    | 'upload_pending'
+    | 'uploaded'
+    | 'configuring'
+    | 'activation_pending'
+    | 'active'
+    | 'verified'
+    | 'failed'
+    | 'rollback_pending'
+    | 'rolled_back';
+  activated_at: string | null;
+  smoke: 'pending' | 'passed' | 'failed';
+  rollback: 'not_needed' | 'pending' | 'succeeded' | 'failed' | 'unknown';
+  preview: 'disabled' | 'enable_pending' | 'enabled' | 'cleanup_pending';
+  prior_settings: ManagedSettings;
+  intended_settings: ManagedSettings;
+  changes: {
+    kind: 'endpoints' | 'schedules' | 'consumer' | 'routes' | 'domain';
+    state: 'pending' | 'applied' | 'unknown';
+    restoration: 'not_needed' | 'restored' | 'retained_first_install' | 'failed' | 'unknown';
+  }[];
+}
+export interface DeploymentJournal {
+  attempt: DeploymentAttempt;
+  last_verified: DeploymentAttempt | null;
+}
+export function safeBuildInfo(raw: unknown): BuildInfo {
+  const bad = () => {
+    throw new CloudflareError('invalid_input', 2);
+  };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return bad();
+  const v = raw as Record<string, unknown>;
+  if (
+    Object.keys(v).some(
+      (k) =>
+        !['schemaVersion', 'target', 'core', 'plugins', 'lockfileSha256', 'gitSha'].includes(k),
+    ) ||
+    v.schemaVersion !== 1 ||
+    v.target !== 'cloudflare' ||
+    typeof v.core !== 'string' ||
+    !/^[a-zA-Z0-9.+-]{1,64}$/.test(v.core) ||
+    !v.plugins ||
+    typeof v.plugins !== 'object' ||
+    Array.isArray(v.plugins)
+  )
+    return bad();
+  if (
+    Object.entries(v.plugins).some(
+      ([k, value]) =>
+        !/^[@a-zA-Z0-9/_.-]{1,128}$/.test(k) ||
+        typeof value !== 'string' ||
+        !/^[a-zA-Z0-9.+-]{1,64}$/.test(value),
+    )
+  )
+    return bad();
+  if (
+    v.lockfileSha256 !== null &&
+    (typeof v.lockfileSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(v.lockfileSha256))
+  )
+    return bad();
+  if (v.gitSha !== null && (typeof v.gitSha !== 'string' || !/^[a-f0-9]{40,64}$/.test(v.gitSha)))
+    return bad();
+  return raw as BuildInfo;
+}
+function deploymentValid(raw: unknown): boolean {
+  const record = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === 'object' && !Array.isArray(v);
+  const exact = (v: unknown, keys: string[]): v is Record<string, unknown> =>
+    record(v) &&
+    Object.keys(v).length === keys.length &&
+    Object.keys(v).every((k) => keys.includes(k));
+  const hash = (v: unknown) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
+  const id = (v: unknown) => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(v);
+  const origin = (v: unknown) => {
+    try {
+      const u = new URL(String(v));
+      return u.protocol === 'https:' && u.origin === v && !u.username && !u.password;
+    } catch {
+      return false;
+    }
+  };
+  const settings = (v: unknown): boolean => {
+    if (
+      !exact(v, ['endpoints', 'schedules', 'consumer', 'routes', 'domain']) ||
+      !exact(v.endpoints, ['enabled', 'previews_enabled']) ||
+      typeof v.endpoints.enabled !== 'boolean' ||
+      typeof v.endpoints.previews_enabled !== 'boolean' ||
+      !Array.isArray(v.schedules) ||
+      !v.schedules.every((s) => s === '* * * * *') ||
+      !Array.isArray(v.routes)
+    )
+      return false;
+    if (v.consumer !== null) {
+      const c = v.consumer;
+      if (
+        !exact(c, [
+          'consumer_id',
+          'script_name',
+          'batch_size',
+          'max_wait_time_ms',
+          'max_retries',
+          'max_concurrency',
+          'dead_letter_queue',
+        ]) ||
+        (c.consumer_id !== null && !id(c.consumer_id)) ||
+        !id(c.script_name) ||
+        !id(c.dead_letter_queue) ||
+        !['batch_size', 'max_wait_time_ms', 'max_retries', 'max_concurrency'].every(
+          (k) => typeof c[k] === 'number' && Number.isSafeInteger(c[k]) && (c[k] as number) >= 0,
+        )
+      )
+        return false;
+    }
+    if (
+      !v.routes.every(
+        (r) =>
+          exact(r, ['id', 'zone_id', 'pattern', 'script']) &&
+          (r.id === null || id(r.id)) &&
+          typeof r.zone_id === 'string' &&
+          /^[a-f0-9]{32}$/.test(r.zone_id) &&
+          typeof r.pattern === 'string' &&
+          /^[a-zA-Z0-9*./:-]{1,256}$/.test(r.pattern) &&
+          id(r.script),
+      )
+    )
+      return false;
+    if (v.domain !== null) {
+      const d = v.domain;
+      if (
+        !exact(d, ['id', 'zone_id', 'hostname', 'service', 'environment']) ||
+        (d.id !== null && !id(d.id)) ||
+        typeof d.zone_id !== 'string' ||
+        !/^[a-f0-9]{32}$/.test(d.zone_id) ||
+        typeof d.hostname !== 'string' ||
+        !/^[a-z0-9.-]{1,253}$/.test(d.hostname) ||
+        !id(d.service) ||
+        d.environment !== 'production'
+      )
+        return false;
+    }
+    return true;
+  };
+  const attempt = (v: unknown): boolean => {
+    if (
+      !exact(v, [
+        'operation_id',
+        'artifact_sha256',
+        'assets_sha256',
+        'settings_sha256',
+        'secret_names',
+        'build_info',
+        'version_id',
+        'previous_version_id',
+        'previous_deployment_id',
+        'previous_distribution',
+        'requested_rollout',
+        'worker_url',
+        'candidate_probe_url',
+        'migration_ledger_sha256',
+        'rollback_compatible',
+        'contract_ids',
+        'phase',
+        'activated_at',
+        'smoke',
+        'rollback',
+        'preview',
+        'prior_settings',
+        'intended_settings',
+        'changes',
+      ])
+    )
+      return false;
+    try {
+      safeBuildInfo(v.build_info);
+    } catch {
+      return false;
+    }
+    return (
+      id(v.operation_id) &&
+      hash(v.artifact_sha256) &&
+      (v.assets_sha256 === null || hash(v.assets_sha256)) &&
+      hash(v.settings_sha256) &&
+      Array.isArray(v.secret_names) &&
+      v.secret_names.every(
+        (n) =>
+          typeof n === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(n) && n !== 'PB_TOKEN_PEPPER',
+      ) &&
+      new Set(v.secret_names).size === v.secret_names.length &&
+      hash(v.migration_ledger_sha256) &&
+      [v.version_id, v.previous_version_id, v.previous_deployment_id].every(
+        (x) => x === null || id(x),
+      ) &&
+      Array.isArray(v.previous_distribution) &&
+      v.previous_distribution.every(
+        (d) => exact(d, ['version_id', 'percentage']) && id(d.version_id) && d.percentage === 100,
+      ) &&
+      v.previous_distribution.length <= 1 &&
+      (v.previous_version_id === null
+        ? v.previous_distribution.length === 0
+        : v.previous_distribution[0]?.version_id === v.previous_version_id) &&
+      typeof v.requested_rollout === 'number' &&
+      Number.isInteger(v.requested_rollout) &&
+      v.requested_rollout >= 1 &&
+      v.requested_rollout <= 100 &&
+      origin(v.worker_url) &&
+      (v.candidate_probe_url === null || origin(v.candidate_probe_url)) &&
+      typeof v.rollback_compatible === 'boolean' &&
+      Array.isArray(v.contract_ids) &&
+      v.contract_ids.every(
+        (x) => typeof x === 'string' && /^[a-z0-9-]+:\d{4}_[a-z0-9_]+$/.test(x),
+      ) &&
+      [
+        'preparing_upload',
+        'upload_pending',
+        'uploaded',
+        'configuring',
+        'activation_pending',
+        'active',
+        'verified',
+        'failed',
+        'rollback_pending',
+        'rolled_back',
+      ].includes(String(v.phase)) &&
+      (v.activated_at === null || iso(v.activated_at)) &&
+      ['pending', 'passed', 'failed'].includes(String(v.smoke)) &&
+      ['not_needed', 'pending', 'succeeded', 'failed', 'unknown'].includes(String(v.rollback)) &&
+      ['disabled', 'enable_pending', 'enabled', 'cleanup_pending'].includes(String(v.preview)) &&
+      settings(v.prior_settings) &&
+      settings(v.intended_settings) &&
+      Array.isArray(v.changes) &&
+      v.changes.every(
+        (c) =>
+          exact(c, ['kind', 'state', 'restoration']) &&
+          ['endpoints', 'schedules', 'consumer', 'routes', 'domain'].includes(String(c.kind)) &&
+          ['pending', 'applied', 'unknown'].includes(String(c.state)) &&
+          ['not_needed', 'restored', 'retained_first_install', 'failed', 'unknown'].includes(
+            String(c.restoration),
+          ),
+      )
+    );
+  };
+  return (
+    exact(raw, ['attempt', 'last_verified']) &&
+    attempt(raw.attempt) &&
+    (raw.last_verified === null ||
+      (record(raw.last_verified) &&
+        attempt(raw.last_verified) &&
+        raw.last_verified.phase === 'verified' &&
+        raw.last_verified.smoke === 'passed'))
+  );
 }
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 const component = (value: string, max: number): boolean =>
@@ -203,7 +510,7 @@ export function validateInventory(raw: unknown, expected: InstallIdentity): Inve
     !data.migrations ||
     !data.bootstrap ||
     !data.secret_delivery ||
-    data.deployment !== null
+    (data.deployment !== null && !deploymentValid(data.deployment))
   )
     return bad();
   const names: Record<ResourceKey, string> = {

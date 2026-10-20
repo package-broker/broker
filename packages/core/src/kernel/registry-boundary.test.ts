@@ -10,6 +10,7 @@ import {
 import { createKernel } from './kernel.js';
 import { KernelConfigError, collectRegistrations, type RegistrationOptions } from './registry.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const handler = () => new Response('ok');
 const API = SUPPORTED_PLUGIN_API[1];
@@ -66,7 +67,7 @@ async function kernelProblems(
       resolveOrg: () => Promise.resolve(orgContext('org-1')),
       health: () => Promise.resolve(true),
       log: () => undefined,
-      coreRoutes: [{ ...r, path: corePath }],
+      coreRoutes: documented([{ ...r, path: corePath }]),
       ...(options?.packageResolver === undefined
         ? {}
         : { packageResolver: options.packageResolver }),
@@ -248,7 +249,7 @@ describe('core self route', () => {
       health: () => Promise.resolve(true),
       log: () => undefined,
       authorization: { authorize: () => Promise.resolve({ allow: false, status: 401 }) },
-      coreRoutes: [
+      coreRoutes: documented([
         route({
           path: '/_pb/me',
           permission: null,
@@ -258,7 +259,7 @@ describe('core self route', () => {
             return new Response('ok');
           },
         }),
-      ],
+      ]),
     });
     const response = await kernel.fetch(new Request('http://broker.test/_pb/me'));
     expect(response.status).toBe(401);

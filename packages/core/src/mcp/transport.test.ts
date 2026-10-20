@@ -14,6 +14,7 @@ import { routeApiProblems, routeBoundaryProblems } from '../kernel/routes.js';
 import type { Principal, RequestContext } from '../plugin.js';
 import { formatToken } from '../secrets/token-format.js';
 import { createMcpRoutes, McpError, McpHttpError, type McpHandler } from './transport.js';
+import { createMcpLimiter } from './limit.js';
 
 const ORIGIN = 'https://broker.test';
 const token = (kind: 'pat' | 'svc' | 'cst' = 'pat') =>
@@ -735,5 +736,106 @@ describe('MCP transport', () => {
       id: 1,
       error: { code: -32603, message: 'Internal error' },
     });
+  });
+});
+
+describe('MCP transport rate limiting', () => {
+  function limitedPost(
+    check: (selector: string) => Promise<boolean>,
+    handler = vi.fn(async () => ({})),
+  ) {
+    const routes = createMcpRoutes({
+      handlers: { 'tools/list': handler },
+      publicOrigin: ORIGIN,
+      limiter: { check },
+    });
+    return (ctx: RequestContext) =>
+      Promise.resolve(routes.find((r) => r.method === 'POST')!.handler(ctx));
+  }
+
+  it('answers a refused call with a 429 REST envelope before reading or dispatching', async () => {
+    const binding = { limit: vi.fn(async () => ({ success: false })) };
+    const handler = vi.fn(async () => ({}));
+    const ctx = context(toolCall);
+    const response = await limitedPost(createMcpLimiter(binding).check, handler)(ctx);
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({
+      error: { code: 'rate_limited', message: 'Rate limit exceeded', requestId: 'req-1' },
+    });
+    expect(Object.fromEntries(response.headers)).toEqual({
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+      'retry-after': '60',
+      'x-request-id': 'req-1',
+    });
+    expect(binding.limit).toHaveBeenCalledExactlyOnceWith({ key: 'abcdefghij23' });
+    expect(ctx.request.bodyUsed).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('limits malformed JSON before parsing it', async () => {
+    const ctx = context('{');
+    const response = await limitedPost(async () => false)(ctx);
+    expect(response.status).toBe(429);
+    expect(ctx.request.bodyUsed).toBe(false);
+  });
+
+  it('dispatches an allowed call with the selector from the authenticated snapshot', async () => {
+    const original = context(toolCall);
+    const ctx = { ...original };
+    const snapshot = accessContextOf(original)!;
+    setAccessContext(ctx, {
+      ...snapshot,
+      rateKey: {
+        stage: 'authenticated',
+        principalId: 'user-1',
+        tokenSelector: 'engine-selector',
+        routeClass: 'authenticated',
+      },
+    });
+    const check = vi.fn(async () => true);
+    const handler = vi.fn(async () => ({ ok: true }));
+    const response = await limitedPost(check, handler)(ctx);
+    expect(check).toHaveBeenCalledExactlyOnceWith('engine-selector');
+    expect(handler).toHaveBeenCalledExactlyOnceWith(undefined, ctx);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ jsonrpc: '2.0', id: 1, result: { ok: true } });
+  });
+
+  it.each([
+    ['authentication', { snapshot: false }, 401],
+    ['scope', { scope: 'write' }, 403],
+    ['Origin', { headers: { origin: 'https://foreign.test' } }, 403],
+    ['protocol version', { headers: { 'MCP-Protocol-Version': 'unsupported' } }, 400],
+  ] as const)('checks %s before calling the limiter', async (_name, options, status) => {
+    const check = vi.fn(async () => false);
+    const handler = vi.fn(async () => ({}));
+    const ctx = context(toolCall, options);
+    const response = await limitedPost(check, handler)(ctx);
+    expect(response.status).toBe(status);
+    expect(check).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(ctx.request.bodyUsed).toBe(false);
+  });
+
+  it('refuses a missing authenticated selector without using another key', async () => {
+    const original = context(toolCall);
+    const ctx = { ...original };
+    setAccessContext(ctx, {
+      ...accessContextOf(original)!,
+      rateKey: {
+        stage: 'authenticated',
+        principalId: 'user-1',
+        tokenSelector: null,
+        routeClass: 'authenticated',
+      },
+    });
+    const check = vi.fn(async () => true);
+    const handler = vi.fn(async () => ({}));
+    const response = await limitedPost(check, handler)(ctx);
+    expect(response.status).toBe(403);
+    expect(check).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(ctx.request.bodyUsed).toBe(false);
   });
 });

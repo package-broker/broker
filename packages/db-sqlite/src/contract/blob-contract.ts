@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
+import type { BlobLifecycleMetadataPort } from '@package-broker/core/platform/blob-lifecycle';
 import {
   BlobBusyError,
   BlobConflictError,
@@ -60,7 +61,8 @@ export type BlobReferenceStatus =
  * `expireLease` moves a live purge lease into the past. `narrowRefetchable` is the metadata port
  * operation of the same name and `generationOf` reads the row's current purge generation.
  * `makeEligible` backdates the blob past the orphan grace period and makes it refetchable, so a
- * scheduled blob with no live reference can be claimed. `addReference` makes a version in
+ * scheduled blob with no live reference can be claimed. `ageBlob` sets the context's blob age in
+ * days from the database clock without changing refetchability. `addReference` makes a version in
  * the context's organization point at the blob with the given status; `setVersionStatus` sets that
  * status on every version of the blob in the organization. `removeCalls` counts `ByteStore.remove`
  * calls; `stallNextRemove` makes the next one never settle and `failNextRemove` makes it reject.
@@ -69,8 +71,13 @@ export type BlobReferenceStatus =
  * database clock.
  */
 export interface BlobLifecycleFixture extends BlobContractFixture {
-  readonly lifecycle: BlobLifecycle;
+  readonly lifecycle: BlobLifecycle & Pick<BlobLifecycleMetadataPort, 'unschedule'>;
+  readonly inspect: (
+    ctx: OrgContext,
+    key: Sha256,
+  ) => Promise<{ info: BlobInfo; purging: boolean } | null>;
   readonly makeEligible: (ctx: OrgContext, key: Sha256) => Promise<void>;
+  readonly ageBlob: (ctx: OrgContext, key: Sha256, days: number) => Promise<void>;
   readonly addReference: (
     ctx: OrgContext,
     key: Sha256,
@@ -154,6 +161,8 @@ const FUNCTION_HOOKS = [
 ] as const;
 
 const LIFECYCLE_FIXTURE_HOOKS = [
+  'inspect',
+  'ageBlob',
   'expireLease',
   'narrowRefetchable',
   'generationOf',
@@ -1202,6 +1211,171 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
       expect(f.removeCalls()).toBe(1);
     });
+
+    async function due(f: BlobLifecycleFixture, label: string, old = true) {
+      const row = await scheduled(f, label);
+      if (old) await f.makeEligible(row.org, row.key);
+      await f.expireRetention(row.org, row.key);
+      return row;
+    }
+
+    it('lifecycle 7: a stalled remove times out and leaves the live lease intact', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'timeout');
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      f.stallNextRemove();
+      const started = performance.now();
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect(performance.now() - started).toBeLessThan(f.leaseMarginMs() / 2 + 500);
+      expect((await f.inspect(org, key))?.purging).toBe(true);
+      expect(f.removeCalls()).toBe(1);
+    }, 5_000);
+
+    it('lifecycle 7 negative: a settled remove succeeds and marking leaves no purging row', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'settled');
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      const started = performance.now();
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+      expect(performance.now() - started).toBeLessThan(f.leaseMarginMs() / 2);
+      expect(await f.lifecycle.markDeleted(org, key, generation)).toBe(true);
+      expect(await f.inspect(org, key)).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 8: a failed remove returns false and keeps the lease', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'failure');
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      f.failNextRemove();
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect((await f.inspect(org, key))?.purging).toBe(true);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 8 negative: expiry recovers a failed remove in two calls', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'retry failure');
+      const first = (await f.lifecycle.claimPurge(org, key))!;
+      f.failNextRemove();
+      expect(await f.lifecycle.recheckAndRemove(org, key, first)).toBe(false);
+      await f.expireLease(org, key);
+      const next = (await f.lifecycle.claimPurge(org, key))!;
+      expect(next).not.toBeNull();
+      expect(next).not.toBe(first);
+      expect(await f.lifecycle.recheckAndRemove(org, key, next)).toBe(true);
+      expect(await f.lifecycle.markDeleted(org, key, next)).toBe(true);
+      expect(f.removeCalls()).toBe(2);
+    }, 5_000);
+
+    it('lifecycle 9: orphan grace blocks a new blob and a re-put after an old claim', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key, data } = await due(f, 'orphan grace', false);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+      await f.makeEligible(org, key);
+      expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+      await f.expireLease(org, key);
+      await put(f.store, org, data);
+      await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+      await f.expireRetention(org, key);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 9 negative: an old non-refetchable orphan cannot be claimed', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key, data } = await due(f, 'non-refetchable');
+      await put(f.store, org, data, { refetchable: false });
+      await f.makeEligible(org, key);
+      await f.narrowRefetchable(org, { key, size: data.length, mediaType: PLAIN.mediaType });
+      expect(await f.refetchableOf(org, key)).toBe(false);
+      await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+      await f.expireRetention(org, key);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 9: an orphan remains protected six days into the seven-day grace', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'partway through orphan grace', false);
+      await f.ageBlob(org, key, 6);
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+      await f.ageBlob(org, key, 8);
+      expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+    }, 5_000);
+
+    it('lifecycle 9 negative: old referenced blobs follow reference status', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'old reference');
+      await f.addReference(org, key, 'active');
+      expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+      await f.setVersionStatus(org, key, 'removed_upstream');
+      expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+    }, 5_000);
+
+    it('lifecycle 10: repeated softDelete keeps the deadline during a lease and cancel clears it', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'leased schedule');
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      const deadline = (await f.inspect(org, key))!.info.purgeAfter;
+      expect(deadline).not.toBeNull();
+      expect(await f.lifecycle.softDelete(org, key, { removedAt: await f.now() })).toBe(true);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBe(deadline);
+      expect(await f.lifecycle.unschedule(org, key)).toBe(false);
+      expect(await f.lifecycle.cancelPurge(org, key, generation)).toBe(true);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 11: unschedule clears an unleased ineligible schedule', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'ineligible schedule', false);
+      expect(await f.lifecycle.unschedule(org, key)).toBe(true);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 11 negative: unschedule preserves an eligible schedule', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'eligible schedule');
+      const deadline = (await f.inspect(org, key))!.info.purgeAfter;
+      expect(deadline).not.toBeNull();
+      expect(await f.lifecycle.unschedule(org, key)).toBe(false);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBe(deadline);
+    }, 5_000);
+
+    it('lifecycle 11 negative: unschedule preserves an ineligible schedule until lease expiry', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'ineligible under a live lease');
+      expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+      await f.addReference(org, key, 'active');
+      const leased = (await f.inspect(org, key))!;
+      const deadline = leased.info.purgeAfter;
+      expect(leased.purging).toBe(true);
+      expect(deadline).not.toBeNull();
+      expect(await f.lifecycle.unschedule(org, key)).toBe(false);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBe(deadline);
+      await f.expireLease(org, key);
+      expect((await f.inspect(org, key))!.purging).toBe(false);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBe(deadline);
+      expect(await f.lifecycle.unschedule(org, key)).toBe(true);
+      expect((await f.inspect(org, key))!.info.purgeAfter).toBeNull();
+    }, 5_000);
+
+    it('lifecycle 12: another organization sees exactly the absent-key results', async () => {
+      const f = await readyLifecycle(make);
+      const { org, key } = await due(f, 'foreign key');
+      const other = await f.seed(nextOrg());
+      const absent = await digestOf(bytes('never written lifecycle key'));
+      expect(await f.lifecycle.claimPurge(other, absent)).toBeNull();
+      expect(await f.lifecycle.claimPurge(other, key)).toBeNull();
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      for (const method of ['recheckAndRemove', 'markDeleted', 'cancelPurge'] as const) {
+        expect(await f.lifecycle[method](other, absent, generation)).toBe(false);
+        expect(await f.lifecycle[method](other, key, generation)).toBe(false);
+      }
+      await f.expireLease(org, key);
+      await f.addReference(org, key, 'active');
+      expect(await f.lifecycle.unschedule(other, absent)).toBe(false);
+      expect(await f.lifecycle.unschedule(other, key)).toBe(false);
+      expect((await f.inspect(org, key))!.info.purgeAfter).not.toBeNull();
+      expect(f.removeCalls()).toBe(0);
+    }, 5_000);
   });
 }
 

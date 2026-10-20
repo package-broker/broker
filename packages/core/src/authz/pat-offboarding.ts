@@ -11,6 +11,8 @@ export interface PatOffboardingPayload {
   readonly userId: string;
   readonly cause: PatOffboardingCause;
   readonly cutoff: string;
+  /** A selected PAT durably marked by the access-loss write. */
+  readonly invalidatedTokenId?: string;
 }
 
 export type RevokePageOutcome =
@@ -28,6 +30,7 @@ export interface PatOffboardingStore {
       readonly limit: number;
       /** Only tokens bound to selected projects of which the user holds none. */
       readonly selectedOnly?: true;
+      readonly invalidatedTokenId?: string;
     },
   ): Promise<readonly string[]>;
   /**
@@ -46,6 +49,7 @@ export interface PatOffboardingStore {
       readonly lease: { readonly jobId: string; readonly fence: number };
       readonly audits: readonly AuditEvent[];
       readonly selectedOnly?: true;
+      readonly invalidatedTokenId?: string;
     },
   ): Promise<RevokePageOutcome>;
 }
@@ -82,9 +86,14 @@ function validate(input: unknown): PatOffboardingPayload {
   if (proto !== Object.prototype && proto !== null) throw new JobError('invalid_payload');
   const keys = Reflect.ownKeys(input);
   const record = input as Record<string, unknown>;
-  const { userId, cause, cutoff } = record;
+  const { userId, cause, cutoff, invalidatedTokenId } = record;
+  const snapshot = keys.includes('invalidatedTokenId');
   if (
-    keys.length !== 3 ||
+    keys.length !== (snapshot ? 4 : 3) ||
+    (snapshot &&
+      (cause !== 'project_removed' ||
+        typeof invalidatedTokenId !== 'string' ||
+        !isUlid(invalidatedTokenId))) ||
     typeof userId !== 'string' ||
     !isUlid(userId) ||
     !CAUSES.has(cause) ||
@@ -92,7 +101,12 @@ function validate(input: unknown): PatOffboardingPayload {
   ) {
     throw new JobError('invalid_payload');
   }
-  return { userId, cause: cause as PatOffboardingCause, cutoff };
+  return {
+    userId,
+    cause: cause as PatOffboardingCause,
+    cutoff,
+    ...(snapshot ? { invalidatedTokenId: invalidatedTokenId as string } : {}),
+  };
 }
 
 export function createPatOffboardingJob(deps: PatOffboardingDeps): RegisteredCoreJob {
@@ -134,7 +148,7 @@ export function createPatOffboardingJob(deps: PatOffboardingDeps): RegisteredCor
     maxAttempts: 5,
     validate,
     async handler(input, context) {
-      const { userId, cause, cutoff } = input as PatOffboardingPayload;
+      const { userId, cause, cutoff, invalidatedTokenId } = input as PatOffboardingPayload;
       const org = context.org;
       const orgId = org.orgId;
 
@@ -149,7 +163,13 @@ export function createPatOffboardingJob(deps: PatOffboardingDeps): RegisteredCor
         return;
       }
 
-      const narrowing = cause === 'project_removed' ? ({ selectedOnly: true } as const) : {};
+      const narrowing =
+        cause === 'project_removed'
+          ? ({
+              selectedOnly: true,
+              ...(invalidatedTokenId === undefined ? {} : { invalidatedTokenId }),
+            } as const)
+          : {};
       const submitted = new Set<string>();
       let revoked = 0;
       for (;;) {

@@ -16,6 +16,7 @@ import {
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
 import { jobFences } from '@package-broker/core/platform/job-fences';
+import { releaseDelayOf } from '@package-broker/core/platform/job-release';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
 import { safeErrorName, type Observability } from '@package-broker/core/platform/observability';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
@@ -284,6 +285,14 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
       } catch (error) {
         log('warn', 'job.handler_failed', error, claim.id, runner);
         if (stopping && controller.signal.aborted) return { outcome: 'released', delaySeconds: 0 };
+        const delaySeconds = releaseDelayOf(error);
+        if (
+          delaySeconds !== null &&
+          !controller.signal.aborted &&
+          isRegisteredCoreJob(job as RegisteredCoreJob)
+        ) {
+          return { outcome: 'released', delaySeconds };
+        }
         const errorCode = controller.signal.aborted
           ? jobErrorCode(controller.signal.reason)
           : jobErrorCode(error);

@@ -280,7 +280,7 @@ describe('describeComposerV1 provider files', () => {
       codecs,
       selection,
     });
-    expect(result).toEqual({ kind: 'not_found', definitive: true });
+    expect(result).toEqual({ kind: 'not_found', definitive: false });
     expect(requests).toEqual([]);
   });
 });
@@ -319,7 +319,7 @@ describe('describeComposerV1 lazy providers', () => {
   it('makes no request for a name outside the source selection', async () => {
     const { fetch, requests } = setup({});
     const result = await describeComposerV1(fetch, 'acme/unselected', lazyOptions());
-    expect(result).toEqual({ kind: 'not_found', definitive: true });
+    expect(result).toEqual({ kind: 'not_found', definitive: false });
     expect(requests).toEqual([]);
   });
 
@@ -462,7 +462,7 @@ describe('describeComposerV1 round 2', () => {
       codecs,
       selection,
     });
-    expect(ghost).toEqual({ kind: 'not_found', definitive: true });
+    expect(ghost).toEqual({ kind: 'not_found', definitive: false });
   });
 
   it('f13: the packages key differs from the version name', async () => {

@@ -10,6 +10,12 @@ import { systemClock, ulid, type Clock } from '@package-broker/core/ids';
 import type { RegisteredJob } from '@package-broker/core/kernel/registry';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { PluginPorts } from '@package-broker/core/plugin';
+import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
+import {
+  JOB_HANDLER_BUDGET_SECONDS,
+  StaleFenceError,
+} from '@package-broker/core/platform/job-repository';
+import { JobRelease } from '@package-broker/core/platform/job-release';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import {
   createObservability,
@@ -891,5 +897,122 @@ describe('createJobLoop', () => {
     await vi.waitFor(async () => expect((await h.status(id))?.state).toBe('succeeded'), WAIT);
     expect(seen).toBeDefined();
     expect(seen?.fences).toBeUndefined();
+  });
+
+  it('hands a registered core job its claim lease through jobLeaseOf', async () => {
+    const h = await harness();
+    let lease: ReturnType<typeof jobLeaseOf> | undefined;
+    let claimed: { lease_owner: string; fence: number } | undefined;
+    const registered = job('leased', async (_payload, context) => {
+      const rows = await h.executor.all<{ lease_owner: string; fence: number }>({
+        sql: 'SELECT lease_owner, fence FROM job WHERE id = ?',
+        params: [context.jobId],
+      });
+      claimed = rows[0];
+      lease = jobLeaseOf(context);
+    });
+    const id = await h.enqueue(registered.qualifiedName, 'one');
+    h.loop([registered]).start();
+    await vi.waitFor(async () => expect((await h.status(id))?.state).toBe('succeeded'), WAIT);
+    expect(lease).toEqual({ id, owner: claimed?.lease_owner, fence: claimed?.fence });
+  });
+
+  it('releases a core job that throws JobRelease without consuming the attempt', async () => {
+    const h = await harness();
+    const registered = job('release', () => Promise.reject(new JobRelease(60)));
+    const id = await h.enqueue(registered.qualifiedName, 'one');
+    const before = (await h.status(id))?.attempts;
+    h.loop([registered]).start();
+    await vi.waitFor(async () => {
+      const status = await h.status(id);
+      expect(status?.history[0]?.outcome).toBe('released');
+    }, WAIT);
+    const status = await h.status(id);
+    expect(status?.attempts).toBe(before);
+    expect(status?.state).toBe('queued');
+    expect(Date.parse(status?.runAt ?? '') - Date.now()).toBeGreaterThanOrEqual(59_000);
+  });
+
+  it('fails a plugin job that throws JobRelease as an ordinary handler_error', async () => {
+    const h = await harness();
+    const core = job('work', () => Promise.resolve());
+    const plugin: RegisteredJob = {
+      plugin: 'acme',
+      qualifiedName: 'acme:release:v1',
+      definition: { ...core.definition, handler: () => Promise.reject(new JobRelease(60)) },
+    };
+    const id = await h.enqueue(plugin.qualifiedName, 'one');
+    h.loop([plugin]).start();
+    await vi.waitFor(async () => {
+      const status = await h.status(id);
+      expect(status?.history[0]?.outcome).toBe('failed');
+    }, WAIT);
+    const status = await h.status(id);
+    expect(status).toMatchObject({ state: 'queued', attempts: 1, lastErrorCode: 'handler_error' });
+    expect(status?.history[0]).toMatchObject({ outcome: 'failed', errorCode: 'handler_error' });
+  });
+
+  it('fails with timeout when a core job rejects with JobRelease after the budget aborted it', async () => {
+    const h = await harness();
+    const id = await h.enqueue('core:release-late:v1', 'one');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let started = false;
+    h.loop([
+      job('release-late', (_payload, context) => {
+        started = true;
+        return new Promise<void>((_resolve, reject) => {
+          context.signal.addEventListener('abort', () => reject(new JobRelease(60)));
+        });
+      }),
+    ]).start();
+    await vi.waitFor(() => expect(started).toBe(true), WAIT);
+    await vi.advanceTimersByTimeAsync(JOB_HANDLER_BUDGET_SECONDS * 1000);
+    vi.useRealTimers();
+    await vi.waitFor(
+      async () => expect((await h.status(id))?.history[0]?.outcome).toBe('failed'),
+      WAIT,
+    );
+    const status = await h.status(id);
+    expect(status?.attempts).toBe(1);
+    expect(status?.history[0]).toMatchObject({ outcome: 'failed', errorCode: 'timeout' });
+  });
+
+  it('does not release a core job that throws JobRelease after a stale-fence heartbeat aborted it', async () => {
+    const h = await harness();
+    const id = await h.enqueue('core:release-stale:v1', 'one');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const proxy = new Proxy(h.executor, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof value !== 'function') return value;
+        if (property !== 'batch') return (value as (...args: unknown[]) => unknown).bind(target);
+        return (statements: Parameters<SqlExecutor['batch']>[0]) =>
+          statements.some((item) => /lease_until = max\(lease_until/.test(item.sql))
+            ? Promise.reject(new StaleFenceError())
+            : target.batch(statements);
+      },
+    });
+    let started = false;
+    h.loop(
+      [
+        job('release-stale', (_payload, context) => {
+          started = true;
+          return new Promise<void>((_resolve, reject) => {
+            context.signal.addEventListener('abort', () => reject(new JobRelease(60)));
+          });
+        }),
+      ],
+      proxy,
+    ).start();
+    await vi.waitFor(() => expect(started).toBe(true), WAIT);
+    await vi.advanceTimersByTimeAsync(20_000);
+    vi.useRealTimers();
+    await vi.waitFor(
+      async () => expect((await h.status(id))?.history[0]?.outcome).not.toBe('running'),
+      WAIT,
+    );
+    const status = await h.status(id);
+    expect(status?.history[0]?.outcome).not.toBe('released');
+    expect(status?.attempts).toBe(1);
   });
 });

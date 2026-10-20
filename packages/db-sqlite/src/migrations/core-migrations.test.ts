@@ -479,3 +479,79 @@ describe('core migrations', () => {
     });
   });
 });
+
+describe('import rollback persistence (0019)', () => {
+  const COUNT_COLUMNS = [
+    'rollback_restored_count',
+    'rollback_conflict_count',
+    'rollback_expired_count',
+  ];
+
+  async function seedJournal(): Promise<void> {
+    await seedOrganization();
+    await run("INSERT INTO import_run (id, org_id, source_system) VALUES ('run', ?, 'test')", [
+      ORG,
+    ]);
+    await run(
+      "INSERT INTO import_ref (id, org_id, import_run_id, entity_type, entity_id, external_ref, action) VALUES ('ref', ?, 'run', 'project', 'p', 'p', 'create')",
+      [ORG],
+    );
+  }
+
+  it('adds the three count columns and expired_at, additive and in the expand phase', async () => {
+    const sources = await loadCore();
+    const source = sources.find((candidate) => candidate.id.startsWith('core:0019_'));
+    expect(source?.phase).toBe('expand');
+    await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
+
+    expect(
+      await rows<{ name: string; type: string; notnull: number; dflt_value: string | null }>(
+        "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('import_run') WHERE name LIKE 'rollback_%' ORDER BY name",
+      ),
+    ).toEqual(
+      [...COUNT_COLUMNS].sort().map((name) => ({
+        name,
+        type: 'INTEGER',
+        notnull: 1,
+        dflt_value: '0',
+      })),
+    );
+    expect(
+      await rows(
+        "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('import_ref') WHERE name = 'expired_at'",
+      ),
+    ).toEqual([{ name: 'expired_at', type: 'TEXT', notnull: 0, dflt_value: null }]);
+  });
+
+  it('keeps existing journal rows and backfills zero counts and a null expiry', async () => {
+    await migrate(opened.executor, await loadCore((name) => name < '0019_'), {
+      holder: 'core-migrations-test',
+    });
+    await seedJournal();
+    const runBefore = await rows<Record<string, SqlValue>>('SELECT * FROM import_run');
+    const refBefore = await rows<Record<string, SqlValue>>('SELECT * FROM import_ref');
+
+    await migrate(opened.executor, await loadCore(), { holder: 'core-migrations-test' });
+
+    expect(await rows('SELECT * FROM import_run WHERE 1 = 1')).toEqual([
+      {
+        ...runBefore[0],
+        rollback_restored_count: 0,
+        rollback_conflict_count: 0,
+        rollback_expired_count: 0,
+      },
+    ]);
+    expect(await rows('SELECT * FROM import_ref WHERE 1 = 1')).toEqual([
+      { ...refBefore[0], expired_at: null },
+    ]);
+  });
+
+  it.each(COUNT_COLUMNS)('rejects a negative %s', async (column) => {
+    await migrate(opened.executor, await loadCore(), { holder: 'core-migrations-test' });
+    await seedJournal();
+
+    expect(await dbErrorKind(run(`UPDATE import_run SET ${column} = -1 WHERE id = 'run'`))).toBe(
+      'check',
+    );
+  });
+});

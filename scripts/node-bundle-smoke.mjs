@@ -455,7 +455,7 @@ async function checkPackageRoute() {
   const { base, env } = await startBundle(out);
 
   step = 'checking the package-boundary route';
-  const route = (name) => `${base}/fixture/alpha/pkg/${name}`;
+  const route = (name) => `${base}/fixture/pkg/alpha/${name}`;
   const fetchRoute = (name, headers = {}) =>
     fetch(route(name), { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   await expectStatus(await fetchRoute('visible'), 401, 'GET package route without credentials');

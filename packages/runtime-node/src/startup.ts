@@ -1,6 +1,6 @@
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { mkdir, readFile, stat } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   AUTH_REASON_CODES,
   isAuthReasonCode,
@@ -60,6 +60,11 @@ import { createLruCache } from './cache/lru.js';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import { createNodeServer, type NodeBroker } from './index.js';
 import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
+import {
+  RegistryConfigError,
+  resolveRegistryConfig,
+  type RegistryConfig,
+} from '@package-broker/core/registry/registry-config';
 import { createJobLoop, JOB_EVENTS, type JobLoop } from './jobs/loop.js';
 import { createStdioSink, type StdioStream } from './observability/stdio.js';
 
@@ -70,6 +75,7 @@ export interface StartOptions {
   readonly log?: KernelLog;
   readonly platformPorts?: PlatformPortConfig | null;
   readonly observability?: BrokerConfig['observability'];
+  readonly registry?: BrokerConfig['registry'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -221,6 +227,15 @@ function publicOrigin(raw: string | undefined): string {
       origin: 'must be an origin without path, query or credentials',
     };
     throw new StartupConfigError('PB_PUBLIC_URL', problems[error.problem]);
+  }
+}
+
+function registryConfig(input: StartOptions['registry'], origin: string): RegistryConfig {
+  try {
+    return resolveRegistryConfig(input, 'node', origin);
+  } catch (error) {
+    if (!(error instanceof RegistryConfigError)) throw error;
+    throw new StartupConfigError('registry', error.problems.join('; '));
   }
 }
 
@@ -654,6 +669,10 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
 
     const keyring = await readKeyring(options.env);
     const origin = publicOrigin(options.env['PB_PUBLIC_URL']);
+    if (options.registry !== undefined && ports === null) {
+      throw new StartupConfigError('registry', 'requires platformPorts');
+    }
+    const registry = registryConfig(options.registry, origin);
     await selfTestPasswordHashing(keyring);
 
     if (ports !== null) {
@@ -704,6 +723,15 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
             },
           }),
       ...(services === undefined ? {} : { platformServices: services }),
+      ...(services === undefined
+        ? {}
+        : {
+            registry: {
+              config: registry,
+              sshArchiveRoot:
+                options.env['PB_SSH_ARCHIVE_ROOT'] ?? join(dirname(path), 'ssh-archives'),
+            },
+          }),
     });
     const kernel = await broker.ready();
     if (telemetry !== undefined) {

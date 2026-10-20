@@ -375,7 +375,8 @@ export function createVisibilityAttachRepository(
           ? sql<SqlBool>`1`
           : sql<SqlBool>`not exists (
           select 1 from api_idempotency where org_id = ${ctx.orgId}
-          and principal_key = ${input.idempotency.principalKey} and key = ${input.idempotency.key})`,
+          and principal_key = ${input.idempotency.principalKey} and key = ${input.idempotency.key}
+          and expires_at > ${input.idempotency.createdAt})`,
       );
       const changed = sql<SqlBool>`exists (select 1 from project_source as ps
         join json_each(${order}) as wanted on wanted.value = ps.source_id

@@ -21,7 +21,7 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
@@ -275,13 +275,6 @@ function probe(condition: Guard, negate: boolean): Statement {
   return compile(db.selectNoFrom(expression.as('held')));
 }
 
-function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
-  return record === undefined
-    ? sql<SqlBool>`0`
-    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
-        and principal_key = ${record.principalKey} and key = ${record.key})`;
-}
-
 function failed(reason: string): never {
   throw new Error(`project grant write failed without a classification: ${reason}`);
 }
@@ -367,7 +360,7 @@ export function createProjectGrantRepository(
       const probes: FailureProbes = {
         authority: probe(allowed, true),
         conflict: probe(
-          sql<SqlBool>`(${valid} is not 1 or ${idempotencyCollision(ctx, input.idempotency)})`,
+          sql<SqlBool>`(${valid} is not 1 or ${liveIdempotencyCollision(ctx, input.idempotency)})`,
           false,
         ),
         collision: probe(duplicate, false),
@@ -391,7 +384,7 @@ export function createProjectGrantRepository(
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') {
         const [collision] = await executor.all<{ held: number }>(
-          probe(idempotencyCollision(ctx, input.idempotency), false),
+          probe(liveIdempotencyCollision(ctx, input.idempotency), false),
         );
         return collision?.held === 1 ? 'conflict' : 'role_scope_mismatch';
       }
@@ -449,7 +442,7 @@ export function createProjectGrantRepository(
         {
           authority: probe(allowed, true),
           conflict: probe(
-            sql<SqlBool>`(${valid} is not 1 or ${idempotencyCollision(ctx, input.idempotency)})`,
+            sql<SqlBool>`(${valid} is not 1 or ${liveIdempotencyCollision(ctx, input.idempotency)})`,
             false,
           ),
         },
@@ -461,7 +454,7 @@ export function createProjectGrantRepository(
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') {
         const [collision] = await executor.all<{ held: number }>(
-          probe(idempotencyCollision(ctx, input.idempotency), false),
+          probe(liveIdempotencyCollision(ctx, input.idempotency), false),
         );
         if (collision?.held === 1) return 'conflict';
         return diagnose(ctx, target, { id: input.roleId, revision: roleRevision }, revision);
@@ -568,7 +561,7 @@ export function createProjectGrantRepository(
         {
           authority: probe(allowed, true),
           conflict: probe(
-            sql<SqlBool>`(${valid} is not 1 or ${idempotencyCollision(ctx, input.idempotency)})`,
+            sql<SqlBool>`(${valid} is not 1 or ${liveIdempotencyCollision(ctx, input.idempotency)})`,
             false,
           ),
         },
@@ -582,7 +575,7 @@ export function createProjectGrantRepository(
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') {
         const [collision] = await executor.all<{ held: number }>(
-          probe(idempotencyCollision(ctx, input.idempotency), false),
+          probe(liveIdempotencyCollision(ctx, input.idempotency), false),
         );
         if (collision?.held === 1) return 'conflict';
         return (await diagnose(ctx, input, null, revision)) === 'not_found'

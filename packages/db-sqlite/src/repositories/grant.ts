@@ -29,7 +29,7 @@ import { holdsPermission, permissionRows } from './access.js';
 import { revokeAllForUserStatement } from './session.js';
 import { liveSessionCondition } from './session-liveness.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_GROUP_LENGTH = 256;
@@ -262,13 +262,6 @@ function probe(condition: Guard): ScalarStatement {
   return scalar(db.selectNoFrom(sql<number>`${condition}`.as('holds')));
 }
 
-function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
-  return record === undefined
-    ? sql<SqlBool>`0`
-    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
-        and principal_key = ${record.principalKey} and key = ${record.key})`;
-}
-
 function probesFor(
   ctx: OrgContext,
   authority: GrantAuthority,
@@ -282,7 +275,7 @@ function probesFor(
       ? {}
       : {
           conflict: probe(
-            sql<SqlBool>`(${idempotencyCollision(ctx, idempotency)} or ${
+            sql<SqlBool>`(${liveIdempotencyCollision(ctx, idempotency)} or ${
               revision === undefined
                 ? sql<SqlBool>`0`
                 : sql<SqlBool>`exists (select 1 from access_grant where org_id = ${revision.ctx.orgId} and id = ${revision.id} and scope = 'organization' and revision <> ${revision.expected})`
@@ -783,7 +776,7 @@ export function createGrantRepository(
           authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
           ...(idempotency === undefined
             ? {}
-            : { conflict: probe(idempotencyCollision(ctx, idempotency)) }),
+            : { conflict: probe(liveIdempotencyCollision(ctx, idempotency)) }),
           collision: probe(sql<SqlBool>`(${active} and ${lastHolder}) is not 1`),
         },
       );
@@ -838,7 +831,7 @@ export function createGrantRepository(
           authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
           ...(idempotency === undefined
             ? {}
-            : { conflict: probe(idempotencyCollision(ctx, idempotency)) }),
+            : { conflict: probe(liveIdempotencyCollision(ctx, idempotency)) }),
           collision: probe(sql<SqlBool>`${suspended} is not 1`),
         },
       );

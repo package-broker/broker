@@ -3898,6 +3898,21 @@ describe('grant mutation audit and idempotency', () => {
     expect(await snapshot()).toEqual(before);
   });
 
+  it('duplicate grant stays duplicate with an expired record for the key', async () => {
+    const f = await fixture('createOrganization');
+    expect(await f.invoke(0, mutationAudit('grant.create', f.ids[0]!))).toBe('created');
+    await executor.batch([
+      idempotencyInsertStatement(a, {
+        ...record('c'.repeat(64)),
+        createdAt: '2000-01-01T00:00:00.000Z',
+        expiresAt: '2000-01-02T00:00:00.000Z',
+      }),
+    ]);
+    const before = await snapshot();
+    expect(await f.invoke(0, mutationAudit('grant.create', f.ids[0]!), record())).toBe('duplicate');
+    expect(await snapshot()).toEqual(before);
+  });
+
   it('the same idempotency key in another organization does not conflict', async () => {
     const f = await fixture('createOrganization');
     await executor.batch([idempotencyInsertStatement(b, record())]);

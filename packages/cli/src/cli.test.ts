@@ -27,6 +27,7 @@ it('lists only working commands in --help', async () => {
       'admin reset-local',
       'admin rebind-provider',
       'admin show-provider-binding',
+      'import satis plan',
       'version',
     ]);
     expect(help).not.toContain('pb openapi');

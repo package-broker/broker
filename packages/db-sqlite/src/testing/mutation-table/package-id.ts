@@ -18,7 +18,7 @@ function packageIdCase(name: string, rows: { source: Org; pkg: Org }): ContractC
       const seed = seeder(context.executor);
       const orgs = orgOf(context);
       await seedSource(seed, 'S1', orgs[rows.source].orgId, 'vcs');
-      await seedPackage(seed, 'K1', orgs[rows.pkg].orgId, 'S1', 'acme/a');
+      await seedPackage(seed.forged, 'K1', orgs[rows.pkg].orgId, 'S1', 'acme/a');
       const result = await context.executor.all(
         context.mutate(packageIdStatement(orgs.own, 'S1', 'acme/a')),
       );

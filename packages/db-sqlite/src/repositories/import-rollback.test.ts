@@ -10,6 +10,7 @@ import {
 } from '@package-broker/core/import/rollback';
 import { IMPORT_RUN_JOB } from '@package-broker/core/import/run-service';
 import { fixedClock, ulid } from '@package-broker/core/ids';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createImportJournalStore, hash } from './import-journal.js';
 import { createImportRollbackStore, ROLLBACK_ENTITIES } from './import-rollback.js';
@@ -107,6 +108,8 @@ describe('import rollback store', () => {
     database.executor.all<R>(stmt(sql, ...params));
   const exec = (sql: string, ...params: SqlValue[]) =>
     database.executor.batch([stmt(sql, ...params)]);
+  const forgedExec = (sql: string, ...params: SqlValue[]) =>
+    withForeignKeysOff(database.executor, () => exec(sql, ...params));
   const fences = (approver: string, runId: string, expected: Readonly<Record<string, number>>) =>
     delegatedMutationFence(approver, runId, rollbackJob, expected);
 
@@ -477,7 +480,7 @@ describe('import rollback store', () => {
         )
       )[0]!.id;
       const insert = async (): Promise<void> => {
-        await exec(
+        await forgedExec(
           "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('foreign-name', ?, ?, 'npm', 'foreign/*')",
           foreign.orgId,
           sourceId,

@@ -433,7 +433,9 @@ describe('step 5 release gate on the node runtime', () => {
 
     const names = Object.keys(services ?? {}).sort();
     expect(names).toEqual([
+      'administration',
       'engine',
+      'lifetime',
       'personalTokens',
       'projectGrants',
       'projectList',

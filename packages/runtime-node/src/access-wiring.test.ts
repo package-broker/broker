@@ -554,7 +554,9 @@ describe('node access wiring', () => {
     expect(events).toEqual(['handler']);
 
     expect(Object.keys(services ?? {}).sort()).toEqual([
+      'administration',
       'engine',
+      'lifetime',
       'personalTokens',
       'projectGrants',
       'projectList',

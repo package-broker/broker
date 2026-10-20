@@ -23,6 +23,12 @@ import { createOutboundPolicy } from '../sources/url-policy.js';
 import { describeComposerV2 } from './composer/v2-package.js';
 import type { ComposerRoot } from './composer/root.js';
 import type { CatalogueWriter } from '../db/catalogue.js';
+import type { PackageAccess } from '../catalogue/package-access.js';
+import { setContextPackageActor } from '../internal/package-actor.js';
+import { setResolvedPackage } from '../internal/package-context.js';
+import type { RequestContext } from '../plugin.js';
+import { composerRoutes } from '../registry/composer/routes.js';
+import { PackagistBusyError } from './composer/packagist-proxy.js';
 
 vi.mock('./apply-description.js', async (original) => ({
   ...(await original<typeof import('./apply-description.js')>()),
@@ -190,6 +196,146 @@ function setup() {
   return { deps, sessions, plan, describePackage, events, outcome, ensure, cache, service };
 }
 afterEach(() => vi.useRealTimers());
+describe('upstream busy on the request path', () => {
+  function request(h: ReturnType<typeof setup>) {
+    const outcome = {
+      kind: 'proxy_admissible',
+      projectId: actor.projectId,
+      ecosystem: 'composer',
+      key: 'name',
+      sourceIds: ['A', 'B'],
+    } as const;
+    const versions = vi.fn<PackageAccess['versions']>();
+    const route = composerRoutes({
+      access: { versions } as unknown as PackageAccess,
+      fill: h.service,
+      dist: { serve: vi.fn() },
+      clock: { advance: vi.fn() },
+      publicUrl: 'https://broker.test',
+    }).find((route) => route.path === '/:project/p2/:vendor/:file')!;
+    const ctx: RequestContext = {
+      request: new Request('https://broker.test/project/p2/acme/widget.json'),
+      requestId: 'request',
+      org: { orgId: actor.orgId },
+      principal: { kind: 'user', id: actor.userId },
+      projectId: actor.projectId,
+      params: { project: 'project', vendor: 'acme', file: 'widget.json' },
+      ports: {
+        organizations: { get: vi.fn() },
+        clock: systemClock,
+        ids: { ulid: () => 'id' },
+      },
+    };
+    setContextPackageActor(ctx, actor);
+    setResolvedPackage(ctx, outcome);
+    return { call: () => route.handler(ctx), versions };
+  }
+
+  it.each([
+    [null, 10],
+    [Number.NaN, 10],
+    [Number.POSITIVE_INFINITY, 10],
+    [Number.NEGATIVE_INFINITY, 10],
+    [0.4, 1],
+    [1.6, 2],
+    [-5, 1],
+    [0, 1],
+    [1, 1],
+    [5, 5],
+    [60, 60],
+    [61, 60],
+    [86400, 60],
+  ])(
+    'answers busy with 503 Retry-After %s → %i and keeps other failures at 502',
+    async (upstreamRetry, expectedRetry) => {
+      vi.useFakeTimers();
+      const h = setup();
+      h.describePackage.mockRejectedValue(new PackagistBusyError(upstreamRetry));
+      const { call, versions } = request(h);
+      const started = Date.now();
+      const response = await call();
+      expect(Date.now()).toBe(started);
+      expect(response.status).toBe(503);
+      expect(response.headers.get('Retry-After')).toBe(String(expectedRetry));
+      expect(await response.json()).toMatchObject({ error: { code: 'unavailable' } });
+      expect(h.describePackage).toHaveBeenCalledTimes(1);
+      expect(h.deps.planFill).toHaveBeenCalledExactlyOnceWith({ orgId: actor.orgId }, 'A', 'name');
+      expect(applyChunk).not.toHaveBeenCalled();
+      expect(h.cache.set).not.toHaveBeenCalled();
+      expect(h.deps.enqueueSync).not.toHaveBeenCalled();
+      expect(versions).not.toHaveBeenCalled();
+
+      for (const error of [
+        ...[401, 403, 429, 500, 503].map((status) => new UpstreamError('http_status', status)),
+        new UpstreamError('network'),
+        new ComposerV2Error('http_status', 503),
+        new ComposerV1PackageError('status', 503),
+      ]) {
+        const failed = setup();
+        failed.describePackage.mockRejectedValue(error);
+        const response = await request(failed).call();
+        expect(response.status).toBe(502);
+        expect(response.headers.get('Retry-After')).toBeNull();
+        expect(await response.json()).toMatchObject({ error: { code: 'bad_gateway' } });
+        expect(failed.deps.planFill).toHaveBeenCalledExactlyOnceWith(
+          { orgId: actor.orgId },
+          'A',
+          'name',
+        );
+        expect(applyChunk).not.toHaveBeenCalled();
+        expect(failed.cache.set).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('releases the session on busy so the next request can acquire and fill', async () => {
+    const h = setup();
+    let held = false;
+    h.sessions.acquire.mockImplementation(async (_ctx, _scope, owner: string) => {
+      if (held) return 'held' as never;
+      held = true;
+      return { ...handle, owner };
+    });
+    h.sessions.discard.mockImplementation(async () => {
+      held = false;
+      return true;
+    });
+    h.sessions.release.mockImplementation(async () => {
+      held = false;
+      return true;
+    });
+    h.describePackage.mockRejectedValueOnce(new PackagistBusyError(5));
+    expect(await h.ensure({ ...admitted, ecosystem: 'composer' }, 'composer')).toEqual({
+      kind: 'busy',
+      retryAfterSeconds: 5,
+    });
+    expect(held).toBe(false);
+    expect(h.sessions.abandon).not.toHaveBeenCalled();
+    expect(applyChunk).not.toHaveBeenCalled();
+    vi.mocked(applyChunk).mockResolvedValue({ ...h.outcome, done: true, status: 'complete' });
+    expect(await h.ensure({ ...admitted, ecosystem: 'composer' }, 'composer')).toEqual({
+      kind: 'filled',
+    });
+    expect(h.describePackage).toHaveBeenCalledTimes(2);
+    expect(applyChunk).toHaveBeenCalled();
+  });
+
+  it('delivers the upstream Retry-After to every coalesced caller without waiting', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    h.describePackage.mockRejectedValue(new PackagistBusyError(5));
+    expect(
+      await Promise.all(
+        Array.from({ length: 20 }, () =>
+          h.ensure({ ...admitted, ecosystem: 'composer' }, 'composer'),
+        ),
+      ),
+    ).toEqual(Array.from({ length: 20 }, () => ({ kind: 'busy', retryAfterSeconds: 5 })));
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
+    expect(applyChunk).not.toHaveBeenCalled();
+    expect(h.cache.set).not.toHaveBeenCalled();
+  });
+});
 describe('T430n review regressions', () => {
   it.each(['before fill', 'during describe'] as const)(
     'keeps an admitted name busy when its listing becomes incomplete %s',

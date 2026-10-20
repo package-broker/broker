@@ -1,6 +1,7 @@
 import { sql } from 'kysely';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { PatOffboardingStore } from '@package-broker/core/authz/pat-offboarding';
+import type { PatOffboardingSweepStore } from '@package-broker/core/authz/pat-offboarding-sweep';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
 import { isUlid } from '@package-broker/core/ids';
@@ -8,6 +9,7 @@ import { ACCESS_MUTATION_GUARD_CONSTRAINT, assertCheck } from '../kysely.js';
 import { auditPendingStatement } from './audit-pending.js';
 
 const MAX_PAGE = 25;
+const MAX_SWEEP = 100;
 const MAX_TEXT = 512;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -24,8 +26,8 @@ function instant(field: string, value: unknown): string {
   return value;
 }
 
-function text(field: string, value: unknown): string {
-  if (typeof value !== 'string' || value === '' || value.length > MAX_TEXT) {
+function text(field: string, value: unknown, allowEmpty = false): string {
+  if (typeof value !== 'string' || (value === '' && !allowEmpty) || value.length > MAX_TEXT) {
     throw new TypeError(
       `${field} must be a non-empty string of at most ${String(MAX_TEXT)} characters`,
     );
@@ -36,6 +38,13 @@ function text(field: string, value: unknown): string {
 function limitOf(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > MAX_PAGE) {
     throw new RangeError(`limit must be an integer from 1 to ${String(MAX_PAGE)}`);
+  }
+  return value;
+}
+
+function sweepLimitOf(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > MAX_SWEEP) {
+    throw new RangeError(`limit must be an integer from 1 to ${String(MAX_SWEEP)}`);
   }
   return value;
 }
@@ -52,7 +61,9 @@ function checkParameters(statement: Statement): Statement {
   return statement;
 }
 
-export function createPatOffboardingRepository(executor: SqlExecutor): PatOffboardingStore {
+export function createPatOffboardingRepository(
+  executor: SqlExecutor,
+): PatOffboardingStore & PatOffboardingSweepStore {
   return {
     async holdsAnyGrant(ctx, userId, cutoff) {
       const rows = await executor.all<{ held: number }>(
@@ -78,6 +89,23 @@ export function createPatOffboardingRepository(executor: SqlExecutor): PatOffboa
       const row = rows[0];
       if (row === undefined) throw new Error('grant lookup returned no row');
       return row.held === 1;
+    },
+
+    async suspendedUsersWithLivePats(ctx, afterId, limit) {
+      const rows = await executor.all<{ id: string }>(
+        checkParameters({
+          sql: `SELECT u.id FROM user_account AS u
+            WHERE u.org_id = ? AND u.id > ? AND u.status = 'suspended'
+              AND EXISTS (
+                SELECT 1 FROM token AS t
+                WHERE t.org_id = u.org_id AND t.user_id = u.id
+                  AND t.kind = 'pat' AND t.revoked_at IS NULL
+              )
+            ORDER BY u.id LIMIT ?`,
+          params: [ctx.orgId, text('afterId', afterId, true), sweepLimitOf(limit)],
+        }),
+      );
+      return rows.map((row) => row.id);
     },
 
     async candidates(ctx, { userId, cutoff, limit }) {

@@ -192,6 +192,48 @@ const candidatesOrg: ContractCase = {
   },
 };
 
+const sweepUserOrg: ContractCase = {
+  name: 'suspendedUsersWithLivePats lists only users of the context organization',
+  async run(context) {
+    const { own, foreign, token } = await base(context);
+    await context.executor.batch([
+      { sql: "UPDATE user_account SET status = 'suspended' WHERE id = ?", params: [USER] },
+    ]);
+    await token(own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.suspendedUsersWithLivePats(foreign, '', 100)).toEqual([]);
+  },
+};
+
+const sweepTokenOrg: ContractCase = {
+  name: 'suspendedUsersWithLivePats counts only personal tokens of the context organization',
+  async run(context) {
+    const { own, foreign, token } = await base(context);
+    await context.executor.batch([
+      { sql: "UPDATE user_account SET status = 'suspended' WHERE id = ?", params: [USER] },
+    ]);
+    await token(foreign);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.suspendedUsersWithLivePats(own, '', 100)).toEqual([]);
+  },
+};
+
+const sweepCursor: ContractCase = {
+  name: 'suspendedUsersWithLivePats returns only users above the cursor',
+  async run(context) {
+    const { own, token } = await base(context);
+    await context.executor.batch([
+      { sql: "UPDATE user_account SET status = 'suspended' WHERE id = ?", params: [USER] },
+    ]);
+    await token(own);
+    const repo = createPatOffboardingRepository(mutating(context));
+
+    expect(await repo.suspendedUsersWithLivePats(own, USER, 100)).toEqual([]);
+  },
+};
+
 const revokeOrg: ContractCase = {
   name: 'revokePage revokes only tokens of the context organization',
   async run(context) {
@@ -355,6 +397,9 @@ export const entries: readonly MutationEntry[] = [
       holdsGrantOrg,
       holdsMembershipOrg,
       candidatesOrg,
+      sweepUserOrg,
+      sweepTokenOrg,
+      sweepCursor,
       revokeOrg,
       auditOrg,
       leaseOrg,
@@ -387,6 +432,27 @@ export const entries: readonly MutationEntry[] = [
         neutral: NEUTRAL,
         copies: 1,
         caseName: candidatesOrg.name,
+      },
+      {
+        name: 'sweep user organization',
+        locate: /u\.org_id = \?/,
+        neutral: NEUTRAL,
+        copies: 1,
+        caseName: sweepUserOrg.name,
+      },
+      {
+        name: 'sweep token organization',
+        locate: /t\.org_id = u\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: sweepTokenOrg.name,
+      },
+      {
+        name: 'sweep cursor',
+        locate: /u\.id > \?/,
+        neutral: NEUTRAL,
+        copies: 1,
+        caseName: sweepCursor.name,
       },
       {
         name: 'revoke update organization',

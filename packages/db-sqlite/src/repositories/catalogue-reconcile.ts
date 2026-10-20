@@ -163,11 +163,9 @@ function seenRows(
           AND version.listing_seen_stamp = ${stamp})`;
 }
 
-function sourceUnseenPredicate(ctx: OrgContext, boundary: RawBuilder<string>): RawBuilder<boolean> {
+function sourceUnseenPredicate(boundary: RawBuilder<string>): RawBuilder<boolean> {
   return sql<boolean>`package.updated_at < ${boundary}
-      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing'
-        OR EXISTS (SELECT 1 FROM version WHERE version.package_id = package.id
-          AND version.org_id = ${ctx.orgId} AND version.status = 'active'))`;
+      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing')`;
 }
 
 export function unseenSourcePackages(ctx: OrgContext, sourceId: string): RawBuilder<number> {
@@ -307,7 +305,7 @@ export function finalizeListingStatements(
   ];
 
   if (scope.kind === 'source') {
-    const unseen = sourceUnseenPredicate(ctx, boundary);
+    const unseen = sourceUnseenPredicate(boundary);
     const returned = sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'`;
     const rows = (predicate: RawBuilder<boolean>) =>
       sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}`;
@@ -327,7 +325,8 @@ export function finalizeListingStatements(
     statements.push(
       statementOf(
         sql`UPDATE package SET status = 'removed_upstream', removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),
-          removal_cause = 'source_listing', last_op_id = ${opId},
+          removal_cause = 'source_listing',
+          last_op_id = CASE WHEN status = 'active' THEN ${opId} ELSE last_op_id END,
           rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}`,
       ),
     );

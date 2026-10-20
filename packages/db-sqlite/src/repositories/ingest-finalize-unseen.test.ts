@@ -298,6 +298,47 @@ describe('the source unseen count covers only currently-listed active packages',
     ]);
   });
 
+  it('cascades only under packages that go from active to removed in this op', async () => {
+    await seedSourceWithPackages(20);
+    await database.executor.batch([
+      removePackages(11, 18, 'source_listing'),
+      removePackages(19, 20, 'document_absent'),
+      ...Array.from({ length: 10 }, (_, i) =>
+        insertVersions(ctx.orgId, `pid${String(i + 11)}`, '1', 1, 'active'),
+      ),
+      insertVersions(ctx.orgId, 'pid9', '1', 3, 'active'),
+      insertVersions(ctx.orgId, 'pid10', '1', 2, 'active'),
+    ]);
+    const { handle } = await sourceSession(8);
+    expect(
+      await createIngestFinalizer(database.executor).finalize(ctx, handle, honest(8, 2)),
+    ).toMatchObject({ status: 'complete' });
+    expect(await packageStatuses()).toEqual([
+      { status: 'active', n: 8 },
+      { status: 'removed_upstream', n: 12 },
+    ]);
+    expect(await versionStatuses()).toEqual([
+      { status: 'active', n: 10 },
+      { status: 'removed_upstream', n: 5 },
+    ]);
+  });
+
+  it('keeps the relabel of an already removed package without removing its versions', async () => {
+    await seedSourceWithPackages(20);
+    await database.executor.batch([
+      removePackages(11, 20, 'document_absent'),
+      insertVersions(ctx.orgId, 'pid11', '1', 4, 'active'),
+    ]);
+    const { handle } = await sourceSession(8);
+    await createIngestFinalizer(database.executor).finalize(ctx, handle, honest(8, 2));
+    expect(
+      await database.executor.all(
+        stmt("SELECT removal_cause AS c FROM package WHERE id = 'pid11'"),
+      ),
+    ).toEqual([{ c: 'source_listing' }]);
+    expect(await versionStatuses()).toEqual([{ status: 'active', n: 4 }]);
+  });
+
   it('still refuses when the active unseen packages exceed the share', async () => {
     await seedSourceWithPackages(20);
     await database.executor.batch([removePackages(16, 20, 'document_absent')]);

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -18,6 +18,7 @@ interface Bundle {
   readonly external?: readonly string[];
   readonly text?: string;
   readonly plugin?: boolean;
+  readonly files?: Readonly<Record<string, string>>;
 }
 
 async function writeBundle(dir: string, name: string, bundle: Bundle): Promise<void> {
@@ -32,15 +33,23 @@ async function writeBundle(dir: string, name: string, bundle: Bundle): Promise<v
   };
   await writeFile(path.join(target, 'metafile.json'), JSON.stringify(metafile));
   await writeFile(path.join(target, 'bundle.js'), bundle.text ?? 'export default 1;\n');
+  for (const [name, contents] of Object.entries(bundle.files ?? {})) {
+    const file = path.join(target, name);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, contents);
+  }
 }
 
-async function check(cloudflare: Bundle): Promise<{ code: number; output: string }> {
+async function check(
+  cloudflare: Bundle,
+  node: Bundle = {},
+): Promise<{ code: number; output: string }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'pb-treeshake-'));
   dirs.push(dir);
   await writeBundle(dir, 'minimal-cloudflare', cloudflare);
   await writeBundle(dir, 'default-cloudflare', { ...cloudflare, plugin: true });
-  await writeBundle(dir, 'minimal-node', {});
-  await writeBundle(dir, 'default-node', { plugin: true });
+  await writeBundle(dir, 'minimal-node', node);
+  await writeBundle(dir, 'default-node', { ...node, plugin: true });
   try {
     await run('node', ['scripts/check-treeshake.mjs'], {
       cwd: root,
@@ -89,4 +98,29 @@ describe('check-treeshake cloudflare node: allow-list', () => {
     expect(result.code).toBe(1);
     expect(result.output).toContain('node:');
   });
+});
+
+describe('check-treeshake deployment paths', () => {
+  it.each(['cloudflare', 'node'] as const)(
+    'rejects checkout and home paths in every part of the %s output',
+    async (target) => {
+      for (const file of ['generated/manifest.ts', 'bundle.js.map', 'assets/nested/asset.bin']) {
+        for (const absolutePath of [root, homedir()]) {
+          const bundle = { files: { [file]: JSON.stringify({ path: absolutePath }) } };
+          const result = await check(
+            target === 'cloudflare' ? bundle : {},
+            target === 'node' ? bundle : {},
+          );
+          expect(result.code).toBe(1);
+          expect(result.output).toContain(
+            `minimal/${target}: build-machine path in deployment output`,
+          );
+          expect(result.output).toContain(
+            `default/${target}: build-machine path in deployment output`,
+          );
+          expect(result.output).toContain(file);
+        }
+      }
+    },
+  );
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import { completeSourceListing } from '@package-broker/core/catalogue/version-rules';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
 import { createCatalogueWriter } from './catalogue-writer.js';
@@ -18,7 +19,7 @@ beforeEach(async () => {
   database = await openMigratedDatabase({ twoOrganizations: true });
   own = database.orgs!.a;
   foreign = database.orgs!.b;
-  await database.executor.batch([
+  const statements = [
     stmt(
       "INSERT INTO job (id, org_id, type, idempotency_key, state, lease_owner, lease_until, fence) VALUES ('job', ?, 'sync', 'sync', 'running', 'worker', '2999-01-01T00:00:00.000Z', 1)",
       own.orgId,
@@ -45,7 +46,8 @@ beforeEach(async () => {
         ),
       ),
     ),
-  ]);
+  ];
+  await withForeignKeysOff(database.executor, () => database.executor.batch(statements));
 });
 afterEach(async () => {
   await database.close();

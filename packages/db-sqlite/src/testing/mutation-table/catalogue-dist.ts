@@ -43,7 +43,10 @@ const foreignVersion: ContractCase = {
   async run(context) {
     await visiblePackage(context);
     const { own, foreign } = orgOf(context);
-    await seeder(context.executor)("UPDATE version SET org_id = ? WHERE id = 'V'", foreign.orgId);
+    await seeder(context.executor).forged(
+      "UPDATE version SET org_id = ? WHERE id = 'V'",
+      foreign.orgId,
+    );
     expect(
       await createDistResolver(executing(context)).resolveDist(own, {
         ...packageQuery,

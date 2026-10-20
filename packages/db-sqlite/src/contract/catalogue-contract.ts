@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect } from 'vitest';
 import { sql } from 'kysely';
 import type { SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { compile, db } from '../kysely.js';
@@ -14,6 +14,7 @@ import {
 } from '../repositories/catalogue-predicates.js';
 import { visibleWinner } from '../repositories/catalogue-read.js';
 import { seedTwoOrganizations, type TwoOrganizations } from './two-organizations.js';
+import { forgedItFor, withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 interface Opened {
   readonly executor: SqlExecutor;
@@ -22,11 +23,18 @@ interface Opened {
 
 const st = (text: string, ...params: Statement['params']): Statement => ({ sql: text, params });
 
-export function describeCatalogueContract(name: string, open: () => Promise<Opened>): void {
+export function describeCatalogueContract(
+  name: string,
+  open: () => Promise<Opened>,
+  options: { readonly d1?: boolean } = {},
+): void {
+  const forgedIt = forgedItFor(options.d1 === true);
   describe(`catalogue org consistency contract: ${name}`, () => {
     let database: Opened;
     let executor: SqlExecutor;
     let orgs: TwoOrganizations;
+    const batchForged = (statements: readonly Statement[]) =>
+      withForeignKeysOff(executor, () => executor.batch(statements));
 
     beforeEach(async () => {
       database = await open();
@@ -75,8 +83,8 @@ export function describeCatalogueContract(name: string, open: () => Promise<Open
       await database.close();
     });
 
-    it('a foreign tag collision produces no history, change or revision bump', async () => {
-      await executor.batch([
+    forgedIt('a foreign tag collision produces no history, change or revision bump', async () => {
+      await batchForged([
         st(
           "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K', 'latest', 'V')",
           orgs.b.orgId,
@@ -109,8 +117,8 @@ export function describeCatalogueContract(name: string, open: () => Promise<Open
       ['include', 'other/*'],
       ['exclude', 'bad?'],
     ] as const) {
-      it(`ignores a mismatched-org ${effect} pattern ${pattern}`, async () => {
-        await executor.batch([
+      forgedIt(`ignores a mismatched-org ${effect} pattern ${pattern}`, async () => {
+        await batchForged([
           st(
             `INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect)
           VALUES ('PAT', ?, 'P', 'S', ?, ?)`,
@@ -135,8 +143,8 @@ export function describeCatalogueContract(name: string, open: () => Promise<Open
       });
     }
 
-    it('a foreign include cannot admit a package excluded by own includes', async () => {
-      await executor.batch([
+    forgedIt('a foreign include cannot admit a package excluded by own includes', async () => {
+      await batchForged([
         st(
           "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES ('OWN', ?, 'P', 'S', 'other/*', 'include')",
           orgs.a.orgId,
@@ -162,8 +170,8 @@ export function describeCatalogueContract(name: string, open: () => Promise<Open
     });
 
     for (const effect of ['include', 'exclude'] as const) {
-      it(`foreign ${effect} patterns do not count towards the limit`, async () => {
-        await executor.batch(
+      forgedIt(`foreign ${effect} patterns do not count towards the limit`, async () => {
+        await batchForged(
           Array.from({ length: 65 }, (_, i) =>
             st(
               "INSERT INTO project_package_pattern (id, org_id, project_id, source_id, pattern, effect) VALUES (?, ?, 'P', 'S', ?, ?)",
@@ -191,8 +199,8 @@ export function describeCatalogueContract(name: string, open: () => Promise<Open
     }
 
     for (const mismatch of ['package', 'source', 'registered_name'] as const) {
-      it(`a competing foreign ${mismatch} does not shadow a proxy`, async () => {
-        await executor.batch([
+      forgedIt(`a competing foreign ${mismatch} does not shadow a proxy`, async () => {
+        await batchForged([
           st("UPDATE source SET type = 'npmjs_proxy' WHERE id = 'S'"),
           st(
             "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('OTHER', ?, 'other', 'npm', 'npm_registry')",
@@ -225,11 +233,11 @@ export function describeCatalogueContract(name: string, open: () => Promise<Open
       'package',
       'project',
     ] as const) {
-      it(`a mismatched-org ${table} row cannot supply the visible winner`, async () => {
+      forgedIt(`a mismatched-org ${table} row cannot supply the visible winner`, async () => {
         expect(
           await executor.all(compile(visibleWinner(orgs.a, 'P', 'npm', 'widget'))),
         ).toHaveLength(1);
-        await executor.batch([st(`UPDATE ${table} SET org_id = ?`, orgs.b.orgId)]);
+        await batchForged([st(`UPDATE ${table} SET org_id = ?`, orgs.b.orgId)]);
         expect(await executor.all(compile(visibleWinner(orgs.a, 'P', 'npm', 'widget')))).toEqual(
           [],
         );

@@ -46,8 +46,8 @@ async function seedTagFixture(
     FUTURE,
   );
   await seedSource(seed, 'S-NPM', options.packageOrg, 'npm_registry', 'npm');
-  await seedPackage(seed, 'K-NPM', options.packageOrg, 'S-NPM', 'widget', 'npm');
-  await seedVersion(seed, 'V1', options.versionOrg, 'K-NPM', '1.0.0');
+  await seedPackage(seed.forged, 'K-NPM', options.packageOrg, 'S-NPM', 'widget', 'npm');
+  await seedVersion(seed.forged, 'V1', options.versionOrg, 'K-NPM', '1.0.0');
   await seedVersion(seed, 'V2', orgOf(context).own.orgId, 'K-NPM', '2.0.0');
 }
 
@@ -113,9 +113,9 @@ function reblobCase(stage: ReblobStage, table: ReblobTable): ContractCase {
         );
       }
       if (table === 'version')
-        await seed("UPDATE version SET org_id = ? WHERE id = 'V1'", foreign.orgId);
+        await seed.forged("UPDATE version SET org_id = ? WHERE id = 'V1'", foreign.orgId);
       if (table === 'package')
-        await seed("UPDATE package SET org_id = ? WHERE id = 'K-NPM'", foreign.orgId);
+        await seed.forged("UPDATE package SET org_id = ? WHERE id = 'K-NPM'", foreign.orgId);
       if (table === 'job')
         await seed('UPDATE job SET org_id = ? WHERE id = ?', foreign.orgId, A_JOB);
       const index = REBLOB_STAGES.findIndex(([candidate]) => candidate === stage);
@@ -174,8 +174,8 @@ function probe(stage: Stage, table: Table): ContractCase {
       const seed = seeder(context.executor);
       const scopedOrg = (candidate: Table) => (candidate === table ? foreign.orgId : own.orgId);
       await seedSource(seed, 'S', own.orgId, 'composer_repository');
-      await seedPackage(seed, 'K', scopedOrg('package'), 'S', 'acme/widget');
-      await seedVersion(seed, 'V', scopedOrg('version'), 'K', '1.0.0');
+      await seedPackage(seed.forged, 'K', scopedOrg('package'), 'S', 'acme/widget');
+      await seedVersion(seed.forged, 'V', scopedOrg('version'), 'K', '1.0.0');
       await seed(
         'INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key) VALUES (?, ?, ?, 1, ?)',
         'OLD',

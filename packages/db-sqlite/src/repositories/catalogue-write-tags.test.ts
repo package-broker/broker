@@ -12,6 +12,7 @@ import {
   distTagStatements,
   type DistTagRequest,
 } from './catalogue-write-tags.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 const JOB_ID = '01J0JOB00000000000000000C1';
 const OWNER = '01J0WWWWWWWWWWWWWWWWWW0C01';
@@ -30,6 +31,9 @@ let guard: CatalogueWriteGuard;
 function stmt(sql: string, ...params: (string | number | null)[]): Statement {
   return { sql, params };
 }
+
+const batchForged = (statements: readonly Statement[]) =>
+  withForeignKeysOff(database.executor, () => database.executor.batch(statements));
 
 beforeEach(async () => {
   database = await openMigratedDatabase({ twoOrganizations: true });
@@ -427,11 +431,12 @@ describe('distTagStatements org consistency', () => {
 
   async function seedMismatchedTag(tag: string, version: string): Promise<void> {
     if (database.orgs === null) throw new Error('organizations were not seeded');
-    await database.executor.batch([
+    const foreignOrgId = database.orgs.b.orgId;
+    await batchForged([
       stmt(
         `INSERT INTO dist_tag (org_id, package_id, tag, version_id)
           SELECT ?, ?, ?, id FROM version WHERE package_id = ? AND version_normalized = ?`,
-        database.orgs.b.orgId,
+        foreignOrgId,
         PACKAGE,
         tag,
         PACKAGE,

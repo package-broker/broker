@@ -45,9 +45,9 @@ async function seedTagFixture(
     FUTURE,
   );
   await seedSource(seed, 'S-NPM', options.packageOrg, 'npm_registry', 'npm');
-  await seedPackage(seed, 'K-NPM', options.packageOrg, 'S-NPM', 'widget', 'npm');
-  await seedVersion(seed, 'V1', options.versionOrg, 'K-NPM', '1.0.0');
-  await seedVersion(seed, 'V2', orgOf(context).own.orgId, 'K-NPM', '2.0.0');
+  await seedPackage(seed.forged, 'K-NPM', options.packageOrg, 'S-NPM', 'widget', 'npm');
+  await seedVersion(seed.forged, 'V1', options.versionOrg, 'K-NPM', '1.0.0');
+  await seedVersion(seed.forged, 'V2', orgOf(context).own.orgId, 'K-NPM', '2.0.0');
 }
 
 function tagRequest(tags: Record<string, string>, actorType: 'user' | 'sync'): DistTagRequest {
@@ -122,7 +122,7 @@ const tagRemovalSpares: ContractCase = {
   async run(context) {
     const { own, foreign } = orgOf(context);
     await seedTagFixture(context, { packageOrg: own.orgId, versionOrg: own.orgId });
-    await seeder(context.executor)(
+    await seeder(context.executor).forged(
       'INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, ?, ?, ?)',
       foreign.orgId,
       'K-NPM',
@@ -143,7 +143,7 @@ function tagForeignRowCase(sameVersion: boolean): ContractCase {
     async run(context) {
       const { own, foreign } = orgOf(context);
       await seedTagFixture(context, { packageOrg: own.orgId, versionOrg: own.orgId });
-      await seeder(context.executor)(
+      await seeder(context.executor).forged(
         "INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, 'K-NPM', 'latest', ?)",
         foreign.orgId,
         sameVersion ? 'V2' : 'V1',

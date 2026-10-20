@@ -19,6 +19,7 @@ import type { ProviderContext, ProviderSource } from '../sources/provider.js';
 import { applyChunk, type ApplyDeps, type ApplyOutcome } from './apply-description.js';
 import { describePackagist, PackagistBusyError } from './composer/packagist-proxy.js';
 import { createNpmjsProxyProvider } from './npm/npmjs-proxy.js';
+import { COALESCE_POLL_MS } from './coalesce.js';
 import { createPackageSyncJob, PACKAGE_SYNC_JOB_TYPE } from './package-sync-job.js';
 import type { IngestSessionHandle } from './session.js';
 
@@ -122,10 +123,12 @@ type Reply = () => Response;
 function createUpstream() {
   const calls: UpstreamCall[] = [];
   const replies = new Map<string, Reply>();
+  const arrived = deferred();
   let gate: Deferred | null = null;
   const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, headers: new Headers(init?.headers) });
+    arrived.open();
     if (gate !== null) await gate.promise;
     const reply = replies.get(url);
     if (reply === undefined) throw new Error('unexpected upstream request');
@@ -134,6 +137,7 @@ function createUpstream() {
   return {
     calls,
     fetchImpl,
+    arrived: arrived.promise,
     on(url: string, reply: Reply) {
       replies.set(url, reply);
     },
@@ -218,20 +222,49 @@ interface SharedPorts {
   readonly cache: Map<string, unknown>;
   readonly jobs: ReturnType<typeof vi.fn>;
   readonly sessions: ReturnType<typeof createSessions>;
+  readonly negativeReads: ReturnType<typeof createBarrier>;
+}
+
+function createBarrier() {
+  let pending: { size: number; arrived: number; gate: Deferred } | null = null;
+  return {
+    expect(size: number) {
+      pending = { size, arrived: 0, gate: deferred() };
+    },
+    async pass() {
+      const current = pending;
+      if (current === null) return;
+      current.arrived += 1;
+      if (current.arrived === current.size) {
+        pending = null;
+        current.gate.open();
+      }
+      await current.gate.promise;
+    },
+  };
 }
 
 function createSessions(leases: Map<string, string>) {
   let sequence = 0;
+  const held = deferred();
+  const released = deferred();
   const scopeKey = (scope: { sourceId?: string; packageKey?: string }) =>
     `${scope.sourceId}\u0000${scope.packageKey}`;
   const drop = async (_ctx: unknown, handle: IngestSessionHandle) => {
     if (leases.get(handle.scopeKey) === handle.id) leases.delete(handle.scopeKey);
+    if (leases.size === 0) released.open();
     return true;
   };
   return {
+    held: held.promise,
+    released: released.promise,
+    scopeKey,
     acquire: vi.fn(async (_ctx: unknown, scope: object, owner: string) => {
       const key = scopeKey(scope);
-      if (leases.has(key)) return 'held' as const;
+      if (leases.has(key)) {
+        held.open();
+        return 'held' as const;
+      }
       sequence += 1;
       const id = `session-${sequence}`;
       leases.set(key, id);
@@ -259,6 +292,7 @@ function createShared(): SharedPorts {
     cache: new Map(),
     jobs: vi.fn(async () => ({ id: 'job', created: true })),
     sessions: createSessions(leases),
+    negativeReads: createBarrier(),
   };
 }
 
@@ -331,7 +365,10 @@ function mount(fixture: {
   const ports = {
     blob: { get: vi.fn(async () => null), head: vi.fn(async () => null) },
     cache: {
-      get: async (_ctx: unknown, key: unknown) => shared.cache.get(JSON.stringify(key)) ?? null,
+      get: async (_ctx: unknown, key: { kind: string }) => {
+        if (key.kind === 'negative') await shared.negativeReads.pass();
+        return shared.cache.get(JSON.stringify(key)) ?? null;
+      },
       set: async (_ctx: unknown, key: unknown, entry: unknown) => {
         shared.cache.set(JSON.stringify(key), { entry, state: 'fresh' });
       },
@@ -510,9 +547,6 @@ async function settleBackground(mounted: Mounted): Promise<void> {
   expect(results.filter((result) => result.status === 'rejected')).toEqual([]);
 }
 
-const committed = (f: ReturnType<typeof fixture>, target: Target) =>
-  f.shared.leases.size === 0 && (f.catalogue.filled.has(target.name) || f.shared.cache.size > 0);
-
 const scheduled = (mounted: Mounted) => mounted.backgrounds.length + mounted.deferred.length;
 
 function fixture() {
@@ -539,27 +573,6 @@ async function elapse(ms: number): Promise<void> {
   }
 }
 
-const SETTLE_LIMIT_MS = 60_000;
-const QUIESCE_TURNS = 100_000;
-
-async function settle<T>(
-  pending: readonly Promise<T>[],
-  ready: () => boolean = () => true,
-): Promise<T[]> {
-  let done = false;
-  const all = Promise.all(pending).finally(() => {
-    done = true;
-  });
-  all.catch(() => undefined);
-  for (let turn = 0; turn < QUIESCE_TURNS && !ready(); turn += 1) await flush();
-  for (let spent = 0; !done && spent < SETTLE_LIMIT_MS; spent += STEP_MS) {
-    for (let turn = 0; turn < 5; turn += 1) await flush();
-    if (done) break;
-    await vi.advanceTimersByTimeAsync(STEP_MS);
-  }
-  return all;
-}
-
 beforeEach(() => {
   vi.useFakeTimers({
     toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
@@ -571,89 +584,78 @@ afterEach(() => {
 });
 
 describe.each(TARGETS)('$ecosystem proxy: coalescing', (target) => {
-  it('collapses 20 concurrent misses on one coalescer into one fetch per upstream document', async () => {
+  function gated(reply: Reply, mounts: number) {
     const f = fixture();
     admit(f.catalogue, 'proj-1', target.name, [target.sourceId]);
-    stubUpstream(f.upstream, target, target.ok);
+    stubUpstream(f.upstream, target, reply);
     const gate = f.upstream.hold();
-    const mounted = f.mount();
-    const pending = Array.from({ length: 20 }, () => get(mounted, target));
-    await elapse(250);
+    const mounted = Array.from({ length: mounts }, () => f.mount());
+    f.shared.negativeReads.expect(20);
+    const pending = Array.from({ length: 20 }, (_, index) => get(mounted[index % mounts]!, target));
+    return { f, gate, pending };
+  }
+
+  async function overSecondCoalescer(reply: Reply) {
+    const { f, gate, pending } = gated(reply, 2);
+    await Promise.all([f.upstream.arrived, f.shared.sessions.held]);
+    // The waiting coalescer arms its poll timer in the microtasks that follow the 'held' answer.
+    await flush();
     gate.open();
-    const responses = await settle(pending, () => committed(f, target));
+    await f.shared.sessions.released;
+    await vi.advanceTimersByTimeAsync(COALESCE_POLL_MS);
+    return { f, responses: await Promise.all(pending) };
+  }
+
+  it('collapses 20 concurrent misses on one coalescer into one fetch per upstream document', async () => {
+    const { f, gate, pending } = gated(target.ok, 1);
+    await f.upstream.arrived;
+    gate.open();
+    const responses = await Promise.all(pending);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(200));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
   });
 
   it('answers 404, never 503, to every waiter of a definitive 404', async () => {
-    const f = fixture();
-    admit(f.catalogue, 'proj-1', target.name, [target.sourceId]);
-    stubUpstream(f.upstream, target, target.missing);
-    const gate = f.upstream.hold();
-    const mounted = f.mount();
-    const pending = Array.from({ length: 20 }, () => get(mounted, target));
-    await elapse(250);
+    const { f, gate, pending } = gated(target.missing, 1);
+    await f.upstream.arrived;
     gate.open();
-    const responses = await settle(pending, () => committed(f, target));
+    const responses = await Promise.all(pending);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(404));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
   });
 
   it('answers 404 to waiters of a second coalescer on a definitive 404', async () => {
-    const f = fixture();
-    admit(f.catalogue, 'proj-1', target.name, [target.sourceId]);
-    stubUpstream(f.upstream, target, target.missing);
-    const gate = f.upstream.hold();
-    const first = f.mount();
-    const second = f.mount();
-    const pending = [
-      ...Array.from({ length: 10 }, () => get(first, target)),
-      ...Array.from({ length: 10 }, () => get(second, target)),
-    ];
-    await elapse(500);
-    gate.open();
-    const responses = await settle(pending, () => committed(f, target));
+    const { f, responses } = await overSecondCoalescer(target.missing);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(404));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
     expect(f.shared.leases.size).toBe(0);
   });
 
   it('fetches once across two coalescers that share the database lease', async () => {
-    const f = fixture();
-    admit(f.catalogue, 'proj-1', target.name, [target.sourceId]);
-    stubUpstream(f.upstream, target, target.ok);
-    const gate = f.upstream.hold();
-    const first = f.mount();
-    const second = f.mount();
-    const pending = [
-      ...Array.from({ length: 10 }, () => get(first, target)),
-      ...Array.from({ length: 10 }, () => get(second, target)),
-    ];
-    await elapse(500);
-    gate.open();
-    const responses = await settle(pending, () => committed(f, target));
+    const { f, responses } = await overSecondCoalescer(target.ok);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(200));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
     expect(f.shared.leases.size).toBe(0);
   });
 
-  it('answers 503 with Retry-After when the lease holder outlives the wait budget', async () => {
+  it('answers 503 with Retry-After when another holder keeps the lease past the wait budget', async () => {
     const f = fixture();
     admit(f.catalogue, 'proj-1', target.name, [target.sourceId]);
     stubUpstream(f.upstream, target, target.ok);
-    const gate = f.upstream.hold();
-    const holder = f.mount();
-    const waiter = f.mount();
-    const lead = get(holder, target);
-    await elapse(10);
-    const blocked = get(waiter, target);
-    await elapse(26_000);
-    const response = (await settle([blocked]))[0]!;
+    const leaseKey = f.shared.sessions.scopeKey({
+      sourceId: target.sourceId,
+      packageKey: target.name,
+    });
+    f.shared.leases.set(leaseKey, 'other-instance');
+    const blocked = get(f.mount(), target);
+    await f.shared.sessions.held;
+    await flush();
+    await vi.advanceTimersByTimeAsync(26_000);
+    const response = await blocked;
     expect(response.status).toBe(503);
     expect(response.headers.get('Retry-After')).toBe('10');
-    for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
-    gate.open();
-    await settle([lead]);
+    expect(f.upstream.calls).toEqual([]);
+    expect(f.shared.leases.get(leaseKey)).toBe('other-instance');
   });
 });
 
@@ -891,6 +893,7 @@ describe('revalidation job', () => {
   const NPM_URL = NPM.urls[0]!;
 
   function jobHarness(upstream: Upstream, target: Target) {
+    vi.mocked(applyChunk).mockReset().mockResolvedValue(complete);
     const policy = createOutboundPolicy({
       allowPrivateHosts: [],
       runtime: 'node',
@@ -1085,7 +1088,6 @@ describe('revalidation job', () => {
   it('applies a changed document instead of touching state', async () => {
     const upstream = createUpstream();
     upstream.on(NPM_URL, packument('left-pad'));
-    vi.mocked(applyChunk).mockReset().mockResolvedValue(complete);
     const h = jobHarness(upstream, NPM);
     await h.job.handler(h.payload, h.context);
     expect(applyChunk).toHaveBeenCalledTimes(1);

@@ -210,6 +210,7 @@ async function sqliteFixture(): Promise<SqliteFixture> {
       idleTimeoutMs: 2_000,
     }),
     lifecycle,
+    inspect: (ctx, key) => metadata.inspect(ctx, key),
     metadataCalls,
     stagesUploads: true,
     async seed(org) {
@@ -243,6 +244,15 @@ async function sqliteFixture(): Promise<SqliteFixture> {
     async makeEligible(ctx, key) {
       await exec(
         `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', '-8 days'), created_at = strftime('${FORMAT}', 'now', '-8 days'), refetchable = 1 WHERE org_id = ? AND sha256 = ?`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async ageBlob(ctx, key, days) {
+      await exec(
+        `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', ?), created_at = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ?`,
+        `-${days} days`,
+        `-${days} days`,
         ctx.orgId,
         key,
       );
@@ -393,7 +403,7 @@ describe('blob contract harness', () => {
     expect(() => requireBlobFixtureHooks(fixture as unknown as BlobContractFixture)).not.toThrow();
   });
 
-  it.each(['lifecycle', 'expireLease', 'narrowRefetchable', 'generationOf'] as const)(
+  it.each(['lifecycle', 'expireLease', 'narrowRefetchable', 'generationOf', 'ageBlob'] as const)(
     'fails the lifecycle suite when the %s hook is missing',
     async (hook) => {
       const fixture: Record<string, unknown> = { ...(await sqliteFixture()) };
@@ -469,6 +479,29 @@ describe('blob lifecycle fixture hooks', () => {
     expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
     await f.makeEligible(org, key);
     expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+  });
+
+  it('ageBlob ages only the context organization without widening refetchability', async () => {
+    const f = await sqliteFixture();
+    const a = await f.seed(ORG_A);
+    const b = await f.seed(ORG_B);
+    const key = await stored(f, a, 'controlled age in two organizations');
+    await stored(f, b, 'controlled age in two organizations');
+    const local = await stored(f, a, 'non-refetchable controlled age');
+    await f.narrowRefetchable(a, {
+      key: local,
+      size: new TextEncoder().encode('non-refetchable controlled age').length,
+      mediaType: 'application/octet-stream',
+    });
+    await f.ageBlob(a, key, 8);
+    await f.ageBlob(a, local, 8);
+    expect(await f.refetchableOf(a, local)).toBe(false);
+    for (const ctx of [a, b]) {
+      await f.lifecycle.softDelete(ctx, key, { removedAt: await f.now() });
+      await f.expireRetention(ctx, key);
+    }
+    expect(await f.lifecycle.claimPurge(a, key)).not.toBeNull();
+    expect(await f.lifecycle.claimPurge(b, key)).toBeNull();
   });
 
   async function referenced(

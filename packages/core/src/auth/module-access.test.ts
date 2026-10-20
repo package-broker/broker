@@ -7,6 +7,7 @@ import { fixedClock } from '../ids.js';
 import { createKernel } from '../kernel/kernel.js';
 import { createKeyring } from '../secrets/keyring.js';
 import type { EngineAccessPort } from '../authz/engine.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const origin = 'https://broker.test';
 const clock = fixedClock('2026-10-16T00:00:00.000Z');
@@ -66,7 +67,7 @@ async function kernelFor(auth: ReturnType<typeof fixture>['auth']) {
     health: () => Promise.resolve(true),
     log: () => undefined,
     authorization: auth.authorization,
-    coreRoutes: [
+    coreRoutes: documented([
       ...auth.coreRoutes,
       {
         method: 'GET',
@@ -75,7 +76,7 @@ async function kernelFor(auth: ReturnType<typeof fixture>['auth']) {
         boundary: 'organization',
         handler: () => new Response('ok'),
       },
-    ],
+    ]),
   });
 }
 

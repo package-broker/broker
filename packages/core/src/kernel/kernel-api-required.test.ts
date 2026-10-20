@@ -1,0 +1,99 @@
+import { describe, expect, it } from 'vitest';
+import { orgContext } from '../db/port.js';
+import { fixedClock } from '../ids.js';
+import type { RouteDefinition } from '../plugin.js';
+import { createKernel } from './kernel.js';
+import type { KernelOptions } from './kernel.js';
+import { KernelConfigError } from './registry.js';
+import { createUiRoutes } from './ui-routes.js';
+
+function options(
+  coreRoutes: readonly RouteDefinition[],
+  ecosystemRoutes: readonly RouteDefinition[] = [],
+): KernelOptions {
+  return {
+    platform: 'node',
+    plugins: [],
+    ports: {
+      organizations: { get: () => Promise.resolve(null) },
+      clock: fixedClock('2026-10-20T00:00:00.000Z'),
+      ids: { ulid: () => '01JA0000000000000000000000' },
+    },
+    resolveOrg: () => Promise.resolve(orgContext('org-1')),
+    health: () => Promise.resolve(true),
+    log: () => undefined,
+    coreRoutes,
+    ecosystemRoutes,
+  };
+}
+
+function route(
+  path: string,
+  method: RouteDefinition['method'] = 'GET',
+  extra: Partial<RouteDefinition> = {},
+): RouteDefinition {
+  return { method, path, permission: null, handler: () => new Response('ok'), ...extra };
+}
+
+async function problemsOf(kernelOptions: KernelOptions): Promise<readonly string[]> {
+  const error: unknown = await createKernel(kernelOptions).then(
+    () => null,
+    (caught: unknown) => caught,
+  );
+  return error instanceof KernelConfigError ? error.problems : [];
+}
+
+describe('createKernel api requirement for core routes', () => {
+  it('rejects an undocumented core route under /_pb/', async () => {
+    expect(await problemsOf(options([route('/_pb/undocumented')]))).toEqual([
+      'core route GET /_pb/undocumented: api is required under /_pb/',
+    ]);
+  });
+
+  it('accepts a documented core route under /_pb/', async () => {
+    const documented = route('/_pb/documented', 'GET', {
+      api: {
+        operationId: 'documented',
+        summary: 'Documented',
+        tags: ['fixture'],
+        responses: { 200: null },
+      },
+    });
+    expect(await problemsOf(options([documented]))).toEqual([]);
+  });
+
+  it.each([
+    ['GET', '/_pb/ui'],
+    ['GET', '/_pb/ui/assets/:file'],
+    ['GET', '/_pb/ui/:file'],
+    ['POST', '/_pb/hooks/github/:credentialId'],
+    ['GET', '/_pb/mcp'],
+    ['POST', '/_pb/mcp'],
+    ['GET', '/_pb/openapi.json'],
+  ] as const)('accepts the exempt core route %s %s without an api slot', async (method, path) => {
+    expect(await problemsOf(options([route(path, method)]))).toEqual([]);
+  });
+
+  it('rejects an undocumented route next to an exempt path', async () => {
+    expect(await problemsOf(options([route('/_pb/ui/assets/:file/raw')]))).toEqual([
+      'core route GET /_pb/ui/assets/:file/raw: api is required under /_pb/',
+    ]);
+  });
+
+  it('accepts the UI routes as built and as the runtimes mount them', async () => {
+    const ui = createUiRoutes(
+      { manifest: async () => null, read: async () => null },
+      { publicOrigin: 'https://broker.test' },
+    );
+    const mounted = ui.map((definition) => ({
+      ...definition,
+      path: definition.path.replace('/assets/:file', '/:file'),
+    }));
+    expect(await problemsOf(options(ui))).toEqual([]);
+    expect(await problemsOf(options(mounted))).toEqual([]);
+  });
+
+  it('leaves undocumented ecosystem routes to their own validation', async () => {
+    expect(await problemsOf(options([], [route('/:project/packages.json')]))).toEqual([]);
+  });
+});

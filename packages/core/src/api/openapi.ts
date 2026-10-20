@@ -6,6 +6,7 @@ import { routeApiProblems } from '../kernel/routes.js';
 import { IF_MATCH, type ApiRouteSpec } from './route.js';
 import { API_ERROR_CODES, SERVICE_ERROR_TABLE, type ApiErrorCode } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
+import { weakPasswordErrorResponse } from './auth-schemas.js';
 
 export interface OpenApiDocument extends JsonObject {
   openapi: '3.1.0';
@@ -24,10 +25,14 @@ const ERROR_ENVELOPE: JsonObject = {
       type: 'object',
       additionalProperties: false,
       required: ['code', 'message', 'requestId'],
+      dependentSchemas: {
+        problems: { properties: { code: { const: 'weak_password' } } },
+      },
       properties: {
         code: { type: 'string' },
         message: { type: 'string' },
         requestId: { type: 'string' },
+        problems: toJsonSchema(weakPasswordErrorResponse.shape.error.shape.problems, 'output'),
         details: {
           type: 'array',
           maxItems: 20,

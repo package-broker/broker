@@ -6,6 +6,7 @@ import { toJsonSchema, type JsonValue } from './json-schema.js';
 
 import { API_ERROR_CODES, SERVICE_ERROR_TABLE } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
+import { AUTH_API } from './auth-schemas.js';
 
 const info = { title: 'Package Broker', version: '2.0.0' };
 const result = z.strictObject({ ok: z.boolean() });
@@ -279,6 +280,50 @@ describe('generateOpenApi', () => {
       unknown
     >;
     expect(responses['204']).not.toHaveProperty('content');
+  });
+
+  it('documents the weak-password problems on the auth setup error envelope', () => {
+    const doc = generateOpenApi(
+      [
+        defineApi({
+          method: 'POST',
+          path: '/_pb/auth/local/setup/finish',
+          permission: null,
+          api: AUTH_API['POST /_pb/auth/local/setup/finish']!,
+        }),
+      ],
+      info,
+    );
+    expect(doc.paths['/_pb/auth/local/setup/finish']!.post!.responses).toMatchObject({
+      400: {
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
+      },
+    });
+    expect(doc.components).toMatchObject({
+      schemas: {
+        ErrorEnvelope: {
+          additionalProperties: false,
+          properties: {
+            error: {
+              additionalProperties: false,
+              dependentSchemas: {
+                problems: { properties: { code: { const: 'weak_password' } } },
+              },
+              properties: {
+                problems: {
+                  type: 'array',
+                  minItems: 1,
+                  items: {
+                    type: 'string',
+                    enum: ['too_short', 'too_long', 'equals_email', 'not_well_formed'],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
   });
 
   it('omits concurrency parameters and errors from POST', () => {

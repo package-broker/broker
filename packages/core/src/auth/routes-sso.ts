@@ -15,6 +15,9 @@ import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import { isValidProviderId } from '../identity/port.js';
 import type { IdentityProvider, LoginStateData, VerifiedIdentity } from '../identity/port.js';
+import { ssoStartBody } from '../api/auth-schemas.js';
+import { apiError } from '../api/response.js';
+import { validateInput, type ValidationResult } from '../api/validate.js';
 import { reportableErrorName } from '../kernel/error-name.js';
 import { envelopeResponse, errorResponse } from '../kernel/errors.js';
 import type { KernelLog } from '../kernel/errors.js';
@@ -150,20 +153,18 @@ async function readBody(request: Request): Promise<string | null> {
 
 async function readStartBody(
   request: Request,
-): Promise<{ readonly purpose: Purpose; readonly returnTo: string } | null> {
+): Promise<
+  ValidationResult<{ readonly purpose: Purpose; readonly returnTo?: string | undefined }>
+> {
   const text = await readBody(request);
-  if (text === null) return null;
   let parsed: unknown;
   try {
+    if (text === null) throw new TypeError('bad_body');
     parsed = JSON.parse(text);
   } catch {
-    return null;
+    return { ok: false, details: [{ path: '', code: 'invalid_json' }] };
   }
-  if (!isRecord(parsed)) return null;
-  const { purpose, returnTo } = parsed;
-  if (purpose !== 'login' && purpose !== 'reauth') return null;
-  if (returnTo !== undefined && typeof returnTo !== 'string') return null;
-  return { purpose, returnTo: safeReturnTo(returnTo ?? null) };
+  return validateInput(ssoStartBody, parsed);
 }
 
 type StartOutcome =
@@ -326,10 +327,17 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       return envelopeResponse(404, 'not_found', 'Unknown provider', rc.requestId);
     }
     const body = await readStartBody(request);
-    if (body === null) {
-      return envelopeResponse(400, 'invalid_request', 'Invalid request', rc.requestId);
+    if (!body.ok) {
+      const response = apiError(
+        'invalid_request',
+        rc.requestId,
+        body.details.map((detail) => ({ ...detail, path: `/body${detail.path}` })),
+      );
+      response.headers.set('x-request-id', rc.requestId);
+      return response;
     }
-    const { purpose, returnTo } = body;
+    const { purpose } = body.data;
+    const returnTo = safeReturnTo(body.data.returnTo ?? null);
 
     let session: AuthenticatedSession | null = null;
     if (purpose === 'reauth') {

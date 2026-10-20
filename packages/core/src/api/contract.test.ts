@@ -6,6 +6,7 @@ import { createKernel } from '../kernel/kernel.js';
 import { runApiContract } from './contract.js';
 import { generateOpenApi } from './openapi.js';
 import { apiRoute, defineApi } from './route.js';
+import { AUTH_API } from './auth-schemas.js';
 
 const sentinel = 'PRIVATE-SAMPLE-SENTINEL';
 const result = z.strictObject({ ok: z.boolean() });
@@ -392,6 +393,7 @@ describe('runApiContract', () => {
     { error: { code: 'conflict', message: 'Conflict' } },
     { error: { ...envelope.error, requestId: 42 } },
     { error: { ...envelope.error, extra: true } },
+    { error: { ...envelope.error, problems: ['too_short'] } },
     { ...envelope, extra: true },
     { error: { ...envelope.error, details: [{ path: '/body', code: 'unknown' }] } },
     {
@@ -402,6 +404,43 @@ describe('runApiContract', () => {
     },
   ])('rejects an invalid declared error envelope (%#)', async (value) => {
     expect(await errorFindings(value)).toEqual([finding('response_mismatch', 'status')]);
+  });
+  it.each([
+    [['too_short'], true],
+    [['too_short', 'too_long', 'equals_email', 'not_well_formed'], true],
+    [[], false],
+    [['unknown'], false],
+    ['too_short', false],
+    [[42], false],
+  ])('checks weak-password problem codes (%#)', async (problems, valid) => {
+    const spec = defineApi({
+      method: 'POST',
+      path: '/_pb/auth/local/setup/finish',
+      permission: null,
+      api: AUTH_API['POST /_pb/auth/local/setup/finish']!,
+    });
+    const findings = await runApiContract({
+      specs: [spec],
+      document: generateOpenApi([spec], { title: 'T', version: '1' }),
+      samples: {
+        finishLocalSetup: { body: { token: 'fixture', password: 'short', code: '123456' } },
+      },
+      call: () =>
+        Promise.resolve(
+          Response.json(
+            {
+              error: {
+                code: 'weak_password',
+                message: 'Password does not meet the requirements',
+                requestId: 'fixture',
+                problems,
+              },
+            },
+            { status: 400 },
+          ),
+        ),
+    });
+    expect(findings).toEqual(valid ? [] : [finding('response_mismatch', 'finishLocalSetup')]);
   });
   it('accepts validation details in a declared error envelope', async () => {
     expect(

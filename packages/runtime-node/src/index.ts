@@ -138,7 +138,11 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, envelopeResponse, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
+import {
+  createSetupUiRoutes,
+  createUiRoutes,
+  rewriteSetupRequest,
+} from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
 import { nodeCodecs } from './codec/node-codec.js';
@@ -1005,6 +1009,13 @@ export function createNodeServer(
       },
       { publicOrigin: auth?.publicOrigin ?? 'http://localhost', log },
     );
+    const setupRoutes = createSetupUiRoutes(
+      {
+        manifest: async () => assets?.manifest() ?? null,
+        read: async (name) => assets?.read(name) ?? null,
+      },
+      { publicOrigin: auth?.publicOrigin ?? 'http://localhost', log },
+    );
     const uiRoutes = ui.map((route) => ({
       ...route,
       path: route.path.replace('/assets/:file', '/:file'),
@@ -1032,7 +1043,10 @@ export function createNodeServer(
       ...(options.platformServices === undefined
         ? {}
         : { platformServices: options.platformServices }),
-      coreRoutes: [...(access?.module.coreRoutes ?? []), ...(assets === null ? [] : uiRoutes)],
+      coreRoutes: [
+        ...(access?.module.coreRoutes ?? []),
+        ...(assets === null ? [] : [...setupRoutes, ...uiRoutes]),
+      ],
       ...(authorization === undefined ? {} : { authorization }),
     });
     const services: NodeServices = Object.freeze({
@@ -1064,6 +1078,8 @@ export function createNodeServer(
         ? refuse(request)
         : kernel.then(
             async (ready) => {
+              const setup = rewriteSetupRequest(request);
+              if (setup !== null) return ready.fetch(setup);
               const url = new URL(request.url);
               if (url.pathname === '/_pb/ui') {
                 const response = await ready.fetch(request);

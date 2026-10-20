@@ -8,3 +8,5 @@ dist/
 !.env.op
 coverage/
 .DS_Store
+packages/e2e/test-results/
+packages/e2e/playwright-report/

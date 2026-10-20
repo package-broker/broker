@@ -53,12 +53,35 @@ export interface BlobContractFixture {
   readonly answerNextRangeWithFullBody: () => void;
 }
 
+export type BlobReferenceStatus =
+  'active' | 'removed_upstream' | 'yanked' | 'quarantined' | 'tombstoned';
+
 /**
  * `expireLease` moves a live purge lease into the past. `narrowRefetchable` is the metadata port
  * operation of the same name and `generationOf` reads the row's current purge generation.
+ * `makeEligible` backdates the blob past the orphan grace period and makes it refetchable, so a
+ * scheduled blob with no live reference can be claimed. `addReference` makes a version in
+ * the context's organization point at the blob with the given status; `setVersionStatus` sets that
+ * status on every version of the blob in the organization. `removeCalls` counts `ByteStore.remove`
+ * calls; `stallNextRemove` makes the next one never settle and `failNextRemove` makes it reject.
+ * Each of the two affects only the next call.
  */
 export interface BlobLifecycleFixture extends BlobContractFixture {
   readonly lifecycle: BlobLifecycle;
+  readonly makeEligible: (ctx: OrgContext, key: Sha256) => Promise<void>;
+  readonly addReference: (
+    ctx: OrgContext,
+    key: Sha256,
+    status: BlobReferenceStatus,
+  ) => Promise<void>;
+  readonly setVersionStatus: (
+    ctx: OrgContext,
+    key: Sha256,
+    status: BlobReferenceStatus,
+  ) => Promise<void>;
+  readonly removeCalls: () => number;
+  readonly stallNextRemove: () => void;
+  readonly failNextRemove: () => void;
   readonly expireLease: (ctx: OrgContext, key: Sha256) => Promise<void>;
   readonly narrowRefetchable: (
     ctx: OrgContext,
@@ -70,9 +93,12 @@ export interface BlobLifecycleFixture extends BlobContractFixture {
 /**
  * `reserve` and `claimPurge` are the metadata and lifecycle operations of the same name.
  * `reserveWithLeaseExpiringBetweenStatements` runs `reserve` on a metadata port whose executor
- * expires the row's live purge lease after the first statement of each batch.
+ * expires the row's live purge lease after the first statement of each batch. `makeEligible` is the
+ * lifecycle fixture hook of the same name; a backend whose publish already backdates blobs may
+ * omit it.
  */
 export interface BlobReserveFixture extends BlobContractFixture {
+  readonly makeEligible?: (ctx: OrgContext, key: Sha256) => Promise<void>;
   readonly reserve: (ctx: OrgContext, key: Sha256) => Promise<PurgeGeneration>;
   readonly claimPurge: (ctx: OrgContext, key: Sha256) => Promise<PurgeGeneration | null>;
   readonly expireLease: (ctx: OrgContext, key: Sha256) => Promise<void>;
@@ -123,6 +149,18 @@ const FUNCTION_HOOKS = [
   'answerNextRangeWithFullBody',
 ] as const;
 
+const LIFECYCLE_FIXTURE_HOOKS = [
+  'expireLease',
+  'narrowRefetchable',
+  'generationOf',
+  'makeEligible',
+  'addReference',
+  'setVersionStatus',
+  'removeCalls',
+  'stallNextRemove',
+  'failNextRemove',
+] as const;
+
 const LIFECYCLE_METHODS = [
   'softDelete',
   'claimPurge',
@@ -158,7 +196,7 @@ export function requireBlobLifecycleFixtureHooks(fixture: BlobLifecycleFixture):
   if (typeof record.lifecycle !== 'object' || record.lifecycle === null) {
     throw new Error('blob contract fixture is missing the lifecycle hook');
   }
-  for (const hook of ['expireLease', 'narrowRefetchable', 'generationOf'] as const) {
+  for (const hook of LIFECYCLE_FIXTURE_HOOKS) {
     if (typeof record[hook] !== 'function') {
       throw new Error(`blob contract fixture is missing the ${hook} hook`);
     }
@@ -834,6 +872,7 @@ export function describeBlobLifecycleContract(
       const args = { key, size: data.length, mediaType: PLAIN.mediaType };
       expect(await f.narrowRefetchable(org, args)).toBeNull();
       expect(await f.refetchableOf(org, key)).toBe(true);
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       const claimed = await f.lifecycle.claimPurge(org, key);
       expect(claimed).not.toBeNull();
@@ -845,6 +884,7 @@ export function describeBlobLifecycleContract(
     it('refuses a claim before the deadline and grants one once it has passed', async () => {
       const f = await readyLifecycle(make);
       const { org, key } = await scheduled(f, 'claimed at the deadline');
+      await f.makeEligible(org, key);
       expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
       await f.expireRetention(org, key);
       expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
@@ -854,12 +894,14 @@ export function describeBlobLifecycleContract(
       const f = await readyLifecycle(make);
       const org = await f.seed(nextOrg());
       const key = await put(f.store, org, bytes('never removed'));
+      await f.makeEligible(org, key);
       expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
     });
 
     it('a live lease hides the row and refuses a second claim', async () => {
       const f = await readyLifecycle(make);
       const { org, key } = await scheduled(f, 'leased');
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       const generation = await f.lifecycle.claimPurge(org, key);
       expect(generation).not.toBeNull();
@@ -871,6 +913,7 @@ export function describeBlobLifecycleContract(
     it('put after purge restores a readable object', async () => {
       const f = await readyLifecycle(make);
       const { org, data, key } = await scheduled(f, 'purged then uploaded again');
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       const generation = (await f.lifecycle.claimPurge(org, key))!;
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
@@ -884,6 +927,7 @@ export function describeBlobLifecycleContract(
     it('a put during a live purge lease is refused and the purge still completes', async () => {
       const f = await readyLifecycle(make);
       const { org, data, key } = await scheduled(f, 'put races the purge job');
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       const generation = (await f.lifecycle.claimPurge(org, key))!;
       const error = await rejection(put(f.store, org, data));
@@ -897,6 +941,7 @@ export function describeBlobLifecycleContract(
     it('a claim made stale by a later put removes and marks nothing', async () => {
       const f = await readyLifecycle(make);
       const { org, data, key } = await scheduled(f, 'claim invalidated by a put');
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       const stale = (await f.lifecycle.claimPurge(org, key))!;
       await f.expireLease(org, key);
@@ -908,6 +953,7 @@ export function describeBlobLifecycleContract(
     it('an unknown generation removes and marks nothing', async () => {
       const f = await readyLifecycle(make);
       const { org, key } = await scheduled(f, 'wrong generation');
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       await f.lifecycle.claimPurge(org, key);
       const wrong = '0'.repeat(32) as PurgeGeneration;
@@ -919,6 +965,7 @@ export function describeBlobLifecycleContract(
     it('cancelling a claim makes the object readable again with no scheduled purge', async () => {
       const f = await readyLifecycle(make);
       const { org, key } = await scheduled(f, 'claim cancelled');
+      await f.makeEligible(org, key);
       await f.expireRetention(org, key);
       const generation = (await f.lifecycle.claimPurge(org, key))!;
       expect(await f.lifecycle.cancelPurge(org, key, generation)).toBe(true);
@@ -939,6 +986,7 @@ export function describeBlobReserveContract(
       const org = await f.seed(nextOrg());
       const key = await put(f.store, org, bytes(label));
       await f.softDelete(org, key, { removedAt: await f.now() });
+      await f.makeEligible?.(org, key);
       await f.expireRetention(org, key);
       const claimed = await f.claimPurge(org, key);
       expect(claimed).not.toBeNull();

@@ -8,13 +8,9 @@ import {
   createBlobStore,
   createBlobUploadAdmission,
 } from '@package-broker/core/platform/blob';
-import type {
-  BlobLifecycle,
-  BlobMetadataPort,
-  ByteStore,
-  PurgeGeneration,
-  Sha256,
-} from '@package-broker/core/platform/blob';
+import type { BlobMetadataPort, ByteStore, Sha256 } from '@package-broker/core/platform/blob';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import type { Observability } from '@package-broker/core/platform/observability';
 import { createBlobRepository } from '../repositories/blob.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
@@ -30,6 +26,8 @@ import {
 } from './blob-contract.js';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
+const ORG_A = '01J0LIFECYCLE00000000000A';
+const ORG_B = '01J0LIFECYCLE00000000000B';
 const open: MigratedDatabase[] = [];
 
 afterAll(async () => {
@@ -53,17 +51,57 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
   return out;
 }
 
+async function stored(
+  f: Pick<BlobContractFixture, 'store'>,
+  ctx: OrgContext,
+  label: string,
+): Promise<Sha256> {
+  const data = new TextEncoder().encode(label);
+  const key = hex(await crypto.subtle.digest('SHA-256', data)) as Sha256;
+  await f.store.put(
+    ctx,
+    key,
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(data);
+        controller.close();
+      },
+    }),
+    { size: data.length, mediaType: 'application/octet-stream', refetchable: true },
+  );
+  return key;
+}
+
 function hex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixture> {
+const quietObservability: Observability = {
+  log() {},
+  counter() {},
+  histogram() {},
+};
+
+type SqliteFixture = BlobLifecycleFixture &
+  BlobReserveFixture & { readonly metadataCalls: readonly string[] };
+
+async function sqliteFixture(): Promise<SqliteFixture> {
   const database = await openMigratedDatabase({ d1PatternLimit: true });
   open.push(database);
   const executor: SqlExecutor = database.executor;
   const repository = createBlobRepository(executor);
   const objects = new Map<string, { data: Uint8Array; mediaType: string }>();
-  const state = { staged: 0, failPublish: false, failRead: false, fullBody: false };
+  const state = {
+    staged: 0,
+    failPublish: false,
+    failRead: false,
+    fullBody: false,
+    removes: 0,
+    stallRemove: false,
+    failRemove: false,
+  };
+  const metadataCalls: string[] = [];
+  let referenceCounter = 0;
 
   const byteStore: ByteStore = {
     async putVerified(storageKey, body, input) {
@@ -116,6 +154,15 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixtur
       return found === undefined ? null : { size: found.data.length, mediaType: found.mediaType };
     },
     async remove(storageKey) {
+      state.removes += 1;
+      if (state.stallRemove) {
+        state.stallRemove = false;
+        return new Promise<void>(() => {});
+      }
+      if (state.failRemove) {
+        state.failRemove = false;
+        throw new Error('storage down');
+      }
       objects.delete(storageKey);
     },
   };
@@ -127,30 +174,29 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixtur
         state.failPublish = false;
         throw new Error('database down');
       }
-      const result = await repository.publish(ctx, input);
-      await exec(
-        "UPDATE blob SET published_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
-        ctx.orgId,
-        input.sha256,
-      );
-      return result;
+      return repository.publish(ctx, input);
     },
     find: (ctx, key) => repository.find(ctx, key),
     narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),
     inspect: (ctx, key) => repository.inspect(ctx, key),
   };
 
-  const lifecycle: BlobLifecycle = {
-    softDelete: (ctx, key, input) => repository.softDelete(ctx, key, input),
-    claimPurge: (ctx, key) => repository.claimPurge(ctx, key),
-    async recheckAndRemove(ctx, key, generation: PurgeGeneration) {
-      if (!(await repository.canStartRemove(ctx, key, generation, 1000))) return false;
-      await byteStore.remove(blobStorageKey(ctx.orgId, key));
-      return true;
-    },
-    markDeleted: (ctx, key, generation) => repository.markDeleted(ctx, key, generation),
-    cancelPurge: (ctx, key, generation) => repository.cancelPurge(ctx, key, generation),
-  };
+  const lifecycle = createBlobLifecycle({
+    metadata: new Proxy(repository, {
+      get(target, property, receiver) {
+        const member: unknown = Reflect.get(target, property, receiver);
+        if (typeof member !== 'function') return member;
+        return (...args: unknown[]) => {
+          metadataCalls.push(String(property));
+          return member.apply(target, args);
+        };
+      },
+    }),
+    store: byteStore,
+    deleteTimeoutMs: 1000,
+    leaseMs: 900_000,
+    observability: quietObservability,
+  });
 
   const exec = async (sql: string, ...params: (string | number)[]): Promise<void> => {
     await executor.batch([{ sql, params }]);
@@ -163,6 +209,7 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixtur
       idleTimeoutMs: 2_000,
     }),
     lifecycle,
+    metadataCalls,
     stagesUploads: true,
     async seed(org) {
       if (!seeded.has(org)) {
@@ -191,6 +238,58 @@ async function sqliteFixture(): Promise<BlobLifecycleFixture & BlobReserveFixtur
         ctx.orgId,
         key,
       );
+    },
+    async makeEligible(ctx, key) {
+      await exec(
+        `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', '-8 days'), created_at = strftime('${FORMAT}', 'now', '-8 days'), refetchable = 1 WHERE org_id = ? AND sha256 = ?`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async addReference(ctx, key, status) {
+      referenceCounter += 1;
+      const id = `REF${String(referenceCounter).padStart(6, '0')}`;
+      const blobs = await executor.all<{ id: string }>({
+        sql: 'SELECT id FROM blob WHERE org_id = ? AND sha256 = ?',
+        params: [ctx.orgId, key],
+      });
+      if (blobs[0] === undefined) throw new Error('no blob to reference');
+      await executor.batch([
+        {
+          sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, ?, 'npm', 'npmjs_proxy')",
+          params: [id, ctx.orgId, id],
+        },
+        {
+          sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES (?, ?, ?, 'npm', ?)",
+          params: [id, ctx.orgId, id, id.toLowerCase()],
+        },
+        {
+          sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, removed_upstream_at, tombstoned_at)
+VALUES (?, ?, ?, '1.0.0', '00001', strftime('${FORMAT}', 'now'), 'upstream', '{}', ?, ?, CASE WHEN ? = 'removed_upstream' THEN strftime('${FORMAT}', 'now') END, CASE WHEN ? = 'tombstoned' THEN strftime('${FORMAT}', 'now') END)`,
+          params: [id, ctx.orgId, id, blobs[0].id, status, status, status],
+        },
+      ]);
+    },
+    async setVersionStatus(ctx, key, status) {
+      await exec(
+        `UPDATE version SET status = ?,
+  removed_upstream_at = CASE WHEN ? = 'removed_upstream' THEN COALESCE(removed_upstream_at, strftime('${FORMAT}', 'now')) END,
+  tombstoned_at = CASE WHEN ? = 'tombstoned' THEN COALESCE(tombstoned_at, strftime('${FORMAT}', 'now')) END
+WHERE org_id = ? AND blob_id IN (SELECT id FROM blob WHERE org_id = ? AND sha256 = ?)`,
+        status,
+        status,
+        status,
+        ctx.orgId,
+        ctx.orgId,
+        key,
+      );
+    },
+    removeCalls: () => state.removes,
+    stallNextRemove() {
+      state.stallRemove = true;
+    },
+    failNextRemove() {
+      state.failRemove = true;
     },
     async expireLease(ctx, key) {
       await exec(
@@ -305,5 +404,170 @@ describe('blob contract harness', () => {
         store: broken as unknown as BlobContractFixture['store'],
       }),
     ).toThrow(method);
+  });
+});
+
+const LIFECYCLE_HOOKS = [
+  'makeEligible',
+  'addReference',
+  'setVersionStatus',
+  'removeCalls',
+  'stallNextRemove',
+  'failNextRemove',
+] as const;
+
+describe('blob lifecycle fixture hooks', () => {
+  it.each(LIFECYCLE_HOOKS)(
+    'fails the lifecycle suite when the %s hook is missing',
+    async (hook) => {
+      const fixture: Record<string, unknown> = { ...(await sqliteFixture()) };
+      delete fixture[hook];
+      expect(() =>
+        requireBlobLifecycleFixtureHooks(fixture as unknown as BlobLifecycleFixture),
+      ).toThrow(hook);
+    },
+  );
+
+  it('names only the absent hook', async () => {
+    const fixture: Record<string, unknown> = { ...(await sqliteFixture()) };
+    delete fixture.removeCalls;
+    let message = '';
+    try {
+      requireBlobLifecycleFixtureHooks(fixture as unknown as BlobLifecycleFixture);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('removeCalls');
+    expect(message).not.toContain('makeEligible');
+  });
+
+  it('reaches the metadata port through the lifecycle object', async () => {
+    const f = await sqliteFixture();
+    const org = await f.seed(ORG_A);
+    const key = await stored(f, org, 'spied');
+    await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+    await f.lifecycle.claimPurge(org, key);
+    expect(f.metadataCalls).toEqual(['softDelete', 'claimPurge']);
+  });
+
+  it('turns an unreferenced scheduled blob claimable and is needed for that', async () => {
+    const f = await sqliteFixture();
+    const org = await f.seed(ORG_A);
+    const key = await stored(f, org, 'orphan inside the grace period');
+    await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+    await f.expireRetention(org, key);
+    expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    await f.makeEligible(org, key);
+    expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+  });
+
+  async function referenced(
+    f: SqliteFixture,
+    org: OrgContext,
+    label: string,
+    status: 'active' | 'removed_upstream',
+  ): Promise<Sha256> {
+    const key = await stored(f, org, label);
+    await f.addReference(org, key, status);
+    await f.makeEligible(org, key);
+    await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+    await f.expireRetention(org, key);
+    return key;
+  }
+
+  it('an active reference makes the blob unclaimable', async () => {
+    const f = await sqliteFixture();
+    const org = await f.seed(ORG_A);
+    const key = await referenced(f, org, 'actively referenced', 'active');
+    expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+  });
+
+  it('a removed_upstream reference leaves the blob claimable', async () => {
+    const f = await sqliteFixture();
+    const org = await f.seed(ORG_A);
+    const key = await referenced(f, org, 'released reference', 'removed_upstream');
+    expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+  });
+
+  it('addReference scopes the reference to the context organization', async () => {
+    const f = await sqliteFixture();
+    const a = await f.seed(ORG_A);
+    const b = await f.seed(ORG_B);
+    const key = await stored(f, a, 'same bytes in two organizations');
+    await stored(f, b, 'same bytes in two organizations');
+    await f.addReference(b, key, 'active');
+    await f.makeEligible(a, key);
+    await f.lifecycle.softDelete(a, key, { removedAt: await f.now() });
+    await f.expireRetention(a, key);
+    expect(await f.lifecycle.claimPurge(a, key)).not.toBeNull();
+  });
+
+  it('setVersionStatus moves the blob between claimable and unclaimable', async () => {
+    const f = await sqliteFixture();
+    const org = await f.seed(ORG_A);
+    const key = await referenced(f, org, 'status flips', 'active');
+    expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    await f.setVersionStatus(org, key, 'tombstoned');
+    expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+  });
+
+  it('setVersionStatus in another organization changes nothing', async () => {
+    const f = await sqliteFixture();
+    const a = await f.seed(ORG_A);
+    const b = await f.seed(ORG_B);
+    const key = await referenced(f, a, 'status in a foreign organization', 'active');
+    await stored(f, b, 'status in a foreign organization');
+    await f.setVersionStatus(b, key, 'removed_upstream');
+    expect(await f.lifecycle.claimPurge(a, key)).toBeNull();
+  });
+
+  async function claimed(f: SqliteFixture, label: string) {
+    const org = await f.seed(ORG_A);
+    const key = await stored(f, org, label);
+    await f.makeEligible(org, key);
+    await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+    await f.expireRetention(org, key);
+    const generation = await f.lifecycle.claimPurge(org, key);
+    expect(generation).not.toBeNull();
+    return { org, key, generation: generation! };
+  }
+
+  it('counts every remove call', async () => {
+    const f = await sqliteFixture();
+    expect(f.removeCalls()).toBe(0);
+    const { org, key, generation } = await claimed(f, 'counted');
+    expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+    expect(f.removeCalls()).toBe(1);
+  });
+
+  it('failNextRemove fails exactly the next remove', async () => {
+    const f = await sqliteFixture();
+    const { org, key, generation } = await claimed(f, 'fails once');
+    f.failNextRemove();
+    expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+    expect(f.removeCalls()).toBe(1);
+    expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+    expect(f.removeCalls()).toBe(2);
+  });
+
+  it('stallNextRemove stalls exactly the next remove', async () => {
+    const f = await sqliteFixture();
+    const { org, key, generation } = await claimed(f, 'stalls once');
+    f.stallNextRemove();
+    const started = Date.now();
+    expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(f.removeCalls()).toBe(1);
+    expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
+    expect(f.removeCalls()).toBe(2);
+  });
+
+  it('a stalled remove leaves the bytes in place', async () => {
+    const f = await sqliteFixture();
+    const { org, key, generation } = await claimed(f, 'stalled keeps bytes');
+    f.stallNextRemove();
+    await f.lifecycle.recheckAndRemove(org, key, generation);
+    await f.lifecycle.cancelPurge(org, key, generation);
+    expect(await f.store.head(org, key)).not.toBeNull();
   });
 });

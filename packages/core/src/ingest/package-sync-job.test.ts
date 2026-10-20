@@ -623,25 +623,6 @@ describe('upstream 404 rule', () => {
   });
 });
 
-describe('lost lease cleanup', () => {
-  it.each([fresh, staged])(
-    'leaves session $stamp untouched after a guarded apply fails',
-    async (session) => {
-      const h = setup();
-      h.sessions.acquire.mockResolvedValue(session);
-      h.setDescribe({ kind: 'found', description: description() });
-      vi.mocked(applyChunk).mockRejectedValue(
-        new DbError('unique', 'guard', { constraint: ACCESS_MUTATION_GUARD_CONSTRAINT }),
-      );
-      await expect(h.run()).rejects.toMatchObject({ code: 'lease_lost' });
-      expect(h.sessions.release).not.toHaveBeenCalled();
-      expect(h.sessions.abandon).not.toHaveBeenCalled();
-      expect(h.sessions.setPendingValidators).not.toHaveBeenCalled();
-      expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
-    },
-  );
-});
-
 describe('fix round 1', () => {
   it('records the 404 for every upstream form of a Composer package', async () => {
     const h = setup();

@@ -14,6 +14,7 @@ import {
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
 import { jobFences } from '@package-broker/core/platform/job-fences';
+import { releaseDelayOf } from '@package-broker/core/platform/job-release';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
 import type { Observability } from '@package-broker/core/platform/observability';
 
@@ -342,6 +343,14 @@ async function execute(
       job_id: claim.id,
       attempt: claim.attempt,
     });
+    const delaySeconds = releaseDelayOf(error);
+    if (
+      delaySeconds !== null &&
+      stopReason === null &&
+      isRegisteredCoreJob(job as RegisteredCoreJob)
+    ) {
+      return { settle: { outcome: 'released', delaySeconds }, outcome: 'released' };
+    }
     return {
       settle: { outcome: 'failed', errorCode: jobErrorCode(error), permanent: false },
       outcome: 'failed',

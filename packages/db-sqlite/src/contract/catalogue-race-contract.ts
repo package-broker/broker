@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import { deriveVisibility, type VisibilityConfig } from '@package-broker/core/catalogue/visibility';
@@ -344,7 +345,11 @@ type Case = (w: World, order: Order) => Promise<void>;
 
 async function attachedWorld(w: World): Promise<void> {
   const a = w.actor(w.first);
-  await a.store.attachSource(w.org, fence(), { projectId: PROJECT, sourceId: SOURCE });
+  await a.store.attachSource(w.org, fence(), {
+    audit: visibilityAudit(),
+    projectId: PROJECT,
+    sourceId: SOURCE,
+  });
 }
 
 const cases: Record<string, Case> = {
@@ -353,7 +358,12 @@ const cases: Record<string, Case> = {
     const { a } = await race(
       w,
       order,
-      (actor) => actor.store.attachSource(w.org, fence(), { projectId: PROJECT, sourceId: SOURCE }),
+      (actor) =>
+        actor.store.attachSource(w.org, fence(), {
+          audit: visibilityAudit(),
+          projectId: PROJECT,
+          sourceId: SOURCE,
+        }),
       discover(w, 'fresh'),
     );
     expect(a).toMatchObject({ ok: true });
@@ -372,6 +382,7 @@ const cases: Record<string, Case> = {
       order,
       (actor) =>
         actor.store.addPattern(w.org, fence(), {
+          audit: visibilityAudit(),
           projectId: PROJECT,
           sourceId: SOURCE,
           pattern: 'widget-*',
@@ -444,7 +455,12 @@ const cases: Record<string, Case> = {
       w,
       order,
       (actor) => actor.reader.resolveVersions(w.org, { ...query, binding, after: next }),
-      (actor) => actor.store.detachSource(w.org, fence(), { projectId: PROJECT, sourceId: SOURCE }),
+      (actor) =>
+        actor.store.detachSource(w.org, fence(), {
+          audit: visibilityAudit(),
+          projectId: PROJECT,
+          sourceId: SOURCE,
+        }),
     );
     if (order === 'second-then-first') {
       expect(a).toEqual({ changed: true });

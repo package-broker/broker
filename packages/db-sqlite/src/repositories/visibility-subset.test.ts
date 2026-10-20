@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
@@ -249,6 +250,7 @@ describe('visibility subset writes against the oracle', () => {
                 p.projectId === project.id && p.sourceId === source.id && p.pattern === pattern,
             );
             const result = await repo.addPattern(ctx, fence, {
+              audit: visibilityAudit(),
               projectId: project.id,
               sourceId: source.id,
               pattern,
@@ -283,6 +285,7 @@ describe('visibility subset writes against the oracle', () => {
               (p) => p.sourceId === target.sourceId && p.effect === 'include' && p.id !== target.id,
             );
             const result = await repo.removePattern(ctx, fence, {
+              audit: visibilityAudit(),
               projectId: project.id,
               sourceId: target.sourceId,
               pattern: target.pattern,
@@ -492,6 +495,7 @@ describe('visibility subset authority and refusals', () => {
     effect: 'include' | 'exclude',
   ) =>
     repo.addPattern(ctx, actor.fence, {
+      audit: visibilityAudit(),
       projectId,
       sourceId,
       pattern: p,
@@ -653,6 +657,7 @@ describe('visibility subset authority and refusals', () => {
     expect(await visible(ARCHIVED)).toEqual([]);
     const remove = (p: string) =>
       repo.removePattern(ctx, owner.fence, {
+        audit: visibilityAudit(),
         projectId: ARCHIVED,
         sourceId: S_ORG,
         pattern: p,
@@ -739,6 +744,7 @@ describe('visibility subset authority and refusals', () => {
     expect(await visible(P)).toEqual([]);
     expect(
       await repo.removePattern(ctx, owner.fence, {
+        audit: visibilityAudit(),
         projectId: P,
         sourceId: S_ORG,
         pattern: '*',
@@ -824,6 +830,7 @@ describe('visibility subset authority and refusals', () => {
       effect: 'include' | 'exclude',
     ) =>
       spy.addPattern(ctx, actor.fence, {
+        audit: visibilityAudit(),
         projectId,
         sourceId,
         pattern: p,
@@ -832,6 +839,7 @@ describe('visibility subset authority and refusals', () => {
       });
     const removePattern = (actor: Actor, projectId: string, p: string) =>
       spy.removePattern(ctx, actor.fence, {
+        audit: visibilityAudit(),
         projectId,
         sourceId: S_ORG,
         pattern: p,

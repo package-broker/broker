@@ -1,3 +1,4 @@
+import { visibilityAudit } from '../testing/visibility-audit.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext } from '@package-broker/core/db/port';
 import type { Cache, EpochReader } from '@package-broker/core/platform/cache';
@@ -125,12 +126,17 @@ async function narrowingWrite(kind: string) {
     const repo = createVisibilityAttachRepository(database.executor, { providerAnchors: ANCHORS });
     expect(
       kind === 'detach'
-        ? await repo.detachSource(org, fence, { projectId: 'P', sourceId: 'S' })
+        ? await repo.detachSource(org, fence, {
+            audit: visibilityAudit(),
+            projectId: 'P',
+            sourceId: 'S',
+          })
         : await repo.setPackageFlag(org, fence, { packageId: 'K', visibleToNewProjects: false }),
     ).toMatchObject({ ok: true });
   } else if (kind === 'exclude') {
     expect(
       await createVisibilitySubsetRepository(database.executor).addPattern(org, fence, {
+        audit: visibilityAudit(),
         projectId: 'P',
         sourceId: 'S',
         pattern: 'acme/*',

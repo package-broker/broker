@@ -464,6 +464,7 @@ export function describeAccessRace(label: string, open: Open): void {
       providerAnchors: anchors,
       now: iso(0),
       expiresAt: iso(HOUR),
+      maxLifetimeDays: 365,
     });
 
     async function mintedFor(selectorNo: number) {

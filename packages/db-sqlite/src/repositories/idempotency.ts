@@ -38,6 +38,7 @@ function timestamp(value: string): void {
 export function idempotencyInsertStatement(
   ctx: OrgContext,
   record: IdempotencyRecord,
+  onlyIfChanged = false,
 ): ScalarStatement {
   boundedKey('principalKey', record.principalKey, 80);
   boundedKey('key', record.key, 128);
@@ -62,7 +63,7 @@ export function idempotencyInsertStatement(
   return {
     sql: `INSERT INTO api_idempotency
       (org_id, principal_key, key, route, request_hash, status, response_json, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ${onlyIfChanged ? 'SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0' : 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'}`,
     params: [
       ctx.orgId,
       record.principalKey,

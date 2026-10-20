@@ -2,11 +2,17 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { auditEvent, type AuditEvent } from '@package-broker/core/audit/actions';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
-import { createPatOffboardingJob } from '@package-broker/core/authz/pat-offboarding';
+import {
+  createPatOffboardingJob,
+  PAT_OFFBOARDING_JOB_TYPE,
+} from '@package-broker/core/authz/pat-offboarding';
+import { createPatOffboardingSweepJob } from '@package-broker/core/authz/pat-offboarding-sweep';
 import type { PatOffboardingStore } from '@package-broker/core/authz/pat-offboarding';
 import { fixedClock, ulid } from '@package-broker/core/ids';
-import type { JobContext } from '@package-broker/core/platform/jobs';
+import type { JobContext, Jobs } from '@package-broker/core/platform/jobs';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { createJobRepository } from './job.js';
 import { createPatOffboardingRepository } from './pat-offboarding.js';
 
 const USER = '01HZX3VQ7N5R8T2W4Y6A9B1C2D';
@@ -682,5 +688,294 @@ describe('statements', () => {
     expect(sqlText.filter((text) => /UPDATE token/i.test(text))).toSatisfy((list: string[]) =>
       list.every((text) => /org_id = \?/.test(text) && /kind = 'pat'/.test(text)),
     );
+  });
+});
+
+describe('suspendedUsersWithLivePats', () => {
+  type SweepRepository = ReturnType<typeof createPatOffboardingRepository>;
+  const sweep = (): SweepRepository => createPatOffboardingRepository(executor);
+
+  function userKey(n: number): string {
+    return `01J0SWEEP${String(n).padStart(17, '0')}`;
+  }
+
+  async function addUser(
+    id: string,
+    status: 'active' | 'suspended',
+    org: OrgContext = a,
+  ): Promise<void> {
+    await run(
+      'INSERT INTO user_account (id, org_id, email, status) VALUES (?, ?, ?, ?)',
+      id,
+      org.orgId,
+      `${id.toLowerCase()}@example.test`,
+      status,
+    );
+  }
+
+  it('lists suspended users with an unrevoked personal token, ordered by id', async () => {
+    await addUser(userKey(2), 'suspended');
+    await addUser(userKey(1), 'suspended');
+    await seed({ user: userKey(2) });
+    await seed({ user: userKey(1) });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([userKey(1), userKey(2)]);
+  });
+
+  it('lists a user once however many tokens they hold', async () => {
+    await seed();
+    await seed();
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([USER]);
+  });
+
+  it('skips a suspended user with no personal token', async () => {
+    await addUser(userKey(1), 'suspended');
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([]);
+  });
+
+  it('skips a suspended user whose personal tokens are all revoked', async () => {
+    await seed({ revokedAt: BEFORE });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([]);
+  });
+
+  it('skips a suspended user who holds only service tokens', async () => {
+    await seed({ kind: 'svc' });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([]);
+  });
+
+  it('skips an active user with a personal token', async () => {
+    await seed({ user: OTHER_USER });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([]);
+  });
+
+  it('keeps an expired but unrevoked personal token live', async () => {
+    await seed({ expiresAt: '2020-01-01T00:00:00.000Z' });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([USER]);
+  });
+
+  it('does not return a suspended user of another organization', async () => {
+    await addUser(userKey(1), 'suspended', b);
+    await seed({ org: b, user: userKey(1) });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([]);
+    expect(await sweep().suspendedUsersWithLivePats(b, '', 100)).toEqual([userKey(1)]);
+  });
+
+  it('does not count a personal token stored under another organization', async () => {
+    await seed({ org: b });
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 100)).toEqual([]);
+  });
+
+  it('returns only users above the cursor', async () => {
+    for (let n = 1; n <= 3; n += 1) {
+      await addUser(userKey(n), 'suspended');
+      await seed({ user: userKey(n) });
+    }
+
+    expect(await sweep().suspendedUsersWithLivePats(a, userKey(1), 100)).toEqual([
+      userKey(2),
+      userKey(3),
+    ]);
+    expect(await sweep().suspendedUsersWithLivePats(a, userKey(3), 100)).toEqual([]);
+  });
+
+  it('returns at most the limit', async () => {
+    for (let n = 1; n <= 3; n += 1) {
+      await addUser(userKey(n), 'suspended');
+      await seed({ user: userKey(n) });
+    }
+
+    expect(await sweep().suspendedUsersWithLivePats(a, '', 2)).toEqual([userKey(1), userKey(2)]);
+  });
+
+  it.each([0, 101, -1, 1.5, Number.NaN, '5'])(
+    'rejects the limit %s with a RangeError',
+    async (limit) => {
+      await expect(sweep().suspendedUsersWithLivePats(a, '', limit as number)).rejects.toThrow(
+        RangeError,
+      );
+    },
+  );
+
+  it('binds three parameters and pins both tables to the organization', async () => {
+    const seen: Statement[] = [];
+    const spying: SqlExecutor = {
+      ...executor,
+      all: (statement) => {
+        seen.push(statement);
+        return executor.all(statement);
+      },
+    };
+
+    await createPatOffboardingRepository(spying).suspendedUsersWithLivePats(a, '', 100);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.params).toEqual([a.orgId, '', 100]);
+    expect(seen[0]?.sql).toMatch(/\bu\.org_id = \?/);
+    expect(seen[0]?.sql).toMatch(/t\.org_id = u\.org_id/);
+  });
+
+  describe('sweep job against the repository', () => {
+    const DAY = '2026-10-20';
+    const SWEEP_NOW = '2026-10-20T12:00:00.000Z';
+
+    function sweepContext(): JobContext {
+      return {
+        org: a,
+        jobId: 'job-sweep',
+        idempotencyKey: 'k',
+        attempt: 1,
+        fence: 1,
+        signal: new AbortController().signal,
+        ports: {} as JobContext['ports'],
+        observability: {} as JobContext['observability'],
+      };
+    }
+
+    function recordingJobs() {
+      const seenKeys = new Set<string>();
+      const calls: { payload: { userId: string; cutoff: string }; key: string }[] = [];
+      const jobs: Pick<Jobs, 'enqueue'> = {
+        enqueue: async (_ctx, type, payload, input) => {
+          expect(type).toBe(PAT_OFFBOARDING_JOB_TYPE);
+          calls.push({
+            payload: payload as { userId: string; cutoff: string },
+            key: input.idempotencyKey,
+          });
+          const created = !seenKeys.has(input.idempotencyKey);
+          seenKeys.add(input.idempotencyKey);
+          return { id: input.idempotencyKey, created };
+        },
+      };
+      return { jobs, calls };
+    }
+
+    function runSweep(
+      jobs: Pick<Jobs, 'enqueue'>,
+      store: PatOffboardingSweepStoreLike = sweep(),
+    ): Promise<void> {
+      const job = createPatOffboardingSweepJob({
+        store,
+        jobs,
+        clock: fixedClock(SWEEP_NOW),
+        log: () => undefined,
+      });
+      return job.definition.handler(job.definition.validate({}), sweepContext());
+    }
+
+    type PatOffboardingSweepStoreLike = Pick<SweepRepository, 'suspendedUsersWithLivePats'>;
+
+    it('enqueues exactly the two qualifying users with the run date in the key', async () => {
+      await addUser(userKey(1), 'suspended');
+      await addUser(userKey(2), 'suspended');
+      await addUser(userKey(3), 'suspended');
+      await addUser(userKey(4), 'active');
+      await seed({ user: userKey(1) });
+      await seed({ user: userKey(2) });
+      await seed({ user: userKey(4) });
+      const { jobs, calls } = recordingJobs();
+
+      await runSweep(jobs);
+
+      expect(calls.map((call) => call.key)).toEqual([
+        `pat-offboarding:${userKey(1)}:suspended:sweep:${DAY}`,
+        `pat-offboarding:${userKey(2)}:suspended:sweep:${DAY}`,
+      ]);
+      expect(calls.map((call) => call.payload.userId)).toEqual([userKey(1), userKey(2)]);
+    });
+
+    it('completes a second run on the same day with no new job, through the real jobs port', async () => {
+      await addUser(userKey(1), 'suspended');
+      await seed({ user: userKey(1) });
+      await seed();
+      const offboarding = createPatOffboardingJob({
+        store: createPatOffboardingRepository(executor),
+        clock: fixedClock(SWEEP_NOW),
+        ids: { ulid },
+        log: () => undefined,
+      });
+      const jobs = createRepositoryJobs({
+        store: createJobRepository(executor, { random: () => 0.5 }),
+        jobs: [offboarding],
+        clock: fixedClock(SWEEP_NOW),
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null });
+      const events: Record<string, unknown>[] = [];
+      const sweepAt = (instant: string) =>
+        createPatOffboardingSweepJob({
+          store: sweep(),
+          jobs,
+          clock: fixedClock(instant),
+          log: (entry) => events.push({ ...entry }),
+        });
+      const execute = (instant: string) => {
+        const job = sweepAt(instant);
+        return job.definition.handler(job.definition.validate({}), sweepContext());
+      };
+
+      await execute('2026-10-20T08:00:00.000Z');
+      await execute('2026-10-20T20:30:00.000Z');
+
+      expect(events.map((entry) => entry.enqueued)).toEqual([2, 0]);
+      const stored = await all<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM job WHERE type = ? AND org_id = ? AND id <> ?',
+        PAT_OFFBOARDING_JOB_TYPE,
+        a.orgId,
+        JOB,
+      );
+      expect(stored[0]?.n).toBe(2);
+    });
+
+    it('enqueues all 150 qualifying users in one run', async () => {
+      for (let n = 1; n <= 150; n += 1) {
+        await addUser(userKey(n), 'suspended');
+        await seed({ user: userKey(n) });
+      }
+      const { jobs, calls } = recordingJobs();
+
+      await runSweep(jobs);
+
+      expect(calls).toHaveLength(150);
+      expect(calls[0]?.payload.userId).toBe(userKey(1));
+      expect(calls[149]?.payload.userId).toBe(userKey(150));
+    });
+
+    it('does not revoke a personal token created after the cutoff the run enqueued', async () => {
+      const lateAt = '2026-10-20T12:00:00.001Z';
+      const late = tokenId(900);
+      const spied: PatOffboardingSweepStoreLike = {
+        suspendedUsersWithLivePats: async (ctx, afterId, limit) => {
+          const ids = await sweep().suspendedUsersWithLivePats(ctx, afterId, limit);
+          await run(
+            `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json,
+               read_only, user_id, created_by_user_id, expires_at, project_mode, created_at)
+             VALUES (?, ?, 'pat', 'lateselector', ?, 1, 'late', '["write"]', 0, ?, ?, ?, 'all', ?)`,
+            late,
+            a.orgId,
+            'a'.repeat(64),
+            USER,
+            USER,
+            '2027-01-01T00:00:00.000Z',
+            lateAt,
+          );
+          return ids;
+        },
+      };
+      const early = await seed();
+      const { jobs, calls } = recordingJobs();
+
+      await runSweep(jobs, spied);
+
+      const cutoff = calls[0]?.payload.cutoff ?? '';
+      expect(cutoff).toBe(SWEEP_NOW);
+      expect(await sweep().candidates(a, { userId: USER, cutoff, limit: 25 })).toEqual([early]);
+    });
   });
 });

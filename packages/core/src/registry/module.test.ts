@@ -4,12 +4,13 @@ import type { CatalogueReader, PackageVisibility, ResolvedPackage } from '../db/
 import { orgContext } from '../db/port.js';
 import { applyChunk, type ApplyDeps, type ApplyOutcome } from '../ingest/apply-description.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
+import { setContextPackageActor } from '../internal/package-actor.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { systemClock } from '../ids.js';
 import type { PlatformPorts, RequestContext } from '../plugin.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
 import type { SourceRecord } from '../db/source.js';
-import { createPackageAccess } from '../catalogue/package-access.js';
+import { PACKAGES_READ, createPackageAccess } from '../catalogue/package-access.js';
 import { packageSyncEnqueueInput } from '../ingest/package-sync-job.js';
 import { createRegistryModule, type RegistryModuleDeps } from './module.js';
 import { resolveRegistryConfig } from './registry-config.js';
@@ -258,6 +259,18 @@ function context(
         routeClass: 'project',
       },
     });
+  }
+  if (options.snapshot !== false) {
+    setContextPackageActor(
+      ctx,
+      Object.freeze({
+        kind: 'project',
+        userId: 'user-1',
+        orgId: org.orgId,
+        projectId: 'proj-1',
+        permissions: new Set([PACKAGES_READ]),
+      }),
+    );
   }
   if (options.outcome !== undefined && options.outcome.kind !== 'absent') {
     setResolvedPackage(ctx, options.outcome);

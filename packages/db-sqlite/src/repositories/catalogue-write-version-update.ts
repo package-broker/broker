@@ -159,20 +159,20 @@ export function versionUpdateStatements(
         .where('package.id', '=', packageId)
         .where('package.org_id', '=', ctx.orgId)
         .where(
-          sql<boolean>`EXISTS (SELECT 1 FROM version
-            JOIN json_each(${JSON.stringify(
-              accepted.map((input) => ({
-                version: input.versionNormalized,
-                metadata: input.metadata.json,
-                sourceRef: input.sourceRef,
-                distType: input.distType,
-                license: input.license,
-                deprecated: input.metadata.deprecatedMessage,
-                upstream: input.upstreamReleasedAt,
-              })),
-            )}) AS incoming
-              ON version.version_normalized = json_extract(incoming.value, '$.version')
-            WHERE version.package_id = package.id AND version.org_id = ${ctx.orgId}
+          // CROSS JOIN keeps the bounded incoming list outside the version identity seeks.
+          sql<boolean>`EXISTS (SELECT 1 FROM json_each(${JSON.stringify(
+            accepted.map((input) => ({
+              version: input.versionNormalized,
+              metadata: input.metadata.json,
+              sourceRef: input.sourceRef,
+              distType: input.distType,
+              license: input.license,
+              deprecated: input.metadata.deprecatedMessage,
+              upstream: input.upstreamReleasedAt,
+            })),
+          )}) AS incoming CROSS JOIN version
+            WHERE version.version_normalized = json_extract(incoming.value, '$.version')
+              AND version.package_id = package.id AND version.org_id = ${ctx.orgId}
               AND version.status <> 'tombstoned'
               AND (version.deprecated_message IS NOT json_extract(incoming.value, '$.deprecated')
                 OR version.upstream_released_at IS NOT json_extract(incoming.value, '$.upstream')

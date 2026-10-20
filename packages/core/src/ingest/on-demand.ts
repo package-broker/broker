@@ -10,21 +10,18 @@ import type { OrgContext } from '../db/port.js';
 import type { UpstreamForm, UpstreamStateRepository } from '../db/upstream-state.js';
 import type { Clock } from '../ids.js';
 import { defaultEntry, type ScopedCache } from '../platform/cache.js';
-import { UpstreamError } from '../sources/policy-fetch.js';
 import type { SourceType } from '../sources/config.js';
 import type { DescribeOptions, DescribeResult, DocumentValidators } from '../sources/provider.js';
-import {
-  applyChunk,
-  continuationOptions,
-  type ApplyDeps,
-  type ApplyInput,
-} from './apply-description.js';
+import { applyChunk, type ApplyDeps, type ApplyInput } from './apply-description.js';
 import { createCoalescer, type CoalesceFill, type DoneState } from './coalesce.js';
-import { ComposerV2Error } from './composer/v2-package.js';
-import { ComposerV1PackageError } from './composer/v1-package.js';
-import { NpmPackumentError } from './npm/packument.js';
-import { SnapshotCorruptError } from './snapshot.js';
-import { assertHeaderValue, parsePendingValidators, type PendingValidators } from './validators.js';
+import {
+  describeOptions,
+  isSnapshotGone,
+  isUpstreamFailure,
+  pendingValidators,
+  upstreamForm,
+} from './fill-shared.js';
+import { parsePendingValidators } from './validators.js';
 import type {
   IngestScopeRef,
   IngestSessionHandle,
@@ -139,68 +136,6 @@ function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 
 function abortableFill(fill: CoalesceFill): CoalesceFill {
   return (signal) => abortable(fill(signal), signal);
-}
-
-function upstreamForm(type: SourceType, form?: Exclude<UpstreamForm, 'composer-p2-dev'>) {
-  return (
-    form ?? (type === 'npmjs_proxy' || type === 'npm_registry' ? 'npm-packument' : 'composer-p2')
-  );
-}
-
-function safeValidator(value: string | undefined): string | null {
-  try {
-    assertHeaderValue('validator', value ?? null);
-    return value ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function isUpstreamFailure(error: unknown): boolean {
-  return (
-    error instanceof UpstreamError ||
-    error instanceof ComposerV2Error ||
-    error instanceof ComposerV1PackageError
-  );
-}
-
-function describeOptions(
-  session: IngestSessionHandle,
-  published: DocumentValidators,
-): DescribeOptions {
-  const options = continuationOptions(session, published);
-  if (options.snapshot?.stagedBlob === undefined || session.pendingValidators === null)
-    return options;
-  const validators = parsePendingValidators(session.pendingValidators)['npm-packument'];
-  if (validators === undefined) return options;
-  const snapshot = {
-    ...options.snapshot,
-    validators: {
-      ...(validators.etag === null ? {} : { etag: validators.etag }),
-      ...(validators.lastModified === null ? {} : { lastModified: validators.lastModified }),
-    },
-  };
-  return { snapshot };
-}
-
-function pendingValidators(validators: DocumentValidators, form: UpstreamForm): PendingValidators {
-  const entries =
-    form === 'composer-p2'
-      ? ([
-          ['composer-p2', validators['composer-p2']],
-          ['composer-p2-dev', validators['composer-p2-dev']],
-        ] as const)
-      : ([[form, validators[form === 'npm-packument' ? 'npm-full' : 'composer-p2']]] as const);
-  return Object.fromEntries(
-    entries.map(([key, value]) => [
-      key,
-      {
-        etag: safeValidator(value?.etag),
-        lastModified: safeValidator(value?.lastModified),
-        contentSha256: null,
-      },
-    ]),
-  );
 }
 
 export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
@@ -363,10 +298,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
                 described = await plan.describe({}, fillSignal);
             } catch (error) {
               if (fillSignal.aborted) throw fillSignal.reason;
-              if (
-                error instanceof SnapshotCorruptError ||
-                (error instanceof NpmPackumentError && error.code === 'snapshot_gone')
-              ) {
+              if (isSnapshotGone(error)) {
                 await deps.sessions.abandon(ctx, session);
                 return 'pending';
               }
@@ -432,10 +364,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
               });
             } catch (error) {
               if (fillSignal.aborted) throw fillSignal.reason;
-              if (
-                error instanceof SnapshotCorruptError ||
-                (error instanceof NpmPackumentError && error.code === 'snapshot_gone')
-              ) {
+              if (isSnapshotGone(error)) {
                 await deps.sessions.abandon(ctx, session);
                 return 'pending';
               }

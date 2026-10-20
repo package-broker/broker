@@ -261,6 +261,17 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
     return fail('forbidden');
   }
 
+  function denyReauth(ctx: OrgContext, actor: OrgActor, action: string): ProjectResult<never> {
+    emit({
+      event: 'admin.denied',
+      action,
+      orgId: ctx.orgId,
+      actorUserId: actor.userId,
+      reason: 'reauth_required',
+    });
+    return fail('reauth_required');
+  }
+
   function normalize(raw: unknown, scope: 'organization' | 'project'): OrgActor | null {
     if (typeof raw !== 'object' || raw === null) return null;
     const { userId, permissions, kind } = raw as Record<string, unknown>;
@@ -311,6 +322,8 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
         return fail('wrong_state');
       case 'authority':
         return deny(ctx, actor, `project.${action}`);
+      case 'reauth_required':
+        return denyReauth(ctx, actor, `project.${action}`);
       default:
         return fail(answer);
     }

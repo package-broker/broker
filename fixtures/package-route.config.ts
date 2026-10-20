@@ -10,7 +10,7 @@ const packageRoute = definePlugin({
   register(registry) {
     registry.route({
       method: 'GET',
-      path: '/fixture/:project/pkg/:name',
+      path: '/fixture/pkg/:project/:name',
       permission: 'project:packages:read',
       boundary: 'package',
       package: { ecosystem: 'npm', name: (params) => params['name'] ?? null },

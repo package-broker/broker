@@ -1,7 +1,5 @@
-import { accessContextOf } from '../authz/access-context.js';
-import type { ProjectActor } from '../authz/project-actor.js';
 import { displayName } from '../catalogue/names.js';
-import { createPackageAccess, PACKAGES_READ } from '../catalogue/package-access.js';
+import { createPackageAccess } from '../catalogue/package-access.js';
 import type {
   CatalogueReader,
   CatalogueWriteGuard,
@@ -32,6 +30,7 @@ import {
 } from '../ingest/on-demand.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
 import { PACKAGE_SYNC_JOB_TYPE, packageSyncEnqueueInput } from '../ingest/package-sync-job.js';
+import { contextPackageActorOf } from '../internal/package-actor.js';
 import { resolvedPackageOf } from '../internal/package-context.js';
 import type { Codecs } from '../platform/codec.js';
 import { createScopedCache, type EpochReader } from '../platform/cache.js';
@@ -130,43 +129,6 @@ export interface RegistryModule {
 
 const NO_PROBE: CredentialEchoProbe = { secrets: [], queryParams: [] };
 const PROXY_TYPES: ReadonlySet<string> = new Set(['packagist_proxy', 'npmjs_proxy']);
-
-function fireAndForget(thunk: () => Promise<void>): void {
-  void Promise.resolve()
-    .then(thunk)
-    .catch(() => undefined);
-}
-
-function projectActorOf(ctx: RequestContext): ProjectActor | null {
-  const snapshot = accessContextOf(ctx);
-  if (
-    snapshot === null ||
-    snapshot.boundary !== 'project' ||
-    snapshot.principal === null ||
-    snapshot.projectId === null ||
-    ctx.org === null ||
-    ctx.principal === null ||
-    ctx.projectId === null ||
-    snapshot.projectId !== ctx.projectId ||
-    snapshot.principal.id !== ctx.principal.id
-  ) {
-    return null;
-  }
-  if (snapshot.actor !== null) {
-    const held = new Set([
-      ...snapshot.actor.organizationPermissions,
-      ...snapshot.actor.projectPermissions,
-    ]);
-    if (!held.has(PACKAGES_READ)) return null;
-  }
-  return Object.freeze({
-    kind: 'project',
-    userId: snapshot.principal.id,
-    orgId: ctx.org.orgId,
-    projectId: ctx.projectId,
-    permissions: new Set([PACKAGES_READ]),
-  });
-}
 
 export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   const { jobs } = deps.ports;
@@ -399,7 +361,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   });
 
   async function reresolve(ctx: RequestContext): Promise<PackageVisibility> {
-    const actor = projectActorOf(ctx);
+    const actor = contextPackageActorOf(ctx);
     const resolved = resolvedPackageOf(ctx);
     if (actor === null || resolved === null) return { kind: 'absent' };
     const key = resolved.kind === 'visible' ? resolved.pkg.key : resolved.key;
@@ -419,10 +381,9 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       access: packageAccess,
       dist,
       onDemand,
-      actorOf: projectActorOf,
       reresolve,
       handleOf: deps.handleOf ?? (() => null),
-      defer: deps.defer ?? fireAndForget,
+      ...(deps.defer === undefined ? {} : { defer: deps.defer }),
       publicUrl: deps.publicUrl,
       codecs: deps.codecs,
     }),

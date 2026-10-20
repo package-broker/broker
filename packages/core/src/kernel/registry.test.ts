@@ -583,3 +583,347 @@ describe('route API registration', () => {
     ]);
   });
 });
+
+describe('route snapshot', () => {
+  const withResolver: RegistrationOptions = {
+    packageResolver: { resolve: async () => ({ kind: 'absent' }) },
+  };
+
+  function flipping(first: Record<string, unknown>, later: Record<string, unknown>) {
+    const reads = new Map<string, number>();
+    const route: Record<string, unknown> = {};
+    for (const key of new Set([...Object.keys(first), ...Object.keys(later)])) {
+      Object.defineProperty(route, key, {
+        enumerable: true,
+        get() {
+          const n = (reads.get(key) ?? 0) + 1;
+          reads.set(key, n);
+          return n === 1 ? first[key] : later[key];
+        },
+      });
+    }
+    return { route: route as unknown as RouteDefinition, reads };
+  }
+
+  it('registers the first-read values when later reads would widen the route', () => {
+    const { route, reads } = flipping(
+      {
+        method: 'GET',
+        path: '/p/:project/x',
+        permission: 'project:packages:read',
+        boundary: 'project',
+        handler,
+      },
+      {
+        method: 'DELETE',
+        path: '/other',
+        permission: null,
+        boundary: 'none',
+        allowArchived: true,
+        bearerOnly: true,
+        handler: () => new Response('widened'),
+      },
+    );
+    const [registered] = collectRegistrations([withRoutes('p', [route])], withResolver).routes;
+    expect(registered).toMatchObject({
+      method: 'GET',
+      path: '/p/:project/x',
+      permission: 'project:packages:read',
+      boundary: 'project',
+      handler,
+    });
+    expect(registered!.allowArchived).toBeUndefined();
+    expect((registered as unknown as Record<string, unknown>).bearerOnly).toBeUndefined();
+    expect(reads.size).toBe(7);
+    expect([...reads.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  it('rejects the first-read invalid value instead of the later valid one', () => {
+    const { route } = flipping(
+      { method: 'GET', path: 'bad', permission: null, handler },
+      { method: 'GET', path: '/ok', permission: null, handler },
+    );
+    expect(problemsOf([withRoutes('p', [route])])).toEqual([
+      'plugin "p": route path "bad" must start with "/"',
+    ]);
+  });
+
+  it('freezes the registered route and snapshots the package binding once', () => {
+    const name = () => 'x';
+    const binding = flipping(
+      { ecosystem: 'npm', name },
+      { ecosystem: 'bogus', name: undefined, fetchOnAdmission: true },
+    );
+    const { route } = flipping(
+      {
+        method: 'GET',
+        path: '/p/:project/pkg',
+        permission: 'project:packages:read',
+        boundary: 'package',
+        package: binding.route,
+        handler,
+      },
+      {},
+    );
+    const [registered] = collectRegistrations([withRoutes('p', [route])], withResolver).routes;
+    expect(Object.isFrozen(registered)).toBe(true);
+    expect(Object.isFrozen(registered!.package)).toBe(true);
+    expect(registered!.package).toEqual({ ecosystem: 'npm', name });
+    expect(binding.reads.size).toBe(3);
+    expect([...binding.reads.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  const PROTO_REFUSED = 'route is invalid: __proto__ key is not allowed';
+
+  function withOwnProto(
+    base: Record<string, unknown>,
+    proto: Record<string, unknown>,
+    via: 'json' | 'define',
+  ): Record<string, unknown> {
+    if (via === 'json') {
+      return Object.assign(
+        JSON.parse(`{"__proto__":${JSON.stringify(proto)}}`) as Record<string, unknown>,
+        base,
+      );
+    }
+    const target = { ...base };
+    Object.defineProperty(target, '__proto__', { value: proto, enumerable: true });
+    return target;
+  }
+
+  const projectRoute = {
+    method: 'GET',
+    path: '/p/:project/x',
+    permission: 'project:packages:write',
+    handler,
+  };
+
+  it.each(['json', 'define'] as const)(
+    'refuses a route with an own __proto__ key carrying boundary (%s)',
+    (via) => {
+      const route = withOwnProto(projectRoute, { boundary: 'project' }, via);
+      expect(Object.keys(route)).toContain('__proto__');
+      expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+        `plugin "p" ${PROTO_REFUSED}`,
+      ]);
+    },
+  );
+
+  it.each(['json', 'define'] as const)(
+    'refuses a package binding with an own __proto__ key (%s)',
+    (via) => {
+      const binding = withOwnProto({}, { ecosystem: 'npm', fetchOnAdmission: true }, via);
+      const route = {
+        ...projectRoute,
+        path: '/p/:project/pkg',
+        boundary: 'package',
+        package: binding,
+      };
+      expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+        `plugin "p" ${PROTO_REFUSED}`,
+      ]);
+    },
+  );
+
+  it('refuses an own __proto__ key nested inside api', () => {
+    const responses = withOwnProto({}, { '200': { description: 'x' } }, 'define');
+    const route = { ...projectRoute, boundary: 'project', api: { responses: [responses] } };
+    expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+      `plugin "p" ${PROTO_REFUSED}`,
+    ]);
+  });
+
+  it('refuses non-plain objects inside package and api', () => {
+    const refused = 'plugin "p" route is invalid: only plain objects and arrays are allowed';
+    for (const api of [{ tags: new Map() }, new (class Api {})()]) {
+      const route = { ...projectRoute, boundary: 'project', api };
+      expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+        refused,
+      ]);
+    }
+  });
+
+  it('snapshots only own enumerable keys, so validation and registration agree', () => {
+    const inherited = Object.create({ boundary: 'none', bearerOnly: true }) as Record<
+      string,
+      unknown
+    >;
+    Object.assign(inherited, projectRoute, { boundary: 'project' });
+    const [registered] = collectRegistrations(
+      [withRoutes('p', [inherited as unknown as RouteDefinition])],
+      withResolver,
+    ).routes;
+    expect(registered!.boundary).toBe('project');
+    expect((registered as unknown as Record<string, unknown>).bearerOnly).toBeUndefined();
+    const stripped = Object.create({ boundary: 'project' }) as Record<string, unknown>;
+    Object.assign(stripped, projectRoute);
+    expect(problemsOf([withRoutes('p', [stripped as unknown as RouteDefinition])])).toContain(
+      'plugin "p" route GET /p/:project/x: a protected route needs an explicit boundary (organization or project)',
+    );
+  });
+
+  it('reads an api slot once and validates that read', () => {
+    const api = {
+      operationId: 'getUsers',
+      summary: 'Get users',
+      tags: ['users'],
+      responses: { 200: null },
+    };
+    let reads = 0;
+    const route: Record<string, unknown> = {
+      method: 'GET',
+      path: '/_pb/users',
+      permission: null,
+      handler,
+    };
+    Object.defineProperty(route, 'api', {
+      enumerable: true,
+      get() {
+        reads++;
+        return reads === 1 ? { ...api, operationId: 'Bad-Id' } : api;
+      },
+    });
+    const problems = problemsOf([withRoutes('p', [route as unknown as RouteDefinition])]);
+    expect(reads).toBe(1);
+    expect(problems.some((problem) => problem.includes('api operationId'))).toBe(true);
+  });
+
+  it('freezes nested arrays and objects inside the package binding and keeps functions', () => {
+    const name = () => 'x';
+    const route = {
+      ...projectRoute,
+      path: '/p/:project/pkg',
+      permission: 'project:packages:read',
+      boundary: 'package',
+      package: {
+        ecosystem: 'npm',
+        name,
+        tags: ['a'],
+        responses: { '200': { description: 'ok' } },
+      },
+    };
+    const [registered] = collectRegistrations(
+      [withRoutes('p', [route as unknown as RouteDefinition])],
+      withResolver,
+    ).routes;
+    const binding = registered!.package as unknown as {
+      name: unknown;
+      tags: string[];
+      responses: Record<string, { description: string }>;
+    };
+    expect(binding.name).toBe(name);
+    expect(Object.isFrozen(binding.tags)).toBe(true);
+    expect(Object.isFrozen(binding.responses)).toBe(true);
+    expect(Object.isFrozen(binding.responses['200'])).toBe(true);
+    expect(binding.tags).not.toBe(route.package.tags);
+  });
+
+  it('accepts a project path whose later reads would be a plain path', () => {
+    const { route, reads } = flipping(
+      { ...projectRoute, boundary: 'project' },
+      { ...projectRoute, boundary: 'project', path: '/x' },
+    );
+    const [registered] = collectRegistrations([withRoutes('p', [route])], withResolver).routes;
+    expect(registered!.path).toBe('/p/:project/x');
+    expect(reads.size).toBe(5);
+    expect([...reads.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  const objectPath = {
+    startsWith: () => true,
+    slice: () => ({ split: () => ['x'] }),
+    split: () => ['x'],
+    toString: () => '/p/:project/x',
+  };
+
+  it('refuses an object path and a String wrapper path', () => {
+    const refused = 'plugin "p" route is invalid: route fields must be primitive values';
+    for (const path of [objectPath, new String('/x')]) {
+      const route = { ...projectRoute, boundary: 'project', path };
+      expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+        refused,
+      ]);
+    }
+  });
+
+  it('refuses a non-string path or method', () => {
+    const refused = 'plugin "p" route is invalid: method and path must be strings';
+    for (const patch of [{ path: 5 }, { method: undefined }, { path: undefined }]) {
+      const route = { ...projectRoute, boundary: 'project', ...patch };
+      expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+        refused,
+      ]);
+    }
+  });
+
+  it('refuses object-valued top-level fields', () => {
+    const refused = 'plugin "p" route is invalid: route fields must be primitive values';
+    const route = { ...projectRoute, boundary: 'project', permission: { toString: () => 'x' } };
+    expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([refused]);
+    const fn = { ...projectRoute, boundary: 'project', permission: () => 'x' };
+    expect(problemsOf([withRoutes('p', [fn as unknown as RouteDefinition])])).toEqual([refused]);
+  });
+
+  it('refuses a route whose handler is not an own function', () => {
+    class Inherited {
+      method = 'GET';
+      path = '/p/:project/x';
+      permission = 'project:packages:write';
+      boundary = 'project';
+      handler = undefined;
+    }
+    Object.defineProperty(Inherited.prototype, 'handler', { value: handler });
+    const refused = 'plugin "p" route is invalid: handler must be a function';
+    expect(problemsOf([withRoutes('p', [new Inherited() as unknown as RouteDefinition])])).toEqual([
+      refused,
+    ]);
+    const bare = Object.create({ handler }) as Record<string, unknown>;
+    Object.assign(bare, { method: 'GET', path: '/x', permission: null });
+    expect(problemsOf([withRoutes('p', [bare as unknown as RouteDefinition])])).toEqual([refused]);
+  });
+
+  it('refuses cycles inside the package binding', () => {
+    const name = () => 'x';
+    const base = {
+      ...projectRoute,
+      path: '/p/:project/pkg',
+      permission: 'project:packages:read',
+      boundary: 'package',
+    };
+    const circ: Record<string, unknown> = { ecosystem: 'npm', name };
+    circ.self = circ;
+    const arr: unknown[] = [];
+    arr.push(arr);
+    for (const binding of [circ, { ecosystem: 'npm', name, list: arr }]) {
+      const route = { ...base, package: binding };
+      expect(problemsOf([withRoutes('p', [route as unknown as RouteDefinition])])).toEqual([
+        'plugin "p" route is invalid: circular reference',
+      ]);
+    }
+  });
+
+  it('accepts a shared non-circular value and caps array length at 1024', () => {
+    const name = () => 'x';
+    const shared = { k: 1 };
+    const base = {
+      ...projectRoute,
+      path: '/p/:project/pkg',
+      permission: 'project:packages:read',
+      boundary: 'package',
+    };
+    const ok = { ...base, package: { ecosystem: 'npm', name, a: shared, b: shared } };
+    expect(
+      collectRegistrations([withRoutes('p', [ok as unknown as RouteDefinition])], withResolver)
+        .routes,
+    ).toHaveLength(1);
+    const edge = { ...base, package: { ecosystem: 'npm', name, list: new Array(1024).fill(0) } };
+    expect(
+      collectRegistrations([withRoutes('p', [edge as unknown as RouteDefinition])], withResolver)
+        .routes,
+    ).toHaveLength(1);
+    const long = { ...base, package: { ecosystem: 'npm', name, list: new Array(1025).fill(0) } };
+    expect(problemsOf([withRoutes('p', [long as unknown as RouteDefinition])])).toEqual([
+      'plugin "p" route is invalid: arrays are limited to 1024 elements',
+    ]);
+  });
+});

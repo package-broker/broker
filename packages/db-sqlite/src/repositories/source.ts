@@ -255,6 +255,24 @@ export function dueStatement(ctx: OrgContext, limit: number): Statement {
   );
 }
 
+export function deferPollStatement(
+  ctx: OrgContext,
+  id: string,
+  expectedNextPollAt: string,
+): Statement {
+  return compile(
+    db
+      .updateTable('source')
+      .set({
+        next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || poll_interval_seconds || ' seconds')`,
+      })
+      .where('org_id', '=', ctx.orgId)
+      .where('id', '=', id)
+      .where('status', '<>', sql.lit('paused'))
+      .where('next_poll_at', '=', expectedNextPollAt),
+  );
+}
+
 export function attachedProxyStatement(
   ctx: OrgContext,
   projectId: string,
@@ -593,6 +611,11 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       }
       const rows = await executor.all<SourceRow>(dueStatement(ctx, limit));
       return rows.map(toRecord);
+    },
+
+    async deferPoll(ctx, id, expectedNextPollAt) {
+      const [result] = await executor.batch([deferPollStatement(ctx, id, expectedNextPollAt)]);
+      return result?.changes === 1;
     },
 
     async pollState(ctx, guard, input) {

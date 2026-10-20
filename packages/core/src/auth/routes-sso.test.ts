@@ -592,6 +592,33 @@ describe('start refusals', () => {
     expect(response.headers.getSetCookie()).toEqual([]);
   });
 
+  it.each([
+    [{ purpose: 'login', [EMAIL]: PROVIDER_ERROR_TEXT }, '/body', 'unrecognized_keys'],
+    [{ returnTo: '/' }, '/body/purpose', 'invalid_value'],
+    [{ purpose: 'admin' }, '/body/purpose', 'invalid_value'],
+    [{ purpose: 'reauth', returnTo: 5 }, '/body/returnTo', 'invalid_type'],
+  ])('validates SSO start before calling the provider (%#)', async (body, path, code) => {
+    const start = vi.fn<IdentityProvider['start']>();
+    const app = await build({ providers: [makeProvider('dex', { start })] });
+    const response = await app.kernel.fetch(startRequest('dex', body));
+    expect(response.status).toBe(400);
+    const error = await bodyOf(response);
+    expect(error).toEqual({
+      error: {
+        code: 'invalid_request',
+        message: 'Invalid request',
+        requestId: response.headers.get('x-request-id'),
+        details: [{ path, code }],
+      },
+    });
+    expect(JSON.stringify(error)).not.toContain(EMAIL);
+    expect(JSON.stringify(error)).not.toContain(PROVIDER_ERROR_TEXT);
+    expect(start).not.toHaveBeenCalled();
+    expect(app.login).not.toHaveBeenCalled();
+    expect(app.reauth).not.toHaveBeenCalled();
+    expect(response.headers.getSetCookie()).toEqual([]);
+  });
+
   it('answers a fixed 502 provider_error when start throws, logging only name and detail', async () => {
     class OidcProviderError extends Error {
       readonly detail = 'discovery_failed';

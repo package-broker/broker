@@ -28,6 +28,14 @@ export const localSetupStartResponse = z.strictObject({
 export const localSetupFinishBody = z.strictObject({ token: field, password: field, code: field });
 export const localLoginBody = z.strictObject({ email: field, password: field, code: field });
 export const localReauthBody = z.strictObject({ password: field, code: field });
+export const weakPasswordErrorResponse = z.strictObject({
+  error: z.strictObject({
+    code: z.literal('weak_password'),
+    message: z.string(),
+    requestId: z.string(),
+    problems: z.array(z.enum(['too_short', 'too_long', 'equals_email', 'not_well_formed'])).min(1),
+  }),
+});
 export const sessionResponse = z.strictObject({
   user: z.strictObject({ id: z.string(), email: z.string(), displayName: z.string().nullable() }),
   reauthFresh: z.boolean(),
@@ -47,7 +55,7 @@ export const AUTH_API: Readonly<Record<string, ApiSlot>> = Object.freeze({
     tags: ['auth'],
     params: providerParams,
     body: ssoStartBody,
-    responses: { 200: ssoStartResponse, 303: null, 401: null, 403: null, 502: null },
+    responses: { 200: ssoStartResponse, 303: null, 400: null, 401: null, 403: null, 502: null },
   },
   'GET /_pb/auth/sso/:provider/callback': {
     operationId: 'finishSsoLogin',
@@ -61,34 +69,34 @@ export const AUTH_API: Readonly<Record<string, ApiSlot>> = Object.freeze({
     summary: 'Start the local login setup',
     tags: ['auth'],
     body: localSetupStartBody,
-    responses: { 200: localSetupStartResponse, 401: null, 403: null },
+    responses: { 200: localSetupStartResponse, 400: null, 401: null, 403: null },
   },
   'POST /_pb/auth/local/setup/finish': {
     operationId: 'finishLocalSetup',
     summary: 'Finish the local login setup and sign in',
     tags: ['auth'],
     body: localSetupFinishBody,
-    responses: { 204: null, 401: null, 403: null },
+    responses: { 204: null, 400: null, 401: null, 403: null },
   },
   'POST /_pb/auth/local/login': {
     operationId: 'localLogin',
     summary: 'Sign in with the local login',
     tags: ['auth'],
     body: localLoginBody,
-    responses: { 204: null, 401: null, 403: null },
+    responses: { 204: null, 400: null, 401: null, 403: null },
   },
   'POST /_pb/auth/local/reauth': {
     operationId: 'localReauth',
     summary: 'Re-authenticate with the local login',
     tags: ['auth'],
     body: localReauthBody,
-    responses: { 204: null, 401: null, 403: null },
+    responses: { 204: null, 400: null, 401: null, 403: null },
   },
   'POST /_pb/auth/logout': {
     operationId: 'logout',
     summary: 'End the current session',
     tags: ['session'],
-    responses: { 204: null, 401: null, 403: null },
+    responses: { 204: null, 400: null, 401: null, 403: null },
   },
   'GET /_pb/session': {
     operationId: 'getSession',

@@ -2,6 +2,7 @@ import type { ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db
 import type { CatalogueSourceType } from '@package-broker/core/db/catalogue';
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import { isValidPattern } from '@package-broker/core/catalogue/patterns';
+import { withForeignKeysOff } from './foreign-keys-off.js';
 import { deriveVisibility, type VisibilityConfig } from '@package-broker/core/catalogue/visibility';
 
 export interface FixtureOrganization {
@@ -547,9 +548,61 @@ export async function seedCatalogue(
       `the configuration needs ${all.length} statements, the budget is ${limit}`,
     );
   }
-  for (let at = 0; at < all.length; at += STATEMENTS_PER_BATCH) {
-    await executor.batch(all.slice(at, at + STATEMENTS_PER_BATCH));
+  const insert = async (): Promise<void> => {
+    for (let at = 0; at < all.length; at += STATEMENTS_PER_BATCH) {
+      await executor.batch(all.slice(at, at + STATEMENTS_PER_BATCH));
+    }
+  };
+  if (hasCrossOrgRows(config)) await withForeignKeysOff(executor, insert);
+  else await insert();
+}
+
+function hasCrossOrgRows(config: CatalogueConfig): boolean {
+  const orgOf = (rows: readonly { id: string; orgId: string }[]): Map<string, string> =>
+    new Map(rows.map((r) => [r.id, r.orgId]));
+  const projects = orgOf(config.projects);
+  const sources = orgOf(config.sources);
+  const packages = orgOf(config.packages);
+  const organizations = new Set(config.organizations.map((o) => o.id));
+  let crossOrg = false;
+  const check = (parents: Map<string, string>, id: string, orgId: string): void => {
+    const parentOrg = parents.get(id);
+    if (parentOrg === undefined) throw new RangeError('missing parent in catalogue configuration');
+    if (parentOrg !== orgId) crossOrg = true;
+  };
+  for (const row of [
+    ...config.projects,
+    ...config.sources,
+    ...config.attachments,
+    ...config.patterns,
+    ...config.packages,
+    ...config.explicit,
+    ...config.registeredNames,
+    ...config.versions,
+  ]) {
+    if (!organizations.has(row.orgId)) {
+      throw new RangeError('missing parent organization in catalogue configuration');
+    }
   }
+  for (const s of config.sources) {
+    if (s.projectId !== null) check(projects, s.projectId, s.orgId);
+  }
+  for (const a of config.attachments) {
+    check(projects, a.projectId, a.orgId);
+    check(sources, a.sourceId, a.orgId);
+  }
+  for (const p of config.patterns) {
+    check(projects, p.projectId, p.orgId);
+    check(sources, p.sourceId, p.orgId);
+  }
+  for (const p of config.packages) check(sources, p.sourceId, p.orgId);
+  for (const e of config.explicit) {
+    check(projects, e.projectId, e.orgId);
+    check(packages, e.packageId, e.orgId);
+  }
+  for (const r of config.registeredNames) check(sources, r.sourceId, r.orgId);
+  for (const v of config.versions) check(packages, v.packageId, v.orgId);
+  return crossOrg;
 }
 
 /** Inserts the oracle's non-explicit rows; explicit rows are already written by seedCatalogue. Fixtures only: production writes derived rows through T314. */

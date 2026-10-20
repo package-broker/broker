@@ -9,6 +9,7 @@ import {
   packageUpsertStatements,
   type PackageUpsertInput,
 } from './catalogue-write-package.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 const JOB_ID = '01J0JOB00000000000000000C1';
 const OWNER = '01J0WWWWWWWWWWWWWWWWWW0C01';
@@ -30,6 +31,9 @@ let guard: CatalogueWriteGuard;
 function stmt(sql: string, ...params: (string | number | null)[]): Statement {
   return { sql, params };
 }
+
+const batchForged = (statements: readonly Statement[]) =>
+  withForeignKeysOff(database.executor, () => database.executor.batch(statements));
 
 beforeEach(async () => {
   database = await openMigratedDatabase({ twoOrganizations: true });
@@ -316,7 +320,7 @@ describe('packageUpsertStatements', () => {
   });
 
   it('a forged cross-organization attachment does not materialize the package', async () => {
-    await database.executor.batch([
+    await batchForged([
       stmt(
         'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
         org.orgId,

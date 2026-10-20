@@ -18,6 +18,7 @@ import {
   sourceActivatable,
   type RegisteredNameRepository,
 } from './registered-name.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
   {
@@ -57,6 +58,9 @@ let names: RegisteredNameRepository;
 function stmt(text: string, ...params: Statement['params']): Statement {
   return { sql: text, params };
 }
+
+const batchForged = (statements: readonly Statement[]) =>
+  withForeignKeysOff(executor, () => executor.batch(statements));
 
 function fenceFor(userId: string, sessionId: string): MutationFence {
   return mutationFence({ userId, sessionId } as unknown as AuthenticatedActor, {});
@@ -737,7 +741,7 @@ describe('round 2', () => {
     });
 
     it('keeps coverage and activatability blind to organization b rows', async () => {
-      await executor.batch([
+      await batchForged([
         stmt(
           `INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'acme/*')`,
           NAME_B,

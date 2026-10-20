@@ -359,7 +359,9 @@ describe('resolveVersions statement', () => {
       expect(text).toMatch(/USING INDEX version_by_published/);
       expect(text).toMatch(/SEARCH pp USING (PRIMARY KEY|INDEX project_package_package)/);
       expect(text).toMatch(/SEARCH ps USING PRIMARY KEY/);
-      expect(text).toMatch(/USING INDEX sqlite_autoindex_project_1/);
+      expect(text).toMatch(
+        /SEARCH guard_p (EXISTS )?USING (COVERING )?INDEX project_org_id \(id=\? AND org_id=\?\)/,
+      );
     }
   });
 

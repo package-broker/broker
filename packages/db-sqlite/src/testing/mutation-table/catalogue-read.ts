@@ -12,12 +12,18 @@ function foreignWinner(layer: 'membership' | 'package'): ContractCase {
       const seed = seeder(context.executor);
       await seedProject(seed, 'P', own.orgId);
       await seedSource(seed, 'S', own.orgId, 'vcs');
-      await seedPackage(seed, 'K', layer === 'package' ? foreign.orgId : own.orgId, 'S', 'acme/a');
+      await seedPackage(
+        seed.forged,
+        'K',
+        layer === 'package' ? foreign.orgId : own.orgId,
+        'S',
+        'acme/a',
+      );
       await seed(
         "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
         own.orgId,
       );
-      await seed(
+      await seed.forged(
         "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'explicit')",
         layer === 'membership' ? foreign.orgId : own.orgId,
       );

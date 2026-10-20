@@ -10,7 +10,7 @@ const foreignChild: ContractCase = {
     await visiblePackage(context, false);
     const { own } = orgOf(context);
     const seed = seeder(context.executor);
-    await seed("UPDATE version SET org_id = ? WHERE id = 'V'", orgOf(context).foreign.orgId);
+    await seed.forged("UPDATE version SET org_id = ? WHERE id = 'V'", orgOf(context).foreign.orgId);
     expect(
       await createCatalogueReader(executing(context)).resolveVersions(own, {
         ...packageQuery,

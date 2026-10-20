@@ -24,6 +24,7 @@ import {
   createVisibilitySubsetRepository,
   type VisibilitySubsetRepository,
 } from './visibility-subset.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 const MAX_PROVIDERS = 64;
 const ANCHORS: readonly ProtectedHolderProvider[] = [
@@ -368,6 +369,8 @@ const K_FOREIGN = '01JPKG000000000000000000009';
 
 describe('visibility subset authority and refusals', () => {
   let database: MigratedDatabase;
+  const batchForged = (statements: readonly Statement[]) =>
+    withForeignKeysOff(database.executor, () => database.executor.batch(statements));
   let repo: VisibilitySubsetRepository;
   let ctx: OrgContext;
   let owner: Actor;
@@ -434,9 +437,7 @@ describe('visibility subset authority and refusals', () => {
   });
 
   it('a hidden package with a mismatched source grants no owner authority', async () => {
-    await database.executor.batch([
-      stmt('UPDATE package SET source_id = ? WHERE id = ?', S_FOREIGN, K_HIDDEN),
-    ]);
+    await batchForged([stmt('UPDATE package SET source_id = ? WHERE id = ?', S_FOREIGN, K_HIDDEN)]);
     const before = await rows(database);
     expect(
       await repo.addExplicit(ctx, admin.fence, {

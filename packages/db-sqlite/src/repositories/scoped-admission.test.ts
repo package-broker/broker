@@ -4,6 +4,7 @@ import { countCalls } from '../contract/count-calls.js';
 import { seedCatalogue } from '../testing/catalogue-fixture.js';
 import { openMigratedDatabase } from '../testing/migrated-database.js';
 import { createScopedAdmission } from './scoped-admission.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 const ORG = 'org-a';
 const OTHER_ORG = 'org-b';
@@ -60,6 +61,8 @@ describe('scoped npm admission', () => {
   async function mutate(sql: string, params: ScalarStatement['params'] = []) {
     await database.executor.batch([{ sql, params }]);
   }
+  const mutateForged = (sql: string, params: ScalarStatement['params'] = []) =>
+    withForeignKeysOff(database.executor, () => mutate(sql, params));
   async function admitted(key = '@acme/unseen', projectId = PROJECT, orgId = ORG) {
     const counted = countCalls(database.executor);
     const result = await createScopedAdmission(counted.executor).admitScoped(orgContext(orgId), {
@@ -124,18 +127,18 @@ describe('scoped npm admission', () => {
     expect(await admitted()).toEqual([]);
   });
   it('refuses a foreign source and a foreign registration', async () => {
-    await mutate('UPDATE registered_name SET org_id = ?', [OTHER_ORG]);
+    await mutateForged('UPDATE registered_name SET org_id = ?', [OTHER_ORG]);
     expect(await admitted()).toEqual([]);
     await mutate('UPDATE registered_name SET org_id = ?', [ORG]);
-    await mutate('UPDATE source SET org_id = ?', [OTHER_ORG]);
+    await mutateForged('UPDATE source SET org_id = ?', [OTHER_ORG]);
     expect(await admitted()).toEqual([]);
   });
   it('refuses an attachment with a forged organization', async () => {
-    await mutate('UPDATE project_source SET org_id = ?', [OTHER_ORG]);
+    await mutateForged('UPDATE project_source SET org_id = ?', [OTHER_ORG]);
     expect(await admitted()).toEqual([]);
   });
   it('ignores a package row belonging to another organization', async () => {
-    await mutate(
+    await mutateForged(
       `INSERT INTO package (id, org_id, source_id, ecosystem, name, visible_to_new_projects)
       VALUES ('foreign-package', ?, ?, 'npm', '@acme/unseen', 0)`,
       [OTHER_ORG, SOURCE],

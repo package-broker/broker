@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
-import { blobStorageKey, parseSha256, type ByteStore, type PurgeGeneration } from './blob.js';
+import {
+  blobStorageKey,
+  parseSha256,
+  type ByteStore,
+  type PurgeGeneration,
+  type Sha256,
+} from './blob.js';
 import { createBlobLifecycle } from './blob-lifecycle.js';
 import { createBlobRemoveJob } from './blob-remove-job.js';
 import { type JobContext, type Jobs, validateIdempotencyKey } from './jobs.js';
@@ -19,6 +25,7 @@ function fixture() {
     cancelPurge: vi.fn(async () => true),
     unschedule: vi.fn(async () => true),
     scheduleOrphan: vi.fn(async () => true),
+    listDue: vi.fn(async (): Promise<Sha256[]> => []),
   };
   const remove = vi.fn<ByteStore['remove']>(async () => undefined);
   const store = { remove } as unknown as ByteStore;
@@ -271,5 +278,32 @@ it.each(['A'.repeat(64), 'b'.repeat(63), '', null, 123, 'malformed'])(
       'invalid blob input',
     );
     for (const port of Object.values(f.metadata)) expect(port).not.toHaveBeenCalled();
+  },
+);
+it('passes a retention override through softDelete and keeps the old input valid', async () => {
+  await f.service.softDelete(ctx, key, { ...input, retentionDays: 90 });
+  expect(f.metadata.softDelete).toHaveBeenLastCalledWith(ctx, key, { ...input, retentionDays: 90 });
+  await f.service.softDelete(ctx, key, input);
+  expect(f.metadata.softDelete).toHaveBeenLastCalledWith(ctx, key, input);
+});
+it.each([-1, 1.5, Number.NaN, Infinity, '5', null, 36_501])(
+  'rejects retention override %s before softDelete reaches the port',
+  async (retentionDays) => {
+    await expect(
+      f.service.softDelete(ctx, key, { ...input, retentionDays: retentionDays as number }),
+    ).rejects.toThrow('invalid blob input');
+    expect(f.metadata.softDelete).not.toHaveBeenCalled();
+  },
+);
+it('delegates listDue with the caller context and page', async () => {
+  f.metadata.listDue.mockResolvedValue([key]);
+  await expect(f.service.listDue(ctx, { limit: 50, after: key })).resolves.toEqual([key]);
+  expect(f.metadata.listDue).toHaveBeenCalledExactlyOnceWith(ctx, { limit: 50, after: key });
+});
+it.each([{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { limit: 5, after: 'A'.repeat(64) }])(
+  'rejects page %j before listDue reaches the port',
+  async (page) => {
+    await expect(f.service.listDue(ctx, page as never)).rejects.toThrow('invalid blob input');
+    expect(f.metadata.listDue).not.toHaveBeenCalled();
   },
 );

@@ -11,8 +11,21 @@ import {
 import type { Jobs } from './jobs.js';
 import type { Observability } from './observability.js';
 
+export interface DuePage {
+  readonly limit: number;
+  readonly after?: Sha256 | null;
+}
+
+const DUE_PAGE_MAX = 100;
+const MAX_RETENTION_DAYS = 36_500;
+
 export interface BlobLifecycleMetadataPort {
-  softDelete(ctx: OrgContext, key: Sha256, input: { removedAt: string }): Promise<boolean>;
+  softDelete(
+    ctx: OrgContext,
+    key: Sha256,
+    input: { removedAt: string; retentionDays?: number },
+  ): Promise<boolean>;
+  listDue(ctx: OrgContext, page: DuePage): Promise<Sha256[]>;
   claimPurge(ctx: OrgContext, key: Sha256): Promise<PurgeGeneration | null>;
   canStartRemove(
     ctx: OrgContext,
@@ -49,7 +62,7 @@ export function createBlobLifecycle({
   leaseMs,
   observability,
 }: BlobLifecycleOptions): BlobLifecycle &
-  Pick<BlobLifecycleMetadataPort, 'unschedule' | 'scheduleOrphan'> & {
+  Pick<BlobLifecycleMetadataPort, 'softDelete' | 'unschedule' | 'scheduleOrphan' | 'listDue'> & {
     removeBytes(
       ctx: OrgContext,
       key: Sha256,
@@ -88,8 +101,15 @@ export function createBlobLifecycle({
         ? 'removed'
         : 'refused';
     },
-    async softDelete(ctx, key, input) {
+    async softDelete(ctx, key, input: { removedAt: string; retentionDays?: number }) {
       parseSha256(key);
+      const days = input?.retentionDays;
+      if (
+        days !== undefined &&
+        (!Number.isSafeInteger(days) || days < 0 || days > MAX_RETENTION_DAYS)
+      ) {
+        throw new BlobValidationError();
+      }
       return metadata.softDelete(ctx, key, input);
     },
     async claimPurge(ctx, key) {
@@ -109,6 +129,13 @@ export function createBlobLifecycle({
     async unschedule(ctx, key) {
       parseSha256(key);
       return metadata.unschedule(ctx, key);
+    },
+    async listDue(ctx, page) {
+      if (!Number.isInteger(page?.limit) || page.limit < 1 || page.limit > DUE_PAGE_MAX) {
+        throw new BlobValidationError();
+      }
+      if (page.after !== undefined && page.after !== null) parseSha256(page.after);
+      return metadata.listDue(ctx, page);
     },
     async scheduleOrphan(ctx, key) {
       parseSha256(key);

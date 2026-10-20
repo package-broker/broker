@@ -205,6 +205,11 @@ export interface SourceRepository {
   ): Promise<SourceRecord | null>;
   /** Non-paused sources with `next_poll_at` reached on database time, oldest first. `limit` is an integer from 1 to 50. */
   listDue(ctx: OrgContext, limit: number): Promise<SourceRecord[]>;
+  /**
+   * Moves `next_poll_at` of a non-paused source to database time plus its poll interval, only while
+   * it still equals `expectedNextPollAt`, so a finished sync that already wrote the real value wins.
+   */
+  deferPoll(ctx: OrgContext, id: string, expectedNextPollAt: string): Promise<boolean>;
   /** `stale` when the job guard no longer holds; nothing is written then. */
   pollState(
     ctx: OrgContext,

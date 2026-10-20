@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as z from 'zod';
 import { VALIDATION_CODES, type ValidationDetail } from './validate.js';
 import type { RequestContext } from '../plugin.js';
-import { apiRoute, defineApi, type ApiOutcome, type ApiRouteSpec } from './route.js';
+import {
+  apiRoute,
+  defineApi,
+  type ApiOutcome,
+  type ApiRouteSpec,
+  type RouteOutcome,
+} from './route.js';
+import { SERVICE_ERROR_TABLE } from './response.js';
 
 const SENTINEL = 'S3CR3T-SENTINEL';
 
@@ -525,5 +532,143 @@ describe('apiRoute follow-ups', () => {
     );
     expect(response.status).toBe(400);
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('service error outcomes', () => {
+  type AdminSpec = ApiRouteSpec & { readonly service: 'AdminError' };
+
+  const adminTable = SERVICE_ERROR_TABLE.AdminError;
+  const adminKeys = Object.keys(adminTable) as (keyof typeof adminTable)[];
+
+  function serviceRun(
+    key: unknown,
+    options: Options = {},
+    overrides: Partial<ApiRouteSpec> = { service: 'AdminError' },
+    handler?: () => Promise<unknown>,
+    plain = false,
+  ): Promise<Response> {
+    const base = spec(overrides);
+    const route = apiRoute(
+      defineApi(plain ? omit(base, 'concurrency') : base),
+      (handler ?? (() => Promise.resolve({ serviceError: key }))) as never,
+    );
+    return route.handler(context(options)) as Promise<Response>;
+  }
+
+  it('covers every AdminError key in the table', () => {
+    expect(adminKeys.length).toBe(16);
+  });
+
+  it.each(adminKeys)('maps AdminError %s without concurrency', async (key) => {
+    const { code, status } = adminTable[key];
+    const response = await serviceRun(key, {}, undefined, undefined, true);
+    expect(response.status).toBe(status);
+    const { error } = await envelope(response);
+    expect(error.code).toBe(code);
+    expect(error.requestId).toBe('req-1');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-request-id')).toBe('req-1');
+    if (key !== code) expect(await dump(response)).not.toContain(`"${key}"`);
+  });
+
+  it.each(adminKeys)('maps AdminError %s with If-Match', async (key) => {
+    const { code, status } = adminTable[key];
+    const response = await serviceRun(key, { headers: rev });
+    if (key === 'conflict') {
+      expect(response.status).toBe(412);
+      expect((await envelope(response)).error.code).toBe('precondition_failed');
+    } else {
+      expect(response.status).toBe(status);
+      expect((await envelope(response)).error.code).toBe(code);
+    }
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-request-id')).toBe('req-1');
+    if (key !== code) expect(await dump(response)).not.toContain(`"${key}"`);
+  });
+
+  it('turns only the declared stale-revision error into 412', async () => {
+    for (const key of ['system_role', 'in_use', 'locked']) {
+      const response = await serviceRun(key, { headers: rev });
+      expect(response.status).toBe(409);
+      expect((await envelope(response)).error.code).toBe('conflict');
+    }
+  });
+
+  it('answers a family without a stale-revision error with 409 under If-Match', async () => {
+    const response = await serviceRun(
+      'conflict',
+      { headers: rev },
+      { service: 'PersonalTokenError' },
+    );
+    expect(response.status).toBe(409);
+    expect((await envelope(response)).error.code).toBe('conflict');
+  });
+
+  it.each([
+    ['AdminError', 412],
+    ['ServicePrincipalError', 412],
+    ['ProjectError', 409],
+    ['SourceError', 409],
+    ['VisibilityError', 409],
+    ['PersonalTokenError', 409],
+    ['ServiceTokenError', 409],
+  ] as const)('maps %s conflict under If-Match to %i', async (service, status) => {
+    const response = await serviceRun('conflict', { headers: rev }, { service });
+    expect(response.status).toBe(status);
+    const code = status === 412 ? 'precondition_failed' : 'conflict';
+    expect((await envelope(response)).error.code).toBe(code);
+  });
+
+  it.each([
+    ['an unknown key', 'nope'],
+    ['a prototype key', 'toString'],
+    ['a non-string', 42],
+    ['an object', { a: 1 }],
+    ['undefined', undefined],
+  ])('fails closed for %s', async (_name, key) => {
+    await expect(serviceRun(key, { headers: rev })).rejects.toThrow(TypeError);
+  });
+
+  it('fails closed without service and does not echo the key', async () => {
+    const error: unknown = await serviceRun(SENTINEL, { headers: rev }, {}).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as Error).message).not.toContain(SENTINEL);
+    const unknown: unknown = await serviceRun(SENTINEL, { headers: rev }).catch((e: unknown) => e);
+    expect(unknown).toBeInstanceOf(TypeError);
+    expect((unknown as Error).message).not.toContain(SENTINEL);
+  });
+
+  it('never calls the handler on 428, malformed If-Match or validation failure', async () => {
+    const handler = vi.fn(() => Promise.resolve({ serviceError: 'system_role' }));
+    const missing = await serviceRun(null, {}, undefined, handler);
+    expect(missing.status).toBe(428);
+    const malformed = await serviceRun(
+      null,
+      { headers: { 'if-match': 'abc' } },
+      undefined,
+      handler,
+    );
+    expect(malformed.status).toBe(400);
+    const invalid = await serviceRun(null, { headers: rev, body: '{"x":1}' }, undefined, handler);
+    expect(invalid.status).toBe(400);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('types serviceError against the declared service', () => {
+    const admin: RouteOutcome<AdminSpec> = { serviceError: 'system_role' };
+    expect(admin).toBeDefined();
+    type ProjectSpec = ApiRouteSpec & { readonly service: 'ProjectError' };
+    // @ts-expect-error family mismatch
+    const mismatch: RouteOutcome<ProjectSpec> = { serviceError: 'system_role' };
+    expect(mismatch).toBeDefined();
+    // @ts-expect-error no declared service
+    const none: RouteOutcome<ApiRouteSpec> = { serviceError: 'conflict' };
+    expect(none).toBeDefined();
+    const routeSpec = { ...spec(), service: 'ProjectError' } as const;
+    // @ts-expect-error family mismatch through apiRoute
+    apiRoute(routeSpec, () => Promise.resolve({ serviceError: 'system_role' }));
   });
 });

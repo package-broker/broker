@@ -139,7 +139,12 @@ describe('step 6 release gate on the node runtime', () => {
             sourceId: string;
           };
           return Response.json(
-            await packages.visibility[operation](ctx.org, mutationFence(actor, {}), input),
+            await packages.visibility[operation](
+              ctx.org,
+              mutationFence(actor, {}),
+              input,
+              auditCall(ulid()),
+            ),
           );
         },
       });

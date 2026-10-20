@@ -96,8 +96,6 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'DEFERRED: blob authorization read paths need independent child fixtures; owner T782n follow-up',
   'repositories/fetch-lease.ts#createFetchLeases':
     'DEFERRED: factory acquire, renew and release paths exceed the registered guard cases; owner T782n follow-up',
-  'repositories/visibility-subset.ts#createVisibilitySubsetRepository':
-    'DEFERRED: visibility subset readers need foreign package and source fixtures; owner T782n follow-up',
   'repositories/blob.ts#createBlobRepository':
     'DEFERRED: blob writes and lease lifecycle need independent child fixtures; owner T782n follow-up',
   'repositories/credential.ts#createCredentialRepository':
@@ -164,8 +162,6 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'DEFERRED: user factory methods beyond the auth getIdentity case need separate fixtures; owner T782n follow-up',
   'repositories/cache-epoch.ts#createCacheEpochRepository':
     'DEFERRED: epoch repository adapter exceeds epochReadStatement registration; owner T782n follow-up',
-  'repositories/visibility-attach.ts#createVisibilityAttachRepository':
-    'DEFERRED: factory attachment lifecycle exceeds attachSourceStatements registration; owner T782n follow-up',
 
   'internal/lease-time.ts#until':
     'DEFERRED: builds only a lease timestamp expression; no organization-scoped read or write; owner T782n exemption review',

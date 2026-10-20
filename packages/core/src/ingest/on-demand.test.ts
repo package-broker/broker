@@ -9,7 +9,7 @@ import { applyChunk } from './apply-description.js';
 import { createCoalescer } from './coalesce.js';
 import { UpstreamError } from '../sources/policy-fetch.js';
 import { catalogueNegativeKey } from '../catalogue/cache-keys.js';
-import { createScopedCache } from '../platform/cache.js';
+import { createScopedCache, defaultEntry } from '../platform/cache.js';
 import type { ApplyDeps, ApplyOutcome } from './apply-description.js';
 import type { IngestSessionHandle } from './session.js';
 import { createOnDemandFill, type OnDemandDeps } from './on-demand.js';
@@ -127,6 +127,7 @@ function setup() {
   const sessions = {
     acquire: vi.fn(async (_ctx, _scope, owner: string) => ({ ...handle, owner })),
     latest: vi.fn(async () => ({
+      id: 'session',
       state: 'running' as const,
       generation: 1,
       fence: 1,
@@ -137,6 +138,7 @@ function setup() {
     advance: vi.fn(async () => null),
     setPendingValidators: vi.fn(async () => true),
     abandon: vi.fn(async () => true),
+    discard: vi.fn(async () => true),
     release: vi.fn(async () => {
       events.push('release');
       return true;
@@ -718,19 +720,28 @@ describe('fix round 1 regressions', () => {
     expect(rawSet).not.toHaveBeenCalled();
   });
   it.each(['not_found', 'filled'] as const)(
-    'abandons a generation that never starts: %s',
+    'discards a generation that never starts: %s',
     async (state) => {
       const h = setup();
       if (state === 'not_found')
         h.describePackage.mockResolvedValue({ kind: 'not_found', definitive: true } as never);
       else vi.mocked(h.deps.visibility.resolve).mockResolvedValue(visible());
       await h.ensure();
-      expect(h.sessions.abandon).toHaveBeenCalledWith(
+      expect(h.sessions.discard).toHaveBeenCalledWith(
         { orgId: actor.orgId },
         await h.sessions.acquire.mock.results[0]!.value,
       );
+      expect(h.sessions.abandon).not.toHaveBeenCalled();
+      expect(h.sessions.release).not.toHaveBeenCalled();
     },
   );
+  it('releases a generation that made progress and never discards it', async () => {
+    const h = setup();
+    expect(await h.ensure()).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    expect(h.sessions.release).toHaveBeenCalled();
+    expect(h.sessions.discard).not.toHaveBeenCalled();
+    expect(h.sessions.abandon).not.toHaveBeenCalled();
+  });
   it('retries an unseen not_modified once without validators', async () => {
     const h = setup();
     h.plan.publishedValidators = { 'npm-full': { etag: '"old"' } };
@@ -788,8 +799,27 @@ describe('fix round 1 regressions', () => {
       await adapter.release(ctx, lease);
       expect(h.sessions.release).not.toHaveBeenCalled();
       expect(h.sessions.abandon).not.toHaveBeenCalled();
+      expect(h.sessions.discard).not.toHaveBeenCalled();
     },
   );
+  it('adapter renew fails when a different session row reuses the generation and fence', async () => {
+    const h = setup();
+    const adapter = vi.mocked(createCoalescer).mock.lastCall![0];
+    const key = JSON.stringify(['ingest', 'package', 'A', 'name']);
+    const ctx = { orgId: actor.orgId };
+    const lease = await adapter.acquire(ctx, key, 'first', 60);
+    if (lease === 'held') throw new Error('unexpected holder');
+    expect(await adapter.renew(ctx, lease, 60)).toBe(true);
+    vi.mocked(h.sessions.latest).mockResolvedValue({
+      id: 'recreated',
+      state: 'running',
+      generation: 1,
+      fence: 1,
+      seenCount: 0,
+      pagesSoFar: 0,
+    });
+    expect(await adapter.renew(ctx, lease, 60)).toBe(false);
+  });
   it.each(['sourceMetadata', 'upstreamState'] as const)(
     'serves a complete stored listing when %s fails',
     async (dependency) => {
@@ -830,7 +860,8 @@ describe('fix round 1 regressions', () => {
     const h = setup();
     vi.mocked(applyChunk).mockRejectedValue(new Error('database failure'));
     expect(await h.ensure()).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
-    expect(h.sessions.abandon).toHaveBeenCalledTimes(1);
+    expect(h.sessions.discard).toHaveBeenCalledTimes(1);
+    expect(h.sessions.abandon).not.toHaveBeenCalled();
   });
 });
 
@@ -1198,7 +1229,9 @@ describe('T430n review round 4', () => {
       }),
       Promise.resolve().then(() => gone.abort(new Error('joiner gone'))),
     ]);
-    expect(results[0]).toBeDefined();
+    expect(results[0]).toEqual(
+      mode === 'error' ? { kind: 'upstream_error' } : { kind: 'not_found' },
+    );
     await flush();
     expect(markers(h.service)).toBe(0);
   });
@@ -1228,6 +1261,118 @@ describe('T430n review round 4', () => {
     describing.resolve({ kind: 'not_found', definitive: true });
     await Promise.all([leader, joiner]);
     expect(rawSet).not.toHaveBeenCalled();
+  });
+});
+
+describe('T430n final review hardening', () => {
+  const keepRecordAlive = (h: ReturnType<typeof setup>) => {
+    const metadata = deferred<{ type: 'npmjs_proxy' }>();
+    vi.mocked(h.deps.sourceMetadata).mockImplementationOnce(() => metadata.promise);
+    const holder = h.ensure(visible(), 'npm', { ...actor, projectId: 'holder' });
+    return { holder, release: () => metadata.resolve({ type: 'npmjs_proxy' }) };
+  };
+
+  it('does not let a lease-lost fill mark the record of a later fill', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    const { holder, release } = keepRecordAlive(h);
+    const write = deferred<'stored'>();
+    vi.mocked(h.cache.set).mockImplementation(() => write.promise);
+    h.describePackage.mockResolvedValueOnce({ kind: 'not_found', definitive: true } as never);
+    vi.mocked(h.sessions.latest).mockResolvedValue({
+      id: 'session',
+      state: 'running',
+      generation: 1,
+      fence: 2,
+      seenCount: 0,
+      pagesSoFar: 0,
+    });
+    const first = h.ensure();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await first).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+    expect(h.cache.set).toHaveBeenCalledTimes(1);
+
+    vi.mocked(h.sessions.latest).mockResolvedValue({
+      id: 'session',
+      state: 'running',
+      generation: 1,
+      fence: 1,
+      seenCount: 0,
+      pagesSoFar: 0,
+    });
+    vi.mocked(h.deps.planFill).mockResolvedValueOnce(null);
+    const second = h.ensure();
+    await flush();
+    write.resolve('stored');
+    await flush();
+    expect(await second).toEqual({ kind: 'not_found' });
+    expect(h.cache.set).toHaveBeenCalledTimes(1);
+    release();
+    await holder;
+    expect(markers(h.service)).toBe(0);
+  });
+
+  it('does not let an aborted fill mark the record while another caller waits on the lease', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    const { holder, release } = keepRecordAlive(h);
+    const write = deferred<'stored'>();
+    vi.mocked(h.cache.set).mockImplementation(() => write.promise);
+    h.describePackage.mockResolvedValueOnce({ kind: 'not_found', definitive: true } as never);
+    const caller = new AbortController();
+    const first = h.service.ensure(actor, {
+      ecosystem: 'npm',
+      key: 'name',
+      outcome: admitted,
+      signal: caller.signal,
+    });
+    await flush();
+    expect(h.cache.set).toHaveBeenCalledTimes(1);
+    caller.abort(new Error('caller gone'));
+    expect(await first).toEqual({ kind: 'busy', retryAfterSeconds: 10 });
+
+    h.sessions.acquire.mockResolvedValueOnce('held' as never);
+    const negative = {
+      hit: {
+        entry: {
+          ...defaultEntry('negative', new Uint8Array(), new Date()),
+          insertedAt: new Date().toISOString(),
+        },
+        state: 'fresh' as const,
+      },
+      version: 'epoch',
+    };
+    const miss = { hit: null, version: 'epoch' };
+    vi.mocked(h.cache.get)
+      .mockResolvedValueOnce(miss)
+      .mockResolvedValueOnce(negative)
+      .mockResolvedValueOnce(miss);
+    const waiter = h.ensure();
+    await vi.advanceTimersByTimeAsync(100);
+    write.resolve('stored');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await waiter).toEqual({ kind: 'not_found' });
+    expect(h.cache.set).toHaveBeenCalledTimes(1);
+    release();
+    await holder;
+    expect(markers(h.service)).toBe(0);
+  });
+
+  it('forgets a shared absence when a later fill reuses the record', async () => {
+    const h = setup();
+    const { holder, release } = keepRecordAlive(h);
+    vi.mocked(h.cache.set).mockImplementation(async () => 'stored' as const);
+    h.describePackage.mockResolvedValueOnce({ kind: 'not_found', definitive: true } as never);
+    expect(await h.ensure()).toEqual({ kind: 'not_found' });
+    const writes = vi.mocked(h.cache.set).mock.calls.length;
+    expect(writes).toBeGreaterThan(0);
+
+    vi.mocked(h.deps.planFill).mockResolvedValueOnce(null);
+    expect(await h.ensure()).toEqual({ kind: 'not_found' });
+    expect(h.cache.set).toHaveBeenCalledTimes(writes);
+    release();
+    await holder;
+    expect(markers(h.service)).toBe(0);
   });
 });
 

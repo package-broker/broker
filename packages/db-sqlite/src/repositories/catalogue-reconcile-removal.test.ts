@@ -29,24 +29,27 @@ beforeEach(async () => {
   ctx = database.orgs!.a;
   batches = [];
   databaseNow = undefined;
-  writer = createCatalogueWriter({
-    driver: database.executor.driver,
-    all: () => {
-      throw new Error('catalogue writes must use batches');
+  writer = createCatalogueWriter(
+    {
+      driver: database.executor.driver,
+      all: () => {
+        throw new Error('catalogue writes must use batches');
+      },
+      batch: (statements) => {
+        expect(statements.every((s) => s.params.length <= 100)).toBe(true);
+        batches.push(statements);
+        return database.executor.batch(
+          databaseNow === undefined
+            ? statements
+            : statements.map((s) => ({
+                ...s,
+                sql: s.sql.replaceAll("'now'", `'${databaseNow}'`),
+              })),
+        );
+      },
     },
-    batch: (statements) => {
-      expect(statements.every((s) => s.params.length <= 100)).toBe(true);
-      batches.push(statements);
-      return database.executor.batch(
-        databaseNow === undefined
-          ? statements
-          : statements.map((s) => ({
-              ...s,
-              sql: s.sql.replaceAll("'now'", `'${databaseNow}'`),
-            })),
-      );
-    },
-  });
+    { maxAbsenceShare: 1 },
+  );
   await run(
     statement(
       "INSERT INTO job (id, org_id, type, idempotency_key, state, lease_owner, lease_until, fence) VALUES ('J', ?, 'sync:v1', 'J', 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",

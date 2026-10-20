@@ -10,7 +10,11 @@ import { createIngestFinalizer } from './ingest-finalize.js';
 import { createUpstreamStateRepository } from './upstream-state.js';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createIngestSessions, createIngestSessionWriteGuard } from './ingest-session.js';
+import {
+  createIngestSessionMaintenance,
+  createIngestSessions,
+  createIngestSessionWriteGuard,
+} from './ingest-session.js';
 import { packageUpsertStatements } from './catalogue-write-package.js';
 import { createHash } from 'node:crypto';
 import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
@@ -114,6 +118,65 @@ it('keeps the new holder lease unchanged when the old holder releases after take
       params: [next.id],
     }),
   ).toEqual(before);
+});
+
+const sessionRows = () =>
+  database.executor.all<{ id: string; owner: string; fence: number; stamp: string | null }>({
+    sql: 'SELECT id, owner, fence, stamp FROM ingest_session ORDER BY id',
+    params: [],
+  });
+it('discards a held generation that never started', async () => {
+  const { sessions, handle } = await acquired();
+  expect(await sessions.discard(org, handle)).toBe(true);
+  expect(await sessionRows()).toEqual([]);
+  expect(await sessions.latest(org, scope)).toBeNull();
+});
+it('never discards a started generation', async () => {
+  const { sessions, handle } = await acquired();
+  await sessions.start(org, handle, { stamp: 'a'.repeat(64), snapshot: { id: 'snapshot' } });
+  const before = await sessionRows();
+  expect(await sessions.discard(org, handle)).toBe(false);
+  expect(await sessionRows()).toEqual(before);
+});
+it.each(['fence', 'owner', 'org', 'complete', 'abandoned', 'expired'] as const)(
+  'does not discard with %s mismatch',
+  async (mismatch) => {
+    const { sessions, handle } = await acquired();
+    if (mismatch === 'complete' || mismatch === 'abandoned')
+      await database.executor.batch([
+        { sql: 'UPDATE ingest_session SET state = ? WHERE id = ?', params: [mismatch, handle.id] },
+      ]);
+    if (mismatch === 'expired')
+      await database.executor.batch([
+        {
+          sql: "UPDATE ingest_session SET lease_until = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+          params: [handle.id],
+        },
+      ]);
+    const before = await database.executor.all({ sql: 'SELECT * FROM ingest_session', params: [] });
+    expect(
+      await sessions.discard(mismatch === 'org' ? other : org, {
+        ...handle,
+        ...(mismatch === 'fence' ? { fence: handle.fence + 1 } : {}),
+        ...(mismatch === 'owner' ? { owner: 'other' } : {}),
+      }),
+    ).toBe(false);
+    expect(
+      await database.executor.all({ sql: 'SELECT * FROM ingest_session', params: [] }),
+    ).toEqual(before);
+  },
+);
+it('leaves a takeover holder untouched when the old holder discards', async () => {
+  const { sessions, handle } = await acquired();
+  await sessions.release(org, handle);
+  const next = await sessions.acquire(org, scope, 'next', 60);
+  if (next === 'held') throw new Error('unexpected holder');
+  const before = await database.executor.all({ sql: 'SELECT * FROM ingest_session', params: [] });
+  expect(await sessions.discard(org, handle)).toBe(false);
+  expect(await database.executor.all({ sql: 'SELECT * FROM ingest_session', params: [] })).toEqual(
+    before,
+  );
+  expect(await sessions.advance(org, next, { cursor: null, addSeen: 0 })).not.toBeNull();
 });
 
 function fillDeps(): { deps: OnDemandDeps; actor: ProjectActor } {
@@ -562,3 +625,34 @@ it('hands staged validators through a 400-version continuation within the statem
   for (const count of statements) expect(count).toBeLessThanOrEqual(450);
   expect(fetch).not.toHaveBeenCalled();
 });
+it('retains no ingest session rows after 1,000 distinct definitive-404 names and one maintenance run', async () => {
+  const { deps, actor } = fillDeps();
+  const basePlan = deps.planFill;
+  const service = createOnDemandFill({
+    ...deps,
+    planFill: async (...args) => {
+      const plan = await basePlan(...args);
+      return plan && { ...plan, describe: async () => ({ kind: 'not_found', definitive: true }) };
+    },
+  });
+  for (let i = 0; i < 1000; i++) {
+    const key = `missing-${String(i)}`;
+    expect(
+      await service.ensure(actor, {
+        ecosystem: 'npm',
+        key,
+        outcome: {
+          kind: 'proxy_admissible',
+          projectId: 'project',
+          sourceIds: ['source'],
+          ecosystem: 'npm',
+          key,
+        },
+      }),
+    ).toEqual({ kind: 'not_found' });
+  }
+  await createIngestSessionMaintenance(database.executor).sweep(100);
+  expect(
+    await database.executor.all({ sql: 'SELECT COUNT(*) AS rows FROM ingest_session', params: [] }),
+  ).toEqual([{ rows: 0 }]);
+}, 120_000);

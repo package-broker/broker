@@ -28,6 +28,7 @@ import { versionUpdateStatements } from './catalogue-write-version-update.js';
 import { distTagStatements, MAX_TAGS_PER_CALL } from './catalogue-write-tags.js';
 import { distAttachStatements } from './catalogue-write-dist.js';
 import { quarantineStatements } from './catalogue-status.js';
+import type { FinalizeGuardOptions } from '@package-broker/core/ingest/finalize-guard';
 import { createCatalogueReconciler } from './catalogue-reconcile.js';
 import { createVisibilityAttachRepository } from './visibility-attach.js';
 import {
@@ -116,9 +117,12 @@ function packageLookup(
   );
 }
 
-export function createCatalogueWriter(executor: SqlExecutor): CatalogueWriter {
+export function createCatalogueWriter(
+  executor: SqlExecutor,
+  options: FinalizeGuardOptions = {},
+): CatalogueWriter {
   const bounded = batchExecutor(executor);
-  const reconcile = createCatalogueReconciler(bounded);
+  const reconcile = createCatalogueReconciler(bounded, { ...options, countUnseen: true });
   return {
     ...reconcile,
     statementBudget: {

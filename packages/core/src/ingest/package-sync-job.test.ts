@@ -387,6 +387,54 @@ describe('apply', () => {
   });
 });
 
+describe('refused and incomplete chunks', () => {
+  it.each(['incomplete', 'refused'] as const)(
+    'ends the %s chunk as a retryable failure, never as success',
+    async (status) => {
+      const h = setup();
+      h.sessions.acquire.mockResolvedValue(staged);
+      h.setDescribe({ kind: 'found', description: description() });
+      vi.mocked(applyChunk).mockResolvedValue(outcome({ status }));
+      const error = await h.run().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(JobError);
+      expect((error as JobError).code).toBe('handler_error');
+      expect(h.sessions.release).not.toHaveBeenCalled();
+    },
+  );
+
+  it('abandons a session a non-abandoning refusal left running so the next attempt can acquire', async () => {
+    const h = setup();
+    let held = false;
+    h.sessions.acquire.mockImplementation(async () => (held ? 'held' : staged));
+    h.sessions.abandon.mockImplementation(async () => {
+      held = false;
+      return true;
+    });
+    h.setDescribe({ kind: 'found', description: description() });
+    vi.mocked(applyChunk).mockImplementationOnce(async () => {
+      held = true;
+      return outcome({ status: 'refused', done: false });
+    });
+    await expect(h.run()).rejects.toMatchObject({ code: 'handler_error' });
+    expect(h.sessions.abandon).toHaveBeenCalledTimes(1);
+    expect(held).toBe(false);
+    vi.mocked(applyChunk).mockResolvedValue(outcome({ done: true, status: 'complete' }));
+    await expect(h.run()).resolves.toBeUndefined();
+  });
+
+  it('does not succeed silently when a continuation is answered with not_modified', async () => {
+    const h = setup();
+    h.sessions.acquire.mockResolvedValue(staged);
+    h.setDescribe({ kind: 'not_modified' });
+    await expect(
+      h.run({ sourceId: 'A', key: 'name', sessionId: 'session', generation: 1, step: 1 }),
+    ).rejects.toMatchObject({ code: 'handler_error' });
+    expect(h.sessions.release).toHaveBeenCalledTimes(1);
+    expect(h.deps.upstreamState.touchStatements).not.toHaveBeenCalled();
+    expect(h.deps.jobs.enqueue).not.toHaveBeenCalled();
+  });
+});
+
 describe('upstream 404 rule', () => {
   it('records a definitive 404 and asks the writer for the absence transition', async () => {
     const h = setup();

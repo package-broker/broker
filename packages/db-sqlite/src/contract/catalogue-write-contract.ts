@@ -1,4 +1,4 @@
-import { DbError } from '@package-broker/core/db/errors';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import { settleIdempotent, replayResponse } from '@package-broker/core/api/idempotency';
 import { createIdempotencyRepository } from '../repositories/idempotency.js';
 import { visibilityAudit } from '../testing/visibility-audit.js';
@@ -584,6 +584,9 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
               { attemptedCandidates: count, successfulCandidates: count, definitiveAbsent: 0 },
             );
           await expect(finalize(2)).rejects.toBeInstanceOf(DbError);
+          await expect(finalize(2)).rejects.toMatchObject({
+            constraint: ACCESS_MUTATION_GUARD_CONSTRAINT,
+          });
           const untouched = await w.rows(`SELECT status FROM ${table} WHERE org_id = ?`);
           expect(untouched.every((row) => row['status'] === 'active')).toBe(true);
           if (kind === 'source') return;

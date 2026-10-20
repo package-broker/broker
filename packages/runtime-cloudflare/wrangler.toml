@@ -3,6 +3,10 @@ main = "../../.pb/cloudflare/worker.js"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 
+# With a custom public domain, list every active workers.dev alias in
+# registry.outbound.extraSelfOrigins in broker.config.ts (or disable the alias).
+# See docs/reference/workers-fill-limits.md.
+#
 # Operator template. Bindings are created by name at deploy time and no
 # account or resource ids are committed. Every <deployment> placeholder must be
 # resolved before deploying; unresolved placeholders do not deploy.

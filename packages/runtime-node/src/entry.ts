@@ -117,6 +117,7 @@ export async function runEntry(
       plugins,
       migrations,
       env,
+      log: (entry) => console.log(JSON.stringify(entry)),
       ...(platformPorts == null ? {} : { platformPorts }),
       ...(observability === undefined ? {} : { observability }),
       ...(registry === undefined ? {} : { registry }),

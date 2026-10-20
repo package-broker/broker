@@ -319,7 +319,7 @@ describe('Node package-sync wiring', () => {
   it('registers package-sync alongside the audit jobs and preserves existing auth jobs', async () => {
     const kernel = await boot(remote('npm', 1).transport);
     expect(kernel.registration.jobs.map((job) => job.qualifiedName).sort()).toEqual(
-      [...AUDIT, ...AUTH_JOBS, SYNC].sort(),
+      [...AUDIT, ...AUTH_JOBS, SYNC, 'core:source-sync:v1', 'core:source-poll:v1'].sort(),
     );
   });
 

@@ -199,6 +199,7 @@ export const APPROVED_ERROR_NAMES = [
   'ComposerRootError',
   'ComposerV2Error',
   'PackagistBusyError',
+  'OsvError',
 ] as const;
 
 export type ErrorName = (typeof APPROVED_ERROR_NAMES)[number];
@@ -524,3 +525,29 @@ export const noopObservability: Observability = Object.freeze({
   counter(): void {},
   histogram(): void {},
 });
+
+export const VULNERABILITY_EVENT = 'vulnerability.sync';
+export const VULNERABILITY_REASON_CODES = [
+  'vulnerability.candidates',
+  'vulnerability.authorized',
+  'vulnerability.skipped',
+  'vulnerability.affected',
+  'vulnerability.checked',
+  'vulnerability.pending',
+  'vulnerability.detail',
+  'vulnerability.unavailable',
+  'vulnerability.protocol',
+  'vulnerability.config',
+  'vulnerability.limit',
+] as const;
+export const VULNERABILITY_METRICS = Object.freeze({
+  versions: 'pb.vulnerability.versions',
+  duration: 'pb.vulnerability.duration_ms',
+  bytes: 'pb.vulnerability.bytes',
+  backlogAge: 'pb.vulnerability.backlog_age_ms',
+});
+
+export type VulnerabilityOutcome =
+  (typeof VULNERABILITY_REASON_CODES)[number] extends `vulnerability.${infer Outcome}`
+    ? Outcome
+    : never;

@@ -543,6 +543,7 @@ async function run() {
         ['core:blob-purge:v1', 3600],
         ['core:pat-offboarding-sweep:v1', 86400],
         ['core:retention-scan:v1', 86400],
+        ['core:source-poll:v1', 60],
       ],
     );
     await executor.batch([

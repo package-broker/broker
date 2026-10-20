@@ -462,6 +462,56 @@ describe('lookupSession envelope and oracle', () => {
     }
   });
 
+  it('resolves an archived project with its grants only when allowArchived is set', async () => {
+    const ARCH = '01J0PROJECT0000000000ARCH1';
+    await seed(
+      identity(a, U1, 'u1@example.test'),
+      session(a, U1, 'arch'),
+      project(a, ARCH, 'archived', 'archived'),
+      grant(a, 'email', 'u1@example.test', ROLE_OWNER, { projectId: ARCH }),
+      grant(a, 'email', 'u1@example.test', ROLE_OWNER, { projectId: P1 }),
+    );
+
+    const hidden = await lookup('arch', { projectSlug: 'archived' });
+    const explicitlyOff = await lookup('arch', { projectSlug: 'archived', allowArchived: false });
+    const shown = await lookup('arch', { projectSlug: 'archived', allowArchived: true });
+
+    for (const result of [hidden, explicitlyOff]) {
+      expect(result?.project).toBeNull();
+      expect(result?.projectPermissions).toEqual([]);
+    }
+    expect(shown?.project).toMatchObject({ id: ARCH, slug: 'archived', status: 'archived' });
+    expect(shown?.projectPermissions).toEqual(['project:grants:write', 'project:read']);
+  });
+
+  it('adds no permission through allowArchived: an archived project the user has no grant on stays empty', async () => {
+    const ARCH = '01J0PROJECT0000000000ARCH1';
+    await seed(
+      identity(a, U1, 'u1@example.test'),
+      session(a, U1, 'nogrant'),
+      project(a, ARCH, 'archived', 'archived'),
+      grant(a, 'email', 'u1@example.test', ROLE_OWNER, { projectId: P1 }),
+    );
+
+    const shown = await lookup('nogrant', { projectSlug: 'archived', allowArchived: true });
+
+    expect(shown?.project).toMatchObject({ id: ARCH, status: 'archived' });
+    expect(shown?.projectPermissions).toEqual([]);
+  });
+
+  it('leaves active projects and the organization boundary unchanged under allowArchived', async () => {
+    await seed(
+      identity(a, U1, 'u1@example.test'),
+      session(a, U1, 'same'),
+      grant(a, 'email', 'u1@example.test', ROLE_OWNER, { projectId: P1 }),
+    );
+
+    expect(await lookup('same', { allowArchived: true })).toEqual(await lookup('same'));
+    const org = await lookup('same', { boundary: 'organization', allowArchived: true });
+    expect(org?.project).toBeNull();
+    expect(org?.projectPermissions).toEqual([]);
+  });
+
   it('ignores the slug on an organization boundary and never returns project-scope rows', async () => {
     await seed(
       identity(a, U1, 'u1@example.test'),

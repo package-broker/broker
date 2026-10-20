@@ -20,7 +20,7 @@ const USAGE =
   'Usage: pb build [--config <file>] [--target cloudflare|node] [--out <dir>]\n' +
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
-  '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
+  '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
   '       pb cloudflare migrate --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
@@ -63,6 +63,7 @@ function parseCliArgs(argv: string[]) {
         jurisdiction: { type: 'string' },
         'location-hint': { type: 'string' },
         'adopt-resource': { type: 'string', multiple: true },
+        'abandon-intent': { type: 'string' },
         'allow-contract': { type: 'string', multiple: true },
         domain: { type: 'string' },
         yes: { type: 'boolean' },
@@ -88,6 +89,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'jurisdiction',
     'location-hint',
     'adopt-resource',
+    'abandon-intent',
     'domain',
     'yes',
     'json',
@@ -197,6 +199,9 @@ export async function run(argv: readonly string[]): Promise<number> {
       ...(values['adopt-resource'] === undefined
         ? {}
         : { adoptResource: values['adopt-resource'] }),
+      ...(values['abandon-intent'] === undefined
+        ? {}
+        : { abandonIntent: values['abandon-intent'] }),
       ...(values.domain === undefined ? {} : { domain: values.domain }),
       yes: values.yes ?? false,
       json: values.json ?? false,

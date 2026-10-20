@@ -45,7 +45,11 @@ interface SessionRow {
   pending_validators: string | null;
 }
 
-function markedRows(ctx: OrgContext, scope: ListingScope, stamp: string): RawBuilder<number> {
+export function markedRows(
+  ctx: OrgContext,
+  scope: ListingScope,
+  stamp: string,
+): RawBuilder<number> {
   return scope.kind === 'source'
     ? sql<number>`(SELECT count(*) FROM package
         WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId}

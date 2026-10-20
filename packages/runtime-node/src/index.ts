@@ -1,6 +1,9 @@
 import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import { createObservability } from '@package-broker/core/platform/observability';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
+import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
+import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
+import { createImportRollbackStore } from '@package-broker/db-sqlite/repositories/import-rollback';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
@@ -66,6 +69,7 @@ import {
 import { createAccessRecorder } from '@package-broker/core/registry/access-recorder';
 import type { RegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
+import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { createRepositoryJobs, type JobsFactory } from '@package-broker/core/platform/jobs-port';
 import type { Jobs } from '@package-broker/core/platform/jobs';
@@ -433,6 +437,11 @@ function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveStore {
   };
 }
 
+function credentialOrigins(record: SourceRecord): readonly string[] {
+  if (record.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
+  return [new URL(record.url!).origin];
+}
+
 function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
   const repository = createCredentialRepository(executor);
   const store = createCredentialStore({
@@ -465,7 +474,7 @@ function credentialAccess(executor: SqlExecutor, keyring: Keyring) {
           credential:
             opened.kind === 'ssh_key'
               ? INERT_CREDENTIAL
-              : bindCredential(opened, [new URL(record.url).origin]),
+              : bindCredential(opened, credentialOrigins(record)),
           probe,
         };
       } catch (error) {
@@ -668,6 +677,7 @@ export function createNodeServer(
   });
 
   const { auth } = options;
+  const importJobs = createImportJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;
   const application = (async () => {
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
@@ -741,6 +751,7 @@ export function createNodeServer(
           : [
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+              ...(auth === undefined ? [] : importJobRegistrations(importJobs)),
             ],
     });
     if (registry !== undefined && options.platformServices !== undefined) {
@@ -757,6 +768,13 @@ export function createNodeServer(
       auth === undefined
         ? undefined
         : await assembleAccess(registration, plugins, auth, executor, log);
+    if (access !== undefined && options.platformServices !== undefined) {
+      importJobs.set({
+        applyStore: createImportJournalStore({ executor, providerAnchors: access.anchors }),
+        rollbackStore: createImportRollbackStore({ executor, providerAnchors: access.anchors }),
+        blobs: options.platformServices.blob,
+      });
+    }
     const packages =
       access === undefined || reads === undefined
         ? null

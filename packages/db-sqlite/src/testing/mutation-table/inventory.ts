@@ -93,12 +93,16 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/package-id.ts#createPackageIdReads':
+    'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of packageIdStatement, registered separately in package-id.ts.',
   'repositories/registry-reads.ts#createRegistryReads':
     'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of coversStatement and versionByIdStatement, both registered separately in registry-reads.ts.',
   'repositories/organization.ts#createOrganizationBootstrap':
     'REDUNDANT_BY_SCHEMA: 0001_init.sql organization_singleton UNIQUE (singleton), CHECK (singleton = 1); bootstrap selects the installation singleton rather than an organization context',
   'repositories/keyring-verifier.ts#createKeyringVerifierStore':
     'REDUNDANT_BY_SCHEMA: 0015_keyring_verifier.sql keyring_verifier PRIMARY KEY (key_version); the verifier is installation-global and has no organization column',
+  'repositories/webhook-delivery.ts#createWebhookDeliveryRepository':
+    'NOT_A_MUTATION: the factory only sequences the four registered webhook delivery statements, maps their rows and issues no SQL of its own.',
 
   'internal/lease-time.ts#until':
     'NOT_A_MUTATION: builds a lease timestamp expression without tables or organization predicates.',

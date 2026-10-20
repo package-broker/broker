@@ -5,6 +5,7 @@ const state = vi.hoisted(() => ({
     plugins: [];
     platformPorts: null;
     observability?: { trustInboundTraceparent: boolean };
+    registry?: { timers: { metadataTtlSeconds: number } };
   },
   createWorker: vi.fn(() => ({ fetch: vi.fn() })),
 }));
@@ -17,6 +18,9 @@ vi.mock('#pb-manifest', () => ({
   },
   get observability() {
     return state.manifest.observability;
+  },
+  get registry() {
+    return state.manifest.registry;
   },
 }));
 vi.mock('./index.js', () => ({ createWorker: state.createWorker }));
@@ -43,4 +47,22 @@ describe('Worker entry observability', () => {
       });
     },
   );
+});
+
+describe('Worker entry registry', () => {
+  it('forwards registry', async () => {
+    const registry = { timers: { metadataTtlSeconds: 120 } };
+    state.manifest = { plugins: [], platformPorts: null, registry };
+    await import('./entry.js');
+    const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1] as
+      { registry?: unknown } | undefined;
+    expect(options?.registry).toBe(registry);
+  });
+
+  it('omits registry when the manifest has none', async () => {
+    state.manifest = { plugins: [], platformPorts: null };
+    await import('./entry.js');
+    const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
+    expect(options).not.toHaveProperty('registry');
+  });
 });

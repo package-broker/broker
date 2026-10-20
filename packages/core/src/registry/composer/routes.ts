@@ -195,6 +195,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
             { signal: ctx.request.signal },
           );
           if (result.kind === 'busy') return unavailable(ctx.requestId, result.retryAfterSeconds);
+          if (result.kind === 'refused') return apiError('bad_gateway', ctx.requestId);
           if (result.kind === 'not_found') return notFound(ctx.requestId);
           if (distExtension(result.headers) !== ref.type) {
             void result.body.cancel().catch(() => undefined);

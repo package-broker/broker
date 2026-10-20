@@ -318,7 +318,7 @@ describe('re-mirror and quarantine contract', () => {
     { npmIntegrity: `sha512-${hash('sha512', changed, 'base64')}` },
   ])('quarantines and reports a published digest mismatch: %j', async (fetch) => {
     const r = rig({ fetch });
-    expect(await r.service.serve(actor, request())).toEqual({ kind: 'not_found' });
+    expect(await r.service.serve(actor, request())).toEqual({ kind: 'refused' });
     expect(r.quarantine).toHaveBeenCalledWith(ctx, r.guard, {
       versionId: 'VERSION1',
       reason: 'digest_mismatch',

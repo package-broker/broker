@@ -124,6 +124,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'DEFERRED: closure edge lifecycle needs foreign project and package fixtures; owner T782n follow-up',
   'repositories/representation-clock.ts#createRepresentationClock':
     'DEFERRED: representation clock reads need foreign package fixtures; owner T782n follow-up',
+  'repositories/registry-reads.ts#createRegistryReads':
+    'DEFERRED: factory only validates arguments and maps rows of the two registered statements; owner T782n follow-up',
   'repositories/proxy-admission.ts#createProxyAdmission':
     'DEFERRED: factory admission lifecycle exceeds admittedProxySources registration; owner T782n follow-up',
   'repositories/scoped-admission.ts#createScopedAdmission':

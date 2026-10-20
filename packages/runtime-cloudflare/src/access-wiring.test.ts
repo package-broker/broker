@@ -23,6 +23,7 @@ import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/p
 import { orgContext } from '@package-broker/core/db/port';
 import type { Statement } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
+import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { RouteDefinition } from '@package-broker/core/plugin';
 import { definePlugin, SUPPORTED_PLUGIN_API } from '@package-broker/core/plugin';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -42,6 +43,7 @@ import {
   type Env,
   type ExecutionContextLike,
   type WorkerAccessServices,
+  type WorkerOptions,
 } from './index.js';
 
 const faults = vi.hoisted(() => ({
@@ -120,7 +122,7 @@ const EMAIL = 'admin@example.test';
 const ANCHOR = 'oidc:https://idp.example.test';
 const HOUR = 3_600_000;
 
-const bindings = Array.from({ length: 16 }, (_, index) => `ACDB${index}`);
+const bindings = Array.from({ length: 24 }, (_, index) => `ACDB${index}`);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
@@ -395,6 +397,78 @@ describe('cloudflare access wiring on Miniflare D1', () => {
       });
       registry.route({
         method: 'GET',
+        path: '/probe/personal-token',
+        permission: 'org:read',
+        boundary: 'organization',
+        handler: async (ctx) => {
+          const authenticated = authenticatedActorOf(ctx);
+          if (authenticated === null || ctx.org === null || services === null) {
+            return new Response(null, { status: 500 });
+          }
+          const session = await services.sessions.authenticate(ctx.org, ctx.request);
+          if (session === null) return new Response(null, { status: 401 });
+          const days = Number(new URL(ctx.request.url).searchParams.get('days'));
+          const issued = await services.personalTokens.issue(
+            ctx.org,
+            session,
+            mutationFence(authenticated, {}),
+            {
+              name: 'lifetime',
+              scope: 'full',
+              expiresAt: new Date(Date.now() + days * 24 * HOUR - 60_000).toISOString(),
+              projectMode: 'all',
+              projectIds: [],
+            },
+            apiCall,
+          );
+          return Response.json({ ok: issued.ok, ...(issued.ok ? {} : { error: issued.error }) });
+        },
+      });
+      registry.route({
+        method: 'GET',
+        path: '/probe/service-token',
+        permission: 'org:read',
+        boundary: 'organization',
+        handler: async (ctx) => {
+          const viewed = organizationActorOf(ctx);
+          const authenticated = authenticatedActorOf(ctx);
+          if (viewed === null || authenticated === null || ctx.org === null || services === null) {
+            return new Response(null, { status: 500 });
+          }
+          const session = await services.sessions.authenticate(ctx.org, ctx.request);
+          if (session === null) return new Response(null, { status: 401 });
+          const query = new URL(ctx.request.url).searchParams;
+          const projectId = query.get('project') ?? '';
+          const days = Number(query.get('days'));
+          const actor = { ...viewed, permissions: new Set(viewed.permissions) };
+          const principal = await services.servicePrincipals.create(
+            ctx.org,
+            session,
+            actor,
+            mutationFence(authenticated, {}),
+            { name: 'lifetime', projectId },
+            apiCall,
+          );
+          if (!principal.ok) return Response.json({ principal });
+          const issued = await services.serviceTokens.issue(
+            ctx.org,
+            session,
+            actor,
+            mutationFence(authenticated, {}),
+            {
+              servicePrincipalId: principal.value.id,
+              routeProjectId: projectId,
+              name: 'lifetime',
+              scope: 'read',
+              expiresAt: new Date(Date.now() + days * 24 * HOUR - 60_000).toISOString(),
+            },
+            apiCall,
+          );
+          return Response.json({ principal, issued });
+        },
+      });
+      registry.route({
+        method: 'GET',
         path: '/probe/revoke-token',
         permission: 'org:read',
         boundary: 'organization',
@@ -473,14 +547,17 @@ describe('cloudflare access wiring on Miniflare D1', () => {
     readonly token: string;
   }
 
-  async function boot(): Promise<Booted> {
+  async function boot(tokens?: WorkerOptions['tokens']): Promise<Booted> {
     const { raw, orgId, token } = await database();
     const environment = {
       DB: observed(raw, hooks),
       PB_MASTER_KEY: KEY,
       PB_PUBLIC_URL: PUBLIC_URL,
     } as unknown as Env;
-    const worker = createWorker([plugin], { log: () => undefined });
+    const worker = createWorker([plugin], {
+      log: () => undefined,
+      ...(tokens === undefined ? {} : { tokens }),
+    });
     services = (await worker.services(environment)).access;
     return {
       fetch: (request, ctx) => worker.fetch(request, environment, ctx),
@@ -698,6 +775,64 @@ describe('cloudflare access wiring on Miniflare D1', () => {
     expect(served.status).toBe(200);
     expect(await served.json()).toEqual({ projectId: created.id });
     expect(events).toEqual(['handler']);
+  });
+
+  describe('token lifetime policy', () => {
+    async function issueService(
+      tokens: WorkerOptions['tokens'],
+      days: number,
+    ): Promise<{ issued: { ok: boolean; error?: string } | undefined }> {
+      const booted = await boot(tokens);
+      const cookie = await loginAdmin(booted);
+      const made = await booted.fetch(get('/probe/make-project', { cookie }));
+      const { created } = (await made.json()) as { created: { id: string } };
+      const response = await booted.fetch(
+        get(`/probe/service-token?project=${created.id}&days=${days}`, { cookie }),
+      );
+      return (await response.json()) as { issued: { ok: boolean; error?: string } | undefined };
+    }
+
+    it('refuses a 31-day service token when the configured service maximum is 30 days', async () => {
+      const body = await issueService({ maxLifetimeDays: { service: 30 } }, 31);
+      expect(body.issued).toEqual({ ok: false, error: 'invalid_expiry' });
+    });
+
+    it('accepts a 30-day service token when the configured service maximum is 30 days', async () => {
+      const body = await issueService({ maxLifetimeDays: { service: 30 } }, 30);
+      expect(body.issued?.ok).toBe(true);
+    });
+
+    it('refuses a 31-day personal token when the configured personal maximum is 30 days', async () => {
+      const booted = await boot({ maxLifetimeDays: { personal: 30 } });
+      const cookie = await loginAdmin(booted);
+      const response = await booted.fetch(get('/probe/personal-token?days=31', { cookie }));
+      expect(await response.json()).toEqual({ ok: false, error: 'invalid_expiry' });
+    });
+
+    it('accepts a 30-day personal token when the configured personal maximum is 30 days', async () => {
+      const booted = await boot({ maxLifetimeDays: { personal: 30 } });
+      const cookie = await loginAdmin(booted);
+      const response = await booted.fetch(get('/probe/personal-token?days=30', { cookie }));
+      expect(await response.json()).toEqual({ ok: true });
+    });
+
+    it('refuses to start with a personal maximum above the ceiling and names the key', async () => {
+      const { raw } = await database();
+      const worker = createWorker([plugin], {
+        log: () => undefined,
+        tokens: { maxLifetimeDays: { personal: 400 } },
+      });
+      const environment = {
+        DB: raw,
+        PB_MASTER_KEY: KEY,
+        PB_PUBLIC_URL: PUBLIC_URL,
+      } as unknown as Env;
+      const failure = await rejection(worker.services(environment));
+      expect(failure).toBeInstanceOf(KernelConfigError);
+      expect((failure as KernelConfigError).problems.join('\n')).toContain(
+        'tokens.maxLifetimeDays.personal',
+      );
+    });
   });
 
   it('registers no step 5 HTTP resource', async () => {

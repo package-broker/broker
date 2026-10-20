@@ -72,6 +72,17 @@ import { createScopedAdmittingAccess } from '@package-broker/core/registry/scope
 import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { createRepositoryJobs, type JobsFactory } from '@package-broker/core/platform/jobs-port';
+import {
+  resolveTokenLifetimePolicy,
+  TokenConfigError,
+  type TokenLifetimePolicy,
+} from '@package-broker/core/authz/token-lifetime';
+import {
+  createPatJobHolder,
+  patOffboardingRegistrations,
+  tokenWiring,
+  type TokenWiring,
+} from './token-jobs.js';
 import type { Jobs } from '@package-broker/core/platform/jobs';
 import { SEAMS_KEY } from './internal/seams-key.js';
 import type { RegistrySeams } from './testing/node-server.js';
@@ -121,7 +132,8 @@ import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provid
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
-import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
+import type { BrokerConfig } from '@package-broker/core/config';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
@@ -181,6 +193,8 @@ export interface NodeServerOptions {
   readonly observability?: KernelObservability;
   readonly platformServices?: PlatformServices;
   readonly authorization?: AuthorizationEngine;
+  /** Token lifetime maxima; an invalid value fails server creation. */
+  readonly tokens?: BrokerConfig['tokens'];
   /** Resolves true once the broker may serve; a falsy answer refuses everything except liveness. */
   readonly servingGate?: () => Promise<boolean>;
   /** Registry routes need the database, auth, platform services and this input together. */
@@ -279,6 +293,7 @@ async function assembleAccess(
   auth: NodeAuthOptions,
   executor: SqlExecutor,
   log: KernelLog,
+  tokens: TokenWiring,
 ): Promise<AccessAssembly> {
   await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
   const providers = buildIdentityProviders(registration, plugins, {
@@ -345,6 +360,7 @@ async function assembleAccess(
       grants: wired('project grant repository', createProjectGrantRepository(executor)),
       providers,
       providerAnchors: anchorList,
+      ...tokens.offboarding,
       ...common,
     }),
     projectList: createProjectLister({
@@ -360,6 +376,7 @@ async function assembleAccess(
       organizations,
       providers: providerAnchors,
       keyring: auth.keyring,
+      lifetime: tokens.lifetime,
       ...common,
     }),
     servicePrincipals: createServicePrincipalService({
@@ -377,6 +394,7 @@ async function assembleAccess(
       organizations,
       providers: providerAnchors,
       keyring: auth.keyring,
+      lifetime: tokens.lifetime,
       ...common,
     }),
     tokenRevoke: createTokenRevokeService({
@@ -658,6 +676,15 @@ function buildCatalogue(
   });
 }
 
+function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolicy {
+  try {
+    return resolveTokenLifetimePolicy(input);
+  } catch (error) {
+    if (error instanceof TokenConfigError) throw new KernelConfigError(error.problems);
+    throw error;
+  }
+}
+
 export function createNodeServer(
   plugins: readonly PluginDefinition[],
   options: NodeServerOptions = {},
@@ -666,6 +693,7 @@ export function createNodeServer(
   const shutdownMs = seams.shutdownDeadlineMs ?? SHUTDOWN_IDLE_MS;
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
+  const lifetime = resolveTokenLifetime(options.tokens);
 
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);
@@ -678,6 +706,7 @@ export function createNodeServer(
 
   const { auth } = options;
   const importJobs = createImportJobHolder();
+  const patJobs = createPatJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;
   const application = (async () => {
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
@@ -752,6 +781,7 @@ export function createNodeServer(
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
               ...(auth === undefined ? [] : importJobRegistrations(importJobs)),
+              ...(auth === undefined ? [] : patOffboardingRegistrations(executor, patJobs, log)),
             ],
     });
     if (registry !== undefined && options.platformServices !== undefined) {
@@ -764,10 +794,27 @@ export function createNodeServer(
         }),
       );
     }
+    if (auth !== undefined && options.platformServices !== undefined) {
+      patJobs.set(
+        createRepositoryJobs({
+          store: options.platformServices.jobStore,
+          jobs: registration.jobs,
+          clock: systemClock,
+          ids: { ulid },
+        })('core', { projectId: null, tokenId: null }),
+      );
+    }
     const access =
       auth === undefined
         ? undefined
-        : await assembleAccess(registration, plugins, auth, executor, log);
+        : await assembleAccess(
+            registration,
+            plugins,
+            auth,
+            executor,
+            log,
+            tokenWiring(lifetime, patJobs, options.platformServices !== undefined),
+          );
     if (access !== undefined && options.platformServices !== undefined) {
       importJobs.set({
         applyStore: createImportJournalStore({ executor, providerAnchors: access.anchors }),

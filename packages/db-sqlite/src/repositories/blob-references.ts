@@ -80,7 +80,7 @@ function orphanSql(blob: string): string {
     WHERE bref_r.blob_id = ${blob}.id))`;
 }
 
-export function blobEligibleCondition(ctx: OrgContext, blobRef: string): EligibleCondition {
+function checkedAlias(blobRef: string): void {
   if (
     typeof blobRef !== 'string' ||
     !ALIAS.test(blobRef) ||
@@ -88,15 +88,13 @@ export function blobEligibleCondition(ctx: OrgContext, blobRef: string): Eligibl
   ) {
     invalid();
   }
+}
+
+export function blobOrphanCondition(_ctx: OrgContext, blobRef: string): EligibleCondition {
+  checkedAlias(blobRef);
   if (!Number.isSafeInteger(ORPHAN_GRACE_DAYS) || ORPHAN_GRACE_DAYS <= 0) invalid();
-  const released = (consistent: string) =>
-    `COALESCE(${consistent} AND (bref_v.status IN ('tombstoned', 'removed_upstream') OR bref_p.status = 'removed_upstream'), 0)`;
   return {
-    sql: `(${blobRef}.org_id = ?
-  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})
-  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})
-  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted'`)}))
-  OR (${orphanSql(blobRef)}
+    sql: `(${orphanSql(blobRef)}
     AND ${blobRef}.refetchable = 1
     AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')
     AND NOT EXISTS (
@@ -104,7 +102,22 @@ export function blobEligibleCondition(ctx: OrgContext, blobRef: string): Eligibl
       WHERE bref_ing.org_id = ${blobRef}.org_id AND bref_ing.snapshot_blob_sha256 = ${blobRef}.sha256)
     AND NOT EXISTS (
       SELECT 1 FROM upstream_state bref_up
-      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256)))
+      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256))`,
+    params: [],
+  };
+}
+
+export function blobEligibleCondition(ctx: OrgContext, blobRef: string): EligibleCondition {
+  checkedAlias(blobRef);
+  const orphan = blobOrphanCondition(ctx, blobRef);
+  const released = (consistent: string) =>
+    `COALESCE(${consistent} AND (bref_v.status IN ('tombstoned', 'removed_upstream') OR bref_p.status = 'removed_upstream'), 0)`;
+  return {
+    sql: `(${blobRef}.org_id = ?
+  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})
+  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})
+  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted'`)}))
+  OR ${orphan.sql})
   AND NOT EXISTS (
     SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external
       ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id

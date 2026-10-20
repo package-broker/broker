@@ -733,3 +733,32 @@ describe('audit verifier fields', () => {
     }
   });
 });
+
+describe('fixed vulnerability observability registration', () => {
+  it('accepts every registered outcome with bounded feature metrics', async () => {
+    const { VULNERABILITY_EVENT, VULNERABILITY_REASON_CODES, VULNERABILITY_METRICS } =
+      await import('./observability.js');
+    const { sink, records } = collector();
+    const obs = createObservability(sink, scope(), {
+      events: new Set([VULNERABILITY_EVENT]),
+      reasonCodes: new Set(VULNERABILITY_REASON_CODES),
+      routeTemplates: new Set(),
+    });
+    for (const reason_code of VULNERABILITY_REASON_CODES) {
+      obs.log({ level: 'info', event: VULNERABILITY_EVENT, reason_code });
+      obs.counter(
+        VULNERABILITY_METRICS.versions,
+        { outcome: reason_code.slice('vulnerability.'.length) },
+        1,
+      );
+    }
+    obs.histogram(VULNERABILITY_METRICS.duration, 4000);
+    obs.counter(VULNERABILITY_METRICS.bytes, undefined, 100);
+    expect(records.filter((row) => row.kind === 'log')).toHaveLength(
+      VULNERABILITY_REASON_CODES.length,
+    );
+    expect(records.some((row) => row.kind === 'counter' && row.name === 'pb.obs.dropped')).toBe(
+      false,
+    );
+  });
+});

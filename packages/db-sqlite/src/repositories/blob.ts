@@ -13,13 +13,22 @@ import {
   type Sha256,
 } from '@package-broker/core/platform/blob';
 import { compile, db } from '../kysely.js';
-import { blobEligibleCondition, blobOrphanCondition } from './blob-references.js';
+import {
+  blobEligibleCondition,
+  blobOrphanCondition,
+  blobPrematureCondition,
+} from './blob-references.js';
 import { leaseLive } from './blob-lease-guard.js';
 
 export interface BlobLifecycleMetadata {
   unschedule(ctx: OrgContext, key: Sha256): Promise<boolean>;
   scheduleOrphan(ctx: OrgContext, key: Sha256): Promise<boolean>;
-  softDelete(ctx: OrgContext, key: Sha256, input: { removedAt: string }): Promise<boolean>;
+  softDelete(
+    ctx: OrgContext,
+    key: Sha256,
+    input: { removedAt: string; retentionDays?: number },
+  ): Promise<boolean>;
+  listDue(ctx: OrgContext, page: DuePage): Promise<Sha256[]>;
   claimPurge(ctx: OrgContext, key: Sha256): Promise<PurgeGeneration | null>;
   canStartRemove(
     ctx: OrgContext,
@@ -30,6 +39,14 @@ export interface BlobLifecycleMetadata {
   markDeleted(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<boolean>;
   cancelPurge(ctx: OrgContext, key: Sha256, generation: PurgeGeneration): Promise<boolean>;
 }
+
+export interface DuePage {
+  readonly limit: number;
+  readonly after?: Sha256 | null;
+}
+
+export const DUE_PAGE_MAX = 100;
+const MAX_RETENTION_DAYS = 36_500;
 
 export interface BlobRepositoryOptions {
   readonly purgeLeaseSeconds?: number;
@@ -73,6 +90,26 @@ function eligibleStatement(ctx: OrgContext, query: Compilable, suffix = ''): Sca
     sql: `${base.sql} AND ${eligible.sql}${suffix}`,
     params: [...base.params, ...eligible.params],
   };
+}
+
+export function dueBlobsStatement(ctx: OrgContext, page: DuePage): ScalarStatement {
+  if (!Number.isInteger(page?.limit) || page.limit < 1 || page.limit > DUE_PAGE_MAX) {
+    throw new BlobValidationError();
+  }
+  const after = page.after === undefined || page.after === null ? '' : parseSha256(page.after);
+  return statement(
+    db
+      .selectFrom('blob')
+      .select('sha256')
+      .where('org_id', '=', ctx.orgId)
+      .where('deleted_at', 'is', null)
+      .where('purge_after', 'is not', null)
+      .where(sql<SqlBool>`purge_after <= ${NOW}`)
+      .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
+      .where('sha256', '>', after)
+      .orderBy('sha256')
+      .limit(page.limit),
+  );
 }
 
 function requireGeneration(generation: string): void {
@@ -275,11 +312,20 @@ export function createBlobRepository(
       const { org, sha256 } = keyed(ctx, parseSha256(key));
       requireTimestamp(input?.removedAt);
       const removedAt = input.removedAt;
+      const override = input.retentionDays;
+      if (
+        override !== undefined &&
+        (!Number.isSafeInteger(override) || override < 0 || override > MAX_RETENTION_DAYS)
+      ) {
+        throw new BlobValidationError();
+      }
+      const orgDays = sql<number>`(select retention_removed_upstream_days from organization where id = blob.org_id)`;
+      const days = override === undefined ? orgDays : sql<number>`max(${orgDays}, ${override})`;
       return changed(
         db
           .updateTable('blob')
           .set({
-            purge_after: sql<string>`coalesce(purge_after, strftime(${sql.lit(FORMAT)}, 'now', '+' || (select retention_removed_upstream_days from organization where id = blob.org_id) || ' days'))`,
+            purge_after: sql<string>`coalesce(purge_after, strftime(${sql.lit(FORMAT)}, 'now', '+' || ${days} || ' days'))`,
           })
           .where('org_id', '=', org)
           .where('sha256', '=', sha256)
@@ -291,16 +337,22 @@ export function createBlobRepository(
       );
     },
 
+    async listDue(ctx, page) {
+      const rows = await executor.all<{ sha256: Sha256 }>(dueBlobsStatement(ctx, page));
+      return rows.map((row) => row.sha256);
+    },
+
     async unschedule(ctx, key) {
       const sha256 = parseSha256(key);
       const eligible = blobEligibleCondition(ctx, 'blob');
+      const premature = blobPrematureCondition(ctx, 'blob');
       const [result] = await executor.batch([
         {
           sql: `UPDATE blob SET purge_after = NULL
 WHERE org_id = ? AND sha256 = ? AND deleted_at IS NULL AND purge_after IS NOT NULL
 AND (purge_lease_until IS NULL OR purge_lease_until <= strftime('${FORMAT}', 'now'))
-AND NOT ${eligible.sql}`,
-          params: [ctx.orgId, sha256, ...eligible.params],
+AND (NOT ${eligible.sql} OR ${premature.sql})`,
+          params: [ctx.orgId, sha256, ...eligible.params, ...premature.params],
         } satisfies ScalarStatement,
       ]);
       return result?.changes === 1;
@@ -328,6 +380,7 @@ AND NOT ${eligible.sql}`,
 
     async claimPurge(ctx, key) {
       const sha256 = parseSha256(key);
+      const premature = blobPrematureCondition(ctx, 'blob');
       const [result] = await executor.batch([
         eligibleStatement(
           ctx,
@@ -342,7 +395,8 @@ AND NOT ${eligible.sql}`,
             .where('deleted_at', 'is', null)
             .where('purge_after', 'is not', null)
             .where(sql<SqlBool>`purge_after <= ${NOW}`)
-            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`),
+            .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)
+            .where(sql<SqlBool>`not ${sql.raw(premature.sql)}`),
           ' RETURNING purge_generation',
         ),
       ]);
@@ -357,6 +411,7 @@ AND NOT ${eligible.sql}`,
         throw new BlobValidationError();
       }
       const modifier = `+${Math.ceil(deleteTimeoutMs / 1000)} seconds`;
+      const premature = blobPrematureCondition(ctx, 'blob');
       const rows = await executor.all(
         eligibleStatement(
           ctx,
@@ -369,7 +424,8 @@ AND NOT ${eligible.sql}`,
             .where('purge_generation', '=', generation)
             .where(
               sql<SqlBool>`purge_lease_until > strftime(${sql.lit(FORMAT)}, 'now', ${modifier})`,
-            ),
+            )
+            .where(sql<SqlBool>`not ${sql.raw(premature.sql)}`),
         ),
       );
       return rows.length === 1;

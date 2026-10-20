@@ -907,7 +907,11 @@ it.each([0, 1])(
     const digest = await attachBlob('1.0.0');
     await run(
       stmt("UPDATE version SET status = 'removed_upstream', removed_upstream_at = ?", OLD),
-      stmt('UPDATE blob SET refetchable = ?, purge_after = ?', refetchable, OLD),
+      stmt(
+        'UPDATE blob SET refetchable = ?, purge_after = ?',
+        refetchable,
+        '2021-06-01T00:00:00.000Z',
+      ),
     );
     expect(await createBlobReferenceReader(database.executor).stillEligible(org, digest)).toBe(
       true,

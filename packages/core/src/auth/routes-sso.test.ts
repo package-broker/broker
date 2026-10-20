@@ -17,6 +17,7 @@ import type {
 import { createKernel } from '../kernel/kernel.js';
 import { createSecretCipher } from '../secrets/cipher.js';
 import { createKeyring } from '../secrets/keyring.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.test';
 const NOW = Date.parse('2026-10-15T12:00:00.000Z');
@@ -215,7 +216,7 @@ async function build(options: Options = {}) {
     },
     resolveOrg: () => Promise.resolve(ORG),
     health: () => Promise.resolve(true),
-    coreRoutes: createSsoRoutes(deps),
+    coreRoutes: documented(createSsoRoutes(deps)),
     log: (entry) => {
       logs.push(entry);
     },

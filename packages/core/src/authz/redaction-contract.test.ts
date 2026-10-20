@@ -25,6 +25,7 @@ import type { PersonalTokenIssueOutcome } from './pat-service.js';
 import type { ServicePrincipalRecord } from './service-principal-service.js';
 import { createServiceTokenService } from './service-token-service.js';
 import type { TokenListItem } from './token-read.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.test';
 const ORG = 'org-1';
@@ -362,7 +363,7 @@ async function run(
     resolveOrg: () => Promise.resolve(orgContext(ORG)),
     health: () => Promise.resolve(true),
     log: (entry) => legacy.push({ ...entry }),
-    coreRoutes: routes(rig),
+    coreRoutes: documented(routes(rig)),
     authorization: engine(rig, engineLogs, dispatched),
     observability: {
       sink: { emit: (record) => records.push(record) },

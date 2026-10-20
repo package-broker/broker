@@ -294,7 +294,7 @@ function validateCoreRoutes(
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
     );
-    problems.push(...routeApiProblems(route, label));
+    problems.push(...routeApiProblems(route, label, ecosystem ? {} : { requireApi: true }));
     if (placeable) eligible.push(route);
   }
   for (let i = 0; i < eligible.length; i++) {

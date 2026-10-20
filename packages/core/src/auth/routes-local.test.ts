@@ -13,6 +13,7 @@ import { fixedClock } from '../ids.js';
 import { createKernel } from '../kernel/kernel.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { PluginPorts } from '../plugin.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.example.test';
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -116,13 +117,15 @@ async function harness(options: Options = {}): Promise<Harness> {
     resolveOrg: () => Promise.resolve(ORG),
     health: () => Promise.resolve(true),
     log,
-    coreRoutes: createLocalRoutes({
-      local: { login, reauth } as unknown as LocalLoginService,
-      setup: { start, finish } as unknown as LocalSetupService,
-      sessions,
-      publicOrigin: ORIGIN,
-      log,
-    }),
+    coreRoutes: documented(
+      createLocalRoutes({
+        local: { login, reauth } as unknown as LocalLoginService,
+        setup: { start, finish } as unknown as LocalSetupService,
+        sessions,
+        publicOrigin: ORIGIN,
+        log,
+      }),
+    ),
   });
   return {
     fetch: (request) => kernel.fetch(request),

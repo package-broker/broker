@@ -5,6 +5,7 @@ import { definePlugin, type RouteDefinition } from '../plugin.js';
 import * as securityHeaders from './security-headers.js';
 import { createKernel, type KernelOptions } from './kernel.js';
 import { createUiRoutes, UI_CSP } from './ui-routes.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const HTTPS = 'https://public.test';
 const HSTS = 'max-age=31536000; includeSubDomains';
@@ -33,7 +34,7 @@ async function app(extra: Partial<KernelOptions> = {}) {
     authorization: {
       authorize: () => Promise.resolve({ allow: false, status: 401 }),
     },
-    coreRoutes: [
+    coreRoutes: documented([
       route('/_pb/json'),
       route('/_pb/auth/providers'),
       route('/_pb/auth/local/login', { method: 'POST' }),
@@ -63,7 +64,7 @@ async function app(extra: Partial<KernelOptions> = {}) {
         },
         { publicOrigin: HTTPS },
       ),
-    ],
+    ]),
     ...extra,
   });
 }
@@ -137,13 +138,13 @@ describe('kernel security headers', () => {
 
   it('prevents caching auth handler errors', async () => {
     const kernel = await app({
-      coreRoutes: [
+      coreRoutes: documented([
         route('/_pb/auth/failure', {
           handler: () => {
             throw new Error('failure');
           },
         }),
-      ],
+      ]),
     });
     const response = await kernel.fetch(new Request(`${HTTPS}/_pb/auth/failure`));
     expect(response.status).toBe(500);
@@ -152,11 +153,11 @@ describe('kernel security headers', () => {
 
   it('overrides cache-control on auth responses', async () => {
     const kernel = await app({
-      coreRoutes: [
+      coreRoutes: documented([
         route('/_pb/auth/providers', {
           handler: () => new Response(null, { headers: { 'cache-control': 'public, max-age=60' } }),
         }),
-      ],
+      ]),
     });
     expect(
       (await kernel.fetch(new Request(`${HTTPS}/_pb/auth/providers`))).headers.get('cache-control'),
@@ -212,14 +213,14 @@ describe('kernel security headers', () => {
 
   it('preserves route-provided baseline values', async () => {
     const kernel = await app({
-      coreRoutes: [
+      coreRoutes: documented([
         route('/_pb/custom', {
           handler: () =>
             new Response(null, {
               headers: { 'x-content-type-options': 'custom', 'referrer-policy': 'same-origin' },
             }),
         }),
-      ],
+      ]),
     });
     const response = await kernel.fetch(new Request(`${HTTPS}/_pb/custom`));
     expect(response.headers.get('x-content-type-options')).toBe('custom');
@@ -251,13 +252,13 @@ describe('kernel security headers', () => {
 
   it('preserves denial-page headers through the kernel', async () => {
     const kernel = await app({
-      coreRoutes: [
+      coreRoutes: documented([
         route('/_pb/protected', {
           permission: 'org:read',
           boundary: 'organization',
           needsOrg: true,
         }),
-      ],
+      ]),
       authorization: {
         authorize: () => Promise.resolve({ allow: false, status: 403 }),
       },

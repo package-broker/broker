@@ -563,6 +563,135 @@ describe('scale', () => {
   }, 120_000);
 });
 
+describe('restricted listing', () => {
+  const actorOf = (permissions: Permission[], admin = false): ActorContext => ({
+    kind: 'organization',
+    userId: U1,
+    permissions: new Set<Permission>(permissions),
+    isOrganizationAdmin: admin,
+  });
+  const lister = () =>
+    createProjectLister({ source: createProjectRepository(executor), readable: repository() });
+
+  beforeEach(async () => {
+    await seed(
+      user(a, U1, 'u1@example.test'),
+      identity(a, U1, 'u1@example.test'),
+      ...[1, 2, 3, 4, 5].map((n) => project(a, n)),
+      project(a, 6, 'archived'),
+      project(b, 7),
+    );
+  });
+
+  it('lists only bound projects the user can still read through project grants', async () => {
+    await seed(
+      ...[1, 2, 3].map((n) =>
+        grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(n) }),
+      ),
+    );
+    const result = await lister().list(a, actorOf([]), {
+      limit: 10,
+      restrictTo: [projectId(2), projectId(3), projectId(4)],
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        items: [
+          { id: projectId(2), slug: 'p2', name: 'Project 2', status: 'active' },
+          { id: projectId(3), slug: 'p3', name: 'Project 3', status: 'active' },
+        ],
+        nextAfterId: null,
+      },
+    });
+  });
+
+  it('drops a bound project whose live grant is gone', async () => {
+    await seed(grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(1) }));
+    const result = await lister().list(a, actorOf([]), {
+      limit: 10,
+      restrictTo: [projectId(1), projectId(2)],
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { items: [{ id: projectId(1) }], nextAfterId: null },
+    });
+  });
+
+  it('pages a restricted list in id order with a stable cursor', async () => {
+    await seed(
+      ...[1, 2, 3, 4].map((n) =>
+        grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(n) }),
+      ),
+    );
+    const restrictTo = [projectId(4), projectId(2), projectId(1), projectId(3)];
+    const first = await lister().list(a, actorOf([]), { limit: 2, restrictTo });
+    expect(first).toMatchObject({
+      ok: true,
+      value: { items: [{ id: projectId(1) }, { id: projectId(2) }], nextAfterId: projectId(2) },
+    });
+    const second = await lister().list(a, actorOf([]), {
+      limit: 2,
+      restrictTo,
+      afterId: projectId(2),
+    });
+    expect(second).toMatchObject({
+      ok: true,
+      value: { items: [{ id: projectId(3) }, { id: projectId(4) }] },
+    });
+  });
+
+  it('lists every bound project for an owner who inherits project:read, never an unbound one', async () => {
+    const result = await lister().list(a, actorOf(['project:read']), {
+      limit: 10,
+      restrictTo: [projectId(1), projectId(5)],
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { items: [{ id: projectId(1) }, { id: projectId(5) }], nextAfterId: null },
+    });
+  });
+
+  it('never lists a bound project of another organization', async () => {
+    const result = await lister().list(a, actorOf(['project:read']), {
+      limit: 10,
+      restrictTo: [projectId(7)],
+    });
+    expect(result).toEqual({ ok: true, value: { items: [], nextAfterId: null } });
+  });
+
+  it('answers an empty page for an empty binding without reading', async () => {
+    const result = await lister().list(a, actorOf(['project:read']), {
+      limit: 10,
+      restrictTo: [],
+    });
+    expect(result).toEqual({ ok: true, value: { items: [], nextAfterId: null } });
+  });
+
+  it('keeps the archived listing for admins and refuses it for others when restricted', async () => {
+    const restrictTo = [projectId(5), projectId(6)];
+    expect(
+      await lister().list(a, actorOf(['project:read'], true), {
+        limit: 10,
+        restrictTo,
+        status: 'archived',
+      }),
+    ).toMatchObject({ ok: true, value: { items: [{ id: projectId(6) }] } });
+    expect(
+      await lister().list(a, actorOf(['project:read']), {
+        limit: 10,
+        restrictTo,
+        status: 'archived',
+      }),
+    ).toEqual({ ok: false, error: 'forbidden' });
+  });
+
+  it('rejects a malformed bound id', async () => {
+    expect(
+      await lister().list(a, actorOf(['project:read']), { limit: 10, restrictTo: ['nope'] }),
+    ).toEqual({ ok: false, error: 'source_invalid' });
+  });
+});
+
 describe('query shape', () => {
   it('uses indexes on project and grant tables and binds fewer than 100 parameters', async () => {
     const statement = listReadableProjectsStatement(

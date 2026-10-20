@@ -284,20 +284,8 @@ function mutationStatements(
   const replay =
     input.idempotency === undefined
       ? undefined
-      : idempotencyInsertStatement(ctx, input.idempotency);
-  return [
-    auditPendingStatement(ctx, input.audit, when),
-    ...(replay === undefined
-      ? []
-      : [
-          when === undefined
-            ? replay
-            : {
-                sql: `${replay.sql.replace('VALUES (', 'SELECT * FROM (VALUES (')}) WHERE ${when.sql}`,
-                params: [...replay.params, ...when.params],
-              },
-        ]),
-  ];
+      : idempotencyInsertStatement(ctx, input.idempotency, false, when);
+  return [auditPendingStatement(ctx, input.audit, when), ...(replay === undefined ? [] : [replay])];
 }
 
 export function createServicePrincipalRepository(

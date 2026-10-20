@@ -1,5 +1,4 @@
 import { sql, type Expression, type SqlBool } from 'kysely';
-import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import {
   MAX_PATTERN_BYTES,
@@ -23,7 +22,7 @@ import {
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
 const PROXY_TYPES = ['packagist_proxy', 'npmjs_proxy'] as const;
 const COMPOSER_PATTERN = /^[a-z0-9._*-]+\/[a-z0-9._*-]+$/;
@@ -86,13 +85,6 @@ function probe(condition: Guard, negate: boolean): Statement {
 
 function allOf(conditions: readonly Guard[]): Guard {
   return sql<SqlBool>`(${sql.join(conditions, sql` and `)})`;
-}
-
-function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
-  return record === undefined
-    ? sql<SqlBool>`0`
-    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
-        and principal_key = ${record.principalKey} and key = ${record.key})`;
 }
 
 interface SourceRow {
@@ -173,7 +165,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (!(await holds(held))) return 'forbidden';
       if (
         input.idempotency !== undefined &&
-        (await holds(idempotencyCollision(ctx, input.idempotency)))
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
       )
         return 'conflict';
       const source = await readSource(ctx, input.sourceId);
@@ -216,7 +208,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         {
           authority: probe(held, true),
           conflict: probe(
-            sql<SqlBool>`(${idempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,
+            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,
             false,
           ),
           collision: probe(sameSource, false),
@@ -227,7 +219,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (
         outcome.reason === 'conflict' &&
         input.idempotency !== undefined &&
-        (await holds(idempotencyCollision(ctx, input.idempotency)))
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
       )
         return 'conflict';
       if (outcome.reason === 'conflict') return 'pattern_taken';
@@ -241,7 +233,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (!(await holds(held))) return 'forbidden';
       if (
         input.idempotency !== undefined &&
-        (await holds(idempotencyCollision(ctx, input.idempotency)))
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
       )
         return 'conflict';
       const sourceId = await readName(ctx, input.id);
@@ -281,7 +273,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         ],
         {
           authority: probe(held, true),
-          conflict: probe(idempotencyCollision(ctx, input.idempotency), false),
+          conflict: probe(liveIdempotencyCollision(ctx, input.idempotency), false),
         },
       );
       if (outcome.ok) {
@@ -302,7 +294,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (!(await holds(held))) return 'forbidden';
       if (
         input.idempotency !== undefined &&
-        (await holds(idempotencyCollision(ctx, input.idempotency)))
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
       )
         return 'conflict';
       if (source === null) return 'not_found';
@@ -340,7 +332,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         {
           authority: probe(held, true),
           conflict: probe(
-            sql<SqlBool>`(${idempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,
+            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,
             false,
           ),
           collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),
@@ -351,7 +343,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (
         outcome.reason === 'conflict' &&
         input.idempotency !== undefined &&
-        (await holds(idempotencyCollision(ctx, input.idempotency)))
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
       )
         return 'conflict';
       if (outcome.reason === 'conflict') return 'activation_requires_registered_names';

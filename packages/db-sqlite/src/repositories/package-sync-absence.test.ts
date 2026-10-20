@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { OrgContext } from '@package-broker/core/db/port';
+import { jobFences } from '@package-broker/core/platform/job-fences';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import { createPackageSyncJob } from '@package-broker/core/ingest/package-sync-job';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
@@ -95,11 +96,13 @@ it('two Composer 404s an hour apart reach the real absence transition', async ()
       validatorTtlSeconds: 300,
     }),
     writeGuard: () => guard,
+    clock: { now: () => new Date() },
   } as never);
   const context = {
     org: ctx,
     jobId: 'J',
     signal: new AbortController().signal,
+    fences: jobFences({ id: 'J', owner: 'worker', fence: 1 }),
   } as JobContext;
   const run = () => job.handler({ sourceId: 'S', key: 'acme/lib' }, context);
 

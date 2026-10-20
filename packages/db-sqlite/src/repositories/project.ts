@@ -31,7 +31,7 @@ import {
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { attachSourceStatements } from './visibility-attach.js';
 import {
   DEFAULT_IDLE_SECONDS,
@@ -227,13 +227,6 @@ function failure(reason: string): Failure {
   throw new Error(`project mutation failed unclassified (${reason})`);
 }
 
-function idempotencyCollision(ctx: OrgContext, record: IdempotencyRecord | undefined): Guard {
-  return record === undefined
-    ? sql<SqlBool>`0`
-    : sql<SqlBool>`exists (select 1 from api_idempotency where org_id = ${ctx.orgId}
-        and principal_key = ${record.principalKey} and key = ${record.key})`;
-}
-
 export function createProjectRepository(
   executor: ScalarSqlExecutor,
   options: ProjectRepositoryOptions = {},
@@ -374,7 +367,7 @@ export function createProjectRepository(
       authority: authorityProbe(authority),
       conflict: scalar(
         db.selectNoFrom(
-          sql<number>`(${idempotencyCollision(ctx, idempotency)} or exists (select 1 from project where org_id = ${ctx.orgId} and id = ${id} and revision <> ${expected}))`.as(
+          sql<number>`(${liveIdempotencyCollision(ctx, idempotency)} or exists (select 1 from project where org_id = ${ctx.orgId} and id = ${id} and revision <> ${expected}))`.as(
             'holds',
           ),
         ),
@@ -588,7 +581,7 @@ export function createProjectRepository(
           authority: authorityProbe(authority),
           conflict: scalar(
             db.selectNoFrom(
-              sql<number>`${idempotencyCollision(ctx, input.idempotency)}`.as('holds'),
+              sql<number>`${liveIdempotencyCollision(ctx, input.idempotency)}`.as('holds'),
             ),
           ),
           collision: scalar(

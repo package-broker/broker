@@ -2115,6 +2115,23 @@ describe('role mutation audit and idempotency', () => {
     },
   );
 
+  it('role-key collision stays duplicate_key with an expired record for the key', async () => {
+    const f = await fixture('create');
+    expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!))).toBe('created');
+    await database.executor.batch([
+      idempotencyInsertStatement(a, {
+        ...record('c'.repeat(64)),
+        createdAt: '2000-01-01T00:00:00.000Z',
+        expiresAt: '2000-01-02T00:00:00.000Z',
+      }),
+    ]);
+    const before = await snapshot();
+    expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!), record())).toBe(
+      'duplicate_key',
+    );
+    expect(await snapshot()).toEqual(before);
+  });
+
   it('role-key collision remains duplicate_key and stores neither event nor record', async () => {
     const f = await fixture('create');
     expect(await f.invoke(0, mutationAudit('role.create', f.ids[0]!))).toBe('created');

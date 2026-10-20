@@ -1265,7 +1265,7 @@ describe('atomic principal audit', () => {
         opId: ulid(),
         audit: mutationAudit(action),
         idempotency: {
-          principalKey: U1,
+          principalKey: `user:${U1}`,
           key: operation,
           route: 'POST /principals',
           requestHash: 'a'.repeat(64),

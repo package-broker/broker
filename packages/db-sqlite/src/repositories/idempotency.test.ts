@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { DbError } from '@package-broker/core/db/errors';
@@ -147,6 +148,118 @@ describe('idempotency repository', () => {
   });
 });
 
+describe('expired key replacement', () => {
+  const later = { createdAt: AFTER, expiresAt: '2026-10-20T12:00:00.001Z' };
+  const replacement = { ...record, ...later, responseJson: '{"id":"replacement"}' };
+
+  it('replaces an expired row with the new record', async () => {
+    await seed();
+    await executor.batch([idempotencyInsertStatement(a, replacement)]);
+    expect(await rows()).toHaveLength(1);
+    expect(await repo.find(a, record.principalKey, record.key, AFTER)).toEqual(replacement);
+  });
+  it('replaces a row that expires at the exact creation instant', async () => {
+    await seed();
+    await executor.batch([
+      idempotencyInsertStatement(a, {
+        ...replacement,
+        createdAt: EXPIRY,
+        expiresAt: later.expiresAt,
+      }),
+    ]);
+    expect(await repo.find(a, record.principalKey, record.key, EXPIRY)).toMatchObject({
+      responseJson: replacement.responseJson,
+    });
+  });
+  it('never takes over a row that is still live at the creation instant', async () => {
+    await seed();
+    const createdAt = '2026-10-19T11:59:59.999Z';
+    const attempt = executor.batch([
+      idempotencyInsertStatement(a, { ...replacement, createdAt, expiresAt: later.expiresAt }),
+    ]);
+    await expect(attempt).rejects.toBeInstanceOf(DbError);
+    await expect(attempt).rejects.toMatchObject({ kind: 'unique' });
+    expect(await repo.find(a, record.principalKey, record.key, NOW)).toEqual(record);
+  });
+  it('keeps the live record when a live key is inserted again with another hash', async () => {
+    await seed();
+    const attempt = executor.batch([
+      idempotencyInsertStatement(a, { ...record, requestHash: 'cd'.repeat(32) }),
+    ]);
+    await expect(attempt).rejects.toMatchObject({ kind: 'unique' });
+    expect(await repo.find(a, record.principalKey, record.key, NOW)).toEqual(record);
+  });
+  it('leaves other keys, principals and organizations untouched', async () => {
+    await seed();
+    await seed(a, { key: 'other-key' });
+    await seed(a, { principalKey: 'user:bob' });
+    await seed(b);
+    const before = [await rows(a), await rows(b)];
+    await executor.batch([idempotencyInsertStatement(a, replacement)]);
+    const [afterA, afterB] = [await rows(a), await rows(b)];
+    expect(afterB).toEqual(before[1]);
+    expect(afterA).toHaveLength(3);
+    expect(
+      afterA.filter((row) => !before[0]?.some((old) => isDeepStrictEqual(old, row))),
+    ).toHaveLength(1);
+  });
+  it('lets exactly one of two concurrent inserts replace an expired row', async () => {
+    await seed();
+    const settled = await Promise.allSettled([
+      executor.batch([idempotencyInsertStatement(a, replacement)]),
+      executor.batch([
+        idempotencyInsertStatement(a, { ...replacement, responseJson: '{"id":"second"}' }),
+      ]),
+    ]);
+    expect(settled.map(({ status }) => status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect(await rows()).toHaveLength(1);
+  });
+  it('rolls back the replacement with the rest of the batch', async () => {
+    await seed();
+    const original = await rows();
+    await expect(
+      executor.batch([
+        idempotencyInsertStatement(a, replacement),
+        { sql: 'INSERT INTO api_idempotency (org_id) VALUES (?)', params: [a.orgId] },
+      ]),
+    ).rejects.toBeInstanceOf(DbError);
+    expect(await rows()).toEqual(original);
+  });
+  it('replaces an expired row when the insert runs only after a changing statement', async () => {
+    await seed();
+    await executor.batch([
+      { sql: 'UPDATE organization SET id = id WHERE id = ?', params: [a.orgId] },
+      idempotencyInsertStatement(a, replacement, true),
+    ]);
+    expect(await repo.find(a, record.principalKey, record.key, AFTER)).toEqual(replacement);
+  });
+  it.each([
+    ['holds', true],
+    ['fails', false],
+  ])('replaces an expired row only when the extra condition %s', async (_name, holds) => {
+    await seed();
+    await executor.batch([
+      idempotencyInsertStatement(a, replacement, false, {
+        sql: 'exists (select 1 from organization where id = ? and ?)',
+        params: [a.orgId, holds ? 1 : 0],
+      }),
+    ]);
+    expect(await repo.find(a, record.principalKey, record.key, AFTER)).toEqual(
+      holds ? replacement : null,
+    );
+    expect(await rows()).toHaveLength(1);
+  });
+  it('inserts nothing when the preceding statement changed nothing', async () => {
+    await seed();
+    await executor.batch([
+      { sql: 'UPDATE organization SET id = id WHERE id = ?', params: ['missing'] },
+      idempotencyInsertStatement(a, replacement, true),
+    ]);
+    expect(await repo.find(a, record.principalKey, record.key, AFTER)).toBeNull();
+    expect(await rows()).toEqual([expect.objectContaining({ response_json: record.responseJson })]);
+  });
+});
+
 describe('validation before SQL', () => {
   it.each<[string, Partial<IdempotencyRecord>]>([
     ['63-character hash', { requestHash: 'a'.repeat(63) }],
@@ -164,6 +277,7 @@ describe('validation before SQL', () => {
     ['NUL key', { key: '\u0000' }],
     ['embedded NUL key', { key: 'before\u0000after' }],
     ['empty principal key', { principalKey: '' }],
+    ['principal key without a kind', { principalKey: 'alice' }],
     ['overlong principal key', { principalKey: 'a'.repeat(81) }],
     ['overlong non-BMP principal key', { principalKey: '😀'.repeat(81) }],
     ['NUL principal key', { principalKey: '\u0000' }],
@@ -175,6 +289,7 @@ describe('validation before SQL', () => {
   });
   it.each([
     ['', record.key, NOW],
+    ['alice', record.key, NOW],
     ['a'.repeat(81), record.key, NOW],
     ['😀'.repeat(81), record.key, NOW],
     ['\u0000', record.key, NOW],
@@ -207,12 +322,12 @@ describe('validation before SQL', () => {
     expect(counted.counts()).toEqual({ all: 0, batch: 0 });
   });
   it.each([100, 599])('accepts status boundary %i and maximum key lengths', async (status) => {
-    const value = { ...record, status, key: 'k'.repeat(128), principalKey: 'p'.repeat(80) };
+    const value = { ...record, status, key: 'k'.repeat(128), principalKey: `${'p'.repeat(78)}:x` };
     await executor.batch([idempotencyInsertStatement(a, value)]);
     expect(await repo.find(a, value.principalKey, value.key, NOW)).toEqual(value);
   });
   it('round trips maximum code point lengths with non-BMP keys', async () => {
-    const value = { ...record, key: '😀'.repeat(128), principalKey: '😀'.repeat(80) };
+    const value = { ...record, key: '😀'.repeat(128), principalKey: `${'😀'.repeat(79)}:` };
     await executor.batch([idempotencyInsertStatement(a, value)]);
     expect(await repo.find(a, value.principalKey, value.key, NOW)).toEqual(value);
   });

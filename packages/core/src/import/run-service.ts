@@ -19,6 +19,14 @@ export const IMPORT_RUN_JOB = {
   payload: (runId: string): ImportRunJobPayload => ({ runId }),
 } as const;
 
+export const IMPORT_VERIFICATION_JOB = {
+  type: 'core:import-verify:v1',
+  resourceKey: (runId: string): string => `${IMPORT_RUN_JOB.resourceKey(runId)}:verify`,
+  payload: IMPORT_RUN_JOB.payload,
+  idempotencyKey: (runId: string, requestId: string): string =>
+    `${IMPORT_VERIFICATION_JOB.type}:${runId}:${requestId}`,
+} as const;
+
 /** Approval evidence permits at most one minute of clock skew. */
 export function validImportApprovalTimestamp(value: string | null, nowMs: number): boolean {
   if (value === null) return false;
@@ -67,7 +75,13 @@ export interface CreateRunInput {
 
 type CreateFence = MutationFence | TokenMutationFence;
 export type ImportRunOperation =
-  'createRun' | 'approveRun' | 'requestApply' | 'cancelRun' | 'acceptRun' | 'requestRollback';
+  | 'createRun'
+  | 'approveRun'
+  | 'requestApply'
+  | 'requestVerify'
+  | 'cancelRun'
+  | 'acceptRun'
+  | 'requestRollback';
 
 export type ImportRunWriteOutcome =
   | FencedOutcome
@@ -95,7 +109,7 @@ export interface ImportRunCreateWrite extends Omit<CreateRunInput, 'manifest'> {
 /**
  * All reads and writes are organization-scoped. inspect performs one visibility/authority read:
  * hidden, archived and foreign targets return run=null, including when permission is missing.
- * allowed requires org:import:write for creation, org:import:approve for every other operation;
+ * allowed requires org:import:write for creation and verification, org:import:approve otherwise;
  * reauthFresh is computed from the fence's live session using the shared reauth window.
  *
  * Every write rechecks visibility, live authority, session reauth (except creation), and expected
@@ -105,6 +119,7 @@ export interface ImportRunCreateWrite extends Omit<CreateRunInput, 'manifest'> {
  * createRun stores a non-refetchable manifest blob and exactly one starter from the fence.
  * requestApply changes planned to applying and enqueues apply atomically; requestRollback only
  * enqueues rollback, without claiming completion or introducing a state outside the schema CHECK.
+ * requestVerify changes applied to verifying or re-enqueues a stranded verifying run and enqueues verification atomically.
  * Job requests must refuse an already queued or running job. cancelRun changes planned to cancelled;
  * acceptRun sets accepted_at without changing before_image_expires_at or verified state.
  */
@@ -131,6 +146,11 @@ export interface ImportRunStore {
     input: ImportRunWrite,
   ): Promise<ImportRunWriteOutcome>;
   requestApply(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: ImportRunWrite,
+  ): Promise<ImportRunWriteOutcome>;
+  requestVerify(
     ctx: OrgContext,
     fence: MutationFence,
     input: ImportRunWrite,
@@ -182,6 +202,11 @@ export interface ImportRunService {
     input: ApproveRunInput,
   ): Promise<ImportRunResult>;
   requestApply(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: ImportRunInput,
+  ): Promise<ImportRunResult>;
+  requestVerify(
     ctx: OrgContext,
     fence: MutationFence,
     input: ImportRunInput,
@@ -273,11 +298,16 @@ export function createImportRunService(deps: {
       case 'cancelRun':
         if (run.state !== 'planned') return fail('conflict');
         break;
+      case 'requestVerify':
+        if (!['applied', 'verifying'].includes(run.state) || run.beforeImageExpiresAt !== null)
+          return fail('conflict');
+        break;
       case 'acceptRun':
         if (run.state !== 'verified' || run.acceptedAt !== null) return fail('conflict');
         break;
       case 'requestRollback': {
-        if (!['failed', 'applied', 'verified'].includes(run.state)) return fail('conflict');
+        if (!['failed', 'applied', 'verifying', 'verified'].includes(run.state))
+          return fail('conflict');
         if (run.beforeImageExpiresAt !== null) {
           const expiry = timestamp(run.beforeImageExpiresAt);
           if (expiry === null || expiry <= time) return fail('conflict');
@@ -325,6 +355,7 @@ export function createImportRunService(deps: {
     },
     approveRun: (ctx, fence, input) => transition(ctx, fence, 'approveRun', input, input.planHash),
     requestApply: (ctx, fence, input) => transition(ctx, fence, 'requestApply', input),
+    requestVerify: (ctx, fence, input) => transition(ctx, fence, 'requestVerify', input),
     cancelRun: (ctx, fence, input) => transition(ctx, fence, 'cancelRun', input),
     acceptRun: (ctx, fence, input) => transition(ctx, fence, 'acceptRun', input),
     requestRollback: (ctx, fence, input) => transition(ctx, fence, 'requestRollback', input),

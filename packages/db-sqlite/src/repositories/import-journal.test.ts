@@ -630,12 +630,23 @@ describe('import journal', () => {
       stmt(`SELECT b.id FROM blob b WHERE ${condition.sql}`, ...condition.params),
     );
   }
+  async function expectedEpoch(context: OrgContext) {
+    const [row] = await executor.all<{ version: string }>(
+      stmt('SELECT version FROM cache_epoch WHERE org_id = ?', context.orgId),
+    );
+    if (row === undefined) throw new Error('missing organization epoch');
+    return row.version;
+  }
   async function verify() {
     await executor.batch([
       stmt("UPDATE import_run SET state = 'verifying' WHERE org_id = ? AND id = 'run'", ctx.orgId),
     ]);
     expect(
-      await store.markVerified(ctx, verifier(), { runId: 'run', verifiedAt: V }),
+      await store.markVerified(ctx, verifier(), {
+        runId: 'run',
+        verifiedAt: V,
+        expectedEpoch: await expectedEpoch(ctx),
+      }),
     ).toMatchObject({ ok: true });
   }
   it.each([
@@ -652,7 +663,11 @@ describe('import journal', () => {
       ),
     ]);
     expect(
-      await store.markVerified(ctx, verifier(), { runId: 'run', verifiedAt: V }),
+      await store.markVerified(ctx, verifier(), {
+        runId: 'run',
+        verifiedAt: V,
+        expectedEpoch: await expectedEpoch(ctx),
+      }),
     ).toMatchObject({ ok: false });
     expect(
       await executor.all(
@@ -677,7 +692,11 @@ describe('import journal', () => {
       ]);
     };
     expect(
-      await store.markVerified(ctx, verifier(), { runId: 'run', verifiedAt: V }),
+      await store.markVerified(ctx, verifier(), {
+        runId: 'run',
+        verifiedAt: V,
+        expectedEpoch: await expectedEpoch(ctx),
+      }),
     ).toMatchObject({ ok: false });
     expect(
       await executor.all(
@@ -1204,7 +1223,11 @@ describe('import journal', () => {
       ]);
     };
     expect(
-      await store.markVerified(ctx, verifier(), { runId: 'run', verifiedAt: V }),
+      await store.markVerified(ctx, verifier(), {
+        runId: 'run',
+        verifiedAt: V,
+        expectedEpoch: await expectedEpoch(ctx),
+      }),
     ).toMatchObject({ ok: false });
     expect(
       await executor.all(
@@ -1224,7 +1247,11 @@ describe('import journal', () => {
       ),
     ]);
     expect(
-      await store.markVerified(ctx, verifier(), { runId: 'run', verifiedAt: V }),
+      await store.markVerified(ctx, verifier(), {
+        runId: 'run',
+        verifiedAt: V,
+        expectedEpoch: await expectedEpoch(ctx),
+      }),
     ).toMatchObject({ ok: false });
     expect(
       await executor.all(
@@ -1238,7 +1265,11 @@ describe('import journal', () => {
   });
   it('does not verify a foreign run', async () => {
     expect(
-      await store.markVerified(foreign, verifier(), { runId: 'run', verifiedAt: V }),
+      await store.markVerified(foreign, verifier(), {
+        runId: 'run',
+        verifiedAt: V,
+        expectedEpoch: await expectedEpoch(foreign),
+      }),
     ).toMatchObject({ ok: false });
     expect(await terminalAudits()).toEqual([]);
     expect(
@@ -1252,6 +1283,7 @@ describe('import journal', () => {
       await store.markVerified(ctx, verifier(), {
         runId: 'run',
         verifiedAt: '2026-10-20T00:00:00.000Z',
+        expectedEpoch: await expectedEpoch(ctx),
       }),
     ).toMatchObject({ ok: false });
     expect(

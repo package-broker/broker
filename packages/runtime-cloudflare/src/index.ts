@@ -3,6 +3,7 @@ import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
 import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
 import { createImportRollbackStore } from '@package-broker/db-sqlite/repositories/import-rollback';
+import { createImportVerificationStore } from '@package-broker/db-sqlite/repositories/import-verification';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
 import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
@@ -1352,6 +1353,10 @@ export function createWorker(
         : buildPlatform(config, bound, executor as SqlExecutor, registration, resolveOrg);
     if (built !== undefined && services !== undefined) {
       importJobs.set({
+        verificationStore: createImportVerificationStore({
+          executor: executor as SqlExecutor,
+          providerAnchors: built.anchors,
+        }),
         applyStore: createImportJournalStore({
           executor: executor as SqlExecutor,
           providerAnchors: built.anchors,

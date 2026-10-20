@@ -25,6 +25,7 @@ import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/p
 import { orgContext } from '@package-broker/core/db/port';
 import type { Statement } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
+import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
 import { createKeyring, type Keyring } from '@package-broker/core/secrets/keyring';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
@@ -37,7 +38,7 @@ import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositor
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import { runEntry } from './entry.js';
 import { createNodeServer, type NodeAccessServices, type NodeBroker } from './index.js';
-import { startNode } from './startup.js';
+import { startNode, StartupConfigError, type StartOptions } from './startup.js';
 
 const hooks = vi.hoisted(() => ({
   before: undefined as ((sql: string) => Promise<void> | undefined) | undefined,
@@ -332,6 +333,78 @@ describe('node access wiring', () => {
       });
       registry.route({
         method: 'GET',
+        path: '/probe/personal-token',
+        permission: 'org:read',
+        boundary: 'organization',
+        handler: async (ctx) => {
+          const authenticated = authenticatedActorOf(ctx);
+          if (authenticated === null || ctx.org === null || services === null) {
+            return new Response(null, { status: 500 });
+          }
+          const session = await services.sessions.authenticate(ctx.org, ctx.request);
+          if (session === null) return new Response(null, { status: 401 });
+          const days = Number(new URL(ctx.request.url).searchParams.get('days'));
+          const issued = await services.personalTokens.issue(
+            ctx.org,
+            session,
+            mutationFence(authenticated, {}),
+            {
+              name: 'lifetime',
+              scope: 'full',
+              expiresAt: new Date(Date.now() + days * 24 * HOUR - 60_000).toISOString(),
+              projectMode: 'all',
+              projectIds: [],
+            },
+            apiCall,
+          );
+          return Response.json({ ok: issued.ok, ...(issued.ok ? {} : { error: issued.error }) });
+        },
+      });
+      registry.route({
+        method: 'GET',
+        path: '/probe/service-token',
+        permission: 'org:read',
+        boundary: 'organization',
+        handler: async (ctx) => {
+          const viewed = organizationActorOf(ctx);
+          const authenticated = authenticatedActorOf(ctx);
+          if (viewed === null || authenticated === null || ctx.org === null || services === null) {
+            return new Response(null, { status: 500 });
+          }
+          const session = await services.sessions.authenticate(ctx.org, ctx.request);
+          if (session === null) return new Response(null, { status: 401 });
+          const query = new URL(ctx.request.url).searchParams;
+          const projectId = query.get('project') ?? '';
+          const days = Number(query.get('days'));
+          const actor = { ...viewed, permissions: new Set(viewed.permissions) };
+          const principal = await services.servicePrincipals.create(
+            ctx.org,
+            session,
+            actor,
+            mutationFence(authenticated, {}),
+            { name: 'lifetime', projectId },
+            apiCall,
+          );
+          if (!principal.ok) return Response.json({ principal });
+          const issued = await services.serviceTokens.issue(
+            ctx.org,
+            session,
+            actor,
+            mutationFence(authenticated, {}),
+            {
+              servicePrincipalId: principal.value.id,
+              routeProjectId: projectId,
+              name: 'lifetime',
+              scope: 'read',
+              expiresAt: new Date(Date.now() + days * 24 * HOUR - 60_000).toISOString(),
+            },
+            apiCall,
+          );
+          return Response.json({ principal, issued });
+        },
+      });
+      registry.route({
+        method: 'GET',
         path: '/probe/revoke-token',
         permission: 'org:read',
         boundary: 'organization',
@@ -377,11 +450,15 @@ describe('node access wiring', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  async function start(port: number): Promise<{ broker: NodeBroker; base: string }> {
+  async function start(
+    port: number,
+    tokens?: StartOptions['tokens'],
+  ): Promise<{ broker: NodeBroker; base: string }> {
     const base = `http://127.0.0.1:${port}`;
     const broker = await startNode({
       plugins: [plugin],
       migrations: await migrationSources(),
+      ...(tokens === undefined ? {} : { tokens }),
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -671,6 +748,61 @@ describe('node access wiring', () => {
     expect(served.status).toBe(200);
     expect(await served.json()).toEqual({ projectId: created.id });
     expect(events).toEqual(['handler']);
+  });
+
+  describe('token lifetime policy', () => {
+    async function issueService(
+      tokens: StartOptions['tokens'],
+      days: number,
+    ): Promise<{ issued: { ok: boolean; error?: string } | undefined }> {
+      const { base } = await start(await freePort(), tokens);
+      const cookie = await loginAdmin(base);
+      const made = await fetch(`${base}/probe/make-project`, { headers: { cookie } });
+      const { created } = (await made.json()) as { created: { id: string } };
+      const response = await fetch(
+        `${base}/probe/service-token?project=${created.id}&days=${days}`,
+        { headers: { cookie } },
+      );
+      return (await response.json()) as { issued: { ok: boolean; error?: string } | undefined };
+    }
+
+    it('refuses a 31-day service token when the configured service maximum is 30 days', async () => {
+      const body = await issueService({ maxLifetimeDays: { service: 30 } }, 31);
+      expect(body.issued).toEqual({ ok: false, error: 'invalid_expiry' });
+    });
+
+    it('accepts a 30-day service token when the configured service maximum is 30 days', async () => {
+      const body = await issueService({ maxLifetimeDays: { service: 30 } }, 30);
+      expect(body.issued?.ok).toBe(true);
+    });
+
+    it('refuses a 31-day personal token when the configured personal maximum is 30 days', async () => {
+      const { base } = await start(await freePort(), { maxLifetimeDays: { personal: 30 } });
+      const cookie = await loginAdmin(base);
+      const response = await fetch(`${base}/probe/personal-token?days=31`, { headers: { cookie } });
+      expect(await response.json()).toEqual({ ok: false, error: 'invalid_expiry' });
+    });
+
+    it('accepts a 30-day personal token when the configured personal maximum is 30 days', async () => {
+      const { base } = await start(await freePort(), { maxLifetimeDays: { personal: 30 } });
+      const cookie = await loginAdmin(base);
+      const response = await fetch(`${base}/probe/personal-token?days=30`, { headers: { cookie } });
+      expect(await response.json()).toEqual({ ok: true });
+    });
+
+    it('refuses to create a server with a personal maximum above the ceiling', () => {
+      expect(() =>
+        createNodeServer([], { tokens: { maxLifetimeDays: { personal: 400 } } }),
+      ).toThrow(KernelConfigError);
+    });
+
+    it('refuses to start with a personal maximum above the ceiling and names the key', async () => {
+      const failure = await rejection(
+        start(await freePort(), { maxLifetimeDays: { personal: 400 } }),
+      );
+      expect(failure).toBeInstanceOf(StartupConfigError);
+      expect((failure as StartupConfigError).message).toContain('tokens.maxLifetimeDays.personal');
+    });
   });
 
   it('registers no step 5 HTTP resource', async () => {

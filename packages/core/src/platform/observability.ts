@@ -44,6 +44,7 @@ export interface SafeLogRecord {
   readonly rows?: number;
   readonly head_hash?: string;
   readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
+  readonly package_key?: string;
 }
 
 export const LOG_FIELDS = [
@@ -72,6 +73,7 @@ export const LOG_FIELDS = [
   'rows',
   'head_hash',
   'reason',
+  'package_key',
 ] as const satisfies readonly (keyof SafeLogRecord)[];
 
 export type LogField = (typeof LOG_FIELDS)[number];
@@ -217,6 +219,9 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ROUTE = /^\/[A-Za-z0-9_\-./:{}*]{0,199}$/;
 const LABEL_TOKEN = /^[a-z0-9_]{1,24}$/;
 const LABEL_SLUG = /^[a-z0-9_-]{1,32}$/;
+export const PACKAGE_KEY_MAX_LENGTH = 428;
+// eslint-disable-next-line no-control-regex
+const PACKAGE_KEY_FORBIDDEN = /[\u0000-\u0020\u007f-\u009f:?#\\]/;
 const STATUS_CLASS = /^[1-5]xx$/;
 export const MAX_METRIC_LABELS = 8;
 const LABEL_KEYS = new Set([
@@ -253,6 +258,13 @@ const nullable =
 
 type FieldCheck = (v: unknown) => boolean;
 
+const packageKey: FieldCheck = (v) =>
+  isString(v) &&
+  v.length >= 1 &&
+  v.length <= PACKAGE_KEY_MAX_LENGTH &&
+  v === v.toLowerCase() &&
+  !PACKAGE_KEY_FORBIDDEN.test(v);
+
 const FIELD_CHECKS: Readonly<
   Record<Exclude<LogField, 'level' | 'event' | 'error_name'>, FieldCheck>
 > = {
@@ -278,6 +290,7 @@ const FIELD_CHECKS: Readonly<
   rows: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   head_hash: matches(/^[0-9a-f]{64}$/),
   reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
+  package_key: packageKey,
 };
 
 const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;

@@ -106,6 +106,10 @@
       "types": "./dist/contract/observability-contract.d.ts",
       "default": "./dist/contract/observability-contract.js"
     },
+    "./contract/registry-contract": {
+      "types": "./dist/contract/registry-contract.d.ts",
+      "default": "./dist/contract/registry-contract.js"
+    },
     "./contract/service-principal-contract": {
       "types": "./dist/contract/service-principal-contract.d.ts",
       "default": "./dist/contract/service-principal-contract.js"

@@ -3,6 +3,7 @@ import type { CatalogueWriteGuard, CatalogueWriter, ListingScope } from '../db/c
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../db/errors.js';
 import type { OrgContext, Statement } from '../db/port.js';
 import { fixedClock } from '../ids.js';
+import { jobFences } from '../platform/job-fences.js';
 import { JobError, jobErrorCode, type JobContext } from '../platform/jobs.js';
 import { createPolicyFetch, UpstreamError } from '../sources/policy-fetch.js';
 import {
@@ -379,6 +380,7 @@ function jobContext(model: Model, queue: Enqueued[], fence: number, tag: string)
     idempotencyKey: `key-${tag}`,
     attempt: 1,
     fence,
+    fences: jobFences({ id: `job-${tag}`, owner: 'owner', fence }),
     signal: new AbortController().signal,
     ports: {
       clock: { now: () => new Date('2026-10-20T10:00:00.000Z') },
@@ -844,6 +846,7 @@ function pkgRig(model: Model, server: Server, override?: Describer, timeoutMs?: 
     planFill: async () => plan(override ?? composerDescribe),
     findPackageId: async (_c, _s, key) => (model.packages.has(key) ? key : null),
     writeGuard: (_ctx, session) => model.guard(session),
+    clock: { now: () => new Date('2026-10-20T10:00:00.000Z') },
   };
   const definition = createPackageSyncJob(deps);
   let runs = 0;

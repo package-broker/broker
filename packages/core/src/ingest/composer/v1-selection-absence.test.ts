@@ -5,6 +5,7 @@ import { JobError, type JobContext } from '../../platform/jobs.js';
 import type { PolicyFetch } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
 import type { PackageFillPlan } from '../on-demand.js';
+import { jobFences } from '../../platform/job-fences.js';
 import { createPackageSyncJob, type PackageSyncDeps } from '../package-sync-job.js';
 import type { IngestSessionHandle } from '../session.js';
 import { describeComposerV1, type V1PackageOptions } from './v1-package.js';
@@ -98,9 +99,15 @@ it('retries an unselected Composer v1 name without recording upstream absence', 
     findPackageId: vi.fn(async () => 'pkg'),
     planFill: vi.fn(async () => plan),
     writeGuard: vi.fn(() => catalogueWriteGuard([{ sql: 'guard', params: [] }])),
+    clock: { now: () => new Date('2026-10-20T10:00:00.000Z') },
   } as unknown as PackageSyncDeps;
   const job = createPackageSyncJob(deps);
-  const context = { org, jobId: 'job', signal: new AbortController().signal } as JobContext;
+  const context = {
+    org,
+    jobId: 'job',
+    signal: new AbortController().signal,
+    fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+  } as JobContext;
 
   await expect(
     job.handler(job.validate({ sourceId: 'source', key }), context),

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setAccessContext } from '../authz/access-context.js';
+import { jobFences } from '../platform/job-fences.js';
 import { PACKAGES_READ } from '../catalogue/package-access.js';
 import type { CatalogueReader, CatalogueWriteGuard } from '../db/catalogue.js';
 import { orgContext } from '../db/port.js';
@@ -764,10 +765,10 @@ describe('composer proxy: busy upstream', () => {
     const { f, response } = await busyRequest();
     for (const url of COMPOSER.urls) expect(f.upstream.count(url)).toBe(1);
     expect(f.catalogue.filled.size).toBe(0);
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(503);
   });
 
-  it.fails('answers 503 unavailable carrying the upstream Retry-After', async () => {
+  it('answers 503 unavailable carrying the upstream Retry-After', async () => {
     const { response } = await busyRequest();
     expect(response.status).toBe(503);
     expect(response.headers.get('Retry-After')).toBe('5');
@@ -973,6 +974,7 @@ describe('revalidation job', () => {
       }),
       findPackageId: async () => `pk-${target.name}`,
       writeGuard: () => [] as unknown as CatalogueWriteGuard,
+      clock: systemClock,
     });
     const context = {
       org,
@@ -980,6 +982,7 @@ describe('revalidation job', () => {
       idempotencyKey: 'k',
       attempt: 1,
       fence: 1,
+      fences: jobFences({ id: 'job-1', owner: 'owner', fence: 1 }),
       signal: new AbortController().signal,
       ports: {},
       observability: { log: vi.fn() },

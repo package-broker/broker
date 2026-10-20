@@ -167,7 +167,7 @@ const ORDER = [
 const NO_UPDATE_IMAGE: ReadonlySet<string> = new Set();
 /** Import writes update images for versions only; every other type is created, never updated. */
 const RESTORABLE_COLUMNS: Readonly<Record<string, ReadonlySet<string>>> = {
-  version: new Set(['blob_id', 'published_at', 'status', 'metadata_json']),
+  version: new Set(['blob_id', 'published_at', 'status', 'metadata_json', 'published_at_basis']),
   project: new Set(['slug', 'name', 'status', 'token_max_scope', 'require_publish_approval']),
   role: NO_UPDATE_IMAGE,
   source: NO_UPDATE_IMAGE,

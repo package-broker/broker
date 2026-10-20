@@ -197,7 +197,21 @@ async function expectStatus(label, response, status) {
   }
 }
 
-function createMiniflare(script) {
+async function readAssetsDescriptor(script) {
+  const outDir = dirname(script);
+  let text;
+  try {
+    text = await readFile(join(outDir, 'assets.json'), 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const { descriptor } = JSON.parse(text);
+  return { ...descriptor, directory: resolve(outDir, descriptor.directory) };
+}
+
+async function createMiniflare(script) {
+  const assets = await readAssetsDescriptor(script);
   return new Miniflare(
     convertV4MiniflareOptions({
       rootPath: dirname(script),
@@ -207,13 +221,20 @@ function createMiniflare(script) {
       compatibilityDate: '2026-10-01',
       compatibilityFlags: ['nodejs_compat'],
       d1Databases: ['DB'],
-      assets: {
-        directory: join(repoRoot, 'packages/ui/dist/assets'),
-        binding: 'ASSETS',
-        run_worker_first: true,
-        routerConfig: { has_user_worker: true },
-        assetConfig: { html_handling: 'none' },
-      },
+      ...(assets === null
+        ? {}
+        : {
+            assets: {
+              directory: assets.directory,
+              binding: assets.binding,
+              run_worker_first: assets.run_worker_first,
+              routerConfig: { has_user_worker: true },
+              assetConfig: {
+                html_handling: assets.html_handling,
+                not_found_handling: assets.not_found_handling,
+              },
+            },
+          }),
       r2Buckets: ['STORAGE'],
       queueProducers: { JOBS: 'pb-smoke-jobs' },
       analyticsEngineDatasets: { ANALYTICS: { dataset: 'pb-smoke' } },
@@ -250,7 +271,7 @@ async function run() {
     const migrations = await readMigrations();
 
     step = 'constructing Miniflare';
-    mf = createMiniflare(workerScript);
+    mf = await createMiniflare(workerScript);
 
     step = 'opening the D1 database';
     const executor = createD1Executor(await mf.getD1Database('DB'));
@@ -335,21 +356,59 @@ async function run() {
     console.log('smoke:cloudflare workerd: session after setup ok');
 
     step = 'checking the authenticated UI mount';
+    const stagedAssets = await readAssetsDescriptor(workerScript);
+    assert.ok(stagedAssets !== null, 'the build output has no assets.json');
+    assert.equal(stagedAssets.binding, 'ASSETS');
+    assert.equal(stagedAssets.run_worker_first, true);
+    assert.equal(stagedAssets.html_handling, 'none');
+    assert.equal(stagedAssets.not_found_handling, 'none');
     const uiManifest = JSON.parse(
-      await readFile(join(repoRoot, 'packages/ui/dist/assets/manifest.json'), 'utf8'),
+      await readFile(join(stagedAssets.directory, 'manifest.json'), 'utf8'),
     );
-    for (const path of ['/_pb/ui/', '/_pb/ui/manifest.json']) {
+    const uiDocument = await readFile(join(stagedAssets.directory, uiManifest.entry), 'utf8');
+    const referenced = [...uiDocument.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]);
+    assert.ok(referenced.length > 0, 'the UI document references no assets');
+    for (const name of referenced) {
+      assert.ok(
+        name in uiManifest.files,
+        `the document references ${name}, absent from the manifest`,
+      );
+    }
+    const uiPaths = [
+      '/_pb/ui/',
+      '/_pb/ui/manifest.json',
+      ...Object.keys(uiManifest.files)
+        .filter((name) => name !== uiManifest.entry)
+        .map((name) => `/_pb/ui/${name}`),
+    ];
+    for (const path of uiPaths) {
       await expectStatus(`${path} without credentials`, await dispatch(path, limitMs), 401);
       const response = await send(path, limitMs, { cookie: cookiesOf(finished) });
       await expectStatus(`${path} with a session`, response, 200);
-      if (path.endsWith('.json')) assert.deepEqual(await response.json(), uiManifest);
+      const name = path === '/_pb/ui/' ? uiManifest.entry : path.slice('/_pb/ui/'.length);
+      if (name === 'manifest.json') assert.deepEqual(await response.json(), uiManifest);
       else
-        assert.equal(
-          await response.text(),
-          await readFile(join(repoRoot, 'packages/ui/dist/assets', uiManifest.entry), 'utf8'),
+        assert.deepEqual(
+          Buffer.from(await response.arrayBuffer()),
+          await readFile(join(stagedAssets.directory, name)),
+          `${path} differs from the staged file`,
         );
     }
-    console.log('smoke:cloudflare UI document and manifest require a session');
+    for (const name of ['index.html', 'manifest.json', ...referenced]) {
+      await expectStatus(
+        `raw /${name} without credentials`,
+        await dispatch(`/${name}`, limitMs),
+        404,
+      );
+      await expectStatus(
+        `raw /${name} with a session`,
+        await send(`/${name}`, limitMs, { cookie: cookiesOf(finished) }),
+        404,
+      );
+    }
+    console.log(
+      `smoke:cloudflare UI document, manifest and ${uiPaths.length - 2} assets require a session and match the staged output`,
+    );
 
     step = 'storing the section 2.6 password vector';
     await executor.all({
@@ -524,7 +583,7 @@ async function run() {
     );
     await disposeMiniflare();
     disposed = false;
-    mf = createMiniflare(join(routeOut, 'worker.js'));
+    mf = await createMiniflare(join(routeOut, 'worker.js'));
     const routeExecutor = createD1Executor(await mf.getD1Database('DB'));
     await migrate(routeExecutor, await readMigrations(routeOut), { holder: 'smoke' });
     const routeOrgId = ulid();

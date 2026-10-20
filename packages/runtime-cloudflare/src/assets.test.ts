@@ -117,7 +117,7 @@ describe('Workers assets', () => {
   it('documents assets after the Worker in the operator template', async () => {
     const text = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8');
     expect(text).toContain(
-      '# [assets]\n# binding = "ASSETS"\n# directory = "../../packages/ui/dist/assets"\n# run_worker_first = true\n# html_handling = "none"\n# not_found_handling = "none"',
+      '# [assets]\n# binding = "ASSETS"\n# directory = "../../.pb/cloudflare/assets"\n# run_worker_first = true\n# html_handling = "none"\n# not_found_handling = "none"',
     );
   });
 });

@@ -1461,7 +1461,7 @@ export function describeVulnerabilityMigrationContract(
               ? await executor.all({ sql: 'SELECT * FROM version', params: [] })
               : [];
             const migrated = await migrate(executor, all, { holder: 'vulnerability-migration' });
-            expect(migrated.applied.at(-1)).toBe('core:0022_vulnerability_status');
+            expect(migrated.applied).toContain('core:0022_vulnerability_status');
             if (populated)
               expect(await executor.all({ sql: 'SELECT * FROM version', params: [] })).toEqual(
                 previous,

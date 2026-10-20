@@ -7,6 +7,7 @@ import {
   accessContextOf,
   authenticatedActorOf,
   organizationActorOf,
+  projectActorOf,
   setAccessContext,
 } from './access-context.js';
 import type { AccessContextSnapshot } from './access-context.js';
@@ -86,6 +87,84 @@ const organizationSnapshot = (
     rateKey: userKey('organization'),
     ...overrides,
   });
+
+const patSnapshot = (token: Record<string, unknown>) =>
+  organizationSnapshot({
+    sessionId: null,
+    actor: null,
+    token: { kind: 'pat', scope: 'full', readOnly: false, ...token },
+    rateKey: userKey('organization', 'abcdefghijkl'),
+  });
+
+const PROJECT_A = '01JA0000000000000000000001';
+const PROJECT_B = '01JA0000000000000000000002';
+
+describe('access context token project binding', () => {
+  it('stores the selected binding frozen', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(
+      ctx,
+      patSnapshot({
+        projectMode: 'selected',
+        projectIds: [PROJECT_A, PROJECT_B],
+        organizationAdmin: false,
+        projectReadInherited: true,
+      }),
+    );
+    const token = accessContextOf(ctx)!.token!;
+    expect(token.projectMode).toBe('selected');
+    expect(token.projectIds).toEqual([PROJECT_A, PROJECT_B]);
+    expect(token.projectReadInherited).toBe(true);
+    expect(Object.isFrozen(token)).toBe(true);
+    expect(Object.isFrozen(token.projectIds)).toBe(true);
+  });
+
+  it('stores an all-mode binding with no project ids', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(
+      ctx,
+      patSnapshot({ projectMode: 'all', projectIds: [], organizationAdmin: true }),
+    );
+    expect(accessContextOf(ctx)!.token).toMatchObject({
+      projectMode: 'all',
+      projectIds: [],
+      organizationAdmin: true,
+    });
+  });
+
+  it('keeps a token snapshot without a binding free of binding fields', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(ctx, patSnapshot({}));
+    const token = accessContextOf(ctx)!.token!;
+    expect(token.projectMode).toBeUndefined();
+    expect(token.projectIds).toBeUndefined();
+  });
+
+  it('keeps an explicit null mode', () => {
+    const ctx = requestContext(USER, null);
+    setAccessContext(ctx, patSnapshot({ projectMode: null, projectIds: [] }));
+    expect(accessContextOf(ctx)!.token).toMatchObject({ projectMode: null, projectIds: [] });
+  });
+
+  it.each([
+    ['an unknown mode', { projectMode: 'some', projectIds: [] }],
+    ['ids on an all-mode token', { projectMode: 'all', projectIds: [PROJECT_A] }],
+    ['ids on an unbound token', { projectMode: null, projectIds: [PROJECT_A] }],
+    ['an empty id', { projectMode: 'selected', projectIds: [''] }],
+    ['a non-string id', { projectMode: 'selected', projectIds: [7] }],
+    ['non-array ids', { projectMode: 'selected', projectIds: PROJECT_A }],
+    ['a duplicate id', { projectMode: 'selected', projectIds: [PROJECT_A, PROJECT_A] }],
+    ['a non-boolean admin flag', { projectMode: 'all', projectIds: [], organizationAdmin: 1 }],
+    [
+      'a non-boolean inheritance flag',
+      { projectMode: 'all', projectIds: [], projectReadInherited: 'yes' },
+    ],
+  ])('refuses %s', (_name, token) => {
+    const ctx = requestContext(USER, null);
+    expect(() => setAccessContext(ctx, patSnapshot(token))).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+});
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -587,4 +666,63 @@ describe('authenticated actor', () => {
       expect(authenticatedActorOf(ctx)).toBeNull();
     },
   );
+});
+
+describe('project actor', () => {
+  it('builds a frozen project actor over the union of project rows and project names of organization rows', () => {
+    const ctx = requestContext();
+    setAccessContext(
+      ctx,
+      snapshot({
+        actor: actor({
+          organizationPermissions: ['org:read', 'project:grants:write'],
+          projectPermissions: ['project:read'],
+        }),
+      }),
+    );
+    const built = projectActorOf(ctx)!;
+    expect(built).toMatchObject({
+      kind: 'project',
+      userId: 'user-1',
+      orgId: 'org-a',
+      projectId: 'project-1',
+    });
+    expect(Object.isFrozen(built)).toBe(true);
+    expect(Object.isFrozen(built.permissions)).toBe(true);
+    expect([...built.permissions].sort()).toEqual(['project:grants:write', 'project:read']);
+    expect(built.permissions.has('org:read')).toBe(false);
+    expect(built.permissions).not.toBeInstanceOf(Set);
+    expect('add' in built.permissions).toBe(false);
+    expect(projectActorOf(ctx)?.permissions).not.toBe(built.permissions);
+  });
+
+  it('takes the user from the session snapshot, not from a second source', () => {
+    const ctx = requestContext({ kind: 'user', id: 'user-2' });
+    setAccessContext(
+      ctx,
+      snapshot({
+        principal: { kind: 'user', id: 'user-2' },
+        actor: actor({ user: { id: 'user-2' }, session: { id: 'session-1', userId: 'user-2' } }),
+        rateKey: { ...userKey(), principalId: 'user-2' },
+      }),
+    );
+    expect(projectActorOf(ctx)?.userId).toBe('user-2');
+  });
+
+  it('builds nothing off the project boundary, for tokens, or without a snapshot', () => {
+    const org = requestContext(USER, null);
+    setAccessContext(org, organizationSnapshot());
+    expect(projectActorOf(org)).toBeNull();
+    const service = requestContext(SERVICE);
+    setAccessContext(service, serviceSnapshot());
+    expect(projectActorOf(service)).toBeNull();
+    expect(projectActorOf(requestContext())).toBeNull();
+  });
+
+  it('builds nothing without an organization on the context', () => {
+    const base = requestContext();
+    const ctx = Object.freeze({ ...base, org: null }) as unknown as RequestContext;
+    setAccessContext(ctx, snapshot());
+    expect(projectActorOf(ctx)).toBeNull();
+  });
 });

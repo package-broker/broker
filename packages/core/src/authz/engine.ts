@@ -14,8 +14,9 @@ import type {
 import type { Principal } from '../plugin.js';
 import { decidePatValidation } from './pat-validation.js';
 import type { PatValidationDecision, PatValidationView } from './pat-validation.js';
-import type { ScopeLevel } from './scope.js';
+import type { ScopeLevel, TokenProjectMode } from './scope.js';
 import { isValidProjectSlug } from './project-path.js';
+import { projectBoundaryPermissions } from './project-actor.js';
 import { authenticateToken } from './token-use.js';
 import type { TokenAccessView, TokenUseDeps } from './token-use.js';
 
@@ -28,6 +29,10 @@ export interface EngineGrant {
     readonly kind: 'pat' | 'svc';
     readonly scope: ScopeLevel | null;
     readonly readOnly: boolean;
+    readonly projectMode: TokenProjectMode | null;
+    readonly projectIds: readonly string[];
+    readonly projectReadInherited: boolean;
+    readonly organizationAdmin: boolean;
   } | null;
   readonly actor: ActorAccessSnapshot | null;
 }
@@ -61,7 +66,10 @@ export interface EngineSessionAccess extends EngineAccessCommon {
 }
 
 export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, PatValidationView {
+  readonly projectReadInherited?: boolean;
+  readonly protectedHolder?: boolean;
   readonly token: TokenAccessView['token'] & {
+    readonly boundProjectIds?: readonly string[];
     readonly userId: string | null;
     readonly servicePrincipalId: string | null;
     readonly bindingOk: boolean;
@@ -75,6 +83,8 @@ export type EngineBoundary = 'organization' | 'project';
 export interface EngineLookupInput {
   readonly boundary: EngineBoundary;
   readonly projectSlug: string | null;
+  /** Set only for a project-boundary route that opted in; the port then resolves an archived project too. */
+  readonly allowArchived?: true;
   readonly providerAnchors: readonly EngineProviderAnchor[];
 }
 
@@ -184,14 +194,10 @@ interface Authenticated {
   readonly projectVisible: boolean;
 }
 
-function projectOnly(names: readonly string[]): string[] {
-  return names.filter((name) => name.startsWith('project:'));
-}
-
 function sessionEffective(found: EngineSessionAccess, boundary: EngineBoundary): Set<string> {
   return boundary === 'organization'
     ? new Set(found.organizationPermissions)
-    : new Set([...found.projectPermissions, ...projectOnly(found.organizationPermissions)]);
+    : projectBoundaryPermissions(found.projectPermissions, found.organizationPermissions);
 }
 
 function tokenEffective(found: EngineTokenAccess, boundary: EngineBoundary): Set<string> {
@@ -379,6 +385,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
           kind: found.token.kind,
           scope: found.token.scope?.level ?? null,
           readOnly: found.token.scope?.readOnly ?? false,
+          projectMode: found.token.projectMode,
+          projectIds: Object.freeze(
+            found.token.projectMode === 'selected' ? [...(found.token.boundProjectIds ?? [])] : [],
+          ),
+          projectReadInherited: found.projectReadInherited === true,
+          organizationAdmin: found.protectedHolder === true,
         }),
         actor: null,
       }),
@@ -456,6 +468,9 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       const input: EngineLookupInput = {
         boundary,
         projectSlug: boundary === 'project' && isValidProjectSlug(slug) ? slug : null,
+        ...(boundary === 'project' && request.route.allowArchived === true
+          ? { allowArchived: true as const }
+          : {}),
         providerAnchors: await deps.providerAnchors(request.org),
       };
       if (credential.outcome === 'token') {

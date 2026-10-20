@@ -88,6 +88,7 @@ export const SERVICE_ERROR_TABLE = {
   } satisfies Record<AdminError, ServiceErrorMapping>,
   ProjectError: {
     forbidden: { status: 403, code: 'forbidden' },
+    reauth_required: { status: 403, code: 'reauth_required' },
     invalid_name: { status: 400, code: 'invalid_request' },
     invalid_scope: { status: 400, code: 'invalid_request' },
     invalid_policy: { status: 400, code: 'invalid_request' },

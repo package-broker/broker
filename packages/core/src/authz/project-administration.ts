@@ -8,7 +8,7 @@ import { normalizeEmail } from '../identity/policy.js';
 import { isPermissionView } from './actor.js';
 import type { AdminLog, AdminResult, AdministrationDeps } from './administration.js';
 import type { MutationFence } from './fence.js';
-import type { ProjectActor } from './project-actor.js';
+import { accessGrantFenceKey, roleFenceKey, type ProjectActor } from './project-actor.js';
 
 const WRITE_PERMISSION = 'project:grants:write';
 const GROUP_VALUE_MAX_LENGTH = 256;
@@ -37,10 +37,7 @@ export interface ProjectGrantStore {
   ): Promise<
     'created' | 'duplicate' | 'forbidden' | 'role_scope_mismatch' | 'conflict' | 'indeterminate'
   >;
-  /**
-   * The fence carries the grant revision at `access_grant:<id>` and the new role revision at `role:<roleId>`.
-   * These keys are defined by projectGrantKey and projectGrantRoleKey in packages/db-sqlite, which core cannot import.
-   */
+  /** The fence carries the grant revision at `accessGrantFenceKey(id)` and the new role revision at `roleFenceKey(roleId)`. */
   changeRole(
     ctx: OrgContext,
     fence: MutationFence,
@@ -56,7 +53,7 @@ export interface ProjectGrantStore {
   ): Promise<
     'updated' | 'forbidden' | 'role_scope_mismatch' | 'not_found' | 'conflict' | 'indeterminate'
   >;
-  /** The fence carries the grant revision at `access_grant:<id>`. */
+  /** The fence carries the grant revision at `accessGrantFenceKey(id)`. */
   delete(
     ctx: OrgContext,
     fence: MutationFence,
@@ -335,7 +332,7 @@ export function createProjectAdministration(
       const fence = requireFence(actor, rawFence);
       if (!isUlid(grantId)) return fail('not_found');
       if (!isUlid(roleId)) return fail('role_scope_mismatch');
-      if (!expects(fence, `access_grant:${grantId}`, `role:${roleId}`)) {
+      if (!expects(fence, accessGrantFenceKey(grantId), roleFenceKey(roleId))) {
         return fail('invalid_revision');
       }
       const stamp = now();
@@ -360,7 +357,7 @@ export function createProjectAdministration(
       if (actor === null) return fail('forbidden');
       const fence = requireFence(actor, rawFence);
       if (!isUlid(grantId)) return fail('not_found');
-      if (!expects(fence, `access_grant:${grantId}`)) return fail('invalid_revision');
+      if (!expects(fence, accessGrantFenceKey(grantId))) return fail('invalid_revision');
       const stamp = now();
       const answer = await grants.delete(ctx, fence, {
         ...mutationAudit(call, actor, 'project_grant.revoke', grantId, stamp),

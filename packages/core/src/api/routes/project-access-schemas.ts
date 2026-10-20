@@ -57,6 +57,7 @@ export const PROJECT_ACCESS_API_SPECS = [
     method: 'DELETE',
     path: '/_pb/projects/:project/grants/:grant',
     boundary: 'project',
+    allowArchived: true,
     permission: 'project:grants:write',
     concurrency: 'if-match',
     service: 'AdminError',

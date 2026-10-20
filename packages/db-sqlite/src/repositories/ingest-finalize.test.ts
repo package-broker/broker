@@ -228,7 +228,9 @@ describe('ingest session finalize', () => {
     await setValidators(session);
     expect(await upstreamRows()).toEqual([]);
 
-    const result = await createIngestFinalizer(database.executor).finalize(org, session, input(2));
+    const result = await createIngestFinalizer(database.executor, {
+      maxAbsenceShare: 0.5,
+    }).finalize(org, session, input(2));
     expect(result).toEqual({ status: 'complete', empty: false, validatorsPublished: 1 });
     expect(await versionStatuses()).toEqual([
       { id: 'V-1.0.0', status: 'active' },
@@ -259,7 +261,9 @@ describe('ingest session finalize', () => {
     );
     const { session, mark } = await begin('source');
     await mark(['acme/two']);
-    const result = await createIngestFinalizer(database.executor).finalize(org, session, input(1));
+    const result = await createIngestFinalizer(database.executor, {
+      maxAbsenceShare: 0.5,
+    }).finalize(org, session, input(1));
     expect(result).toMatchObject({ status: 'complete', empty: false });
     expect(await refetchable()).toEqual([{ id: 'B-1.0.0', refetchable: 0 }]);
     expect(await all<{ status: string }>('SELECT status FROM package ORDER BY name')).toEqual([
@@ -411,7 +415,11 @@ describe('ingest session finalize', () => {
     const { session, mark } = await begin('package');
     await mark(['1.0.0']);
     expect(
-      await createIngestFinalizer(database.executor).finalize(org, session, input(1)),
+      await createIngestFinalizer(database.executor, { maxAbsenceShare: 1 }).finalize(
+        org,
+        session,
+        input(1),
+      ),
     ).toMatchObject({ status: 'complete' });
     expect((await refetchable()).map((b) => b.refetchable)).toEqual([1, 1, 1, 1, 0]);
   });

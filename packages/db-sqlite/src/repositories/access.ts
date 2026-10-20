@@ -55,6 +55,8 @@ export interface SessionLookupInput {
   readonly secretHash: string;
   readonly boundary: AccessBoundary;
   readonly projectSlug: string | null;
+  /** Resolve an archived project too. Never adds a permission; only the project row becomes visible. */
+  readonly allowArchived?: boolean;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
@@ -101,6 +103,8 @@ export interface TokenLookupInput {
   readonly selector: string;
   readonly boundary: AccessBoundary;
   readonly projectSlug: string | null;
+  /** Resolve an archived project too. Never adds a permission; only the project row becomes visible. */
+  readonly allowArchived?: boolean;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
@@ -112,6 +116,8 @@ export interface TokenAccess {
     readonly userId: string | null;
     readonly servicePrincipalId: string | null;
     readonly boundProjectId: string | null;
+    /** The projects a `selected` PAT is bound to, in id order; empty for every other token. */
+    readonly boundProjectIds: readonly string[];
     readonly projectMode: TokenProjectMode | null;
     readonly scope: { readonly level: ScopeLevel; readonly readOnly: boolean } | null;
     readonly bindingOk: boolean;
@@ -133,6 +139,8 @@ export interface TokenAccess {
   readonly organizationPermissions: readonly string[];
   readonly projectPermissions: readonly string[];
   readonly protectedHolder: boolean;
+  /** A live PAT whose owner's organization grants carry `project:read`; false for service tokens. */
+  readonly projectReadInherited: boolean;
   /**
    * The principal's own grants (a user's, or a service principal's stored permissions and
    * project binding) reach the requested active project, whatever the token's scope, read-only
@@ -200,6 +208,10 @@ const nowMs = sql<number>`cast(round(unixepoch('now', 'subsec') * 1000) as integ
 
 function instantMs(column: string) {
   return sql<number>`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
+}
+
+function projectStatuses(input: { readonly allowArchived?: boolean }): readonly string[] {
+  return input.allowArchived === true ? ['active', 'archived'] : ['active'];
 }
 
 type ProjectOperand = Expression<string | null> | string | null;
@@ -559,7 +571,7 @@ export function lookupSessionStatement(
       join
         .onRef('p.org_id', '=', 's.org_id')
         .on('p.slug', '=', input.projectSlug as string)
-        .on('p.status', '=', 'active'),
+        .on('p.status', 'in', projectStatuses(input)),
     );
   }
 
@@ -672,6 +684,7 @@ interface TokenRow {
   readonly user_id: string | null;
   readonly service_principal_id: string | null;
   readonly token_project_id: string | null;
+  readonly bound_project_ids: string;
   readonly project_mode: string | null;
   readonly validation_kind: string | null;
   readonly validation_identity_id: string | null;
@@ -818,13 +831,13 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
       join
         .onRef('vp.org_id', '=', 't.org_id')
         .on('vp.slug', '=', input.projectSlug as string)
-        .on('vp.status', '=', sql.lit('active')),
+        .on('vp.status', 'in', projectStatuses(input)),
     );
     query = query.leftJoin('project as p', (join) =>
       join
         .onRef('p.org_id', '=', 't.org_id')
         .on('p.slug', '=', input.projectSlug as string)
-        .on('p.status', '=', 'active')
+        .on('p.status', 'in', projectStatuses(input))
         .on(
           sql<SqlBool>`(
             (t.kind = 'pat' and t.project_id is null and t.project_mode = 'all')
@@ -850,6 +863,8 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
       't.user_id as user_id',
       't.service_principal_id as service_principal_id',
       't.project_id as token_project_id',
+      sql<string>`(select json_group_array(json_object('org', tpb.org_id, 'project', tpb.project_id))
+        from token_project tpb where tpb.token_id = t.id)`.as('bound_project_ids'),
       't.project_mode as project_mode',
       't.validation_kind as validation_kind',
       't.validation_identity_id as validation_identity_id',
@@ -900,7 +915,18 @@ export function tokenProjectMode(
   return stored === 'all' || stored === 'selected' ? stored : null;
 }
 
-function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
+function boundProjects(stored: string, orgId: string): string[] {
+  const parsed: unknown = JSON.parse(stored);
+  if (!Array.isArray(parsed)) return [];
+  return names(
+    parsed.flatMap((entry: unknown) => {
+      const binding = entry as { org?: unknown; project?: unknown } | null;
+      return binding?.org === orgId ? [binding.project] : [];
+    }),
+  );
+}
+
+function toTokenAccess(row: TokenRow, boundary: AccessBoundary, orgId: string): TokenAccess {
   const scope = parsedScope(row);
   const projectMode = tokenProjectMode(row.kind, row.project_mode, row.principal_project_id);
   const isService = row.kind === 'svc';
@@ -925,6 +951,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
   let projectPermissions: string[] = [];
   let protectedHolder = false;
   let projectVisible = false;
+  let projectReadInherited = false;
   if (
     boundary === 'project' &&
     row.visible_project_id !== null &&
@@ -948,6 +975,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
     const stored = JSON.parse(row.access) as AccessJson;
     const orgRows = names(stored.organization);
     const projectRows = names(stored.project);
+    projectReadInherited = !isService && orgRows.includes('project:read');
     protectedHolder =
       !isService && scope.level === 'full' && projectMode === 'all' && stored.holder === 1;
     const service = names(JSON.parse(row.service_permissions));
@@ -984,6 +1012,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
       userId: row.user_id,
       servicePrincipalId: row.service_principal_id,
       boundProjectId: row.token_project_id,
+      boundProjectIds: boundProjects(row.bound_project_ids, orgId),
       projectMode,
       scope,
       bindingOk: row.binding_ok === 1,
@@ -1010,6 +1039,7 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary): TokenAccess {
     organizationPermissions,
     projectPermissions,
     protectedHolder,
+    projectReadInherited,
     projectVisible,
   };
   return Object.defineProperty(envelope, 'verifier', {
@@ -1033,7 +1063,7 @@ export function createAccessRepository(
     async lookupToken(ctx, input) {
       const rows = await executor.all<TokenRow>(lookupTokenStatement(ctx, input));
       const row = rows[0];
-      return row === undefined ? null : toTokenAccess(row, input.boundary);
+      return row === undefined ? null : toTokenAccess(row, input.boundary, ctx.orgId);
     },
 
     async touchSession(ctx, sessionId) {

@@ -10,7 +10,9 @@ import { MassAbsenceError } from '@package-broker/core/ingest/absence-guard';
 import type { IngestFinalizer } from '@package-broker/core/ingest/finalize';
 import {
   assertFinalizeAllowed,
+  DEFAULT_MAX_ABSENCE_SHARE,
   FinalizeEvidenceError,
+  recordMassAbsence,
   type FinalizeGuardOptions,
 } from '@package-broker/core/ingest/finalize-guard';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
@@ -18,7 +20,13 @@ import { assertCheck, compile, db } from '../kysely.js';
 import { parsePendingValidators, type UpstreamForm } from '@package-broker/core/ingest/validators';
 import { NOW } from '../internal/lease-time.js';
 import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
-import { finalizeListingStatements, removedBlobs } from './catalogue-reconcile.js';
+import {
+  finalizeListingStatements,
+  removedBlobs,
+  unseenPackageVersions,
+  unseenSourcePackages,
+  withinAbsenceShare,
+} from './catalogue-reconcile.js';
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
 
@@ -154,7 +162,10 @@ export function createIngestFinalizer(
             ? completeSourceListing({ sourceId: scope.sourceId, stamp, count: expectedCount })
             : completeVersionListing({ packageId: scope.packageId, stamp, count: expectedCount });
         statements.push(
-          ...finalizeListingStatements(ctx, guard, listing, input, options).statements,
+          ...finalizeListingStatements(ctx, guard, listing, input, {
+            ...options,
+            countUnseen: true,
+          }).statements,
         );
       } else {
         const openStamp =
@@ -193,6 +204,35 @@ export function createIngestFinalizer(
         );
       } catch (error) {
         if (error instanceof DbError && error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT) {
+          if (expectedCount >= 1) {
+            const table = scope.kind === 'source' ? sql`source` : sql`package`;
+            const scopeId = scope.kind === 'source' ? scope.sourceId : scope.packageId;
+            const unseen =
+              scope.kind === 'source'
+                ? unseenSourcePackages(ctx, scopeId)
+                : unseenPackageVersions(ctx, scopeId);
+            const [probe] = await executor.all<{ held: number; ok: number }>(
+              compile(
+                db.selectNoFrom([
+                  sql<number>`(EXISTS (SELECT 1 FROM ingest_session
+                    WHERE id = ${session.id} AND org_id = ${ctx.orgId} AND owner = ${session.owner}
+                      AND fence = ${session.fence} AND state = 'running' AND lease_until > ${NOW})
+                    AND EXISTS (SELECT 1 FROM ${table}
+                      WHERE id = ${scopeId} AND org_id = ${ctx.orgId}
+                        AND listing_open_stamp = ${stamp}))`.as('held'),
+                  withinAbsenceShare(
+                    unseen,
+                    expectedCount,
+                    options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
+                  ).as('ok'),
+                ]),
+              ),
+            );
+            if (probe?.held === 1 && probe.ok === 0) {
+              recordMassAbsence(options);
+              return { status: 'refused', reason: 'mass_absence' };
+            }
+          }
           return { status: 'refused', reason: 'superseded' };
         }
         throw error;

@@ -550,6 +550,80 @@ describe('lookupToken personal access tokens', () => {
   });
 });
 
+describe('lookupToken project binding for listing', () => {
+  const org = { boundary: 'organization', projectSlug: null } as const;
+
+  it('reports the bound project ids of a selected PAT in id order on every boundary', async () => {
+    await seed(pat('pat-ids', { mode: 'selected' }), bind('pat-ids', P2), bind('pat-ids', P1));
+
+    expect((await lookup('pat-ids', org))?.token.boundProjectIds).toEqual([P1, P2]);
+    expect((await lookup('pat-ids'))?.token.boundProjectIds).toEqual([P1, P2]);
+  });
+
+  it('reports no ids for an all-project PAT, a selected PAT without rows and a service token', async () => {
+    await seed(
+      pat('pat-all'),
+      pat('pat-nobind', { mode: 'selected' }),
+      principal(SP1, 'ci', null, U1),
+      svc('svc-ids', SP1),
+    );
+
+    expect((await lookup('pat-all', org))?.token.boundProjectIds).toEqual([]);
+    expect((await lookup('pat-nobind', org))?.token.boundProjectIds).toEqual([]);
+    expect((await lookup('svc-ids', org))?.token.boundProjectIds).toEqual([]);
+  });
+
+  it('ignores a binding row stored for another organization and another token', async () => {
+    await seed(
+      pat('pat-one', { mode: 'selected' }),
+      pat('pat-two', { mode: 'selected' }),
+      bind('pat-one', P1),
+      bind('pat-two', P2),
+      stmt(
+        'INSERT INTO token_project (org_id, token_id, project_id) VALUES (?, ?, ?)',
+        b.orgId,
+        'tok-pat-one',
+        PB,
+      ),
+    );
+
+    expect((await lookup('pat-one', org))?.token.boundProjectIds).toEqual([P1]);
+  });
+
+  it('reports the inherited organization project:read of a live PAT owner', async () => {
+    await seed(pat('pat-inh'), pat('pat-inhr', { scopes: '["read"]', readOnly: 1 }));
+
+    expect((await lookup('pat-inh', org))?.projectReadInherited).toBe(true);
+    expect((await lookup('pat-inhr', org))?.projectReadInherited).toBe(true);
+  });
+
+  it('does not report inheritance when the owner holds no organization project:read', async () => {
+    await seed(
+      pat('pat-noinh', { userId: U2, validationKind: 'local' }),
+      pat('pat-grant-only'),
+      stmt(
+        "DELETE FROM access_grant WHERE subject_value = ? AND scope = 'organization'",
+        'u1@example.test',
+      ),
+    );
+
+    expect((await lookup('pat-noinh', org))?.projectReadInherited).toBe(false);
+    expect((await lookup('pat-grant-only', org))?.projectReadInherited).toBe(false);
+  });
+
+  it('does not report inheritance for an expired or revoked token or a suspended owner', async () => {
+    await seed(
+      pat('pat-exp', { expiresAt: at(-HOUR) }),
+      pat('pat-rev', { revokedAt: at(-HOUR) }),
+      pat('pat-susp', { userId: U3 }),
+    );
+
+    for (const label of ['pat-exp', 'pat-rev', 'pat-susp']) {
+      expect((await lookup(label, org))?.projectReadInherited).toBe(false);
+    }
+  });
+});
+
 describe('lookupToken service tokens', () => {
   beforeEach(async () => {
     await seed(
@@ -1249,6 +1323,21 @@ describe('lookupToken projectVisible', () => {
 
     expect(result?.project).toBeNull();
     expect(result?.projectVisible).toBe(false);
+  });
+
+  it('resolves an archived project the principal has grants on only when allowArchived is set', async () => {
+    await seed(
+      project(a, '01J0PROJECT0000000000000P3', 'gone', { status: 'archived' }),
+      pat('pat-a'),
+    );
+
+    const hidden = await lookup('pat-a', { projectSlug: 'gone' });
+    const shown = await lookup('pat-a', { projectSlug: 'gone', allowArchived: true });
+
+    expect(hidden?.project).toBeNull();
+    expect(hidden?.projectVisible).toBe(false);
+    expect(shown?.project).toMatchObject({ slug: 'gone', status: 'archived' });
+    expect(shown?.projectVisible).toBe(true);
   });
 
   it('is false for a project the principal reaches only through the token binding', async () => {

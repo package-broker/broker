@@ -1,9 +1,11 @@
 import { SCOPE_LEVELS } from './scope.js';
-import type { ScopeLevel } from './scope.js';
+import type { ScopeLevel, TokenProjectMode } from './scope.js';
 import type { AuthenticatedActor } from './fence.js';
 import type { Principal, RequestContext, RouteBoundary } from '../plugin.js';
 import { buildOrganizationActor } from './actor.js';
 import type { ActorAccessSnapshot, OrganizationActor } from './actor.js';
+import { projectBoundaryPermissions } from './project-actor.js';
+import type { ProjectActor } from './project-actor.js';
 
 export type AccessRouteClass = Exclude<RouteBoundary, 'package'>;
 
@@ -31,6 +33,14 @@ export interface AccessContextSnapshot {
     readonly kind: 'pat' | 'svc';
     readonly scope: ScopeLevel | null;
     readonly readOnly: boolean;
+    /** `all` or `selected` as stored on the token; null when the token carries no valid binding. */
+    readonly projectMode?: TokenProjectMode | null;
+    /** The projects a `selected` token is bound to; empty for every other token. */
+    readonly projectIds?: readonly string[];
+    /** The owner's live organization grants include `project:read`. */
+    readonly projectReadInherited?: boolean;
+    /** The owner is a protected organization holder under a full all-project token. */
+    readonly organizationAdmin?: boolean;
   } | null;
   readonly actor: ActorAccessSnapshot | null;
   readonly rateKey: AccessRateKey;
@@ -46,6 +56,7 @@ const ROUTE_CLASSES = [
   'authenticated',
 ] as const satisfies readonly AccessRouteClass[];
 const TOKEN_KINDS = ['pat', 'svc'] as const;
+const PROJECT_MODES = ['all', 'selected'] as const satisfies readonly TokenProjectMode[];
 const PRINCIPAL_KINDS = [
   'user',
   'service',
@@ -84,6 +95,38 @@ function principalOf(value: unknown): Principal | null {
   return Object.freeze({ kind: oneOf(PRINCIPAL_KINDS, raw['kind']), id: text(raw['id']) });
 }
 
+function flag(value: unknown): boolean {
+  return typeof value === 'boolean' ? value : refuse();
+}
+
+function projectIdsOf(value: unknown, mode: TokenProjectMode | null): readonly string[] {
+  const listed = names(value);
+  if (listed.length > 0 && mode !== 'selected') refuse();
+  if (listed.some((id, index) => listed.indexOf(id) !== index)) refuse();
+  return listed;
+}
+
+function bindingOf(
+  raw: Record<string, unknown>,
+): Partial<NonNullable<AccessContextSnapshot['token']>> {
+  const projectMode =
+    raw['projectMode'] === undefined || raw['projectMode'] === null
+      ? null
+      : oneOf(PROJECT_MODES, raw['projectMode']);
+  return {
+    ...(raw['projectMode'] === undefined ? {} : { projectMode }),
+    ...(raw['projectIds'] === undefined
+      ? {}
+      : { projectIds: projectIdsOf(raw['projectIds'], projectMode) }),
+    ...(raw['projectReadInherited'] === undefined
+      ? {}
+      : { projectReadInherited: flag(raw['projectReadInherited']) }),
+    ...(raw['organizationAdmin'] === undefined
+      ? {}
+      : { organizationAdmin: flag(raw['organizationAdmin']) }),
+  };
+}
+
 function tokenOf(value: unknown): AccessContextSnapshot['token'] {
   if (value === null) return null;
   const raw = record(value);
@@ -92,6 +135,7 @@ function tokenOf(value: unknown): AccessContextSnapshot['token'] {
     kind: oneOf(TOKEN_KINDS, raw['kind']),
     scope: raw['scope'] === null ? null : oneOf(SCOPE_LEVELS, raw['scope']),
     readOnly: raw['readOnly'],
+    ...bindingOf(raw),
   });
 }
 
@@ -207,6 +251,30 @@ export function organizationActorOf(ctx: RequestContext): OrganizationActor | nu
   const actor = buildOrganizationActor('organization', snapshot.actor);
   if (actor === null) return null;
   return Object.freeze({ ...actor, permissions: readOnlyView(actor.permissions) });
+}
+
+export function projectActorOf(ctx: RequestContext): ProjectActor | null {
+  const snapshot = snapshots.get(ctx);
+  if (
+    snapshot?.actor == null ||
+    snapshot.boundary !== 'project' ||
+    snapshot.projectId === null ||
+    ctx.org === null
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    kind: 'project',
+    userId: snapshot.actor.user.id,
+    orgId: ctx.org.orgId,
+    projectId: snapshot.projectId,
+    permissions: readOnlyView(
+      projectBoundaryPermissions(
+        snapshot.actor.projectPermissions,
+        snapshot.actor.organizationPermissions,
+      ),
+    ),
+  });
 }
 
 export function authenticatedActorOf(ctx: RequestContext): AuthenticatedActor | null {

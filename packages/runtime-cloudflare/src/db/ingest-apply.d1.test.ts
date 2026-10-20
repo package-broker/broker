@@ -132,7 +132,7 @@ describe('D1 ingest apply at the largest planned invocation', () => {
       writer: createCatalogueWriter(counter.executor),
       sessions: createIngestSessions(counter.executor),
       existing: createExistingVersionsReader(counter.executor),
-      finalizer: createIngestFinalizer(counter.executor),
+      finalizer: createIngestFinalizer(counter.executor, { maxAbsenceShare: 1 }),
     };
     const acquired = await createIngestSessions(executor).acquire(
       org,

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createSourceSyncReads, staleHeldKeysStatement } from './source-sync-reads.js';
 
@@ -244,9 +245,8 @@ describe('source sync reads', () => {
     }
   });
 
-  // Before migration 0020 these cross-organization rows satisfy the single-column FKs.
   it('excludes an own package referencing a foreign source', async () => {
-    await pkg('cross-source', own, 'F', 'cross-source');
+    await withForeignKeysOff(executor, () => pkg('cross-source', own, 'F', 'cross-source'));
     expect(await reads().staleHeldKeys(own, 'F', { after: null, limit: 2 })).toEqual({
       keys: [],
       next: null,
@@ -255,7 +255,9 @@ describe('source sync reads', () => {
 
   it('ignores foreign upstream state referencing an own package', async () => {
     await pkg('cross-state', own, 'S', 'cross-state');
-    await state('cross-state', foreign, 'npm-packument', FUTURE);
+    await withForeignKeysOff(executor, () =>
+      state('cross-state', foreign, 'npm-packument', FUTURE),
+    );
     expect(await reads().staleHeldKeys(own, 'S', { after: null, limit: 2 })).toEqual({
       keys: ['cross-state'],
       next: null,

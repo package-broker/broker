@@ -26,14 +26,13 @@ function foreignSource(read: 'existing' | 'stale'): ContractCase {
 const existing = foreignSource('existing');
 const stale = foreignSource('stale');
 
-// Before migration 0020 these rows are legal with foreign keys enabled.
 const foreignSourceReference: ContractCase = {
   name: 'stale keys exclude an own package referencing a foreign source',
   async run(context) {
     const { own, foreign } = orgOf(context);
     const seed = seeder(context.executor);
     await seedSource(seed, 'S', foreign.orgId, 'npmjs_proxy', 'npm');
-    await seedPackage(seed, 'P', own.orgId, 'S', 'shared', 'npm');
+    await seedPackage(seed.forged, 'P', own.orgId, 'S', 'shared', 'npm');
     expect(
       await context.executor.all(
         context.mutate(staleHeldKeysStatement(own, 'S', { after: null, limit: 2 })),
@@ -49,7 +48,7 @@ const foreignStateReference: ContractCase = {
     const seed = seeder(context.executor);
     await seedSource(seed, 'S', own.orgId, 'npmjs_proxy', 'npm');
     await seedPackage(seed, 'P', own.orgId, 'S', 'shared', 'npm');
-    await seed(
+    await seed.forged(
       `INSERT INTO upstream_state (org_id, package_id, form, checked_at, fresh_until)
        VALUES (?, 'P', 'npm-packument', ?, ?)`,
       foreign.orgId,

@@ -4,6 +4,10 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import {
+  forgedItFor,
+  withForeignKeysOff,
+} from '@package-broker/db-sqlite/testing/foreign-keys-off';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -98,6 +102,7 @@ async function state(id: string, org: OrgContext, form: string, freshUntil: stri
 }
 
 const reads = () => createSourceSyncReads(executor);
+const forgedIt = forgedItFor(true);
 
 describe('D1 source sync reads', () => {
   beforeEach(async () => {
@@ -278,18 +283,19 @@ describe('D1 source sync reads', () => {
     }
   });
 
-  // Before migration 0020 these cross-organization rows satisfy the single-column FKs.
-  it('excludes an own package referencing a foreign source', async () => {
-    await pkg('cross-source', own, 'F', 'cross-source');
+  forgedIt('excludes an own package referencing a foreign source', async () => {
+    await withForeignKeysOff(executor, () => pkg('cross-source', own, 'F', 'cross-source'));
     expect(await reads().staleHeldKeys(own, 'F', { after: null, limit: 2 })).toEqual({
       keys: [],
       next: null,
     });
   });
 
-  it('ignores foreign upstream state referencing an own package', async () => {
+  forgedIt('ignores foreign upstream state referencing an own package', async () => {
     await pkg('cross-state', own, 'S', 'cross-state');
-    await state('cross-state', foreign, 'npm-packument', FUTURE);
+    await withForeignKeysOff(executor, () =>
+      state('cross-state', foreign, 'npm-packument', FUTURE),
+    );
     expect(await reads().staleHeldKeys(own, 'S', { after: null, limit: 2 })).toEqual({
       keys: ['cross-state'],
       next: null,

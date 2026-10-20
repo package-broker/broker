@@ -59,6 +59,7 @@ import { composerVersionInput } from './composer/version-object.js';
 import { composerRoutes } from './composer/routes.js';
 import type { RepresentationClock } from './conditional.js';
 import { createDistService, type DistFetchPlan } from './dist-service.js';
+import { createRegistryJobs, type RegistryJobs, type RegistryJobsDeps } from './jobs.js';
 import { npmVersionInput } from './npm/version-object.js';
 import { npmRoutes } from './npm/routes.js';
 import type { RegistryConfig } from './registry-config.js';
@@ -97,6 +98,7 @@ export interface RegistryModuleDeps {
   readonly policyFetch: (userAgent: string) => PolicyFetch;
   readonly deploymentId: string;
   readonly providers?: readonly SourceProvider[];
+  readonly registryJobs?: RegistryJobsDeps;
   readonly defer?: (thunk: () => Promise<void>) => void;
   readonly handleOf?: (ctx: RequestContext) => string | null;
   readonly catalogue: {
@@ -144,7 +146,7 @@ export interface RegistryModuleDeps {
   };
 }
 
-export interface RegistryModule {
+export interface RegistryModule extends Partial<RegistryJobs> {
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
   readonly packageSyncJob?: JobDefinition;
@@ -455,5 +457,8 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     ecosystemRoutes,
     visibilityPort,
     ...(packageSyncJob === undefined ? {} : { packageSyncJob }),
+    ...(jobs === undefined || deps.registryJobs === undefined
+      ? {}
+      : createRegistryJobs(deps.registryJobs, jobs)),
   });
 }

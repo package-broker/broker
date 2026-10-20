@@ -1,9 +1,11 @@
 import { apiError, jsonResponse } from '../api/response.js';
 import { readJsonBody } from '../api/validate.js';
+import { accessContextOf } from '../authz/access-context.js';
 import { envelopeResponse } from '../kernel/errors.js';
 import type { RouteDefinition } from '../kernel/routes.js';
 import type { RequestContext } from '../plugin.js';
 import { mcpGate } from './gate.js';
+import type { McpLimiter } from './limit.js';
 
 export type McpHandler = (params: unknown, ctx: RequestContext) => Promise<unknown>;
 
@@ -11,6 +13,7 @@ export interface McpOptions {
   readonly handlers: Readonly<Record<string, McpHandler>>;
   readonly publicOrigin: string;
   readonly timeoutMs?: number;
+  readonly limiter?: McpLimiter;
 }
 
 const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ['2025-11-25'];
@@ -121,6 +124,24 @@ export function createMcpRoutes(options: McpOptions): readonly RouteDefinition[]
     let notification = false;
     try {
       return await withDeadline(async (signal) => {
+        if (options.limiter !== undefined) {
+          const key = accessContextOf(ctx)?.rateKey;
+          if (key?.stage !== 'authenticated' || key.tokenSelector === null) {
+            return apiError('forbidden', ctx.requestId);
+          }
+          const allowed = await options.limiter.check(key.tokenSelector);
+          signal.throwIfAborted();
+          if (!allowed) {
+            const response = envelopeResponse(
+              429,
+              'rate_limited',
+              'Rate limit exceeded',
+              ctx.requestId,
+            );
+            response.headers.set('retry-after', '60');
+            return response;
+          }
+        }
         const request =
           ctx.request.body === null
             ? ctx.request

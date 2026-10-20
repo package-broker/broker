@@ -770,7 +770,11 @@ export function createNodeServer(
     const authorization = options.authorization ?? access?.module.authorization;
     const assets = await createNodeAssets(
       fileURLToPath(new URL('./assets/', import.meta.url)),
-    ).catch(() => null);
+    ).catch((error: unknown) => {
+      if ((error as { code?: unknown }).code !== 'UI_ASSETS_ABSENT') throw error;
+      log({ level: 'info', event: 'ui.assets_absent' });
+      return null;
+    });
     const ui = createUiRoutes(
       {
         manifest: async () => assets?.manifest() ?? null,

@@ -536,6 +536,22 @@ async function elapse(ms: number): Promise<void> {
   }
 }
 
+const SETTLE_LIMIT_MS = 60_000;
+
+async function settle<T>(pending: readonly Promise<T>[]): Promise<T[]> {
+  let done = false;
+  const all = Promise.all(pending).finally(() => {
+    done = true;
+  });
+  all.catch(() => undefined);
+  for (let spent = 0; !done && spent < SETTLE_LIMIT_MS; spent += STEP_MS) {
+    for (let turn = 0; turn < 5; turn += 1) await flush();
+    if (done) break;
+    await vi.advanceTimersByTimeAsync(STEP_MS);
+  }
+  return all;
+}
+
 beforeEach(() => {
   vi.useFakeTimers({
     toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
@@ -556,8 +572,7 @@ describe.each(TARGETS)('$ecosystem proxy: coalescing', (target) => {
     const pending = Array.from({ length: 20 }, () => get(mounted, target));
     await elapse(250);
     gate.open();
-    await elapse(250);
-    const responses = await Promise.all(pending);
+    const responses = await settle(pending);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(200));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
   });
@@ -571,8 +586,7 @@ describe.each(TARGETS)('$ecosystem proxy: coalescing', (target) => {
     const pending = Array.from({ length: 20 }, () => get(mounted, target));
     await elapse(250);
     gate.open();
-    await elapse(250);
-    const responses = await Promise.all(pending);
+    const responses = await settle(pending);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(404));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
   });
@@ -590,8 +604,7 @@ describe.each(TARGETS)('$ecosystem proxy: coalescing', (target) => {
     ];
     await elapse(500);
     gate.open();
-    await elapse(1000);
-    const responses = await Promise.all(pending);
+    const responses = await settle(pending);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(404));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
     expect(f.shared.leases.size).toBe(0);
@@ -610,8 +623,7 @@ describe.each(TARGETS)('$ecosystem proxy: coalescing', (target) => {
     ];
     await elapse(500);
     gate.open();
-    await elapse(500);
-    const responses = await Promise.all(pending);
+    const responses = await settle(pending);
     expect(responses.map((response) => response.status)).toEqual(Array(20).fill(200));
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
     expect(f.shared.leases.size).toBe(0);
@@ -628,13 +640,12 @@ describe.each(TARGETS)('$ecosystem proxy: coalescing', (target) => {
     await elapse(10);
     const blocked = get(waiter, target);
     await elapse(26_000);
-    const response = await blocked;
+    const response = (await settle([blocked]))[0]!;
     expect(response.status).toBe(503);
     expect(response.headers.get('Retry-After')).toBe('10');
     for (const url of target.urls) expect(f.upstream.count(url)).toBe(1);
     gate.open();
-    await elapse(500);
-    await lead;
+    await settle([lead]);
   });
 });
 

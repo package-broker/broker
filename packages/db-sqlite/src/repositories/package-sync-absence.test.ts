@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { OrgContext } from '@package-broker/core/db/port';
+import { createPackageSyncJob } from '@package-broker/core/ingest/package-sync-job';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import type { JobContext } from '@package-broker/core/platform/jobs';
-import { createPackageSyncJob } from '@package-broker/core/ingest/package-sync-job';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
 import { createCatalogueWriter } from './catalogue-writer.js';

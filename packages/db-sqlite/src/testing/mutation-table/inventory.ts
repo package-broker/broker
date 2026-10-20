@@ -100,7 +100,7 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
   'repositories/keyring-verifier.ts#createKeyringVerifierStore':
     'REDUNDANT_BY_SCHEMA: 0015_keyring_verifier.sql keyring_verifier PRIMARY KEY (key_version); the verifier is installation-global and has no organization column',
   'repositories/webhook-delivery.ts#createWebhookDeliveryRepository':
-    'DEFERRED: the factory only sequences the four registered webhook delivery statements and maps their rows; the cases run record, settle and sourcesFor through it; owner T414',
+    'NOT_A_MUTATION: the factory only sequences the four registered webhook delivery statements, maps their rows and issues no SQL of its own.',
 
   'internal/lease-time.ts#until':
     'NOT_A_MUTATION: builds a lease timestamp expression without tables or organization predicates.',

@@ -146,6 +146,15 @@ export interface AdministrationDeps {
     ctx: OrgContext,
     input: { readonly userId: string; readonly cause: CreatorOffboardingCause },
   ) => Promise<void> | void;
+  /** Runs after `onCreatorOffboarded`; production enqueues the personal-token offboarding job. */
+  readonly onUserOffboarded?: (
+    ctx: OrgContext,
+    input: {
+      readonly userId: string;
+      readonly cause: CreatorOffboardingCause;
+      readonly at: string;
+    },
+  ) => Promise<void> | void;
 }
 
 const GROUP_VALUE_MAX_LENGTH = 256;
@@ -311,6 +320,32 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         deps.log({
           level: 'warn',
           event: 'user.offboarding_callback_failed',
+          orgId: ctx.orgId,
+          userId,
+          cause,
+          error: error instanceof Error ? error.name : typeof error,
+        });
+      } catch {
+        // The change is stored; neither the callback nor the sink may report it as failed.
+      }
+    }
+  }
+
+  async function userOffboarded(
+    ctx: OrgContext,
+    userId: string,
+    cause: CreatorOffboardingCause,
+    at: string,
+  ): Promise<void> {
+    const callback = deps.onUserOffboarded;
+    if (callback === undefined) return;
+    try {
+      await callback(ctx, { userId, cause, at });
+    } catch (error) {
+      try {
+        deps.log({
+          level: 'warn',
+          event: 'user.pat_offboarding_enqueue_failed',
           orgId: ctx.orgId,
           userId,
           cause,
@@ -634,6 +669,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       grantEvent(ctx, actor, 'revoked', id, grant.roleId);
       if (result.offboardedUserId !== null) {
         await creatorOffboarded(ctx, result.offboardedUserId, 'membership_removed');
+        await userOffboarded(ctx, result.offboardedUserId, 'membership_removed', stamp);
       }
       return OK;
     },
@@ -694,6 +730,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         if (result !== 'suspended') return fail(result);
         userEvent(ctx, actor, 'suspended', userId);
         await creatorOffboarded(ctx, userId, 'suspended');
+        await userOffboarded(ctx, userId, 'suspended', stamp);
         return OK;
       }),
 

@@ -93,6 +93,7 @@ function setup(
     stored?: readonly Role[];
     storedGrants?: readonly OrganizationGrant[];
     onCreatorOffboarded?: unknown;
+    onUserOffboarded?: unknown;
   } = {},
 ) {
   const stored = overrides.stored ?? [customRole(), adminRole];
@@ -145,6 +146,13 @@ function setup(
       : {
           onCreatorOffboarded: overrides.onCreatorOffboarded as NonNullable<
             AdministrationDeps['onCreatorOffboarded']
+          >,
+        }),
+    ...(overrides.onUserOffboarded === undefined
+      ? {}
+      : {
+          onUserOffboarded: overrides.onUserOffboarded as NonNullable<
+            AdministrationDeps['onUserOffboarded']
           >,
         }),
   });
@@ -2423,6 +2431,193 @@ describe('creator offboarding on organization grant revoke', () => {
       },
     ]);
     expect(JSON.stringify(log.mock.calls)).not.toContain('secret-bearing detail');
+  });
+});
+
+describe('user offboarding trigger', () => {
+  const revokedFor = (offboardedUserId: string | null) => ({
+    deleteOrganization: vi.fn(async () => ({ outcome: 'deleted', offboardedUserId })),
+  });
+  const failuresOf = (log: ReturnType<typeof vi.fn>) =>
+    log.mock.calls
+      .map(([entry]) => entry as Record<string, unknown>)
+      .filter((entry) => entry['event'] === 'user.pat_offboarding_enqueue_failed');
+
+  it('reports a fresh suspension once with cause suspended and the write timestamp', async () => {
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ onUserOffboarded });
+    expect(
+      await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall),
+    ).toEqual({ ok: true, value: null });
+    expect(onUserOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'u1',
+      cause: 'suspended',
+      at: NOW,
+    });
+  });
+
+  it('does not report a suspension of an already suspended user', async () => {
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({
+      grants: { suspendUser: vi.fn(async () => 'unchanged') },
+      onUserOffboarded,
+    });
+    expect(
+      (await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall)).ok,
+    ).toBe(true);
+    expect(onUserOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('does not report a refused suspension', async () => {
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({
+      grants: { suspendUser: vi.fn(async () => 'last_holder') },
+      onUserOffboarded,
+    });
+    expect(
+      (await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall)).ok,
+    ).toBe(false);
+    expect(onUserOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('reports an organization grant revoke with an offboarded user once', async () => {
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ grants: revokedFor('u1'), onUserOffboarded });
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', apiCall),
+    ).toEqual({ ok: true, value: null });
+    expect(onUserOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'u1',
+      cause: 'membership_removed',
+      at: NOW,
+    });
+  });
+
+  it('does not report an organization grant revoke without an offboarded user', async () => {
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ grants: revokedFor(null), onUserOffboarded });
+    expect(
+      (
+        await admin.revokeOrganizationGrant(
+          ctx,
+          grantsWriter,
+          fenceFor(grantsWriter),
+          'g1',
+          apiCall,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(onUserOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('never reports a reactivation', async () => {
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ onUserOffboarded });
+    expect(
+      (await admin.reactivateUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall)).ok,
+    ).toBe(true);
+    expect(onUserOffboarded).not.toHaveBeenCalled();
+  });
+
+  it('suspends without the callback configured', async () => {
+    const { admin } = setup();
+    expect(
+      await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall),
+    ).toEqual({ ok: true, value: null });
+  });
+
+  it('keeps the result ok, logs the error name and still ran the creator callback when it throws', async () => {
+    const order: string[] = [];
+    const onCreatorOffboarded = vi.fn(async () => {
+      order.push('creator');
+    });
+    const onUserOffboarded = vi.fn(async () => {
+      order.push('user');
+      throw new RangeError('secret-bearing detail');
+    });
+    const { admin, log } = setup({ onCreatorOffboarded, onUserOffboarded });
+    expect(
+      await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall),
+    ).toEqual({ ok: true, value: null });
+    expect(order).toEqual(['creator', 'user']);
+    expect(failuresOf(log)).toEqual([
+      {
+        level: 'warn',
+        event: 'user.pat_offboarding_enqueue_failed',
+        orgId: 'org-a',
+        userId: 'u1',
+        cause: 'suspended',
+        error: 'RangeError',
+      },
+    ]);
+    expect(JSON.stringify(log.mock.calls)).not.toContain('secret-bearing detail');
+  });
+
+  it('runs the creator callback before the user callback on an organization grant revoke', async () => {
+    const order: string[] = [];
+    const { admin } = setup({
+      grants: revokedFor('u1'),
+      onCreatorOffboarded: () => {
+        order.push('creator');
+      },
+      onUserOffboarded: () => {
+        order.push('user');
+      },
+    });
+    await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', apiCall);
+    expect(order).toEqual(['creator', 'user']);
+  });
+
+  it('hands the callback the timestamp the write used, not a later clock reading', async () => {
+    let tick = 0;
+    const clock: Clock = {
+      now: () => new Date(Date.parse(NOW) + tick++ * 1000),
+    };
+    const suspendUser = vi.fn(async () => 'suspended');
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({ clock, grants: { suspendUser }, onUserOffboarded });
+    await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall);
+    const written = (suspendUser.mock.calls[0] as unknown as [unknown, unknown, { now: string }])[2]
+      .now;
+    expect(onUserOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'u1',
+      cause: 'suspended',
+      at: written,
+    });
+  });
+
+  it('still runs the user callback when the creator callback throws', async () => {
+    const onCreatorOffboarded = vi.fn(async () => {
+      throw new TypeError('creator failure');
+    });
+    const onUserOffboarded = vi.fn(async () => undefined);
+    const { admin } = setup({
+      grants: revokedFor('u1'),
+      onCreatorOffboarded,
+      onUserOffboarded,
+    });
+    expect(
+      await admin.revokeOrganizationGrant(ctx, grantsWriter, fenceFor(grantsWriter), 'g1', apiCall),
+    ).toEqual({ ok: true, value: null });
+    expect(onUserOffboarded).toHaveBeenCalledExactlyOnceWith(ctx, {
+      userId: 'u1',
+      cause: 'membership_removed',
+      at: NOW,
+    });
+  });
+
+  it('keeps the result ok when the callback and the log sink both throw', async () => {
+    const { admin, log } = setup({
+      onUserOffboarded: () => {
+        throw new Error('enqueue down');
+      },
+    });
+    log.mockImplementation((entry: Record<string, unknown>) => {
+      if (entry['event'] === 'user.pat_offboarding_enqueue_failed') throw new Error('sink down');
+    });
+    expect(
+      await admin.suspendUser(ctx, administrator, fenceFor(administrator), 'u1', apiCall),
+    ).toEqual({ ok: true, value: null });
   });
 });
 

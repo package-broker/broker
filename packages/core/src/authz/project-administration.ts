@@ -122,6 +122,7 @@ export interface ProjectAdministration {
 
 export interface ProjectAdministrationDeps {
   readonly onCreatorOffboarded?: AdministrationDeps['onCreatorOffboarded'];
+  readonly onUserOffboarded?: AdministrationDeps['onUserOffboarded'];
   readonly grants: ProjectGrantStore;
   readonly providers: Pick<ReadonlyMap<string, unknown>, 'has'>;
   readonly providerAnchors: readonly ProviderAnchor[];
@@ -367,16 +368,32 @@ export function createProjectAdministration(
       });
       if (typeof answer === 'string') return refused(ctx, actor, action, answer);
       changed(ctx, actor, 'revoke', grantId);
-      if (answer.offboardedUserId !== null && deps.onCreatorOffboarded !== undefined) {
+      if (answer.offboardedUserId !== null) {
         const userId = answer.offboardedUserId;
         const cause = 'membership_removed';
         try {
-          await deps.onCreatorOffboarded(ctx, { userId, cause });
+          await deps.onCreatorOffboarded?.(ctx, { userId, cause });
         } catch (error) {
           try {
             deps.log({
               level: 'warn',
               event: 'user.offboarding_callback_failed',
+              orgId: ctx.orgId,
+              userId,
+              cause,
+              error: error instanceof Error ? error.name : typeof error,
+            });
+          } catch {
+            // The grant is deleted; callback and sink failures must not change the result.
+          }
+        }
+        try {
+          await deps.onUserOffboarded?.(ctx, { userId, cause, at: stamp });
+        } catch (error) {
+          try {
+            deps.log({
+              level: 'warn',
+              event: 'user.pat_offboarding_enqueue_failed',
               orgId: ctx.orgId,
               userId,
               cause,

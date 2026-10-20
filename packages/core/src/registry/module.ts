@@ -8,7 +8,8 @@ import type {
   PackageVisibility,
   PackageVisibilityPort,
 } from '../db/catalogue.js';
-import type { OrgContext } from '../db/port.js';
+import type { OrgContext, SqlExecutor } from '../db/port.js';
+import type { PackageIdReads } from '../db/registry-reads.js';
 import type { SourceRecord, SourceRepository } from '../db/source.js';
 import type { UpstreamStateRepository } from '../db/upstream-state.js';
 import type { Clock } from '../ids.js';
@@ -29,17 +30,25 @@ import {
   type PackageSyncPayload,
 } from '../ingest/on-demand.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
-import { PACKAGE_SYNC_JOB_TYPE, packageSyncEnqueueInput } from '../ingest/package-sync-job.js';
+import { safeValidator } from '../ingest/fill-shared.js';
+import {
+  createPackageSyncJob,
+  PACKAGE_SYNC_JOB_TYPE,
+  packageSyncEnqueueInput,
+} from '../ingest/package-sync-job.js';
 import { contextPackageActorOf } from '../internal/package-actor.js';
 import { resolvedPackageOf } from '../internal/package-context.js';
 import type { Codecs } from '../platform/codec.js';
 import { createScopedCache, type EpochReader } from '../platform/cache.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
+import type { JobGuard } from '../platform/job-repository.js';
+import type { JobDefinition } from '../platform/jobs.js';
 import type { PlatformPorts, Platform, RequestContext, RouteDefinition } from '../plugin.js';
 import { parseSourceConfig } from '../sources/config.js';
 import type { CredentialEchoProbe } from '../sources/credentials.js';
 import type { PolicyFetch, UpstreamCredential } from '../sources/policy-fetch.js';
 import {
+  type DocumentValidators,
   type ProviderContext,
   type ProviderSource,
   type SourceProvider,
@@ -112,6 +121,19 @@ export interface RegistryModuleDeps {
       source: SourceRecord,
     ) => Promise<SourceCredential | null>;
   };
+  readonly sync?: {
+    readonly packageId: PackageIdReads['packageId'];
+    readonly upstreamState: Pick<
+      UpstreamStateRepository,
+      'touchStatements' | 'notFoundStatements' | 'resetNotFoundStatements'
+    >;
+    readonly executor: Pick<SqlExecutor, 'batch'>;
+    readonly writeGuard: (
+      ctx: OrgContext,
+      session: IngestSessionHandle,
+      job: JobGuard,
+    ) => CatalogueWriteGuard;
+  };
   readonly dist: {
     readonly leases: FetchLeases;
     readonly leaseKey: (parts: readonly string[]) => Promise<string>;
@@ -125,6 +147,7 @@ export interface RegistryModuleDeps {
 export interface RegistryModule {
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
+  readonly packageSyncJob?: JobDefinition;
 }
 
 const NO_PROBE: CredentialEchoProbe = { secrets: [], queryParams: [] };
@@ -140,7 +163,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     throw new PlatformUnavailableError();
   }
   const { blob, cache, observability } = deps.ports;
-  const { catalogue, ingest, registry } = deps;
+  const { catalogue, ingest, registry, sync } = deps;
 
   const packageAccess = createPackageAccess(catalogue.reader);
   const visibilityPort = createScopedAdmittingAccess(packageAccess, catalogue.scopedAdmission);
@@ -238,6 +261,27 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     if (record === null) return null;
     const bound = await bind(ctx, record);
     if (bound === null) return null;
+    const publishedValidators: DocumentValidators = {};
+    if (sync !== undefined) {
+      const packageId = await sync.packageId(ctx, record.id, key);
+      if (packageId !== null) {
+        const forms =
+          record.ecosystem === 'composer'
+            ? (['composer-p2', 'composer-p2-dev'] as const)
+            : (['npm-packument'] as const);
+        for (const form of forms) {
+          const state = await catalogue.upstreamState.get(ctx, packageId, form);
+          if (state === null) continue;
+          const etag = safeValidator(state.etag ?? undefined);
+          const lastModified = safeValidator(state.lastModified ?? undefined);
+          if (etag === null && lastModified === null) continue;
+          publishedValidators[form === 'npm-packument' ? 'npm-full' : form] = {
+            ...(etag === null ? {} : { etag }),
+            ...(lastModified === null ? {} : { lastModified }),
+          };
+        }
+      }
+    }
     const proxy = PROXY_TYPES.has(record.type);
     const probe = bound.credential?.probe ?? NO_PROBE;
     const toVersion: ApplyInput['toVersion'] = (candidate) => {
@@ -272,7 +316,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       toVersion,
       packageDescription: null,
       validatorTtlSeconds: registry.timers.metadataTtlSeconds,
-      publishedValidators: {},
+      publishedValidators,
       async describe(options, signal): Promise<Awaited<ReturnType<SourceProvider['describe']>>> {
         const context = providerContext(ctx, bound, signal);
         if (record.type === 'packagist_proxy') {
@@ -332,6 +376,28 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     );
   }
 
+  const sourceMetadata: OnDemandDeps['sourceMetadata'] = async (ctx, sourceId) => {
+    const record = await catalogue.sources.get(ctx, sourceId);
+    if (record === null) throw new SourceMissingError();
+    return { type: record.type };
+  };
+
+  const packageSyncJob =
+    sync === undefined || jobs === undefined
+      ? undefined
+      : createPackageSyncJob({
+          sessions: ingest.sessions,
+          apply: ingest.apply,
+          jobs,
+          upstreamState: sync.upstreamState,
+          executor: sync.executor,
+          sourceMetadata,
+          planFill,
+          findPackageId: sync.packageId,
+          writeGuard: sync.writeGuard,
+          clock: deps.clock,
+        });
+
   const onDemand = createOnDemandFill({
     sessions: ingest.sessions,
     clock: deps.clock,
@@ -339,11 +405,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     visibility: visibilityPort,
     upstreamState: catalogue.upstreamState,
     apply: ingest.apply,
-    async sourceMetadata(ctx, sourceId) {
-      const record = await catalogue.sources.get(ctx, sourceId);
-      if (record === null) throw new SourceMissingError();
-      return { type: record.type };
-    },
+    sourceMetadata,
     writeGuard: ingest.writeGuard,
     planFill,
     enqueueSync,
@@ -389,5 +451,9 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     }),
   ]);
 
-  return Object.freeze({ ecosystemRoutes, visibilityPort });
+  return Object.freeze({
+    ecosystemRoutes,
+    visibilityPort,
+    ...(packageSyncJob === undefined ? {} : { packageSyncJob }),
+  });
 }

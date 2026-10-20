@@ -86,6 +86,10 @@
       "types": "./dist/contract/executor-contract.d.ts",
       "default": "./dist/contract/executor-contract.js"
     },
+    "./contract/import-verification-contract": {
+      "types": "./dist/contract/import-verification-contract.d.ts",
+      "default": "./dist/contract/import-verification-contract.js"
+    },
     "./contract/job-contract": {
       "types": "./dist/contract/job-contract.d.ts",
       "default": "./dist/contract/job-contract.js"

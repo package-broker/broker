@@ -14,6 +14,8 @@ import {
   type JobRepository,
 } from '@package-broker/core/platform/job-repository';
 import { fenceKind } from '@package-broker/core/authz/fence';
+import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
+import { JobRelease } from '@package-broker/core/platform/job-release';
 import { JobError, type JobContext } from '@package-broker/core/platform/jobs';
 import {
   DROPPED_COUNTER,
@@ -866,6 +868,97 @@ describe('createQueueHandler transport boundaries', () => {
     await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
     expect(seen).toBeDefined();
     expect((seen as JobContext | undefined)?.fences).toBeUndefined();
+  });
+
+  it('releases a core job that throws JobRelease without consuming the attempt', async () => {
+    const f = await fixture();
+    const { job } = counting('release', () => Promise.reject(new JobRelease(60)));
+    const id = await enqueue(f, job.qualifiedName, 'k1');
+    const before = (await f.repository.status(f.ctx, id))?.attempts;
+    const m = message(jobNotification(f.ctx, id));
+    await handlerFor(f, [job])({ messages: [m] }, {});
+
+    expect(m.acked()).toBe(1);
+    expect(m.retried()).toEqual([]);
+    const status = await f.repository.status(f.ctx, id);
+    expect(status?.history[0]?.outcome).toBe('released');
+    expect(status?.attempts).toBe(before);
+    expect(status?.state).toBe('queued');
+    expect(Date.parse(status?.runAt ?? '') - Date.now()).toBeGreaterThanOrEqual(59_000);
+  });
+
+  it('fails a plugin job that throws JobRelease as an ordinary handler_error', async () => {
+    const f = await fixture();
+    const { job: core } = counting('work');
+    const plugin: RegisteredJob = {
+      plugin: 'acme',
+      qualifiedName: 'acme:release:v1',
+      definition: { ...core.definition, handler: () => Promise.reject(new JobRelease(60)) },
+    };
+    const id = await enqueue(f, plugin.qualifiedName, 'k1');
+    const m = message(jobNotification(f.ctx, id));
+    await handlerFor(f, [plugin])({ messages: [m] }, {});
+
+    expect(m.acked()).toBe(1);
+    const status = await f.repository.status(f.ctx, id);
+    expect(status).toMatchObject({ state: 'queued', attempts: 1, lastErrorCode: 'handler_error' });
+    expect(status?.history[0]).toMatchObject({ outcome: 'failed', errorCode: 'handler_error' });
+  });
+
+  it('hands a core job its claim lease through jobLeaseOf', async () => {
+    let lease: ReturnType<typeof jobLeaseOf> | undefined;
+    const leased = registerCoreJob({
+      name: 'leased',
+      version: 1,
+      validate: (input) => input,
+      handler: (_payload, context) => {
+        lease = jobLeaseOf(context);
+        return Promise.resolve();
+      },
+    });
+    const claim = { ...fakeClaim(leased.qualifiedName), fence: 7 };
+    const handle = createQueueHandler({
+      repository: fakeRepository({
+        claim: () => Promise.resolve(claim),
+        settle: () => Promise.resolve(),
+      }),
+      jobs: { jobs: [leased] },
+      observability: recorder().observability,
+      scope: () => ({ ports, observability: recorder().observability }),
+    });
+    await handle({ messages: [message(jobNotification(orgA, someJob))] }, {});
+    expect(lease).toEqual({ id: claim.id, owner: claim.owner, fence: 7 });
+  });
+
+  it('settles nothing when JobRelease is thrown after the lease was lost', async () => {
+    const lost = registerCoreJob({
+      name: 'lost',
+      version: 1,
+      validate: (input) => input,
+      handler: (_payload, context) =>
+        new Promise<void>((_resolve, reject) => {
+          context.signal.addEventListener('abort', () => {
+            reject(new JobRelease(60));
+          });
+        }),
+    });
+    const settle = vi.fn(() => Promise.resolve());
+    const handle = createQueueHandler({
+      repository: fakeRepository({
+        claim: () => Promise.resolve(fakeClaim(lost.qualifiedName)),
+        settle,
+        heartbeat: () => Promise.reject(new StaleFenceError()),
+      }),
+      jobs: { jobs: [lost] },
+      observability: recorder().observability,
+      scope: () => ({ ports, observability: recorder().observability }),
+      limits: { heartbeatMs: 5 },
+    });
+    const m = message(jobNotification(orgA, someJob));
+    await handle({ messages: [m] }, {});
+
+    expect(settle).not.toHaveBeenCalled();
+    expect(m.acked()).toBe(1);
   });
 });
 

@@ -107,6 +107,12 @@ export function createIngestSessionWriteGuard(
   ]);
 }
 
+export function discardStatement(ctx: OrgContext, handle: IngestSessionHandle): Statement {
+  return compile(
+    db.deleteFrom('ingest_session').where(holds(ctx, handle)).where('stamp', 'is', null),
+  );
+}
+
 interface SessionRow {
   id: string;
   scope_key: string;
@@ -123,6 +129,7 @@ interface SessionRow {
 }
 
 interface LatestRow {
+  id: string;
   state: IngestSessionLatest['state'];
   generation: number;
   fence: number;
@@ -384,7 +391,7 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions & In
         compile(
           db
             .selectFrom('ingest_session')
-            .select(['state', 'generation', 'fence', 'seen_count', 'pages_so_far'])
+            .select(['id', 'state', 'generation', 'fence', 'seen_count', 'pages_so_far'])
             .where('org_id', '=', ctx.orgId)
             .where('scope_key', '=', scopeKey)
             .orderBy('generation', 'desc')
@@ -394,6 +401,7 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions & In
       return row === undefined
         ? null
         : {
+            id: row.id,
             state: row.state,
             generation: row.generation,
             fence: row.fence,
@@ -411,6 +419,10 @@ export function createIngestSessions(executor: SqlExecutor): IngestSessions & In
             .where(holds(ctx, guard)),
         ),
       );
+    },
+
+    discard(ctx, guard) {
+      return changed(discardStatement(ctx, guard));
     },
 
     abandon(ctx, guard) {
@@ -453,9 +465,10 @@ export function sweepStatements(limit: number, cutoff: string, now: string): rea
           .select('old.id')
           .where('old.state', 'in', ['complete', 'abandoned'])
           .where(
-            sql<boolean>`EXISTS (SELECT 1 FROM ingest_session AS newer
+            sql<boolean>`(EXISTS (SELECT 1 FROM ingest_session AS newer
               WHERE newer.org_id = old.org_id AND newer.scope_key = old.scope_key
-                AND newer.generation > old.generation)`,
+                AND newer.generation > old.generation)
+              OR (old.state = 'abandoned' AND old.stamp IS NULL))`,
           )
           .orderBy('old.lease_until')
           .limit(limit),

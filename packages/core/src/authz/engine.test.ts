@@ -9,7 +9,8 @@ import type { AuthorizationRequest } from '../kernel/authorize.js';
 import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
-import { accessContextOf } from './access-context.js';
+import { accessContextOf, projectActorOf, setAccessContext } from './access-context.js';
+import { PERMISSIONS } from './permissions.js';
 import type { AccessContextSnapshot } from './access-context.js';
 import type { AccessCheckInput } from '../plugin.js';
 import type { ScopeLevel } from './scope.js';
@@ -176,6 +177,7 @@ function req(
     permission?: string;
     boundary?: NonNullable<AuthorizationRequest['route']['boundary']> | 'absent';
     params?: Record<string, string>;
+    allowArchived?: true;
   } = {},
 ): AuthorizationRequest {
   const method = init.method ?? 'GET';
@@ -188,6 +190,7 @@ function req(
       path: '/_pb/projects/:project',
       permission: init.permission ?? 'project:packages:read',
       ...(init.boundary === 'absent' ? {} : { boundary: init.boundary ?? 'project' }),
+      ...(init.allowArchived === undefined ? {} : { allowArchived: init.allowArchived }),
     },
     params: init.params ?? { project: 'demo' },
   };
@@ -913,7 +916,18 @@ describe('engine grants', () => {
         }),
       );
       expect(response.status).toBe(200);
-      const expected = kind === null ? null : { kind, scope, readOnly };
+      const expected =
+        kind === null
+          ? null
+          : {
+              kind,
+              scope,
+              readOnly,
+              projectMode: 'all',
+              projectIds: [],
+              projectReadInherited: false,
+              organizationAdmin: false,
+            };
       expect(grantToken).toEqual(expected);
       expect(Object.isFrozen(grantToken)).toBe(true);
       expect(snapshots).toHaveLength(1);
@@ -1001,7 +1015,15 @@ describe('engine grants', () => {
         sessionId: null,
         actor: null,
         tokenSelector: kind === 'pat' ? SELECTOR : 'mnopqrstuvwx',
-        token: { kind, scope: 'full', readOnly: false },
+        token: {
+          kind,
+          scope: 'full',
+          readOnly: false,
+          projectMode: 'all',
+          projectIds: [],
+          projectReadInherited: false,
+          organizationAdmin: false,
+        },
       });
     },
   );
@@ -1818,7 +1840,15 @@ describe('bearer-only authenticated MCP POST', () => {
       principal: { kind: 'user', id: 'user-1' },
       sessionId: null,
       tokenSelector: SELECTOR,
-      token: { kind: 'pat', scope: 'full', readOnly: false },
+      token: {
+        kind: 'pat',
+        scope: 'full',
+        readOnly: false,
+        projectMode: 'all',
+        projectIds: [],
+        projectReadInherited: false,
+        organizationAdmin: false,
+      },
     });
   });
 
@@ -1913,5 +1943,177 @@ describe('bearer-only authenticated MCP POST', () => {
     expect(await refusal({ authorization: `Basic ${btoa(`${PAT}:x`)}` })).toEqual(
       await refusal({}),
     );
+  });
+});
+
+describe('allowArchived routes', () => {
+  function archivedProject(state: State) {
+    const base = deps(state);
+    const seen: (true | undefined)[] = [];
+    const engineDeps: AuthorizationEngineDeps = {
+      ...base,
+      access: {
+        ...base.access,
+        lookupSession: async (ctx, input) => {
+          seen.push(input.allowArchived);
+          const found = await base.access.lookupSession(ctx, input);
+          return found === null || input.allowArchived === true
+            ? found
+            : { ...found, project: null, projectPermissions: [] };
+        },
+        lookupToken: async (ctx, input) => {
+          seen.push(input.allowArchived);
+          const found = await base.access.lookupToken(ctx, input);
+          return found === null || input.allowArchived === true
+            ? found
+            : (Object.defineProperty(
+                { ...found, project: null, projectPermissions: [] },
+                'verifier',
+                { value: (found as never as { verifier: unknown }).verifier, enumerable: false },
+              ) as EngineTokenAccess);
+        },
+      },
+    };
+    return { engineDeps, seen };
+  }
+
+  it('answers 404 for an archived project on a route that does not opt in', async () => {
+    const state = freshState();
+    const { engineDeps, seen } = archivedProject(state);
+    const engine = createAuthorizationEngine(engineDeps);
+    expect(await engine.authorize(req({ headers: cookie }))).toEqual({
+      allow: false,
+      status: 404,
+    });
+    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+      allow: false,
+      status: 404,
+    });
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  it('lets an opted-in route see an archived project the session holds the permission on', async () => {
+    const state = freshState();
+    const { engineDeps, seen } = archivedProject(state);
+    const engine = createAuthorizationEngine(engineDeps);
+    expect(await engine.authorize(req({ headers: cookie, allowArchived: true }))).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: 'proj-1',
+    });
+    expect(seen).toEqual([true]);
+  });
+
+  it('still refuses an opted-in route without the permission', async () => {
+    const state = freshState();
+    state.sessionProjectPermissions = ['project:read'];
+    const { engineDeps } = archivedProject(state);
+    const engine = createAuthorizationEngine(engineDeps);
+    expect(await engine.authorize(req({ headers: cookie, allowArchived: true }))).toEqual({
+      allow: false,
+      status: 403,
+    });
+  });
+
+  it('still answers 404 on an opted-in route when the project resolves to nothing', async () => {
+    const state = freshState();
+    state.sessionProject = null;
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(req({ headers: cookie, allowArchived: true }))).toEqual({
+      allow: false,
+      status: 404,
+    });
+  });
+
+  it('answers 404 for an invalid slug even when opted in', async () => {
+    const engine = createAuthorizationEngine(deps(freshState()));
+    expect(
+      await engine.authorize(
+        req({ headers: cookie, allowArchived: true, params: { project: 'Bad Slug' } }),
+      ),
+    ).toEqual({ allow: false, status: 404 });
+  });
+
+  it('does not pass the opt-in to an organization lookup', async () => {
+    const state = freshState();
+    const { engineDeps, seen } = archivedProject(state);
+    const engine = createAuthorizationEngine(engineDeps);
+    await engine.authorize(
+      req({
+        headers: cookie,
+        boundary: 'organization',
+        permission: 'org:read',
+        params: {},
+        allowArchived: true,
+      }),
+    );
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('lets an opted-in route see the archived project through a token', async () => {
+    const state = freshState();
+    const { engineDeps, seen } = archivedProject(state);
+    const engine = createAuthorizationEngine(engineDeps);
+    expect((await engine.authorize(req({ headers: bearer(PAT), allowArchived: true }))).allow).toBe(
+      true,
+    );
+    expect(seen).toEqual([true]);
+  });
+});
+
+describe('projectActorOf parity with the engine', () => {
+  function actorFor(orgNames: string[], projectNames: string[]) {
+    const ctx = Object.freeze({
+      request: new Request(`${ORIGIN}/_pb/projects/demo`),
+      requestId: 'req-1',
+      org,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: 'proj-1',
+      params: Object.freeze({}),
+      ports: Object.freeze({}),
+    }) as never;
+    setAccessContext(ctx, {
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: 'proj-1',
+      boundary: 'project',
+      sessionId: 'sess-1',
+      token: null,
+      actor: {
+        session: { id: 'sess-1', userId: 'user-1' },
+        user: { id: 'user-1' },
+        organizationPermissions: orgNames,
+        projectPermissions: projectNames,
+        protectedHolder: false,
+      },
+      rateKey: {
+        stage: 'authenticated',
+        tokenSelector: null,
+        principalId: 'user-1',
+        routeClass: 'project',
+      },
+    });
+    return projectActorOf(ctx)!;
+  }
+
+  it.each([
+    ['project rows only', ['org:read'], ['project:read', 'project:grants:write']],
+    [
+      'organization rows carrying project names',
+      ['project:read', 'org:read', 'org:users:read'],
+      [],
+    ],
+    ['both', ['project:packages:read', 'org:read'], ['project:read', 'project:grants:write']],
+    ['neither', [], []],
+  ])('allows exactly what the engine allows with %s', async (_label, orgNames, projectNames) => {
+    const held = actorFor(orgNames, projectNames).permissions;
+    for (const { name } of PERMISSIONS) {
+      const state = freshState();
+      state.sessionOrg = orgNames;
+      state.sessionProjectPermissions = projectNames;
+      const decision = await createAuthorizationEngine(deps(state)).authorize(
+        req({ headers: cookie, permission: name }),
+      );
+      expect(held.has(name), name).toBe(decision.allow);
+    }
   });
 });

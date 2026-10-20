@@ -20,6 +20,7 @@ export interface ApiRouteSpec {
   readonly path: string;
   readonly permission: string | null;
   readonly boundary?: RouteBoundary;
+  readonly allowArchived?: true;
   readonly concurrency?: 'if-match';
   readonly service?: keyof typeof SERVICE_ERROR_TABLE;
   readonly api: ApiSlot;
@@ -144,6 +145,7 @@ export function apiRoute<const S extends ApiRouteSpec>(
     path: spec.path,
     permission: spec.permission,
     ...(spec.boundary === undefined ? {} : { boundary: spec.boundary }),
+    ...(spec.allowArchived === true ? { allowArchived: true as const } : {}),
     api,
     handler: async (ctx) => {
       const fail = (code: ApiErrorCode, details?: readonly ValidationDetail[]): Response =>

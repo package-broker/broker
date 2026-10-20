@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from 'n
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { CloudflareError } from './api.js';
+import { CloudflareError, GitWorktreeRequiredError } from './api.js';
 
 export type Jurisdiction = 'eu' | 'default';
 export type ResourceKey = 'd1' | 'r2' | 'dlq' | 'jobs' | 'analytics' | 'worker';
@@ -433,6 +433,11 @@ export class InventoryStore {
       for (const candidate of [path, lockPath, join(directory, '.inventory-probe.tmp')])
         await promisify(execFile)('git', ['check-ignore', '--quiet', candidate], { cwd: project });
     } catch {
+      try {
+        await promisify(execFile)('git', ['rev-parse', '--is-inside-work-tree'], { cwd: project });
+      } catch (probe) {
+        if ((probe as { code?: unknown }).code === 128) throw new GitWorktreeRequiredError();
+      }
       throw new CloudflareError('unsafe_path', 2);
     }
     return new InventoryStore(project, directory, path, lockPath, o.identity, stateRoot);

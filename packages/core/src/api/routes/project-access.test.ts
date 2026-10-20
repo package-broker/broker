@@ -18,6 +18,7 @@ import { createKernel } from '../../kernel/kernel.js';
 import { createKeyring } from '../../secrets/keyring.js';
 import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
+import { readdirSync, readFileSync } from 'node:fs';
 import { defineApi } from '../route.js';
 import { PROJECT_ACCESS_API_SPECS } from './project-access-schemas.js';
 import { projectAccessRoutes } from './project-access.js';
@@ -50,6 +51,7 @@ type RouteCase = (typeof cases)[number];
 async function fixture(
   options: {
     visible?: boolean;
+    archived?: boolean;
     tokenScope?: 'read' | 'full';
     permissions?: readonly string[];
     organizationPermissions?: readonly string[];
@@ -100,7 +102,9 @@ async function fixture(
   };
   const clientIp = vi.fn(() => '203.0.113.7');
   const permissions = options.permissions ?? PERMISSIONS.map((p) => p.name);
-  const visible = options.visible ?? true;
+  const authority = options.visible ?? true;
+  const resolves = (allowArchived: boolean | undefined) =>
+    authority && (options.archived !== true || allowArchived === true);
   const app = await createKernel({
     platform: 'node',
     plugins: [],
@@ -116,9 +120,11 @@ async function fixture(
           user: { id: options.userId ?? 'user-1' },
           identity: null,
           protectedHolder: false,
-          project: input.boundary === 'project' && visible ? { id: PROJECT } : null,
+          project:
+            input.boundary === 'project' && resolves(input.allowArchived) ? { id: PROJECT } : null,
           organizationPermissions: options.organizationPermissions ?? [],
-          projectPermissions: input.boundary === 'project' ? permissions : [],
+          projectPermissions:
+            input.boundary === 'project' && resolves(input.allowArchived) ? permissions : [],
         }),
         lookupToken: async (_org, input) =>
           Object.defineProperty(
@@ -141,7 +147,10 @@ async function fixture(
               principalStatus: 'active',
               projectVisible: true,
               validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
-              project: input.boundary === 'project' ? { id: PROJECT } : null,
+              project:
+                input.boundary === 'project' && resolves(input.allowArchived)
+                  ? { id: PROJECT }
+                  : null,
               organizationPermissions: [],
               projectPermissions: permissions,
             },
@@ -273,6 +282,15 @@ describe('POST /_pb/projects/:project/grants', () => {
     expect(results[2]).toEqual(results[0]);
   });
 
+  it('answers the uniform 404 for an archived project even with full authority', async () => {
+    const archived = await fixture({ archived: true });
+    const absent = await fixture({ visible: false });
+    const response = await normalized(await archived.request(post));
+    expect(response.status).toBe(404);
+    expect(response).toEqual(await normalized(await absent.request(post)));
+    noServiceCalls(archived);
+  });
+
   it('rejects a projectId in the body as an unknown property', async () => {
     const f = await fixture();
     const response = await f.request(post, { body: { ...emailBody, projectId: OTHER_PROJECT } });
@@ -388,6 +406,12 @@ describe('POST /_pb/projects/:project/grants', () => {
 describe('PATCH /_pb/projects/:project/grants/:grant', () => {
   const patch = cases[1];
 
+  it('answers 404 for an archived project: only revoke opts in', async () => {
+    const f = await fixture({ archived: true });
+    expect((await f.request(patch)).status).toBe(404);
+    noServiceCalls(f);
+  });
+
   it('answers 428 without If-Match', async () => {
     const f = await fixture();
     expect((await f.request(patch, { ifMatch: null })).status).toBe(428);
@@ -464,8 +488,31 @@ describe('PATCH /_pb/projects/:project/grants/:grant', () => {
 describe('DELETE /_pb/projects/:project/grants/:grant', () => {
   const del = cases[2];
 
-  // Gap (T884): allowArchived per route and archived project visibility are not yet in the engine,
-  // so DELETE on an archived project answers the uniform 404 until then.
+  it('answers 204 for an archived project the caller holds project:grants:write on', async () => {
+    const f = await fixture({ archived: true });
+    const response = await f.request(del);
+    expect(response.status).toBe(204);
+    expect(f.audits).toEqual(['project_grant.revoke']);
+    expect(f.revoke.mock.calls[0]![3]).toBe(PROJECT);
+  });
+
+  it('still answers 403 on an archived project without project:grants:write', async () => {
+    const f = await fixture({ archived: true, permissions: ['project:read'] });
+    expect((await f.request(del)).status).toBe(403);
+    noServiceCalls(f);
+  });
+
+  it('answers 403 to a bearer token on an archived project without calling the service', async () => {
+    const f = await fixture({ archived: true });
+    expect((await f.request(del, { auth: 'token' })).status).toBe(403);
+    noServiceCalls(f);
+  });
+
+  it('answers 404 on an archived project the caller has no authority over', async () => {
+    const f = await fixture({ archived: true, visible: false });
+    expect((await f.request(del)).status).toBe(404);
+    noServiceCalls(f);
+  });
 
   it('answers 428 without If-Match', async () => {
     const f = await fixture();
@@ -535,5 +582,38 @@ describe('response bodies never contain an e-mail address', () => {
       const response = await f.request(cases[0]);
       expect(await response.text()).not.toContain('@');
     }
+  });
+});
+
+describe('allowArchived registry', () => {
+  const deps = {
+    projectAdministration: {} as never,
+    roles: { get: async () => null },
+    clock,
+    ids: { ulid: () => '01JB0000000000000000000001' },
+    clientIp: () => null,
+  };
+
+  it('is set on exactly the revoke route of the project access routes', () => {
+    const flagged = projectAccessRoutes(deps)
+      .filter((route) => route.allowArchived === true)
+      .map((route) => (route.api as { operationId: string }).operationId);
+    expect(flagged).toEqual(['revokeProjectGrant']);
+  });
+
+  it('is declared by the revoke spec alone', () => {
+    const flagged = PROJECT_ACCESS_API_SPECS.filter(
+      (spec) => 'allowArchived' in spec && spec.allowArchived === true,
+    ).map((spec) => spec.api.operationId);
+    expect(flagged).toEqual(['revokeProjectGrant']);
+  });
+
+  it('appears in no other core route module', () => {
+    const dir = new URL('./', import.meta.url);
+    const users = readdirSync(dir)
+      .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+      .filter((name) => readFileSync(new URL(name, dir), 'utf8').includes('allowArchived'))
+      .sort();
+    expect(users).toEqual(['project-access-schemas.ts']);
   });
 });

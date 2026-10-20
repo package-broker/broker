@@ -166,6 +166,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
           handle?.owner === lease.owner &&
           handle.fence === lease.fence &&
           latest?.state === 'running' &&
+          latest.id === handle.id &&
           latest.fence === lease.fence &&
           latest.generation === handle.generation
         );
@@ -176,7 +177,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
         if (handle?.owner !== lease.owner || handle.fence !== lease.fence) return;
         try {
           if (handle.stamp === null && !resumable.has(handle))
-            await deps.sessions.abandon(ctx, handle);
+            await deps.sessions.discard(ctx, handle);
           else await deps.sessions.release(ctx, handle);
         } finally {
           if (handles.get(key) === handle) handles.delete(key);

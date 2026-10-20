@@ -38,5 +38,11 @@ export const entries: readonly MutationEntry[] = [
     builder: 'visibilityAuditStatements',
     cases: [scopedAudit],
     predicates: [],
+    waivers: [
+      {
+        locate: /org_id = \?(?= AND principal_key = \? AND key = \? AND expires_at)/,
+        reason: 'the idempotency live-row lookup is judged by the idempotencyInsertStatement entry',
+      },
+    ],
   },
 ];

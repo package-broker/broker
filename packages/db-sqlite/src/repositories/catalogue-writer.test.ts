@@ -148,7 +148,7 @@ beforeEach(async () => {
       return database.executor.batch(changed);
     },
   };
-  writer = createCatalogueWriter(executor);
+  writer = createCatalogueWriter(executor, { maxAbsenceShare: 1 });
   const providerAnchors = [
     {
       provider: 'oidc',

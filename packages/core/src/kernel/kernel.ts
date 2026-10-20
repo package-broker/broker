@@ -56,8 +56,14 @@ import { collectRegistrations, KernelConfigError, ROUTE_METHODS } from './regist
 import type { RegisteredJob, Registration } from './registry.js';
 import { bindPluginPorts } from './plugin-ports.js';
 import type { PlatformServices } from './plugin-ports.js';
+import type { ProjectActor } from '../authz/project-actor.js';
 import { setResolvedPackage } from '../internal/package-context.js';
-import { packageActorOf } from '../internal/package-actor.js';
+import {
+  narrowPackageActor,
+  packageActorOf,
+  setContextPackageActor,
+} from '../internal/package-actor.js';
+import { createExecutionTracker, setWaitUntil, type ExecutionPort } from './execution.js';
 import type { PackageVisibility, PackageVisibilityPort } from '../db/catalogue.js';
 import type { RouteDefinition } from './routes.js';
 import {
@@ -114,7 +120,9 @@ export interface JobScope {
 }
 
 export interface Kernel {
-  fetch(request: Request): Promise<Response>;
+  fetch(request: Request, execution?: ExecutionPort): Promise<Response>;
+  /** Resolves once all work scheduled through the request waitUntil port has settled. */
+  idle(deadlineMs?: number): Promise<void>;
   readonly registration: Registration;
   readonly coreRoutes: readonly RouteDefinition[];
   /** Route templates usable as metric `route` labels and OTLP route attributes. */
@@ -131,6 +139,7 @@ type KernelEnv = {
     readonly scope: RequestScope;
     readonly guard: CompletionGuard;
     readonly log: KernelLog;
+    readonly waitUntil: (promise: Promise<unknown>) => void;
   };
 };
 type RegisteredRoute = Registration['routes'][number];
@@ -452,6 +461,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     projectId: string | null,
     snapshot: AccessContextSnapshot | null,
     resolved: Exclude<PackageVisibility, { kind: 'absent' }> | null = null,
+    packageActor: ProjectActor | null = null,
   ): Promise<Response> {
     const context: RequestContext = Object.freeze({
       request: c.req.raw,
@@ -466,10 +476,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         initiator: { projectId, tokenId: c.env.scope.fields().tokenId ?? null },
       }),
     });
+    setWaitUntil(context, c.env.waitUntil);
     if (snapshot !== null) {
       try {
         setAccessContext(context, snapshot);
         if (resolved !== null) setResolvedPackage(context, resolved);
+        if (packageActor !== null) setContextPackageActor(context, packageActor);
       } catch (error) {
         c.env.guard.reason(hookErrorReason(ENGINE_PLUGIN, ENGINE_PLUGIN));
         c.env.scope.obs({ plugin: hookPlugin(ENGINE_PLUGIN) }).log({
@@ -580,6 +592,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ...('bearerOnly' in route && route.bearerOnly === true
           ? { bearerOnly: true as const }
           : {}),
+        ...(route.boundary === 'project' && route.allowArchived === true
+          ? { allowArchived: true as const }
+          : {}),
       },
       params: Object.freeze({ ...c.req.param() }),
     };
@@ -602,7 +617,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
     scope.set({ projectId: decision.projectId, tokenId: decision.tokenId ?? null });
     const grant = engineGrantOf(authorizationRequest);
-    const packageActor = route.boundary === 'package' ? packageActorOf(authorizationRequest) : null;
+    const boundaryActor =
+      route.boundary === 'package' || route.boundary === 'project'
+        ? packageActorOf(authorizationRequest)
+        : null;
+    const actorConsistent =
+      boundaryActor === null ||
+      (boundaryActor.userId === decision.principal.id &&
+        boundaryActor.projectId === decision.projectId &&
+        boundaryActor.orgId === org.orgId);
+    const exposedActor =
+      boundaryActor === null || !actorConsistent
+        ? null
+        : narrowPackageActor(boundaryActor, permission);
+    const packageActor = route.boundary === 'package' ? exposedActor : null;
     if (grant === null && route.boundary !== 'package') {
       return invoke(route, c, org, decision.principal, decision.projectId, null);
     }
@@ -611,6 +639,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       grant.principal.kind !== decision.principal.kind ||
       grant.principal.id !== decision.principal.id ||
       grant.projectId !== decision.projectId ||
+      !actorConsistent ||
       (route.boundary === 'package' &&
         (packageActor === null ||
           packageActor.userId !== decision.principal.id ||
@@ -677,7 +706,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         routeClass: boundary,
       },
     };
-    return invoke(route, c, org, decision.principal, decision.projectId, snapshot, resolved);
+    return invoke(
+      route,
+      c,
+      org,
+      decision.principal,
+      decision.projectId,
+      snapshot,
+      resolved,
+      exposedActor,
+    );
   }
 
   const app = new Hono<KernelEnv>();
@@ -739,7 +777,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     options.publicOrigin !== undefined &&
     parsePublicOrigin(options.publicOrigin, { http: 'allow' }).startsWith('https:');
 
-  async function fetch(request: Request): Promise<Response> {
+  const execution = createExecutionTracker();
+
+  async function fetch(request: Request, port?: ExecutionPort): Promise<Response> {
     const responsePolicy = { noStore: false };
     const scope = createRequestScope(obsContext, request);
     const guard = createCompletionGuard(scope, httpMetrics, request.signal);
@@ -761,6 +801,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
           scope,
           guard,
           log,
+          waitUntil: execution.bind(port, (error) => {
+            scope.obs().log({
+              level: 'warn',
+              event: 'http.error',
+              error_name: reportableErrorName(error),
+              reason_code: 'error.internal',
+            });
+          }),
         });
       } catch (error) {
         response = await failed(
@@ -792,5 +840,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
   }
 
-  return Object.freeze({ fetch, registration, coreRoutes, routeTemplates, jobScope });
+  return Object.freeze({
+    fetch,
+    idle: execution.idle,
+    registration,
+    coreRoutes,
+    routeTemplates,
+    jobScope,
+  });
 }

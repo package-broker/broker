@@ -259,7 +259,9 @@ describe('ingest session finalize', () => {
     );
     const { session, mark } = await begin('source');
     await mark(['acme/two']);
-    const result = await createIngestFinalizer(database.executor).finalize(org, session, input(1));
+    const result = await createIngestFinalizer(database.executor, {
+      maxAbsenceShare: 0.5,
+    }).finalize(org, session, input(1));
     expect(result).toMatchObject({ status: 'complete', empty: false });
     expect(await refetchable()).toEqual([{ id: 'B-1.0.0', refetchable: 0 }]);
     expect(await all<{ status: string }>('SELECT status FROM package ORDER BY name')).toEqual([

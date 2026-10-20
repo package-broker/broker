@@ -7,6 +7,7 @@ import type { ProjectStatus } from './project-service.js';
 export const PROJECT_LIST_MAX_LIMIT = 200;
 
 const MAX_SOURCE_READS = 10;
+const RESTRICTED_CHUNK = 50;
 
 export interface ProjectListEntry {
   readonly id: string;
@@ -19,7 +20,12 @@ export interface ProjectListEntry {
 export interface ProjectListSource {
   list(
     ctx: OrgContext,
-    page: { readonly afterId?: string; readonly limit: number; readonly status: ProjectStatus },
+    page: {
+      readonly afterId?: string;
+      readonly limit: number;
+      readonly status: ProjectStatus;
+      readonly ids?: readonly string[];
+    },
   ): Promise<readonly ProjectListEntry[]>;
 }
 
@@ -57,6 +63,8 @@ export interface ProjectListRequest {
   readonly limit: number;
   readonly afterId?: string;
   readonly status?: ProjectStatus;
+  /** Lists nothing outside these project ids, and still only what the actor can read. */
+  readonly restrictTo?: readonly string[];
 }
 
 export interface ProjectListPage {
@@ -114,6 +122,84 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
     );
   }
 
+  const pages: ProjectListSource = source;
+
+  async function listRestricted(
+    ctx: OrgContext,
+    userId: string,
+    inheritsAll: boolean,
+    page: { readonly limit: number; readonly afterId?: string; readonly status: ProjectStatus },
+    restrictTo: unknown,
+  ): Promise<ProjectListResult> {
+    if (
+      !Array.isArray(restrictTo) ||
+      !restrictTo.every((id: unknown) => typeof id === 'string' && isUlid(id))
+    ) {
+      return fail('source_invalid');
+    }
+    const bound = [...new Set(restrictTo as string[])].sort();
+    const wanted = new Set(bound);
+    const { limit, status } = page;
+    const viaReadable = !inheritsAll && readable !== undefined;
+    const items: ProjectListEntry[] = [];
+    let cursor = page.afterId;
+    let exhausted = false;
+    for (
+      let reads = 0;
+      items.length < limit && !exhausted && (!viaReadable || reads < MAX_SOURCE_READS);
+      reads += 1
+    ) {
+      let rows: readonly ProjectListEntry[];
+      let granted: ReadonlyMap<string, ReadonlySet<string>> | null = null;
+      if (viaReadable) {
+        rows = await readable.listReadableProjects(
+          ctx,
+          { userId },
+          {
+            ...(cursor === undefined ? {} : { afterId: cursor }),
+            limit: PROJECT_LIST_MAX_LIMIT,
+            status,
+          },
+        );
+        exhausted = rows.length < PROJECT_LIST_MAX_LIMIT;
+        cursor = rows[rows.length - 1]?.id;
+      } else {
+        const start = cursor;
+        const chunk = bound
+          .filter((id) => start === undefined || id > start)
+          .slice(0, RESTRICTED_CHUNK);
+        const last = chunk[chunk.length - 1];
+        if (last === undefined) break;
+        rows = await pages.list(ctx, { limit: chunk.length, status, ids: chunk });
+        granted = inheritsAll
+          ? null
+          : await (access as ProjectReadAccess).permissionsFor(
+              ctx,
+              userId,
+              rows.map((row) => row.id),
+            );
+        cursor = last;
+        exhausted = bound[bound.length - 1] === last;
+      }
+      for (const row of rows) {
+        if (items.length === limit) break;
+        if (row.status !== status || !wanted.has(row.id)) continue;
+        if (granted !== null && granted.get(row.id)?.has('project:read') !== true) continue;
+        items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
+      }
+    }
+    const lastItem = items[items.length - 1];
+    if (lastItem === undefined) {
+      return exhausted || cursor === undefined || !viaReadable
+        ? { ok: true, value: { items, nextAfterId: null } }
+        : fail('scan_incomplete');
+    }
+    return {
+      ok: true,
+      value: { items, nextAfterId: exhausted && items.length < limit ? null : lastItem.id },
+    };
+  }
+
   return {
     async list(ctx, actor, request) {
       if (typeof actor !== 'object' || actor === null) return fail('forbidden');
@@ -135,6 +221,19 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       if (status === 'archived' && !admin) return fail('forbidden');
 
       const inheritsAll = orgPermissions.has('project:read');
+
+      if (request.restrictTo !== undefined) {
+        if (request.restrictTo.length === 0) {
+          return { ok: true, value: { items: [], nextAfterId: null } };
+        }
+        return listRestricted(
+          ctx,
+          userId,
+          inheritsAll,
+          { limit, status, ...(afterId === undefined ? {} : { afterId }) },
+          request.restrictTo,
+        );
+      }
 
       if (!inheritsAll && readable !== undefined) {
         const rows = await readable.listReadableProjects(

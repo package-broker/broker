@@ -14,7 +14,7 @@ import type {
   ImportApplyRun,
   ImportApplyStore,
 } from '@package-broker/core/import/apply';
-import { IMPORT_RUN_JOB } from '@package-broker/core/import/run-service';
+import { IMPORT_RUN_JOB, IMPORT_VERIFICATION_JOB } from '@package-broker/core/import/run-service';
 import { parseSha256 } from '@package-broker/core/platform/blob';
 import { ulid } from '@package-broker/core/ids';
 import {
@@ -48,11 +48,7 @@ const MAX_STATEMENT_PARAMETERS = 100;
 const MAX_STATEMENT_SQL_BYTES = 100_000;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 const ENCODER = new TextEncoder();
-export const IMPORT_VERIFICATION_JOB = {
-  type: 'core:import-verify:v1',
-  resourceKey: (runId: string): string => `${IMPORT_RUN_JOB.resourceKey(runId)}:verify`,
-  payload: IMPORT_RUN_JOB.payload,
-} as const;
+export { IMPORT_VERIFICATION_JOB } from '@package-broker/core/import/run-service';
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 type Row = Record<string, SqlValue>;
 type Chunk = Parameters<ImportApplyStore['applyChunk']>[2];
@@ -80,7 +76,7 @@ export interface ImportJournalStore extends ImportApplyStore {
   markVerified(
     ctx: OrgContext,
     fence: SystemMutationFence,
-    input: { readonly runId: string; readonly verifiedAt: string },
+    input: { readonly runId: string; readonly verifiedAt: string; readonly expectedEpoch: string },
   ): Promise<FencedOutcome>;
 }
 
@@ -703,6 +699,10 @@ export function createImportJournalStore(options: {
       if (fenceKind(fence) !== 'system' || fence.writer !== 'verifier')
         throw new TypeError('import verification requires a verifier fence');
       const allowed = sql<SqlBool>`(exists (select 1 from import_run ijverified where ijverified.org_id = ${ctx.orgId} and ijverified.id = ${input.runId} and ijverified.state = 'verifying' and ijverified.before_image_expires_at is null)
+        and abs(unixepoch(${input.verifiedAt}, 'subsec') - unixepoch('now', 'subsec')) <= 60
+        and exists (select 1 from cache_epoch where cache_epoch.org_id = ${ctx.orgId} and cache_epoch.version = ${input.expectedEpoch})
+        and not exists (select 1 from job ijbusy where ijbusy.org_id = ${ctx.orgId}
+          and ijbusy.resource_key = ${IMPORT_RUN_JOB.resourceKey(input.runId)} and ijbusy.type = ${IMPORT_RUN_JOB.rollback} and ijbusy.state in ('queued', 'running'))
         and exists (select 1 from job where job.org_id = ${ctx.orgId} and job.id = ${fence.job.id}
           and job.type = ${IMPORT_VERIFICATION_JOB.type}
           and job.resource_key = ${IMPORT_VERIFICATION_JOB.resourceKey(input.runId)}
@@ -714,7 +714,7 @@ export function createImportJournalStore(options: {
         [
           ...jobLeaseGuard(ctx, fence.job),
           statement(
-            "UPDATE import_run SET state = 'verified', before_image_expires_at = ?, updated_at = ? WHERE org_id = ? AND id = ?",
+            "UPDATE import_run SET state = 'verified', last_error = NULL, before_image_expires_at = ?, updated_at = ? WHERE org_id = ? AND id = ?",
             expiry,
             input.verifiedAt,
             ctx.orgId,

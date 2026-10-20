@@ -1,5 +1,6 @@
 import { PACKAGE_BOUNDARY_PERMISSIONS } from '../authz/project-actor.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
+import { catalogueTokenEligible } from '../authz/catalogue.js';
 import { PERMISSIONS } from '../authz/permissions.js';
 import type { PackageEcosystem, RouteDefinition as PluginRouteDefinition } from '../plugin.js';
 
@@ -116,6 +117,7 @@ interface BoundaryInput {
   readonly permission: unknown;
   readonly boundary?: unknown;
   readonly bearerOnly?: unknown;
+  readonly allowArchived?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;
 }
@@ -203,6 +205,15 @@ export function routeBoundaryProblems(
   }
   if (boundary === 'self' && options.allowSelf !== true) {
     fail('the self boundary is not available to plugin routes');
+  }
+
+  const allowArchived = route.allowArchived;
+  if (allowArchived !== undefined) {
+    if (allowArchived !== true) fail('allowArchived must be true when set');
+    if (boundary !== 'project') fail('allowArchived requires the project boundary');
+    if (typeof permission !== 'string' || catalogueTokenEligible(permission)) {
+      fail('allowArchived requires a session-only permission');
+    }
   }
 
   if (route.bearerOnly !== undefined) {

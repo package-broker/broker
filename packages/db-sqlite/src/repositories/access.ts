@@ -55,6 +55,8 @@ export interface SessionLookupInput {
   readonly secretHash: string;
   readonly boundary: AccessBoundary;
   readonly projectSlug: string | null;
+  /** Resolve an archived project too. Never adds a permission; only the project row becomes visible. */
+  readonly allowArchived?: boolean;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
@@ -101,6 +103,8 @@ export interface TokenLookupInput {
   readonly selector: string;
   readonly boundary: AccessBoundary;
   readonly projectSlug: string | null;
+  /** Resolve an archived project too. Never adds a permission; only the project row becomes visible. */
+  readonly allowArchived?: boolean;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
@@ -200,6 +204,10 @@ const nowMs = sql<number>`cast(round(unixepoch('now', 'subsec') * 1000) as integ
 
 function instantMs(column: string) {
   return sql<number>`cast(round(unixepoch(${sql.ref(column)}, 'subsec') * 1000) as integer)`;
+}
+
+function projectStatuses(input: { readonly allowArchived?: boolean }): readonly string[] {
+  return input.allowArchived === true ? ['active', 'archived'] : ['active'];
 }
 
 type ProjectOperand = Expression<string | null> | string | null;
@@ -559,7 +567,7 @@ export function lookupSessionStatement(
       join
         .onRef('p.org_id', '=', 's.org_id')
         .on('p.slug', '=', input.projectSlug as string)
-        .on('p.status', '=', 'active'),
+        .on('p.status', 'in', projectStatuses(input)),
     );
   }
 
@@ -818,13 +826,13 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
       join
         .onRef('vp.org_id', '=', 't.org_id')
         .on('vp.slug', '=', input.projectSlug as string)
-        .on('vp.status', '=', sql.lit('active')),
+        .on('vp.status', 'in', projectStatuses(input)),
     );
     query = query.leftJoin('project as p', (join) =>
       join
         .onRef('p.org_id', '=', 't.org_id')
         .on('p.slug', '=', input.projectSlug as string)
-        .on('p.status', '=', 'active')
+        .on('p.status', 'in', projectStatuses(input))
         .on(
           sql<SqlBool>`(
             (t.kind = 'pat' and t.project_id is null and t.project_mode = 'all')

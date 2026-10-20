@@ -1,9 +1,11 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { assetProviderProblems, assetProviderResultProblems } from '@package-broker/core/config';
+import type { AssetProviderV1 } from '@package-broker/core/config';
 import provider, { createUiAssetsProvider } from './index.js';
 
 function manifestOf(name: string): string {
@@ -79,6 +81,33 @@ describe('ui-assets provider', () => {
     const anchor = fileURLToPath(anchorIn(root));
     const result = await createUiAssetsProvider(anchor).resolve({ target: 'cloudflare' });
     expect(readFileSync(new URL(result.manifestUrl), 'utf8')).toBe(manifestOf('path'));
+  });
+
+  it('resolves the default export from its own location, independent of the working directory', async () => {
+    const bridgeBase = join(root, 'bridge');
+    const otherBase = join(root, 'other');
+    installUi(bridgeBase, 'bridge');
+    installUi(otherBase, 'other');
+    const installed = fileURLToPath(anchorIn(bridgeBase));
+    writeFileSync(
+      installed,
+      stripTypeScriptTypes(readFileSync(new URL('./index.ts', import.meta.url), 'utf8')),
+    );
+    process.chdir(otherBase);
+
+    const loaded = (await import(pathToFileURL(installed).href)) as { default: AssetProviderV1 };
+    const result = await loaded.default.resolve({ target: 'node' });
+
+    expect(readFileSync(new URL(result.manifestUrl), 'utf8')).toBe(manifestOf('bridge'));
+  });
+
+  it('rejects when the manifest export is declared but its file is missing', async () => {
+    const manifest = installUi(root, 'gone');
+    rmSync(manifest);
+    const bridge = createUiAssetsProvider(anchorIn(root));
+    await expect(bridge.resolve({ target: 'node' })).rejects.toMatchObject({
+      code: 'MODULE_NOT_FOUND',
+    });
   });
 
   it('rejects when the installed UI package does not export the manifest', async () => {

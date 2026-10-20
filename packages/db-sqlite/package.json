@@ -42,6 +42,10 @@
       "types": "./dist/repositories/*.d.ts",
       "default": "./dist/repositories/*.js"
     },
+    "./contract/vulnerability-contract": {
+      "types": "./dist/contract/vulnerability-contract.d.ts",
+      "default": "./dist/contract/vulnerability-contract.js"
+    },
     "./contract/access-contract": {
       "types": "./dist/contract/access-contract.d.ts",
       "default": "./dist/contract/access-contract.js"

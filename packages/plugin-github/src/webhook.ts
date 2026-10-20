@@ -1,4 +1,6 @@
-import type { WebhookVerifier } from '@package-broker/core/sources/provider';
+import type { SourceProvider } from '@package-broker/core/plugin';
+
+type WebhookVerifier = NonNullable<SourceProvider['webhookVerifier']>;
 
 const SIGNATURE = /^sha256=([0-9a-f]{64})$/;
 

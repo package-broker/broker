@@ -20,7 +20,7 @@ const mf = new Miniflare(
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
     compatibilityDate: '2026-10-01',
-    d1Databases: ['SHARE_A', 'SHARE_B'],
+    d1Databases: ['SHARE_A', 'SHARE_B', 'SHARE_C', 'SHARE_D'],
   } as Parameters<typeof convertV4MiniflareOptions>[0]),
 );
 
@@ -116,5 +116,70 @@ describe('D1 source finalize at the exact share', () => {
         params: [],
       }),
     ).toEqual([{ n: 1 }]);
+  }, 120_000);
+});
+
+async function versionSession(executor: SqlExecutor, marked: number, total: number) {
+  const { a: ctx } = await seedTwoOrganizations(executor);
+  await executor.batch([
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('S', ?, 's', 'composer', 'composer_repository')",
+      params: [ctx.orgId],
+    },
+    {
+      sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at) VALUES ('P', ?, 'S', 'composer', 'acme/p', '2020-01-01T00:00:00.000Z')",
+      params: [ctx.orgId],
+    },
+    {
+      sql: `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+        INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at,
+          published_at_basis, metadata_json, updated_at)
+        SELECT 'v' || i, ?, 'P', '1.0.' || i, '1.0.' || i, '2020-01-01T00:00:00.000Z',
+          'release_date', '{}', '2020-01-01T00:00:00.000Z' FROM n`,
+      params: [total, ctx.orgId],
+    },
+  ]);
+  const sessions = createIngestSessions(executor);
+  const handle = await sessions.acquire(
+    ctx,
+    { scope: 'package', sourceId: 'S', packageKey: 'acme/p' },
+    'worker',
+    60,
+  );
+  if (handle === 'held') throw new Error('held');
+  const guard = createIngestSessionWriteGuard(ctx, handle);
+  const scope = { kind: 'package', packageId: 'P' } as const;
+  const reconciler = createCatalogueReconciler(executor);
+  const { stamp } = await reconciler.openListing(ctx, guard, scope);
+  await sessions.start(ctx, handle, { snapshot: { id: 'snapshot' }, stamp });
+  await reconciler.markListing(ctx, guard, {
+    scope,
+    stamp,
+    present: Array.from({ length: marked }, (_, i) => `1.0.${String(i + 1)}`),
+  });
+  return { ctx, handle };
+}
+
+const activeVersions = (executor: SqlExecutor) =>
+  executor.all({ sql: "SELECT count(*) AS n FROM version WHERE status = 'active'", params: [] });
+
+describe('D1 version finalize mass-removal share', () => {
+  it('refuses an above-share version listing even when the evidence understates it', async () => {
+    const executor = await migrated('SHARE_C');
+    const { ctx, handle } = await versionSession(executor, 2, 10);
+    expect(await createIngestFinalizer(executor).finalize(ctx, handle, input(2))).toEqual({
+      status: 'refused',
+      reason: 'mass_absence',
+    });
+    expect(await activeVersions(executor)).toEqual([{ n: 10 }]);
+  }, 120_000);
+
+  it('completes at exactly 25 percent unseen and removes only those', async () => {
+    const executor = await migrated('SHARE_D');
+    const { ctx, handle } = await versionSession(executor, 3, 4);
+    expect(await createIngestFinalizer(executor).finalize(ctx, handle, input(3))).toMatchObject({
+      status: 'complete',
+    });
+    expect(await activeVersions(executor)).toEqual([{ n: 3 }]);
   }, 120_000);
 });

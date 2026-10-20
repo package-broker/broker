@@ -40,7 +40,7 @@ function foreignCase(layer: Layer): ContractCase {
         own.orgId,
       );
       const id = ulid();
-      await seed(
+      await (layer === 'owner' ? seed.forged : seed)(
         `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, user_id, expires_at, project_mode, created_at)
         VALUES (?, ?, 'pat', 'abcdefabcdef', ?, 1, 'test', '["read"]', 'U', '2999-01-01T00:00:00.000Z', 'selected', '2020-01-01T00:00:00.000Z')`,
         id,
@@ -50,12 +50,12 @@ function foreignCase(layer: Layer): ContractCase {
       // The first four layers test affected-user selection. The others test remaining access.
       const targeting = ['token', 'owner', 'removed', 'member', 'lost'].includes(layer);
       if (layer === 'lost') {
-        await seed(
+        await seed.forged(
           "INSERT INTO user_group (org_id, user_id, provider, group_name) VALUES (?, 'U', 'oidc', 'removed')",
           foreign.orgId,
         );
       } else if (layer === 'removed') {
-        await seed(
+        await seed.forged(
           "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES ('removed', ?, 'email', 'user@example.test', 'organization', 'R')",
           foreign.orgId,
         );
@@ -64,21 +64,21 @@ function foreignCase(layer: Layer): ContractCase {
           "INSERT INTO access_grant (id, org_id, subject_type, subject_provider, subject_value, scope, role_id) VALUES ('removed', ?, 'group', 'oidc', 'removed', 'organization', 'R')",
           org('removed'),
         );
-        await seed(
+        await seed.forged(
           "INSERT INTO user_group (org_id, user_id, provider, group_name) VALUES (?, 'U', 'oidc', 'removed')",
           org('member'),
         );
       } else if (!targeting) {
-        await seed(
+        await (layer === 'bound' ? seed.forged : seed)(
           "INSERT INTO token_project (org_id, token_id, project_id) VALUES (?, ?, 'P')",
           org('bound'),
           id,
         );
-        await seed(
-          "INSERT INTO access_grant (id, org_id, subject_type, subject_provider, subject_value, scope, project_id, role_id) VALUES ('held', ?, 'group', 'oidc', 'held', 'project', 'P', 'R')",
+        await (layer === 'reach' ? seed.forged : seed)(
+          "INSERT INTO access_grant (id, org_id, subject_type, subject_provider, subject_value, scope, project_id, role_id, created_at) VALUES ('held', ?, 'group', 'oidc', 'held', 'project', 'P', 'R', '2020-01-01T00:00:00.000Z')",
           org('reach'),
         );
-        await seed(
+        await (layer === 'via' ? seed.forged : seed)(
           "INSERT INTO user_group (org_id, user_id, provider, group_name) VALUES (?, 'U', 'oidc', 'held')",
           org('via'),
         );

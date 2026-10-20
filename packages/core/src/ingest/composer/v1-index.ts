@@ -121,6 +121,7 @@ const DEFAULT_MAX_MEMBER_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PASS_BYTES = 128 * 1024 * 1024;
 const DEFAULT_PASS_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const DEFAULT_MAX_CACHED_BYTES = 8 * 1024 * 1024;
 const MAX_FILES = 1000;
 const MAX_DEPTH = 8;
@@ -165,6 +166,7 @@ interface Pass {
   readonly destinations: readonly string[];
   readonly base: string;
   readonly deadline: number;
+  expired?: AbortSignal;
   readonly entries: Map<string, V1IndexEntry>;
   readonly documents: Map<string, V1CachedDocument>;
   cacheBytes: number;
@@ -282,6 +284,7 @@ async function guarded<T>(pass: Pass, step: () => Promise<T>): Promise<T> {
     return await step();
   } catch (error) {
     aborted(pass.options);
+    if (pass.expired?.aborted === true) throw new IncludeFailure('deadline');
     if (error instanceof IncludeFailure) throw error;
     if (
       error instanceof UpstreamError ||
@@ -374,8 +377,13 @@ async function readDocument(
     throw new IncludeFailure('limit');
   }
   const remaining = pass.deadline - Date.now();
-  if (remaining <= 0) throw new IncludeFailure('deadline');
+  if (remaining <= 0 || pass.expired?.aborted === true) throw new IncludeFailure('deadline');
   const { source, codecs, signal } = pass.options;
+  // Classify the deadline by its timer: the wall clock can lag when a fetch is aborted.
+  if (pass.expired === undefined && remaining <= MAX_TIMER_MS) {
+    pass.expired = AbortSignal.timeout(remaining);
+  }
+  const abort = [signal, pass.expired].filter((s): s is AbortSignal => s !== undefined);
   const algs = [
     ...(expected.sha1 === undefined ? [] : (['sha1'] as const)),
     ...(expected.sha256 === undefined ? [] : (['sha256'] as const)),
@@ -389,8 +397,10 @@ async function readDocument(
       destinations: pass.destinations,
       purpose: 'metadata',
       maxBytes: pass.limits.maxDocumentBytes,
-      timeoutMs: Math.min(source.timeoutMs ?? DEFAULT_TIMEOUT_MS, remaining),
-      ...(signal === undefined ? {} : { signal }),
+      timeoutMs: Math.min(source.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMER_MS),
+      ...(abort.length === 0
+        ? {}
+        : { signal: abort.length === 1 ? abort[0] : AbortSignal.any(abort) }),
     }),
   );
   if (response.status !== 200 || response.body === null) {
@@ -618,7 +628,7 @@ export async function readV1Index(
   if (previous?.complete === true && previous.rootSha256 === first.validator.sha256) {
     return { status: 'not_modified', root: first };
   }
-  const outcome = await indexPass(send, options, limits, first, firstBytes, firstDeadline);
+  const outcome = await indexPass(fetch, options, limits, first, firstBytes, firstDeadline);
   if ('entries' in outcome || firstBytes > limits.maxPassBytes)
     return updated(first, first.validator.sha256, outcome);
   let again: RootRead;
@@ -636,6 +646,6 @@ export async function readV1Index(
   return updated(
     root,
     root.validator.sha256,
-    await indexPass(send, options, limits, root, bytes, retryDeadline),
+    await indexPass(fetch, options, limits, root, bytes, retryDeadline),
   );
 }

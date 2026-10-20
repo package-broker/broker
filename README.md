@@ -37,7 +37,7 @@ pnpm build
 pnpm pb build --config broker.config.ts --target cloudflare   # or --target node
 ```
 
-`pb build` validates the plugin set, writes `.pb/<target>/generated/manifest.ts` and `manifest.json`, and bundles the runtime entry for the target to `.pb/<target>/worker.js` (Cloudflare) or `.pb/<target>/server.js` (Node) with `metafile.json`.
+`pb build` validates the plugin set, writes `.pb/<target>/generated/manifest.ts` and `manifest.json`, and bundles the runtime entry for the target to `.pb/<target>/worker.js` (Cloudflare) or `.pb/<target>/server.js` (Node) with `metafile.json`. The generated config import is relative to `manifest.ts`, keeping absolute build-machine paths out of the generated source, source map and metafile.
 
 `broker.config.ts` selects the UI with `assets: [defineAssets({ kind: 'ui', provider: '@package-broker/ui-assets' })]`. The declaration is inert: `pb build` resolves the provider, checks the UI manifest and stages the files into `<out>/assets` beside the bundle, with the deployment descriptor in `<out>/assets.json`. A config without `assets` builds a headless broker. Run `pnpm build` before `pnpm bundle` so the UI output exists.
 

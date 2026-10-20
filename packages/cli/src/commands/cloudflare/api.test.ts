@@ -265,3 +265,34 @@ it('keeps an injected deadline when the budget is restarted', () => {
   restarted.restartDeadline();
   expect(restarted.deadline).toBe(600_005);
 });
+
+it('sends multipart without a JSON content type, isolates the asset-session token, and scopes zone calls correctly', async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  const h = harness((url, init) => {
+    calls.push({ url, ...(init ? { init } : {}) });
+    return json({});
+  });
+  const form = new FormData();
+  form.set('metadata', '{}');
+  form.set('worker.js', new Blob(['export default {}']), 'worker.js');
+  await h.api.request('/workers/scripts/broker/versions', 'POST', form);
+  await h.api.uploadAssets(form, 'SESSION_SENTINEL');
+  await h.api.requestZone('b'.repeat(32), '/workers/routes', 'PUT', {});
+  expect(calls[0]?.init?.body).toBe(form);
+  expect(new Headers(calls[0]?.init?.headers).has('content-type')).toBe(false);
+  expect(new Headers(calls[1]?.init?.headers).get('authorization')).toBe('Bearer SESSION_SENTINEL');
+  expect(new Headers(calls[2]?.init?.headers).get('authorization')).toBe(`Bearer ${apiToken}`);
+  expect(calls[2]?.url).toBe(
+    `https://api.cloudflare.com/client/v4/zones/${'b'.repeat(32)}/workers/routes`,
+  );
+});
+it.each(['PUT', 'PATCH'] as const)(
+  'never retries a %s mutation after an unknown response',
+  async (method) => {
+    const h = harness(() => new Response('SENTINEL', { status: 503 }));
+    await expect(
+      h.api.request('/workers/scripts/broker/settings', method, {}),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  },
+);

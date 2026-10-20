@@ -1,6 +1,15 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build as bundle } from 'esbuild';
@@ -347,6 +356,49 @@ describe('build with platformPorts', () => {
   async function readManifest(outDir: string): Promise<Record<string, unknown>> {
     return JSON.parse(await readFile(path.join(outDir, 'generated', 'manifest.json'), 'utf8'));
   }
+
+  it.each([
+    ['node', false],
+    ['cloudflare', false],
+    ['node', true],
+    ['cloudflare', true],
+  ] as const)(
+    'keeps absolute build paths out of the entire %s deployment (custom output: %s)',
+    async (target, customOutput) => {
+      const root = await realpath(project);
+      const config = await realpath(
+        await writeConfig(target, { node: NODE_PORTS, cloudflare: CLOUDFLARE_PORTS }),
+      );
+      const cwd = customOutput ? path.join(root, 'invocation') : root;
+      await mkdir(cwd, { recursive: true });
+      const result = await build({
+        configPath: config,
+        target,
+        cwd,
+        runtimeEntry: await realpath(runtimeEntry),
+        ...(customOutput ? { outDir: '../deploy output' } : {}),
+      });
+      const entries = await readdir(result.outDir, { recursive: true, withFileTypes: true });
+      const files = entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => path.relative(result.outDir, path.join(entry.parentPath, entry.name)));
+      expect(files).toEqual(
+        expect.arrayContaining([
+          'metafile.json',
+          path.join('generated', 'manifest.ts'),
+          `${path.basename(result.bundle)}.map`,
+        ]),
+      );
+      const forbidden = [root, fileURLToPath(new URL('../../..', import.meta.url)), homedir()];
+      for (const file of files) {
+        const contents = await readFile(path.join(result.outDir, file), 'utf8');
+        for (const absolutePath of forbidden) {
+          expect(contents, file).not.toContain(absolutePath);
+          expect(contents, file).not.toContain(JSON.stringify(absolutePath).slice(1, -1));
+        }
+      }
+    },
+  );
 
   it.each(['node', 'cloudflare'] as const)(
     'builds --target %s from a config with both stanzas and records references only',

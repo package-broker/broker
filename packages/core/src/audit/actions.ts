@@ -86,7 +86,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'project_grant.revoke': GRANT_FIELDS,
   'project_grant.role_change': GRANT_FIELDS,
   'token.issue': ['kind', 'name', 'scope', 'expires_at', 'project_mode', 'project_count'],
-  'token.revoke': [],
+  'token.revoke': ['cause'],
   'service_principal.create': ['name', 'project_id', 'permissions'],
   'service_principal.permissions_set': ['permissions'],
   'service_principal.suspend': [],

@@ -738,12 +738,17 @@ export { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors
 
 const guardOrgs = new WeakMap<object, string>();
 
-/** Replaces the organization's cache_epoch version, then fails the batch unless exactly one row changed. */
-export function cacheEpochBumpStatements(ctx: OrgContext): readonly Statement[] {
+/** Replaces the organization's epoch when changed is true; requires exactly one matching epoch row. */
+export function cacheEpochBumpStatements(ctx: OrgContext, changed?: Guard): readonly Statement[] {
   const ctes = db as unknown as Kysely<GuardCtes & Database>;
   const bump = ctes
     .updateTable('cache_epoch')
-    .set({ version: sql<string>`hex(randomblob(16))` })
+    .set({
+      version:
+        changed === undefined
+          ? sql<string>`hex(randomblob(16))`
+          : sql<string>`case when ${changed} then hex(randomblob(16)) else version end`,
+    })
     .where('org_id', '=', ctx.orgId);
   const bumpedOnce = ctes
     .with('guard_rows(n)', (qb) =>
@@ -764,10 +769,10 @@ export function cacheEpochBumpStatements(ctx: OrgContext): readonly Statement[] 
  * The fence guard: three statements. The check from assertCheck, then the organization's cache_epoch
  * version replaced, then a failure unless exactly one row was replaced, so a missing cache_epoch row
  * fails the whole batch. Exactly one assertGuard belongs in a batch; it is the only statement that
- * bumps the epoch.
+ * bumps the epoch. An optional changed condition preserves the epoch for no-op writes.
  */
-export function assertGuard(condition: Guard, ctx: OrgContext): FenceGuard {
-  const guard = fenceGuard([...assertCheck(condition), ...cacheEpochBumpStatements(ctx)]);
+export function assertGuard(condition: Guard, ctx: OrgContext, changed?: Guard): FenceGuard {
+  const guard = fenceGuard([...assertCheck(condition), ...cacheEpochBumpStatements(ctx, changed)]);
   guardOrgs.set(guard, ctx.orgId);
   return guard;
 }

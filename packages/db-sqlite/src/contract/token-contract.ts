@@ -344,6 +344,7 @@ function ssoAnchors(count: number): Case {
             providerAnchors,
             now: iso(0),
             expiresAt: iso(3_600_000),
+            maxLifetimeDays: 365,
           },
           () => ({ selector: SELECTOR, hash, pepperVersion: 1, plaintext }),
         );

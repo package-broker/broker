@@ -187,5 +187,17 @@ export function createUpstreamStateRepository(
         ),
       ];
     },
+
+    resetNotFoundStatements(ctx, packageId) {
+      return [
+        compile(
+          db
+            .updateTable('upstream_state')
+            .set({ not_found_count: 0, first_not_found_at: null })
+            .where('org_id', '=', ctx.orgId)
+            .where('package_id', '=', packageId),
+        ) as ScalarStatement,
+      ];
+    },
   };
 }

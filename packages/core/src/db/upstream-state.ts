@@ -40,4 +40,6 @@ export interface UpstreamStateRepository {
     form: UpstreamForm,
     ttlSeconds: number,
   ): ScalarStatement[];
+  /** Clears the 404 evidence of every form of the package; creates no rows and keeps validators. */
+  resetNotFoundStatements(ctx: OrgContext, packageId: string): ScalarStatement[];
 }

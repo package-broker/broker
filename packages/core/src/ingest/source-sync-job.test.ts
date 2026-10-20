@@ -83,6 +83,7 @@ function setup(options: {
   credentialError?: boolean;
   credentialNull?: boolean;
   unseen?: number | Error;
+  marked?: number;
   heldError?: boolean;
   signal?: AbortSignal;
   listPackages?: SourceProvider['listPackages'];
@@ -211,7 +212,7 @@ function setup(options: {
       },
       async markListing(_ctx, _guard, input) {
         marks.push({ stamp: input.stamp, present: input.present });
-        return { changed: true, statements: 4 };
+        return { changed: true, marked: input.present.length, statements: 4 };
       },
     },
     finalizer: {
@@ -231,6 +232,7 @@ function setup(options: {
     },
     writeGuard: () => [] as unknown as CatalogueWriteGuard,
     jobGuard: (job) => ({ id: job.jobId, owner: 'owner', fence: job.fence }),
+    markedCount: async () => options.marked ?? state.session?.seenCount ?? 0,
     unseenExistingCount: async () => {
       if (options.unseen instanceof Error) throw options.unseen;
       return options.unseen ?? 0;
@@ -566,6 +568,33 @@ describe('source sync job: never removes on an incomplete or untrusted listing',
     });
     await t.run(payload()).catch(() => undefined);
     expect(t.polls.every((p) => (p as { outcome: string }).outcome === 'failure')).toBe(true);
+  });
+
+  it('records mass_absence as the poll error when the finalizer refuses for it', async () => {
+    const t = setup({
+      pages: { '': page(['a/one'], null) },
+      finalize: () => ({ status: 'refused', reason: 'mass_absence' }),
+    });
+    await t.run(payload()).catch(() => undefined);
+    expect(t.polls).toEqual([{ id: 'src', outcome: 'failure', error: 'mass_absence' }]);
+    expect(t.calls.abandon).toBe(1);
+  });
+
+  it('finalizes on the database count when a retry marked nothing new and the counter is short', async () => {
+    const t = setup({
+      pages: { '': page(['a/one', 'a/two'], null) },
+      existing: (names) => [names[0] as string],
+      marked: 2,
+    });
+    await t.run(payload());
+    expect(t.finalizes[0]).toMatchObject({ expectedCount: 2, successfulCandidates: 2 });
+    expect(t.state.session?.seenCount).toBe(1);
+  });
+
+  it('does not finalize and retries when the marked count cannot be read', async () => {
+    const t = setup({ pages: { '': page(['a/one'], null) }, marked: Number.NaN });
+    await expect(t.run(payload())).rejects.toMatchObject({ code: 'handler_error' });
+    expect(t.finalizes).toEqual([]);
   });
 
   it('does not report poll success when the session was superseded', async () => {

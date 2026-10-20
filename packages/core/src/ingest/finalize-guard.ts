@@ -22,6 +22,16 @@ export interface FinalizeGuardOptions {
   readonly observability?: Pick<Observability, 'counter' | 'log'>;
 }
 
+export function recordMassAbsence(options: FinalizeGuardOptions = {}): void {
+  const observability = options.observability ?? noopObservability;
+  observability.counter('pb.ingest.mass_absence', undefined, 1);
+  observability.log({
+    level: 'warn',
+    event: 'ingest.mass_absence',
+    reason_code: 'mass_absence',
+  });
+}
+
 export class FinalizeEvidenceError extends Error {
   override readonly name = 'FinalizeEvidenceError';
   constructor(readonly reason: 'no_success' | 'candidate_count_mismatch') {
@@ -53,13 +63,7 @@ export function assertFinalizeAllowed(
     );
   } catch (error) {
     if (error instanceof MassAbsenceError) {
-      const observability = options.observability ?? noopObservability;
-      observability.counter('pb.ingest.mass_absence', undefined, 1);
-      observability.log({
-        level: 'warn',
-        event: 'ingest.mass_absence',
-        reason_code: 'mass_absence',
-      });
+      recordMassAbsence(options);
     }
     throw error;
   }

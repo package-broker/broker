@@ -546,7 +546,7 @@ const upgrade: Case = async (open) => {
         executor,
         "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
       ),
-    ).toBe(50);
+    ).toBe(55);
     expect(
       await rowsOf(
         executor,

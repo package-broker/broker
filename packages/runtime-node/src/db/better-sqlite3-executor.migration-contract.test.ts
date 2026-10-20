@@ -1,7 +1,10 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeMigrationContract } from '@package-broker/db-sqlite/contract/migration-contract';
+import {
+  describeMigrationContract,
+  describeVulnerabilityMigrationContract,
+} from '@package-broker/db-sqlite/contract/migration-contract';
 import { describeMigrationLockContract } from '@package-broker/db-sqlite/contract/migration-lock-contract';
 import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { openBetterSqliteExecutor } from './better-sqlite3-executor.js';
@@ -44,3 +47,5 @@ async function firstCoreMigration() {
 
 describeMigrationContract('better-sqlite3', openPair, firstCoreMigration);
 describeMigrationLockContract('better-sqlite3', openPair, firstCoreMigration);
+
+describeVulnerabilityMigrationContract('better-sqlite3', openPair);

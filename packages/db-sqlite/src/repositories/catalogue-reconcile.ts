@@ -327,7 +327,8 @@ export function finalizeListingStatements(
         sql`UPDATE package SET status = 'removed_upstream', removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),
           removal_cause = 'source_listing',
           last_op_id = CASE WHEN status = 'active' THEN ${opId} ELSE last_op_id END,
-          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}`,
+          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}
+          RETURNING package.last_op_id = ${opId} AS newly_removed`,
       ),
     );
     const restoration = statements.length;
@@ -439,6 +440,14 @@ export function finalizeListingStatements(
   return { statements, removalIndex, restorationIndex: revivalIndex, leaseHeldBackIndex };
 }
 
+function removedCount(result: { rows: Record<string, unknown>[]; changes: number } | undefined) {
+  if (result === undefined) return 0;
+  const [first] = result.rows;
+  return first !== undefined && 'newly_removed' in first
+    ? result.rows.filter((row) => Number(row['newly_removed']) === 1).length
+    : result.changes;
+}
+
 export function createCatalogueReconciler(
   executor: SqlExecutor,
   options: FinalizeStatementOptions = {},
@@ -501,7 +510,7 @@ export function createCatalogueReconciler(
           ? 0
           : Number(results[leaseHeldBackIndex]?.rows[0]?.['held'] ?? 0);
       return {
-        removed: results[removalIndex]?.changes ?? 0,
+        removed: removedCount(results[removalIndex]),
         restored: results[restorationIndex]?.changes ?? 0,
         statements: statements.length,
         leaseHeldBack,

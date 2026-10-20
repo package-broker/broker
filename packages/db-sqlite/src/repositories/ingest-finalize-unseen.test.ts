@@ -118,7 +118,10 @@ const packageStatuses = () =>
   );
 const versionStatuses = () =>
   database.executor.all<{ status: string; n: number }>(
-    stmt('SELECT status, count(*) AS n FROM version GROUP BY status ORDER BY status'),
+    stmt(
+      'SELECT status, count(*) AS n FROM version WHERE org_id = ? GROUP BY status ORDER BY status',
+      ctx.orgId,
+    ),
   );
 const tables = () =>
   Promise.all(
@@ -296,6 +299,7 @@ describe('the source unseen count covers only currently-listed active packages',
       { status: 'active', n: 8 },
       { status: 'removed_upstream', n: 12 },
     ]);
+    expect(await versionStatuses()).toEqual([{ status: 'active', n: 10 }]);
   });
 
   it('cascades only under packages that go from active to removed in this op', async () => {
@@ -320,6 +324,33 @@ describe('the source unseen count covers only currently-listed active packages',
     expect(await versionStatuses()).toEqual([
       { status: 'active', n: 10 },
       { status: 'removed_upstream', n: 5 },
+    ]);
+  });
+
+  it('marks blobs non-refetchable only for versions the op removes', async () => {
+    await seedSourceWithPackages(20);
+    await database.executor.batch([
+      removePackages(11, 20, 'document_absent'),
+      insertVersions(ctx.orgId, 'pid11', '1', 1, 'active'),
+      insertVersions(ctx.orgId, 'pid9', '1', 1, 'active'),
+      stmt(
+        `INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key)
+         VALUES ('B11', ?, ?, 1, 'k/11'), ('B9', ?, ?, 1, 'k/9')`,
+        ctx.orgId,
+        '1'.repeat(64),
+        ctx.orgId,
+        '9'.repeat(64),
+      ),
+      stmt("UPDATE version SET blob_id = 'B11' WHERE package_id = 'pid11'"),
+      stmt("UPDATE version SET blob_id = 'B9' WHERE package_id = 'pid9'"),
+    ]);
+    const { handle } = await sourceSession(8);
+    await createIngestFinalizer(database.executor).finalize(ctx, handle, honest(8, 2));
+    expect(
+      await database.executor.all(stmt('SELECT id, refetchable FROM blob ORDER BY id')),
+    ).toEqual([
+      { id: 'B11', refetchable: 1 },
+      { id: 'B9', refetchable: 0 },
     ]);
   });
 

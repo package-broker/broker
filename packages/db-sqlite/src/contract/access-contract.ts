@@ -1226,6 +1226,7 @@ function issueInput(
     providerAnchors: anchors,
     now: iso(0),
     expiresAt: iso(HOUR),
+    maxLifetimeDays: 365,
     ...overrides,
   };
 }
@@ -1355,6 +1356,7 @@ const issuanceBoundaries: Case = (open, wrap) =>
       };
       const tokens = createTokenRepository(clock);
       let next = 0;
+      let limit = 90;
       const attempt = async (reauthOffset: number, expiresOffset: number) => {
         next += 1;
         await world.executor.batch([
@@ -1363,7 +1365,12 @@ const issuanceBoundaries: Case = (open, wrap) =>
         const result = await tokens.issuePersonal(
           world.a,
           FENCE(),
-          issueInput({ id: `issued-${next}`, now: iso(0), expiresAt: iso(expiresOffset) }),
+          issueInput({
+            id: `issued-${next}`,
+            now: iso(0),
+            expiresAt: iso(expiresOffset),
+            maxLifetimeDays: limit,
+          }),
           () => minted(next),
         );
         return result.status === 'issued' ? 'issued' : result;
@@ -1379,24 +1386,27 @@ const issuanceBoundaries: Case = (open, wrap) =>
         reason: 'authority',
       });
       expect(await attempt(-60_000, 1000)).toBe('issued');
-      const days = (count: number) =>
-        world.executor.batch([
-          st(
-            'UPDATE organization SET token_default_expiry_days = ? WHERE id = ?',
-            count,
-            world.a.orgId,
-          ),
-        ]);
-      await days(400);
+      const days = (count: number) => {
+        limit = count;
+      };
+      days(400);
       expect(await attempt(-60_000, 90 * DAY - 1000)).toBe('issued');
-      expect(await attempt(-60_000, 91 * DAY)).toEqual({ status: 'refused', reason: 'authority' });
-      await days(30);
+      expect(await attempt(-60_000, 91 * DAY)).toBe('issued');
+      expect(await attempt(-60_000, 400 * DAY + 1000)).toEqual({
+        status: 'refused',
+        reason: 'authority',
+      });
+      days(30);
       expect(await attempt(-60_000, 30 * DAY - 1000)).toBe('issued');
       expect(await attempt(-60_000, 30 * DAY + 1000)).toEqual({
         status: 'refused',
         reason: 'authority',
       });
-      await days(90);
+      await world.executor.batch([
+        st('UPDATE organization SET token_default_expiry_days = 1 WHERE id = ?', world.a.orgId),
+      ]);
+      days(90);
+      expect(await attempt(-60_000, 30 * DAY)).toBe('issued');
       expect(await attempt(-60_000, -1000).catch((error: unknown) => String(error))).toContain(
         'expiresAt must be in the future',
       );

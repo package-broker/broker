@@ -64,7 +64,7 @@ export interface SourceSyncDeps {
     credential: UpstreamCredential | null,
   ) => ProviderContext;
   readonly sessions: Pick<IngestSessions, 'acquire' | 'start' | 'advance' | 'abandon'> &
-    IngestSessionRelease;
+    Pick<IngestSessionRelease, 'release'>;
   readonly writer: Pick<CatalogueWriter, 'openListing' | 'markListing'>;
   readonly finalizer: IngestFinalizer;
   /** The session guard together with the job lease guard. */

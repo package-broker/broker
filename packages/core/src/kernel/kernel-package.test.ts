@@ -335,7 +335,7 @@ describe('package boundary resolution', () => {
         'composer',
         'acme/lib',
       );
-      expect([...h.resolve.mock.calls[0]![0].permissions]).toEqual([read, write]);
+      expect([...h.resolve.mock.calls[0]![0].permissions]).toEqual([read]);
     },
   );
   it.each([

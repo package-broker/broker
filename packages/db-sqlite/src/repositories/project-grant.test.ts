@@ -1629,3 +1629,125 @@ describe('project grant mutation audit and idempotency', () => {
     expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
   });
 });
+
+describe('project grant delete stamps pat_invalid_before', () => {
+  const TARGET = OTHER + 'target';
+  const CANONICAL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  async function stampOf(userId: string): Promise<string | null | undefined> {
+    const found = await rows<{ pat_invalid_before: string | null }>(
+      'SELECT pat_invalid_before FROM user_account WHERE id = ?',
+      userId,
+    );
+    return found[0]?.pat_invalid_before;
+  }
+
+  const revoke = (id = G_TARGET) =>
+    repository.delete(a, actorFence({ [projectGrantKey(id)]: 1 }), {
+      audit: mutationAudit('project_grant.revoke', id, P1),
+      id,
+      projectId: P1,
+      providerAnchors: ANCHORS,
+    });
+
+  async function dropOtherProjectGrants(): Promise<void> {
+    await executor.batch([
+      stmt('DELETE FROM access_grant WHERE id IN (?, ?)', G_ARCH_TARGET, G_P2_TARGET),
+    ]);
+  }
+
+  it('stamps the user whose last grant at any level was removed', async () => {
+    await executor.batch([user(a, TARGET, 'target@example.test')]);
+    await dropOtherProjectGrants();
+
+    expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+
+    expect(await stampOf(TARGET)).toMatch(CANONICAL);
+  });
+
+  it('does not stamp a user who keeps a grant in another project', async () => {
+    await executor.batch([user(a, TARGET, 'target@example.test')]);
+
+    expect(await revoke()).toEqual({ status: 'deleted', offboardedUserId: TARGET });
+
+    expect(await stampOf(TARGET)).toBeNull();
+  });
+
+  it('does not stamp a user who keeps an organization e-mail grant', async () => {
+    await executor.batch([
+      user(a, TARGET, 'target@example.test'),
+      grant(a, G_NEW, 'target@example.test', ORG_PLAIN, null),
+    ]);
+    await dropOtherProjectGrants();
+
+    await revoke();
+
+    expect(await stampOf(TARGET)).toBeNull();
+  });
+
+  it('does not stamp a user whose stored group membership still carries a grant', async () => {
+    await executor.batch([
+      user(a, TARGET, 'target@example.test'),
+      groupGrant(G_NEW, 'okta', 'team'),
+      member(TARGET, 'okta', 'team', ago(25 * HOUR)),
+    ]);
+    await dropOtherProjectGrants();
+
+    await revoke();
+
+    expect(await stampOf(TARGET)).toBeNull();
+  });
+
+  it('stamps a member whose last grant was the removed group grant, and spares one with another grant', async () => {
+    await executor.batch([
+      user(a, TARGET, 'target@example.test'),
+      user(a, 'kept-member', 'kept@example.test'),
+      groupGrant(G_NEW, 'okta', 'team'),
+      member(TARGET, 'okta', 'team'),
+      member('kept-member', 'okta', 'team'),
+      grant(a, '01J0GRANT000000000000000AF', 'kept@example.test', VIEWER, P2),
+    ]);
+    await dropOtherProjectGrants();
+    await executor.batch([stmt('DELETE FROM access_grant WHERE id = ?', G_TARGET)]);
+
+    await repository.delete(a, actorFence({ [projectGrantKey(G_NEW)]: 1 }), {
+      audit: mutationAudit('project_grant.revoke', G_NEW, P1),
+      id: G_NEW,
+      projectId: P1,
+      providerAnchors: ANCHORS,
+    });
+
+    expect(await stampOf(TARGET)).toMatch(CANONICAL);
+    expect(await stampOf('kept-member')).toBeNull();
+  });
+
+  it('does not stamp an account of another organization with the same e-mail', async () => {
+    await executor.batch([
+      user(a, TARGET, 'target@example.test'),
+      user(b, 'other-org-user', 'target@example.test'),
+    ]);
+    await dropOtherProjectGrants();
+
+    await revoke();
+
+    expect(await stampOf('other-org-user')).toBeNull();
+    expect(await stampOf(TARGET)).toMatch(CANONICAL);
+  });
+
+  it('stamps nothing for a refused delete', async () => {
+    await executor.batch([user(a, TARGET, 'target@example.test')]);
+    await dropOtherProjectGrants();
+
+    expect(
+      await repository.delete(a, actorFence({ [projectGrantKey(G_TARGET)]: 9 }), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toBe('conflict');
+
+    expect(await stampOf(TARGET)).toBeNull();
+    expect(await grantRow(G_TARGET)).toBeDefined();
+  });
+});

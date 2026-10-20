@@ -1,5 +1,7 @@
 import { API_ERROR_CODES, jsonResponse } from '../../api/response.js';
 import { accessContextOf } from '../../authz/access-context.js';
+import { contextPackageActorOf } from '../../internal/package-actor.js';
+import { deferOf } from '../defer.js';
 import type { ProjectActor } from '../../authz/project-actor.js';
 import { displayName, packageKey } from '../../catalogue/names.js';
 import type { PackageAccess } from '../../catalogue/package-access.js';
@@ -30,10 +32,10 @@ export interface NpmRouteDeps {
   readonly access: PackageAccess;
   readonly dist: Pick<DistService, 'serve'>;
   readonly onDemand: OnDemandFill;
-  readonly actorOf: (ctx: RequestContext) => ProjectActor | null;
+  readonly actorOf?: (ctx: RequestContext) => ProjectActor | null;
   readonly reresolve: (ctx: RequestContext) => Promise<PackageVisibility>;
   readonly handleOf: (ctx: RequestContext) => string | null;
-  readonly defer: (thunk: () => Promise<void>) => void;
+  readonly defer?: (thunk: () => Promise<void>) => void;
   readonly publicUrl: string;
   readonly codecs: Pick<Codecs, 'gunzip'>;
 }
@@ -90,7 +92,7 @@ type Served = Extract<NpmPath, { kind: 'packument' | 'version' | 'tarball' }>;
 
 export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   function actorFor(ctx: RequestContext): ProjectActor | null {
-    const actor = deps.actorOf(ctx);
+    const actor = (deps.actorOf ?? contextPackageActorOf)(ctx);
     const snapshot = accessContextOf(ctx);
     if (
       actor === null ||
@@ -146,7 +148,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       return fail(ctx, 502, 'bad_gateway', API_ERROR_CODES.bad_gateway.message);
     }
     if (filled.kind === 'serve' && filled.background !== undefined) {
-      deps.defer(filled.background);
+      (deps.defer ?? deferOf(ctx))(filled.background);
     }
     if (resolved.kind === 'visible' && filled.kind === 'serve') {
       return { actor, pkg: resolved.pkg, stale: filled.stale };
@@ -219,12 +221,22 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     if (found === null || (found.version.distType !== null && found.version.distType !== 'tgz')) {
       return notFound(ctx);
     }
-    const served = await deps.dist.serve(actor, {
-      ecosystem: 'npm',
-      key: parsed.key,
-      versionId: found.version.versionId,
-      revision: found.version.revision,
-    });
+    let served: Awaited<ReturnType<typeof deps.dist.serve>>;
+    try {
+      served = await deps.dist.serve(
+        actor,
+        {
+          ecosystem: 'npm',
+          key: parsed.key,
+          versionId: found.version.versionId,
+          revision: found.version.revision,
+        },
+        { signal: ctx.request.signal },
+      );
+    } catch (error) {
+      if (ctx.request.signal.aborted) return new Response(null, { status: 499 });
+      throw error;
+    }
     if (served.kind === 'busy') return unavailable(ctx, served.retryAfterSeconds);
     if (served.kind === 'not_found') return notFound(ctx);
     if (ctx.request.method === 'HEAD') {

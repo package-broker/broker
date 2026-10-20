@@ -9,7 +9,9 @@ import type {
 import { orgContext } from '../../db/port.js';
 import { fixedClock } from '../../ids.js';
 import type { OnDemandFill, OnDemandResult } from '../../ingest/on-demand.js';
+import { contextPackageActorOf, setContextPackageActor } from '../../internal/package-actor.js';
 import { setResolvedPackage } from '../../internal/package-context.js';
+import { setWaitUntil } from '../../kernel/execution.js';
 import { createKernel } from '../../kernel/kernel.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
 import type { DistService, DistServeResult } from '../dist-service.js';
@@ -108,6 +110,7 @@ function context(
   params: Record<string, string>,
   outcome: PackageVisibility | null,
   headers: Record<string, string> = {},
+  withActor = true,
 ): RequestContext {
   const ctx = {
     request: new Request(url, { headers }),
@@ -118,6 +121,15 @@ function context(
     params,
     ports: {},
   } as unknown as RequestContext;
+  if (withActor) {
+    setContextPackageActor(ctx, {
+      kind: 'project',
+      userId: 'user-1',
+      orgId: org.orgId,
+      projectId: 'proj-1',
+      permissions: new Set(['project:packages:read']),
+    });
+  }
   if (outcome !== null && outcome.kind !== 'absent') setResolvedPackage(ctx, outcome);
   return ctx;
 }
@@ -231,6 +243,79 @@ describe('GET /:project/packages.json', () => {
       });
     },
   );
+});
+
+describe('kernel-provided actor', () => {
+  it.each([
+    [
+      'packages.json',
+      ROOT,
+      () => context('https://broker.test/demo/packages.json', { project: 'demo' }, null, {}, false),
+    ],
+    [
+      'p2',
+      P2,
+      () =>
+        context(
+          'https://broker.test/demo/p2/acme/lib.json',
+          { project: 'demo', vendor: 'acme', file: 'lib.json' },
+          visible,
+          {},
+          false,
+        ),
+    ],
+    [
+      'dist',
+      DIST,
+      () =>
+        context(
+          'https://broker.test/demo/dist/acme/lib/x.zip',
+          { project: 'demo', vendor: 'acme', name: 'lib', file: 'x.zip' },
+          visible,
+          {},
+          false,
+        ),
+    ],
+  ])('answers 404 and reads nothing without a kernel actor on %s', async (_name, path, build) => {
+    const h = harness();
+    const response = await h.find(path).handler(build());
+    expect(response.status).toBe(404);
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.versions).not.toHaveBeenCalled();
+    expect(h.list).not.toHaveBeenCalled();
+    expect(h.serve).not.toHaveBeenCalled();
+  });
+
+  it('passes the kernel actor object itself to the fill and the dist service', async () => {
+    const h = harness();
+    const ctx = p2('lib.json', visible);
+    await h.find(P2).handler(ctx);
+    const kernelActor = contextPackageActorOf(ctx);
+    expect(h.ensure.mock.calls[0]![0]).toBe(kernelActor);
+    const distCtx = dist(`${VERSION_ID}.2.zip`);
+    await h.find(DIST).handler(distCtx);
+    expect(h.serve.mock.calls[0]![0]).toBe(contextPackageActorOf(distCtx));
+  });
+
+  it('schedules a stale-serve background through the kernel waitUntil', async () => {
+    const h = harness();
+    const background = vi.fn(async () => undefined);
+    h.ensure.mockResolvedValue({ kind: 'serve', stale: true, background });
+    const scheduled: Promise<unknown>[] = [];
+    const ctx = p2('lib.json', visible);
+    setWaitUntil(ctx, (promise) => scheduled.push(promise));
+    await h.find(P2).handler(ctx);
+    expect(scheduled).toHaveLength(1);
+    await Promise.all(scheduled);
+    expect(background).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the request signal to the dist service', async () => {
+    const h = harness();
+    const ctx = dist(`${VERSION_ID}.2.zip`);
+    await h.find(DIST).handler(ctx);
+    expect(h.serve.mock.calls[0]![2]).toEqual({ signal: ctx.request.signal });
+  });
 });
 
 describe('GET /:project/p2/:vendor/:file', () => {
@@ -486,6 +571,7 @@ describe('GET /:project/dist/:vendor/:name/:file', () => {
     expect(h.serve).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 'proj-1', orgId: 'org-1' }),
       { ecosystem: 'composer', key: 'acme/lib', versionId: VERSION_ID, revision: 2 },
+      { signal: expect.any(AbortSignal) },
     );
     expect(h.ensure).not.toHaveBeenCalled();
   });

@@ -26,6 +26,7 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { holdsPermission, permissionRows } from './access.js';
+import { patInvalidationStatement } from './pat-offboarding.js';
 import { revokeAllForUserStatement } from './session.js';
 import { liveSessionCondition } from './session-liveness.js';
 import { auditPendingStatement } from './audit-pending.js';
@@ -629,6 +630,10 @@ export function createGrantRepository(
           ...assertCheck(revision),
           ...assertCheck(lastHolder),
           offboarded,
+          patInvalidationStatement(ctx, id, {
+            sql: "removed.scope = 'organization' AND removed.revision = ?",
+            params: [expected],
+          }),
           scalar(
             db
               .deleteFrom('access_grant')
@@ -648,7 +653,7 @@ export function createGrantRepository(
         if ((deleted?.rows.length ?? 0) === 0) {
           throw new Error('grant delete matched no row after its guards held');
         }
-        const row = outcome.results.at(idempotency === undefined ? -3 : -4)?.rows[0] as
+        const row = outcome.results.at(idempotency === undefined ? -4 : -5)?.rows[0] as
           { offboarded_user_id: string | null } | undefined;
         return { outcome: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };
       }
@@ -751,7 +756,11 @@ export function createGrantRepository(
       const update = scalar(
         db
           .updateTable('user_account')
-          .set({ status: 'suspended', updated_at: stamp })
+          .set({
+            status: 'suspended',
+            updated_at: stamp,
+            pat_invalid_before: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+          })
           .where('user_account.id', '=', userId)
           .where('user_account.org_id', '=', ctx.orgId)
           .where('user_account.status', '=', 'active')

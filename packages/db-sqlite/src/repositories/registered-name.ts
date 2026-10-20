@@ -64,7 +64,7 @@ export function sourceActivatable(ctx: OrgContext, sourceId: SourceRef): Guard {
 export function coveredByRegisteredNames(
   ctx: OrgContext,
   sourceId: SourceRef,
-  ecosystem: Ecosystem,
+  ecosystem: Ecosystem | Expression<string>,
   key: string | Expression<string>,
 ): Guard {
   return sql<SqlBool>`exists (select 1 from registered_name as rn_cov

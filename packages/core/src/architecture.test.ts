@@ -82,6 +82,7 @@ const RULES: Readonly<Record<string, Rule>> = {
     testsAndScripts: ['node', 'esbuild'],
     onlyIn: { '@package-broker/core': ['packages/ui/src/manifest.ts'] },
   },
+  'ui-assets': { allow: [...ws('core', 'ui'), 'node'], testOnly: ['vitest'] },
 };
 
 type PackageImports = Readonly<Record<string, unknown>>;

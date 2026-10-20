@@ -30,6 +30,7 @@ export interface IngestSessionProgress {
 export type IngestSessionState = 'running' | 'complete' | 'abandoned';
 
 export interface IngestSessionLatest {
+  readonly id: string;
   readonly state: IngestSessionState;
   readonly generation: number;
   readonly fence: number;
@@ -77,6 +78,8 @@ export interface IngestSessions {
 export interface IngestSessionRelease {
   /** Ends this holder's lease, preserving the running generation and resume state; false when not held. */
   release(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;
+  /** Deletes the generation this live holder acquired but never started; false when started, superseded or not held. */
+  discard(ctx: OrgContext, guard: IngestSessionHandle): Promise<boolean>;
 }
 
 export interface IngestSessionSweep {
@@ -86,6 +89,6 @@ export interface IngestSessionSweep {
 
 /** Cross-org maintenance; kept apart from `IngestSessions` so ingest consumers never see it. */
 export interface IngestSessionMaintenance {
-  /** Marks long-dead running sessions abandoned and deletes finished generations that have a newer one, each at most `limit` per run. */
+  /** Marks long-dead running sessions abandoned and deletes finished generations that have a newer one and abandoned generations that never started, each at most `limit` per run. */
   sweep(limit: number): Promise<IngestSessionSweep>;
 }

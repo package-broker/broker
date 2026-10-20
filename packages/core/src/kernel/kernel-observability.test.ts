@@ -14,6 +14,7 @@ import { envelopeResponse } from './errors.js';
 import { createKernel } from './kernel.js';
 import type { KernelOptions } from './kernel.js';
 import { KernelConfigError } from './registry.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORG = orgContext('org-1');
 const BASE = 'http://broker.test';
@@ -514,7 +515,7 @@ describe('kernel authorization records', () => {
     const kernel = await createKernel(
       options([], logs, {
         authorization: { authorize: () => Promise.resolve({ allow: false, status: 401 }) },
-        coreRoutes: [
+        coreRoutes: documented([
           {
             method: 'GET',
             path: '/_pb/me',
@@ -522,7 +523,7 @@ describe('kernel authorization records', () => {
             boundary: 'self',
             handler: () => new Response('me'),
           },
-        ],
+        ]),
       }),
     );
 
@@ -585,9 +586,9 @@ describe('kernel observability option', () => {
   it('exposes the route templates once', async () => {
     const kernel = await createKernel(
       options([plugin('alpha', [publicItem])], [], {
-        coreRoutes: [
+        coreRoutes: documented([
           { method: 'GET', path: '/_pb/ping', permission: null, handler: () => new Response('') },
-        ],
+        ]),
       }),
     );
 
@@ -1047,7 +1048,7 @@ describe('handler status and envelope reason', () => {
       const logs: Entry[] = [];
       const kernel = await createKernel(
         options([], logs, {
-          coreRoutes: [
+          coreRoutes: documented([
             {
               method: 'GET',
               path: '/_pb/unavailable',
@@ -1055,7 +1056,7 @@ describe('handler status and envelope reason', () => {
               handler: (ctx) =>
                 envelopeResponse(503, 'unavailable', 'Try again later', ctx.requestId, reason),
             },
-          ],
+          ]),
         }),
       );
       const json = vi.spyOn(Response.prototype, 'json');

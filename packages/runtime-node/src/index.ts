@@ -1,3 +1,17 @@
+import { createBlobRepository } from '@package-broker/db-sqlite/repositories/blob';
+import {
+  retentionScanJob,
+  blobPurgeJob,
+  createRetentionScanJob,
+  createBlobPurgeJob,
+  type RetentionLifecycle,
+} from '@package-broker/core/ingest/retention-jobs';
+import type { ByteStore } from '@package-broker/core/platform/blob';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
+import { JobError } from '@package-broker/core/platform/jobs';
+import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
+import { jobLeaseGuard } from '@package-broker/db-sqlite/repositories/job-lease-guard';
 import { createOrganizationAdministration } from './organization-administration.js';
 import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
 import { createObservability } from '@package-broker/core/platform/observability';
@@ -183,6 +197,82 @@ import { createTokenRepository } from '@package-broker/db-sqlite/repositories/to
 import { createTokenReader } from '@package-broker/db-sqlite/repositories/token-read';
 import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
 
+interface RetentionStorage {
+  readonly store: ByteStore;
+  readonly deleteTimeoutMs: number;
+  readonly leaseMs: number;
+}
+
+function retentionRegistrations(
+  executor: SqlExecutor,
+  storage: () => RetentionStorage,
+): readonly RegisteredCoreJob[] {
+  return [retentionScanJob, blobPurgeJob].map((definition) =>
+    registerCoreJob({
+      ...definition,
+      async handler(payload, context) {
+        const lease = jobLeaseOf(context);
+        if (lease === null) throw new JobError('lease_lost');
+        const checkSignal = () => {
+          if (context.signal.aborted) throw new JobError('aborted');
+        };
+        const guard = jobLeaseGuard(context.org, lease);
+        const guarded: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          async batch(statements) {
+            checkSignal();
+            // Guard assertions and metadata writes share one atomic batch.
+            const results = await executor.batch([...guard, ...statements]);
+            return results.slice(guard.length);
+          },
+        };
+        const { store, deleteTimeoutMs, leaseMs } = storage();
+        const metadata = createBlobRepository(guarded, { purgeLeaseSeconds: leaseMs / 1000 });
+        const lifecycle: RetentionLifecycle = {
+          ...metadata,
+          async removeBytes(org, key, generation) {
+            // A removal that starts after this deadline could outlive the purge lease the recheck saw.
+            const deadline = performance.now() + deleteTimeoutMs;
+            let leaseLost: unknown;
+            const removal = createBlobLifecycle({
+              metadata,
+              store: {
+                putVerified: (...args) => store.putVerified(...args),
+                head: (...args) => store.head(...args),
+                get: (...args) => store.get(...args),
+                async remove(storageKey) {
+                  checkSignal();
+                  try {
+                    await executor.batch(guard);
+                  } catch (error) {
+                    leaseLost = error;
+                    throw error;
+                  }
+                  checkSignal();
+                  if (performance.now() >= deadline) throw new JobError('aborted');
+                  return store.remove(storageKey);
+                },
+              },
+              deleteTimeoutMs,
+              leaseMs,
+              observability: context.observability,
+            });
+            const outcome = await removal.purgeBytes(org, key, generation);
+            if (leaseLost !== undefined) throw leaseLost;
+            return outcome;
+          },
+        };
+        const bound =
+          definition.name === retentionScanJob.name
+            ? createRetentionScanJob({ reader: createBlobReferenceReader(guarded), lifecycle })
+            : createBlobPurgeJob({ lifecycle });
+        await bound.handler(payload, context);
+      },
+    }),
+  );
+}
+
 export interface NodeAuthOptions {
   readonly keyring: Keyring;
   readonly publicOrigin: string;
@@ -312,7 +402,7 @@ async function assembleAccess(
   const ids = { ulid };
 
   const module = createAuthModule({
-    repositories: createAuthRepositories(executor),
+    repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
     keyring: auth.keyring,
     clock: systemClock,
     ids,
@@ -380,7 +470,10 @@ async function assembleAccess(
       ...common,
     }),
     projectGrants: createProjectAdministration({
-      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      grants: wired(
+        'project grant repository',
+        createProjectGrantRepository(executor, { ...tokens.offboarding, log }),
+      ),
       providers,
       providerAnchors: anchorList,
       onCreatorOffboarded,
@@ -831,12 +924,17 @@ export function createNodeServer(
           });
     drainRegistry = registry?.drain;
     const packageResolver = registry?.module.visibilityPort ?? reads?.resolver;
+    const retention = (
+      options.platformServices as
+        (PlatformServices & { readonly retention?: RetentionStorage }) | undefined
+    )?.retention;
     const registration = collectRegistrations(plugins, {
       ...(packageResolver === undefined ? {} : { packageResolver }),
       coreJobs:
         options.platformServices === undefined
           ? []
           : [
+              ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
               ...(registry?.module.packageSyncJob === undefined

@@ -10,6 +10,7 @@ import { createLocalRoutes } from './routes-local.js';
 import { createSsoRoutes } from './routes-sso.js';
 import { createSessionService } from './session.js';
 import type { SessionService } from './session.js';
+import { AUTH_API } from '../api/auth-schemas.js';
 import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
 import type { AuthorizationEngineDeps } from '../authz/engine.js';
 import { createUnlinkService } from '../authz/unlink-service.js';
@@ -88,11 +89,14 @@ interface LockScope {
 }
 
 function withNeedsOrg(route: RouteDefinition): RouteDefinition {
-  const needsOrg = ROUTE_NEEDS_ORG[`${route.method} ${route.path}`];
+  const key = `${route.method} ${route.path}`;
+  const needsOrg = ROUTE_NEEDS_ORG[key];
   if (needsOrg === undefined) {
     throw new TypeError('auth route has no needsOrg decision');
   }
-  return Object.freeze({ ...route, needsOrg });
+  const api = AUTH_API[key];
+  if (api === undefined) throw new TypeError('auth route has no api slot');
+  return Object.freeze({ ...route, needsOrg, api });
 }
 
 export function createAuthModule(options: AuthModuleOptions): AuthModule {

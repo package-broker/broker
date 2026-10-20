@@ -10,6 +10,7 @@ import { createKeyring } from '../secrets/keyring.js';
 import type { KernelLog } from './errors.js';
 import { createKernel } from './kernel.js';
 import { UI_CSP, createUiRoutes, uiRootRedirect } from './ui-routes.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const HTTPS = 'https://broker.test';
 const HTTP = 'http://broker.test';
@@ -449,7 +450,7 @@ describe('single sign-on under the UI policy', () => {
       },
       resolveOrg: () => Promise.resolve(ORG),
       health: () => Promise.resolve(true),
-      coreRoutes: [...createUiRoutes(fakeAssets(), { publicOrigin: HTTPS }), ...sso],
+      coreRoutes: documented([...createUiRoutes(fakeAssets(), { publicOrigin: HTTPS }), ...sso]),
       log: () => undefined,
     });
 

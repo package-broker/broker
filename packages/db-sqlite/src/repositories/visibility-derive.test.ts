@@ -94,10 +94,11 @@ async function seedNoise(database: MigratedDatabase, config: CatalogueConfig, se
   for (const r of expected) {
     const roll = next();
     if (roll < 0.3) continue;
+    const pkg = config.packages.find((p) => p.id === r.packageId)!;
     const origin = roll < 0.55 ? (r.origin === 'pattern' ? 'subscription' : 'pattern') : r.origin;
     statements.push({
-      sql: 'INSERT OR IGNORE INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
-      params: [r.orgId, r.projectId, r.packageId, origin],
+      sql: 'INSERT OR IGNORE INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, ?, ?, ?)',
+      params: [r.orgId, r.projectId, r.packageId, origin, pkg.ecosystem, pkg.key],
     });
   }
   const derived = new Set(expected.map((r) => `${r.projectId}\0${r.packageId}`));
@@ -105,8 +106,15 @@ async function seedNoise(database: MigratedDatabase, config: CatalogueConfig, se
     for (const k of config.packages) {
       if (k.orgId !== p.orgId || derived.has(`${p.id}\0${k.id}`) || next() > 0.2) continue;
       statements.push({
-        sql: 'INSERT OR IGNORE INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
-        params: [p.orgId, p.id, k.id, next() < 0.5 ? 'pattern' : 'subscription'],
+        sql: 'INSERT OR IGNORE INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, ?, ?, ?)',
+        params: [
+          p.orgId,
+          p.id,
+          k.id,
+          next() < 0.5 ? 'pattern' : 'subscription',
+          k.ecosystem,
+          k.key,
+        ],
       });
     }
   }
@@ -181,7 +189,8 @@ describe('rederiveStatements invariants', () => {
   let other: OrgContext;
 
   async function exec(text: string, params: (string | number | null)[] = []): Promise<void> {
-    await database.executor.batch([{ sql: text, params }]);
+    const [result] = await database.executor.batch([{ sql: text, params }]);
+    if (/^INSERT INTO project_package \(/i.test(text)) expect(result?.changes).toBe(1);
   }
   const execForged = (text: string, params: (string | number | null)[] = []) =>
     withForeignKeysOff(database.executor, () => exec(text, params));
@@ -229,11 +238,11 @@ describe('rederiveStatements invariants', () => {
     await setup(ctx.orgId, '2', 'archived');
     await setup(other.orgId, '9');
     await exec(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P1', 'K1-b', 'explicit')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P1' AS project_id, 'K1-b' AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
       [ctx.orgId],
     );
     await exec(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P9', 'K9-b', 'subscription')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P9' AS project_id, 'K9-b' AS package_id, 'subscription' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
       [other.orgId],
     );
     await rederive(database, ctx, { kind: 'project', projectId: 'P1' });

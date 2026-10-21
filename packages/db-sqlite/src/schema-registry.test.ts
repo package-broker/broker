@@ -231,3 +231,14 @@ describe('registry table types', () => {
     expect([column, state, form]).toHaveLength(3);
   });
 });
+
+it.each([
+  ['version_package_id', ['package_id', 'id']],
+  ['project_package_name', ['org_id', 'project_id', 'ecosystem', 'name']],
+])('closure edge index %s has the ordered columns', async (index, expected) => {
+  const columns = await opened.executor.all<{ name: string }>({
+    sql: `SELECT name FROM pragma_index_info('${index}') ORDER BY seqno`,
+    params: [],
+  });
+  expect(columns.map((c) => c.name)).toEqual(expected);
+});

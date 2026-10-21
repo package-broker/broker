@@ -184,6 +184,7 @@ function handle(job: ReturnType<typeof build>, claim: JobClaim) {
     fence: claim.fence,
     signal: new AbortController().signal,
     fences: jobFences(claim),
+    observability: { log: () => {}, counter: () => {}, histogram: () => {} },
   } as unknown as JobContext;
   return job.handler(job.validate(JSON.parse(claim.payloadJson)), context);
 }

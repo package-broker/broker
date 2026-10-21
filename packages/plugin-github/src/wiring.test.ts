@@ -18,6 +18,7 @@ import {
   type SourceSyncDeps,
 } from '@package-broker/core/ingest/source-sync-job';
 import type { JobContext } from '@package-broker/core/platform/jobs';
+import { noopObservability } from '@package-broker/core/platform/observability';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import {
   createPackageSyncJob,
@@ -478,6 +479,7 @@ describe('GitHub plugin wiring', () => {
       org: ctx.org,
       signal: ctx.signal,
       ports: { platform: { jobs: { enqueue } } },
+      observability: noopObservability,
     } as unknown as JobContext;
     await createSourceSyncJob(deps).handler({ sourceId: source.id, reason: 'admin' }, job);
     expect(enqueue).toHaveBeenCalledWith(
@@ -605,6 +607,7 @@ describe('GitHub plugin wiring', () => {
       org: h.ctx.org,
       signal: h.ctx.signal,
       fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+      observability: noopObservability,
     } as JobContext;
     const payload = { sourceId: source.id, key: 'vendor/package' };
     try {
@@ -695,6 +698,7 @@ describe('GitHub plugin wiring', () => {
         org: h.ctx.org,
         signal: h.ctx.signal,
         ports: { platform: { jobs: { enqueue } } },
+        observability: noopObservability,
       } as unknown as JobContext;
       try {
         await createSourceSyncJob(deps).handler({ sourceId: source.id, reason: 'admin' }, context);

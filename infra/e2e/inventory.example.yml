@@ -1,0 +1,22 @@
+---
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: '{{ ansible_playbook_python }}'
+  vars:
+    e2e_candidate_commit: REPLACE_WITH_FULL_40_HEX_COMMIT_SHA
+    e2e_image_source: target_build
+    # Switch to ghcr after T835; its OCI revision label must match the commit.
+    # e2e_registry_image: ghcr.io/OWNER/IMAGE@sha256:MANIFEST_DIGEST
+    e2e_arch: amd64
+    e2e_server_type: cx23
+    e2e_location: fsn1
+    e2e_os_image_id: REPLACE_WITH_NUMERIC_DEBIAN_IMAGE_ID
+    e2e_docker_version: REPLACE_WITH_EXACT_APT_VERSION
+    e2e_docker_buildx_version: REPLACE_WITH_EXACT_DOCKER_BUILDX_APT_VERSION
+    e2e_cloudflared_version: REPLACE_WITH_EXACT_RELEASE_VERSION
+    e2e_cloudflared_sha256: REPLACE_WITH_RELEASE_BINARY_SHA256
+    e2e_runner_cidrs: [REPLACE_WITH_RUNNER_PUBLIC_IPV4/32]
+    e2e_ssh_private_key_file: /absolute/private/ci
+    e2e_master_key_file: /absolute/private/master.key

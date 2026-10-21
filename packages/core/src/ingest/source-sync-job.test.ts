@@ -222,6 +222,7 @@ function setup(options: {
           status: 'complete' as const,
           empty: input.expectedCount === 0,
           validatorsPublished: 0,
+          leaseHeldBack: 0,
         };
         if (result.status === 'complete') {
           state.session = { ...state.session!, stamp: 'complete' };
@@ -831,7 +832,7 @@ describe('source sync job: fix round 1', () => {
       finalize: (input) =>
         input.definitiveAbsent / input.attemptedCandidates > 0.25
           ? { status: 'refused', reason: 'mass_absence' }
-          : { status: 'complete', empty: false, validatorsPublished: 0 },
+          : { status: 'complete', empty: false, validatorsPublished: 0, leaseHeldBack: 0 },
     });
     await t.run(payload()).catch(() => undefined);
     expect(t.finalizes).toEqual([

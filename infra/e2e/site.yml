@@ -1,0 +1,503 @@
+---
+- name: Provision one isolated Hetzner candidate host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Require explicit candidate and infrastructure inputs
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - e2e_run_id is match('^[a-z0-9][a-z0-9-]{7,39}$')
+          - e2e_candidate_commit is match('^[a-f0-9]{40}$')
+          - e2e_image_source | default('target_build') in ['target_build', 'ghcr']
+          - e2e_os_image_id | string is match('^[1-9][0-9]*$')
+          - e2e_arch | default('amd64') in ['amd64', 'arm64']
+          - e2e_docker_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
+          - e2e_docker_buildx_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
+          - e2e_cloudflared_version is match('^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$')
+          - e2e_cloudflared_sha256 is match('^[a-f0-9]{64}$')
+          - e2e_runner_cidrs is sequence and e2e_runner_cidrs is not string
+          - e2e_runner_cidrs | length > 0
+          - lookup('ansible.builtin.env', 'HCLOUD_TOKEN') | length > 0
+        quiet: true
+        fail_msg: Required candidate, package pins, runner addresses or Hetzner credentials are missing.
+      no_log: true
+
+    - name: Require an immutable GHCR reference when selected
+      ansible.builtin.assert:
+        that: e2e_registry_image is match('^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$')
+        quiet: true
+      when: e2e_image_source | default('target_build') == 'ghcr'
+
+    - name: Restrict SSH sources to individual runner addresses
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_playbook_python }}'
+          - -c
+          - >-
+            import ipaddress, json, sys;
+            nets = [ipaddress.ip_network(s, strict=True) for s in json.loads(sys.argv[1])];
+            sys.exit(0 if all(n.prefixlen == n.max_prefixlen for n in nets) else 1)
+          - '{{ e2e_runner_cidrs | to_json }}'
+      changed_when: false
+
+    - name: Record controller start time
+      ansible.builtin.set_fact:
+        e2e_started_at: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+    - name: Require a future expiry within six hours
+      ansible.builtin.assert:
+        that:
+          - e2e_expires_at | int > e2e_started_at | int
+          - e2e_expires_at | int <= (e2e_started_at | int) + 21600
+        quiet: true
+
+    - name: Verify the exact candidate commit exists locally
+      ansible.builtin.command:
+        argv:
+          [
+            git,
+            -C,
+            '{{ playbook_dir }}/../..',
+            rev-parse,
+            --verify,
+            '{{ e2e_candidate_commit }}^{commit}',
+          ]
+      register: e2e_commit
+      changed_when: false
+      when: e2e_image_source | default('target_build') == 'target_build'
+
+    - name: Require the full candidate identity
+      ansible.builtin.assert:
+        that: e2e_commit.stdout == e2e_candidate_commit
+        quiet: true
+      when: e2e_image_source | default('target_build') == 'target_build'
+
+    - name: Check that the owner SSH key and broker master key files exist
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - '{{ e2e_ssh_private_key_file }}'
+        - '{{ e2e_master_key_file }}'
+      register: e2e_secret_files
+      no_log: true
+
+    - name: Require regular secret source files
+      ansible.builtin.assert:
+        that: item.stat.isreg | default(false)
+        quiet: true
+      loop: '{{ e2e_secret_files.results }}'
+      no_log: true
+
+    - name: Resolve the existing owner project key without creating a key
+      ansible.builtin.uri:
+        url: https://api.hetzner.cloud/v1/ssh_keys?name=ci
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
+        status_code: 200
+        follow_redirects: none
+        use_proxy: false
+        timeout: 30
+      register: e2e_ci_key
+      no_log: true
+
+    - name: Require exactly the registered ci key
+      ansible.builtin.assert:
+        that:
+          - e2e_ci_key.json.ssh_keys | length == 1
+          - e2e_ci_key.json.ssh_keys[0].name == 'ci'
+        quiet: true
+
+    - name: Refuse to overwrite an existing run journal
+      ansible.builtin.stat:
+        path: '{{ e2e_run_dir }}'
+      register: e2e_existing_run
+
+    - name: Require a fresh run directory
+      ansible.builtin.assert:
+        that: not e2e_existing_run.stat.exists
+        fail_msg: Use a fresh run id; destroy the existing run using its recorded inventory.
+
+    - name: Create private controller run directory
+      ansible.builtin.file:
+        path: '{{ e2e_run_dir }}'
+        state: directory
+        mode: '0700'
+
+    - name: Initialize the non-secret journal before any cloud create
+      ansible.builtin.set_fact:
+        e2e_state:
+          schema: 1
+          run_id: '{{ e2e_run_id }}'
+          expires_at: '{{ e2e_expires_at | string }}'
+          started_at: '{{ e2e_started_at | int }}'
+          candidate_commit: '{{ e2e_candidate_commit }}'
+          image_source: "{{ e2e_image_source | default('target_build') }}"
+          resources: {}
+          created_at: {}
+
+    - name: Save initial journal
+      ansible.builtin.include_tasks: tasks/record.yml
+
+    - name: Archive only the committed candidate source for the target build
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - '{{ playbook_dir }}/../..'
+          - archive
+          - --format=tar
+          - '--output={{ e2e_run_dir }}/candidate-source.tar'
+          - '{{ e2e_candidate_commit }}'
+        creates: '{{ e2e_run_dir }}/candidate-source.tar'
+      when: e2e_image_source | default('target_build') == 'target_build'
+
+    - name: Create the labelled SSH-only firewall before the server
+      ansible.builtin.uri:
+        url: https://api.hetzner.cloud/v1/firewalls
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
+        method: POST
+        body_format: json
+        body:
+          name: 'pb-e2e-{{ e2e_run_id }}'
+          labels: '{{ e2e_labels }}'
+          rules:
+            - direction: in
+              protocol: tcp
+              port: '22'
+              source_ips: '{{ e2e_runner_cidrs }}'
+        status_code: 201
+        follow_redirects: none
+        use_proxy: false
+        timeout: 30
+      register: e2e_created_firewall
+      changed_when: true
+      no_log: true
+
+    - name: Journal firewall id immediately
+      ansible.builtin.include_tasks: tasks/record-resource.yml
+      vars:
+        e2e_resource_kind: firewalls
+        e2e_resource_id: '{{ e2e_created_firewall.json.firewall.id }}'
+
+    - name: Create the labelled persistent primary IPv4
+      hetzner.hcloud.primary_ip:
+        name: 'pb-e2e-{{ e2e_run_id }}'
+        location: "{{ e2e_location | default('fsn1') }}"
+        type: ipv4
+        auto_delete: false
+        labels: '{{ e2e_labels }}'
+        state: present
+      register: e2e_created_ip
+      no_log: true
+
+    - name: Journal primary IP id immediately
+      ansible.builtin.include_tasks: tasks/record-resource.yml
+      vars:
+        e2e_resource_kind: primary_ips
+        e2e_resource_id: '{{ e2e_created_ip.hcloud_primary_ip.id }}'
+        e2e_resource_extra:
+          ipv4: '{{ e2e_created_ip.hcloud_primary_ip.ip }}'
+
+    - name: Create the labelled server with only the recorded IPv4
+      hetzner.hcloud.server:
+        name: 'pb-e2e-{{ e2e_run_id }}'
+        server_type: "{{ e2e_server_type | default('cx23') }}"
+        image: '{{ e2e_os_image_id | string }}'
+        location: "{{ e2e_location | default('fsn1') }}"
+        ssh_keys: ['{{ e2e_ci_key.json.ssh_keys[0].id | string }}']
+        firewalls:
+          - '{{ e2e_state.resources.firewalls | string }}'
+        ipv4: '{{ e2e_state.resources.primary_ips | string }}'
+        enable_ipv4: true
+        enable_ipv6: false
+        labels: '{{ e2e_labels }}'
+        user_data: |
+          #cloud-config
+          ssh_pwauth: false
+        state: present
+      register: e2e_created_server
+      no_log: true
+
+    - name: Journal server id immediately
+      ansible.builtin.include_tasks: tasks/record-resource.yml
+      vars:
+        e2e_resource_kind: servers
+        e2e_resource_id: '{{ e2e_created_server.hcloud_server.id }}'
+
+    - name: Create the labelled ext4 data volume
+      hetzner.hcloud.volume:
+        name: 'pb-e2e-{{ e2e_run_id }}'
+        size: 10
+        location: "{{ e2e_location | default('fsn1') }}"
+        format: ext4
+        labels: '{{ e2e_labels }}'
+        state: present
+      register: e2e_created_volume
+      no_log: true
+
+    - name: Journal volume id immediately before attaching
+      ansible.builtin.include_tasks: tasks/record-resource.yml
+      vars:
+        e2e_resource_kind: volumes
+        e2e_resource_id: '{{ e2e_created_volume.hcloud_volume.id }}'
+
+    - name: Attach the recorded volume to the recorded server by API id
+      ansible.builtin.uri:
+        url: 'https://api.hetzner.cloud/v1/volumes/{{ e2e_state.resources.volumes }}/actions/attach'
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
+        method: POST
+        body_format: json
+        body:
+          server: '{{ e2e_state.resources.servers | int }}'
+          automount: false
+        status_code: 201
+        follow_redirects: none
+        use_proxy: false
+        timeout: 30
+      register: e2e_attach
+      changed_when: true
+      no_log: true
+
+    - name: Wait for the recorded attachment action to succeed
+      ansible.builtin.uri:
+        url: 'https://api.hetzner.cloud/v1/actions/{{ e2e_attach.json.action.id }}'
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
+        status_code: 200
+        follow_redirects: none
+        use_proxy: false
+        timeout: 30
+      register: e2e_attach_action
+      until: e2e_attach_action.json.action.status == 'success'
+      retries: 60
+      delay: 2
+      no_log: true
+
+    - name: Add the candidate host using an isolated SSH trust file
+      ansible.builtin.add_host:
+        name: pb_e2e_candidate
+        groups: pb_e2e
+        ansible_host: '{{ e2e_created_ip.hcloud_primary_ip.ip }}'
+        ansible_user: root
+        ansible_ssh_private_key_file: '{{ e2e_ssh_private_key_file }}'
+        ansible_ssh_common_args: >-
+          -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile={{ (e2e_run_dir + '/known_hosts') | quote }}
+          -o IdentitiesOnly=yes
+        e2e_volume_device: '{{ e2e_created_volume.hcloud_volume.linux_device }}'
+
+- name: Run and verify the candidate through a quick tunnel
+  hosts: pb_e2e
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Wait for initial cloud provisioning
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+
+    - name: Install the exact operator-supplied Docker version
+      ansible.builtin.apt:
+        name:
+          - 'docker.io={{ e2e_docker_version }}'
+          - 'docker-cli={{ e2e_docker_version }}'
+          - 'docker-buildx={{ e2e_docker_buildx_version }}'
+        state: present
+        update_cache: true
+
+    - name: Enable Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Wait for the data volume device
+      ansible.builtin.wait_for:
+        path: '{{ e2e_volume_device }}'
+        timeout: 120
+
+    - name: Create the volume mountpoint
+      ansible.builtin.file:
+        path: /srv/pb-data
+        state: directory
+        mode: '0700'
+
+    - name: Persist the exact volume mount across reboot
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: '{{ e2e_volume_device }} /srv/pb-data ext4 defaults 0 2'
+        state: present
+
+    - name: Mount the data volume
+      ansible.builtin.command:
+        argv: [mount, /srv/pb-data]
+      register: e2e_mount
+      changed_when: e2e_mount.rc == 0
+      failed_when: e2e_mount.rc not in [0, 32]
+
+    - name: Require that the expected device backs the data directory
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, SOURCE, --target, /srv/pb-data]
+      register: e2e_mount_source
+      changed_when: false
+
+    - name: Resolve the expected volume device
+      ansible.builtin.command:
+        argv: [readlink, -f, '{{ e2e_volume_device }}']
+      register: e2e_expected_device
+      changed_when: false
+
+    - name: Verify mount identity
+      ansible.builtin.assert:
+        that: e2e_mount_source.stdout == e2e_expected_device.stdout
+        quiet: true
+
+    - name: Assign data ownership to the image user
+      ansible.builtin.file:
+        path: /srv/pb-data
+        state: directory
+        owner: '1000'
+        group: '1000'
+        mode: '0700'
+
+    - name: Create private configuration and candidate directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        mode: '0750'
+      loop: [/etc/pb-e2e, /opt/pb-e2e-source]
+
+    - name: Install the broker master key without logging its contents
+      ansible.builtin.copy:
+        src: '{{ e2e_master_key_file }}'
+        dest: /etc/pb-e2e/master.key
+        owner: '1000'
+        group: '1000'
+        mode: '0400'
+      no_log: true
+      diff: false
+
+    - name: Build or pull the immutable candidate on the target
+      ansible.builtin.include_tasks: tasks/image.yml
+
+    - name: Install the pinned tunnel binary with checksum verification
+      ansible.builtin.get_url:
+        url: 'https://github.com/cloudflare/cloudflared/releases/download/{{ e2e_cloudflared_version }}/cloudflared-linux-{{ e2e_arch | default("amd64") }}'
+        dest: /usr/local/bin/cloudflared
+        checksum: 'sha256:{{ e2e_cloudflared_sha256 }}'
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Bootstrap the broker with a loopback public URL before tunnel discovery
+      ansible.builtin.set_fact:
+        e2e_public_url: http://127.0.0.1:8787
+
+    - name: Install the broker service
+      ansible.builtin.template:
+        src: pb-e2e.service.j2
+        dest: /etc/systemd/system/pb-e2e.service
+        mode: '0644'
+
+    - name: Install the quick tunnel service
+      ansible.builtin.template:
+        src: cloudflared.service.j2
+        dest: /etc/systemd/system/pb-e2e-tunnel.service
+        mode: '0644'
+
+    - name: Start the broker before the tunnel
+      ansible.builtin.systemd_service:
+        name: pb-e2e
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Require broker readiness before starting the tunnel
+      ansible.builtin.include_tasks: tasks/ready.yml
+
+    - name: Discover the initial URL and reconfigure the broker before testing
+      ansible.builtin.include_tasks: tasks/tunnel.yml
+      vars:
+        e2e_phase: before_reboot
+
+    - name: Verify candidate readiness and trusted public TLS before reboot
+      ansible.builtin.include_tasks: tasks/health.yml
+
+    - name: Write a persistence marker as the container user
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - --user
+          - '1000:1000'
+          - pb-e2e
+          - node
+          - -e
+          - "require('node:fs').writeFileSync('/data/reboot-marker', process.argv[1], {mode: 0o600})"
+          - '{{ e2e_run_id }}'
+      changed_when: true
+
+    - name: Reboot the host and wait for reconnection
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+
+    - name: Discover the current tunnel URL and reconfigure the broker after reboot
+      ansible.builtin.include_tasks: tasks/tunnel.yml
+      vars:
+        e2e_phase: after_reboot
+
+    - name: Verify candidate readiness and trusted public TLS after reboot
+      ansible.builtin.include_tasks: tasks/health.yml
+
+    - name: Verify the volume mount survived reboot
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, SOURCE, --target, /srv/pb-data]
+      register: e2e_reboot_mount
+      changed_when: false
+
+    - name: Verify persistent data and live non-root process
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - pb-e2e
+          - node
+          - -e
+          - >-
+            const fs = require('node:fs');
+            if (process.getuid() !== 1000 || fs.readFileSync('/data/reboot-marker', 'utf8') !== process.argv[1]
+            || fs.statSync('/data/broker.sqlite').uid !== 1000) process.exit(1);
+          - '{{ e2e_run_id }}'
+      changed_when: false
+
+    - name: Confirm the same volume is mounted after reboot
+      ansible.builtin.assert:
+        that: e2e_reboot_mount.stdout == e2e_expected_device.stdout
+        quiet: true
+
+    - name: Record successful reboot acceptance time
+      ansible.builtin.set_fact:
+        e2e_state: >-
+          {{ hostvars['localhost'].e2e_state | combine({
+          'verified_at': lookup('ansible.builtin.pipe', 'date +%s') | int,
+          'checks': {'ready': true, 'trusted_tls': true, 'reboot_volume': true, 'non_root': true}
+          }) }}
+      delegate_to: localhost
+      delegate_facts: true
+
+    - name: Save acceptance evidence on the controller
+      ansible.builtin.copy:
+        content: "{{ hostvars['localhost'].e2e_state | to_nice_json }}\n"
+        dest: '{{ e2e_inventory_file }}'
+        mode: '0600'
+      delegate_to: localhost

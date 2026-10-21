@@ -355,6 +355,7 @@ export interface FinalizeResult {
   readonly removed: number;
   readonly restored: number;
   readonly statements: number;
+  readonly leaseHeldBack: number;
 }
 
 export type CatalogueWriteMethod =

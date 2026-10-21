@@ -16,7 +16,7 @@ export async function visiblePackage(
     own.orgId,
   );
   await seed.forged(
-    "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'explicit')",
+    "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P' AS project_id, 'K' AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
     foreignMembership ? foreign.orgId : own.orgId,
   );
 }

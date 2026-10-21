@@ -429,7 +429,7 @@ function seedPackageCatalogue(database) {
       ).run(randomUUID(), orgId, id, new Date().toISOString());
     }
     db.prepare(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'npm', 'visible')",
     ).run(orgId, ids.project, ids.visible);
     return ids;
   } finally {

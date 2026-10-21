@@ -212,7 +212,12 @@ describe('ingest session finalize', () => {
     const { session } = await begin('package');
     await setValidators(session);
     const result = await createIngestFinalizer(database.executor).finalize(org, session, input(0));
-    expect(result).toEqual({ status: 'complete', empty: true, validatorsPublished: 1 });
+    expect(result).toEqual({
+      status: 'complete',
+      empty: true,
+      validatorsPublished: 1,
+      leaseHeldBack: 0,
+    });
     expect((await versionStatuses()).map((v) => v.status)).toEqual(['active', 'active']);
     expect((await refetchable()).map((b) => b.refetchable)).toEqual([1, 1]);
     expect(await sessionState()).toBe('complete');
@@ -231,7 +236,12 @@ describe('ingest session finalize', () => {
     const result = await createIngestFinalizer(database.executor, {
       maxAbsenceShare: 0.5,
     }).finalize(org, session, input(2));
-    expect(result).toEqual({ status: 'complete', empty: false, validatorsPublished: 1 });
+    expect(result).toEqual({
+      status: 'complete',
+      empty: false,
+      validatorsPublished: 1,
+      leaseHeldBack: 0,
+    });
     expect(await versionStatuses()).toEqual([
       { id: 'V-1.0.0', status: 'active' },
       { id: 'V-1.1.0', status: 'active' },
@@ -328,7 +338,7 @@ describe('ingest session finalize', () => {
     const normalised = { etag: '"normalised"', lastModified: null, contentSha256: null };
     expect(stored?.pending_validators).toBe(JSON.stringify({ 'composer-p2': normalised }));
     expect(await createIngestFinalizer(database.executor).finalize(org, session, input(0))).toEqual(
-      { status: 'complete', empty: true, validatorsPublished: 1 },
+      { status: 'complete', empty: true, validatorsPublished: 1, leaseHeldBack: 0 },
     );
     expect(
       await createUpstreamStateRepository(database.executor).get(org, PACKAGE, 'composer-p2'),
@@ -448,6 +458,7 @@ describe('ingest session finalize', () => {
       status: 'complete',
       empty: true,
       validatorsPublished: 0,
+      leaseHeldBack: 0,
     });
     expect(await upstreamRows()).toEqual([]);
   });

@@ -448,6 +448,7 @@ async function syncListing(
     if (result.reason === 'mass_absence') throw massAbsence();
     throw invalidListing();
   }
+  job.observability.counter('pb.ingest.lease_held_back', undefined, result.leaseHeldBack);
   run.session = null;
   await recordSuccess(deps, job, record.id, session.snapshotId ?? undefined);
 }

@@ -35,6 +35,8 @@ export interface SafeLogRecord {
   readonly duration_ms?: number;
   readonly project_id?: string | null;
   readonly token_id?: string | null;
+  readonly user_id?: string | null;
+  readonly session_id?: string | null;
   readonly job_id?: string;
   readonly attempt?: number;
   readonly error_name?: ErrorName;
@@ -64,6 +66,8 @@ export const LOG_FIELDS = [
   'duration_ms',
   'project_id',
   'token_id',
+  'user_id',
+  'session_id',
   'job_id',
   'attempt',
   'error_name',
@@ -283,6 +287,8 @@ const FIELD_CHECKS: Readonly<
   duration_ms: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
   project_id: nullable(matches(ENTITY_ID)),
   token_id: nullable(matches(ENTITY_ID)),
+  user_id: nullable(matches(ENTITY_ID)),
+  session_id: nullable(matches(ENTITY_ID)),
   job_id: matches(ENTITY_ID),
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),

@@ -184,7 +184,7 @@ describe('auth module request correlation', () => {
         level: 'warn',
         event: 'auth.local.locked',
         reason: 'attempts',
-        userId: 'user-1',
+        user_id: 'user-1',
         request_id: 'request-lock',
       },
     ]);

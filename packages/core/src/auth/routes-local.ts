@@ -171,7 +171,7 @@ export function createLocalRoutes(deps: {
             level: 'info',
             event: 'auth.local.setup.completed',
             requestId: ctx.requestId,
-            userId: result.userId,
+            user_id: result.userId,
           });
           return noContent(result.cookies);
         }
@@ -206,7 +206,7 @@ export function createLocalRoutes(deps: {
             event: 'auth.login.succeeded',
             provider: 'local',
             requestId: ctx.requestId,
-            userId: result.userId,
+            user_id: result.userId,
           });
           return noContent(result.cookies);
         }
@@ -234,7 +234,7 @@ export function createLocalRoutes(deps: {
             level: 'info',
             event: 'auth.reauth.succeeded',
             requestId: ctx.requestId,
-            sessionId: authenticated.session.id,
+            session_id: authenticated.session.id,
           });
           return noContent([]);
         }
@@ -243,7 +243,7 @@ export function createLocalRoutes(deps: {
           event: 'auth.reauth.refused',
           ...(result.reason === 'session_inactive' ? { reason: result.reason } : {}),
           requestId: ctx.requestId,
-          sessionId: authenticated.session.id,
+          session_id: authenticated.session.id,
         });
         if (result.reason === 'session_inactive') return unauthorized(ctx);
         return invalidCredentials(ctx);

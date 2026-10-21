@@ -116,7 +116,12 @@ async function withWorld(open: Open, body: (w: World) => Promise<void>, wrap?: W
         "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('role', ?, 'admin', 'Admin', 'organization', 0)",
         org.orgId,
       ),
-      ...['org:sources:write', 'project:sources:write', 'project:packages:manage'].map((p) =>
+      ...[
+        'org:sources:write',
+        'org:packages:manage',
+        'project:sources:write',
+        'project:packages:manage',
+      ].map((p) =>
         st(
           "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'role', ?)",
           org.orgId,
@@ -511,7 +516,16 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
           'id'
         ] as string;
         expect(
-          await w.store.tombstoneVersion(w.org, fence(), { versionId, reason: 'admin_tombstone' }),
+          await w.store.tombstoneVersion(w.org, fence(), {
+            packageId: (await w.rows('SELECT package_id FROM version WHERE org_id = ?'))[0]![
+              'package_id'
+            ] as string,
+            expectedStatus: 'active',
+            manage: { kind: 'organization' },
+            audit: visibilityAudit('version.state_change'),
+            versionId,
+            reason: 'admin_tombstone',
+          }),
         ).toMatchObject({ ok: true });
         expect(await w.sync()).toMatchObject({
           inserted: 0,
@@ -802,6 +816,10 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
               'id'
             ] as string;
             result = await w.store.quarantineVersion(w.org, fence(), {
+              packageId,
+              expectedStatus: 'active',
+              manage: { kind: 'organization' },
+              audit: visibilityAudit('version.state_change'),
               versionId,
               reason: 'admin_quarantine',
             });

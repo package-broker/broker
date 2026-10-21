@@ -1,6 +1,7 @@
 import type { LoginRefusal } from './identity-login.js';
 import type { ReauthRefusal } from './identity-reauth.js';
 import type { IdentityFailure, IdentityFailureDetail } from '../identity/port.js';
+import { FINISH_FAILURE_DETAIL_LABELS } from '../platform/observability.js';
 
 function reasonSet<const T extends string>(reasons: Record<T, true>): ReadonlySet<T> {
   return new Set(Object.keys(reasons) as T[]);
@@ -21,15 +22,9 @@ export const START_FAILURE_DETAILS = reasonSet({
   discovery_bad_json: true,
 });
 
-export const FINISH_FAILURE_DETAILS = reasonSet({
-  invalid_grant: true,
-  invalid_client: true,
-  invalid_request: true,
-  unauthorized_client: true,
-  unsupported_grant_type: true,
-  invalid_scope: true,
-  token_endpoint_error: true,
-} satisfies Record<IdentityFailureDetail, true>);
+export const FINISH_FAILURE_DETAILS: ReadonlySet<IdentityFailureDetail> = reasonSet(
+  FINISH_FAILURE_DETAIL_LABELS satisfies Record<IdentityFailureDetail, true>,
+);
 
 export const IDENTITY_FAILURES = reasonSet({
   missing_credentials: true,

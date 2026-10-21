@@ -1,5 +1,3 @@
-import { FINISH_FAILURE_DETAILS } from '../auth/reason-codes.js';
-
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface LogRecord {
@@ -231,6 +229,15 @@ export const PACKAGE_KEY_MAX_LENGTH = 428;
 const PACKAGE_KEY_FORBIDDEN = /[\u0000-\u0020\u007f-\u009f:?#\\]/;
 const STATUS_CLASS = /^[1-5]xx$/;
 export const MAX_METRIC_LABELS = 8;
+export const FINISH_FAILURE_DETAIL_LABELS = Object.freeze({
+  invalid_grant: true,
+  invalid_client: true,
+  invalid_request: true,
+  unauthorized_client: true,
+  unsupported_grant_type: true,
+  invalid_scope: true,
+  token_endpoint_error: true,
+} as const);
 const LABEL_KEYS = new Set([
   'method',
   'route',
@@ -403,7 +410,7 @@ export function metricLabelValueAllowed(
 ): boolean {
   switch (key) {
     case 'detail':
-      return (FINISH_FAILURE_DETAILS as ReadonlySet<string>).has(value);
+      return Object.hasOwn(FINISH_FAILURE_DETAIL_LABELS, value);
     case 'method':
       return METHODS.has(value);
     case 'route':

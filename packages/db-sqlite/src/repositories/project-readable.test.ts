@@ -454,6 +454,9 @@ describe('listReadableProjects', () => {
     [{ limit: 1.5, status: 'active' }],
     [{ limit: 5, status: 'deleted' }],
     [{ limit: 5, status: 'active', afterId: 'not-a-ulid' }],
+    [{ limit: 5, status: 'active', ids: ['not-a-ulid'] }],
+    [{ limit: 5, status: 'active', ids: Array.from({ length: 51 }, () => projectId(1)) }],
+    [{ limit: 5, status: 'active', ids: null }],
   ])('refuses page %j', async (page) => {
     await expect(
       repository().listReadableProjects(a, { userId: U1 }, page as never),

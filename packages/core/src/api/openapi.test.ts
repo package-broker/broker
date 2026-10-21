@@ -7,6 +7,7 @@ import { toJsonSchema, type JsonValue } from './json-schema.js';
 import { API_ERROR_CODES, SERVICE_ERROR_TABLE } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 import { AUTH_API } from './auth-schemas.js';
+import { PROJECT_API_SPECS } from './routes/projects-schemas.js';
 
 const info = { title: 'Package Broker', version: '2.0.0' };
 const result = z.strictObject({ ok: z.boolean() });
@@ -103,6 +104,12 @@ describe('generateOpenApi', () => {
         content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
       },
     });
+  });
+
+  it('does not advertise scan_incomplete for project listing', () => {
+    const operation = generateOpenApi(PROJECT_API_SPECS, info).paths['/_pb/projects']!.get;
+    expect(JSON.stringify(operation)).not.toContain('scan_incomplete');
+    expect(SERVICE_ERROR_TABLE.ProjectListError).not.toHaveProperty('scan_incomplete');
   });
 
   it('derives only errors present in the linked service', () => {

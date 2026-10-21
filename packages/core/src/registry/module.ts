@@ -235,7 +235,16 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       draft.type === 'vcs' ? draft : ({ ...draft, providerId: provider.id } as ProviderSource);
     const credential = record.credentialId === null ? null : await ingest.credential(ctx, record);
     if (record.credentialId !== null && credential === null) return null;
-    return { provider, source, credential, fetch: deps.policyFetch(userAgentOf(record)) };
+    const fetch = deps.policyFetch(userAgentOf(record));
+    const boundedFetch: PolicyFetch = (request) =>
+      fetch({
+        ...request,
+        maxBytes:
+          request.purpose === 'metadata'
+            ? Math.min(request.maxBytes, registry.caps.metadataBytes)
+            : request.maxBytes,
+      });
+    return { provider, source, credential, fetch: boundedFetch };
   }
 
   function providerContext(

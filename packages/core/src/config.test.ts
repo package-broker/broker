@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   brokerAssetsProblems,
+  brokerVulnerabilityProblems,
+  vulnerabilityEnabled,
   brokerMcpProblems,
   brokerObservabilityProblems,
   mcpEnabled,
@@ -153,5 +155,38 @@ describe('brokerMcpProblems', () => {
 
   it.each([[null], [[]], [7]])('rejects a non-object block %j', (mcp) => {
     expect(brokerMcpProblems(mcpConfig(mcp))).toEqual(['mcp: must be an object']);
+  });
+});
+
+describe('vulnerability configuration', () => {
+  const input = (vulnerability?: unknown): BrokerConfig =>
+    ({
+      platform: 'node',
+      plugins: [],
+      ...(vulnerability === undefined ? {} : { vulnerability }),
+    }) as BrokerConfig;
+  it.each([undefined, {}, { enabled: true }, { enabled: false }])('accepts %j', (value) => {
+    expect(brokerVulnerabilityProblems(input(value))).toEqual([]);
+    expect(vulnerabilityEnabled(input(value))).toBe(
+      value === undefined || !('enabled' in value) || value.enabled,
+    );
+  });
+  it.each([null, [], 'secret', 42].map((value) => [value]))(
+    'rejects malformed blocks %j with fixed messages',
+    (value) => {
+      expect(brokerVulnerabilityProblems(input(value))).toEqual([
+        'vulnerability: must be an object',
+      ]);
+      expect(vulnerabilityEnabled(input(value))).toBe(false);
+    },
+  );
+  it('rejects invalid flags and unknown keys without echoing sentinels', () => {
+    expect(
+      brokerVulnerabilityProblems(input({ enabled: 'secret@example.test', 'token-secret': true })),
+    ).toEqual([
+      'vulnerability.enabled: must be a boolean',
+      'vulnerability: contains an unknown key',
+    ]);
+    expect(vulnerabilityEnabled(input({ enabled: 'true' }))).toBe(false);
   });
 });

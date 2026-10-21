@@ -7,6 +7,7 @@ import type { IngestSessionHandle } from '../ingest/session.js';
 import { narrowPackageActor, setContextPackageActor } from '../internal/package-actor.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { systemClock } from '../ids.js';
+import { createPolicyFetch } from '../sources/policy-fetch.js';
 import type { PlatformPorts, RequestContext } from '../plugin.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
 import type { SourceRecord } from '../db/source.js';
@@ -525,6 +526,42 @@ describe('continuation', () => {
     key: 'left-pad',
     sourceIds: ['src-1'],
   };
+
+  it.each(['node', 'cloudflare'] as const)(
+    'rejects a streamed packument above the configured cap before applying it on %s',
+    async (runtime) => {
+      const h = harness();
+      h.deps = {
+        ...h.deps,
+        runtime,
+        outboundPolicy: { ...h.deps.outboundPolicy, runtime },
+        registry: resolveRegistryConfig(
+          { caps: { metadataBytes: 128 } },
+          runtime,
+          'https://broker.test',
+        ),
+        policyFetch: () =>
+          createPolicyFetch({
+            policy: h.deps.outboundPolicy,
+            userAgent: 'PackageBroker/2',
+            fetchImpl: async () =>
+              new Response(
+                JSON.stringify({ name: 'left-pad', readme: 'x'.repeat(256), versions: {} }),
+              ),
+          }),
+      };
+      const { ecosystemRoutes } = h.module();
+      const ctx = context(
+        'https://broker.test/demo/npm/left-pad',
+        { project: 'demo', a: 'left-pad' },
+        { outcome: admitted },
+      );
+      const response = await routeOf(ecosystemRoutes, 'GET', '/:project/npm/:a').handler(ctx);
+      expect(response.status).toBe(502);
+      expect(applyChunk).not.toHaveBeenCalled();
+      expect(h.jobs.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('enqueues exactly one package-sync job with the session payload after releasing the session', async () => {
     const h = harness();

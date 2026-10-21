@@ -1114,3 +1114,26 @@ it('39. a non-lost executor error exits 1 with the error name only', async () =>
     await failing.database.close();
   }
 });
+
+it('T865. bootstrap names the relative browser setup path and both POST routes without printing a URL or the token', async () => {
+  const file = await sqliteFile();
+  vi.mocked(console.error).mockClear();
+  expect(
+    await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
+  ).toBe(0);
+  const printed = lastJson();
+  const token = String(printed.setupToken);
+  const { stderr } = output();
+  expect(stderr).toContain('open /_pb/ui/setup on the broker in a browser');
+  expect(stderr).toContain('the token never goes into the address bar');
+  expect(stderr).toContain('POST routes named under "next"');
+  expect(stderr).not.toMatch(/https?:\/\//);
+  expect(stderr).not.toContain(token);
+  expect(Object.keys(printed).sort()).toEqual(
+    ['expiresAt', 'next', 'result', 'setupToken', 'tokenFile'].sort(),
+  );
+  expect(printed.next).toEqual([
+    'POST /_pb/auth/local/setup/start {"token"}',
+    'POST /_pb/auth/local/setup/finish {"token","password","code"}',
+  ]);
+});

@@ -1,10 +1,12 @@
 import { execFile, type ExecFileOptions } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { gzipSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as manifest from './manifest.js';
 
@@ -212,5 +214,129 @@ describe('ui build output', () => {
       await expect(readdir(result.out)).rejects.toThrow();
     },
     BUILD_TIMEOUT_MS,
+  );
+});
+
+describe('ui setup build output', () => {
+  it(
+    'reports setup dependencies and outputs in the isolation graph',
+    async () => {
+      const entry = await writeEntry("console.log('app');");
+      const corePath = fileURLToPath(
+        new URL('../../core/src/authz/permissions.ts', import.meta.url),
+      );
+      const setupEntry = await writeEntry(
+        `import { PERMISSIONS } from ${JSON.stringify(corePath)}; console.log(PERMISSIONS);`,
+      );
+      const out = path.join(scratch, `out-${counter++}`);
+      const metafile = path.join(scratch, `meta-${counter++}.json`);
+      await run(
+        process.execPath,
+        [
+          BUILD_SCRIPT,
+          '--entry',
+          entry,
+          '--setup-entry',
+          setupEntry,
+          '--out',
+          out,
+          '--budget',
+          await writeBudget(1_000_000),
+          '--metafile',
+          metafile,
+        ],
+        { timeout: BUILD_TIMEOUT_MS },
+      );
+      const graph = JSON.parse(await readFile(metafile, 'utf8')) as {
+        inputs: Record<string, unknown>;
+        outputs: Record<string, { entryPoint?: string }>;
+      };
+      const absolute = (input: string) => realpathSync(path.resolve(input));
+      expect(Object.keys(graph.inputs).map(absolute)).toEqual(
+        expect.arrayContaining([entry, setupEntry, corePath].map(absolute)),
+      );
+      expect(
+        Object.values(graph.outputs).map((output) => absolute(output.entryPoint ?? '')),
+      ).toEqual(expect.arrayContaining([entry, setupEntry].map(absolute)));
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
+  it(
+    'measures every emitted HTML, script and stylesheet in the budget',
+    async () => {
+      const entry = await writeEntry("console.log('budget');");
+      const out = path.join(scratch, `out-${counter++}`);
+      const budget = await writeBudget(1_000_000);
+      const args = [BUILD_SCRIPT, '--entry', entry, '--out', out, '--budget', budget];
+      const { stdout } = await run(process.execPath, args, { timeout: BUILD_TIMEOUT_MS });
+      const files = await readOutput(out);
+      const measured = [...files]
+        .filter(([name]) => /\.(?:html|js|css)$/.test(name))
+        .reduce((sum, [, bytes]) => sum + gzipSync(bytes).length, 0);
+      expect(stdout).toContain(`bundle gzip total ${measured} bytes`);
+      await run(process.execPath, [...args, '--init-budget'], { timeout: BUILD_TIMEOUT_MS });
+      expect(JSON.parse(await readFile(budget, 'utf8'))).toEqual({ gzipBytes: measured });
+    },
+    BUILD_TIMEOUT_MS * 2,
+  );
+
+  const setupReferences = (html: string): string[] =>
+    [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1] ?? '');
+
+  it(
+    'emits setup.html with absolute setup asset URLs that the manifest lists',
+    async () => {
+      const result = await build(await writeEntry("console.log('app');"));
+      expect(result.code).toBe(0);
+      const files = await readOutput(result.out);
+      const parsed = manifest.parseUiManifest(files.get('manifest.json')!.toString('utf8'));
+      expect(parsed.entry).toBe('index.html');
+      expect(parsed.files['setup.html']?.contentType).toBe('text/html');
+      const html = files.get('setup.html')?.toString('utf8') ?? '';
+      assertNoInlineCode(html);
+      const references = setupReferences(html);
+      expect(references).toHaveLength(2);
+      for (const reference of references) {
+        expect(reference).toMatch(/^\/_pb\/ui\/setup\/assets\/[A-Za-z0-9][A-Za-z0-9._-]*$/);
+        const name = reference.slice('/_pb/ui/setup/assets/'.length);
+        expect(parsed.files[name]).toBeDefined();
+        expect(files.has(name)).toBe(true);
+      }
+      expect(references.some((reference) => /\/setup\.[0-9a-f]{12}\.js$/.test(reference))).toBe(
+        true,
+      );
+      expect(html).toContain('name="referrer" content="no-referrer"');
+      expect(html).not.toMatch(/https?:\/\//);
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
+  it(
+    'bundles the setup script without React and keeps the normal entry untouched',
+    async () => {
+      const result = await build(await writeEntry("console.log('app');"));
+      const files = await readOutput(result.out);
+      const setupScript = [...files.keys()].find((name) => /^setup\.[0-9a-f]{12}\.js$/.test(name));
+      expect(setupScript).toBeDefined();
+      const text = files.get(setupScript!)!.toString('utf8');
+      expect(text).not.toMatch(/\beval\s*\(|new Function/);
+      expect(text).not.toContain('react-dom');
+      const index = files.get('index.html')!.toString('utf8');
+      expect(index).not.toContain('setup');
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
+  it(
+    'keeps the setup script name stable when only the app entry changes',
+    async () => {
+      const a = await readOutput((await build(await writeEntry("console.log('one');"))).out);
+      const b = await readOutput((await build(await writeEntry("console.log('two');"))).out);
+      const setupName = (files: Map<string, Buffer>) =>
+        [...files.keys()].find((name) => name.startsWith('setup.') && name.endsWith('.js'));
+      expect(setupName(a)).toBe(setupName(b));
+    },
+    BUILD_TIMEOUT_MS * 2,
   );
 });

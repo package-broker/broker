@@ -27,9 +27,59 @@ const inputs = {
   removePattern: { projectId, sourceId, pattern: 'private/*' },
   addExplicit: { projectId, packageId },
   removeExplicit: { projectId, packageId },
-  quarantineVersion: { versionId, reason: 'admin_quarantine' },
-  releaseQuarantine: { versionId },
-  tombstoneVersion: { versionId, reason: 'admin_tombstone' },
+  quarantineVersion: {
+    versionId,
+    reason: 'admin_quarantine',
+    packageId,
+    expectedStatus: 'active',
+    manage: { kind: 'organization' },
+    audit: {
+      id: '01ARZ3NDEKTSV4RRFFQ69G5FAZ',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      action: 'version.state_change',
+      actor: { type: 'user', id: fence.userId },
+      target: { type: 'version', id: versionId },
+      projectId: null,
+      sourceIp: null,
+      tokenSelector: null,
+      payloadJson: '{}',
+    },
+  },
+  releaseQuarantine: {
+    versionId,
+    packageId,
+    expectedStatus: 'quarantined',
+    manage: { kind: 'organization' },
+    audit: {
+      id: '01ARZ3NDEKTSV4RRFFQ69G5FAZ',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      action: 'version.state_change',
+      actor: { type: 'user', id: fence.userId },
+      target: { type: 'version', id: versionId },
+      projectId: null,
+      sourceIp: null,
+      tokenSelector: null,
+      payloadJson: '{}',
+    },
+  },
+  tombstoneVersion: {
+    versionId,
+    reason: 'admin_tombstone',
+    packageId,
+    expectedStatus: 'active',
+    manage: { kind: 'organization' },
+    audit: {
+      id: '01ARZ3NDEKTSV4RRFFQ69G5FAZ',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      action: 'version.state_change',
+      actor: { type: 'user', id: fence.userId },
+      target: { type: 'version', id: versionId },
+      projectId: null,
+      sourceIp: null,
+      tokenSelector: null,
+      payloadJson: '{}',
+    },
+  },
 } as const;
 const auditedActions = {
   attachSource: 'source.attach',
@@ -124,6 +174,20 @@ describe('visibility administration', () => {
     await expect(call(op, null)).rejects.toThrow(TypeError);
     expect(store[op]).not.toHaveBeenCalled();
   });
+
+  it.each(['quarantineVersion', 'releaseQuarantine', 'tombstoneVersion'] as const)(
+    '%s requires a valid package id before storage',
+    async (op) => {
+      const { store, log, call } = setup();
+      for (const invalid of [undefined, '', ' ', 'invalid', null, 42]) {
+        await expect(call(op, { ...inputs[op], packageId: invalid })).rejects.toThrow(
+          'invalid visibility id',
+        );
+      }
+      expect(store[op]).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    },
+  );
 
   it('validates precedence, flags, effects, patterns and fixed status reasons before storage', async () => {
     const { store, call } = setup();

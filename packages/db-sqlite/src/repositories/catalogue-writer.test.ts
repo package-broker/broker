@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vites
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import type {
   CatalogueWriter,
+  PackageManageScope,
   VisibilityStore,
   VersionInput,
   SyncPackageInput,
@@ -65,6 +66,19 @@ const epoch = () => scalar('SELECT version AS value FROM cache_epoch WHERE org_i
 const versionId = () =>
   scalar('SELECT id AS value FROM version WHERE org_id = ? LIMIT 1', org.orgId) as Promise<string>;
 
+async function stateWrite(id: string, expectedStatus: 'active' | 'quarantined' = 'active') {
+  return {
+    packageId: (await scalar(
+      'SELECT package_id AS value FROM version WHERE org_id = ? AND id = ?',
+      org.orgId,
+      id,
+    )) as string,
+    expectedStatus,
+    manage: { kind: 'organization' as const },
+    audit: visibilityAudit('version.state_change'),
+  };
+}
+
 beforeEach(async () => {
   database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
   org = database.orgs!.a;
@@ -111,7 +125,12 @@ beforeEach(async () => {
       "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('role', ?, 'admin', 'Admin', 'organization', 0)",
       org.orgId,
     ),
-    ...['org:sources:write', 'project:sources:write', 'project:packages:manage'].map((p) =>
+    ...[
+      'org:sources:write',
+      'org:packages:manage',
+      'project:sources:write',
+      'project:packages:manage',
+    ].map((p) =>
       stmt(
         "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'role', ?)",
         org.orgId,
@@ -161,6 +180,251 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await database.close();
+});
+
+describe('version-state fenced batch', () => {
+  const methods = ['quarantineVersion', 'tombstoneVersion', 'releaseQuarantine'] as const;
+  type Method = (typeof methods)[number];
+  const anchors = [
+    {
+      provider: 'oidc',
+      anchor: 'oidc:https://idp.example.test',
+      emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test'],
+    },
+  ];
+  async function request(method: Method) {
+    const { packageId } = await sync([input(0)]);
+    const id = await versionId();
+    if (method === 'releaseQuarantine')
+      await database.executor.batch([
+        stmt(
+          "UPDATE version SET status = 'quarantined' WHERE org_id = ? AND id = ?",
+          org.orgId,
+          id,
+        ),
+      ]);
+    return {
+      packageId,
+      versionId: id,
+      expectedStatus:
+        method === 'releaseQuarantine' ? ('quarantined' as const) : ('active' as const),
+      manage: { kind: 'organization' } as PackageManageScope,
+      audit: {
+        ...visibilityAudit('version.state_change'),
+        target: { type: 'version' as const, id },
+      },
+      idempotency: {
+        principalKey: 'user:admin',
+        key: 'version-state',
+        route: '/version-state',
+        requestHash: 'a'.repeat(64),
+        status: 200,
+        responseJson: '{}',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: '2999-01-01T00:00:00.000Z',
+      },
+    };
+  }
+  function act(method: Method, write: Awaited<ReturnType<typeof request>>, repository = store) {
+    if (method === 'quarantineVersion')
+      return repository.quarantineVersion(org, fence(), { ...write, reason: 'admin_quarantine' });
+    if (method === 'tombstoneVersion')
+      return repository.tombstoneVersion(org, fence(), { ...write, reason: 'admin_tombstone' });
+    return repository.releaseQuarantine(org, fence(), write);
+  }
+  async function snapshot() {
+    return {
+      status: await scalar('SELECT status AS value FROM version WHERE org_id = ?', org.orgId),
+      revision: await scalar('SELECT revision AS value FROM version WHERE org_id = ?', org.orgId),
+      packageRev: await scalar('SELECT rev AS value FROM package WHERE org_id = ?', org.orgId),
+      revisions: await scalar(
+        'SELECT count(*) AS value FROM version_revision WHERE org_id = ?',
+        org.orgId,
+      ),
+      audit: await scalar(
+        'SELECT count(*) AS value FROM audit_pending WHERE org_id = ?',
+        org.orgId,
+      ),
+      idempotency: await scalar(
+        'SELECT count(*) AS value FROM api_idempotency WHERE org_id = ?',
+        org.orgId,
+      ),
+      epoch: await epoch(),
+    };
+  }
+  async function projectManager() {
+    await database.executor.batch([
+      stmt(
+        "DELETE FROM role_permission WHERE org_id = ? AND permission <> 'project:packages:manage'",
+        org.orgId,
+      ),
+      stmt(
+        "UPDATE access_grant SET scope = 'project', project_id = 'project' WHERE org_id = ?",
+        org.orgId,
+      ),
+      stmt("UPDATE role SET scope = 'project' WHERE org_id = ?", org.orgId),
+    ]);
+  }
+  it('organization admin tombstones a project package with audit and revision in one batch', async () => {
+    const write = await request('tombstoneVersion');
+    await database.executor.batch([
+      stmt("UPDATE source SET project_id = 'project' WHERE org_id = ?", org.orgId),
+    ]);
+    batches.length = 0;
+    expect(await act('tombstoneVersion', write)).toMatchObject({ ok: true });
+    const state = await snapshot();
+    expect(state).toMatchObject({
+      status: 'tombstoned',
+      revision: 2,
+      revisions: 1,
+      audit: 1,
+      idempotency: 1,
+    });
+    const mutations = batches.filter((batch) =>
+      batch.some((s) => /INSERT INTO audit_pending/i.test(s.sql)),
+    );
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.some((s) => /insert into "version_revision"/i.test(s.sql))).toBe(true);
+  });
+  it('a fault after the audit statement rolls back the transition, revision, idempotency and epoch', async () => {
+    const write = await request('tombstoneVersion');
+    const before = await snapshot();
+    let injected = false;
+    const repository = createVisibilityStore(
+      {
+        ...database.executor,
+        async batch(statements) {
+          const broken = statements.flatMap((s) => {
+            if (!/INSERT INTO audit_pending/i.test(s.sql)) return [s];
+            injected = true;
+            return [
+              s,
+              stmt('INSERT INTO access_mutation_guard (key) VALUES (?), (?)', 'fault', 'fault'),
+            ];
+          });
+          return database.executor.batch(broken);
+        },
+      },
+      { providerAnchors: anchors },
+    );
+    expect(await act('tombstoneVersion', write, repository)).toMatchObject({ ok: false });
+    expect(injected).toBe(true);
+    expect(await snapshot()).toEqual(before);
+  });
+  it.each(methods)(
+    '%s refuses a project A manager targeting project B before authority',
+    async (method) => {
+      const write = await request(method);
+      await projectManager();
+      await database.executor.batch([
+        stmt(
+          "INSERT INTO project (id, org_id, slug, name) VALUES ('project-b', ?, 'project-b', 'Project B')",
+          org.orgId,
+        ),
+        stmt("UPDATE source SET project_id = 'project-b' WHERE org_id = ?", org.orgId),
+      ]);
+      const before = await snapshot();
+      expect(
+        await act(method, { ...write, manage: { kind: 'project', projectId: 'project' } }),
+      ).toEqual({ ok: false, reason: 'not_found' });
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+  it.each(methods)(
+    '%s refuses a project manager targeting an organization package before authority',
+    async (method) => {
+      const write = await request(method);
+      await projectManager();
+      const before = await snapshot();
+      expect(
+        await act(method, { ...write, manage: { kind: 'project', projectId: 'project' } }),
+      ).toEqual({ ok: false, reason: 'not_found' });
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+  it.each(methods)('%s refuses revoked project authority without mutation', async (method) => {
+    const write = await request(method);
+    await projectManager();
+    await database.executor.batch([
+      stmt("UPDATE source SET project_id = 'project' WHERE org_id = ?", org.orgId),
+      stmt(
+        "DELETE FROM role_permission WHERE org_id = ? AND permission = 'project:packages:manage'",
+        org.orgId,
+      ),
+    ]);
+    const before = await snapshot();
+    expect(
+      await act(method, { ...write, manage: { kind: 'project', projectId: 'project' } }),
+    ).toEqual({ ok: false, reason: 'authority' });
+    expect(await snapshot()).toEqual(before);
+  });
+  it.each(methods)(
+    '%s rejects a stale status without audit, idempotency or epoch change',
+    async (method) => {
+      const write = await request(method);
+      await database.executor.batch([
+        stmt(
+          "UPDATE version SET status = 'removed_upstream', removed_upstream_at = '2026-01-01T00:00:00.000Z' WHERE org_id = ?",
+          org.orgId,
+        ),
+      ]);
+      const before = await snapshot();
+      expect(await act(method, write)).toEqual({ ok: false, reason: 'conflict' });
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+  it.each(methods)(
+    '%s rolls back a duplicate idempotency key without a second audit',
+    async (method) => {
+      const write = await request(method);
+      expect(await act(method, write)).toMatchObject({ ok: true });
+      const next = await sync([input(1)]);
+      const nextId = (await scalar(
+        "SELECT id AS value FROM version WHERE org_id = ? AND version = '1.0.1'",
+        org.orgId,
+      )) as string;
+      if (method === 'releaseQuarantine')
+        await database.executor.batch([
+          stmt(
+            "UPDATE version SET status = 'quarantined' WHERE org_id = ? AND id = ?",
+            org.orgId,
+            nextId,
+          ),
+        ]);
+      const before = await snapshot();
+      const replay = {
+        ...write,
+        packageId: next.packageId,
+        versionId: nextId,
+        audit: {
+          ...visibilityAudit('version.state_change'),
+          target: { type: 'version' as const, id: nextId },
+        },
+      };
+      expect(await act(method, replay)).toMatchObject({ ok: false });
+      expect(await snapshot()).toEqual(before);
+      expect(
+        await scalar(
+          'SELECT revision AS value FROM version WHERE org_id = ? AND id = ?',
+          org.orgId,
+          nextId,
+        ),
+      ).toBe(1);
+    },
+  );
+  it('org:sources:write alone cannot tombstone', async () => {
+    const write = await request('tombstoneVersion');
+    await database.executor.batch([
+      stmt(
+        "DELETE FROM role_permission WHERE org_id = ? AND permission = 'org:packages:manage'",
+        org.orgId,
+      ),
+    ]);
+    const before = await snapshot();
+    expect(await act('tombstoneVersion', write)).toEqual({ ok: false, reason: 'authority' });
+    expect(await snapshot()).toEqual(before);
+  });
 });
 
 describe('catalogue adapter', () => {
@@ -222,7 +486,11 @@ describe('catalogue adapter', () => {
   it('reports invalid, oversized and tombstoned inputs without counting them unchanged', async () => {
     await sync([input(0)]);
     const id = await versionId();
-    await store.tombstoneVersion(org, fence(), { versionId: id, reason: 'admin_tombstone' });
+    await store.tombstoneVersion(org, fence(), {
+      ...(await stateWrite(id)),
+      versionId: id,
+      reason: 'admin_tombstone',
+    });
     const result = await sync([
       input(0),
       input(1, { versionNormalized: 'bad' }),
@@ -546,7 +814,11 @@ describe('epoch contract', () => {
       if (method === 'removeExplicit')
         await store.addExplicit(org, fence(), { projectId: 'project', packageId });
       if (method === 'releaseQuarantine')
-        await store.quarantineVersion(org, fence(), { versionId: id, reason: 'admin_quarantine' });
+        await store.quarantineVersion(org, fence(), {
+          ...(await stateWrite(id)),
+          versionId: id,
+          reason: 'admin_quarantine',
+        });
       const before = await epoch();
       batches.length = 0;
       const calls = {
@@ -589,11 +861,23 @@ describe('epoch contract', () => {
         addExplicit: () => store.addExplicit(org, fence(), { projectId: 'project', packageId }),
         removeExplicit: () =>
           store.removeExplicit(org, fence(), { projectId: 'project', packageId }),
-        quarantineVersion: () =>
-          store.quarantineVersion(org, fence(), { versionId: id, reason: 'admin_quarantine' }),
-        releaseQuarantine: () => store.releaseQuarantine(org, fence(), { versionId: id }),
-        tombstoneVersion: () =>
-          store.tombstoneVersion(org, fence(), { versionId: id, reason: 'admin_tombstone' }),
+        quarantineVersion: async () =>
+          store.quarantineVersion(org, fence(), {
+            ...(await stateWrite(id)),
+            versionId: id,
+            reason: 'admin_quarantine',
+          }),
+        releaseQuarantine: async () =>
+          store.releaseQuarantine(org, fence(), {
+            ...(await stateWrite(id, 'quarantined')),
+            versionId: id,
+          }),
+        tombstoneVersion: async () =>
+          store.tombstoneVersion(org, fence(), {
+            ...(await stateWrite(id)),
+            versionId: id,
+            reason: 'admin_tombstone',
+          }),
       };
       const contract = async () => {
         expect(await calls[method]()).toMatchObject({ ok: true });
@@ -870,6 +1154,7 @@ it('denies a project actor organization authority, hidden explicit admission and
   });
   expect(
     await store.quarantineVersion(org, fence(), {
+      ...(await stateWrite(await versionId())),
       versionId: await versionId(),
       reason: 'admin_quarantine',
     }),

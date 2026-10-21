@@ -5,6 +5,7 @@ import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import { isoTimestamp, isUlid } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
+import { creatorOffboarded } from './creator-offboarded.js';
 import { isPermissionView } from './actor.js';
 import type { AdminLog, AdminResult, AdministrationDeps } from './administration.js';
 import type { MutationFence } from './fence.js';
@@ -373,22 +374,7 @@ export function createProjectAdministration(
       if (answer.offboardedUserId !== null) {
         const userId = answer.offboardedUserId;
         const cause = 'membership_removed';
-        try {
-          await deps.onCreatorOffboarded?.(ctx, { userId, cause });
-        } catch (error) {
-          try {
-            deps.log({
-              level: 'warn',
-              event: 'user.offboarding_callback_failed',
-              orgId: ctx.orgId,
-              userId,
-              cause,
-              error: error instanceof Error ? error.name : typeof error,
-            });
-          } catch {
-            // The grant is deleted; callback and sink failures must not change the result.
-          }
-        }
+        await creatorOffboarded(deps, ctx, userId, cause);
         try {
           await deps.onUserOffboarded?.(ctx, { userId, cause, at: stamp });
         } catch (error) {

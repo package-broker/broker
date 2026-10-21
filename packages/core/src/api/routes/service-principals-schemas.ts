@@ -55,6 +55,7 @@ function specs(project: boolean) {
       path: `${path}/restore`,
       boundary,
       permission,
+      concurrency: 'if-match',
       service: 'ServicePrincipalError',
       api: {
         operationId: `restore${subject}`,

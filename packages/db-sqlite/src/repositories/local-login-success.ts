@@ -162,6 +162,37 @@ function reauthStatement(
  */
 export function createLocalLoginSuccessWriter(executor: SqlExecutor): LocalLoginSuccessWriter {
   return {
+    async replacePasswordHash(ctx, input): Promise<boolean> {
+      timestamp('now', input.now);
+      if (typeof input.newHash !== 'string' || !input.newHash.startsWith('pbkdf2-sha256$')) {
+        throw new TypeError('newHash must start with pbkdf2-sha256$');
+      }
+      const results = await executor.batch([
+        compile(
+          db
+            .updateTable('local_login')
+            .set({
+              password_hash: input.newHash,
+              credential_rev: sql<number>`credential_rev + 1`,
+              updated_at: input.now,
+            })
+            .where('local_login.org_id', '=', ctx.orgId)
+            .where('local_login.user_id', '=', input.userId)
+            .where('local_login.password_hash', '=', input.expectedHash)
+            .where((eb) =>
+              eb.exists(
+                db
+                  .selectFrom('user_account')
+                  .select(sql.lit(1).as('one'))
+                  .where('user_account.org_id', '=', ctx.orgId)
+                  .where('user_account.id', '=', input.userId)
+                  .where('user_account.status', '=', 'active'),
+              ),
+            ),
+        ),
+      ]);
+      return results[0]?.changes === 1;
+    },
     async succeed(ctx, input): Promise<boolean> {
       validate(input);
       const { snapshot, session, reauthSessionId, previousSecretHash, now } = input;

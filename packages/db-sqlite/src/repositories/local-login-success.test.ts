@@ -12,6 +12,7 @@ import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createLocalLoginReader } from './local-login.js';
 import { createLocalLoginSuccessWriter } from './local-login-success.js';
+import { createSessionRepository } from './session.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 const FUTURE = '2026-10-15T20:00:00.000Z';
@@ -735,5 +736,72 @@ describe('input validation', () => {
       await expect(writer.succeed(a, loginInput(snapshot, overrides))).rejects.toThrow(TypeError);
     }
     expect(await sessionCount()).toBe(0);
+  });
+});
+
+describe('replacePasswordHash', () => {
+  const replacement = { userId: ADMIN, expectedHash: PASSWORD_HASH, newHash: REHASH, now: NOW };
+
+  it('replaces the current hash and bumps credential_rev in one statement', async () => {
+    const calls = countCalls(executor);
+    const statements: Statement[] = [];
+    const captured: SqlExecutor = {
+      ...calls.executor,
+      batch: (batch) => {
+        statements.push(...batch);
+        return calls.executor.batch(batch);
+      },
+    };
+    expect(await createLocalLoginSuccessWriter(captured).replacePasswordHash(a, replacement)).toBe(
+      true,
+    );
+    expect(calls.counts()).toEqual({ all: 0, batch: 1 });
+    expect(statements).toHaveLength(1);
+    expect(await loginRow()).toMatchObject({
+      password_hash: REHASH,
+      credential_rev: 4,
+      updated_at: NOW,
+    });
+  });
+
+  it('leaves the hash and credential_rev unchanged when expectedHash is stale', async () => {
+    const before = await loginRow();
+    expect(await writer.replacePasswordHash(a, { ...replacement, expectedHash: REHASH })).toBe(
+      false,
+    );
+    expect(await loginRow()).toEqual(before);
+  });
+
+  it('refuses a suspended user without changing the hash or credential_rev', async () => {
+    await exec(insert("UPDATE user_account SET status = 'suspended' WHERE id = ?", ADMIN));
+    const before = await loginRow();
+    expect(await writer.replacePasswordHash(a, replacement)).toBe(false);
+    expect(await loginRow()).toEqual(before);
+  });
+
+  it('refuses a foreign organization without changing the hash or credential_rev', async () => {
+    const before = await loginRow();
+    expect(await writer.replacePasswordHash(b, replacement)).toBe(false);
+    expect(await loginRow()).toEqual(before);
+  });
+
+  it('refuses a local login whose user belongs to another organization', async () => {
+    await exec(insert('UPDATE local_login SET org_id = ? WHERE user_id = ?', b.orgId, ADMIN));
+    const before = await loginRow();
+    expect(await writer.replacePasswordHash(b, replacement)).toBe(false);
+    expect(await loginRow()).toEqual(before);
+  });
+
+  it('keeps the session created by succeed active after bumping credential_rev', async () => {
+    const input = loginInput(await snapshotOf());
+    expect(await writer.succeed(a, input)).toBe(true);
+    expect(await writer.replacePasswordHash(a, replacement)).toBe(true);
+    if (input.session === null) throw new Error('session missing');
+    expect(
+      await createSessionRepository(executor).findActive(a, input.session.secretHash, {
+        now: NOW,
+        idleSince: PAST,
+      }),
+    ).not.toBeNull();
   });
 });

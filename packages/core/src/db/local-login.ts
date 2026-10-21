@@ -105,6 +105,20 @@ export interface LocalLoginSetupWriter {
 }
 
 export interface LocalLoginSuccessWriter {
+  /**
+   * One statement. Replaces only an active user's matching password hash in this organization,
+   * increments credential_rev and sets updated_at to now. False when the comparison no longer
+   * matches. TypeError unless now is YYYY-MM-DDTHH:MM:SS.mmmZ and newHash starts with pbkdf2-sha256$.
+   */
+  replacePasswordHash(
+    ctx: OrgContext,
+    input: {
+      readonly userId: string;
+      readonly expectedHash: string;
+      readonly newHash: string;
+      readonly now: string;
+    },
+  ): Promise<boolean>;
   succeed(
     ctx: OrgContext,
     input: {

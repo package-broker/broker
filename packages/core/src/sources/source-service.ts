@@ -81,6 +81,12 @@ export type SourceDto = Pick<
 > & { readonly hasCredential: boolean };
 
 export interface SourceService {
+  /** Visibility preflight for a matching project actor with project:sources:write. */
+  getVisible(
+    ctx: OrgContext,
+    actor: SourceActor,
+    input: { readonly projectId: string; readonly sourceId: string },
+  ): Promise<SourceServiceResult<SourceDto>>;
   list(
     ctx: OrgContext,
     actor: SourceActor,
@@ -127,7 +133,7 @@ export interface SourceService {
 export interface SourceServiceDeps {
   readonly sources: Pick<
     SourceRepository,
-    'create' | 'update' | 'get' | 'delete' | 'resume' | 'list' | 'pause'
+    'create' | 'update' | 'get' | 'getVisible' | 'delete' | 'resume' | 'list' | 'pause'
   >;
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly registeredNames: RegisteredNameRepository;
@@ -442,6 +448,11 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
   }
 
   return {
+    async getVisible(ctx, who, input) {
+      if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
+      const source = await deps.sources.getVisible(ctx, input);
+      return source === null ? fail('not_found') : success(sourceDto(source));
+    },
     async list(ctx, who, input) {
       const projectId = input.projectId ?? null;
       if (

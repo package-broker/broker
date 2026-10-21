@@ -14,6 +14,9 @@ all:
     e2e_location: fsn1
     e2e_os_image_id: REPLACE_WITH_NUMERIC_DEBIAN_IMAGE_ID
     e2e_docker_version: REPLACE_WITH_EXACT_APT_VERSION
+    e2e_containerd_version: REPLACE_WITH_EXACT_CONTAINERD_APT_VERSION
+    e2e_runc_version: REPLACE_WITH_EXACT_RUNC_APT_VERSION
+    # Required only for target_build.
     e2e_docker_buildx_version: REPLACE_WITH_EXACT_DOCKER_BUILDX_APT_VERSION
     e2e_cloudflared_version: REPLACE_WITH_EXACT_RELEASE_VERSION
     e2e_cloudflared_sha256: REPLACE_WITH_RELEASE_BINARY_SHA256

@@ -4,7 +4,7 @@ import { openLoginState, sealLoginState } from './login-state.js';
 import type { LoginOutcome } from './identity-login.js';
 import { createSsoRoutes } from './routes-sso.js';
 import type { ReauthOutcome, SsoRouteDeps } from './routes-sso.js';
-import { createSessionService, newSessionSecrets } from './session.js';
+import { createSessionService, newSessionSecrets, SESSION_IDLE_MS } from './session.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import type { Clock } from '../ids.js';
@@ -192,7 +192,9 @@ async function build(options: Options = {}) {
   const providers = new Map(
     (options.providers ?? [makeProvider('dex'), makeProvider('other')]).map((p) => [p.id, p]),
   );
+  const findActiveById = vi.fn(repository.findActiveById);
   const deps: SsoRouteDeps = {
+    reauthSessions: { findActiveById },
     providers,
     sessions,
     login,
@@ -229,6 +231,7 @@ async function build(options: Options = {}) {
     seed,
     cipher,
     deps,
+    findActiveById,
     advance: (ms: number) => {
       now += ms;
     },
@@ -1246,6 +1249,73 @@ describe('re-authentication', () => {
 
     expect(response.status).toBe(401);
     expect(app.reauth).not.toHaveBeenCalled();
+  });
+
+  it.each(['revoked', 'expired', 'idle', 'past the absolute cap', 'user inactive'])(
+    'refuses a %s session before the callback contacts the provider',
+    async () => {
+      const finish = vi.fn(makeProvider('dex').finish);
+      const app = await build({ providers: [makeProvider('dex', { finish })] });
+      const { cookie, csrf, id } = await app.seed();
+      const started = await app.kernel.fetch(
+        startRequest('dex', reauthBody, { cookie, 'x-csrf-token': csrf }),
+      );
+      const login = `${LOGIN_COOKIE}=${cookieValue(started, LOGIN_COOKIE) ?? ''}`;
+      app.findActiveById.mockResolvedValue(null);
+      const response = await app.kernel.fetch(callback('dex', `${login}; ${cookie}`));
+      expect(response.status).toBe(401);
+      expect(await bodyOf(response)).toMatchObject({
+        error: { code: 'login_failed', message: 'Login failed' },
+      });
+      expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
+      expect(finish).not.toHaveBeenCalled();
+      expect(app.reauth).not.toHaveBeenCalled();
+      expect(refusals(app)).toEqual([expect.objectContaining({ reason: 'session_inactive' })]);
+      expect(app.findActiveById).toHaveBeenLastCalledWith(ORG, id, {
+        now: new Date(NOW).toISOString(),
+        idleSince: new Date(NOW - SESSION_IDLE_MS).toISOString(),
+      });
+    },
+  );
+
+  it('fails closed when the route has no session reader', async () => {
+    const start = vi.fn(makeProvider('dex').start);
+    const app = await build({ providers: [makeProvider('dex', { start })] });
+    const { cookie, csrf } = await app.seed();
+    delete (app.deps as { reauthSessions?: unknown }).reauthSessions;
+    const response = await app.kernel.fetch(
+      startRequest('dex', reauthBody, { cookie, 'x-csrf-token': csrf }),
+    );
+    expect(response.status).toBe(401);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('refuses an inactive session before starting provider work', async () => {
+    const start = vi.fn(makeProvider('dex').start);
+    const app = await build({ providers: [makeProvider('dex', { start })] });
+    const { cookie, csrf } = await app.seed();
+    app.findActiveById.mockResolvedValue(null);
+    const response = await app.kernel.fetch(
+      startRequest('dex', reauthBody, { cookie, 'x-csrf-token': csrf }),
+    );
+    expect(response.status).toBe(401);
+    expect(start).not.toHaveBeenCalled();
+    expect(refusals(app)).toEqual([expect.objectContaining({ reason: 'session_inactive' })]);
+  });
+
+  it('maps the service session_inactive refusal to the existing generic 401', async () => {
+    const app = await build({ reauthRefusal: 'session_inactive' });
+    const { cookie, csrf } = await app.seed();
+    const started = await app.kernel.fetch(
+      startRequest('dex', reauthBody, { cookie, 'x-csrf-token': csrf }),
+    );
+    const login = `${LOGIN_COOKIE}=${cookieValue(started, LOGIN_COOKIE) ?? ''}`;
+    const response = await app.kernel.fetch(callback('dex', `${login}; ${cookie}`));
+    expect(response.status).toBe(401);
+    expect(await bodyOf(response)).toMatchObject({
+      error: { code: 'login_failed', message: 'Login failed' },
+    });
+    expect(refusals(app)).toEqual([expect.objectContaining({ reason: 'session_inactive' })]);
   });
 
   it('answers the generic 401 when the reauth service refuses', async () => {

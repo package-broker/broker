@@ -1,4 +1,4 @@
-import { REAUTH_WINDOW_MS } from './session.js';
+import { REAUTH_WINDOW_MS, SESSION_IDLE_MS } from './session.js';
 import type { AuthenticatedSession } from './session.js';
 import type { OrgContext } from '../db/port.js';
 import type { SessionRepository } from '../db/sessions.js';
@@ -11,6 +11,7 @@ import type { HookErrorHandler } from '../kernel/access.js';
 import type { Registration } from '../kernel/registry.js';
 
 export type ReauthRefusal =
+  | 'session_inactive'
   | 'not_sso_session'
   | 'not_supported'
   | 'state_mismatch'
@@ -26,7 +27,7 @@ export type ReauthResult =
 
 export interface IdentityReauthDeps {
   readonly users: UserRepository;
-  readonly sessions: SessionRepository;
+  readonly sessions: Pick<SessionRepository, 'findActiveById' | 'markReauthenticatedByIdentity'>;
   readonly clock: Clock;
   readonly hooks: Pick<Registration['hooks'], 'auth.resolveIdentity'>;
   readonly onHookError?: HookErrorHandler;
@@ -53,6 +54,20 @@ function refuse(reason: ReauthRefusal): ReauthResult {
   return { ok: false, reason };
 }
 
+export async function isReauthSessionActive(
+  deps: { readonly sessions: Pick<SessionRepository, 'findActiveById'>; readonly clock: Clock },
+  ctx: OrgContext,
+  sessionId: string,
+): Promise<boolean> {
+  const now = deps.clock.now().getTime();
+  return (
+    (await deps.sessions.findActiveById(ctx, sessionId, {
+      now: new Date(now).toISOString(),
+      idleSince: new Date(now - SESSION_IDLE_MS).toISOString(),
+    })) !== null
+  );
+}
+
 function canonicalTimestampMs(value: string): number | null {
   if (!CANONICAL_TIMESTAMP.test(value)) return null;
   const ms = Date.parse(value);
@@ -74,6 +89,9 @@ export async function reauthenticateWithIdentity(
   identity: VerifiedIdentity,
   loginState: ReauthLoginState,
 ): Promise<ReauthResult> {
+  if (!(await isReauthSessionActive(deps, ctx, session.session.id))) {
+    return refuse('session_inactive');
+  }
   const identityId = session.session.identityId;
   if (identityId === null) return refuse('not_sso_session');
   if (!provider.supportsReauth) return refuse('not_supported');
@@ -136,6 +154,9 @@ export async function reauthenticateWithIdentity(
     return refuse('hook_denied');
   }
 
+  if (!(await isReauthSessionActive(deps, ctx, session.session.id))) {
+    return refuse('session_inactive');
+  }
   const updated = await deps.sessions.markReauthenticatedByIdentity(ctx, {
     sessionId: session.session.id,
     identityId,

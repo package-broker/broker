@@ -240,7 +240,8 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     reader: localReader,
     writer: repositories.localSuccess,
     credentials,
-    sessions,
+    sessionCookies: sessions,
+    sessions: repositories.sessions,
     keyring,
     clock,
     ids,
@@ -282,6 +283,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   const sso = createSsoRoutes({
     providers,
     sessions,
+    reauthSessions: repositories.sessions,
     login: (ctx, provider, identity, meta) =>
       completeIdentityLogin(
         { ...loginDeps, onHookError: onHookError(ctx), onDenied: onDenied(ctx) },

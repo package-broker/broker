@@ -32,6 +32,7 @@ const usersResponse = z.strictObject({
   items: z.array(
     z.strictObject({
       id: z.string(),
+      email: z.string().optional(),
       displayName: z.string().nullable(),
       status: z.enum(['active', 'suspended']),
       lastLoginAt: timestamp.nullable(),

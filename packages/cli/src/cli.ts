@@ -13,6 +13,7 @@ import {
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
 import { runCloudflareDeploy } from './commands/cloudflare/deploy.js';
+import { runCloudflareSmoke } from './commands/cloudflare/smoke.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
 import { runOpenApi } from './commands/openapi.js';
@@ -24,6 +25,7 @@ const USAGE =
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
   '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
   '       pb cloudflare deploy --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
+  '       pb cloudflare smoke --worker-name <slug> [--project <slug>] [--smoke-token-env <name>] [--deadline-seconds <1..300>] [--no-rollback] [--json] [--dry-run]\n' +
   '       pb cloudflare migrate --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
@@ -34,6 +36,7 @@ const USAGE =
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
+  'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
   'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
   'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)\n' +
   'Exit codes for pb admin show-provider-binding: 0 success; 1 error; 2 usage or invalid provider; 5 organization not bootstrapped; 6 no_binding; nothing is bound for that provider; 7 outcome unknown (D1 response lost, re-running is safe)';
@@ -78,6 +81,9 @@ function parseCliArgs(argv: string[]) {
         yes: { type: 'boolean' },
         json: { type: 'boolean' },
         project: { type: 'string' },
+        'smoke-token-env': { type: 'string' },
+        'deadline-seconds': { type: 'string' },
+        'no-rollback': { type: 'boolean' },
         credentials: { type: 'string' },
         'repository-map': { type: 'string' },
         baseline: { type: 'string' },
@@ -124,6 +130,22 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'secret',
     'secrets',
     'allow-contract',
+    'json',
+    'dry-run',
+  ],
+  'cloudflare smoke': [
+    'worker-name',
+    'config',
+    'environment',
+    'deployment-id',
+    'inventory',
+    'out',
+    'jurisdiction',
+    'public-url',
+    'project',
+    'smoke-token-env',
+    'deadline-seconds',
+    'no-rollback',
     'json',
     'dry-run',
   ],
@@ -197,7 +219,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     const cloudflareIndex = argv.findIndex(
       (value, index) =>
         value === 'cloudflare' &&
-        ['provision', 'migrate', 'deploy'].includes(argv[index + 1] ?? ''),
+        ['provision', 'migrate', 'deploy', 'smoke'].includes(argv[index + 1] ?? ''),
     );
     if (cloudflareIndex >= 0 && argv.includes('--json')) {
       console.log(
@@ -239,6 +261,39 @@ export async function run(argv: readonly string[]): Promise<number> {
         : { repositoryMap: values['repository-map'] }),
       ...(values.baseline === undefined ? {} : { baseline: values.baseline }),
       ...(mode === undefined ? {} : { mode }),
+    });
+  }
+
+  if (command === 'cloudflare' && subcommand === 'smoke') {
+    if (
+      !values['worker-name'] ||
+      (values.jurisdiction !== undefined && !['eu', 'default'].includes(values.jurisdiction)) ||
+      (values['deadline-seconds'] !== undefined &&
+        !/^(?:[1-9]|[1-9][0-9]|[12][0-9]{2}|300)$/.test(values['deadline-seconds']))
+    )
+      return usageError();
+    return runCloudflareSmoke({
+      workerName: values['worker-name'],
+      env: process.env,
+      ...(values.config === undefined ? {} : { configPath: values.config }),
+      ...(values.out === undefined ? {} : { outDir: values.out }),
+      ...(values.environment === undefined ? {} : { environment: values.environment }),
+      ...(values['deployment-id'] === undefined ? {} : { deploymentId: values['deployment-id'] }),
+      ...(values.inventory === undefined ? {} : { inventory: values.inventory }),
+      ...(values.jurisdiction === undefined
+        ? {}
+        : { jurisdiction: values.jurisdiction as 'eu' | 'default' }),
+      ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }),
+      ...(values.project === undefined ? {} : { project: values.project }),
+      ...(values['smoke-token-env'] === undefined
+        ? {}
+        : { smokeTokenEnv: values['smoke-token-env'] }),
+      ...(values['deadline-seconds'] === undefined
+        ? {}
+        : { deadlineSeconds: Number(values['deadline-seconds']) }),
+      noRollback: values['no-rollback'] ?? false,
+      json: values.json ?? false,
+      dryRun: values['dry-run'] ?? false,
     });
   }
 

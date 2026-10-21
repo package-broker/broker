@@ -24,6 +24,10 @@ export type ErrorCode =
   | 'r2_unavailable'
   | 'analytics_engine_unavailable'
   | 'migration_failed'
+  | 'smoke_failed'
+  | 'rollback_blocked_contract'
+  | 'rollback_unavailable_first_deploy'
+  | 'rollback_failed'
   | 'organization_slug_mismatch';
 
 const GUIDANCE =
@@ -61,6 +65,12 @@ const MESSAGES: Record<ErrorCode, string> = {
   r2_unavailable: `Enable R2 manually, then rerun. ${GUIDANCE}`,
   analytics_engine_unavailable: GUIDANCE,
   migration_failed: 'Migration failed; inspect the migration state before continuing.',
+  smoke_failed: 'Smoke assertions failed; inspect the named checks and rollback result.',
+  rollback_blocked_contract:
+    'A contract migration boundary blocks code rollback; restore or forward repair is required.',
+  rollback_unavailable_first_deploy:
+    'Smoke failed on the first deployment; retain the candidate and resources for forward repair.',
+  rollback_failed: 'Rollback activation, configuration or readiness could not be verified.',
   organization_slug_mismatch: 'The existing organization has a different slug.',
 };
 
@@ -116,13 +126,19 @@ export function commandEnvelope(command: string, dryRun = false) {
     pending_migrations: [] as string[],
     remote_state: null as 'absent' | 'present' | null,
     plan: [] as PlanEntry[],
-    checks: [] as { name: string; status: string }[],
+    checks: [] as CommandCheck[],
     rollback: { status: 'not_needed' as string, target_version_id: null as string | null },
     bootstrap_url: null as string | null,
     error: null as { code: ErrorCode; message: string; retryable: boolean; stage: string } | null,
   };
 }
 export type CommandEnvelope = ReturnType<typeof commandEnvelope>;
+export interface CommandCheck {
+  name: string;
+  status: string;
+  attempt?: number;
+  elapsed_ms?: number;
+}
 export interface CommandResult {
   exitCode: number;
   output: CommandEnvelope;
@@ -149,6 +165,10 @@ export interface ApiOptions {
   sleep?: (ms: number) => Promise<void>;
   jitter?: () => number;
   deadline?: number;
+  /** A caller-owned absolute recovery bound, independent of an exhausted probe budget. */
+  recoveryDeadline?: () => number;
+  /** Recovery mutations can use the remaining bounded budget after durable intent is saved. */
+  minimumMutationBudgetMs?: number;
 }
 export type ApiMethod = 'GET' | 'POST' | 'PUT' | 'PATCH';
 export interface ApiResponse {
@@ -229,6 +249,10 @@ export class CloudflareApi {
   }
   /** Each recovery mutation keeps its full settle reserve plus its own read-back allowance. */
   reserveRecovery(mutations: number): void {
+    if (this.options.recoveryDeadline) {
+      this.budgetEnd = this.options.recoveryDeadline();
+      return;
+    }
     if (!this.fixedDeadline)
       this.budgetEnd = Math.max(
         this.budgetEnd,
@@ -236,7 +260,7 @@ export class CloudflareApi {
       );
   }
   assertCreateBudget(): void {
-    if (this.deadline - this.now() < CREATE_SETTLE_MS)
+    if (this.deadline - this.now() < (this.options.minimumMutationBudgetMs ?? CREATE_SETTLE_MS))
       throw new CloudflareError('deadline_exceeded', 1, true);
   }
   async pause(ms: number): Promise<void> {

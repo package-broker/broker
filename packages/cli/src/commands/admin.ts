@@ -219,11 +219,38 @@ function toppedUpText(count: number): string {
   return `topped up ${count} organization_admin ${count === 1 ? 'permission' : 'permissions'}`;
 }
 
-async function issue(command: Command, o: AdminOptions): Promise<number> {
+export interface AdminIssueResult {
+  readonly exitCode: number;
+  readonly state: 'issued' | 'already_set_up' | 'error' | 'unknown';
+  readonly expiresAt: string | null;
+}
+
+export interface AdminOutputSink {
+  diagnostic(message: string): void;
+  output(value: Readonly<Record<string, unknown>>): void;
+  deliver?(token: string): Promise<void>;
+}
+
+const cliAdminSink: AdminOutputSink = {
+  diagnostic: (message) => console.error(message),
+  output: (value) => console.log(JSON.stringify(value)),
+};
+
+async function issue(
+  command: Command,
+  o: AdminOptions,
+  sink: AdminOutputSink = cliAdminSink,
+): Promise<AdminIssueResult> {
+  const say = (_command: string, text: string) => sink.diagnostic(`${command}: ${text}`);
+  const finish = (
+    exitCode: number,
+    state: AdminIssueResult['state'] = exitCode === 7 ? 'unknown' : 'error',
+    expiresAt: string | null = null,
+  ): AdminIssueResult => ({ exitCode, state, expiresAt });
   const email = typeof o.email === 'string' ? normalizeEmail(o.email) : null;
   if (email === null) {
     say(command, 'invalid_email');
-    return 2;
+    return finish(2);
   }
 
   let handle: FileHandle | null = null;
@@ -247,20 +274,20 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
   try {
     if (o.tokenFile !== undefined) {
       const file = await createTokenFile(command, o.tokenFile);
-      if (file === 'exists') return 2;
-      if (file === 'failed') return 1;
+      if (file === 'exists') return finish(2);
+      if (file === 'failed') return finish(1);
       handle = file;
       const { dev, ino } = await handle.stat({ bigint: true });
       identity = { dev, ino };
     }
 
     opened = openTarget(command, o.target);
-    if (opened === null) return 2;
+    if (opened === null) return finish(2);
 
     const organization = await createOrganizationBootstrap(opened.executor).findSingleton();
     if (organization === null) {
       say(command, 'organization not found; run pb bootstrap or pb cloudflare bootstrap first');
-      return 5;
+      return finish(5);
     }
 
     const now = systemClock.now();
@@ -279,7 +306,7 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
 
     if (pending.signal !== null) {
       say(command, 'outcome unknown; re-running is safe');
-      return 7;
+      return finish(7);
     }
 
     if (handle !== null && o.tokenFile !== undefined) {
@@ -292,25 +319,25 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
 
     if (pending.signal !== null) {
       say(command, 'outcome unknown; re-running is safe');
-      return 7;
+      return finish(7);
     }
 
     const outcome = await runOperation(command, opened.executor, ctx, input);
     if (pending.signal !== null) {
       say(command, 'outcome unknown; re-running is safe');
-      return 7;
+      return finish(7);
     }
     if (!outcome.issued && 'toppedUp' in outcome) {
       say(
         command,
         `already_set_up; ${toppedUpText(outcome.toppedUp)}; no setup token issued; run pb admin reset-local to issue a new setup token`,
       );
-      console.log(JSON.stringify({ result: 'already_set_up', toppedUp: outcome.toppedUp }));
-      return 0;
+      sink.output({ result: 'already_set_up', toppedUp: outcome.toppedUp });
+      return finish(0, 'already_set_up');
     }
     if (!outcome.issued) {
       say(command, outcome.text);
-      return outcome.exit;
+      return finish(outcome.exit, outcome.exit === 6 ? 'already_set_up' : 'error');
     }
     issued = true;
     if (outcome.toppedUp > 0) say(command, toppedUpText(outcome.toppedUp));
@@ -322,34 +349,37 @@ async function issue(command: Command, o: AdminOptions): Promise<number> {
       );
     }
     const toTerminal = o.stdoutIsTTY ?? process.stdout.isTTY === true;
-    if (o.tokenFile === undefined && !toTerminal) {
+    if (o.tokenFile === undefined && !toTerminal && sink.deliver === undefined) {
       say(
         command,
         'warning: the setup token is being written to a non-terminal stdout; use --token-file to keep it out of logs',
       );
     }
     say(command, BROWSER_NEXT);
-    console.log(
-      JSON.stringify({
-        result: outcome.result,
-        setupToken: o.tokenFile === undefined ? token : null,
-        tokenFile: o.tokenFile ?? null,
-        expiresAt: input.setupExpiresAt,
-        next: NEXT,
-      }),
-    );
-    return 0;
+    await sink.deliver?.(token);
+    sink.output({
+      result: outcome.result,
+      setupToken: o.tokenFile === undefined && sink.deliver === undefined ? token : null,
+      tokenFile: o.tokenFile ?? null,
+      expiresAt: input.setupExpiresAt,
+      next: NEXT,
+    });
+    return finish(0, 'issued', input.setupExpiresAt);
   } catch (error) {
+    if (issued && sink !== cliAdminSink) {
+      say(command, 'outcome unknown; use explicit setup-token refresh if delivery was lost');
+      return finish(7);
+    }
     if (error instanceof DbError && error.kind === 'foreign_key') {
       say(command, 'organization not found; run pb bootstrap or pb cloudflare bootstrap first');
-      return 5;
+      return finish(5);
     }
     if (isLostResponse(error)) {
       say(command, 'outcome unknown; re-running is safe');
-      return 7;
+      return finish(7);
     }
     say(command, `failed (${reportableErrorName(error)})`);
-    return 1;
+    return finish(1);
   } finally {
     await handle?.close().catch(() => undefined);
     if (identity !== null && !issued && o.tokenFile !== undefined) {
@@ -406,12 +436,16 @@ async function runOperation(
   return { issued: true, result, toppedUp: 0 };
 }
 
+export function bootstrapAdmin(o: AdminOptions, sink: AdminOutputSink): Promise<AdminIssueResult> {
+  return issue('admin bootstrap', o, sink);
+}
+
 export function runAdminBootstrap(o: AdminOptions): Promise<number> {
-  return issue('admin bootstrap', o);
+  return issue('admin bootstrap', o).then((result) => result.exitCode);
 }
 
 export function runAdminResetLocal(o: AdminOptions): Promise<number> {
-  return issue('admin reset-local', o);
+  return issue('admin reset-local', o).then((result) => result.exitCode);
 }
 
 export interface RebindProviderOptions {

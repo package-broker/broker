@@ -19,6 +19,7 @@ it('lists only working commands in --help', async () => {
       'build',
       'migrate',
       'bootstrap',
+      'cloudflare setup',
       'cloudflare provision',
       'cloudflare deploy',
       'cloudflare smoke',

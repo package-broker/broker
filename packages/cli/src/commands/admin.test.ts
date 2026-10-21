@@ -14,7 +14,12 @@ import {
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { run } from '../cli.js';
-import { runAdminBootstrap, runAdminResetLocal, runGenerateMasterKey } from './admin.js';
+import {
+  bootstrapAdmin,
+  runAdminBootstrap,
+  runAdminResetLocal,
+  runGenerateMasterKey,
+} from './admin.js';
 
 const ACCOUNT_ID = '0f3e9b7c2d14a6e85b1c9d07a3f24e68';
 const DATABASE_ID = '5c1a77e2-9f40-4b8d-a3c6-1e2f7d90b4a5';
@@ -1136,4 +1141,59 @@ it('T865. bootstrap names the relative browser setup path and both POST routes w
     'POST /_pb/auth/local/setup/start {"token"}',
     'POST /_pb/auth/local/setup/finish {"token","password","code"}',
   ]);
+});
+
+it('exposes typed bootstrap results with dedicated token delivery and no console token', async () => {
+  const file = await sqliteFile();
+  const delivered: string[] = [];
+  const outputs: Readonly<Record<string, unknown>>[] = [];
+  const result = await bootstrapAdmin(
+    { email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: false },
+    {
+      diagnostic: () => undefined,
+      output: (value) => {
+        outputs.push(value);
+      },
+      deliver: async (token) => {
+        delivered.push(token);
+      },
+    },
+  );
+  expect(result).toMatchObject({ exitCode: 0, state: 'issued', expiresAt: expect.any(String) });
+  expect(delivered).toHaveLength(1);
+  expect(outputs[0]?.setupToken).toBeNull();
+  expect(
+    JSON.stringify(result) + JSON.stringify(outputs) + output().stdout + output().stderr,
+  ).not.toContain(delivered[0]);
+});
+
+it('reports typed unknown after admin commit followed by dedicated delivery loss', async () => {
+  const file = await sqliteFile();
+  const result = await bootstrapAdmin(
+    { email: EMAIL, target: sqliteTarget(file) },
+    {
+      diagnostic: () => undefined,
+      output: () => undefined,
+      deliver: async () => {
+        throw new Error(SENTINEL);
+      },
+    },
+  );
+  expect(result).toEqual({ exitCode: 7, state: 'unknown', expiresAt: null });
+  const users = await sqliteQuery(file, 'SELECT setup_hash FROM local_login');
+  expect(users).toHaveLength(1);
+  expect(users[0]?.setup_hash).toBeTruthy();
+  expect(output().stdout + output().stderr).not.toContain(SENTINEL);
+});
+
+it('reports typed organization absence without changing the direct exit 5 contract', async () => {
+  const file = await sqliteFile(false);
+  const sink = { diagnostic: vi.fn(), output: vi.fn(), deliver: vi.fn() };
+  expect(await bootstrapAdmin({ email: EMAIL, target: sqliteTarget(file) }, sink)).toEqual({
+    exitCode: 5,
+    state: 'error',
+    expiresAt: null,
+  });
+  expect(sink.deliver).not.toHaveBeenCalled();
+  expect(await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file) })).toBe(5);
 });

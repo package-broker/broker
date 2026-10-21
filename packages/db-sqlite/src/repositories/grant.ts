@@ -1,6 +1,5 @@
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
-import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type {
   GrantRepository,
@@ -25,11 +24,11 @@ import {
   type ProtectedHolderInput,
   type ProtectedHolderProvider,
 } from '../kysely.js';
-import { holdsPermission, permissionRows } from './access.js';
+import { permissionRows } from './access.js';
 import { patInvalidationStatement } from './pat-offboarding.js';
 import { selectedPatInvalidationStatement } from './access-loss.js';
 import { revokeAllForUserStatement } from './session.js';
-import { liveSessionCondition } from './session-liveness.js';
+import { actorAuthority } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
@@ -186,7 +185,7 @@ interface ActorEvidence {
   readonly live: (permission: string) => Guard;
 }
 
-function actorEvidence(
+function grantReachEvidence(
   ctx: OrgContext,
   fence: MutationFence,
   providers: readonly ProtectedHolderProvider[],
@@ -208,21 +207,12 @@ function actorEvidence(
       .select(sql.lit(1).as('one'))
       .where(sql<SqlBool>`lr.protects = 1`)}`,
     livePermissions: rows().select(sql<string>`lr.permission`.as('permission')),
-    live: (permission) => sql<SqlBool>`(
-    exists (
-      select 1 from user_account au
-      join session s on s.org_id = au.org_id and s.user_id = au.id
-      where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
-        and s.id = ${fence.sessionId}
-        and ${liveSessionCondition('s', SESSION_IDLE_MS / 1000)})
-    and ${holdsPermission(ctx, {
-      userId: fence.userId,
-      permission,
-      projectId: null,
-      providerAnchors: providers,
-      projectState: 'any',
-      session: fence.sessionId,
-    })})`,
+    live: (permission) =>
+      actorAuthority(ctx, fence, {
+        permission,
+        projectId: null,
+        providerAnchors: providers,
+      }),
   };
 }
 
@@ -233,7 +223,7 @@ function grantAuthority(
   scope: ReachScope,
 ): GrantAuthority {
   const org = ctx.orgId;
-  const { isAdmin, livePermissions, live } = actorEvidence(ctx, fence, providers);
+  const { isAdmin, livePermissions, live } = grantReachEvidence(ctx, fence, providers);
   const grantRole = sql`(select g.role_id from access_grant g where g.org_id = ${org} and g.id = ${scope.grantId ?? null})`;
   const involved = sql`(${sql.join(
     [
@@ -742,7 +732,7 @@ export function createGrantRepository(
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
-      const evidence = actorEvidence(
+      const evidence = grantReachEvidence(
         ctx,
         fence,
         holders.kind === 'local_recovery' ? [] : providers,
@@ -806,7 +796,7 @@ export function createGrantRepository(
       const stamp = timestamp(now);
       requireNonEmpty(userId, 'userId');
       const holders = await options.holderInput(ctx);
-      const evidence = actorEvidence(
+      const evidence = grantReachEvidence(
         ctx,
         fence,
         holders.kind === 'local_recovery' ? [] : providers,

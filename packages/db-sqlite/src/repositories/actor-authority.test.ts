@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { assertGuard, compile, db, runOrgFenced, type ProtectedHolderProvider } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { createGrantRepository } from './grant.js';
+import { createRoleRepository } from './role.js';
+import { createUnlinkRepository } from './unlink.js';
+import { createIdentityBlockRepository } from './identity-block.js';
 import { actorHolds, type ActorHoldsInput } from './actor-authority.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -481,5 +487,342 @@ describe('actorHolds bound parameters', () => {
       expect(count(eight, projectId)).toBeLessThanOrEqual(100);
       expect(count(eight, projectId)).toBe(count(eight.slice(0, 1), projectId));
     }
+  });
+});
+
+const TARGET_ROLE = '01J0ROLETARGET000000000001';
+const TARGET_GRANT = '01J0GRANTTARGET00000000001';
+const OWN_IDENTITY = '01J0IDENT00000000000000001';
+const OTHER_IDENTITY = '01J0IDENT00000000000000002';
+const FOREIGN_IDENTITY = '01J0IDENTFOREIGN0000000001';
+const CALLERS = ['helper', 'grant create', 'role update', 'unlink', 'unblock'] as const;
+type Caller = (typeof CALLERS)[number];
+
+function writerAudit(action: AuditAction) {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: NOW,
+    action,
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: action.split('.')[0]!, id: null },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+
+function writers(connection: SqlExecutor = executor, providerAnchors = ANCHORS) {
+  const holderInput = async () => ({ kind: 'fresh' as const, providers: providerAnchors });
+  return {
+    grants: createGrantRepository(connection, { holderInput, providerAnchors }),
+    roles: createRoleRepository(connection, { providerAnchors }),
+    unlink: createUnlinkRepository(connection, { holderInput }),
+    unblock: createIdentityBlockRepository(connection, { holderInput }),
+  };
+}
+
+async function callWriter(
+  caller: Caller,
+  connection: SqlExecutor = executor,
+  providerAnchors = ANCHORS,
+) {
+  const repository = writers(connection, providerAnchors);
+  switch (caller) {
+    case 'helper':
+      return commits({ permission: ORG_PERMISSION, projectId: null });
+    case 'grant create':
+      return (
+        (await repository.grants.createOrganization(a, fence(), {
+          id: TARGET_GRANT,
+          subject: { type: 'email', value: 'new@example.test' },
+          roleId: TARGET_ROLE,
+          createdBy: USER,
+          now: NOW,
+          opId: ulid(),
+          audit: writerAudit('grant.create'),
+        })) === 'created'
+      );
+    case 'role update':
+      return (
+        (await repository.roles.rename(
+          a,
+          mutationFence({ userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor, {
+            role: 1,
+          }),
+          {
+            id: TARGET_ROLE,
+            name: 'renamed',
+            now: NOW,
+            opId: ulid(),
+            audit: writerAudit('role.rename'),
+          },
+        )) === 'renamed'
+      );
+    case 'unlink':
+      return (
+        (await repository.unlink.unlinkIdentity(a, fence(), {
+          identityId: OTHER_IDENTITY,
+          userId: USER_B,
+          provider: 'oidc',
+          subject: `subject-${OTHER_IDENTITY}`,
+          anchor: ANCHORS[0]!.anchor,
+          now: NOW,
+        })) === 'unlinked'
+      );
+    case 'unblock':
+      return (
+        (await repository.unblock.unblock(a, fence(), {
+          provider: 'oidc',
+          issuer: ANCHORS[0]!.anchor,
+          subject: 'blocked-target',
+        })) === 'unblocked'
+      );
+  }
+}
+
+async function authorityTargets() {
+  return Promise.all([
+    executor.all(stmt('SELECT id, name, revision FROM role WHERE org_id = ? ORDER BY id', a.orgId)),
+    executor.all(
+      stmt('SELECT id, role_id, revision FROM access_grant WHERE org_id = ? ORDER BY id', a.orgId),
+    ),
+    executor.all(stmt('SELECT id FROM identity WHERE org_id = ? ORDER BY id', a.orgId)),
+    executor.all(
+      stmt('SELECT subject FROM identity_block WHERE org_id = ? ORDER BY subject', a.orgId),
+    ),
+    executor.all(stmt('SELECT id, name FROM project WHERE org_id = ? ORDER BY id', a.orgId)),
+    executor.all(stmt('SELECT id FROM audit_pending WHERE org_id = ? ORDER BY id', a.orgId)),
+    epoch(),
+  ]);
+}
+
+describe('shared actor session identity binding', () => {
+  beforeEach(async () => {
+    await executor.batch([
+      ...seedRole(TARGET_ROLE, 'organization', 'org:users:read'),
+      stmt(
+        'UPDATE role SET protects_last_holder = 1 WHERE org_id = ? AND id = ?',
+        a.orgId,
+        ORG_WRITER,
+      ),
+      ...['org:grants:write', 'org:roles:write', 'org:users:write'].map((permission) =>
+        stmt(
+          'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+          a.orgId,
+          ORG_WRITER,
+          permission,
+        ),
+      ),
+      seedGrant('01J0GRANTACTOR00000000001', 'holder@example.test', ORG_WRITER, null),
+      stmt(
+        'UPDATE session SET reauth_at = ? WHERE org_id = ? AND id = ?',
+        new Date().toISOString(),
+        a.orgId,
+        SESSION,
+      ),
+      stmt(
+        'INSERT INTO identity_block (org_id, provider, issuer, subject, blocked_at) VALUES (?, ?, ?, ?, ?)',
+        a.orgId,
+        'oidc',
+        ANCHORS[0]!.anchor,
+        'blocked-target',
+        NOW,
+      ),
+      stmt(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
+        FOREIGN_IDENTITY,
+        b.orgId,
+        USER,
+        'oidc',
+        'foreign-org-actor',
+        'holder@example.test',
+      ),
+    ]);
+  });
+
+  const baseline = {
+    helper: [14, 1, 1, 3],
+    'grant create': [10, 1, 1, 15, 3, 3, 6, 14, 12],
+    'grant revoke': [10, 1, 1, 9, 4, 9, 3, 9, 8, 4, 12],
+    'grant change': [10, 1, 1, 19, 4, 3, 12, 7, 12],
+    'user suspend': [10, 1, 1, 10, 4, 13, 1, 6, 12],
+    'user reactivate': [10, 1, 1, 10, 4, 5, 12],
+    'role create': [34, 1, 1, 12, 10, 11, 5, 12],
+    'role update': [34, 1, 1, 4, 3, 5, 12],
+    'role permissions': [34, 1, 1, 4, 3, 6, 6, 4, 12],
+    'role delete': [34, 1, 1, 4, 3, 3, 12],
+    unlink: [10, 1, 1, 6, 6, 4, 14, 5, 5, 3, 2, 3, 5, 1],
+    unblock: [13, 1, 1, 6, 4, 1],
+  } as const;
+  type Operation = keyof typeof baseline;
+  const parameterCases = (Object.keys(baseline) as Operation[]).flatMap((operation) =>
+    [1, 8].map((anchorCount) => ({ operation, anchorCount })),
+  );
+  it.each(parameterCases)(
+    '$operation full statement parameter counts with $anchorCount anchors',
+    async ({ operation, anchorCount }) => {
+      const providerAnchors: readonly ProtectedHolderProvider[] = [
+        ...ANCHORS,
+        ...Array.from({ length: anchorCount - 1 }, (_, index) => ({
+          provider: `extra${index}`,
+          anchor: `oidc:https://extra${index}.example.test`,
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        })),
+      ];
+      const batches: number[][] = [];
+      const connection: SqlExecutor = {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        batch: (statements) => {
+          batches.push(statements.map((statement) => statement.params.length));
+          return executor.batch(statements);
+        },
+      };
+      const repository = writers(connection, providerAnchors);
+      const roleFence = mutationFence(
+        { userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor,
+        { role: 1 },
+      );
+      const grantFence = mutationFence(
+        { userId: USER, sessionId: SESSION } as unknown as AuthenticatedActor,
+        { grant: 1 },
+      );
+      const common = { now: NOW, opId: ulid() };
+      let outcome: unknown;
+      if (operation === 'helper') {
+        outcome = await runOrgFenced(
+          connection,
+          a,
+          fence(),
+          assertGuard(
+            actorHolds(a, fence(), { permission: PERMISSION, projectId: PA, providerAnchors }),
+            a,
+          ),
+          [stmt('UPDATE project SET name = ? WHERE org_id = ? AND id = ?', 'touched', a.orgId, PA)],
+          {},
+        );
+        expect(outcome).toHaveProperty('ok', true);
+      } else if (operation === 'grant revoke' || operation === 'grant change') {
+        await executor.batch([seedGrant(TARGET_GRANT, 'target@example.test', TARGET_ROLE, null)]);
+        outcome =
+          operation === 'grant revoke'
+            ? await repository.grants.deleteOrganization(a, grantFence, {
+                id: TARGET_GRANT,
+                ...common,
+                audit: writerAudit('grant.revoke'),
+              })
+            : await repository.grants.changeRole(a, grantFence, {
+                id: TARGET_GRANT,
+                roleId: ORG_WRITER,
+                ...common,
+                audit: writerAudit('grant.role_change'),
+              });
+        if (operation === 'grant revoke') expect(outcome).toHaveProperty('outcome', 'deleted');
+        else expect(outcome).toBe('updated');
+      } else if (operation === 'user suspend' || operation === 'user reactivate') {
+        if (operation === 'user reactivate')
+          await executor.batch([
+            stmt(
+              "UPDATE user_account SET status = 'suspended' WHERE org_id = ? AND id = ?",
+              a.orgId,
+              USER_B,
+            ),
+          ]);
+        outcome =
+          operation === 'user suspend'
+            ? await repository.grants.suspendUser(a, fence(), {
+                userId: USER_B,
+                now: NOW,
+                audit: writerAudit('user.suspend'),
+              })
+            : await repository.grants.reactivateUser(a, fence(), {
+                userId: USER_B,
+                now: NOW,
+                audit: writerAudit('user.reactivate'),
+              });
+        expect(outcome).toBe(operation === 'user suspend' ? 'suspended' : 'reactivated');
+      } else if (operation === 'role create') {
+        outcome = await repository.roles.create(a, fence(), {
+          id: '01J0ROLENEW00000000000001',
+          key: 'new_role',
+          name: 'New role',
+          scope: 'organization',
+          permissions: ['org:users:read'],
+          ...common,
+          audit: writerAudit('role.create'),
+        });
+        expect(outcome).toBe('created');
+      } else if (operation === 'role permissions') {
+        outcome = await repository.roles.setPermissions(a, roleFence, {
+          id: TARGET_ROLE,
+          permissions: ['org:users:write'],
+          ...common,
+          audit: writerAudit('role.permissions_set'),
+        });
+        expect(outcome).toBe('updated');
+      } else if (operation === 'role delete') {
+        outcome = await repository.roles.delete(a, roleFence, {
+          id: TARGET_ROLE,
+          ...common,
+          audit: writerAudit('role.delete'),
+        });
+        expect(outcome).toBe('deleted');
+      } else {
+        expect(await callWriter(operation, connection, providerAnchors)).toBe(true);
+      }
+      expect(batches).toHaveLength(1);
+      const counts = batches[0]!;
+      expect(counts).toHaveLength(baseline[operation].length);
+      for (const [index, count] of counts.entries()) {
+        const before =
+          operation === 'unlink' && anchorCount === 8 && index === 6
+            ? 15
+            : baseline[operation][index]!;
+        expect(count).toBeLessThanOrEqual(before);
+        expect(count).toBeLessThanOrEqual(100);
+      }
+    },
+  );
+
+  it.each(CALLERS)('%s commits with the actor’s own SSO identity', async (caller) => {
+    await executor.batch([
+      stmt(
+        'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
+        OWN_IDENTITY,
+        a.orgId,
+        SESSION,
+      ),
+    ]);
+    expect(await callWriter(caller)).toBe(true);
+  });
+
+  it.each(CALLERS)('%s rolls back with a foreign-account identity', async (caller) => {
+    await executor.batch([
+      stmt(
+        'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
+        OTHER_IDENTITY,
+        a.orgId,
+        SESSION,
+      ),
+    ]);
+    const before = await authorityTargets();
+    expect(await callWriter(caller)).toBe(false);
+    expect(await authorityTargets()).toEqual(before);
+  });
+
+  it.each(CALLERS)('%s rolls back with a foreign-org identity', async (caller) => {
+    await executor.batch([
+      stmt(
+        'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
+        FOREIGN_IDENTITY,
+        a.orgId,
+        SESSION,
+      ),
+    ]);
+    const before = await authorityTargets();
+    expect(await callWriter(caller)).toBe(false);
+    expect(await authorityTargets()).toEqual(before);
   });
 });

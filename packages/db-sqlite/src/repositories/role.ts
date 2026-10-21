@@ -1,6 +1,5 @@
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
-import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import {
   DEFAULT_ROLES,
@@ -29,8 +28,8 @@ import {
   type Database,
   type Guard,
 } from '../kysely.js';
-import { holdsPermission, permissionRows, type ProtectedHolderProvider } from './access.js';
-import { liveSessionCondition } from './session-liveness.js';
+import { permissionRows, type ProtectedHolderProvider } from './access.js';
+import { actorAuthority } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
@@ -116,7 +115,7 @@ interface AuthorityScope {
   readonly requested?: readonly string[];
 }
 
-function actorAuthority(
+function roleReachAuthority(
   ctx: OrgContext,
   fence: MutationFence,
   providers: readonly ProtectedHolderProvider[],
@@ -142,13 +141,10 @@ function actorAuthority(
     sql<SqlBool>`(${isAdmin} or not exists (
       select 1 from (${wanted}) wanted where wanted.permission not in ${livePermissions()}))`;
 
-  const roleWrite = holdsPermission(ctx, {
-    userId: fence.userId,
+  const roleWrite = actorAuthority(ctx, fence, {
     permission: 'org:roles:write',
     projectId: null,
     providerAnchors: providers,
-    projectState: 'any',
-    session: fence.sessionId,
   });
   const requested = within(
     sql`select j.value as permission from json_each(${JSON.stringify(scope.requested ?? [])}) j`,
@@ -158,14 +154,7 @@ function actorAuthority(
         where op.org_id = ${org} and op.role_id = ${scope.oldRoleId ?? null}
           and op.permission in (select value from json_each(${JSON.stringify(PERMISSIONS.map(({ name }) => name))}))`,
   );
-  return sql<SqlBool>`(
-    exists (
-      select 1 from user_account au
-      join session s on s.org_id = au.org_id and s.user_id = au.id
-      where au.org_id = ${org} and au.id = ${fence.userId} and au.status = 'active'
-        and s.id = ${fence.sessionId}
-        and ${liveSessionCondition('s', SESSION_IDLE_MS / 1000)})
-    and ${roleWrite} and ${old} and ${requested})`;
+  return sql<SqlBool>`(${roleWrite} and ${old} and ${requested})`;
 }
 
 function expectedRevision(fence: MutationFence): number {
@@ -472,7 +461,7 @@ export function createRoleRepository(
             and r.is_system = 0 and r.protects_last_holder = 0
             and r.created_at = ${input.now} and r.updated_at = ${input.now}
             and not exists (select 1 from role_permission p where p.role_id = r.id))))`;
-      const authority = actorAuthority(ctx, fence, providers, { requested: input.permissions });
+      const authority = roleReachAuthority(ctx, fence, providers, { requested: input.permissions });
       const outcome = await fenced(
         ctx,
         fence,
@@ -527,7 +516,7 @@ export function createRoleRepository(
 
       const open = roleIs(ctx, id, sql<SqlBool>`protects_last_holder = 0`);
       const conditions = [revisionHolds(ctx, id, expected), open];
-      const authority = actorAuthority(ctx, fence, providers, { oldRoleId: id });
+      const authority = roleReachAuthority(ctx, fence, providers, { oldRoleId: id });
       const outcome = await fenced(
         ctx,
         fence,
@@ -573,7 +562,7 @@ export function createRoleRepository(
       );
       const conditions = [revisionHolds(ctx, id, expected), open];
 
-      const authority = actorAuthority(ctx, fence, providers, {
+      const authority = roleReachAuthority(ctx, fence, providers, {
         oldRoleId: id,
         requested: permissions,
       });
@@ -620,7 +609,7 @@ export function createRoleRepository(
         sql<SqlBool>`not exists (select 1 from access_grant g where g.role_id = role.id)`,
       );
       const conditions = [revisionHolds(ctx, id, expected), removable];
-      const authority = actorAuthority(ctx, fence, providers, { oldRoleId: id });
+      const authority = roleReachAuthority(ctx, fence, providers, { oldRoleId: id });
       const outcome = await fenced(
         ctx,
         fence,

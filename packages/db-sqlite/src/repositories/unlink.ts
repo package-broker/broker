@@ -1,5 +1,4 @@
 import { sql, type Compilable, type Kysely, type SqlBool } from 'kysely';
-import { SESSION_IDLE_MS } from '@package-broker/core/auth/session';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { isValidProviderId, isValidTrustAnchor } from '@package-broker/core/identity/port';
@@ -15,8 +14,8 @@ import {
   type Guard,
   type ProtectedHolderInput,
 } from '../kysely.js';
-import { holdsPermission, permissionRows } from './access.js';
-import { liveSessionCondition } from './session-liveness.js';
+import { permissionRows } from './access.js';
+import { actorAuthority } from './actor-authority.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -119,7 +118,7 @@ function holdsAfterUnlink(
   return sql<SqlBool>`(not ${targetHolds} or ${anotherUser} or ${targetStays})`;
 }
 
-function actorAuthority(
+function unlinkAuthority(
   ctx: OrgContext,
   fence: MutationFence,
   holders: ProtectedHolderInput,
@@ -132,21 +131,11 @@ function actorAuthority(
     .where('la_session.id', '=', fence.sessionId)
     .where('la_session.revoked_at', 'is', null)
     .where('la_session.identity_id', 'is', null)}`;
-  const live = sql<SqlBool>`(
-    exists (
-      select 1 from user_account au
-      join session s on s.org_id = au.org_id and s.user_id = au.id
-      where au.org_id = ${ctx.orgId} and au.id = ${fence.userId} and au.status = 'active'
-        and s.id = ${fence.sessionId}
-        and ${liveSessionCondition('s', SESSION_IDLE_MS / 1000)})
-    and ${holdsPermission(ctx, {
-      userId: fence.userId,
-      permission: 'org:users:write',
-      projectId: null,
-      providerAnchors: providers,
-      projectState: 'any',
-      session: fence.sessionId,
-    })})`;
+  const live = actorAuthority(ctx, fence, {
+    permission: 'org:users:write',
+    projectId: null,
+    providerAnchors: providers,
+  });
   const reach = sql<SqlBool>`exists ${loose
     .selectFrom(
       permissionRows(ctx, fence.userId, null, providers, { localAdmin }).as('lr') as never,
@@ -202,7 +191,7 @@ export async function unlinkIdentity(
   }
   requireTimestamp(input.now);
 
-  const { live, reach } = actorAuthority(ctx, fence, holders);
+  const { live, reach } = unlinkAuthority(ctx, fence, holders);
   const matches = identityMatches(ctx, input);
   const anchored = anchorMatches(ctx, input.provider, input.anchor);
   const remaining = holdsAfterUnlink(ctx, input, holders);

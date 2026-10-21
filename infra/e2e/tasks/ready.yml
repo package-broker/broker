@@ -20,11 +20,17 @@
       register: e2e_broker_log
       changed_when: false
       failed_when: false
+      no_log: true
 
-    - name: Show the broker service log
-      ansible.builtin.debug:
-        var: e2e_broker_log.stdout_lines
+    - name: Save broker diagnostics in the protected controller run directory
+      ansible.builtin.copy:
+        content: '{{ e2e_broker_log.stdout }}'
+        dest: '{{ e2e_run_dir }}/broker-readiness.log'
+        mode: '0600'
+      delegate_to: localhost
+      no_log: true
+      diff: false
 
     - name: Fail after collecting diagnostics
       ansible.builtin.fail:
-        msg: NOT RUN cleanly - the broker did not become ready on loopback; see the service log above.
+        msg: 'NOT RUN: broker readiness failed; diagnostics: {{ e2e_run_dir }}/broker-readiness.log'

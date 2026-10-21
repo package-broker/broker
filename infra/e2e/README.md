@@ -34,8 +34,15 @@ per-run key nor deletes `ci`. Do not put secrets in command arguments or the
 inventory. Supply an absolute path to the production-format broker master key.
 Secret copies disable Ansible logging and diffs.
 
-Select a numeric Debian cloud image ID and exact `docker.io` apt version for
-that OS. Pin `e2e_cloudflared_version` to an approved release and
+Select a numeric Debian cloud image ID and exact `docker.io`, `containerd` and
+`runc` apt versions for that OS. Debian 13 provides separate packages for all
+three; supply `e2e_docker_version`, `e2e_containerd_version` and
+`e2e_runc_version`. Where `docker-cli` is a separate package, it uses the Docker
+pin; older releases use the CLI bundled in `docker.io`. Target builds also need
+the exact `docker-buildx` apt version in `e2e_docker_buildx_version`. GHCR mode
+neither requires that variable nor installs `docker-buildx`.
+
+Pin `e2e_cloudflared_version` to an approved release and
 `e2e_cloudflared_sha256` to the SHA-256 of its Linux binary for `e2e_arch`.
 The target downloads that version from the Cloudflare GitHub release and
 verifies the checksum; automatic updates are disabled. Resolve these pins in
@@ -65,9 +72,9 @@ BuildKit, missing required builder tooling or an older bundled frontend fails
 with NOT RUN before building the candidate. In particular, selecting Debian
 Bookworm's `docker.io` 20.10 package alone does not establish compatibility.
 Supply a compatible pinned Docker configuration or select the GHCR path; the
-playbook does not install additional builder dependencies or fall back to the
-legacy builder. The capability check and candidate build use the same builder
-environment. GHCR mode needs no builder.
+playbook installs the pinned `docker-buildx` package for target builds and
+refuses to fall back to the legacy builder. The capability check and candidate
+build use the same builder environment. GHCR mode needs no builder.
 
 The broker runs using the resulting `sha256:` **local image config digest**,
 with `--pull=never`. This is distinguished from a registry manifest digest in
@@ -88,7 +95,9 @@ The broker starts with a temporary loopback `PB_PUBLIC_URL`, published only at
 `127.0.0.1:8787`, and passes a local readiness check. Then systemd starts the
 pinned `cloudflared tunnel --url http://127.0.0.1:8787` process with no account,
 credentials or automatic process restart. Ansible reads only the current
-systemd invocation's journal, with a one-minute bounded poll. It retries startup
+systemd invocation's journal, with a one-minute bounded poll. Only the origin
+line in cloudflared's successful tunnel announcement is accepted; request
+errors mentioning the quick tunnel API are ignored. It retries startup
 once; failure to discover a URL reports NOT RUN and fails the leg.
 
 The discovered origin becomes the `e2e_public_url` fact on the candidate and
@@ -147,8 +156,11 @@ PyYAML and Jinja2. They validate the firewall ID shape and run the real image
 preparation tasks against a fake Docker executable, covering BuildKit selection,
 unsupported builders and GHCR bypass. They make no Docker daemon or cloud calls.
 Set `ANSIBLE_PLAYBOOK` to an alternate existing executable when needed. These
-tests do not replace validation against the pinned Hetzner collection or a live
-target build.
+tests also simulate accepted creates with lost responses, paginated recovery,
+ownership checks and repeated teardown; cover package pins, both CLI layouts
+and image modes; and check private readiness diagnostics and tunnel discovery
+with failure logs. They do not replace validation against the pinned Hetzner
+collection or a live target build.
 
 ## Live acceptance and recovery
 
@@ -170,13 +182,19 @@ a custom CA. It writes a marker as UID 1000, reboots, repeats URL discovery and
 acceptance, and verifies the same volume, marker and SQLite ownership.
 
 `resources.json` is the atomically replaced, non-secret resource journal. IDs
-and timestamps are saved after each create, before the next cloud action. It
-also records candidate/image identity, both public URLs and discovery times,
+and timestamps are saved after each create, before the next cloud action. A
+catchable create failure lists that resource kind by the exact `run_id` label,
+verifies all ownership labels, and journals every matching ID before failing.
+Recovered kinds contain ID lists; destroy accepts these and normal single IDs.
+The journal also records candidate/image identity, both public URLs and discovery times,
 successful acceptance time and teardown history. Preserve it and `outputs.json`
 as release evidence; report actual IDs, URLs and timings. A recorded URL can
 outlive its tunnel and is not proof of a running server. Preserve the input
 inventory as protected operator configuration. The temporary committed source
-archive and isolated `known_hosts` file are removed after successful cleanup.
+archive and isolated `known_hosts` file are removed before the final cleanup
+assertion, including when a cloud resource could not be deleted. If readiness
+fails, the last 120 broker journal lines are saved as protected
+`runs/<run-id>/broker-readiness.log` (mode `0600`); output reports only its path.
 The owner private key stays at its operator-managed path and is never copied
 into the run directory. SSH accepts the new server's key on first connection
 and refuses subsequent changes.
@@ -190,9 +208,9 @@ ansible-playbook infra/e2e/destroy.yml -e e2e_run_id=RECORDED_RUN_ID
 
 Destroy verifies recorded numeric IDs and ownership labels, deletes server,
 volume, primary IP and firewall in dependency order, and confirms each exact ID
-returns 404. It retains support for old journals' labelled per-run SSH keys;
-the shared `ci` key is never journaled as a deletable resource. Already-absent
-resources succeed. Other API errors, foreign labels and malformed/missing
+returns 404. Journals containing `ssh_keys` are refused; the shared `ci` key is
+never journaled as a deletable resource. Already-absent resources succeed.
+Other API errors, foreign labels and malformed/missing
 journals remain failures, and each remaining resource is attempted after an
 individual failure. Both destroys retain IDs and append evidence.
 

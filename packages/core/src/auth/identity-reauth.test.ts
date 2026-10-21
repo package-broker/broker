@@ -137,6 +137,15 @@ function setup(options: Setup = {}) {
   const reauthAtBySession = new Map<string, string>();
   if (options.storedReauthAt != null) reauthAtBySession.set(SESSION_ID, options.storedReauthAt);
   const getIdentity = vi.fn(() => Promise.resolve(stored));
+  const lookupForLogin = vi.fn<UserRepository['lookupForLogin']>(() =>
+    Promise.resolve({
+      boundAnchor: providerOf().trustAnchor,
+      identity: stored,
+      identityUser: null,
+      userByEmail: null,
+      invited: false,
+    }),
+  );
   const mark = vi.fn((_ctx: unknown, input: MarkInput) => {
     const current = reauthAtBySession.get(input.sessionId) ?? null;
     const changed =
@@ -149,7 +158,7 @@ function setup(options: Setup = {}) {
   const unexpected = (name: string) => vi.fn(() => Promise.reject(new Error(`unexpected ${name}`)));
   const users = {
     getIdentity,
-    lookupForLogin: unexpected('lookupForLogin'),
+    lookupForLogin,
     get: unexpected('get'),
     list: unexpected('list'),
   } as unknown as UserRepository;
@@ -178,12 +187,141 @@ function setup(options: Setup = {}) {
     deps,
     findActiveById,
     getIdentity,
+    lookupForLogin,
     mark,
     storedReauthAt: (sessionId: string = SESSION_ID) => reauthAtBySession.get(sessionId) ?? null,
   };
 }
 
 describe('reauthenticateWithIdentity', () => {
+  it('requires the user repository binding read capability', () => {
+    expectTypeOf<Omit<IdentityReauthDeps, 'users'>>().not.toExtend<IdentityReauthDeps>();
+    expectTypeOf<IdentityReauthDeps['users']>().toExtend<Pick<UserRepository, 'lookupForLogin'>>();
+  });
+
+  describe('provider binding', () => {
+    it('accepts matching anchors and scopes the lookup to the organization and identity', async () => {
+      const fixture = setup();
+      expect(await run(fixture.deps, CTX, sessionOf(), providerOf(), verified())).toEqual({
+        ok: true,
+      });
+      expect(fixture.lookupForLogin).toHaveBeenCalledExactlyOnceWith(CTX, {
+        provider: 'oidc-main',
+        subject: 'subject-1',
+        email: EMAIL,
+        groups: ['staff'],
+      });
+      expect(fixture.mark).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['missing', null],
+      ['different', 'oidc:https://other.example.test'],
+    ])('refuses a %s binding without updating reauth_at', async (_name, boundAnchor) => {
+      const fixture = setup();
+      fixture.lookupForLogin.mockResolvedValue({
+        boundAnchor,
+        identity: null,
+        identityUser: null,
+        userByEmail: null,
+        invited: false,
+      });
+      expect(await run(fixture.deps, CTX, sessionOf(), providerOf(), verified())).toEqual({
+        ok: false,
+        reason: 'anchor_mismatch',
+      });
+      expect(fixture.mark).not.toHaveBeenCalled();
+      expect(fixture.storedReauthAt()).toBeNull();
+    });
+
+    it('propagates a failed binding read for the internal-error handler without marking', async () => {
+      const fixture = setup();
+      const failure = new Error('database down');
+      fixture.lookupForLogin.mockRejectedValueOnce(failure);
+      await expect(run(fixture.deps, CTX, sessionOf(), providerOf(), verified())).rejects.toBe(
+        failure,
+      );
+      expect(fixture.mark).not.toHaveBeenCalled();
+    });
+
+    it('does not read the binding before verifying the stored identity', async () => {
+      const fixture = setup({ stored: null });
+      expect(await run(fixture.deps, CTX, sessionOf(), providerOf(), verified())).toEqual({
+        ok: false,
+        reason: 'identity_mismatch',
+      });
+      expect(fixture.lookupForLogin).not.toHaveBeenCalled();
+      expect(fixture.mark).not.toHaveBeenCalled();
+    });
+
+    it('keeps hook refusals observable before reading the binding', async () => {
+      const onDenied = vi.fn();
+      const fixture = setup({
+        hooks: [resolving('plugin-a', () => ({ deny: true }))],
+        onDenied,
+      });
+      fixture.lookupForLogin.mockRejectedValueOnce(new Error('database down'));
+      expect(await run(fixture.deps, CTX, sessionOf(), providerOf(), verified())).toEqual({
+        ok: false,
+        reason: 'hook_denied',
+      });
+      expect(onDenied).toHaveBeenCalledWith({ plugin: 'plugin-a', code: 'denied' });
+      expect(fixture.lookupForLogin).not.toHaveBeenCalled();
+      expect(fixture.mark).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing', undefined],
+      ['null', null],
+      ['non-string', 42],
+      ['empty', ''],
+      ['malformed', 'not-an-anchor'],
+      ['dot-segment', 'oidc:https://idp.example.test/a/../issuer'],
+    ])('rejects a %s provider trust anchor before the binding read', async (_name, anchor) => {
+      const fixture = setup();
+      const provider = providerOf({ trustAnchor: anchor as string });
+      await expect(run(fixture.deps, CTX, sessionOf(), provider, verified())).rejects.toThrow(
+        TypeError,
+      );
+      expect(fixture.lookupForLogin).not.toHaveBeenCalled();
+      expect(fixture.mark).not.toHaveBeenCalled();
+    });
+
+    it('rejects an accessor trust anchor without invoking it', async () => {
+      const fixture = setup();
+      const getter = vi.fn(() => providerOf().trustAnchor);
+      const provider = providerOf();
+      Object.defineProperty(provider, 'trustAnchor', { get: getter });
+      await expect(run(fixture.deps, CTX, sessionOf(), provider, verified())).rejects.toThrow(
+        TypeError,
+      );
+      expect(getter).not.toHaveBeenCalled();
+      expect(fixture.lookupForLogin).not.toHaveBeenCalled();
+      expect(fixture.mark).not.toHaveBeenCalled();
+    });
+
+    it('compares the validated anchor even if the provider changes during the read', async () => {
+      const fixture = setup();
+      const provider = providerOf();
+      fixture.lookupForLogin.mockImplementationOnce(async () => {
+        const boundAnchor = 'oidc:https://other.example.test';
+        Object.assign(provider, { trustAnchor: boundAnchor });
+        return {
+          boundAnchor,
+          identity: null,
+          identityUser: null,
+          userByEmail: null,
+          invited: false,
+        };
+      });
+      expect(await run(fixture.deps, CTX, sessionOf(), provider, verified())).toEqual({
+        ok: false,
+        reason: 'anchor_mismatch',
+      });
+      expect(fixture.mark).not.toHaveBeenCalled();
+    });
+  });
+
   it('requires the session repository read capability', () => {
     expectTypeOf<Omit<IdentityReauthDeps, 'sessions'>>().not.toExtend<IdentityReauthDeps>();
     expectTypeOf<IdentityReauthDeps['sessions']>().toExtend<
@@ -812,6 +950,14 @@ describe('reauthenticateWithIdentity', () => {
         ),
       identity_mismatch: () =>
         run(setup().deps, CTX, sessionOf(), providerOf(), verified({ subject: 'subject-2' })),
+      anchor_mismatch: () =>
+        run(
+          setup().deps,
+          CTX,
+          sessionOf(),
+          providerOf({ trustAnchor: 'oidc:https://other.example.test' }),
+          verified(),
+        ),
       no_auth_time: () =>
         run(setup().deps, CTX, sessionOf(), providerOf(), verified({ authTime: null })),
       stale_auth_time: () =>

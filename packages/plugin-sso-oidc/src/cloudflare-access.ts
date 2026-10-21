@@ -10,6 +10,7 @@ import {
   type VerifiedIdentity,
 } from '@package-broker/core/plugin';
 import { checkPolicy } from './config.js';
+import { fetchBounded } from './http.js';
 import { createJwksCache } from './jwks.js';
 import { JwtError, type JwtFailure, type VerifiedClaims, verifyJwt } from './jwt.js';
 
@@ -21,6 +22,7 @@ export interface CloudflareAccessConfig {
   readonly audience: string;
   readonly policy: DomainPolicy;
   readonly trustEmailVerification: boolean;
+  readonly groups?: 'none' | 'get-identity';
 }
 
 const ASSERTION_HEADER = 'Cf-Access-Jwt-Assertion';
@@ -28,6 +30,8 @@ const DEFAULT_DISPLAY_NAME = 'Cloudflare Access';
 const AUDIENCE_PATTERN = /^[0-9a-f]{64}$/;
 const TEAM_DOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/;
 const GROUPS_UNSUPPORTED = 'groups are not supported until spike T172';
+const MAX_IDENTITY_BYTES = 64 * 1024;
+const IDENTITY_TIMEOUT_MS = 5_000;
 const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'id',
   'kind',
@@ -36,6 +40,7 @@ const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'audience',
   'policy',
   'trustEmailVerification',
+  'groups',
 ]);
 
 function unknownKeyProblems(candidate: Record<string, unknown>): string[] {
@@ -47,7 +52,7 @@ function unknownKeyProblems(candidate: Record<string, unknown>): string[] {
   for (const key of keys) {
     const hidden =
       !Object.hasOwn(candidate, key) || !Object.prototype.propertyIsEnumerable.call(candidate, key);
-    if (key !== 'groups' && (typeof key !== 'string' || !ALLOWED_KEYS.has(key) || hidden)) {
+    if (typeof key !== 'string' || !ALLOWED_KEYS.has(key) || hidden) {
       problems.push('unknown configuration key');
     }
   }
@@ -92,7 +97,10 @@ function inspect(config: unknown): Inspection {
   }
   const policy = checkPolicy(candidate.policy);
   problems.push(...policy.problems.map((problem) => `policy: ${problem}`));
-  if ('groups' in candidate || policy.groups) {
+  if (
+    ('groups' in candidate && candidate.groups !== 'none' && candidate.groups !== 'get-identity') ||
+    policy.groups
+  ) {
     problems.push(GROUPS_UNSUPPORTED);
   }
   problems.push(...unknownKeyProblems(candidate));
@@ -131,6 +139,52 @@ function isApplicationAssertion(claims: VerifiedClaims, audience: string): boole
   );
 }
 
+function accessCookie(request: Request): string | null {
+  const matches = (request.headers.get('cookie') ?? '')
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith('CF_Authorization='));
+  if (matches.length !== 1) {
+    return null;
+  }
+  const value = matches[0]?.slice('CF_Authorization='.length);
+  return value !== undefined && /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/.test(value)
+    ? `CF_Authorization=${value}`
+    : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function identityGroups(json: unknown, subject: string, email: string): readonly string[] | null {
+  if (
+    !isRecord(json) ||
+    json.user_uuid !== subject ||
+    typeof json.email !== 'string' ||
+    normalizeEmail(json.email) !== email
+  ) {
+    return null;
+  }
+  if (json.groups === undefined) {
+    return [];
+  }
+  if (!Array.isArray(json.groups)) {
+    return null;
+  }
+  const groups: string[] = [];
+  for (const entry of json.groups) {
+    let group: unknown = entry;
+    if (isRecord(entry)) {
+      group = typeof entry.id === 'string' && entry.id !== '' ? entry.id : entry.name;
+    }
+    if (typeof group === 'string' && group !== '') {
+      groups.push(group);
+    }
+  }
+  return groups;
+}
+
 export function createCloudflareAccessProvider(
   config: CloudflareAccessConfig,
   ctx: IdentityContext,
@@ -141,7 +195,7 @@ export function createCloudflareAccessProvider(
       `invalid cloudflare-access configuration: ${inspection.problems.join('; ')}`,
     );
   }
-  const { id, teamDomain, audience, trustEmailVerification } = config;
+  const { id, teamDomain, audience, trustEmailVerification, groups: groupsMode = 'none' } = config;
   const checked = inspection.policy as DomainPolicy;
   const policy: DomainPolicy = Object.freeze({
     verifiedDomains: Object.freeze([...checked.verifiedDomains]),
@@ -169,13 +223,37 @@ export function createCloudflareAccessProvider(
     if (email === null) {
       return failure('email_missing');
     }
+    let groups: readonly string[] = [];
+    if (groupsMode === 'get-identity') {
+      const cookie = accessCookie(input.request);
+      if (cookie === null) {
+        return failure('provider_error');
+      }
+      try {
+        const { status, json } = await fetchBounded(
+          ctx,
+          new Request(`${issuer}/cdn-cgi/access/get-identity`, {
+            method: 'GET',
+            headers: { accept: 'application/json', cookie },
+          }),
+          { maxBytes: MAX_IDENTITY_BYTES, timeoutMs: IDENTITY_TIMEOUT_MS },
+        );
+        const parsed = status === 200 ? identityGroups(json, claims.sub, email) : null;
+        if (parsed === null) {
+          return failure('provider_error');
+        }
+        groups = parsed;
+      } catch {
+        return failure('provider_error');
+      }
+    }
     const identity: VerifiedIdentity = {
       provider: id,
       subject: claims.sub,
       email,
       emailVerified: trustEmailVerification,
       displayName: null,
-      groups: [],
+      groups,
       issuedAt: new Date(claims.iat * 1000).toISOString(),
       authTime: null,
     };

@@ -1,0 +1,30 @@
+---
+- name: Require loopback readiness
+  block:
+    - name: Poll the broker readiness endpoint on loopback
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8787/health/ready
+        status_code: 200
+        return_content: false
+        follow_redirects: none
+        use_proxy: false
+        timeout: 10
+      register: e2e_ready
+      until: e2e_ready.status == 200
+      retries: 30
+      delay: 2
+      no_log: true
+  rescue:
+    - name: Collect the broker service log for diagnosis
+      ansible.builtin.command: journalctl -u pb-e2e -n 120 --no-pager -o cat
+      register: e2e_broker_log
+      changed_when: false
+      failed_when: false
+
+    - name: Show the broker service log
+      ansible.builtin.debug:
+        var: e2e_broker_log.stdout_lines
+
+    - name: Fail after collecting diagnostics
+      ansible.builtin.fail:
+        msg: NOT RUN cleanly - the broker did not become ready on loopback; see the service log above.

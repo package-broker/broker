@@ -1,0 +1,11 @@
+---
+- name: Add the created id and timestamp to the journal
+  ansible.builtin.set_fact:
+    e2e_state: >-
+      {{ e2e_state | combine({
+      'resources': e2e_state.resources | combine({e2e_resource_kind: e2e_resource_id | int}),
+      'created_at': e2e_state.created_at | combine({e2e_resource_kind: lookup('ansible.builtin.pipe', 'date +%s') | int})
+      }) | combine(e2e_resource_extra | default({})) }}
+
+- name: Save the created resource before proceeding
+  ansible.builtin.include_tasks: record.yml

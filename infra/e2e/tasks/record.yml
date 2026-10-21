@@ -1,0 +1,6 @@
+---
+- name: Persist non-secret resource inventory atomically
+  ansible.builtin.copy:
+    content: "{{ e2e_state | to_nice_json }}\n"
+    dest: '{{ e2e_inventory_file }}'
+    mode: '0600'

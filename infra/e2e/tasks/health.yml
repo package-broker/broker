@@ -1,0 +1,39 @@
+---
+- name: Require loopback readiness
+  ansible.builtin.include_tasks: ready.yml
+
+- name: Require trusted HTTPS from the controller without redirects or a custom CA
+  ansible.builtin.uri:
+    url: '{{ e2e_public_url }}/health/ready'
+    status_code: 200
+    validate_certs: true
+    follow_redirects: none
+    use_proxy: false
+    return_content: false
+    timeout: 10
+  delegate_to: localhost
+  register: e2e_tls
+  until: e2e_tls.status == 200
+  retries: 30
+  delay: 2
+  no_log: true
+
+- name: Inspect the running container identity and health
+  ansible.builtin.command:
+    argv: [docker, container, inspect, pb-e2e]
+  register: e2e_container
+  until: (e2e_container.stdout | from_json)[0].State.Health.Status == 'healthy'
+  retries: 30
+  delay: 2
+  changed_when: false
+  no_log: true
+
+- name: Require the pinned image, current origin, loopback publication and health
+  ansible.builtin.assert:
+    that:
+      - (e2e_container.stdout | from_json)[0].Image == e2e_image_id
+      - (e2e_container.stdout | from_json)[0].Config.User == '1000:1000'
+      - (e2e_container.stdout | from_json)[0].State.Health.Status == 'healthy'
+      - "'PB_PUBLIC_URL=' + e2e_public_url in (e2e_container.stdout | from_json)[0].Config.Env"
+      - (e2e_container.stdout | from_json)[0].HostConfig.PortBindings['8787/tcp'] == [{'HostIp':'127.0.0.1', 'HostPort':'8787'}]
+    quiet: true

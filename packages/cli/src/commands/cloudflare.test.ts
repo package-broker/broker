@@ -1212,3 +1212,58 @@ it('redacts the complete token before sanitizing overlapping email text in legac
   for (const fragment of [token, 'prefix:', ':suffix', 'person@example.com'])
     expect(diagnostics).not.toContain(fragment);
 });
+
+it('verification-only migration refuses pending schema and records a matching live ledger without applying', async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-verify-test-'));
+  const { harness, close } = await createHarness();
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    const identity = installIdentity({ accountId: ACCOUNT_ID, workerName: 'broker' });
+    const store = await InventoryStore.create({ project, outDir: output, identity });
+    const inventory = emptyInventory(identity, Date.now());
+    inventory.resources.d1 = {
+      name: 'broker-production-db',
+      id: DATABASE_ID,
+      jurisdiction: 'eu',
+      state: 'complete',
+      evidence: { source: 'adopted', operation_id: null, verified_at: new Date().toISOString() },
+    };
+    await store.write(inventory);
+    const onBeforeApply = vi.fn();
+    const options = {
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: false,
+      env: ENV,
+      fetch: harness.fetch,
+      allowContract: ['core:0006_ports'],
+      onBeforeApply,
+    };
+    expect(await migrateCloudflare({ ...options, verifyOnly: true })).toMatchObject({
+      exitCode: 11,
+      output: { error: { code: 'configuration_conflict', stage: 'migrate' } },
+    });
+    expect(onBeforeApply).not.toHaveBeenCalled();
+    expect((await store.read())?.migrations.ledger).toEqual([]);
+    const applied = await migrateCloudflare(options);
+    expect(applied.exitCode).toBe(0);
+    const j = (await store.read())!;
+    j.migrations.ledger = [];
+    await store.write(j);
+    onBeforeApply.mockClear();
+    const verified = await migrateCloudflare({ ...options, verifyOnly: true });
+    expect(verified.exitCode).toBe(0);
+    expect(verified.value?.applied).toEqual([]);
+    expect(onBeforeApply).not.toHaveBeenCalled();
+    expect((await store.read())?.migrations.ledger.map((entry) => entry.id)).toEqual(
+      applied.value?.applied,
+    );
+    expect((await store.read())?.migrations.applied_this_transaction).toEqual([]);
+  } finally {
+    await close();
+    await rm(project, { recursive: true, force: true });
+  }
+});

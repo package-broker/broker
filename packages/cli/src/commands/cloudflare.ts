@@ -151,6 +151,7 @@ export interface CloudflareMigrateOptions {
   fetch?: typeof fetch;
   json?: boolean;
   allowContract?: readonly string[];
+  verifyOnly?: boolean;
   onBeforeApply?: Parameters<typeof migrate>[2]['onBeforeApply'];
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -313,7 +314,7 @@ export async function migrateCloudflare(
     }
     const result = await migrate(executor, sources, {
       holder,
-      dryRun: o.dryRun,
+      dryRun: o.dryRun || o.verifyOnly === true,
       lockTtlSeconds: LOCK_TTL_SECONDS,
       ...(o.now === undefined ? {} : { now: o.now }),
       ...(o.sleep === undefined ? {} : { sleep: o.sleep }),
@@ -341,6 +342,8 @@ export async function migrateCloudflare(
           );
       },
     });
+    if (o.verifyOnly && (result.pending.length || result.unknown.length))
+      throw new CloudflareError('configuration_conflict', 11, false, 'migrate');
     if (!o.dryRun && journal) {
       journal.migrations.applied_this_transaction = o.transaction
         ? o.transaction.recordAppliedMigrations(result.applied)

@@ -628,17 +628,10 @@ function credentialOrigins(
 }
 
 function openSourceCredential(
-  executor: SqlExecutor,
-  keyring: Keyring,
+  repository: ReturnType<typeof createCredentialRepository>,
+  store: ReturnType<typeof createCredentialStore>,
   policy: Parameters<typeof parseSourceConfig>[4]['policy'],
 ) {
-  const repository = createCredentialRepository(executor);
-  const store = createCredentialStore({
-    repository,
-    cipher: createSecretCipher(keyring, 'credential-encryption'),
-    ids: { ulid },
-    clock: systemClock,
-  });
   return async (ctx: OrgContext, source: SourceRecord): Promise<SourceCredential | null> => {
     const origins = credentialOrigins(source, policy);
     if (source.credentialId === null || origins === null) return null;
@@ -700,6 +693,7 @@ function registryJobDependencies(input: {
   readonly policy: Parameters<typeof parseSourceConfig>[4]['policy'];
   readonly fetch: (record: SourceRecord) => ProviderContext['fetch'];
   readonly credential: (ctx: OrgContext, record: SourceRecord) => Promise<SourceCredential | null>;
+  readonly webhook: Pick<RegistryJobsDeps['webhook'], 'loadCredential' | 'verifier'>;
 }): RegistryJobsDeps {
   const { executor } = input;
   const sources = createSourceRepository(executor);
@@ -779,10 +773,8 @@ function registryJobDependencies(input: {
       ...createSourceSyncReads(executor),
     },
     sourcePoll: { sources },
-    // The jobs module requires webhook ports; no webhook route is mounted by this assembly.
     webhook: {
-      loadCredential: async () => null,
-      verifier: { verify: async () => false },
+      ...input.webhook,
       deliveries: createWebhookDeliveryRepository(executor),
     },
   };
@@ -820,7 +812,14 @@ function buildRegistryModule(input: {
     now: () => Date.now(),
     onError: () => undefined,
   });
-  const credential = openSourceCredential(executor, input.keyring, outboundPolicy);
+  const credentialRepository = createCredentialRepository(executor);
+  const credentialStore = createCredentialStore({
+    repository: credentialRepository,
+    cipher: createSecretCipher(input.keyring, 'credential-encryption'),
+    ids: { ulid },
+    clock: systemClock,
+  });
+  const credential = openSourceCredential(credentialRepository, credentialStore, outboundPolicy);
   const providerRegistry = createProviderRegistry();
   const providers: SourceProvider[] = [];
   for (const provider of input.registration.sourceProviders.values()) {
@@ -841,6 +840,15 @@ function buildRegistryModule(input: {
       providers: providerRegistry,
       policy: outboundPolicy,
       credential,
+      webhook: {
+        loadCredential: githubApp,
+        verifier: {
+          verify: async (...args) =>
+            (await providers
+              .find((provider) => provider.id === 'github')
+              ?.webhookVerifier?.verify(...args)) ?? false,
+        },
+      },
       fetch: (record) =>
         policyFetch(
           record.userAgent ??
@@ -907,13 +915,6 @@ function buildRegistryModule(input: {
   };
   const module = createRegistryModule(dependencies);
   const job = module.packageSyncJob;
-  const credentialRepository = createCredentialRepository(executor);
-  const credentialStore = createCredentialStore({
-    repository: credentialRepository,
-    cipher: createSecretCipher(input.keyring, 'credential-encryption'),
-    ids: { ulid },
-    clock: systemClock,
-  });
   const sources = createSourceRepository(executor);
   const discoveryBindings = new WeakMap<
     UpstreamCredential,
@@ -1955,6 +1956,13 @@ export function createWorker(
         health: async () => (await bootstrap.findSingleton()) !== null,
         coreRoutes: [
           ...(auth?.coreRoutes ?? []),
+          ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
+            ...route,
+            async handler(context: Parameters<typeof route.handler>[0]) {
+              const response = await route.handler(context);
+              return response.status === 401 ? new Response(null, { status: 404 }) : response;
+            },
+          })),
           ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
         ],
         ...(authorization === undefined ? {} : { authorization }),

@@ -695,6 +695,7 @@ function registryJobDependencies(input: {
   readonly policy: Parameters<typeof parseSourceConfig>[4]['policy'];
   readonly fetch: (record: SourceRecord) => ProviderContext['fetch'];
   readonly credential: (ctx: OrgContext, record: SourceRecord) => Promise<SourceCredential | null>;
+  readonly webhook: Pick<RegistryJobsDeps['webhook'], 'loadCredential' | 'verifier'>;
 }): RegistryJobsDeps {
   const { executor } = input;
   const sources = createSourceRepository(executor);
@@ -774,10 +775,8 @@ function registryJobDependencies(input: {
       ...createSourceSyncReads(executor),
     },
     sourcePoll: { sources },
-    // The jobs module requires webhook ports; no webhook route is mounted by this assembly.
     webhook: {
-      loadCredential: async () => null,
-      verifier: { verify: async () => false },
+      ...input.webhook,
       deliveries: createWebhookDeliveryRepository(executor),
     },
   };
@@ -891,6 +890,15 @@ function assembleRegistry(input: {
       providers: providerRegistry,
       policy,
       credential: credentials.forSource,
+      webhook: {
+        loadCredential: credentials.githubApp,
+        verifier: {
+          verify: async (...args) =>
+            (await providers
+              .find((provider) => provider.id === 'github')
+              ?.webhookVerifier?.verify(...args)) ?? false,
+        },
+      },
       fetch: (record) =>
         policyFetch(
           record.userAgent ??
@@ -1287,6 +1295,13 @@ export function createNodeServer(
         : { platformServices: options.platformServices }),
       coreRoutes: [
         ...(access?.module.coreRoutes ?? []),
+        ...(registry?.module.coreRoutes ?? []).map((route) => ({
+          ...route,
+          async handler(context: Parameters<typeof route.handler>[0]) {
+            const response = await route.handler(context);
+            return response.status === 401 ? new Response(null, { status: 404 }) : response;
+          },
+        })),
         ...(assets === null ? [] : [...setupRoutes, ...uiRoutes]),
       ],
       ...(authorization === undefined ? {} : { authorization }),

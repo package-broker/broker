@@ -1,9 +1,12 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { build as bundle } from 'esbuild';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import {
   formatMasterKey,
   generateMasterKey,
@@ -31,6 +34,7 @@ let project: string, outside: string, store: InventoryStore;
 let calls: string[], options: SetupOptions, ops: SetupOperations;
 let installed: boolean, exists: boolean;
 let sentKey: string | undefined;
+let buildFixture: string;
 const result = (command: string) => ({ exitCode: 0, output: commandEnvelope(command) });
 const journal = async () => (await store.read())!;
 async function update(change: (j: Inventory) => void) {
@@ -39,6 +43,44 @@ async function update(change: (j: Inventory) => void) {
   j.revision++;
   await store.write(j);
 }
+
+beforeAll(async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  buildFixture = await mkdtemp(resolve('.pb/setup-build-'));
+  const sourceRoot = fileURLToPath(new URL('../../', import.meta.url));
+  await bundle({
+    entryPoints: [join(sourceRoot, 'commands/cloudflare/setup.ts'), join(sourceRoot, 'build.ts')],
+    outbase: sourceRoot,
+    outdir: buildFixture,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    plugins: [
+      {
+        name: 'workspace-sources',
+        setup(build) {
+          build.onResolve({ filter: /^[^./]/ }, (args) => {
+            const workspace = /^@package-broker\/([^/]+)(?:\/(.+))?$/.exec(args.path);
+            if (workspace) {
+              return {
+                path: fileURLToPath(
+                  new URL(
+                    `../../../../${workspace[1]}/src/${workspace[2] ?? 'index'}.ts`,
+                    import.meta.url,
+                  ),
+                ),
+              };
+            }
+            return { path: createRequire(args.importer).resolve(args.path), external: true };
+          });
+        },
+      },
+    ],
+  });
+});
+afterAll(async () => {
+  await rm(buildFixture, { recursive: true, force: true });
+});
 
 beforeEach(async () => {
   await mkdir(resolve('.pb'), { recursive: true });
@@ -1240,7 +1282,7 @@ throw new Error('fixture stops after inspecting environment');
 export default {};
 `,
   );
-  const moduleUrl = new URL('../../../dist/commands/cloudflare/setup.js', import.meta.url).href;
+  const moduleUrl = pathToFileURL(join(buildFixture, 'commands/cloudflare/setup.js')).href;
   const script =
     'const { buildSetupArtifact } = await import(process.argv[1]); try { await buildSetupArtifact(process.argv[2], process.argv[3], process.env); process.exitCode = 1; } catch (error) { if (error.code !== "invalid_input" || error.stage !== "build") process.exitCode = 2; }';
   await promisify(execFile)(

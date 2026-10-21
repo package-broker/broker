@@ -179,7 +179,7 @@ function toVersion(row: Row): CatalogueVersion {
   };
 }
 
-export function createCatalogueReader(
+export function createVersionReader(
   executor: ScalarSqlExecutor,
 ): Pick<CatalogueReader, 'resolveVersions'> {
   return {

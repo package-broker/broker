@@ -24,7 +24,8 @@ import {
   type CatalogueConfig,
 } from '../testing/catalogue-fixture.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createCatalogueReader } from './catalogue-read.js';
+import * as versionReaderModule from './catalogue-read.js';
+import { createVersionReader } from './catalogue-read.js';
 
 type Result = PackageResolution | PageChanged | null;
 
@@ -43,7 +44,7 @@ async function readAll(
   query: Omit<ResolveVersionsQuery, 'binding' | 'after'>,
 ): Promise<{ first: PackageResolution | null; versions: CatalogueVersion[]; calls: number }> {
   const counted = countCalls(executor);
-  const reader = createCatalogueReader(counted.executor);
+  const reader = createVersionReader(counted.executor);
   const first = await reader.resolveVersions(ctx, query);
   if (first === null) return { first: null, versions: [], calls: counted.counts().all };
   let current = page(first);
@@ -63,6 +64,17 @@ async function readAll(
   expect(counted.counts()).toEqual({ all: pages, batch: 0 });
   return { first: page(first), versions, calls: pages };
 }
+
+describe('version reader factory exports', () => {
+  it('exports createVersionReader for version resolution', () => {
+    const executor = {} as SqlExecutor;
+    expect(Object.keys(createVersionReader(executor))).toEqual(['resolveVersions']);
+  });
+
+  it('does not export the composed catalogue reader name', () => {
+    expect(versionReaderModule).not.toHaveProperty('createCatalogueReader');
+  });
+});
 
 describe('resolveVersions against the oracle', () => {
   it('1: matches resolveWinner and the filtered version list on 200 random configurations', async () => {
@@ -268,7 +280,7 @@ const T0 = '2020-01-01T00:00:00.000Z';
 const day = (n: number): string => new Date(Date.UTC(2020, 0, 1 + n)).toISOString();
 
 function reader() {
-  return createCatalogueReader(database.executor);
+  return createVersionReader(database.executor);
 }
 
 function query(key: string, extra: Partial<ResolveVersionsQuery> = {}): ResolveVersionsQuery {
@@ -330,9 +342,9 @@ describe('resolveVersions statement', () => {
       },
     });
     const first = page(
-      await createCatalogueReader(capturing).resolveVersions(ctx, query('acme/p7', { limit: 2 })),
+      await createVersionReader(capturing).resolveVersions(ctx, query('acme/p7', { limit: 2 })),
     );
-    await createCatalogueReader(capturing).resolveVersions(
+    await createVersionReader(capturing).resolveVersions(
       ctx,
       query('acme/p7', {
         limit: 2,
@@ -486,7 +498,7 @@ describe('resolveVersions statement', () => {
 
   it('refuses invalid queries before touching the database', async () => {
     const counted = countCalls(database.executor);
-    const r = createCatalogueReader(counted.executor);
+    const r = createVersionReader(counted.executor);
     await expect(r.resolveVersions(ctx, query('acme/a', { limit: 0 }))).rejects.toThrow(TypeError);
     await expect(r.resolveVersions(ctx, query('acme/a', { limit: 201 }))).rejects.toThrow(
       TypeError,

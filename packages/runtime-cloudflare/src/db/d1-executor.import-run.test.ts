@@ -770,4 +770,62 @@ describe('import run repository on the D1 executor', () => {
       expect(await jobs()).toEqual([]);
     }
   });
+  it('reads only own organization runs and omits secret-bearing columns', async () => {
+    await executor.batch([
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system, last_error) VALUES ('own-read', ?, 'test', 'PRIVATE')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system) VALUES ('foreign-read', ?, 'test')",
+        foreign.orgId,
+      ),
+      stmt(
+        "INSERT INTO import_ref (id, org_id, import_run_id, entity_type, entity_id, external_ref, action, before_image_json) VALUES ('ref-read', ?, 'own-read', 'source', 'source', 'PRIVATE', 'update', ?)",
+        ctx.orgId,
+        JSON.stringify({ credential_ref: 'PRIVATE' }),
+      ),
+    ]);
+    const own = await store.get(ctx, 'own-read');
+    expect(own).toMatchObject({ id: 'own-read', orgId: ctx.orgId });
+    expect(await store.get(ctx, 'foreign-read')).toBeNull();
+    expect(await store.get(ctx, 'absent')).toBeNull();
+    expect(await store.list(ctx, { after: null, limit: 10 })).toEqual([own]);
+    expect(JSON.stringify(own)).not.toContain('PRIVATE');
+    expect(Object.keys(own!)).toEqual([
+      'id',
+      'orgId',
+      'state',
+      'planHash',
+      'approvedAt',
+      'approvedByUserId',
+      'acceptedAt',
+      'beforeImageExpiresAt',
+    ]);
+  });
+  it('uses descending id keysets without offsets or cross-organization rows', async () => {
+    await executor.batch([
+      ...['a', 'c', 'e'].map((id) =>
+        stmt(
+          'INSERT INTO import_run (id, org_id, source_system) VALUES (?, ?, ?)',
+          id,
+          ctx.orgId,
+          'test',
+        ),
+      ),
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system) VALUES ('d', ?, 'test')",
+        foreign.orgId,
+      ),
+    ]);
+    expect((await store.list(ctx, { after: null, limit: 2 })).map((run) => run.id)).toEqual([
+      'e',
+      'c',
+    ]);
+    await executor.batch([
+      stmt("INSERT INTO import_run (id, org_id, source_system) VALUES ('f', ?, 'test')", ctx.orgId),
+    ]);
+    expect((await store.list(ctx, { after: 'c', limit: 2 })).map((run) => run.id)).toEqual(['a']);
+    expect(await store.list(ctx, { after: 'a', limit: 2 })).toEqual([]);
+  });
 });

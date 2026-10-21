@@ -787,4 +787,127 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
       expect(await jobs()).toEqual([]);
     }
   });
+  it('reads only own organization runs and omits secret-bearing columns', async () => {
+    await executor.batch([
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system, last_error) VALUES ('own-read', ?, 'test', 'PRIVATE')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system) VALUES ('foreign-read', ?, 'test')",
+        foreign.orgId,
+      ),
+      stmt(
+        "INSERT INTO import_ref (id, org_id, import_run_id, entity_type, entity_id, external_ref, action, before_image_json) VALUES ('ref-read', ?, 'own-read', 'source', 'source', 'PRIVATE', 'update', ?)",
+        ctx.orgId,
+        JSON.stringify({ credential_ref: 'PRIVATE' }),
+      ),
+    ]);
+    const own = await store.get(ctx, 'own-read');
+    expect(own).toMatchObject({ id: 'own-read', orgId: ctx.orgId });
+    expect(await store.get(ctx, 'foreign-read')).toBeNull();
+    expect(await store.get(ctx, 'absent')).toBeNull();
+    expect(await store.list(ctx, { after: null, limit: 10 })).toEqual([own]);
+    expect(JSON.stringify(own)).not.toContain('PRIVATE');
+    expect(Object.keys(own!)).toEqual([
+      'id',
+      'orgId',
+      'state',
+      'planHash',
+      'approvedAt',
+      'approvedByUserId',
+      'acceptedAt',
+      'beforeImageExpiresAt',
+    ]);
+  });
+  it('uses descending id keysets without offsets or cross-organization rows', async () => {
+    await executor.batch([
+      ...['a', 'c', 'e'].map((id) =>
+        stmt(
+          'INSERT INTO import_run (id, org_id, source_system) VALUES (?, ?, ?)',
+          id,
+          ctx.orgId,
+          'test',
+        ),
+      ),
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system) VALUES ('d', ?, 'test')",
+        foreign.orgId,
+      ),
+    ]);
+    expect((await store.list(ctx, { after: null, limit: 2 })).map((run) => run.id)).toEqual([
+      'e',
+      'c',
+    ]);
+    await executor.batch([
+      stmt("INSERT INTO import_run (id, org_id, source_system) VALUES ('f', ?, 'test')", ctx.orgId),
+    ]);
+    expect((await store.list(ctx, { after: 'c', limit: 2 })).map((run) => run.id)).toEqual(['a']);
+    expect(await store.list(ctx, { after: 'a', limit: 2 })).toEqual([]);
+  });
+
+  it.each(['pat', 'svc', 'session'] as const)(
+    'allows %s verification without reauth and enqueues atomically',
+    async (kind) => {
+      const actor =
+        kind === 'pat' ? await seedPatToken() : kind === 'svc' ? await seedServiceToken() : fence;
+      await create();
+      await executor.batch([
+        stmt(
+          "UPDATE import_run SET state = 'applied' WHERE org_id = ? AND id = ?",
+          ctx.orgId,
+          input.id,
+        ),
+        stmt('UPDATE session SET reauth_at = null WHERE org_id = ?', ctx.orgId),
+      ]);
+      const value = await write();
+      const audit = stmt(
+        'SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?',
+        ...Array(11).fill(null),
+        JSON.stringify({ request_id: 'verify-request' }),
+      );
+      expect(await store.requestVerify(ctx, actor, { ...value, audit })).toMatchObject({
+        ok: true,
+      });
+      expect(
+        await executor.all(
+          stmt('SELECT state FROM import_run WHERE org_id = ? AND id = ?', ctx.orgId, input.id),
+        ),
+      ).toEqual([{ state: 'verifying' }]);
+      expect(await executor.all(stmt('SELECT type FROM job WHERE org_id = ?', ctx.orgId))).toEqual([
+        { type: IMPORT_VERIFICATION_JOB.type },
+      ]);
+      expect(batches.at(-1)).toContainEqual(audit);
+    },
+  );
+  it('refuses a token without import write authority before any batch', async () => {
+    const actor = await seedServiceToken();
+    await create();
+    await executor.batch([
+      stmt(
+        "UPDATE import_run SET state = 'applied' WHERE org_id = ? AND id = ?",
+        ctx.orgId,
+        input.id,
+      ),
+      stmt('DELETE FROM service_principal_permission WHERE org_id = ?', ctx.orgId),
+    ]);
+    const before = batches.length;
+    expect(await store.requestVerify(ctx, actor, await write())).toEqual({
+      ok: false,
+      reason: 'authority',
+    });
+    expect(batches).toHaveLength(before);
+  });
+  it.each(['approveRun', 'requestApply', 'requestRollback', 'acceptRun', 'cancelRun'] as const)(
+    '%s refuses token fences before any database write',
+    async (operation) => {
+      const actor = await seedServiceToken();
+      await create();
+      const value = await write();
+      const before = batches.length;
+      // @ts-expect-error Import approval operations require a session fence.
+      await expect(store[operation](ctx, actor, value)).rejects.toThrow(TypeError);
+      expect(batches).toHaveLength(before);
+    },
+  );
 });

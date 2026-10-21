@@ -14,6 +14,7 @@ import {
   validImportApprovalTimestamp,
   type ImportRun,
   type ImportRunOperation,
+  type ImportRunReadQuery,
   type ImportRunStore,
   type ImportRunWrite,
   type ImportRunWriteOutcome,
@@ -62,6 +63,24 @@ const runOf = (row: Row): ImportRun => ({
   acceptedAt: row.accepted_at,
   beforeImageExpiresAt: row.before_image_expires_at,
 });
+
+export function getImportRunStatement(ctx: OrgContext, runId: string): Statement {
+  return compile(
+    db
+      .selectFrom('import_run')
+      .select(COLUMNS)
+      .where('org_id', '=', ctx.orgId)
+      .where('id', '=', runId),
+  );
+}
+
+export function listImportRunsStatement(ctx: OrgContext, input: ImportRunReadQuery): Statement {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 101)
+    throw new TypeError('invalid import run read limit');
+  let query = db.selectFrom('import_run').select(COLUMNS).where('org_id', '=', ctx.orgId);
+  if (input.after !== null) query = query.where('id', '<', input.after);
+  return compile(query.orderBy('id', 'desc').limit(input.limit));
+}
 
 export function createImportRunStore(options: {
   readonly executor: SqlExecutor;
@@ -114,14 +133,14 @@ export function createImportRunStore(options: {
     compile(db.selectNoFrom(sql<number>`case when ${guard} is 1 then 0 else 1 end`.as('failed')));
   async function transition(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: CreateFence,
     operation: Exclude<ImportRunOperation, 'createRun'>,
     input: ImportRunWrite,
   ): Promise<ImportRunWriteOutcome> {
-    session(fence);
+    if (operation !== 'requestVerify') session(fence);
     const allowed = authority(ctx, fence, operation);
     const visible = sql<SqlBool>`exists ${target(ctx, input.runId)}`;
-    const reauth = fresh(ctx, fence);
+    const reauth = operation === 'requestVerify' ? sql<SqlBool>`1` : fresh(ctx, fence);
     // Missing targets take precedence over authority failures on both initial reads and failed batches.
     const inspect = async () =>
       executor.all<{ present: number; allowed: number; fresh: number }>(
@@ -144,9 +163,9 @@ export function createImportRunStore(options: {
     const mutations: Statement[] = [];
     switch (operation) {
       case 'approveRun':
-        valid = sql<SqlBool>`${approvalTime && e.state === 'planned' && e.approvedAt === null && input.approvedByUserId === fence.userId && input.approvedAt === input.now && input.credentialWindowUntil === new Date(Date.parse(input.now) + 3600000).toISOString() ? 1 : 0} = 1 and unixepoch(${input.now}, 'subsec') <= ${CLOCK} + 60`;
+        valid = sql<SqlBool>`${approvalTime && e.state === 'planned' && e.approvedAt === null && input.approvedByUserId === session(fence).userId && input.approvedAt === input.now && input.credentialWindowUntil === new Date(Date.parse(input.now) + 3600000).toISOString() ? 1 : 0} = 1 and unixepoch(${input.now}, 'subsec') <= ${CLOCK} + 60`;
         update = {
-          approved_by_user_id: fence.userId,
+          approved_by_user_id: session(fence).userId,
           approved_at: input.now,
           credential_window_until: input.credentialWindowUntil ?? '',
         };
@@ -196,7 +215,7 @@ export function createImportRunStore(options: {
       const payload =
         operation !== 'requestRollback'
           ? IMPORT_RUN_JOB.payload(input.runId)
-          : { ...IMPORT_RUN_JOB.payload(input.runId), requestedBy: fence.userId };
+          : { ...IMPORT_RUN_JOB.payload(input.runId), requestedBy: session(fence).userId };
       mutations.push(
         ...assertCheck(
           sql<SqlBool>`not exists (select 1 from job irj where irj.org_id = ${ctx.orgId} and irj.resource_key in (${IMPORT_RUN_JOB.resourceKey(input.runId)}, ${IMPORT_VERIFICATION_JOB.resourceKey(input.runId)}) and irj.state in ('queued', 'running'))`,
@@ -248,6 +267,13 @@ export function createImportRunStore(options: {
     return outcome.reason === 'unclassified' ? { ok: false, reason: 'conflict' } : outcome;
   }
   return {
+    async get(ctx, runId) {
+      const [row] = await executor.all<Row>(getImportRunStatement(ctx, runId));
+      return row === undefined ? null : runOf(row);
+    },
+    async list(ctx, input) {
+      return (await executor.all<Row>(listImportRunsStatement(ctx, input))).map(runOf);
+    },
     async inspect(ctx, fence, operation, runId) {
       const allowed = authority(ctx, fence, operation);
       const reauth = fresh(ctx, fence);

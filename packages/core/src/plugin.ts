@@ -8,7 +8,9 @@ import type { Cache } from './platform/cache.js';
 import { PlatformUnavailableError } from './platform/errors.js';
 import type { JobDefinition, Jobs } from './platform/jobs.js';
 import type { Observability } from './platform/observability.js';
-import type { SourceProvider } from './sources/provider.js';
+import type { GithubAppMaterial } from './sources/credentials.js';
+import type { UpstreamCredential } from './sources/policy-fetch.js';
+import type { ProviderSource, SourceProvider } from './sources/provider.js';
 
 export { PlatformUnavailableError } from './platform/errors.js';
 
@@ -40,6 +42,7 @@ export type {
 } from './identity/port.js';
 export { providerSecretName } from './identity/secret-name.js';
 export type { Clock } from './ids.js';
+export { SnapshotCorruptError } from './ingest/snapshot.js';
 export { versionsFromRefs } from './registry/composer/version-rules.js';
 export { readFileAtRefs } from './sources/git/fetch.js';
 export { lsRefs } from './sources/git/refs.js';
@@ -65,8 +68,27 @@ export type PortName =
 
 export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
 
-/** Receives no adapters and no credentials. */
-export type SourceProviderFactory = () => readonly SourceProvider[];
+export interface SourceProviderContext {
+  readonly runtime: 'docker' | 'cloudflare';
+  /** Opens an opaque, organization-scoped App binding for discovery before a source exists. */
+  discoveryCredential?(
+    org: OrgContext,
+    credentialId: string,
+    installationId: string,
+  ): Promise<UpstreamCredential | null>;
+  /** Resolves an organization-owned GitHub App installation; unknown bindings return null. */
+  tokensFor<T>(
+    org: OrgContext,
+    source: ProviderSource | UpstreamCredential,
+    create: (
+      app: Pick<GithubAppMaterial, 'appId' | 'privateKeyPem'>,
+      installationId: string,
+      credentialId?: string,
+    ) => T,
+  ): Promise<T | null>;
+}
+
+export type SourceProviderFactory = (context?: SourceProviderContext) => readonly SourceProvider[];
 
 export interface PluginApi {
   readonly apiVersion: number;

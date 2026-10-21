@@ -168,6 +168,64 @@ async function migrateTo(upTo: string | null): Promise<void> {
   await migrate(opened.executor, sources, { holder: 'registry-migration-test' });
 }
 
+describe('migration 0023 version package status index', () => {
+  const migrationId = 'core:0023_version_package_status';
+
+  it.each(['fresh', 'upgrade'])('applies to a %s database', async (mode) => {
+    const sources = await loadCore();
+    if (mode === 'upgrade') {
+      await migrate(
+        opened.executor,
+        sources.filter((source) => source.id < migrationId),
+        {
+          holder: 'version-status-test',
+        },
+      );
+    }
+    const result = await migrate(opened.executor, sources, { holder: 'version-status-test' });
+    expect(result.applied.at(-1)).toBe(migrationId);
+    if (mode === 'upgrade') expect(result.applied).toEqual([migrationId]);
+    expect(await indexNames('version')).toContainEqual({
+      name: 'version_package_status',
+      unique: 0,
+      partial: 0,
+    });
+    expect(await rows('SELECT id FROM schema_migration ORDER BY id DESC LIMIT 1')).toEqual([
+      { id: migrationId },
+    ]);
+  });
+
+  it('skips an already applied migration', async () => {
+    const sources = await loadCore();
+    await migrate(opened.executor, sources, { holder: 'version-status-test' });
+    const result = await migrate(opened.executor, sources, { holder: 'version-status-test' });
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toContain(migrationId);
+  });
+
+  it('does not change the schema when the index SQL is reapplied', async () => {
+    await migrateTo(null);
+    const before = await rows('PRAGMA schema_version');
+    const sql = readFileSync(new URL('0023_version_package_status.sql', migrationsUrl), 'utf8');
+    await run(sql);
+    expect(await rows('PRAGMA schema_version')).toEqual(before);
+    expect(await indexNames('version')).toContainEqual({
+      name: 'version_package_status',
+      unique: 0,
+      partial: 0,
+    });
+  });
+
+  it('uses the index for a quarantined version existence probe', async () => {
+    await migrateTo(null);
+    const plan = await rows<{ detail: string }>(
+      "EXPLAIN QUERY PLAN SELECT 1 FROM version WHERE package_id = ? AND status = 'quarantined' LIMIT 1",
+      [PACKAGE],
+    );
+    expect(plan.some((step) => step.detail.includes('version_package_status'))).toBe(true);
+  });
+});
+
 describe.each([
   ['a fresh database', async () => migrateTo('0008_')],
   [

@@ -18,6 +18,7 @@ import { setResolvedPackage } from '../../internal/package-context.js';
 import { setAccessContext } from '../../authz/access-context.js';
 import type { RequestContext } from '../../plugin.js';
 import { createKernel } from '../../kernel/kernel.js';
+import { BlobBusyError } from '../../platform/blob.js';
 import { createKeyring } from '../../secrets/keyring.js';
 import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
@@ -355,6 +356,28 @@ describe('npm tarballs', () => {
     const missing = await harness({ dist: { kind: 'not_found' } });
     expect((await missing.call('/x/-/x-1.0.0.tgz')).status).toBe(404);
   });
+
+  it.each(['/x', '/x/-/x-1.0.0.tgz'])(
+    'answers BlobBusyError with 503 and Retry-After without request data on %s',
+    async (path) => {
+      const { call, ensure, serve } = await harness({ kernelActor: true });
+      const error = new BlobBusyError();
+      error.message = 'private-request-sentinel';
+      if (path.endsWith('.tgz')) serve.mockRejectedValue(error);
+      else ensure.mockRejectedValue(error);
+
+      const response = await call(`${path}?private=private-request-sentinel`);
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get('Retry-After')).toBe('5');
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(await response.json()).toEqual({
+        error: 'Try again later',
+        code: 'unavailable',
+        requestId: response.headers.get('x-request-id'),
+      });
+    },
+  );
 });
 
 describe('npm on-demand fill', () => {

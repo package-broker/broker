@@ -212,6 +212,7 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
 
   return {
     async login(ctx, input, meta) {
+      if (input === null || typeof input !== 'object') return REFUSED;
       if (!strings(input.email, input.password, input.code)) return REFUSED;
       const verified = await attempt(ctx, input.email, input.password, input.code, null);
       if (verified === null) return REFUSED;
@@ -250,6 +251,7 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       if (!(await isReauthSessionActive(deps, ctx, authenticated.session.id))) {
         return { ok: false, reason: 'session_inactive' };
       }
+      if (input === null || typeof input !== 'object') return REFUSED;
       if (!strings(input.password, input.code)) return REFUSED;
       const { session } = authenticated;
       if (session.identityId !== null) {

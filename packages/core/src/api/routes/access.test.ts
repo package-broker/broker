@@ -102,6 +102,7 @@ async function fixture(
   options: {
     tokenScope?: 'read' | 'full';
     admin?: boolean;
+    projectPermissions?: readonly string[];
     wideRole?: boolean;
     permissions?: readonly string[];
     roleResult?: Partial<Record<'create' | 'rename' | 'setPermissions' | 'delete', string>>;
@@ -230,6 +231,7 @@ async function fixture(
 
   let sequence = 0;
   const ids = { ulid: () => `01JB${String(++sequence).padStart(22, '0')}` };
+  const log = vi.fn();
   const administration = createAdministration({
     roles: roleRepo,
     grants: grantRepo,
@@ -237,7 +239,7 @@ async function fixture(
     providers: { has: (name: string) => name === 'okta' },
     clock,
     ids,
-    log: () => undefined,
+    log,
   });
   const spies = {
     createRole: vi.spyOn(administration, 'createRole'),
@@ -263,7 +265,7 @@ async function fixture(
     ports: { organizations: { get: async () => null }, clock, ids },
     resolveOrg: async () => orgContext('org-1'),
     health: async () => true,
-    log: () => undefined,
+    log,
     authorization: createAuthorizationEngine({
       access: {
         lookupSession: async () => ({
@@ -273,7 +275,7 @@ async function fixture(
           protectedHolder: options.admin ?? true,
           project: null,
           organizationPermissions: permissions,
-          projectPermissions: [],
+          projectPermissions: options.projectPermissions ?? [],
         }),
         lookupToken: async () =>
           Object.defineProperty(
@@ -293,12 +295,13 @@ async function fixture(
                   readOnly: options.tokenScope === 'read',
                 },
               },
+              protectedHolder: options.admin ?? true,
               principalStatus: 'active',
               projectVisible: true,
               validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
               project: null,
               organizationPermissions: permissions,
-              projectPermissions: [],
+              projectPermissions: options.projectPermissions ?? [],
             },
             'verifier',
             { value: { secretHash: await hashToken(keyring, 1, bearer), pepperVersion: 1 } },
@@ -312,7 +315,7 @@ async function fixture(
         dispatch: (run) => {
           void run();
         },
-        log: () => undefined,
+        log,
       },
       patValidation: patValidationGate,
       publicOrigin: ORIGIN,
@@ -344,7 +347,7 @@ async function fixture(
       new Request(ORIGIN + path, { method, headers, ...(body === undefined ? {} : { body }) }),
     );
   };
-  return { request, roleRepo, grantRepo, spies, clientIp };
+  return { request, roleRepo, grantRepo, spies, clientIp, log };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -707,10 +710,17 @@ describe('grants', () => {
   });
 });
 
-describe('grant listing never discloses e-mail addresses', () => {
-  it('omits the value of e-mail subjects and of e-mail-looking group values', async () => {
-    const f = await fixture();
-    const response = await f.request('GET', '/_pb/grants');
+describe('grant listing e-mail visibility', () => {
+  it.each([
+    ['project admin', { admin: false, projectPermissions: PERMISSIONS.map((p) => p.name) }, false],
+    ['organization reader', { admin: false, permissions: ['org:grants:read'] }, false],
+    ['custom role with every permission', { admin: false }, false],
+    ['read-only admin token', { tokenScope: 'read' }, true],
+    ['non-admin full token', { tokenScope: 'full', admin: false }, true],
+  ] as const)('omits e-mail values for a %s', async (_name, options, token) => {
+    const f = await fixture(options);
+    const response = await f.request('GET', '/_pb/grants', token ? { auth: 'token' } : {});
+    expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).not.toContain('@');
     const body = JSON.parse(text) as { items: { id: string; subject: Record<string, unknown> }[] };
@@ -723,7 +733,40 @@ describe('grant listing never discloses e-mail addresses', () => {
     });
     expect(subjects.get('01JA0000000000000000000027')).toEqual({ type: 'group', provider: 'okta' });
   });
-  it('declares a listGrants subject schema that has no e-mail value', () => {
+  it.each([false, true])(
+    'returns e-mail subjects for an organization admin (token=%s)',
+    async (token) => {
+      const f = await fixture();
+      const response = await f.request('GET', '/_pb/grants', token ? { auth: 'token' } : {});
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { items: { id: string; subject: unknown }[] };
+      expect(body.items.find((item) => item.id === GRANT_FIRST)?.subject).toEqual({
+        type: 'email',
+        value: 'holder-21@example.test',
+      });
+      expect(body.items.find((item) => item.id === '01JA0000000000000000000027')?.subject).toEqual({
+        type: 'group',
+        provider: 'okta',
+      });
+      expect(ACCESS_SPECS.listGrants.api.responses[200].safeParse(body).success).toBe(true);
+    },
+  );
+
+  it('keeps list responses out of logs and makes no audit-producing write', async () => {
+    const f = await fixture();
+    expect((await f.request('GET', '/_pb/grants')).status).toBe(200);
+    expect(f.log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'http.request', status: 200 }),
+    );
+    vi.spyOn(f.grantRepo, 'listOrganization').mockRejectedValueOnce(new Error(EMAIL));
+    const failure = await f.request('GET', '/_pb/grants');
+    expect(failure.status).toBe(500);
+    expect(await failure.text()).not.toContain('@');
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain('@');
+    noWrites(f);
+  });
+
+  it('declares the optional e-mail subject value in the list schema', () => {
     const spec = ACCESS_SPECS.listGrants;
     const emailSubject = {
       id: GRANT_FIRST,
@@ -733,7 +776,7 @@ describe('grant listing never discloses e-mail addresses', () => {
       revision: 2,
     };
     expect(spec.api.responses[200].safeParse({ items: [emailSubject], next: null }).success).toBe(
-      false,
+      true,
     );
   });
 });

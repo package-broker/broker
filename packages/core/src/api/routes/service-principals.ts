@@ -4,22 +4,14 @@ import type {
 } from '../../authz/service-principal-service.js';
 import { isUlid } from '../../ids.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
-import { SERVICE_ERROR_TABLE, type ApiErrorCode } from '../response.js';
-import { apiRoute, IF_MATCH, type ApiOutcome } from '../route.js';
+import { SERVICE_ERROR_TABLE } from '../response.js';
+import { apiRoute, type ApiOutcome, type RouteOutcome } from '../route.js';
 import { callContext, projectSessionCallContext, type ApiRouteDeps } from './context.js';
 import { SERVICE_PRINCIPAL_API_SPECS } from './service-principals-schemas.js';
 
 export interface ServicePrincipalRouteDeps extends ApiRouteDeps {
   readonly servicePrincipals: ServicePrincipalService;
   readonly principals: Pick<ServicePrincipalStore, 'get'>;
-}
-
-function restoreRevision(ctx: RequestContext): number | ApiErrorCode {
-  const header = ctx.request.headers.get('if-match');
-  if (header === null) return 'precondition_required';
-  const match = IF_MATCH.exec(header);
-  const revision = match?.[1] === undefined ? Number.NaN : Number(match[1]);
-  return Number.isSafeInteger(revision) ? revision : 'invalid_request';
 }
 
 export function servicePrincipalRoutes(
@@ -78,30 +70,28 @@ export function servicePrincipalRoutes(
       );
     }
     const restore = spec.path.endsWith('/restore');
-    return apiRoute(spec, async ({ ctx, params }): Promise<ApiOutcome> => {
-      if (!isUlid(params.principal)) return { error: 'invalid_request' };
-      const revision = restore ? restoreRevision(ctx) : null;
-      if (typeof revision === 'string') return { error: revision };
-      const context = await target(
-        ctx,
-        spec.boundary === 'project',
-        params.principal,
-        revision === null ? {} : { service_principal: revision },
-        restore ? 'restore' : 'suspend',
-      );
-      if (context === null) return { error: 'not_found' };
-      const result = await deps.servicePrincipals[restore ? 'restore' : 'suspend'](
-        context.org,
-        context.actor,
-        context.fence,
-        params.principal,
-        context.call,
-      );
-      if (result.ok) return { status: 204 };
-      const error = SERVICE_ERROR_TABLE.ServicePrincipalError[result.error].code;
-      return {
-        error: restore && result.error === 'conflict' ? 'precondition_failed' : error,
-      };
-    });
+    return apiRoute(
+      spec,
+      async ({ ctx, params, expectedRevision }): Promise<RouteOutcome<typeof spec>> => {
+        if (!isUlid(params.principal)) return { error: 'invalid_request' };
+        const context = await target(
+          ctx,
+          spec.boundary === 'project',
+          params.principal,
+          expectedRevision === null ? {} : { service_principal: expectedRevision },
+          restore ? 'restore' : 'suspend',
+        );
+        if (context === null) return { error: 'not_found' };
+        const result = await deps.servicePrincipals[restore ? 'restore' : 'suspend'](
+          context.org,
+          context.actor,
+          context.fence,
+          params.principal,
+          context.call,
+        );
+        if (result.ok) return { status: 204 };
+        return { serviceError: result.error };
+      },
+    );
   });
 }

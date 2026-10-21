@@ -662,7 +662,7 @@ describe('apply failure classes and observability', () => {
     expect(f.abandoned).toBe(0);
   });
 
-  it('logs budget exhaustion with the package key and ordinal', async () => {
+  it('logs budget exhaustion with the package key, source id and ordinal', async () => {
     const f = fixture();
     const writer = {
       ...f.deps.writer,
@@ -679,6 +679,7 @@ describe('apply failure classes and observability', () => {
         event: 'ingest.budget_exhausted',
         reason_code: 'budget_exhausted',
         package_key: KEY,
+        source_id: 'source-1',
         seq: 0,
       }),
     );

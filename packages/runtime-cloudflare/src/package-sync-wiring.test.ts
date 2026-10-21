@@ -727,7 +727,7 @@ describe.each([
     ).toEqual([]);
   });
 
-  it('delivers an ingest budget event to the sink with job_id and package_key', async () => {
+  it('delivers an ingest budget event to the sink with job_id, package_key and source_id', async () => {
     const up = upstream('npm', 1);
     const original = catalogueModule.createCatalogueWriter;
     vi.spyOn(catalogueModule, 'createCatalogueWriter').mockImplementation((executor) => {
@@ -743,6 +743,7 @@ describe.each([
         reason_code: 'budget_exhausted',
         job_id: notification.job,
         package_key: up.key,
+        source_id: 'S1',
       }),
     );
   });

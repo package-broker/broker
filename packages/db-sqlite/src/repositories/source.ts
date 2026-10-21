@@ -280,6 +280,26 @@ export function listSourcesStatement(ctx: OrgContext, input: SourceListQuery): S
   return compile(query.orderBy('id').limit(input.limit + 1));
 }
 
+export function getVisibleSourceStatement(
+  ctx: OrgContext,
+  input: { readonly projectId: string; readonly sourceId: string },
+): Statement {
+  return compile(
+    db
+      .selectFrom('source')
+      .select([...SOURCE_COLUMNS])
+      .where('org_id', '=', ctx.orgId)
+      .where('id', '=', input.sourceId)
+      .where(sql<SqlBool>`exists (select 1 from project as visible_project
+        where visible_project.id = ${input.projectId} and visible_project.org_id = ${ctx.orgId}
+          and visible_project.status = 'active')`)
+      .where(sql<SqlBool>`(source.project_id = ${input.projectId} or
+        (source.project_id is null and exists (select 1 from project_source as attachment
+          where attachment.org_id = ${ctx.orgId} and attachment.project_id = ${input.projectId}
+            and attachment.source_id = source.id)))`),
+  );
+}
+
 export function pauseSourceStatement(ctx: OrgContext, id: string): Statement {
   return compile(
     db
@@ -380,6 +400,10 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async getVisible(ctx, input) {
+      const [row] = await executor.all<SourceRow>(getVisibleSourceStatement(ctx, input));
+      return row === undefined ? null : toRecord(row);
+    },
     async list(ctx, input) {
       const rows = await executor.all<SourceRow>(listSourcesStatement(ctx, input));
       return rows.map(toRecord);

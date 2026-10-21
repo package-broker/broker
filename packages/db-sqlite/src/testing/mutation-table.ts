@@ -1,3 +1,4 @@
+import { entries as sourceVisibleEntries } from './mutation-table/source-visible.js';
 import { entries as sourceListEntries } from './mutation-table/source-list.js';
 import { entries as sourcePauseEntries } from './mutation-table/source-pause.js';
 import { entries as vulnerabilityEntries } from './mutation-table/vulnerability.js';
@@ -102,6 +103,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...sourceVisibleEntries,
   ...sourceListEntries,
   ...sourcePauseEntries,
   ...fixtureVersionListingsEntries,

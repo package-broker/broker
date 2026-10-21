@@ -35,6 +35,7 @@ import { createCatalogueWriter, createVisibilityStore } from '../repositories/ca
 import { createCatalogueWriteGuard } from '../repositories/catalogue-write-package.js';
 import { createCatalogueReader } from '../repositories/catalogue.js';
 import { seedTwoOrganizations } from './two-organizations.js';
+import { describeWriterBatchContract } from './writer-batch-contract.js';
 
 export interface OpenedCatalogueWriteDatabase {
   readonly executor: SqlExecutor;
@@ -403,6 +404,11 @@ export const catalogueWriteContractCases = {
 
 export function describeCatalogueWriteContract(name: string, open: Open): void {
   describe(`catalogue write contract: ${name}`, () => {
+    describeWriterBatchContract(async () => {
+      const opened = await open();
+      const { a: ctx } = await seedTwoOrganizations(opened.executor);
+      return { executor: opened.executor, ctx, close: () => opened.close() };
+    });
     for (const ecosystem of ['npm', 'composer'] as const) {
       const denied = [
         'token',

@@ -55,7 +55,13 @@ function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
     createRun: vi.fn<ImportRunStore['createRun']>().mockResolvedValue({ ok: true, results: [] }),
     approveRun: write(),
     requestApply: write(),
-    requestVerify: write(),
+    requestVerify: vi
+      .fn<ImportRunStore['requestVerify']>()
+      .mockResolvedValue({ ok: true, results: [] }),
+    get: vi.fn<ImportRunStore['get']>().mockImplementation(async () => access.run),
+    list: vi
+      .fn<ImportRunStore['list']>()
+      .mockImplementation(async () => (access.run === null ? [] : [access.run])),
     cancelRun: write(),
     acceptRun: write(),
     requestRollback: write(),
@@ -66,7 +72,6 @@ function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
 const methods = [
   'approveRun',
   'requestApply',
-  'requestVerify',
   'cancelRun',
   'acceptRun',
   'requestRollback',
@@ -161,7 +166,7 @@ describe('import run service', () => {
     access.allowed = false;
     expect(await service.approveRun(ctx, fence, input)).toEqual({ ok: false, error: 'forbidden' });
   });
-  for (const method of methods) {
+  for (const method of [...methods, 'requestVerify'] as const) {
     const state =
       method === 'requestVerify'
         ? 'applied'
@@ -392,5 +397,119 @@ describe('verification requests', () => {
       error: 'conflict',
     });
     expect(store.requestVerify).not.toHaveBeenCalled();
+  });
+});
+
+describe('token-capable verification', () => {
+  it.each([token, fence])('permits verify without fresh reauthentication', async (actor) => {
+    const { service, store, access, run } = setup({ state: 'applied' });
+    access.reauthFresh = false;
+    expect(await service.requestVerify(ctx, actor, input)).toEqual({ ok: true, value: null });
+    expect(store.requestVerify).toHaveBeenCalledExactlyOnceWith(ctx, actor, {
+      ...input,
+      expected: run,
+    });
+  });
+  it('refuses a token without live import write permission before writing', async () => {
+    const { service, store, access } = setup({ state: 'applied' });
+    access.allowed = false;
+    expect(await service.requestVerify(ctx, token, input)).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(store.requestVerify).not.toHaveBeenCalled();
+  });
+  it('refuses a token fence for a different permission before inspection', async () => {
+    const { service, store } = setup({ state: 'applied' });
+    const wrong = tokenMutationFence(
+      { tokenId: 'other', tokenKind: 'svc', principalId: 'principal' } as AuthenticatedTokenActor,
+      'project:packages:write',
+      {},
+    );
+    await expect(service.requestVerify(ctx, wrong, input)).rejects.toThrow(TypeError);
+    expect(store.inspect).not.toHaveBeenCalled();
+    expect(store.requestVerify).not.toHaveBeenCalled();
+  });
+  for (const method of methods) {
+    it(`${method} refuses tokens without any store write`, async () => {
+      const { service, store } = setup({
+        state: method === 'acceptRun' || method === 'requestRollback' ? 'verified' : 'planned',
+        approvedAt: method === 'approveRun' ? null : now,
+      });
+      // @ts-expect-error Import approval operations require a session fence.
+      await expect(service[method](ctx, token, input)).rejects.toThrow(TypeError);
+      expect(store[method]).not.toHaveBeenCalled();
+    });
+  }
+});
+
+describe('import run reads', () => {
+  it('returns only the safe DTO even if the store returns extra fields', async () => {
+    const { service, access, run } = setup();
+    Object.assign(access.run!, {
+      manifest: 'PRIVATE',
+      credential_ref: 'PRIVATE',
+      before_image_json: 'PRIVATE',
+    });
+    expect(await service.get(ctx, 'run')).toEqual({
+      ok: true,
+      value: {
+        id: run.id,
+        state: run.state,
+        planHash: run.planHash,
+        approvedAt: run.approvedAt,
+        approvedByUserId: run.approvedByUserId,
+        acceptedAt: run.acceptedAt,
+        beforeImageExpiresAt: run.beforeImageExpiresAt,
+      },
+    });
+    expect(JSON.stringify(await service.list(ctx, {}))).not.toContain('PRIVATE');
+  });
+  it('hides an absent run', async () => {
+    const { service, access } = setup();
+    access.run = null;
+    expect(await service.get(ctx, 'missing')).toEqual({ ok: false, error: 'not_found' });
+  });
+  it('hides a foreign run', async () => {
+    const { service } = setup({ orgId: orgContext('foreign').orgId });
+    expect(await service.get(ctx, 'run')).toEqual({ ok: false, error: 'not_found' });
+    expect(await service.list(ctx, {})).toEqual({ ok: true, value: { items: [], next: null } });
+  });
+  it('hides a mismatched run id', async () => {
+    const { service } = setup();
+    expect(await service.get(ctx, 'different')).toEqual({ ok: false, error: 'not_found' });
+  });
+  it('caps pages, uses a scoped opaque cursor, and ends pagination', async () => {
+    const { service, store, run } = setup();
+    store.list.mockResolvedValueOnce(
+      Array.from({ length: 101 }, (_, index) => ({ ...run, id: String(1000 - index) })),
+    );
+    const first = await service.list(ctx, { limit: 200 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error('missing page');
+    expect(first.value.items).toHaveLength(100);
+    expect(first.value.next).toEqual(expect.any(String));
+    expect(first.value.next).not.toContain(ctx.orgId);
+    expect(store.list).toHaveBeenLastCalledWith(ctx, { after: null, limit: 101 });
+    const second = await service.list(ctx, { cursor: first.value.next!, limit: 2 });
+    expect(store.list).toHaveBeenLastCalledWith(ctx, { after: '901', limit: 3 });
+    expect(second.ok && second.value.next).toBeNull();
+    expect(await service.list(orgContext('foreign'), { cursor: first.value.next! })).toEqual({
+      ok: false,
+      error: 'invalid_cursor',
+    });
+  });
+  it('refuses malformed cursors before reading', async () => {
+    const { service, store } = setup();
+    expect(await service.list(ctx, { cursor: 'invalid!' })).toEqual({
+      ok: false,
+      error: 'invalid_cursor',
+    });
+    expect(store.list).not.toHaveBeenCalled();
+  });
+  it.each([0, -1, 1.5, NaN, Infinity])('refuses invalid limit %s before reading', async (limit) => {
+    const { service, store } = setup();
+    expect(await service.list(ctx, { limit })).toEqual({ ok: false, error: 'invalid_limit' });
+    expect(store.list).not.toHaveBeenCalled();
   });
 });

@@ -55,6 +55,25 @@ export interface ImportRun {
   readonly beforeImageExpiresAt: string | null;
 }
 
+/** Public run summary: never includes stored manifests, credential data or before-images. */
+export type ImportRunDto = Omit<ImportRun, 'orgId'>;
+
+export interface ImportRunPage {
+  readonly items: readonly ImportRunDto[];
+  readonly next: string | null;
+}
+
+export interface ImportRunListInput {
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
+export interface ImportRunReadQuery {
+  readonly after: string | null;
+  /** Includes the service's one-row lookahead; at most 101. */
+  readonly limit: number;
+}
+
 export interface ImportRunInput {
   readonly runId: string;
   readonly now: string;
@@ -112,7 +131,7 @@ export interface ImportRunCreateWrite extends Omit<CreateRunInput, 'manifest'> {
  * allowed requires org:import:write for creation and verification, org:import:approve otherwise;
  * reauthFresh is computed from the fence's live session using the shared reauth window.
  *
- * Every write rechecks visibility, live authority, session reauth (except creation), and expected
+ * Every write rechecks visibility, live authority, session reauth (except creation and verification), and expected
  * transition predicates on database time. It runs mutations, audit and optional idempotency in
  * one runFenced batch. No SQL or guard is constructed in this service.
  *
@@ -124,6 +143,9 @@ export interface ImportRunCreateWrite extends Omit<CreateRunInput, 'manifest'> {
  * acceptRun sets accepted_at without changing before_image_expires_at or verified state.
  */
 export interface ImportRunStore {
+  /** Runs are organization resources. Callers authorize org:import:write before reading. */
+  get(ctx: OrgContext, runId: string): Promise<ImportRun | null>;
+  list(ctx: OrgContext, input: ImportRunReadQuery): Promise<readonly ImportRun[]>;
   inspect(
     ctx: OrgContext,
     fence: CreateFence,
@@ -152,7 +174,7 @@ export interface ImportRunStore {
   ): Promise<ImportRunWriteOutcome>;
   requestVerify(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: CreateFence,
     input: ImportRunWrite,
   ): Promise<ImportRunWriteOutcome>;
   cancelRun(
@@ -180,11 +202,15 @@ export type ImportRunError =
   | 'conflict'
   | 'unavailable'
   | 'invalid_manifest'
-  | 'invalid_time';
+  | 'invalid_time'
+  | 'invalid_cursor'
+  | 'invalid_limit';
 export type ImportRunResult<T = null> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: ImportRunError };
 
 export interface ImportRunService {
+  get(ctx: OrgContext, runId: string): Promise<ImportRunResult<ImportRunDto>>;
+  list(ctx: OrgContext, input: ImportRunListInput): Promise<ImportRunResult<ImportRunPage>>;
   createRun(
     ctx: OrgContext,
     fence: CreateFence,
@@ -208,7 +234,7 @@ export interface ImportRunService {
   ): Promise<ImportRunResult>;
   requestVerify(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: CreateFence,
     input: ImportRunInput,
   ): Promise<ImportRunResult>;
   cancelRun(ctx: OrgContext, fence: MutationFence, input: ImportRunInput): Promise<ImportRunResult>;
@@ -247,6 +273,48 @@ function outcome<T>(answer: ImportRunWriteOutcome, value: T): ImportRunResult<T>
   }
 }
 
+function dto(run: ImportRun): ImportRunDto {
+  return {
+    id: run.id,
+    state: run.state,
+    planHash: run.planHash,
+    approvedAt: run.approvedAt,
+    approvedByUserId: run.approvedByUserId,
+    acceptedAt: run.acceptedAt,
+    beforeImageExpiresAt: run.beforeImageExpiresAt,
+  };
+}
+
+function cursor(ctx: OrgContext, id: string): string {
+  const bytes = new TextEncoder().encode(JSON.stringify([1, ctx.orgId, id]));
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '');
+}
+
+function cursorId(ctx: OrgContext, value: string): string | null {
+  if (value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const bytes = Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), (c) =>
+      c.charCodeAt(0),
+    );
+    const decoded: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 3 ||
+      decoded[0] !== 1 ||
+      decoded[1] !== ctx.orgId ||
+      typeof decoded[2] !== 'string' ||
+      decoded[2].length === 0
+    )
+      return null;
+    return cursor(ctx, decoded[2]) === value ? decoded[2] : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createImportRunService(deps: {
   readonly store: ImportRunStore;
   readonly ids: { ulid(): string };
@@ -256,20 +324,27 @@ export function createImportRunService(deps: {
 
   async function transition(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: CreateFence,
     operation: Exclude<ImportRunOperation, 'createRun'>,
     input: ImportRunInput,
     hash?: string,
   ): Promise<ImportRunResult> {
-    if (fenceKind(fence) !== 'session')
+    const kind = fenceKind(fence);
+    if (operation !== 'requestVerify' && kind !== 'session')
       throw new TypeError('import operation requires a session fence');
+    if (operation === 'requestVerify') {
+      if (kind !== 'session' && kind !== 'token')
+        throw new TypeError('import verification requires a session or token fence');
+      if (kind === 'token' && (fence as TokenMutationFence).permission !== 'org:import:write')
+        throw new TypeError('import verification requires an import write fence');
+    }
     const time = timestamp(input.now);
     if (time === null) return fail('invalid_time');
     const access = await store.inspect(ctx, fence, operation, input.runId, input.now);
     const run = access.run;
     if (run === null || run.orgId !== ctx.orgId || run.id !== input.runId) return fail('not_found');
     if (!access.allowed) return fail('forbidden');
-    if (!access.reauthFresh) return fail('reauth_required');
+    if (operation !== 'requestVerify' && !access.reauthFresh) return fail('reauth_required');
     if (
       operation === 'approveRun' &&
       !validImportApprovalTimestamp(input.now, clock.now().getTime())
@@ -288,7 +363,7 @@ export function createImportRunService(deps: {
         const until = time + 3_600_000;
         if (!Number.isFinite(new Date(until).getTime())) return fail('invalid_time');
         extra = {
-          approvedByUserId: fence.userId,
+          approvedByUserId: (fence as MutationFence).userId,
           approvedAt: input.now,
           credentialWindowUntil: new Date(until).toISOString(),
         };
@@ -315,13 +390,43 @@ export function createImportRunService(deps: {
         break;
       }
     }
+    const write = { ...input, expected: { ...run }, ...extra };
     return outcome(
-      await store[operation](ctx, fence, { ...input, expected: { ...run }, ...extra }),
+      operation === 'requestVerify'
+        ? await store.requestVerify(ctx, fence, write)
+        : await store[operation](ctx, fence as MutationFence, write),
       null,
     );
   }
 
   return {
+    async get(ctx, runId) {
+      const run = await store.get(ctx, runId);
+      if (run === null || run.orgId !== ctx.orgId || run.id !== runId) return fail('not_found');
+      return { ok: true, value: dto(run) };
+    },
+    async list(ctx, input) {
+      const requested = input.limit ?? 50;
+      if (!Number.isSafeInteger(requested) || requested < 1) return fail('invalid_limit');
+      const limit = Math.min(requested, 100);
+      let after: string | null = null;
+      if (input.cursor !== undefined) {
+        after = cursorId(ctx, input.cursor);
+        if (after === null) return fail('invalid_cursor');
+      }
+      const rows = (await store.list(ctx, { after, limit: limit + 1 })).filter(
+        (run) => run.orgId === ctx.orgId,
+      );
+      const items = rows.slice(0, limit).map(dto);
+      const last = items.at(-1);
+      return {
+        ok: true,
+        value: {
+          items,
+          next: rows.length > limit && last !== undefined ? cursor(ctx, last.id) : null,
+        },
+      };
+    },
     async createRun(ctx, fence, input) {
       const kind = fenceKind(fence);
       if (kind !== 'session' && kind !== 'token')

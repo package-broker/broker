@@ -94,6 +94,10 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/import-run.ts#getImportRunStatement':
+    'NOT_A_MUTATION: read-only organization-scoped import run summary; organization isolation is covered by repository, D1 twin and cp-restore mutation tests.',
+  'repositories/import-run.ts#listImportRunsStatement':
+    'NOT_A_MUTATION: read-only organization-scoped import run keyset page; organization isolation is covered by repository, D1 twin and cp-restore mutation tests.',
   ...sourceSyncReadsAllowlist,
   'repositories/package-id.ts#createPackageIdReads':
     'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of packageIdStatement, registered separately in package-id.ts.',

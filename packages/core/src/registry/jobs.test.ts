@@ -155,6 +155,7 @@ function setup() {
         status: 'complete',
         empty: false,
         validatorsPublished: 0,
+        leaseHeldBack: 0,
       }),
     },
     writeGuard: vi.fn<SourceSyncDeps['writeGuard']>().mockReturnValue(catalogueWriteGuard([])),

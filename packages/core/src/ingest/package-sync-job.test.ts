@@ -150,7 +150,8 @@ function setup() {
     jobId: 'job-1',
     signal: new AbortController().signal,
     fences: jobFences(lease),
-  } as JobContext;
+    observability: { log: () => {}, counter: () => {}, histogram: () => {} },
+  } as unknown as JobContext;
   const run = (payload: unknown = { sourceId: 'A', key: 'name' }) =>
     job.handler(job.validate(payload), context);
   return {
@@ -712,7 +713,12 @@ describe('fix round 1', () => {
     h.setDescribe({ kind: 'found', description: description() });
     const finalize = vi.fn(async () => {
       h.events.push('finalize');
-      return { status: 'complete' as const, empty: false, validatorsPublished: 1 };
+      return {
+        status: 'complete' as const,
+        empty: false,
+        validatorsPublished: 1,
+        leaseHeldBack: 0,
+      };
     });
     (h.deps.apply as { finalizer: unknown }).finalizer = { finalize };
     vi.mocked(applyChunk).mockImplementation(async (_ctx, applyDeps) => {

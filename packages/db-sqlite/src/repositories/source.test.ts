@@ -1,7 +1,8 @@
 import { settleIdempotent, type IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { createIdempotencyRepository, idempotencyInsertStatement } from './idempotency.js';
 import { countCalls } from '../contract/count-calls.js';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createSourceService } from '@package-broker/core/sources/source-service';
 import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor, MutationFence } from '@package-broker/core/authz/fence';
 import { credentialAad } from '@package-broker/core/secrets/cipher';
@@ -695,6 +696,110 @@ describe('source delete', () => {
     expect(await repository.delete(a, orgFence(), { id: SRC_NEW, providerAnchors: ANCHORS })).toBe(
       'not_found',
     );
+  });
+});
+
+describe('source project visibility', () => {
+  function visible(projectId: string, sourceId: string, ctx = a) {
+    const service = createSourceService({
+      sources: repository,
+      organizations: { get: vi.fn() },
+      credentials: { prepare: vi.fn() },
+      credentialRepository: { get: vi.fn() },
+      registeredNames: { owner: vi.fn(), add: vi.fn(), remove: vi.fn(), enable: vi.fn() },
+      catalogue: { previewWinners: vi.fn() },
+      policy: { runtime: 'node', allowPrivateHosts: [], selfOrigins: [] },
+      providerAnchors: ANCHORS,
+      ids: { ulid: vi.fn() },
+      log: vi.fn(),
+    });
+    return service.getVisible(
+      ctx,
+      {
+        kind: 'project',
+        actor: {
+          kind: 'project',
+          userId: P1_MAINTAINER,
+          orgId: ctx.orgId,
+          projectId,
+          permissions: new Set(['project:sources:write']),
+        },
+      },
+      { projectId, sourceId },
+    );
+  }
+
+  it('reads a project-owned source', async () => {
+    await executor.batch([seedSource(SRC_P1, 'owned', { project_id: P1 })]);
+    expect(await repository.getVisible(a, { projectId: P1, sourceId: SRC_P1 })).toEqual(
+      await repository.get(a, SRC_P1),
+    );
+    expect(await visible(P1, SRC_P1)).toMatchObject({
+      ok: true,
+      value: { id: SRC_P1, projectId: P1, hasCredential: false },
+    });
+  });
+
+  it('reads an attached organization source', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'shared'),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        a.orgId,
+        P1,
+        SRC_ORG,
+      ),
+    ]);
+    expect(await repository.getVisible(a, { projectId: P1, sourceId: SRC_ORG })).toEqual(
+      await repository.get(a, SRC_ORG),
+    );
+    expect(await visible(P1, SRC_ORG)).toMatchObject({
+      ok: true,
+      value: { id: SRC_ORG, projectId: null, hasCredential: false },
+    });
+  });
+
+  it('hides an absent source', async () => {
+    expect(await repository.getVisible(a, { projectId: P1, sourceId: SRC_NEW })).toBeNull();
+    expect(await visible(P1, SRC_NEW)).toEqual({ ok: false, error: 'not_found' });
+  });
+
+  it('hides a source owned by another project', async () => {
+    await executor.batch([seedSource(SRC_P1, 'foreign', { project_id: P2 })]);
+    expect(await repository.getVisible(a, { projectId: P1, sourceId: SRC_P1 })).toBeNull();
+    expect(await visible(P1, SRC_P1)).toEqual({ ok: false, error: 'not_found' });
+  });
+
+  it('hides a source in another organization', async () => {
+    await executor.batch([seedSource(SRC_ORG, 'foreign')]);
+    expect(await repository.getVisible(b, { projectId: P1, sourceId: SRC_ORG })).toBeNull();
+    expect(await visible(P1, SRC_ORG, b)).toEqual({ ok: false, error: 'not_found' });
+  });
+
+  it('hides a source of an archived project', async () => {
+    await executor.batch([seedSource(SRC_P1, 'archived', { project_id: P_ARCHIVED })]);
+    expect(await repository.getVisible(a, { projectId: P_ARCHIVED, sourceId: SRC_P1 })).toBeNull();
+    expect(await visible(P_ARCHIVED, SRC_P1)).toEqual({ ok: false, error: 'not_found' });
+  });
+
+  it('hides an attached organization source from an archived project', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'shared'),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        a.orgId,
+        P_ARCHIVED,
+        SRC_ORG,
+      ),
+    ]);
+    expect(await repository.getVisible(a, { projectId: P_ARCHIVED, sourceId: SRC_ORG })).toBeNull();
+    expect(await visible(P_ARCHIVED, SRC_ORG)).toEqual({ ok: false, error: 'not_found' });
+  });
+
+  it('hides an unattached organization source', async () => {
+    await executor.batch([seedSource(SRC_ORG, 'unattached')]);
+    expect(await repository.getVisible(a, { projectId: P1, sourceId: SRC_ORG })).toBeNull();
+    expect(await visible(P1, SRC_ORG)).toEqual({ ok: false, error: 'not_found' });
   });
 });
 

@@ -103,7 +103,7 @@ function foreignBlobScope(table: 'blob' | 'version' | 'package'): ContractCase {
           session,
           INPUT,
         ),
-      ).toEqual({ status: 'complete', empty: true, validatorsPublished: 0 });
+      ).toEqual({ status: 'complete', empty: true, validatorsPublished: 0, leaseHeldBack: 0 });
       expect(
         await context.executor.all({
           sql: "SELECT refetchable FROM blob WHERE id = 'B-FINAL'",

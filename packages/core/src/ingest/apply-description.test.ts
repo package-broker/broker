@@ -106,7 +106,7 @@ function fixture(): Fixture {
     skipTags: [],
     advanceGuards: [],
     existing: [],
-    finalizeResult: { status: 'complete', empty: false, validatorsPublished: 0 },
+    finalizeResult: { status: 'complete', empty: false, validatorsPublished: 0, leaseHeldBack: 0 },
     deps: undefined as never,
   };
   const writer: CatalogueWriter = {

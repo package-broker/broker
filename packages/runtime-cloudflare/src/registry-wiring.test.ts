@@ -305,8 +305,11 @@ async function boot(
     opId: ulid(),
     now: now.toISOString(),
   });
-  const seed = (sql: string, params: (string | number | null)[] = []) =>
-    executor.batch([{ sql, params }]);
+  const seed = async (sql: string, params: (string | number | null)[] = []) => {
+    const results = await executor.batch([{ sql, params }]);
+    if (/^INSERT INTO project_package \(/i.test(sql)) expect(results[0]?.changes).toBe(1);
+    return results;
+  };
   await seed('INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)', [
     'P1',
     orgId,
@@ -377,7 +380,7 @@ async function boot(
   );
   for (const id of ['K1', 'K2']) {
     await seed(
-      'INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
+      'INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, ? AS origin) AS input JOIN package AS p ON p.org_id = input.org_id AND p.id = input.package_id',
       [orgId, 'P1', id, 'subscription'],
     );
   }
@@ -756,7 +759,7 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
         [orgId],
       );
       await seed(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P1', 'K9', 'subscription')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P1' AS project_id, 'K9' AS package_id, 'subscription' AS origin) AS input JOIN package AS p ON p.org_id = input.org_id AND p.id = input.package_id",
         [orgId],
       );
       await seed(

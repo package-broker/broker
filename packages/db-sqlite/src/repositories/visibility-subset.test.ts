@@ -680,7 +680,7 @@ describe('visibility subset authority and refusals', () => {
     expect(await remove('acme/p*')).toBe('forbidden');
     await database.executor.batch([
       stmt(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
         ORG,
         ARCHIVED,
         K_HIDDEN,

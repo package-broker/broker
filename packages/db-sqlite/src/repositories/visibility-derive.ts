@@ -97,7 +97,7 @@ export function rederiveStatements(ctx: OrgContext, scope: DeriveScope): Stateme
   const insert = db
     .insertInto(ROW)
     .orIgnore()
-    .columns(['org_id', 'project_id', 'package_id', 'origin'])
+    .columns(['org_id', 'project_id', 'package_id', 'origin', 'ecosystem', 'name'])
     .expression(
       db
         .selectFrom('package as derive_package')
@@ -111,6 +111,8 @@ export function rederiveStatements(ctx: OrgContext, scope: DeriveScope): Stateme
           'derive_attachment.project_id',
           'derive_package.id',
           derivedOrigin(ctx, attachmentProject, col('derive_package.source_id')).as('origin'),
+          'derive_package.ecosystem',
+          'derive_package.name',
         ])
         .where('derive_attachment.org_id', '=', ctx.orgId)
         .where(candidateInScope(scope))

@@ -1,0 +1,111 @@
+---
+- name: Unpack the exact committed source on the target
+  ansible.builtin.unarchive:
+    src: '{{ e2e_run_dir }}/candidate-source.tar'
+    dest: /opt/pb-e2e-source
+  when: e2e_image_source | default('target_build') == 'target_build'
+
+- name: Check BuildKit heredoc support without pulling an image
+  ansible.builtin.command:
+    argv: [docker, build, --quiet, '-']
+    stdin: |
+      FROM scratch
+      COPY <<'PB_E2E_HEREDOC' /pb-e2e-buildkit-probe
+      BuildKit heredoc support
+      PB_E2E_HEREDOC
+  environment:
+    DOCKER_BUILDKIT: '1'
+  register: e2e_buildkit_probe
+  changed_when: e2e_buildkit_probe.rc == 0
+  failed_when: false
+  when: e2e_image_source | default('target_build') == 'target_build'
+
+- name: Refuse target builds without BuildKit heredoc support
+  ansible.builtin.assert:
+    that: e2e_buildkit_probe.rc == 0
+    quiet: true
+    fail_msg: >-
+      NOT RUN: target_build requires working BuildKit with Dockerfile heredoc
+      support. Select a compatible pinned Docker configuration or use ghcr.
+  when: e2e_image_source | default('target_build') == 'target_build'
+
+- name: Build the candidate on the target and save its immutable local digest
+  ansible.builtin.command:
+    argv:
+      - docker
+      - build
+      - --iidfile
+      - /etc/pb-e2e/image-id
+      - --label
+      - 'org.opencontainers.image.revision={{ e2e_candidate_commit }}'
+      - /opt/pb-e2e-source
+  environment:
+    DOCKER_BUILDKIT: '1'
+  changed_when: true
+  no_log: false
+  when: e2e_image_source | default('target_build') == 'target_build'
+
+- name: Read the target build digest
+  ansible.builtin.slurp:
+    src: /etc/pb-e2e/image-id
+  register: e2e_built_id
+  when: e2e_image_source | default('target_build') == 'target_build'
+
+- name: Select the target build by local image config digest
+  ansible.builtin.set_fact:
+    e2e_image_reference: '{{ e2e_built_id.content | b64decode | trim }}'
+  when: e2e_image_source | default('target_build') == 'target_build'
+
+- name: Pull the exact GHCR manifest digest when publication is available
+  ansible.builtin.command:
+    argv: [docker, pull, '{{ e2e_registry_image }}']
+  changed_when: true
+  no_log: true
+  when: e2e_image_source | default('target_build') == 'ghcr'
+
+- name: Select the immutable GHCR reference
+  ansible.builtin.set_fact:
+    e2e_image_reference: '{{ e2e_registry_image }}'
+  when: e2e_image_source | default('target_build') == 'ghcr'
+
+- name: Inspect the immutable candidate on the target
+  ansible.builtin.command:
+    argv: [docker, image, inspect, '{{ e2e_image_reference }}']
+  register: e2e_remote_image
+  changed_when: false
+  no_log: true
+
+- name: Require the candidate commit, architecture and non-root configuration
+  ansible.builtin.assert:
+    that:
+      - (e2e_remote_image.stdout | from_json)[0].Id is match('^sha256:[a-f0-9]{64}$')
+      - (e2e_remote_image.stdout | from_json)[0].Architecture == e2e_arch | default('amd64')
+      - (e2e_remote_image.stdout | from_json)[0].Os == 'linux'
+      - (e2e_remote_image.stdout | from_json)[0].Config.User == '1000:1000'
+      - (e2e_remote_image.stdout | from_json)[0].Config.Labels['org.opencontainers.image.revision'] == e2e_candidate_commit
+      - e2e_image_source | default('target_build') != 'target_build' or (e2e_remote_image.stdout | from_json)[0].Id == e2e_image_reference
+      - e2e_image_source | default('target_build') != 'ghcr' or e2e_image_reference in (e2e_remote_image.stdout | from_json)[0].RepoDigests
+    quiet: true
+
+- name: Retain the config digest for the running-container check
+  ansible.builtin.set_fact:
+    e2e_image_id: '{{ (e2e_remote_image.stdout | from_json)[0].Id }}'
+
+- name: Record target image provenance on the controller
+  ansible.builtin.set_fact:
+    e2e_state: >-
+      {{ hostvars['localhost'].e2e_state | combine({
+      'image_id': e2e_image_id,
+      'image_reference': e2e_image_reference,
+      'image_digest': e2e_image_reference.split('@')[-1],
+      'image_digest_kind': 'image_config' if e2e_image_source | default('target_build') == 'target_build' else 'registry_manifest'
+      }) }}
+  delegate_to: localhost
+  delegate_facts: true
+
+- name: Save target image provenance before starting services
+  ansible.builtin.copy:
+    content: "{{ hostvars['localhost'].e2e_state | to_nice_json }}\n"
+    dest: '{{ e2e_inventory_file }}'
+    mode: '0600'
+  delegate_to: localhost

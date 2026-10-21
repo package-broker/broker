@@ -97,7 +97,7 @@ function attach(org: string, project: string, source: string, precedence = 100):
 
 function link(org: string, project: string, packageId: string): Statement {
   return st(
-    "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+    "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, 'subscription' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
     org,
     project,
     packageId,
@@ -174,7 +174,12 @@ function tagRow(org: string, packageId: string, tag: string, versionId: string):
 
 async function write(executor: SqlExecutor, statements: readonly Statement[]): Promise<void> {
   for (let i = 0; i < statements.length; i += 50) {
-    await executor.batch(statements.slice(i, i + 50));
+    const batch = statements.slice(i, i + 50);
+    const results = await executor.batch(batch);
+    for (const [index, statement] of batch.entries()) {
+      if (/^INSERT INTO project_package \(/i.test(statement.sql))
+        expect(results[index]?.changes).toBe(1);
+    }
   }
 }
 

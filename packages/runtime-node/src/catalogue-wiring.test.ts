@@ -173,7 +173,7 @@ describe('node catalogue wiring on node:sqlite', () => {
       [packageId, orgId, sourceId],
     );
     await sql(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'npm', 'visible')",
       [orgId, projectId, packageId],
     );
     await sql(

@@ -286,7 +286,10 @@ export interface Seed {
 
 export function seeder(executor: SqlExecutor): Seed {
   const insert = async (sql: string, ...params: (string | number | null)[]): Promise<void> => {
-    await executor.batch([{ sql, params }]);
+    const [result] = await executor.batch([{ sql, params }]);
+    if (/^INSERT INTO project_package \(/i.test(sql) && result?.changes !== 1) {
+      throw new Error('project_package fixture must change exactly one row');
+    }
   };
   const forged = (async (sql: string, ...params: (string | number | null)[]): Promise<void> => {
     await withForeignKeysOff(executor, () => insert(sql, ...params));

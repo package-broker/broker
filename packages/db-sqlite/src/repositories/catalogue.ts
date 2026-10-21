@@ -1,6 +1,6 @@
 import type { CatalogueReader } from '@package-broker/core/db/catalogue';
 import type { ScalarSqlExecutor } from '@package-broker/core/db/port';
-import { createCatalogueReader as createVersionReader } from './catalogue-read.js';
+import { createVersionReader } from './catalogue-read.js';
 import { createDistResolver } from './catalogue-dist.js';
 import { createCatalogueList } from './catalogue-list.js';
 import { createCatalogueLookup } from './catalogue-lookup.js';

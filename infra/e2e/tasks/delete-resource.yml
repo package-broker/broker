@@ -3,7 +3,7 @@
   block:
     - name: Read this exact id without a collection or name search
       ansible.builtin.uri:
-        url: 'https://api.hetzner.cloud/v1/{{ e2e_delete.kind }}/{{ e2e_state.resources[e2e_delete.kind] }}'
+        url: 'https://api.hetzner.cloud/v1/{{ e2e_delete.kind }}/{{ e2e_delete_id }}'
         headers:
           Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
         method: GET
@@ -27,7 +27,7 @@
 
     - name: Delete the verified id and retry transient attachment locks
       ansible.builtin.uri:
-        url: 'https://api.hetzner.cloud/v1/{{ e2e_delete.kind }}/{{ e2e_state.resources[e2e_delete.kind] }}'
+        url: 'https://api.hetzner.cloud/v1/{{ e2e_delete.kind }}/{{ e2e_delete_id }}'
         headers:
           Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
         method: DELETE
@@ -45,7 +45,7 @@
 
     - name: Require confirmed absence of this exact id
       ansible.builtin.uri:
-        url: 'https://api.hetzner.cloud/v1/{{ e2e_delete.kind }}/{{ e2e_state.resources[e2e_delete.kind] }}'
+        url: 'https://api.hetzner.cloud/v1/{{ e2e_delete.kind }}/{{ e2e_delete_id }}'
         headers:
           Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
         method: GET

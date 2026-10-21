@@ -28,25 +28,27 @@
           - e2e_state.run_id == e2e_run_id
           - e2e_state.expires_at | string is match('^[1-9][0-9]*$')
           - e2e_state.resources is mapping
-          - e2e_state.resources.keys() | difference(['servers', 'volumes', 'primary_ips', 'ssh_keys', 'firewalls']) | length == 0
+          - e2e_state.resources.keys() | difference(['servers', 'volumes', 'primary_ips', 'firewalls']) | length == 0
         quiet: true
 
     - name: Refuse malformed ids before contacting the API
       ansible.builtin.assert:
-        that: item.value | string is match('^[1-9][0-9]*$')
+        that:
+          - item.value is not mapping
+          - (item.value if item.value is sequence and item.value is not string else [item.value]) | map('string') | reject('match', '^[1-9][0-9]*$') | list | length == 0
+          - item.value is not sequence or item.value | length > 0
         quiet: true
       loop: '{{ e2e_state.resources | dict2items }}'
       loop_control:
         label: '{{ item.key }}'
 
     - name: Attempt every resource in dependency order
-      ansible.builtin.include_tasks: tasks/delete-resource.yml
+      ansible.builtin.include_tasks: tasks/delete-kind.yml
       loop:
         - { kind: servers, object: server }
         - { kind: volumes, object: volume }
         - { kind: primary_ips, object: primary_ip }
         - { kind: firewalls, object: firewall }
-        - { kind: ssh_keys, object: ssh_key }
       loop_control:
         loop_var: e2e_delete
         label: '{{ e2e_delete.kind }}'
@@ -65,13 +67,13 @@
     - name: Save teardown evidence
       ansible.builtin.include_tasks: tasks/record.yml
 
+    - name: Remove local source transport and host trust file
+      ansible.builtin.file:
+        path: '{{ e2e_run_dir }}/{{ item }}'
+        state: absent
+      loop: [known_hosts, candidate-source.tar]
+
     - name: Fail if any resource could not be confirmed absent
       ansible.builtin.assert:
         that: e2e_cleanup_errors | length == 0
         fail_msg: 'Cleanup could not confirm absence for: {{ e2e_cleanup_errors | join(", ") }}. Retry destroy with the retained journal.'
-
-    - name: Remove local source transport and host trust file after complete cleanup
-      ansible.builtin.file:
-        path: '{{ e2e_run_dir }}/{{ item }}'
-        state: absent
-      loop: [id_ed25519, id_ed25519.pub, known_hosts, candidate.tar, candidate-source.tar]

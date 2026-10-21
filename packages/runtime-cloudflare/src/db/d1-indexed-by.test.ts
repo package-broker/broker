@@ -18,6 +18,7 @@ import { createCatalogueLookup } from '@package-broker/db-sqlite/repositories/ca
 import { proxyEligibleCondition } from '@package-broker/db-sqlite/repositories/catalogue-predicates';
 import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import { createVersionReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
+import { createPackageAdminReader } from '@package-broker/db-sqlite/repositories/package-admin-read';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
 const mf = new Miniflare(
@@ -209,6 +210,25 @@ describe('INDEXED BY statements on D1', () => {
     });
     return plan.map((row) => row.detail).join('\n');
   }
+
+  it('package admin status (version_package_status)', async () => {
+    for (const projectId of ['P1', undefined]) {
+      const details = await planOf(async (recording) => {
+        const reader = createPackageAdminReader(recording);
+        const query = { ...PAGE, status: 'active' } as const;
+        const page =
+          projectId === undefined
+            ? await reader.listOrganization(a, query)
+            : await reader.listProject(a, projectId, query);
+        expect(page.items.map((item) => ({ id: item.id, status: item.status }))).toEqual([
+          { id: 'K1', status: 'active' },
+        ]);
+      });
+      expect(
+        details.match(/SEARCH vs USING INDEX version_package_status \(package_id=\?/g),
+      ).toHaveLength(3);
+    }
+  });
 
   it('closure edges page (project_package_name)', async () => {
     let page: Awaited<ReturnType<ReturnType<typeof createClosureEdges>['pageEdges']>> | undefined;

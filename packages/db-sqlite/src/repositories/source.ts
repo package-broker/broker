@@ -6,6 +6,7 @@ import type {
   RemovalPolicy,
   SourceEcosystem,
   SourceErrorCode,
+  SourceListQuery,
   SourceRecord,
   SourceRepository,
   SourceStatus,
@@ -22,6 +23,8 @@ import {
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
 export type { NewSource, SourceRepository } from '@package-broker/core/db/source';
 
@@ -255,6 +258,38 @@ export function dueStatement(ctx: OrgContext, limit: number): Statement {
   );
 }
 
+export function listSourcesStatement(ctx: OrgContext, input: SourceListQuery): Statement {
+  if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
+    throw new RangeError('limit must be an integer from 1 to 100');
+  let query = db
+    .selectFrom('source')
+    .select([...SOURCE_COLUMNS])
+    .where('org_id', '=', ctx.orgId);
+  if (input.projectId === null) {
+    query = query.where('project_id', 'is', null);
+  } else {
+    query = query.where(sql<SqlBool>`exists (select 1 from project as visible_project
+      where visible_project.id = ${input.projectId} and visible_project.org_id = ${ctx.orgId}
+        and visible_project.status = 'active')`)
+      .where(sql<SqlBool>`(source.project_id = ${input.projectId} or
+        (source.project_id is null and exists (select 1 from project_source as attachment
+          where attachment.org_id = ${ctx.orgId} and attachment.project_id = ${input.projectId}
+            and attachment.source_id = source.id)))`);
+  }
+  if (input.after !== null) query = query.where('id', '>', input.after);
+  return compile(query.orderBy('id').limit(input.limit + 1));
+}
+
+export function pauseSourceStatement(ctx: OrgContext, id: string): Statement {
+  return compile(
+    db
+      .updateTable('source')
+      .set({ status: 'paused', updated_at: DB_NOW })
+      .where('org_id', '=', ctx.orgId)
+      .where('id', '=', id),
+  );
+}
+
 export function deferPollStatement(
   ctx: OrgContext,
   id: string,
@@ -345,6 +380,36 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async list(ctx, input) {
+      const rows = await executor.all<SourceRow>(listSourcesStatement(ctx, input));
+      return rows.map(toRecord);
+    },
+    async pause(ctx, fence, input) {
+      const current = await locate(ctx, fence, input.id, input.providerAnchors);
+      if (typeof current === 'string') return current;
+      const collision = liveIdempotencyCollision(ctx, input.idempotency);
+      if (input.idempotency !== undefined) {
+        const [row] = await executor.all<{ held: number }>(probe(collision, false));
+        if (row?.held === 1) return 'conflict';
+      }
+      const held = authority(ctx, fence, current.projectId, input.providerAnchors);
+      const allowed = allOf([held, sourceOwnedBy(ctx, input.id, current.projectId)]);
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(allowed, ctx),
+        [
+          pauseSourceStatement(ctx, input.id),
+          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
+        { authority: probe(held, true), conflict: probe(collision, false) },
+      );
+      return outcome.ok ? 'paused' : failureResult(ctx, input.id, outcome.reason);
+    },
     async hasAttachedProxy(ctx, projectId, ecosystem) {
       return (await executor.all(attachedProxyStatement(ctx, projectId, ecosystem))).length > 0;
     },

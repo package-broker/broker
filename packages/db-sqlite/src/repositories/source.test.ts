@@ -1,3 +1,5 @@
+import { settleIdempotent, type IdempotencyRecord } from '@package-broker/core/api/idempotency';
+import { createIdempotencyRepository, idempotencyInsertStatement } from './idempotency.js';
 import { countCalls } from '../contract/count-calls.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mutationFence } from '@package-broker/core/authz/fence';
@@ -1018,5 +1020,334 @@ describe('source repository lookup', () => {
     expect(await lookup()).toMatchObject({ id: 'LOOKUP-A-ORG', projectId: null });
     await insert('LOOKUP-0-PROJECT', undefined, { projectId });
     expect(await lookup()).toMatchObject({ id: 'LOOKUP-0-PROJECT', projectId });
+  });
+});
+
+describe('source paginated list and pause', () => {
+  function pauseInput(id = SRC_ORG) {
+    return {
+      id,
+      providerAnchors: ANCHORS,
+      audit: {
+        id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        occurredAt: NOW,
+        action: 'source.pause' as const,
+        actor: { type: 'user' as const, id: ORG_ADMIN },
+        tokenSelector: null,
+        sourceIp: '192.0.2.1',
+        target: { type: 'source', id },
+        projectId: null,
+        payloadJson: '{}',
+      },
+    };
+  }
+
+  it('lists in id order without repeating rows when an earlier source is inserted', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'one'),
+      seedSource(SRC_PROXY, 'three'),
+      seedSource(SRC_NEW, 'nine'),
+    ]);
+    const first = await repository.list(a, { projectId: null, after: null, limit: 1 });
+    expect(first.map((row) => row.id)).toEqual([SRC_ORG, SRC_PROXY]);
+    await executor.batch([seedSource('01J0SOURCE0000000000000000', 'zero')]);
+    const second = await repository.list(a, { projectId: null, after: first[0]!.id, limit: 1 });
+    expect(second.map((row) => row.id)).toEqual([SRC_PROXY, SRC_NEW]);
+    expect(await repository.list(b, { projectId: null, after: null, limit: 100 })).toEqual([]);
+    expect(JSON.stringify(first)).not.toMatch(/ciphertext|nonce|sealed/);
+  });
+
+  it('lists project-owned and attached organization sources, excluding other owners and unattached sources', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'shared'),
+      seedSource(SRC_PROXY, 'hidden'),
+      seedSource(SRC_P1, 'owned', { project_id: P1 }),
+      seedSource(SRC_NEW, 'other', { project_id: P2 }),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        a.orgId,
+        P1,
+        SRC_ORG,
+      ),
+    ]);
+    expect(
+      (await repository.list(a, { projectId: P1, after: null, limit: 100 })).map((row) => row.id),
+    ).toEqual([SRC_ORG, SRC_P1]);
+    expect(
+      (await repository.list(a, { projectId: null, after: null, limit: 100 })).map((row) => row.id),
+    ).toEqual([SRC_ORG, SRC_PROXY]);
+    expect(await repository.list(b, { projectId: P1, after: null, limit: 100 })).toEqual([]);
+    await executor.batch([stmt("UPDATE project SET status = 'archived' WHERE id = ?", P1)]);
+    expect(await repository.list(a, { projectId: P1, after: null, limit: 100 })).toEqual([]);
+  });
+
+  it.each([0, 101, 1.5])('rejects repository list limit %s', async (limit) => {
+    await expect(repository.list(a, { projectId: null, after: null, limit })).rejects.toThrow(
+      RangeError,
+    );
+  });
+
+  describe('pause idempotency', () => {
+    function record(): IdempotencyRecord {
+      return {
+        principalKey: `user:${ORG_ADMIN}`,
+        key: 'pause-operation',
+        route: '/sources/pause',
+        requestHash: 'a'.repeat(64),
+        status: 200,
+        responseJson: '{"ok":true}',
+        createdAt: NOW,
+        expiresAt: '2999-01-01T00:00:00.000Z',
+      };
+    }
+
+    const find = (saved: IdempotencyRecord) =>
+      createIdempotencyRepository(executor).find(a, saved.principalKey, saved.key, NOW);
+    const state = () =>
+      Promise.all(
+        ['source', 'audit_pending', 'api_idempotency'].map((table) =>
+          rows(`SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1, 2`, a.orgId),
+        ),
+      );
+
+    it('persists pause idempotency and replays after another user enables the source', async () => {
+      await executor.batch([
+        seedSource(SRC_PROXY, 'proxy', { type: 'packagist_proxy', status: 'active' }),
+        grant('01J0GRANT000000000000000A6', 'm1@example.test', ORG_ROLE, null),
+      ]);
+      const saved = record();
+      const invoke = () =>
+        repository.pause(a, orgFence(), { ...pauseInput(SRC_PROXY), idempotency: saved });
+      expect(await invoke()).toBe('paused');
+      expect(await find(saved)).toEqual(saved);
+      expect(
+        await repository.resume(a, p1Fence(), { id: SRC_PROXY, providerAnchors: ANCHORS }),
+      ).toBe('resumed');
+      const before = await state();
+      expect(
+        await settleIdempotent({
+          record: saved,
+          hash: saved.requestHash,
+          now: new Date(NOW),
+          find: () => find(saved),
+          run: invoke,
+          failed: (result) => result !== 'paused',
+        }),
+      ).toEqual({ kind: 'replay', record: saved });
+      expect(await state()).toEqual(before);
+      expect(await repository.get(a, SRC_PROXY)).toMatchObject({ status: 'active' });
+    });
+
+    it.each(['a', 'b'])(
+      'rejects a direct pause retry with hash %s without effects',
+      async (hash) => {
+        await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active' })]);
+        const saved = record();
+        expect(await repository.pause(a, orgFence(), { ...pauseInput(), idempotency: saved })).toBe(
+          'paused',
+        );
+        await executor.batch([
+          stmt("UPDATE source SET status = 'active' WHERE org_id = ? AND id = ?", a.orgId, SRC_ORG),
+        ]);
+        const before = await state();
+        expect(
+          await repository.pause(a, orgFence(), {
+            ...pauseInput(),
+            audit: { ...pauseInput().audit, id: '01ARZ3NDEKTSV4RRFFQ69G5FAW' },
+            idempotency: { ...saved, requestHash: hash.repeat(64) },
+          }),
+        ).toBe('conflict');
+        expect(await find(saved)).toEqual(saved);
+        expect(await state()).toEqual(before);
+      },
+    );
+
+    it.each(['a', 'b'])('fences a concurrent pause key winner with hash %s', async (hash) => {
+      await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active' })]);
+      const winner = record();
+      const racing: SqlExecutor = {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        batch: async (statements) => {
+          await executor.batch([idempotencyInsertStatement(a, winner)]);
+          return executor.batch(statements);
+        },
+      };
+      const before = await state();
+      expect(
+        await createSourceRepository(racing).pause(a, orgFence(), {
+          ...pauseInput(),
+          idempotency: { ...winner, requestHash: hash.repeat(64) },
+        }),
+      ).toBe('conflict');
+      expect((await state()).slice(0, 2)).toEqual(before.slice(0, 2));
+      expect(await find(winner)).toEqual(winner);
+    });
+
+    it.each(['audit', 'after-record'])(
+      'rolls back pause idempotency on %s failure',
+      async (failure) => {
+        await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active' })]);
+        if (failure === 'audit')
+          await executor.batch([
+            stmt(
+              'CREATE TRIGGER reject_idempotent_pause_audit BEFORE INSERT ON audit_pending BEGIN INSERT INTO source (id, org_id, name, ecosystem, type) SELECT id, org_id, name, ecosystem, type FROM source; END',
+            ),
+          ]);
+        const failing: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          batch: (statements) =>
+            executor.batch([
+              ...statements,
+              stmt("INSERT INTO access_mutation_guard (key) VALUES ('injected'), ('injected')"),
+            ]),
+        };
+        const before = await state();
+        expect(
+          await createSourceRepository(failure === 'audit' ? executor : failing).pause(
+            a,
+            orgFence(),
+            {
+              ...pauseInput(),
+              idempotency: record(),
+            },
+          ),
+        ).toBe('conflict');
+        expect(await state()).toEqual(before);
+      },
+    );
+
+    it.each(['expired', 'organization', 'principal'])(
+      'accepts a pause key with an %s record',
+      async (scope) => {
+        await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active' })]);
+        const saved = record();
+        const previous = {
+          ...saved,
+          ...(scope === 'expired'
+            ? { createdAt: '2026-10-13T00:00:00.000Z', expiresAt: '2026-10-14T00:00:00.000Z' }
+            : {}),
+          ...(scope === 'principal' ? { principalKey: 'user:other' } : {}),
+        };
+        await executor.batch([
+          idempotencyInsertStatement(scope === 'organization' ? b : a, previous),
+        ]);
+        expect(await repository.pause(a, orgFence(), { ...pauseInput(), idempotency: saved })).toBe(
+          'paused',
+        );
+        expect(await find(saved)).toEqual(saved);
+        if (scope !== 'expired')
+          expect(
+            await createIdempotencyRepository(executor).find(
+              scope === 'organization' ? b : a,
+              previous.principalKey,
+              previous.key,
+              NOW,
+            ),
+          ).toEqual(previous);
+      },
+    );
+
+    it('checks pause authority before a reused idempotency key', async () => {
+      await executor.batch([
+        seedSource(SRC_ORG, 'due', { status: 'active' }),
+        idempotencyInsertStatement(a, record()),
+      ]);
+      await executor.batch([
+        stmt('DELETE FROM role_permission WHERE org_id = ? AND role_id = ?', a.orgId, ORG_ROLE),
+      ]);
+      const before = await state();
+      expect(
+        await repository.pause(a, orgFence(), { ...pauseInput(), idempotency: record() }),
+      ).toBe('forbidden');
+      expect(await state()).toEqual(before);
+    });
+  });
+
+  it('pause stops scheduling and writes an audit in the same batch', async () => {
+    await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active', next_poll_at: at(-60) })]);
+    expect((await repository.listDue(a, 10)).map((row) => row.id)).toEqual([SRC_ORG]);
+    expect(await repository.pause(a, orgFence(), pauseInput())).toBe('paused');
+    expect(await repository.get(a, SRC_ORG)).toMatchObject({ status: 'paused' });
+    expect(await repository.listDue(a, 10)).toEqual([]);
+    expect(await rows('SELECT org_id, action, target_id FROM audit_pending')).toEqual([
+      { org_id: a.orgId, action: 'source.pause', target_id: SRC_ORG },
+    ]);
+  });
+
+  it('permits a project owner to pause its own source', async () => {
+    await executor.batch([seedSource(SRC_P1, 'project', { project_id: P1, status: 'active' })]);
+    expect(
+      await repository.pause(a, p1Fence(), {
+        ...pauseInput(SRC_P1),
+        audit: { ...pauseInput(SRC_P1).audit, projectId: P1 },
+      }),
+    ).toBe('paused');
+    expect(await repository.get(a, SRC_P1)).toMatchObject({ status: 'paused' });
+  });
+
+  it('refuses a reader without changing status or writing an audit', async () => {
+    await executor.batch([seedSource(SRC_P1, 'project', { project_id: P1, status: 'active' })]);
+    const before = await snapshot();
+    expect(await repository.pause(a, fenceFor(P1_READER, S_READER), pauseInput(SRC_P1))).toBe(
+      'forbidden',
+    );
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+
+  it('rolls back pause when audit persistence fails', async () => {
+    await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active' })]);
+    await executor.batch([
+      stmt(
+        'CREATE TRIGGER reject_pause_audit BEFORE INSERT ON audit_pending BEGIN INSERT INTO source (id, org_id, name, ecosystem, type) SELECT id, org_id, name, ecosystem, type FROM source; END',
+      ),
+    ]);
+    expect(await repository.pause(a, orgFence(), pauseInput())).toBe('conflict');
+    expect(await repository.get(a, SRC_ORG)).toMatchObject({ status: 'active' });
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+
+  it('rechecks live authority inside the fenced batch', async () => {
+    await executor.batch([seedSource(SRC_ORG, 'due', { status: 'active' })]);
+    let revoked = false;
+    const racing: SqlExecutor = {
+      ...executor,
+      all: executor.all.bind(executor),
+      async batch(statements) {
+        if (!revoked) {
+          revoked = true;
+          await executor.batch([
+            stmt('DELETE FROM role_permission WHERE org_id = ? AND role_id = ?', a.orgId, ORG_ROLE),
+          ]);
+        }
+        return executor.batch(statements);
+      },
+    };
+    expect(await createSourceRepository(racing).pause(a, orgFence(), pauseInput())).toBe(
+      'forbidden',
+    );
+    expect(await repository.get(a, SRC_ORG)).toMatchObject({ status: 'active' });
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+
+  it('answers not_found for absent targets with organization authority', async () => {
+    expect(await repository.pause(a, orgFence(), pauseInput())).toBe('not_found');
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+
+  it('answers not_found for foreign targets with organization authority and writes nothing', async () => {
+    await executor.batch([
+      stmt(
+        "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'foreign', 'npm', 'npmjs_proxy')",
+        SRC_ORG,
+        b.orgId,
+      ),
+    ]);
+    const before = await snapshot();
+    expect(await repository.pause(a, orgFence(), pauseInput())).toBe('not_found');
+    expect(await snapshot()).toBe(before);
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
   });
 });

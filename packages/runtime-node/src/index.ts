@@ -174,6 +174,16 @@ import type {
   SourceProviderContext,
 } from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
+import {
+  KeyringMismatchError,
+  KeyringPasswordHashUnreadableError,
+  KeyringStoreUnavailableError,
+  KeyringVerifierMissingError,
+  KeyringVersionInUseError,
+  RESEED_VARIABLE,
+  verifyKeyring,
+} from '@package-broker/core/secrets/keyring-verifier';
+import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import type { UpstreamCredential } from '@package-broker/core/sources/policy-fetch';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
@@ -1080,7 +1090,31 @@ export function createNodeServer(
   const patJobs = createPatJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;
   const ingestScope = new AsyncLocalStorage<Observability>();
+  let keyringVerification: Promise<void> | undefined;
+  const verify = async (): Promise<void> => {
+    if (auth !== undefined && options.executor !== undefined) {
+      try {
+        await verifyKeyring(auth.keyring, createKeyringVerifierStore(executor), {
+          reseed: auth.env[RESEED_VARIABLE] === '1',
+        });
+      } catch (error) {
+        if (
+          error instanceof KeyringMismatchError ||
+          error instanceof KeyringPasswordHashUnreadableError ||
+          error instanceof KeyringStoreUnavailableError ||
+          error instanceof KeyringVerifierMissingError ||
+          error instanceof KeyringVersionInUseError
+        ) {
+          throw new KernelConfigError(['PB_MASTER_KEY: keyring verification failed']);
+        }
+        throw error;
+      }
+    }
+  };
+  const verifyOnce = (): Promise<void> => (keyringVerification ??= verify());
   const application = (async () => {
+    // A closed migration gate defers verification until the broker may serve.
+    if (options.servingGate === undefined || (await options.servingGate())) await verifyOnce();
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
@@ -1333,8 +1367,9 @@ export function createNodeServer(
     getRequestListener(async (request) =>
       !(await serving(request))
         ? refuse(request)
-        : kernel.then(
-            async (ready) => {
+        : kernel
+            .then(async (ready) => {
+              if (new URL(request.url).pathname !== '/health/live') await verifyOnce();
               const setup = rewriteSetupRequest(request);
               if (setup !== null) return ready.fetch(setup);
               const url = new URL(request.url);
@@ -1350,12 +1385,11 @@ export function createNodeServer(
               if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
               url.pathname = '/_pb/ui';
               return ready.fetch(new Request(url, request));
-            },
-            (error: unknown) => {
+            })
+            .catch((error: unknown) => {
               const response = errorResponse(error, crypto.randomUUID(), log);
               return request.method === 'HEAD' ? new Response(null, response) : response;
-            },
-          ),
+            }),
     ),
   );
 

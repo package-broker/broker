@@ -131,6 +131,10 @@ export interface Administration {
 }
 
 export interface AdministrationDeps {
+  readonly onProjectAccessLost?: (
+    ctx: OrgContext,
+    input: { readonly userId: string; readonly at: string },
+  ) => Promise<void> | void;
   readonly roles: RoleRepository;
   readonly grants: GrantRepository;
   readonly users: Pick<UserRepository, 'get'>;
@@ -670,6 +674,22 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if (result.offboardedUserId !== null) {
         await creatorOffboarded(ctx, result.offboardedUserId, 'membership_removed');
         await userOffboarded(ctx, result.offboardedUserId, 'membership_removed', stamp);
+        try {
+          await deps.onProjectAccessLost?.(ctx, { userId: result.offboardedUserId, at: stamp });
+        } catch (error) {
+          try {
+            deps.log({
+              level: 'warn',
+              event: 'user.pat_offboarding_enqueue_failed',
+              orgId: ctx.orgId,
+              userId: result.offboardedUserId,
+              cause: 'project_removed',
+              error: error instanceof Error ? error.name : typeof error,
+            });
+          } catch {
+            // The grant is deleted; callback and sink failures cannot undo it.
+          }
+        }
       }
       return OK;
     },

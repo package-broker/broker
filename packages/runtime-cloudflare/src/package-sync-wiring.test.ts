@@ -417,6 +417,10 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
 }
 
 const BASE_JOBS = [
+  'core:source-sync:v1',
+  'core:source-poll:v1',
+  'core:retention-scan:v1',
+  'core:blob-purge:v1',
   'core:audit-seal:v1',
   'core:audit-verify:v1',
   'core:import-verify:v1',

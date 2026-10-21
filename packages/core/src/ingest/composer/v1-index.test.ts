@@ -969,6 +969,40 @@ describe('readV1Index streamed root', () => {
 });
 
 describe('readV1Index root budget regressions', () => {
+  it.each([false, true])(
+    'maps the deadline when the wall clock lags the timer (caller signal: %s)',
+    async (withCallerSignal) => {
+      const realNow = Date.now.bind(Date);
+      const clock = vi.spyOn(Date, 'now');
+      try {
+        const file = providerFile({ 'vendor/a': H1 });
+        const root = providersRoot({ 'p/a$%hash%.json': file });
+        let lagMs = 0;
+        const fetch = createPolicyFetch({
+          policy,
+          userAgent: 'pb-test/1',
+          fetchImpl: (input, init) => {
+            if (String(input).endsWith('/packages.json'))
+              return Promise.resolve(new Response(root));
+            lagMs += 1000;
+            clock.mockImplementation(() => realNow() - lagMs);
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason as Error));
+            });
+          },
+        });
+        const result = await readV1Index(fetch, {
+          ...options,
+          passTimeoutMs: 50,
+          ...(withCallerSignal ? { signal: new AbortController().signal } : {}),
+        });
+        expect(incomplete(result)).toBe('deadline');
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
   it('does not retry when the root alone exceeds maxPassBytes', async () => {
     const root = providersRoot({});
     const { fetch, requests } = setup({ [`${BASE}/packages.json`]: root });
@@ -982,29 +1016,49 @@ describe('readV1Index root budget regressions', () => {
     const file = providerFile({ 'vendor/a': H1 });
     const other = providerFile({ 'vendor/b': H2 });
     const root = providersRoot({ 'p/a$%hash%.json': file, 'p/b$%hash%.json': other });
-    const { fetch } = setup({
-      [`${BASE}/packages.json`]: async () => {
-        await new Promise((r) => setTimeout(r, 70));
-        return new Response(root);
-      },
-      [`${BASE}/p/b%24${sha256(other)}.json`]: other,
-      [`${BASE}/p/a%24${sha256(file)}.json`]: async () => {
-        await new Promise((r) => setTimeout(r, 70));
-        return new Response(file);
+    const fetch = createPolicyFetch({
+      policy,
+      userAgent: 'pb-test/1',
+      fetchImpl: async (input, init) => {
+        if (String(input).endsWith('/packages.json')) {
+          await new Promise((r) => setTimeout(r, 70));
+          return new Response(root);
+        }
+        if (String(input).endsWith(`/p/a%24${sha256(file)}.json`)) {
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => resolve(new Response(file)), 70);
+            init?.signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(init.signal?.reason as Error);
+            });
+          });
+        }
+        return new Response(other);
       },
     });
     const timeouts: number[] = [];
+    const deadlineSkews: number[] = [];
+    let passStartedAt = 0;
     const result = await readV1Index(
       (request) => {
         timeouts.push(request.timeoutMs);
+        if (request.url.endsWith('/packages.json')) {
+          passStartedAt = performance.now();
+        } else {
+          const startedAt = passStartedAt;
+          const index = deadlineSkews.push(Infinity) - 1;
+          request.signal?.addEventListener('abort', () => {
+            deadlineSkews[index] = Math.abs(performance.now() - startedAt - 110);
+          });
+        }
         return fetch(request);
       },
       { ...options, passTimeoutMs: 110 },
     );
     expect(incomplete(result)).toBe('deadline');
     expect(timeouts).toHaveLength(4);
-    expect(timeouts[1]).toBeLessThan(70);
-    expect(timeouts[3]).toBeLessThan(70);
+    expect.soft(deadlineSkews[0]).toBeLessThanOrEqual(20);
+    expect.soft(deadlineSkews[1]).toBeLessThanOrEqual(20);
   });
 });
 

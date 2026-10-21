@@ -563,7 +563,7 @@ describe('route API registration', () => {
       let calls = 0;
       const route: RouteDefinition = {
         method: 'GET',
-        path: '/_pb/users',
+        path: '/_pb/ui',
         permission: null,
         needsOrg: false,
         ...(slot === undefined ? {} : { api: slot }),
@@ -573,7 +573,7 @@ describe('route API registration', () => {
         },
       };
       const kernel = await createKernel({ ...options, coreRoutes: [route] });
-      const response = await kernel.fetch(new Request('https://broker.test/_pb/users'));
+      const response = await kernel.fetch(new Request('https://broker.test/_pb/ui'));
       results.push({ status: response.status, body: await response.text() });
       expect(calls).toBe(1);
     }

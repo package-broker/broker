@@ -129,7 +129,7 @@ export function createPatOffboardingRepository(
       return rows.map((row) => row.id);
     },
 
-    async candidates(ctx, { userId, cutoff, limit, selectedOnly }) {
+    async candidates(ctx, { userId, cutoff, limit, selectedOnly, invalidatedTokenId }) {
       if (selectedOnly === true) {
         const at = instant('cutoff', cutoff);
         const rows = await executor.all<{ id: string }>(
@@ -138,9 +138,17 @@ export function createPatOffboardingRepository(
               WHERE token.org_id = ? AND token.kind = 'pat' AND token.user_id = ?
                 AND token.revoked_at IS NULL
                 AND unixepoch(token.created_at, 'subsec') <= unixepoch(?, 'subsec')
-                ${SELECTED_PROJECTS_UNHELD}
+                ${invalidatedTokenId === undefined ? SELECTED_PROJECTS_UNHELD : "AND token.project_mode = 'selected' AND token.id = ?"}
               ORDER BY token.id LIMIT ?`,
-            params: [ctx.orgId, text('userId', userId), at, at, limitOf(limit)],
+            params: [
+              ctx.orgId,
+              text('userId', userId),
+              at,
+              invalidatedTokenId === undefined
+                ? at
+                : text('invalidatedTokenId', invalidatedTokenId),
+              limitOf(limit),
+            ],
           }),
         );
         return rows.map((row) => row.id);
@@ -197,9 +205,19 @@ export function createPatOffboardingRepository(
             AND token.revoked_at IS NULL
             AND unixepoch(token.created_at, 'subsec') <= unixepoch(?, 'subsec')
             AND token.id IN (SELECT value FROM json_each(?))
-            ${SELECTED_PROJECTS_UNHELD}
+            ${input.invalidatedTokenId === undefined ? SELECTED_PROJECTS_UNHELD : "AND token.project_mode = 'selected' AND token.id = ?"}
           RETURNING id`,
-              params: [now, input.opId, ctx.orgId, userId, cutoff, JSON.stringify(ids), cutoff],
+              params: [
+                now,
+                input.opId,
+                ctx.orgId,
+                userId,
+                cutoff,
+                JSON.stringify(ids),
+                input.invalidatedTokenId === undefined
+                  ? cutoff
+                  : text('invalidatedTokenId', input.invalidatedTokenId),
+              ],
             }
           : {
               sql: `UPDATE token SET revoked_at = ?, last_op_id = ?

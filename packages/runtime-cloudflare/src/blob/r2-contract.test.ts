@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { afterAll } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
@@ -15,11 +15,15 @@ import {
   createBlobUploadAdmission,
 } from '@package-broker/core/platform/blob';
 import type { BlobMetadataPort, ByteStore, Sha256 } from '@package-broker/core/platform/blob';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import { noopObservability } from '@package-broker/core/platform/observability';
 import {
   describeBlobContract,
+  describeBlobLifecycleContract,
   describeBlobReserveContract,
   executorExpiringLeaseAfterFirstStatement,
   type BlobReserveFixture,
+  type BlobLifecycleFixture,
 } from '@package-broker/db-sqlite/contract/blob-contract';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -93,6 +97,7 @@ export default {
 };
 `;
 
+const DELETE_TIMEOUT_MS = 1_000;
 const POOL = 96;
 const bucketNames = Array.from({ length: POOL }, (_, index) => `BUCKET${index}`);
 const databaseNames = Array.from({ length: POOL }, (_, index) => `META${index}`);
@@ -125,6 +130,9 @@ let nextCase = 0;
 interface Faults {
   failRead: boolean;
   fullBody: boolean;
+  removes: number;
+  stallRemove: boolean;
+  failRemove: boolean;
 }
 
 async function failure(response: Response): Promise<Error> {
@@ -137,6 +145,7 @@ async function failure(response: Response): Promise<Error> {
 type DispatchInit = NonNullable<Parameters<Miniflare['dispatchFetch']>[1]>;
 
 interface BucketAdmin {
+  head(key: string): Promise<unknown | null>;
   get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer>; httpMetadata?: unknown } | null>;
   put(key: string, value: Uint8Array, options: { httpMetadata?: unknown }): Promise<unknown>;
   delete(key: string): Promise<void>;
@@ -230,13 +239,27 @@ function proxyStore(bucketName: string, faults: Faults): ByteStore {
       return (await response.json()) as { size: number; mediaType: string } | null;
     },
     async remove(key) {
+      faults.removes += 1;
+      if (faults.stallRemove) {
+        faults.stallRemove = false;
+        return new Promise<void>(() => {});
+      }
+      if (faults.failRemove) {
+        faults.failRemove = false;
+        throw new Error('storage down');
+      }
       const response = await call('remove', key, { headers: headers() });
       if (!response.ok) throw await failure(response);
     },
   };
 }
 
-async function r2Fixture(): Promise<BlobReserveFixture> {
+type R2LifecycleFixture = BlobReserveFixture &
+  BlobLifecycleFixture & {
+    readonly bucket: BucketAdmin;
+  };
+
+async function r2Fixture(backdatePublished = true): Promise<R2LifecycleFixture> {
   const index = nextCase;
   nextCase += 1;
   const bucketName = bucketNames[index];
@@ -260,7 +283,22 @@ async function r2Fixture(): Promise<BlobReserveFixture> {
     { holder: 'r2-blob-contract' },
   );
   const repository = createBlobRepository(executor);
-  const faults: Faults = { failRead: false, fullBody: false };
+  const faults: Faults = {
+    failRead: false,
+    fullBody: false,
+    removes: 0,
+    stallRemove: false,
+    failRemove: false,
+  };
+  const byteStore = proxyStore(bucketName, faults);
+  const lifecycle = createBlobLifecycle({
+    metadata: repository,
+    store: byteStore,
+    deleteTimeoutMs: DELETE_TIMEOUT_MS,
+    leaseMs: 900_000,
+    observability: noopObservability,
+  });
+  let referenceCounter = 0;
   const state = { failPublish: false };
 
   const metadata: BlobMetadataPort = {
@@ -271,11 +309,13 @@ async function r2Fixture(): Promise<BlobReserveFixture> {
         throw new Error('database down');
       }
       const result = await repository.publish(ctx, input);
-      await exec(
-        "UPDATE blob SET published_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
-        ctx.orgId,
-        input.sha256,
-      );
+      if (backdatePublished) {
+        await exec(
+          "UPDATE blob SET published_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
+          ctx.orgId,
+          input.sha256,
+        );
+      }
       return result;
     },
     find: (ctx, key) => repository.find(ctx, key),
@@ -290,7 +330,10 @@ async function r2Fixture(): Promise<BlobReserveFixture> {
   const seeded = new Set<string>();
 
   return {
-    store: createBlobStore(proxyStore(bucketName, faults), metadata, {
+    bucket,
+    lifecycle,
+    inspect: (ctx, key) => repository.inspect(ctx, key),
+    store: createBlobStore(byteStore, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
     }),
@@ -323,6 +366,77 @@ async function r2Fixture(): Promise<BlobReserveFixture> {
         key,
       );
     },
+    async makeEligible(ctx, key) {
+      await exec(
+        `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', '-8 days'), created_at = strftime('${FORMAT}', 'now', '-8 days'), refetchable = 1 WHERE org_id = ? AND sha256 = ?`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async ageBlob(ctx, key, days) {
+      await exec(
+        `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', ?), created_at = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ?`,
+        `-${days} days`,
+        `-${days} days`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async addReference(ctx, key, status) {
+      referenceCounter += 1;
+      const id = `REF${String(referenceCounter).padStart(6, '0')}`;
+      const blobs = await executor.all<{ id: string }>({
+        sql: 'SELECT id FROM blob WHERE org_id = ? AND sha256 = ?',
+        params: [ctx.orgId, key],
+      });
+      if (blobs[0] === undefined) throw new Error('no blob to reference');
+      await executor.batch([
+        {
+          sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, ?, 'npm', 'npmjs_proxy')",
+          params: [id, ctx.orgId, id],
+        },
+        {
+          sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES (?, ?, ?, 'npm', ?)",
+          params: [id, ctx.orgId, id, id.toLowerCase()],
+        },
+        {
+          sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, removed_upstream_at, tombstoned_at)
+VALUES (?, ?, ?, '1.0.0', '00001', strftime('${FORMAT}', 'now'), 'upstream', '{}', ?, ?, CASE WHEN ? = 'removed_upstream' THEN '2000-01-01T00:00:00.000Z' END, CASE WHEN ? = 'tombstoned' THEN '2000-01-01T00:00:00.000Z' END)`,
+          params: [id, ctx.orgId, id, blobs[0].id, status, status, status],
+        },
+      ]);
+    },
+    async setVersionStatus(ctx, key, status) {
+      await exec(
+        `UPDATE version SET status = ?,
+  removed_upstream_at = CASE WHEN ? = 'removed_upstream' THEN COALESCE(removed_upstream_at, '2000-01-01T00:00:00.000Z') END,
+  tombstoned_at = CASE WHEN ? = 'tombstoned' THEN COALESCE(tombstoned_at, '2000-01-01T00:00:00.000Z') END
+WHERE org_id = ? AND blob_id IN (SELECT id FROM blob WHERE org_id = ? AND sha256 = ?)`,
+        status,
+        status,
+        status,
+        ctx.orgId,
+        ctx.orgId,
+        key,
+      );
+    },
+    leaseMarginMs: () => 2 * DELETE_TIMEOUT_MS,
+    async shortenLease(ctx, key, remainingMs) {
+      await exec(
+        `UPDATE blob SET purge_lease_until = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ? AND purge_lease_until IS NOT NULL`,
+        `+${remainingMs / 1000} seconds`,
+        ctx.orgId,
+        key,
+      );
+    },
+    removeCalls: () => faults.removes,
+    stallNextRemove() {
+      faults.stallRemove = true;
+    },
+    failNextRemove() {
+      faults.failRemove = true;
+    },
+    narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),
     reserve: (ctx, key) => repository.reserve(ctx, key),
     claimPurge: (ctx, key) => repository.claimPurge(ctx, key),
     async expireLease(ctx, key) {
@@ -378,3 +492,77 @@ async function r2Fixture(): Promise<BlobReserveFixture> {
 
 describeBlobContract('r2-miniflare', r2Fixture);
 describeBlobReserveContract('r2-miniflare', r2Fixture);
+
+const lifecycleFixture = (): Promise<R2LifecycleFixture> => r2Fixture(false);
+
+describeBlobLifecycleContract('r2-miniflare', lifecycleFixture);
+
+describe('r2 lifecycle fixture', () => {
+  async function scheduled() {
+    const f = await lifecycleFixture();
+    const org = await f.seed('01J0LIFECYCLE00000000000A');
+    const data = new TextEncoder().encode('physical R2 lifecycle');
+    const key = [...new Uint8Array(await crypto.subtle.digest('SHA-256', data))]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('') as Sha256;
+    await f.store.put(
+      org,
+      key,
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(data);
+          controller.close();
+        },
+      }),
+      { size: data.length, mediaType: 'text/plain', refetchable: true },
+    );
+    await f.makeEligible(org, key);
+    await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+    await f.expireRetention(org, key);
+    return { f, org, key, storageKey: blobStorageKey(org.orgId, key) };
+  }
+
+  it('a referenced blob keeps the physical R2 object', async () => {
+    const { f, org, key, storageKey } = await scheduled();
+    await f.addReference(org, key, 'active');
+    expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    expect(f.removeCalls()).toBe(0);
+    expect(await f.bucket.head(storageKey)).not.toBeNull();
+  });
+
+  it('a crash after byte removal recovers with a missing R2 key and leaves bucket.head null', async () => {
+    const { f, org, key, storageKey } = await scheduled();
+    expect(await f.bucket.head(storageKey)).not.toBeNull();
+    const first = (await f.lifecycle.claimPurge(org, key))!;
+    await f.removeBytes(org, key);
+    await expect.poll(() => f.bucket.head(storageKey)).toBeNull();
+    await f.expireLease(org, key);
+    const recovered = (await f.lifecycle.claimPurge(org, key))!;
+    expect(recovered).not.toBeNull();
+    expect(recovered).not.toBe(first);
+    expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
+    expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
+    expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
+    await expect.poll(() => f.bucket.head(storageKey)).toBeNull();
+  });
+
+  it.each(['stallNextRemove', 'failNextRemove'] as const)(
+    '%s affects only the next remove',
+    async (fault) => {
+      const { f, org, key, storageKey } = await scheduled();
+      const first = (await f.lifecycle.claimPurge(org, key))!;
+      f[fault]();
+      expect(await f.lifecycle.recheckAndRemove(org, key, first)).toBe(false);
+      expect(f.removeCalls()).toBe(1);
+      expect((await f.inspect(org, key))?.purging).toBe(true);
+      expect(await f.bucket.head(storageKey)).not.toBeNull();
+      await f.expireLease(org, key);
+      const next = (await f.lifecycle.claimPurge(org, key))!;
+      expect(next).not.toBeNull();
+      expect(next).not.toBe(first);
+      expect(await f.lifecycle.recheckAndRemove(org, key, next)).toBe(true);
+      expect(f.removeCalls()).toBe(2);
+      await expect.poll(() => f.bucket.head(storageKey)).toBeNull();
+    },
+  );
+});

@@ -33,10 +33,14 @@ import {
   parseSha256,
 } from '@package-broker/core/platform/blob';
 import type { BlobMetadataPort, ByteStore, Sha256 } from '@package-broker/core/platform/blob';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import { noopObservability } from '@package-broker/core/platform/observability';
 import type { FileHandle } from 'node:fs/promises';
 import {
   describeBlobContract,
-  type BlobContractFixture,
+  describeBlobLifecycleContract,
+  requireBlobLifecycleFixtureHooks,
+  type BlobLifecycleFixture,
 } from '@package-broker/db-sqlite/contract/blob-contract';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -83,6 +87,8 @@ const encoder = new TextEncoder();
 const bytes = (text: string): Uint8Array => encoder.encode(text);
 const sha = (data: Uint8Array): Sha256 =>
   parseSha256(createHash('sha256').update(data).digest('hex'));
+
+const DELETE_TIMEOUT_MS = 1_000;
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {
@@ -148,7 +154,9 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   throw new Error('expected a rejection');
 }
 
-async function fsFixture(): Promise<BlobContractFixture> {
+async function fsFixture(): Promise<
+  BlobLifecycleFixture & { pathOf(ctx: OrgContext, key: Sha256): string }
+> {
   const root = await tempRoot();
   const byteStore = await openFilesystemByteStore({ root });
   const directory = await tempRoot();
@@ -166,7 +174,14 @@ async function fsFixture(): Promise<BlobContractFixture> {
     { holder: 'filesystem-blob-test' },
   );
   const repository = createBlobRepository(executor);
-  const state = { failPublish: false, failRead: false, fullBody: false };
+  const state = {
+    failPublish: false,
+    failRead: false,
+    fullBody: false,
+    removes: 0,
+    stallRemove: false,
+    failRemove: false,
+  };
 
   const guarded: ByteStore = {
     putVerified: (key, body, input) => byteStore.putVerified(key, body, input),
@@ -187,7 +202,18 @@ async function fsFixture(): Promise<BlobContractFixture> {
       }
       return byteStore.head(key);
     },
-    remove: (key) => byteStore.remove(key),
+    async remove(key) {
+      state.removes += 1;
+      if (state.stallRemove) {
+        state.stallRemove = false;
+        return new Promise<void>(() => {});
+      }
+      if (state.failRemove) {
+        state.failRemove = false;
+        throw new Error('storage down');
+      }
+      await byteStore.remove(key);
+    },
   };
 
   const metadata: BlobMetadataPort = {
@@ -209,10 +235,20 @@ async function fsFixture(): Promise<BlobContractFixture> {
     await executor.batch([{ sql, params }]);
   };
   const seeded = new Set<string>();
+  let referenceCounter = 0;
   const pathOf = (ctx: OrgContext, key: Sha256): string =>
     join(root, ...blobStorageKey(ctx.orgId, key).split('/'));
 
   return {
+    lifecycle: createBlobLifecycle({
+      metadata: repository,
+      store: guarded,
+      deleteTimeoutMs: DELETE_TIMEOUT_MS,
+      leaseMs: 900_000,
+      observability: noopObservability,
+    }),
+    inspect: (ctx, key) => repository.inspect(ctx, key),
+    pathOf,
     store: createBlobStore(guarded, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
@@ -246,6 +282,91 @@ async function fsFixture(): Promise<BlobContractFixture> {
         key,
       );
     },
+    async makeEligible(ctx, key) {
+      await exec(
+        `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', '-8 days'), created_at = strftime('${FORMAT}', 'now', '-8 days'), refetchable = 1 WHERE org_id = ? AND sha256 = ?`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async ageBlob(ctx, key, days) {
+      await exec(
+        `UPDATE blob SET published_at = strftime('${FORMAT}', 'now', ?), created_at = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ?`,
+        `-${days} days`,
+        `-${days} days`,
+        ctx.orgId,
+        key,
+      );
+    },
+    async addReference(ctx, key, status) {
+      referenceCounter += 1;
+      const id = `REF${String(referenceCounter).padStart(6, '0')}`;
+      const blobs = await executor.all<{ id: string }>({
+        sql: 'SELECT id FROM blob WHERE org_id = ? AND sha256 = ?',
+        params: [ctx.orgId, key],
+      });
+      if (blobs[0] === undefined) throw new Error('no blob to reference');
+      await executor.batch([
+        {
+          sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, ?, 'npm', 'npmjs_proxy')",
+          params: [id, ctx.orgId, id],
+        },
+        {
+          sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES (?, ?, ?, 'npm', ?)",
+          params: [id, ctx.orgId, id, id.toLowerCase()],
+        },
+        {
+          sql: `INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json, blob_id, status, removed_upstream_at, tombstoned_at)
+VALUES (?, ?, ?, '1.0.0', '00001', strftime('${FORMAT}', 'now'), 'upstream', '{}', ?, ?, CASE WHEN ? = 'removed_upstream' THEN strftime('${FORMAT}', 'now', '-366 days') END, CASE WHEN ? = 'tombstoned' THEN strftime('${FORMAT}', 'now', '-366 days') END)`,
+          params: [id, ctx.orgId, id, blobs[0].id, status, status, status],
+        },
+      ]);
+    },
+    async setVersionStatus(ctx, key, status) {
+      await exec(
+        `UPDATE version SET status = ?,
+  removed_upstream_at = CASE WHEN ? = 'removed_upstream' THEN COALESCE(removed_upstream_at, strftime('${FORMAT}', 'now', '-366 days')) END,
+  tombstoned_at = CASE WHEN ? = 'tombstoned' THEN COALESCE(tombstoned_at, strftime('${FORMAT}', 'now', '-366 days')) END
+WHERE org_id = ? AND blob_id IN (SELECT id FROM blob WHERE org_id = ? AND sha256 = ?)`,
+        status,
+        status,
+        status,
+        ctx.orgId,
+        ctx.orgId,
+        key,
+      );
+    },
+    leaseMarginMs: () => 2 * DELETE_TIMEOUT_MS,
+    async shortenLease(ctx, key, remainingMs) {
+      await exec(
+        `UPDATE blob SET purge_lease_until = strftime('${FORMAT}', 'now', ?) WHERE org_id = ? AND sha256 = ? AND purge_lease_until IS NOT NULL`,
+        `+${remainingMs / 1000} seconds`,
+        ctx.orgId,
+        key,
+      );
+    },
+    removeCalls: () => state.removes,
+    stallNextRemove() {
+      state.stallRemove = true;
+    },
+    failNextRemove() {
+      state.failRemove = true;
+    },
+    async expireLease(ctx, key) {
+      await exec(
+        `UPDATE blob SET purge_lease_until = strftime('${FORMAT}', 'now', '-1 minute') WHERE org_id = ? AND sha256 = ?`,
+        ctx.orgId,
+        key,
+      );
+    },
+    narrowRefetchable: (ctx, input) => repository.narrowRefetchable(ctx, input),
+    async generationOf(ctx, key) {
+      const rows = await executor.all<{ purge_generation: string | null }>({
+        sql: 'SELECT purge_generation FROM blob WHERE org_id = ? AND sha256 = ?',
+        params: [ctx.orgId, key],
+      });
+      return rows[0]?.purge_generation ?? null;
+    },
     async refetchableOf(ctx, key) {
       const rows = await executor.all<{ refetchable: number }>({
         sql: 'SELECT refetchable FROM blob WHERE org_id = ? AND sha256 = ?',
@@ -274,6 +395,90 @@ async function fsFixture(): Promise<BlobContractFixture> {
 }
 
 describeBlobContract('filesystem bytes with sqlite metadata', fsFixture);
+
+describeBlobLifecycleContract('filesystem bytes with sqlite metadata', fsFixture);
+
+describe('filesystem bytes with sqlite metadata lifecycle wiring', () => {
+  const make = fsFixture;
+
+  async function scheduledBlob() {
+    const f = await make();
+    const org = await f.seed('01J0LIFECYCLE00000000000A');
+    const data = new TextEncoder().encode('lifecycle adapter bytes');
+    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+    const key = parseSha256([...hash].map((b) => b.toString(16).padStart(2, '0')).join(''));
+    await f.store.put(
+      org,
+      key,
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(data);
+          controller.close();
+        },
+      }),
+      { size: data.length, mediaType: 'application/octet-stream', refetchable: true },
+    );
+    await f.makeEligible(org, key);
+    await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+    await f.expireRetention(org, key);
+    return { f, org, key };
+  }
+
+  it('rejects a fixture missing makeEligible', async () => {
+    const incomplete: Record<string, unknown> = { ...(await make()) };
+    delete incomplete.makeEligible;
+    expect(() =>
+      requireBlobLifecycleFixtureHooks(incomplete as unknown as BlobLifecycleFixture),
+    ).toThrow('makeEligible');
+  });
+
+  it.each(['stallNextRemove', 'failNextRemove'] as const)(
+    '%s affects only the next removal and preserves bytes until the retry',
+    async (hook) => {
+      const { f, org, key } = await scheduledBlob();
+      const generation = (await f.lifecycle.claimPurge(org, key))!;
+      expect(generation).not.toBeNull();
+      f[hook]();
+      expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
+      expect(f.removeCalls()).toBe(1);
+      await f.expireLease(org, key);
+      expect(await f.store.head(org, key)).not.toBeNull();
+      expect((await stat(f.pathOf(org, key))).isFile()).toBe(true);
+      const retry = (await f.lifecycle.claimPurge(org, key))!;
+      expect(retry).not.toBeNull();
+      expect(await f.lifecycle.recheckAndRemove(org, key, retry)).toBe(true);
+      expect(f.removeCalls()).toBe(2);
+      expect(await f.lifecycle.markDeleted(org, key, retry)).toBe(true);
+      await expect(stat(f.pathOf(org, key))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it('recovers a crash after physical removal and accepts a missing key', async () => {
+    const { f, org, key } = await scheduledBlob();
+    const first = await f.lifecycle.claimPurge(org, key);
+    expect(first).not.toBeNull();
+    await f.removeBytes(org, key);
+    await f.expireLease(org, key);
+    const recovered = (await f.lifecycle.claimPurge(org, key))!;
+    expect(recovered).not.toBeNull();
+    expect(recovered).not.toBe(first);
+    expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
+    expect(f.removeCalls()).toBe(1);
+    expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
+    expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
+    expect(await f.store.head(org, key)).toBeNull();
+    await expect(stat(f.pathOf(org, key))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps a referenced blob on disk without invoking remove', async () => {
+    const { f, org, key } = await scheduledBlob();
+    await f.addReference(org, key, 'active');
+    expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+    expect(f.removeCalls()).toBe(0);
+    expect(await f.store.head(org, key)).not.toBeNull();
+    expect((await stat(f.pathOf(org, key))).isFile()).toBe(true);
+  });
+});
 
 describe('openFilesystemByteStore startup', () => {
   it('rejects a relative root', async () => {

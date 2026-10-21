@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Codecs, DigestAlgorithm } from '../../platform/codec.js';
 import type { ComposerVersionOrigin } from '../../registry/composer/version-object.js';
 import type { DescribeResult, VersionCandidate } from '../../sources/provider.js';
@@ -630,6 +630,33 @@ describe('describeComposerV1 round 2', () => {
     expect(requests.length).toBeLessThan(3);
   });
 
+  it.each([2 ** 31 - 1, 2 ** 31])(
+    'accepts a delayed response with source timeout %i ms',
+    async (timeoutMs) => {
+      const body = JSON.stringify({
+        packages: { 'acme/owner': { '1.0.0': version('acme/owner', '1.0.0') } },
+      });
+      const fetch = createPolicyFetch({
+        policy,
+        userAgent: 'pb-test/1',
+        fetchImpl: async (_input, init) => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          init?.signal?.throwIfAborted();
+          return new Response(body);
+        },
+      });
+      const result = await describeComposerV1(
+        fetch,
+        'acme/owner',
+        options('acme/owner', sha256(body), {
+          source: { ...source, timeoutMs },
+          deadlineMs: 1000,
+        }),
+      );
+      expect((await members(result)).map((member) => member.version)).toEqual(['1.0.0']);
+    },
+  );
+
   it('maps an upstream timeout past the deadline to deadline', async () => {
     const fetch = createPolicyFetch({
       policy,
@@ -645,6 +672,31 @@ describe('describeComposerV1 round 2', () => {
       options('acme/owner', '2'.repeat(64), { deadlineMs: 50 }),
     ).catch((e: unknown) => e);
     expect(codeOf(error)).toBe('deadline');
+  });
+
+  it('maps the deadline when the wall clock lags the timer', async () => {
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      const fetch = createPolicyFetch({
+        policy,
+        userAgent: 'pb-test/1',
+        fetchImpl: (_input, init) => {
+          clock.mockImplementation(() => realNow() - 1000);
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason as Error));
+          });
+        },
+      });
+      const error = await describeComposerV1(
+        fetch,
+        'acme/owner',
+        options('acme/owner', '2'.repeat(64), { deadlineMs: 50 }),
+      ).catch((e: unknown) => e);
+      expect(codeOf(error)).toBe('deadline');
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('aborts during the pause between attempts', async () => {

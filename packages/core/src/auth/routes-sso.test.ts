@@ -17,6 +17,7 @@ import type {
 import { createKernel } from '../kernel/kernel.js';
 import { createSecretCipher } from '../secrets/cipher.js';
 import { createKeyring } from '../secrets/keyring.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.test';
 const NOW = Date.parse('2026-10-15T12:00:00.000Z');
@@ -215,7 +216,7 @@ async function build(options: Options = {}) {
     },
     resolveOrg: () => Promise.resolve(ORG),
     health: () => Promise.resolve(true),
-    coreRoutes: createSsoRoutes(deps),
+    coreRoutes: documented(createSsoRoutes(deps)),
     log: (entry) => {
       logs.push(entry);
     },
@@ -588,6 +589,33 @@ describe('start refusals', () => {
 
     expect(response.status).toBe(400);
     expect(await bodyOf(response)).toMatchObject({ error: { code: 'invalid_request' } });
+    expect(response.headers.getSetCookie()).toEqual([]);
+  });
+
+  it.each([
+    [{ purpose: 'login', [EMAIL]: PROVIDER_ERROR_TEXT }, '/body', 'unrecognized_keys'],
+    [{ returnTo: '/' }, '/body/purpose', 'invalid_value'],
+    [{ purpose: 'admin' }, '/body/purpose', 'invalid_value'],
+    [{ purpose: 'reauth', returnTo: 5 }, '/body/returnTo', 'invalid_type'],
+  ])('validates SSO start before calling the provider (%#)', async (body, path, code) => {
+    const start = vi.fn<IdentityProvider['start']>();
+    const app = await build({ providers: [makeProvider('dex', { start })] });
+    const response = await app.kernel.fetch(startRequest('dex', body));
+    expect(response.status).toBe(400);
+    const error = await bodyOf(response);
+    expect(error).toEqual({
+      error: {
+        code: 'invalid_request',
+        message: 'Invalid request',
+        requestId: response.headers.get('x-request-id'),
+        details: [{ path, code }],
+      },
+    });
+    expect(JSON.stringify(error)).not.toContain(EMAIL);
+    expect(JSON.stringify(error)).not.toContain(PROVIDER_ERROR_TEXT);
+    expect(start).not.toHaveBeenCalled();
+    expect(app.login).not.toHaveBeenCalled();
+    expect(app.reauth).not.toHaveBeenCalled();
     expect(response.headers.getSetCookie()).toEqual([]);
   });
 

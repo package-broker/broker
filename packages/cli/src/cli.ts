@@ -12,6 +12,7 @@ import {
 } from './commands/admin.js';
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
+import { runCloudflareDeploy } from './commands/cloudflare/deploy.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
 import { runOpenApi } from './commands/openapi.js';
@@ -22,6 +23,7 @@ const USAGE =
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
   '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
+  '       pb cloudflare deploy --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
   '       pb cloudflare migrate --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
@@ -68,6 +70,11 @@ function parseCliArgs(argv: string[]) {
         'abandon-intent': { type: 'string' },
         'allow-contract': { type: 'string', multiple: true },
         domain: { type: 'string' },
+        rollout: { type: 'string' },
+        'public-url': { type: 'string' },
+        routes: { type: 'string' },
+        secret: { type: 'string', multiple: true },
+        secrets: { type: 'string' },
         yes: { type: 'boolean' },
         json: { type: 'boolean' },
         project: { type: 'string' },
@@ -99,6 +106,24 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'abandon-intent',
     'domain',
     'yes',
+    'json',
+    'dry-run',
+  ],
+  'cloudflare deploy': [
+    'worker-name',
+    'config',
+    'environment',
+    'deployment-id',
+    'inventory',
+    'out',
+    'jurisdiction',
+    'rollout',
+    'public-url',
+    'routes',
+    'domain',
+    'secret',
+    'secrets',
+    'allow-contract',
     'json',
     'dry-run',
   ],
@@ -171,7 +196,8 @@ export async function run(argv: readonly string[]): Promise<number> {
   const usageError = () => {
     const cloudflareIndex = argv.findIndex(
       (value, index) =>
-        value === 'cloudflare' && ['provision', 'migrate'].includes(argv[index + 1] ?? ''),
+        value === 'cloudflare' &&
+        ['provision', 'migrate', 'deploy'].includes(argv[index + 1] ?? ''),
     );
     if (cloudflareIndex >= 0 && argv.includes('--json')) {
       console.log(
@@ -213,6 +239,38 @@ export async function run(argv: readonly string[]): Promise<number> {
         : { repositoryMap: values['repository-map'] }),
       ...(values.baseline === undefined ? {} : { baseline: values.baseline }),
       ...(mode === undefined ? {} : { mode }),
+    });
+  }
+
+  if (command === 'cloudflare' && subcommand === 'deploy') {
+    if (
+      !values['worker-name'] ||
+      (values.jurisdiction !== undefined && !['eu', 'default'].includes(values.jurisdiction)) ||
+      (values.rollout !== undefined && !/^(?:[1-9]|[1-9][0-9]|100)$/.test(values.rollout))
+    )
+      return usageError();
+    return runCloudflareDeploy({
+      workerName: values['worker-name'],
+      env: process.env,
+      ...(values.config === undefined ? {} : { configPath: values.config }),
+      ...(values.out === undefined ? {} : { outDir: values.out }),
+      ...(values.environment === undefined ? {} : { environment: values.environment }),
+      ...(values['deployment-id'] === undefined ? {} : { deploymentId: values['deployment-id'] }),
+      ...(values.inventory === undefined ? {} : { inventory: values.inventory }),
+      ...(values.jurisdiction === undefined
+        ? {}
+        : { jurisdiction: values.jurisdiction as 'eu' | 'default' }),
+      ...(values.rollout === undefined ? {} : { rollout: Number(values.rollout) }),
+      ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }),
+      ...(values.domain === undefined ? {} : { domain: values.domain }),
+      ...(values.routes === undefined ? {} : { routes: values.routes }),
+      ...(values.secret === undefined ? {} : { secret: values.secret }),
+      ...(values.secrets === undefined ? {} : { secrets: values.secrets }),
+      ...(values['allow-contract'] === undefined
+        ? {}
+        : { allowContract: values['allow-contract'] }),
+      json: values.json ?? false,
+      dryRun: values['dry-run'] ?? false,
     });
   }
 

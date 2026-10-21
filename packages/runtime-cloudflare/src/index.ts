@@ -1,3 +1,30 @@
+import { parseSourceConfig } from '@package-broker/core/sources/config';
+import {
+  createProviderRegistry,
+  type ProviderContext,
+  type ProviderSource,
+  type SourceProvider,
+} from '@package-broker/core/sources/provider';
+import type { RegistryJobsDeps } from '@package-broker/core/registry/jobs';
+import { sourceSyncJob } from '@package-broker/core/ingest/source-sync-job';
+import { sourcePollJob } from '@package-broker/core/ingest/retention-jobs';
+import type { JobContext } from '@package-broker/core/platform/jobs';
+import { createSourceSyncCounts } from '@package-broker/db-sqlite/repositories/source-sync-counts';
+import { createSourceSyncReads } from '@package-broker/db-sqlite/repositories/source-sync-reads';
+import { createWebhookDeliveryRepository } from '@package-broker/db-sqlite/repositories/webhook-delivery';
+import {
+  retentionScanJob,
+  blobPurgeJob,
+  createRetentionScanJob,
+  createBlobPurgeJob,
+  type RetentionLifecycle,
+} from '@package-broker/core/ingest/retention-jobs';
+import type { ByteStore } from '@package-broker/core/platform/blob';
+import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
+import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
+import { JobError } from '@package-broker/core/platform/jobs';
+import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
+import { jobLeaseGuard } from '@package-broker/db-sqlite/repositories/job-lease-guard';
 import { createOrganizationAdministration } from './organization-administration.js';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { packageSyncJob } from '@package-broker/core/ingest/package-sync-job';
@@ -103,7 +130,11 @@ import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize'
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
 import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createKernel } from '@package-broker/core/kernel/kernel';
-import { createUiRoutes } from '@package-broker/core/kernel/ui-routes';
+import {
+  createSetupUiRoutes,
+  createUiRoutes,
+  rewriteSetupRequest,
+} from '@package-broker/core/kernel/ui-routes';
 import { createWorkersAssets } from './assets.js';
 import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
 import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
@@ -416,7 +447,7 @@ async function buildAuth(
   const ids = { ulid };
   await verifyMasterKey(keyring, executor, env, log);
   const auth = createAuthModule({
-    repositories: createAuthRepositories(executor),
+    repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
     keyring,
     clock: systemClock,
     ids,
@@ -484,7 +515,10 @@ async function buildAuth(
       ...common,
     }),
     projectGrants: createProjectAdministration({
-      grants: wired('project grant repository', createProjectGrantRepository(executor)),
+      grants: wired(
+        'project grant repository',
+        createProjectGrantRepository(executor, { ...tokens.offboarding, log }),
+      ),
       providers,
       providerAnchors: anchorList,
       onCreatorOffboarded,
@@ -561,22 +595,36 @@ function buildCatalogue(
   });
 }
 
-function credentialOrigins(source: SourceRecord): readonly string[] | null {
-  if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
-  if (
-    (source.type === 'npm_registry' || source.type === 'composer_repository') &&
-    source.url !== null
-  ) {
-    try {
-      return [new URL(source.url).origin];
-    } catch {
-      return null;
+function credentialOrigins(
+  source: SourceRecord,
+  policy: Parameters<typeof parseSourceConfig>[4]['policy'],
+): readonly string[] | null {
+  if (source.type === 'vcs') {
+    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
+      runtime: 'cloudflare',
+      policy,
+      hasCredential: source.credentialId !== null,
+    });
+    if (!parsed.ok || !('provider' in parsed.config)) return null;
+    switch (parsed.config.provider) {
+      case 'github':
+        return [GITHUB_API, GITHUB_CODELOAD];
+      case 'git':
+        return [new URL(parsed.config.repository).origin];
+      case 'ssh':
+        return [];
     }
   }
-  return null;
+  if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
+  if (source.type !== 'npm_registry' && source.type !== 'composer_repository') return null;
+  return source.url === null || !URL.canParse(source.url) ? null : [new URL(source.url).origin];
 }
 
-function openSourceCredential(executor: SqlExecutor, keyring: Keyring) {
+function openSourceCredential(
+  executor: SqlExecutor,
+  keyring: Keyring,
+  policy: Parameters<typeof parseSourceConfig>[4]['policy'],
+) {
   const repository = createCredentialRepository(executor);
   const store = createCredentialStore({
     repository,
@@ -585,7 +633,7 @@ function openSourceCredential(executor: SqlExecutor, keyring: Keyring) {
     clock: systemClock,
   });
   return async (ctx: OrgContext, source: SourceRecord): Promise<SourceCredential | null> => {
-    const origins = credentialOrigins(source);
+    const origins = credentialOrigins(source, policy);
     if (source.credentialId === null || origins === null) return null;
     try {
       const row = await repository.get(ctx, source.credentialId);
@@ -636,6 +684,100 @@ function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolic
   }
 }
 
+function registryJobDependencies(input: {
+  readonly executor: SqlExecutor;
+  readonly providers: ReturnType<typeof createProviderRegistry>;
+  readonly policy: Parameters<typeof parseSourceConfig>[4]['policy'];
+  readonly fetch: (record: SourceRecord) => ProviderContext['fetch'];
+  readonly credential: (ctx: OrgContext, record: SourceRecord) => Promise<SourceCredential | null>;
+}): RegistryJobsDeps {
+  const { executor } = input;
+  const sources = createSourceRepository(executor);
+  const { providers } = input;
+  const sourceFetches = new WeakMap<ProviderSource, ProviderContext['fetch']>();
+  const guard = (job: JobContext) => {
+    const lease = jobLeaseOf(job);
+    if (lease === null) throw new JobError('lease_lost');
+    return lease;
+  };
+  return {
+    sourceSync: {
+      sources,
+      providers: {
+        forSource: (source) => {
+          const provider = providers.forSource(source);
+          const fetch = sourceFetches.get(source);
+          if (fetch === undefined) throw new JobError('invalid_payload');
+          return {
+            ...provider,
+            ...(provider.listPackages === undefined
+              ? {}
+              : {
+                  listPackages: (context, boundSource, cursor) =>
+                    provider.listPackages!({ ...context, fetch }, boundSource, cursor),
+                }),
+          };
+        },
+      },
+      toProviderSource: (record) => {
+        const parsed = parseSourceConfig(
+          record.type,
+          record.ecosystem,
+          record.url,
+          record.configJson,
+          {
+            runtime: 'cloudflare',
+            policy: input.policy,
+            hasCredential: record.credentialId !== null,
+          },
+        );
+        if (!parsed.ok) throw new JobError('invalid_payload');
+        const base = {
+          id: record.id,
+          ecosystem: record.ecosystem,
+          url: record.url,
+          config: parsed.config,
+        };
+        const source = (
+          record.type === 'vcs'
+            ? { ...base, type: 'vcs' }
+            : { ...base, type: record.type, providerId: providers.get(record.type).id }
+        ) as ProviderSource;
+        sourceFetches.set(source, input.fetch(record));
+        return source;
+      },
+      loadCredential: async (ctx, record) =>
+        (await input.credential(ctx, record))?.credential ?? null,
+      providerContext: (job, credential) => ({
+        org: job.org,
+        // SourceSyncDeps supplies the source at provider dispatch, where fetch is bound.
+        fetch: async () => {
+          throw new JobError('invalid_payload');
+        },
+        credential,
+        codecs: workersCodecs,
+        signal: job.signal,
+        clock: systemClock,
+        observability: job.observability,
+      }),
+      sessions: createIngestSessions(executor),
+      writer: createCatalogueWriter(executor),
+      finalizer: createIngestFinalizer(executor),
+      writeGuard: (ctx, session, job) => createIngestSessionWriteGuard(ctx, session, guard(job)),
+      jobGuard: guard,
+      ...createSourceSyncCounts(executor),
+      ...createSourceSyncReads(executor),
+    },
+    sourcePoll: { sources },
+    // The jobs module requires webhook ports; no webhook route is mounted by this assembly.
+    webhook: {
+      loadCredential: async () => null,
+      verifier: { verify: async () => false },
+      deliveries: createWebhookDeliveryRepository(executor),
+    },
+  };
+}
+
 function buildRegistryModule(input: {
   readonly executor: SqlExecutor;
   readonly reads: ReturnType<typeof buildPackageReads>;
@@ -664,8 +806,35 @@ function buildRegistryModule(input: {
     now: () => Date.now(),
     onError: () => undefined,
   });
+  const credential = openSourceCredential(executor, input.keyring, outboundPolicy);
+  const providerRegistry = createProviderRegistry();
+  const providers: SourceProvider[] = [];
+  for (const provider of input.registration.sourceProviders.values()) {
+    providerRegistry.register(provider);
+    providers.push(providerRegistry.get(provider.sourceTypes[0]!, provider.id));
+  }
+  const policyFetch = (userAgent: string) =>
+    createPolicyFetch({
+      fetchImpl: (...args) => globalThis.fetch(...args),
+      policy: outboundPolicy,
+      userAgent,
+      observability,
+    });
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
+    registryJobs: registryJobDependencies({
+      executor,
+      providers: providerRegistry,
+      policy: outboundPolicy,
+      credential,
+      fetch: (record) =>
+        policyFetch(
+          record.userAgent ??
+            (record.ecosystem === 'composer'
+              ? registry.userAgent.composerStyle
+              : registry.userAgent.default),
+        ),
+    }),
     ports: {
       blob: platformServices.blob,
       cache: platformServices.cache,
@@ -682,14 +851,9 @@ function buildRegistryModule(input: {
     publicUrl: input.publicUrl,
     registry,
     outboundPolicy,
-    policyFetch: (userAgent) =>
-      createPolicyFetch({
-        fetchImpl: (...args) => globalThis.fetch(...args),
-        policy: outboundPolicy,
-        userAgent,
-        observability,
-      }),
+    policyFetch,
     deploymentId: input.deploymentId,
+    providers,
     catalogue: {
       reader: reads.reader,
       scopedAdmission: createScopedAdmission(executor),
@@ -710,7 +874,7 @@ function buildRegistryModule(input: {
         observability,
       },
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
-      credential: openSourceCredential(executor, input.keyring),
+      credential,
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,
@@ -963,6 +1127,82 @@ function queueBatchOf(batch: unknown): QueueBatchLike {
   return { messages: Array.isArray(messages) ? (messages as QueueMessageLike[]) : [] };
 }
 
+interface RetentionStorage {
+  readonly store: ByteStore;
+  readonly deleteTimeoutMs: number;
+  readonly leaseMs: number;
+}
+
+function retentionRegistrations(
+  executor: SqlExecutor,
+  storage: () => RetentionStorage,
+): readonly RegisteredCoreJob[] {
+  return [retentionScanJob, blobPurgeJob].map((definition) =>
+    registerCoreJob({
+      ...definition,
+      async handler(payload, context) {
+        const lease = jobLeaseOf(context);
+        if (lease === null) throw new JobError('lease_lost');
+        const checkSignal = () => {
+          if (context.signal.aborted) throw new JobError('aborted');
+        };
+        const guard = jobLeaseGuard(context.org, lease);
+        const guarded: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          async batch(statements) {
+            checkSignal();
+            // Guard assertions and metadata writes share one atomic batch.
+            const results = await executor.batch([...guard, ...statements]);
+            return results.slice(guard.length);
+          },
+        };
+        const { store, deleteTimeoutMs, leaseMs } = storage();
+        const metadata = createBlobRepository(guarded, { purgeLeaseSeconds: leaseMs / 1000 });
+        const lifecycle: RetentionLifecycle = {
+          ...metadata,
+          async removeBytes(org, key, generation) {
+            // A removal that starts after this deadline could outlive the purge lease the recheck saw.
+            const deadline = performance.now() + deleteTimeoutMs;
+            let leaseLost: unknown;
+            const removal = createBlobLifecycle({
+              metadata,
+              store: {
+                putVerified: (...args) => store.putVerified(...args),
+                head: (...args) => store.head(...args),
+                get: (...args) => store.get(...args),
+                async remove(storageKey) {
+                  checkSignal();
+                  try {
+                    await executor.batch(guard);
+                  } catch (error) {
+                    leaseLost = error;
+                    throw error;
+                  }
+                  checkSignal();
+                  if (performance.now() >= deadline) throw new JobError('aborted');
+                  return store.remove(storageKey);
+                },
+              },
+              deleteTimeoutMs,
+              leaseMs,
+              observability: context.observability,
+            });
+            const outcome = await removal.purgeBytes(org, key, generation);
+            if (leaseLost !== undefined) throw leaseLost;
+            return outcome;
+          },
+        };
+        const bound =
+          definition.name === retentionScanJob.name
+            ? createRetentionScanJob({ reader: createBlobReferenceReader(guarded), lifecycle })
+            : createBlobPurgeJob({ lifecycle });
+        await bound.handler(payload, context);
+      },
+    }),
+  );
+}
+
 export const BLOB_PURGE_LEASE_SECONDS = 900;
 export const BLOB_DELETE_TIMEOUT_MS = 30_000;
 
@@ -1193,9 +1433,10 @@ export function createWorker(
 
     const definitions = registration.jobs.map((job) => job.qualifiedName);
     blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
+    const byteStore = createR2ByteStore(bound.bucket);
     const platformServices: PlatformServices = Object.freeze({
       blob: createBlobStore(
-        createR2ByteStore(bound.bucket),
+        byteStore,
         createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
         {
           admission: uploadAdmission,
@@ -1295,6 +1536,11 @@ export function createWorker(
 
     return {
       platformServices,
+      retention: {
+        store: byteStore,
+        deleteTimeoutMs: BLOB_DELETE_TIMEOUT_MS,
+        leaseMs: BLOB_PURGE_LEASE_SECONDS * 1000,
+      },
       observability,
       sink,
       deploymentId: bound.deploymentId,
@@ -1390,6 +1636,12 @@ export function createWorker(
           config === null
             ? []
             : [
+                ...(db === undefined
+                  ? []
+                  : retentionRegistrations(executor as SqlExecutor, () => {
+                      if (services === undefined) throw new JobError('handler_error');
+                      return services.retention;
+                    })),
                 registerObservedJob(
                   auditSealJob(createAuditSealRepository(executor as SqlExecutor)),
                 ),
@@ -1403,6 +1655,25 @@ export function createWorker(
                 ...(db === undefined || registryConfig === undefined
                   ? []
                   : [
+                      ...[sourceSyncJob, sourcePollJob].map((definition) =>
+                        registerObservedJob(
+                          {
+                            ...definition,
+                            handler: (payload, context) => {
+                              const job = coreJobBindings.registry?.module.coreJobs?.find(
+                                (job) => job.definition.name === definition.name,
+                              );
+                              if (job === undefined) throw new PlatformUnavailableError();
+                              return job.definition.handler(payload, context);
+                            },
+                          },
+                          {
+                            events: INGEST_EVENTS,
+                            reasonCodes: INGEST_REASON_CODES,
+                            routeTemplates: new Set(),
+                          },
+                        ),
+                      ),
                       registerObservedJob(
                         {
                           ...packageSyncJob,
@@ -1528,6 +1799,13 @@ export function createWorker(
       },
       { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
     );
+    const setupRoutes = createSetupUiRoutes(
+      {
+        manifest: async () => (await uiAssets())?.manifest() ?? null,
+        read: async (name) => (await uiAssets())?.read(name) ?? null,
+      },
+      { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
+    );
     const uiRoutes = ui.map((route) => ({
       ...route,
       path: route.path.replace('/assets/:file', '/:file'),
@@ -1555,7 +1833,10 @@ export function createWorker(
         ...(services === undefined ? {} : { platformServices: services.platformServices }),
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
-        coreRoutes: [...(auth?.coreRoutes ?? []), ...(env?.ASSETS === undefined ? [] : uiRoutes)],
+        coreRoutes: [
+          ...(auth?.coreRoutes ?? []),
+          ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
+        ],
         ...(authorization === undefined ? {} : { authorization }),
         ...(registryModule === undefined
           ? reads === undefined
@@ -1713,6 +1994,8 @@ export function createWorker(
       }
       return inScope(application, ctx, async () => {
         try {
+          const setup = rewriteSetupRequest(request);
+          if (setup !== null) return await application.kernel.fetch(setup, ctx);
           const url = new URL(request.url);
           if (url.pathname === '/_pb/ui') {
             const response = await application.kernel.fetch(request, ctx);

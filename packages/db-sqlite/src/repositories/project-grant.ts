@@ -24,6 +24,12 @@ import {
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { patInvalidationStatement } from './pat-offboarding.js';
+import {
+  grantGroupMembersStatement,
+  selectedPatInvalidationStatement,
+  notifyProjectAccessLost,
+  type AccessLossOptions,
+} from './access-loss.js';
 import { holdsPermission, permissionRows } from './access.js';
 import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
@@ -277,7 +283,7 @@ function failed(reason: string): never {
   throw new Error(`project grant write failed without a classification: ${reason}`);
 }
 
-export interface ProjectGrantRepositoryOptions {
+export interface ProjectGrantRepositoryOptions extends AccessLossOptions {
   readonly idleSeconds?: number;
 }
 
@@ -541,7 +547,8 @@ export function createProjectGrantRepository(
       const guard = assertGuard(allowed, ctx);
       const checks = [...assertCheck(valid), tombstone, ...assertCheck(owned)];
       const offboardedAt = guard.length + checks.length;
-      const changedAt = offboardedAt + 2;
+      const membersAt = offboardedAt + 2;
+      const changedAt = membersAt + 2;
       const outcome = await runOrgFenced(
         executor,
         ctx,
@@ -553,6 +560,12 @@ export function createProjectGrantRepository(
           patInvalidationStatement(ctx, input.id, {
             sql: 'removed.last_op_id = ?',
             params: [opId],
+          }),
+          grantGroupMembersStatement(ctx, input.id),
+          selectedPatInvalidationStatement(ctx, {
+            grantId: input.id,
+            at: input.audit.occurredAt,
+            opId,
           }),
           remove,
           auditPendingStatement(ctx, input.audit),
@@ -570,6 +583,13 @@ export function createProjectGrantRepository(
       );
       if (outcome.ok) {
         if ((outcome.results[changedAt]?.rows.length ?? 0) !== 1) failed('delete removed no row');
+        const members = (outcome.results[membersAt]?.rows ?? []) as { user_id: string }[];
+        await notifyProjectAccessLost(
+          options,
+          ctx,
+          members.map((member) => member.user_id),
+          input.audit.occurredAt,
+        );
         const row = outcome.results[offboardedAt]?.rows[0] as
           { offboarded_user_id: string | null } | undefined;
         return { status: 'deleted', offboardedUserId: row?.offboarded_user_id ?? null };

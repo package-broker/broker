@@ -1,0 +1,310 @@
+{
+  "source": "qrcode@1.5.4 (npm) byte mode, ECC M, generated offline; hex packs the row-major module bits, 1 = dark",
+  "capacities": [14, 26, 42, 62, 84, 106, 122, 152, 180, 213, 251, 287, 331, 362],
+  "vectors": [
+    {
+      "name": "v1-min-1B",
+      "text": "n",
+      "version": 1,
+      "mask": 2,
+      "size": 21,
+      "hex": "fe53fc13d06ea4bb7555dbacaec16907faafe01400be33e1ecf22892c0aafc9bac93804497f8d3d05436baf4e5d6f22ebac104fc8fec930"
+    },
+    {
+      "name": "v1-max-14B",
+      "text": "nu18%cjqy5?@gn",
+      "version": 1,
+      "mask": 6,
+      "size": 21,
+      "hex": "fee3fc15906ebebb74e5dbafaec11d07faafe00c009fb4bacc1b88cb8ea048dcb89000425bfb63905164babd15d5e22e9abf046e7fef280"
+    },
+    {
+      "name": "v2-min-15B",
+      "text": "07=bipw3/_fmt07",
+      "version": 2,
+      "mask": 5,
+      "size": 25,
+      "hex": "fe29bfc15f506eb54bb75815dba79aec130907faaafe01070082b86744b27e8d9bf63eaabbac30d34cc3080a48e5fb79a11db771fe8047c5bf9c2af04d91aba6bfb5d31796e9e01304e7b9fee6a88"
+    },
+    {
+      "name": "v2-max-26B",
+      "text": "07=bipw3/_fmt07=cjqx4/_fnu",
+      "version": 2,
+      "mask": 3,
+      "size": 25,
+      "hex": "fe8cbfc14f506e916bb757e5dba49aec12a107faaafe01e100b72b25f49b39bbaead462badfbfcdef8a18b457abb212ac2011a7efb007cc4ffbbaa305911bba76fcdd4bbeeeb55a504bedcfeee738"
+    },
+    {
+      "name": "v3-min-27B",
+      "text": "&ahov29.elsz6&ahpw3:-els07=",
+      "version": 3,
+      "mask": 2,
+      "size": 29,
+      "hex": "fe21fbfc10c0506eacaabb75e185dbabf1aec15bf507faaaafe01ca100be5373e5cccc97f3c408181aa56caa628fd79ee78bef9c7f248087a2d0aec36975c98ebcebb2032938a53239ba0afe0063bc5ff9bf6b505caf11baf30fbdd66d032eae09ed04753fafef2b5a0"
+    },
+    {
+      "name": "v3-max-42B",
+      "text": "&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cj",
+      "version": 3,
+      "mask": 6,
+      "size": 29,
+      "hex": "fe9423fc1464906eb54ebb745f95dbae0d2ec1105507faaaafe008f2009f81e4be4348e62efb7a51d996e29331a2613af845d69f3d6da58a2317331c2057864c8431acd5f3f2fa0adf7835fa8047dc43fa3eebd05b2f10baa71fd5d7bfe06e9bed7f049923dfedf9c80"
+    },
+    {
+      "name": "v4-min-43B",
+      "text": "gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3",
+      "version": 4,
+      "mask": 2,
+      "size": 33,
+      "hex": "fe021d3fc12096506ebca5abb75c2695dbafb8e2ec17239d07faaaaafe01d17e00be4cd3be76136c127cf7f082563e9d2aeb6da8fdd0ea0b0525d85ea8ec03520b4f0f25625d06bb4ff371eec909d59c63c050a5a345dd0d7c7f960bf0587579753e4fbbc470fc804279c57f8872eb90576c116bae79efcdd4f92ec6eb7f21c104424a24fee9499d0"
+    },
+    {
+      "name": "v4-max-62B",
+      "text": "gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt0",
+      "version": 4,
+      "mask": 6,
+      "size": 33,
+      "hex": "fe84823fc14619506eab012bb74bcb95dbaf0d4aec10212d07faaaaafe007d57009fd851cbaab8890e29cefbcb67b02d096d6369830ae47e2eab4f7ee1c823b2073ec7c33b79a624ae7d6eea6752a398000e65ee2e814ec1a8ce529ac71ce772b6b075c75ebbf80049d5c5bfa0deebd05c11117ba8fb1f85d533862ee9346c7704e772c7fedcdbd40"
+    },
+    {
+      "name": "v5-min-63B",
+      "text": "t07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&a",
+      "version": 5,
+      "mask": 6,
+      "size": 37,
+      "hex": "fec8b5c3fc16a170106ea4a33cbb74b9e9e5dba905022ec11df2a507faaaaaafe00cc1a8009ff8bdbcbecc50708cb09310a6afc8fe844df03be301618e09a118e3db1f587262b67f24b567dbdc722dc6754d8924d5434e36207405bb92e3102a69bc77dadbe37a778f6a3c354ae08e37cdf5af444f44c1a5b9c4afe56f230e525b68bf0884fa006d9c545bfb9e5e2b705c3e5f1bbaa417bfc5d495253bae9b674967048db76e7fe978b1d48"
+    },
+    {
+      "name": "v5-max-84B",
+      "text": "t07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fm",
+      "version": 5,
+      "mask": 2,
+      "size": 37,
+      "hex": "fe507fabfc13b113906eae25eebb75cfd595dbaad5902ec159d02907faaaaaafe01532a600be284173e58658cd4bb4bee28f8a598b1a7513624fa7bab4090d20039b049956f9ac06e3a9d7f55b56bc4be6a96a98e153b55b7ab53d581aef380efbca761fc79219473bf863bd32c300ae416a42f60084aa2bab90e9372753314d2a9bab6c16fb80735ddc63f985bbabb051d19113babcebffe5d51d98fceea0730047047929569feb04070f8"
+    },
+    {
+      "name": "v6-min-85B",
+      "text": "6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6",
+      "version": 6,
+      "mask": 2,
+      "size": 41,
+      "hex": "fe5255cbbfc1132239506eb63f926bb75ac18445dbaf8ff85aec179817c507faaaaaaafe01847d1300be2dd15d3e30020f8196caa343ad268a1bb1944c057aee8ed527ae9020b6ff1b4daef4b013564a2758efe26b7502566c4cc2dc65c4ca8703ccb7c316c495b2e3708d2004d8e915750fbc21c20599e87d2308fffd607dd618fa4d879ecbfd8a9608818d71d42db0a617774b2cae0e76c2cece0ed1026d09ed3d50cabe5ef26efb80513eb0457f83d13caad053ccf831abaa8143aff5d6edd82e02ea30a246f904967b753afe9ed1fc4e0"
+    },
+    {
+      "name": "v6-max-106B",
+      "text": "6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_",
+      "version": 6,
+      "mask": 2,
+      "size": 41,
+      "hex": "fe16118bbfc1313319506ea6a78aebb7564d4c85dbadcfd85aec159817c507faaaaaaafe010c7d1300be2b515d3e30060f8196c8a303ad269b9891944c09baf6865d278e54ac7ffc2b6fa8f0b093677a345873626a6502444e6ee0dc69a4520f03ceb3c3920494a0e136ed2080d8e905754c3c21c205bb6c7d230bfe9de07dd7dcefcd879ef8f9ca9600818f41d42db06607f7412e8ecefe0fcede6c93426d01de0d40cabecee26efb80533c90457f9bd135aad05340f431abaae325eff5d7ffd92e0eea20a246f90456bb753afeb0f1fc4e0"
+    },
+    {
+      "name": "v7-min-107B",
+      "text": "@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.els",
+      "version": 7,
+      "mask": 2,
+      "size": 45,
+      "hex": "fe67955e0bfc1144e782906eae7e7a74bb75ca5462b5dba9a1ff23aec1685448c107faaaaaaaafe0111d1f7f00be3f2fb623e4e87b46184069ab90cf4bdcba91b087b344ba56f7406010a9ee01cedc1d15e7c998d4078095c7771289e8c5224f82ec08fce5dda315fe65c0d32f2b1991c9fd4ffd77fd1c798c4bac7e6b376b04eb11110319391d4fba4f937f85a0fdf2d4a204eb0a4c6d5c382907ebf5f12e9ec480a8f4d3716ec4b429b72eace14837e8dbb74402b649c02b96a463947898c29482bd5a1cf2b0dfddec69b858fa70fd8079f47b6c6ff9356a27aa10520915df1dbac74ff70fd5d7f31afe0f6eba6d584f1d04a9500798cfea077b74610"
+    },
+    {
+      "name": "v7-max-122B",
+      "text": "@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07",
+      "version": 7,
+      "mask": 2,
+      "size": 45,
+      "hex": "fe66955e0bfc1144e782906eaf1e6a74bb75e65422b5dba961fd23aec1605478c107faaaaaaaafe016151f7f00be2f2fb623e4e93a42184069bf96af4bdca2b180b7b344b847e640601ca92103cede3d11e7d198dd87a015c77762086ec52249eaf408fce5c58255fe65c1f3242b1991c1fccff977fd7c7d8c6bac7e6bf7eb84eb11110b19391d4fe22f937f85adfdf2d4a204931a4c6d5c392987f3f5d12e96c400a8f4c32d6dc4b5a9af0c94e14a37b9dbb744b2b559402b97845b947898c295a23d5a1cf2bad39dec69a198fe70fd8070f44b6c6ff8746ba7aa105a0115df1dbabf4ff70fd5d6330afe0feea27dd84f1d0439d03f98cfe8077b14610"
+    },
+    {
+      "name": "v8-min-123B",
+      "text": "mt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ah",
+      "version": 8,
+      "mask": 7,
+      "size": 49,
+      "hex": "fe4bcf4440bfc11b5282f5d06e963571286bb744ca1088a5dba3f23fa002ec157f91b57107faaaaaaaaafe0000b44b550096fc7bf90cd0643489e0a662c5ed25c31c22e9bd3b3dcb523fa68dab9eb09a4abb328984178eccdbc13f4ba3b4abc88970db6724c7cb9b426fdf506b2454e65713bb80e5b71a721bf5f9ae9dcdf2f1446e738226481cff226fc0abee11cc347697125a92b2b998ad2453f116b846cfeb75fa54bfb235b4831da12a28f19f69e66be92c214ab9f75f5a16f157f7b09676f42cd52a575c5582dd56be409ddd4aeb845cfe85b8271f4493d11da3b29772dfc740ef4739cd26151f75111e2ca6e0830673f1e9e36427f0dcff804f8f1c69c63f97f6ae422af0513dc697b15ba5677fb2efc5d62b9da6ed66e9653316f56f04fb3401ac80fe91662eee9d8"
+    },
+    {
+      "name": "v8-max-152B",
+      "text": "mt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3",
+      "version": 8,
+      "mask": 2,
+      "size": 49,
+      "hex": "fe2d194608bfc103635259d06eac62d6346bb75564186b25dbaf1a7ebc42ec150ad1a91107faaaaaaaaafe016344572400be0dbfe57cbe5c7ab183281a14bdf2ff6da5f508f421ba952c28b7c810887eab7c1ef8430b8f83e7b0f85649c0a0758993aaca1ea33a87329323238c383adc949b0fe36402260fdce9846899b835ed324e500e1eab933e1e1f87b7ff51f344718b135af13ea17bab544f8111a4470bee94fd48fe6ebef6bffe1f1dacc1d07597ace07ea656c833bdcc0a12d9cef32b09fdc1113a1219557b1a360aaa7d607236f59ae74dff3b2d938fa0dabc3cbf9151ffa28e4425bce1091e940d6febbae2a8e5fdc90ae2233be11bfb8048931daec67f8f85a87aeb7052e9c750b12bae7fbe75ffb5d7cb909e0eeeea6943d1e919046b551504f1feb2e8746d138"
+    },
+    {
+      "name": "v9-min-153B",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.e",
+      "version": 9,
+      "mask": 4,
+      "size": 53,
+      "hex": "fec604fac8a3fc12e89d277f906e8857c2a8d4bb75141f9a65d5dbae437fedfa2ec15e1e46549107faaaaaaaaaafe01080f1478e008bb90cfc7807c963a2dc78d565cda6b6b360dd6e138d0e9bda89ab7d2915ffd70cb2b371dd673c144ba396a54ed0a9097a0253c5320af6b41ead66d346633bf75f6872d5862edffa133b86688751d7a16f4e6d5fa25914a3b8734f9e7da8282c9276b77aa4f7d21ea4d91ff2b0faf51fcbc5701c563e454ea4112af296aa91a8e11afc5101fd9b4fbed7fd9a314f8f45f14fdf9785987ffd3182a81579bf292ffde509bd3e0e0ee76be6dd7d7e9919c1268e8e3af86a71d8229d66334bacb7d54c5ac7e94f36d78dbd7e4ed98a2a18a565bff390131cb17afdb51e068f68b80556f78c9d69841bc2c00ea6b989a2a133459fbed7fc006843c5addc5bfa84c6aa486ab04feeb1098318bac70efc2b7fddd3174d38f381ae8738dff59805049b7b5bf2243fe8608a6ba3290"
+    },
+    {
+      "name": "v9-max-180B",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fm",
+      "version": 9,
+      "mask": 2,
+      "size": 53,
+      "hex": "fe0499ab0da3fc10f37aa953906ea7af5124e4bb756d18c614d5dbabd6bff10e2ec1799046b71107faaaaaaaaaafe0169c91b09200be7e30fc3f1be2ed983ffeed866ea88e508ee58d08fcc987ab4ebf615952a3a6cb9a10f3e584b22e79c01895ad5e9cb665739cd9436a71a86f6a7aa14c5fd87a678bc1e3b8cd59c2f11bbb879b2310b6f5e78a43d39e6861f74faed045b8d8208a89394a22a393dab8a8efb7cdfb2a2fb847bbfc5887c6eea821ab7eb6a991e9e5178d9116f9e88fb2a6faa0d2d1bb267f75cf740a269c730005b460fea35a5e3ae15c7a226580dfcb58e59ed59f252328b66d02098d6d69e5886e520cb0c612741905d18cb8effe508077ba040f9b4bd4785fe16300290b3929698cafbb362db577a49d8a0be320c26aa1a5e865b12f125fa3a4fb004dddc5467463f806ceb2ab6a905af611de9f19ba8034fd6c6fadd52eaabacb626ea9007c5ba0e704eab47b83e32fec11cc77d2ee0"
+    },
+    {
+      "name": "v10-min-181B",
+      "text": "?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6",
+      "version": 10,
+      "mask": 4,
+      "size": 57,
+      "hex": "feca9fe3473f3fc114bee65d28906e9ef5741299cbb752745174baa5dbad882ff07652ec14f83f13203107faaaaaaaaaaafe0115ebc7da67008bac1e3ecf587cc28340db83b6d91ff153e3ef81195c22404bf6854c0663971d9b31f418e9cfe7501acd71ac1dd1192942f1a34a5221d49faa32943a36de2b309e6bb645e3767ab7f5428084f858caa72c88bff3e8057e13216cdae35266839d1205ed601a56e7070190891929528a7c74631ae5d541dc5b22b2b2b7f949b4fbc7f1176f84adbec31e1e24512491b5afb0c6abe46ac2c56ca7133ba4723e30effddde7eddb0dd0f74eb062026daaadaf7c297c3463a82d5eba38dd947a55a344a63b649c49819d0ea126d149a4cbfeed5b95301781391a2db0a66bc75cea3bfb3d91785aa2c20e2aca4aedca1d79e0e3b6113bd6d59b2762454218491643830e0f3c3652c7f1a89c0e0f8e8ad57592987c6baf88bb09f2821b19d42dda034f7b3ede5afc8072e051cb7646bfaf907a8ef86bd04664b47e27d11baca37fed10bfddd341c4ce1e68eee89ae0793914e90455fa597056a0fe9f5131995ac08"
+    },
+    {
+      "name": "v10-max-213B",
+      "text": "?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4",
+      "version": 10,
+      "mask": 2,
+      "size": 57,
+      "hex": "fe75e39285233fc1330cdebf66906eb4cf97bca1cbb7566420a3a6a5dba9f9ebfc0792ec1660fd1d18d107faaaaaaaaaaafe015c28c7ebb000be69847f08543e42600de34030e1f8feaa0069b9faca257cb9309d3dc37faed307c4330387c32e9e212eff5df85fc1ab4cc8b3f9913da558b64373326719374126883f7d00f84254eb7c630ac0bb5b2c37f9f83f99c26b626610e32449e5f9bebc010eee2ef42927f81eb0805845960db37fabb2a9311b47534ad909c1ea3ac337feaf8fea95ff4b1942545a3bf17dabf102b5952adfc774451c03047cbed561fcbe2bf4827217eb0f777e73acb15c784058d4d4afd0ced08293c3cd19dd93a775bc78cd8e9decc93b5652d5d50ce5616365be2f62b72a4edfde884965ea8a3c01e3bf46df2d425b08569c76c6fbd8003829e9dee978a9baa6c31c5167949f3fc031c195c3806f8784766d3ced861e9cbfe5996b3d31f3c7dc0925dac6038be77f3956fd0052ee7128f8467f81a99a88c0aa505108447a33b1dba8b2e3f0e17fc5d54d1f40a58b62ebf97c41fa1ad104e531450191bcfed859405e46b10"
+    },
+    {
+      "name": "v11-min-214B",
+      "text": "fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-e",
+      "version": 11,
+      "mask": 2,
+      "size": 61,
+      "hex": "fe6bf65240215bfc13d4f51d7048d06ebf50b5b06b0ebb757f1a331ae355dba9090afc02c72ec1412f9c4ef89107faaaaaaaaaaaafe014bfb31ff50700be64d69fba759be263c257cca3a01482e6bd92cdb6b94b8a46d10543fec7bca880b903a71982e0aa75b5c674e3e03b5b81b1e82dd4af2ef9fc71e41a90ca39bbc574fd7f3b838b8f8c2f42382884545b9ca7c91e728a6864edf40104eb2197c0f62eb7e48241c92e38634aed3c8ddde61e95f5279f9576d94eb1634852dfeb06cf722615f9793e5ebf91c72817104d0a3700ff820e8918a794ff6540fed219fed46581dc44560448abd8486af92eeb211df9a31079831b2ff5b21ffc75eff8e98ddf40ebc24ba4851f17ffd0fcfbb023bd7eb82ffb893d3f81f8d22b9a5e0407f44e38e71ecb773447ac0b88423561382617258163ee458a7842bea9047166002f86da14904bf5fcc59aa64236111ca17a9a39672be5a1d60dafd4109258a8da09895b7657f631a23e642110ce0e1fccb357abc8550d24fae74d4b5c5a49e2498ff129f509d1f7efd2e132db42d0400f387ba1f8833bf90078cefc465a8c4bf869b22a9b4debf05f0d551de89b18baa9391f90df3fedd6a73f342f40446ea5cbdb6db6dc530464d8750936049feb5aae55e17c0b8"
+    },
+    {
+      "name": "v11-max-251B",
+      "text": "fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4/_fnu18%cjqy5?",
+      "version": 11,
+      "mask": 2,
+      "size": 61,
+      "hex": "fe586da3c0215bfc13d035597048d06eb950f5b86a0ebb755d2a3392a755dba81182fc02c72ec141a7dc5fc99107faaaaaaaaaaaafe0148e831ff50700be64d69fba759be3afc257cca3a01483e6bd92cdb6b94bab46d10543fec7b0a880b903a71982a0ea75b5c674e3e0395211b1e82dd4af2ef9bc72d72a90ca5d99c57d64ff3b81ba8f8cebc6382894d4cb9a85a91e7202e864edf40124eb42c5c0f62eb6648e577b2e38634aed7ec9fde61e95f4269da472994eb17f5852c5cf40cf72265135360f4ebfbbc14e5759dd8a3689ef820d8918a796ff6540fed219fed46581dc4456044bebd8486af92eeb371df9a31079831b2ff5b21ffc75eff8e18ddf48ebc24ba5951f17ffd0fcfbb1ef797ea93efb893f7fe1f9c32b9a5ee616f44230a71acbf7ac478a0b88420de5b82617258163fa9d4a7842bea9079a67002f86da14942ff5fcc59aa64224031c6dba9a3a67aa6523d46dafcc105a508af829885b3617ce283abe602103cece1fccb3dfabc8430d24fae70d4b5c6a49e2498ff129f529d1f7efd2e132da42d0400f387ba1f8833bf90078cefc465a8c4bf861ba2a9b4debf05f09151cfbab18ba8b3f1f9857bfedd5941f3caf84446eb452cb6b92dc53042094b50936049feae45055e17c0b8"
+    },
+    {
+      "name": "v12-min-252B",
+      "text": "sz6&ahov3:-elsz6=bipw3:-fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fm",
+      "version": 12,
+      "mask": 2,
+      "size": 65,
+      "hex": "fe3a7833d835813fc1157cf686b068506ea999ad0c6f0eabb75a506fb1c254e5dbaf19b03e86004aec158d18b1741d1107faaaaaaaaaaaaafe0126458c45581100be1e56cffe65d33e4e74be3a46d0a911f4ed97dbebd3fe5503b5d774d673ef80146f7b6d92b76c5fef099e15344fa232f61ba89ee16f28b3b131e2af1711305e6347b5d58c5a23868934a9fef1aa584387399e06144de1bc4e09207b02dad52be095f73fa595d37d1fe96d28ad98e76ad837bc73c107cd1af7f9e86c7737a7f597297ad5d88d4c6784dda6de8f906cb88f2cefbf4589ef84ce0cd6bf577ff09d2d58a6203a1c43d57908e68b04839c258658373e36b98fe97dd3fb71beb2ec5e85e91afad4484ab29f28ab444516a913e53ec5d7e30de2fc2f42ff08046238ae73efaf3ab9425988b76c4c604ab246098f22f2e74f1909f72f28b109b30a8dd651305f7b7238d6cdba2386f30c175a513ad8832607cc52bd8de1dc0117b825c60ad52bdc1eb0b2c7f1d37d15abe4a42c9267aa1c75db457f154d1af769726084b467f5971d5b25e2cecc6784819a4b5fe1ac788ffced9fe921c7c4ce41c22632afbc9d2d6fa131f102bdd5790964c584ee8ae546defcd8f62af3695dd17923c8682b6b72f36a6ae8ce1bec50e0fa004509c11c3667457f89517fa986f52ad05eda4a44d781112ba85c833f841f7ffdd7a0354ce94ede2aea0b8ae8dd5f802d040bc417306b040afeb66b6f6d60d67a0"
+    },
+    {
+      "name": "v12-max-287B",
+      "text": "sz6&ahov3:-elsz6=bipw3:-fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4/_fnu18%cjqy5?@gnu19.dkry5",
+      "version": 12,
+      "mask": 2,
+      "size": 65,
+      "hex": "fe3a7833807dc93fc1157cc69b01e4506ea999ad2c6f0eabb75a506b81c254e5dbaf19b63e86004aec158d18b1741d1107faaaaaaaaaaaaafe0126458c45581100be1e56cffe65d3be4874be3a86d0a9a9f7a5065babd3fe2f02bd53f4d673ef9014e93f6d92b76c5fef28af15344fa232f62ab08ee16f28b3b131ea2f1711305e6b47b2bc0c5a23868f34adfdf1aa584387299a26344de1bc4f81207832dad52be095f627bd95d37d1fe96de0e198e76ad837bc718507cd1af7f8e84d7437a7f59729aad5d88d4c6784dd86de8f906cb88f2cebbf4589ef84ce0cd2bf577ff09d2d58a6203a1cc3d57908e68b04832c258658337e36b9bfe97dd3fd51beb2f44d1af518fad4484abf11f6ab444516ab1a3a2bc5d7e30debfe74c97f08046238ee73efaf3ab9425988b76c4c604ab247098f22f2e74f1909f72f28b109b30a8dd651305f7b7338d6cd9a2386f30c575a510ad8832607e44bb595e1dc01178c210a06d52bfc1ef6f6e1f9d37d0b2bc7b63c9267aa1865ebc566154d1af2217ae804f467f597d1532ff28ecc678487984936c1ac788ffccc9fcd61c7c4ce41c3a532bfbc9d2d6fa5316802bdd5790962c500a28ae546defcd8d66ef3695dd17923d8682b6b72f36a6ae8ce1bec50e0fa004509c11c3667457f89517fa986f52ad05eda4a44d781112ba85c83bf841f7ffdd7a0350ce94ede2aea0b8ac8dd5f802d040bc407015c900afeb66b6f7865b27a0"
+    },
+    {
+      "name": "v13-min-288B",
+      "text": "5?@gnu18.dkry5?@hov29.dksz6&ahov3:-elsz6=bipw3:-fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4/_f",
+      "version": 13,
+      "mask": 5,
+      "size": 69,
+      "hex": "fe6649e08baeaafbfc14e40c5dd427ca106eaa93136d3f8378bb7596766f6db75b15dba286140fd3046aaec1162f3045add53107faaaaaaaaaaaaaafe01eb4f53117ea730082d23beafb61f226724aa9054711f1d9f031ff0b781f9bbd0fed38c19427b120b9ef6635715974aaddcc3d800a7822cadc4f7efe6dcf27f67a6f9749492772ef5760407c44bf2ca65eac35d0155c4b0157a78d22b842e9cd5f2e26c20560d71b52f98a803ad9719f371e8efaed5a10028e0dfb5c933ff2f71448a0435afb18ceacd63c559b2bbbe3d8b7d6c94b26cc998eb485a746f40927607ec648c59764e6e06a59ad2b504ccf5ed2a25ef2fb1c91b6318b03551c08a4f31a54b10c54ca281941f303f245f8a4fd1d011fc8324e6ff34e54f921c67f81467a529c59759f47cebce3ffab90bb4aa0914746b11d1d99916ef85f2aff8ec6aafdbc95e202feb707a6bdce58df029c559793dfb992fd05688e6aa52bc509fe0673e32d474c7346afeb6a7e2ce4c906a263121758cfe0d16f0cd7b2cf37e963f746f1d17cc41c72bd9e8c0523b196725b6adefd0e98b4e7cd907777796963d3dd9abe60e6fedbcbbf4e678ac402cf0810d951c39f2e91a5fd27358919540af8c0616969676811682349784d6c95962adb14e74e9d0c25bc8d1b04604ea7872d23a367497247a68c251e4313864ee7aabbefcc1ff3db47abbc7c9185d2abc9990240dae15dfed1b049b79f403fad888ff88074681846f6af2c57f99b6096bc5d11ab50435ff9316fe6a11fba28e72cfc00d76fddd15218182f8430272e9cd95983176b122704a6690f4779ff79cfeb4c8436925f61210"
+    },
+    {
+      "name": "v13-max-331B",
+      "text": "5?@gnu18.dkry5?@hov29.dksz6&ahov3:-elsz6=bipw3:-fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4/_fnu18%cjqy5?@gnu19.dkry5?ahov29.dlsz6&ahow3:",
+      "version": 13,
+      "mask": 2,
+      "size": 69,
+      "hex": "fe7c92a57d71477bfc13682c1fdc3b48106ea69319753f8378bb75906a1d6aab2a95dbac9e161fd3046aaec1766d18452fdd1107faaaaaaaaaaaaaafe0168477313f697b00be73a38afb01e223e3e9b1f4800d805eec71bf6c787f93bf0fed1b41a4463328992d60e61c4fafc76b135008aafd0aea5e474e7d69cf47f67a6f97c9463b01a84b918770b5ff2ca85ea835d0155cc109c725a5023a48d2a0e8154af4de0de03bd07baa0332f1f3db371ebefae55a7004b27c0e40e2f8ed86c148a0c15afb18c6ad54347139239b61d0977b7f904b7a42e3025d254dd48b2f40fcce48c59765e6e06a59ad5a9f51be99fe1399e0fbdc91b6310b03550c2316fa3adea92cd1fcab74e7286fc49edeaedd9f493f4a3a6e5ffd4e4ef921c66f814566238c450458c74ab3e3fbab90bb4ea4f1554e811f1ab9117afee29dafe30870f83c8aa00ade34cf863dce5adfc29c5f9793d8a4f33b19194976d427e5099e0673e32cc7ec73642de34afc28feac90790ca4cc3519c8d067ec757affb7e9e1fec0f1517c441c6efc59a0f4d4a9e7b64b6ecef80f1894e7ce1865b97d49e1d7fdf288a9ca4800a66996a182658fc72890d173c3992e91a5fd2f3571de747b3fdc13ae756768a9680349604d24b51da2fa96efae1dbafe953bd869d495cd8f0651ab77cbba6f278c221e4313804ec269a7820b03823c7beb9c64d185f2aa491902c293c1dff6f13249acf2e6efc03e54fd0054da904674a70c57f992e28ebc5d11ab505fe61ef11d25bd1ebab0a72afc10d76fddd78938aa2724b22f2eb2ef836ea3b87f910420612bc571dffbcfebcc84f6925f61210"
+    },
+    {
+      "name": "v14-min-332B",
+      "text": "_fmt07=bjqx4/_fmu18%cjqx5?@gnu18.dkry5?@hov29.dksz6&ahov3:-elsz6=bipw3:-fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4/_fnu18%cjqy5?@gnu19.dk",
+      "version": 14,
+      "mask": 2,
+      "size": 73,
+      "hex": "fe7b2be65de8395abfc13b97e0516f3351106eb4102425ba1be70bb75b8e1163a6ee8465dbac32ffb8cbfcf81aec15262c6f70454b3107faaaaaaaaaaaaaaafe01a3bb1d41710fa100be1d43f85b6f94ce3e70fd321b88345875cc37b7e8042fe4976b1afa1d6c7c38d67de6eaa324399701e775a8ed3882fa8332ebf0124fd248841bb0cd071239ea323624e78358177283be7eab170c7692ce743aa492e9645d00ac81b4b57f778118bd25af303b3ccd05ec8bb3ba19fc7b8aff2ef9e66e1d8544d7942d015b5de84dc9e317db6dbc9cb622eaa8ad289c4bae22dff35bfd6e7fdaa0fe54419845cc7c413c4716b852ab1fa6bfa96a6d1a9cf1949f145a7105f9e7df83d3ff8affa92b07c8b4cf39cfcfa78b4ed5e4f84b767e5f78f9fc4fcfa36458d20b77d3814c7ab8a4837ab5487faaf0883c5662ed0e420e97bdbff56f22c95f92bd31a26fb9714daed791034c002bed1e567a216c4f0d182fcfb2f1af6940d323ea051b6ea98c43fef382a8ec7b39581ac757b08df701ccb7d8f48dabf27fae79de8295afee8870617850ec26a514fd308fe3c3f9442faec4d984744fc4da5c602a76caa0ac2b567eae51276517c9319ec31afff698fe4a2fbca2fb78255467221e10684a8df2e33158f3dd25db2f11743ab6f811bbbe08749ce316a03726a6ed20a51eadfa4d57d49aacfd38cb24f5fc9fef901bd9fe388003b7e34276deb04d4c14efaf16aad6c18c364db02325c445b51bcf5f895b79157b6596364c72451f6e7172d1f141022bfd456b17b80b254ec6235dcc5afcd85170f4c6317a0df30d07dee0238abc14fa7e5fb808fb0076bd4762745d7dc7bf9dcceb2c32b903abb05e08b1323d1b1e11bbac3a6ff4a2fc74dfbdd7308b1665f95e0176ea2f35f3ab3d9e9d530427fd05256f5bb4a9fe9cac777f009c46578"
+    },
+    {
+      "name": "v14-max-362B",
+      "text": "_fmt07=bjqx4/_fmu18%cjqx5?@gnu18.dkry5?@hov29.dksz6&ahov3:-elsz6=bipw3:-fmt07=biqx4/_fmt18%cjqx4?@gnu18%dkry5?@gov29.dkrz6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=bipw4/_fmt07%cjqx4/_gnu18%cjry5?@gnu29.dkry5&ahov29.elsz6&ahpw3:-els07=bipw3/_fmt07=cjqx4/_fnu18%cjqy5?@gnu19.dkry5?ahov29.dlsz6&ahow3:-elsz7=",
+      "version": 14,
+      "mask": 2,
+      "size": 73,
+      "hex": "fe7b2be65de8395abfc13b97e0516f3351106eb4102425ba0af70bb75b8e1163a6ea4065dbac32ffb8cbf89c1aec15262c6f7046693107faaaaaaaaaaaaaaafe01a3bb1d41714fe100be1d43f85b6f94ce3e727d321b88345875cc34a7f9042fe4976b1afb9168bc38d67de6eaa3e01df701e775a8ed38c2e8b332ebf0124fd2699d8bb0cd071239ea3afae0e34fd9177283ba5ec9090e1712ce743a86a0e1465d40ac83b4b57ff119809d25afb03a2dce34fc8bb3ba19fd6b0af6a6f9e66e1f858cd75c29c15b5deb4dada5719f0dbc9cb7a2e8995d289c4bae221ff34bfd6e6fdaa0fe1c4154c5cc7c413c4726be52eb1fa6bfa96a6b1a9ed1949f145a7106f9e7cf83d3ff8affa8ab07ceb4cf39cfcfa78b4ed464f84b745e5f18f9fd8fcfa34768d20b77d3814c7eb0a4836ab5487faaf284fc5622ed0e4a0e96bdfff56f22c95f92bd71a26fb9714daed791034c002bed1e567a216c4f0d182fcfb2f1af6940d323ea051b6ea98ccb7ef382a8ec7b39581ac757b08df701ccb7d9f48dabd27fae79de9305afee8870617850e866a514fd308fe3c3f9442faec4d984744fc4da5c602a66daa0ac2b567eae51e36d17c9319ec31affd6fcfe4a2fbca2fb78355667221e10684a8da36a3158f3dd25db2f2d387af2bc11bbbe087adee350e03726a6ed2da41e9ccb4d57d49aa8fdb0d3bc75fc9fef980ac9ff2b8003b7e3427e56b14c4c14efaf76aa1ac108364db02325c027b57bcf5f895b7995696596364c72451fae6872d1f141022bfd05ef17b80b254ec6235de858dcd87570f4c631582de30d25dee0238abc14fa7e5fb808fb0076bdc7627c5d7dc7bf9dccab2c32bb23abb05e08b1323d192e11bbac3a6ff4a2fdecdfbdd7308b5665f9560176ea2f3793ab3d9a9d530427fd29256f5bb4a9fe9cadf77f009c46578"
+    },
+    {
+      "name": "v6-mask0",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 0,
+      "size": 41,
+      "hex": "fe0f11ff3fc16aadfe906e8f44222bb74be81575dbabd917c2ec11f7ec8d07faaaaaaafe0016daa900aa2bcc67093858455413f1e3d0892065b81ba8ce89ff95f6cb57e2dff0250e380d733073aa7d9a8eba23d1fe54e45e959462f047fb32228fb2ab32cc9a2be589a45f0908f46611074bae33225f19ceecbf22e6a2cfe431a6d1b36610e4c782233c2e0edc8f9f8ab99f654a02eb1fa2071699e392131acb36ab8960a7906c44f8805eb443467f8789036b3041fe09f12baeba9c6f9dd2d5e770deebdb19076f04589cbdf2fee216dcbd8",
+      "forced": true
+    },
+    {
+      "name": "v6-mask1",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 1,
+      "size": 41,
+      "hex": "feda44aa3fc1000754106eba11776bb74142bfd5dba68c4292ec175d462507faaaaaaafe00bc700300a37e99321292f2effeb964b685dc752f12b102642caac0a39e0548755a8fa76d5826652700d73024107684ab01b1743f3ec85ad2ae6777daf8019866308eb0dcf10a5ba25eccbbae1efb66770bb364461588b3f79ab1648c7b19ccba7192d7766964a47625352fecca301f5041b508adbfccb6c7464e619c0123caf2c53911fd80741ee9c4ffb2dc562a704b54a3518ba3efc93fcdd07f4dda76ea8e4c523b04f2361758feb74389e88",
+      "forced": true
+    },
+    {
+      "name": "v6-mask2",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 2,
+      "size": 41,
+      "hex": "fe6c9fc7bfc124951d106eb7a7ac0bb758662d95dbade1f44aec151462b507faaaaaaafe012e392700be48425fbe5ad67db79dffdb3307189d1b95902d0a71ad154569ca3c7e1deedb834bd3fc20457900821b32706c07bc1bac817e49c3d1acb74a08bcf479a86bb147d1372017e829e7a8200bc1d093f60f311ade4141dcd2445f8b859eeaff61ad04d6ad52b77c0937a786c43cc3fc2c3ff67a6daaf095410e4807589f73e27cfb00508ca0c47f9f6a8d6bd052703111aba8827fefa5d63669483eea5521e4e104607f33cafe8198e45e0",
+      "forced": true
+    },
+    {
+      "name": "v6-mask3",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 3,
+      "size": 41,
+      "hex": "feec9fc7bfc14923c6506e8cca1acbb758662d95dba0572f22ec1279d46d07faaaaaaafe0198e24a00b725f484a5dad67db79dd2ede86aae4636234b40ba71ad15456c6ce713ab35be3590be4a2045790082afe91ddadcd0ad77ecc889c3d1acb75c93d142a2c5fd6a2a67ef2017e829e57b4dbd1abd212d6287c1de4141dcd21e323d5ef35ca40c1bdfb6ad52b77c027a115da98a08919ae49a7a6daaf09428b8936aee461e54a7fe80508ca0c47fa9b1e0eb105fc6ea711ba0827fefa5d4ed04fee6ebe3fa895704607f33cafedaf552850",
+      "forced": true
+    },
+    {
+      "name": "v6-mask4",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 4,
+      "size": 41,
+      "hex": "feab83b63fc1071b25d06e999f4f8bb75f7a5c55dba9903352ec172c813907faaaaaaafe015ffe3b008b8f5e2e7ce235f38f7e5cd50be496ac9c89e1ea1d6ddcd2591a44049d93d4eb60c5eb1f3834be1cf36af56c1dc084f822b99deacde94f397b8fa085bebf77c080cd44ae2f0ba7dd98c385f9338b87c82d6baf865dad157cbc05bd7d49f1594e8ae72a4ec6bb1e2bd641d84f4dc4cfb1cc4a8e24c876597f8f1b29eeb4fe0dfc0073029847ffb1526eebf0456c40d1bbacf3b8ffd5d00e8ac606e8b6afdc030411b82fbbfec68495990",
+      "forced": true
+    },
+    {
+      "name": "v6-mask5",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 5,
+      "size": 41,
+      "hex": "fe5a44aa3fc1441715106eb7a7ac0bb75417ea85dba5e1f44aec131c423507faaaaaaafe01ac31070082c8425fe746a7baabec3fdb3307189f13b512252caac0a39e0148345e9fe6db834bd3fc51826571451b32706c07b43b2e895ed2ae6777dae8009c7671886bb147d136e70b99eefba8200bc1d0b374071198b3f79ab164cc7f098dbe6aff61ad04d1b12370607937a786c43c41f40cbdffccb6c7464f618c4027da9f73e27cfb00614bbcc5bf9f6a8d6bd04a50b3118ba3efc93fcdd03e49ca36e85521e4e104a763420dfe8198e45e0",
+      "forced": true
+    },
+    {
+      "name": "v6-mask6",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 6,
+      "size": 41,
+      "hex": "feda44aa3fc1471b25d06ebe833e4bb74417ea85dbacc56602ec129a5a5507faaaaaaafe00a001c4009fecd016cbc6a7baabec36ffa14e3c1e95ad73a33caac0a39e0244049d93d7ff1102f76e51826571453fa0394895b2234f0f4692ae6777dae4305f7a414cf9f863437ee70b99eefb3a692f5398ab158109f9b3f79ab164fcbc05bd7d78b6453f4df1b12370607b7e83148d1c207214dc7bccb6c7464fa28070e4d6d6577035ff80614bbcc5bfbbf8c46b505c48d2919babefc93fcdd40e8ac606e8c768c07304a763420dfe93d1c0cc0",
+      "forced": true
+    },
+    {
+      "name": "v6-mask7",
+      "text": "z6&ahov2:-elsz6&bipw3:-emt07=bipx4/_fmt08%cjqx4/@gnu18%ckry5?@gnv29.dkry6&ahov29-elsz6&aipw3:-elt07=",
+      "version": 6,
+      "mask": 7,
+      "size": 41,
+      "hex": "fe0f11ff3fc138e4da106e8bd66b0bb74be81575dba1903352ec1565a5a907faaaaaaafe005ffe3b0096b98543d03858455413e3aaf41b69412a528c5cc9ff95f6cb55abfb626c2aaa4457a23baa7d9a8eba6af56c1dc0ccdcb0f0b947fb32228fbb8fa085beb9acad36162908f46611066f3c7a06cd50ea7ef606e6a2cfe4318243fa4282ade3106a18ae0edc8f9f8e2bd641d84bcf8deb238699e392131a597f8f1b2983022560fa805eb443467f8ead912a1053b72d716ba6ba9c6f9dd7f17539fae9923d952704589cbdf2fec68495990",
+      "forced": true
+    },
+    {
+      "name": "otpauth-uri",
+      "text": "otpauth://totp/Package%20Broker:admin%40example.test?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Package%20Broker&algorithm=SHA1&digits=6&period=30",
+      "version": 8,
+      "mask": 2,
+      "size": 49,
+      "hex": "fe7708575cbfc11f7b1a57d06ea65d9fb66bb75b72bceba5dba83a7eb0c2ec1550918b3107faaaaaaaaafe01bf4c5bad00be564bf63bbe709348a30a3f90ad364eddc5a3155b83db4f14e8d22e75925dce92cefea3abe83fb655d03fa2c7795d949a5a926be319f77c82eaefe6b88de51a6958916111ec2bfb8735ec8d6c719d3dc669a21c6ba53e501fd1abf791ea8c432911badd4ea108ae9c5479178646b3f67df8debfa6b6699d501633223802169c9e24422fd86a80bd658751a19e31e6c4751fb032679e557d17eadfdbcd889a3bc4fa513bcf719994fb7bda20ac1f6813f2e3823fae9cad8d1d726b51b986e2c8c145a811e2ffefe13dfa006b89174ac63f8104ad8baab05fffc69e710ba89ffe71ef95d4f018bc4feeeaaf76daf8c1040e4b993fe1feb961b75d678"
+    }
+  ]
+}

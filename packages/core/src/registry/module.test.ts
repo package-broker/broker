@@ -7,6 +7,7 @@ import type { IngestSessionHandle } from '../ingest/session.js';
 import { narrowPackageActor, setContextPackageActor } from '../internal/package-actor.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { systemClock } from '../ids.js';
+import { createPolicyFetch } from '../sources/policy-fetch.js';
 import type { PlatformPorts, RequestContext } from '../plugin.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
 import type { SourceRecord } from '../db/source.js';
@@ -14,6 +15,7 @@ import { PACKAGES_READ, createPackageAccess } from '../catalogue/package-access.
 import { packageSyncEnqueueInput } from '../ingest/package-sync-job.js';
 import { createRegistryModule, type RegistryModuleDeps } from './module.js';
 import { resolveRegistryConfig } from './registry-config.js';
+import type { RegistryJobsDeps } from './jobs.js';
 
 vi.mock('../catalogue/package-access.js', async (original) => {
   const actual = await original<typeof import('../catalogue/package-access.js')>();
@@ -88,6 +90,75 @@ const visibleNpm = (over: Partial<ResolvedPackage> = {}): PackageVisibility => (
 });
 
 const time = { at: Date.parse('2026-10-20T00:00:00Z') };
+
+describe('registry job attachment', () => {
+  const registryJobs: RegistryJobsDeps = {
+    sourceSync: {
+      sources: {
+        get: vi.fn<RegistryJobsDeps['sourceSync']['sources']['get']>(),
+        pollState: vi.fn<RegistryJobsDeps['sourceSync']['sources']['pollState']>(),
+      },
+      providers: { forSource: vi.fn<RegistryJobsDeps['sourceSync']['providers']['forSource']>() },
+      toProviderSource: vi.fn<RegistryJobsDeps['sourceSync']['toProviderSource']>(),
+      loadCredential: vi.fn<RegistryJobsDeps['sourceSync']['loadCredential']>(),
+      providerContext: vi.fn<RegistryJobsDeps['sourceSync']['providerContext']>(),
+      sessions: {
+        acquire: vi.fn<RegistryJobsDeps['sourceSync']['sessions']['acquire']>(),
+        start: vi.fn<RegistryJobsDeps['sourceSync']['sessions']['start']>(),
+        advance: vi.fn<RegistryJobsDeps['sourceSync']['sessions']['advance']>(),
+        abandon: vi.fn<RegistryJobsDeps['sourceSync']['sessions']['abandon']>(),
+        release: vi.fn<RegistryJobsDeps['sourceSync']['sessions']['release']>(),
+      },
+      writer: {
+        openListing: vi.fn<RegistryJobsDeps['sourceSync']['writer']['openListing']>(),
+        markListing: vi.fn<RegistryJobsDeps['sourceSync']['writer']['markListing']>(),
+      },
+      finalizer: { finalize: vi.fn<RegistryJobsDeps['sourceSync']['finalizer']['finalize']>() },
+      writeGuard: vi.fn<RegistryJobsDeps['sourceSync']['writeGuard']>(),
+      jobGuard: vi.fn<RegistryJobsDeps['sourceSync']['jobGuard']>(),
+      markedCount: vi.fn<RegistryJobsDeps['sourceSync']['markedCount']>(),
+      unseenExistingCount: vi.fn<RegistryJobsDeps['sourceSync']['unseenExistingCount']>(),
+      existingKeys: vi.fn<RegistryJobsDeps['sourceSync']['existingKeys']>(),
+      staleHeldKeys: vi.fn<RegistryJobsDeps['sourceSync']['staleHeldKeys']>(),
+    },
+    sourcePoll: {
+      sources: {
+        listDue: vi.fn<RegistryJobsDeps['sourcePoll']['sources']['listDue']>(),
+        deferPoll: vi.fn<RegistryJobsDeps['sourcePoll']['sources']['deferPoll']>(),
+      },
+    },
+    webhook: {
+      loadCredential: vi.fn<RegistryJobsDeps['webhook']['loadCredential']>(),
+      verifier: { verify: vi.fn<RegistryJobsDeps['webhook']['verifier']['verify']>() },
+      deliveries: {
+        record: vi.fn<RegistryJobsDeps['webhook']['deliveries']['record']>(),
+        sourcesFor: vi.fn<RegistryJobsDeps['webhook']['deliveries']['sourcesFor']>(),
+        settle: vi.fn<RegistryJobsDeps['webhook']['deliveries']['settle']>(),
+      },
+    },
+  };
+
+  it('attaches the webhook and each source job once when jobs are enabled', () => {
+    const h = harness();
+    const built = createRegistryModule({ ...h.deps, registryJobs });
+    expect(built.coreRoutes?.map(({ method, path }) => [method, path])).toEqual([
+      ['POST', '/_pb/hooks/github/:credentialId'],
+    ]);
+    expect(built.coreJobs?.map(({ qualifiedName }) => qualifiedName)).toEqual([
+      'core:source-sync:v1',
+      'core:source-poll:v1',
+    ]);
+    expect(built.coreJobs?.[1]?.definition.schedule).toEqual({ everySeconds: 60 });
+    expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('ignores job dependencies without the job port', () => {
+    const h = harness({ jobs: false });
+    const built = createRegistryModule({ ...h.deps, registryJobs });
+    expect(Object.keys(built).sort()).toEqual(['ecosystemRoutes', 'visibilityPort']);
+    expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  });
+});
 
 function harness(options: { jobs?: boolean; ports?: Partial<PlatformPorts> } = {}) {
   const reader = {
@@ -455,6 +526,42 @@ describe('continuation', () => {
     key: 'left-pad',
     sourceIds: ['src-1'],
   };
+
+  it.each(['node', 'cloudflare'] as const)(
+    'rejects a streamed packument above the configured cap before applying it on %s',
+    async (runtime) => {
+      const h = harness();
+      h.deps = {
+        ...h.deps,
+        runtime,
+        outboundPolicy: { ...h.deps.outboundPolicy, runtime },
+        registry: resolveRegistryConfig(
+          { caps: { metadataBytes: 128 } },
+          runtime,
+          'https://broker.test',
+        ),
+        policyFetch: () =>
+          createPolicyFetch({
+            policy: h.deps.outboundPolicy,
+            userAgent: 'PackageBroker/2',
+            fetchImpl: async () =>
+              new Response(
+                JSON.stringify({ name: 'left-pad', readme: 'x'.repeat(256), versions: {} }),
+              ),
+          }),
+      };
+      const { ecosystemRoutes } = h.module();
+      const ctx = context(
+        'https://broker.test/demo/npm/left-pad',
+        { project: 'demo', a: 'left-pad' },
+        { outcome: admitted },
+      );
+      const response = await routeOf(ecosystemRoutes, 'GET', '/:project/npm/:a').handler(ctx);
+      expect(response.status).toBe(502);
+      expect(applyChunk).not.toHaveBeenCalled();
+      expect(h.jobs.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('enqueues exactly one package-sync job with the session payload after releasing the session', async () => {
     const h = harness();

@@ -25,6 +25,7 @@ export interface BrokerConfig {
   readonly registry?: RegistryConfigInput;
   readonly tokens?: TokenLifetimeInput;
   readonly observability?: BrokerObservabilityConfig;
+  readonly vulnerability?: { readonly enabled?: boolean };
   /** Read-only MCP endpoint for `read` tokens; requires the Rate Limiting binding on Workers. */
   readonly mcp?: { readonly enabled?: boolean };
 }
@@ -94,4 +95,23 @@ export function mcpEnabled(config: BrokerConfig): boolean {
 
 export function defineConfig(config: BrokerConfig): BrokerConfig {
   return config;
+}
+
+export function brokerVulnerabilityProblems(config: BrokerConfig): string[] {
+  const value: unknown = config.vulnerability;
+  if (value === undefined) return [];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return ['vulnerability: must be an object'];
+  }
+  const problems: string[] = [];
+  for (const [key, entry] of Object.entries(value)) {
+    if (key !== 'enabled') problems.push('vulnerability: contains an unknown key');
+    else if (typeof entry !== 'boolean') problems.push('vulnerability.enabled: must be a boolean');
+  }
+  return problems;
+}
+
+export function vulnerabilityEnabled(config: BrokerConfig): boolean {
+  if (brokerVulnerabilityProblems(config).length) return false;
+  return config.vulnerability?.enabled !== false;
 }

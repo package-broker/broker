@@ -9,7 +9,17 @@ import { createSecretCipher } from '../secrets/cipher.js';
 import { createKeyring } from '../secrets/keyring.js';
 import type { KernelLog } from './errors.js';
 import { createKernel } from './kernel.js';
-import { UI_CSP, createUiRoutes, uiRootRedirect } from './ui-routes.js';
+import {
+  SETUP_ASSET_PREFIX,
+  SETUP_DOCUMENT_ROUTE,
+  SETUP_UI_PATH,
+  UI_CSP,
+  createSetupUiRoutes,
+  createUiRoutes,
+  rewriteSetupRequest,
+  uiRootRedirect,
+} from './ui-routes.js';
+import { documented } from '../test-support/documented-routes.js';
 
 const HTTPS = 'https://broker.test';
 const HTTP = 'http://broker.test';
@@ -449,7 +459,7 @@ describe('single sign-on under the UI policy', () => {
       },
       resolveOrg: () => Promise.resolve(ORG),
       health: () => Promise.resolve(true),
-      coreRoutes: [...createUiRoutes(fakeAssets(), { publicOrigin: HTTPS }), ...sso],
+      coreRoutes: documented([...createUiRoutes(fakeAssets(), { publicOrigin: HTTPS }), ...sso]),
       log: () => undefined,
     });
 
@@ -473,5 +483,273 @@ describe('single sign-on under the UI policy', () => {
     expect(await start.json()).toEqual({
       location: 'https://dex.example.test/authorize?client_id=pb',
     });
+  });
+});
+
+describe('setup UI routes', () => {
+  const SETUP_HTML =
+    '<!doctype html><link rel="stylesheet" href="/_pb/ui/setup/assets/app.0123456789ab.css"><script type="module" src="/_pb/ui/setup/assets/setup.0123456789ab.js"></script>';
+  const SETUP_MANIFEST: UiManifest = {
+    version: 1,
+    entry: 'index.html',
+    files: {
+      'index.html': { contentType: 'text/html', bytes: 40 },
+      'setup.html': { contentType: 'text/html', bytes: SETUP_HTML.length },
+      'app.abc123.js': { contentType: 'text/javascript', bytes: 12 },
+      'app.0123456789ab.css': { contentType: 'text/css', bytes: 8 },
+      'setup.0123456789ab.js': { contentType: 'text/javascript', bytes: 12 },
+      'unlisted-by-document.js': { contentType: 'text/javascript', bytes: 12 },
+      'extra.json': { contentType: 'application/json', bytes: 2 },
+    },
+  };
+  const SETUP_BODIES: Record<string, string> = {
+    ...BODIES,
+    'app.0123456789ab.css': 'body{}',
+    'setup.html': SETUP_HTML,
+    'setup.0123456789ab.js': 'console.log("setup")',
+    'unlisted-by-document.js': 'console.log("x")',
+    'extra.json': '{}',
+  };
+
+  function setupAssets(
+    options: {
+      readonly manifest?: UiManifest | null;
+      readonly bodies?: Record<string, string>;
+      readonly typeOverride?: Record<string, string>;
+    } = {},
+  ): Fake {
+    const manifest = options.manifest === undefined ? SETUP_MANIFEST : options.manifest;
+    const bodies = options.bodies ?? SETUP_BODIES;
+    const reads: string[] = [];
+    return {
+      reads,
+      manifest: () => Promise.resolve(manifest),
+      read: (name) => {
+        reads.push(name);
+        const text = bodies[name];
+        if (text === undefined || manifest === null || !Object.hasOwn(manifest.files, name)) {
+          return Promise.resolve(null);
+        }
+        return Promise.resolve({
+          body: new TextEncoder().encode(text),
+          contentType:
+            options.typeOverride?.[name] ??
+            (manifest.files[name] as { contentType: string }).contentType,
+          bytes: text.length,
+        });
+      },
+    };
+  }
+
+  async function setupApp(assets: StaticAssets = setupAssets()) {
+    const clock: Clock = { now: () => new Date('2026-10-15T12:00:00.000Z') };
+    return createKernel({
+      platform: 'node',
+      publicOrigin: HTTPS,
+      plugins: [],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock,
+        ids: { ulid: () => '01J0A0000000000000000000000'.slice(0, 26) },
+      },
+      resolveOrg: () => Promise.resolve(ORG),
+      health: () => Promise.resolve(true),
+      coreRoutes: createSetupUiRoutes(assets, { publicOrigin: HTTPS }),
+      log: () => undefined,
+    });
+  }
+
+  async function document(
+    kernel: Awaited<ReturnType<typeof setupApp>>,
+    method = 'GET',
+  ): Promise<Response> {
+    const rewritten = rewriteSetupRequest(new Request(`${HTTPS}/_pb/ui/setup`, { method }));
+    if (rewritten === null) throw new Error('the setup path was not rewritten');
+    return kernel.fetch(rewritten);
+  }
+
+  it('adds exactly the public document route and the scoped asset route', () => {
+    const routes = createSetupUiRoutes(setupAssets(), { publicOrigin: HTTPS });
+    expect(routes.map((route) => [route.method, route.path])).toEqual([
+      ['GET', '/_pb/ui/setup/document'],
+      ['GET', '/_pb/ui/setup/assets/:file'],
+    ]);
+    for (const route of routes) {
+      expect(route.permission).toBeNull();
+      expect(route.needsOrg).toBe(false);
+      expect(route.boundary).toBeUndefined();
+      expect(Object.isFrozen(route)).toBe(true);
+    }
+    expect(SETUP_UI_PATH).toBe('/_pb/ui/setup');
+    expect(SETUP_DOCUMENT_ROUTE).toBe('/_pb/ui/setup/document');
+    expect(SETUP_ASSET_PREFIX).toBe('/_pb/ui/setup/assets/');
+    expect(
+      createUiRoutes(setupAssets(), { publicOrigin: HTTPS }).map((route) => route.path),
+    ).toEqual(['/_pb/ui', '/_pb/ui/assets/:file']);
+  });
+
+  it('serves the setup document without credentials, no-store, no-referrer and under the CSP', async () => {
+    const response = await document(await setupApp());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(SETUP_HTML);
+    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(response.headers.get('content-security-policy')).toBe(CSP);
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it.each(['app.0123456789ab.css', 'setup.0123456789ab.js'])(
+    'serves the referenced asset %s with immutable caching and a validator',
+    async (name) => {
+      const kernel = await setupApp();
+      const response = await kernel.fetch(get(`/_pb/ui/setup/assets/${name}`));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(SETUP_BODIES[name]);
+      expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+      expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(response.headers.get('content-security-policy')).toBe(CSP);
+      const etag = response.headers.get('etag')!;
+      const revalidated = await kernel.fetch(
+        new Request(`${HTTPS}/_pb/ui/setup/assets/${name}`, { headers: { 'if-none-match': etag } }),
+      );
+      expect(revalidated.status).toBe(304);
+    },
+  );
+
+  it.each([
+    'index.html',
+    'setup.html',
+    'manifest.json',
+    'app.abc123.js',
+    'unlisted-by-document.js',
+    'extra.json',
+    'missing.js',
+    '..%2Findex.html',
+    '.%2e%2fapp.0123456789ab.css',
+    'app.0123456789ab.css%00',
+    'app.0123456789ab.css%2Fx',
+    'APP.ABC123.CSS',
+  ])('answers the uniform 404 for %s through the setup asset route', async (name) => {
+    const assets = setupAssets();
+    const response = await (await setupApp(assets)).fetch(get(`/_pb/ui/setup/assets/${name}`));
+    expect(await errorOf(response)).toEqual({
+      status: 404,
+      code: 'not_found',
+      message: 'Route not found',
+    });
+    expect(response.headers.get('content-security-policy')).toBe(CSP);
+    expect(assets.reads.filter((read) => !['setup.html'].includes(read))).toEqual([]);
+  });
+
+  it('never lists a directory or falls back when the asset prefix has no file', async () => {
+    const kernel = await setupApp();
+    for (const path of [
+      '/_pb/ui/setup/assets/',
+      '/_pb/ui/setup/assets',
+      '/_pb/ui/setup/',
+      '/_pb/ui/setup/x',
+    ]) {
+      const response = await kernel.fetch(get(path));
+      expect(response.status).toBe(404);
+    }
+  });
+
+  it('refuses everything when the manifest or the setup document is absent', async () => {
+    for (const assets of [
+      setupAssets({ manifest: null }),
+      setupAssets({ manifest: MANIFEST, bodies: SETUP_BODIES }),
+      setupAssets({ bodies: { ...SETUP_BODIES, 'setup.html': undefined as unknown as string } }),
+    ]) {
+      const kernel = await setupApp(assets);
+      expect((await document(kernel)).status).toBe(404);
+      expect((await kernel.fetch(get('/_pb/ui/setup/assets/app.0123456789ab.css'))).status).toBe(
+        404,
+      );
+    }
+  });
+
+  it.each([
+    ['an external script', '<script src="https://cdn.example/x.js"></script>'],
+    ['a protocol-relative script', '<script src="//cdn.example/x.js"></script>'],
+    ['a relative reference', '<script src="setup.0123456789ab.js"></script>'],
+    ['the app prefix', '<script src="/_pb/ui/assets/app.abc123.js"></script>'],
+    ['the manifest', '<script src="/_pb/ui/setup/assets/manifest.json"></script>'],
+    ['the entry document', '<link href="/_pb/ui/setup/assets/index.html">'],
+    ['itself', '<link href="/_pb/ui/setup/assets/setup.html">'],
+    ['a JSON file', '<link href="/_pb/ui/setup/assets/extra.json">'],
+    ['a traversal', '<script src="/_pb/ui/setup/assets/../index.html"></script>'],
+    ['an unlisted file', '<script src="/_pb/ui/setup/assets/nope.js"></script>'],
+  ])('fails closed when the setup document references %s', async (_, reference) => {
+    const kernel = await setupApp(
+      setupAssets({ bodies: { ...SETUP_BODIES, 'setup.html': `<!doctype html>${reference}` } }),
+    );
+    expect((await document(kernel)).status).toBe(404);
+    expect((await kernel.fetch(get('/_pb/ui/setup/assets/app.0123456789ab.css'))).status).toBe(404);
+  });
+
+  it('refuses a document whose stored type differs from the manifest and an asset with a wrong type', async () => {
+    const wrongDocument = await setupApp(
+      setupAssets({ typeOverride: { 'setup.html': 'text/plain' } }),
+    );
+    expect((await document(wrongDocument)).status).toBe(404);
+    const wrongAsset = await setupApp(
+      setupAssets({ typeOverride: { 'setup.0123456789ab.js': 'text/html' } }),
+    );
+    expect((await wrongAsset.fetch(get('/_pb/ui/setup/assets/setup.0123456789ab.js'))).status).toBe(
+      404,
+    );
+  });
+
+  it('does not treat a manifest whose entry is the setup document as a setup page', async () => {
+    const kernel = await setupApp(
+      setupAssets({ manifest: { ...SETUP_MANIFEST, entry: 'setup.html' } }),
+    );
+    expect((await document(kernel)).status).toBe(404);
+  });
+
+  it('answers HEAD for the document and refuses other methods', async () => {
+    const kernel = await setupApp();
+    const head = await document(kernel, 'HEAD');
+    expect(head.status).toBe(200);
+    for (const method of ['POST', 'PUT', 'DELETE']) {
+      const response = await kernel.fetch(
+        new Request(`${HTTPS}/_pb/ui/setup`, { method, headers: { origin: HTTPS } }),
+      );
+      expect(response.status).toBeGreaterThanOrEqual(400);
+    }
+  });
+
+  it('rewrites only a GET or HEAD of the exact public setup path', () => {
+    expect(rewriteSetupRequest(new Request(`${HTTPS}/_pb/ui/setup`))?.url).toBe(
+      `${HTTPS}${SETUP_DOCUMENT_ROUTE}`,
+    );
+    expect(rewriteSetupRequest(new Request(`${HTTPS}/_pb/ui/setup?x=1`))?.url).toBe(
+      `${HTTPS}${SETUP_DOCUMENT_ROUTE}?x=1`,
+    );
+    for (const request of [
+      new Request(`${HTTPS}/_pb/ui/setup`, { method: 'POST', body: '{}' }),
+      new Request(`${HTTPS}/_pb/ui/setup/`),
+      new Request(`${HTTPS}/_pb/ui/setupx`),
+      new Request(`${HTTPS}/_pb/ui/`),
+      new Request(`${HTTPS}${SETUP_DOCUMENT_ROUTE}`),
+    ]) {
+      expect(rewriteSetupRequest(request)).toBeNull();
+    }
+  });
+
+  it('does not serve the internal document route to a direct request or a forged marker', async () => {
+    const kernel = await setupApp();
+    const direct = await kernel.fetch(get(SETUP_DOCUMENT_ROUTE));
+    expect(await errorOf(direct)).toMatchObject({ status: 404, code: 'not_found' });
+    const forged = await kernel.fetch(
+      new Request(`${HTTPS}${SETUP_DOCUMENT_ROUTE}`, { headers: { 'x-pb-setup-ui': 'guess' } }),
+    );
+    expect(forged.status).toBe(404);
+    const spoofed = rewriteSetupRequest(
+      new Request(`${HTTPS}/_pb/ui/setup`, { headers: { 'x-pb-setup-ui': 'guess' } }),
+    );
+    expect((await kernel.fetch(spoofed!)).status).toBe(200);
   });
 });

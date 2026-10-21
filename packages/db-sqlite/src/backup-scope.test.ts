@@ -99,6 +99,11 @@ describe('backup scope manifest', () => {
       upstream_state: 'exclude',
       fetch_lease: 'exclude',
       representation_clock: 'exclude',
+      vulnerability_advisory: 'exclude',
+      vulnerability_match: 'exclude',
+      vulnerability_refresh: 'exclude',
+      vulnerability_result: 'exclude',
+      vulnerability_sync_state: 'exclude',
     });
   });
 

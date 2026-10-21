@@ -25,7 +25,10 @@ function repositorySources(): Record<string, string> {
   return Object.fromEntries(
     readdirSync(sourceRoot, { recursive: true, encoding: 'utf8' })
       .map((name) => name.replaceAll('\\', '/'))
-      .filter((name) => name.endsWith('.ts') && !excluded.test(name))
+      .filter(
+        (name) =>
+          name.endsWith('.ts') && (!excluded.test(name) || name === 'testing/migrated-database.ts'),
+      )
       .map((name) => [name, readFileSync(new URL(name, sourceRoot), 'utf8')]),
   );
 }
@@ -431,18 +434,19 @@ describe('mutation table completeness', () => {
     );
   });
 
-  it('scans every source outside tests, migrations, contract and testing', () => {
+  it('scans production sources and the registered fixture listing builder', () => {
     const files = Object.keys(repositorySources());
     expect(files).toEqual(
       expect.arrayContaining([
         'kysely.ts',
         'internal/catalogue-write-guard.ts',
         'repositories/access.ts',
+        'testing/migrated-database.ts',
       ]),
     );
     expect(
       files.filter((name) => /\.test\.ts$|^(migrations|contract|testing)\//.test(name)),
-    ).toEqual([]);
+    ).toEqual(['testing/migrated-database.ts']);
   });
 
   it('requires registration for SQL factories, including create arrow constants', () => {

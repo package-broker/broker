@@ -1,18 +1,31 @@
+import type { $ZodType, output } from 'zod/v4/core';
 import { CsrfError, assertSameOrigin } from './csrf.js';
 import { sessionMetaOf } from './session.js';
 import type { LocalLoginService } from './local-login.js';
 import type { LocalSetupService } from './local-setup.js';
 import type { SessionService } from './session.js';
 import type { OrgContext } from '../db/port.js';
+import {
+  localLoginBody,
+  localReauthBody,
+  localSetupFinishBody,
+  localSetupStartBody,
+} from '../api/auth-schemas.js';
+import { apiError } from '../api/response.js';
+import { validateInput, type ValidationDetail } from '../api/validate.js';
 import { envelopeResponse } from '../kernel/errors.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { RequestContext, RouteDefinition } from '../plugin.js';
 
 const MAX_BODY_BYTES = 8192;
-const MAX_FIELD_LENGTH = 1024;
 const JSON_MEDIA_TYPE = 'application/json';
 
-type Fields = Readonly<Record<string, unknown>>;
+class InvalidBodyError extends Error {
+  constructor(readonly details: readonly ValidationDetail[]) {
+    super('invalid_request');
+    this.name = 'InvalidBodyError';
+  }
+}
 
 class BadBodyError extends Error {
   constructor() {
@@ -53,7 +66,7 @@ async function readBytes(request: Request): Promise<Uint8Array> {
   return bytes;
 }
 
-async function readFields(request: Request): Promise<Fields> {
+async function readFields<S extends $ZodType>(request: Request, schema: S): Promise<output<S>> {
   const mediaType = request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
   if (mediaType !== JSON_MEDIA_TYPE) throw new BadBodyError();
   const bytes = await readBytes(request);
@@ -63,14 +76,13 @@ async function readFields(request: Request): Promise<Fields> {
   } catch {
     throw new BadBodyError();
   }
-  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-    ? (parsed as Fields)
-    : {};
-}
-
-function text(fields: Fields, name: string): string | null {
-  const value = Object.hasOwn(fields, name) ? fields[name] : undefined;
-  return typeof value === 'string' && value.length <= MAX_FIELD_LENGTH ? value : null;
+  const result = validateInput(schema, parsed);
+  if (!result.ok) {
+    throw new InvalidBodyError(
+      result.details.map((detail) => ({ ...detail, path: `/body${detail.path}` })),
+    );
+  }
+  return result.data;
 }
 
 function orgOf(ctx: RequestContext): OrgContext {
@@ -120,6 +132,11 @@ export function createLocalRoutes(deps: {
       } catch (error) {
         if (error instanceof CsrfError) return forbidden(ctx);
         if (error instanceof BadBodyError) return badRequest(ctx);
+        if (error instanceof InvalidBodyError) {
+          const response = apiError('invalid_request', ctx.requestId, error.details);
+          response.headers.set('x-request-id', ctx.requestId);
+          return response;
+        }
         throw error;
       }
     };
@@ -130,10 +147,9 @@ export function createLocalRoutes(deps: {
       path: '/_pb/auth/local/setup/start',
       permission: null,
       handler: guarded(async (ctx, org) => {
-        const fields = await readFields(ctx.request);
-        const token = text(fields, 'token');
-        const result = token === null ? null : await setup.start(org, token);
-        if (result === null || !result.ok) {
+        const { token } = await readFields(ctx.request, localSetupStartBody);
+        const result = await setup.start(org, token);
+        if (!result.ok) {
           log({ level: 'info', event: 'auth.local.setup.refused', requestId: ctx.requestId });
           return invalidCredentials(ctx);
         }
@@ -148,15 +164,9 @@ export function createLocalRoutes(deps: {
       path: '/_pb/auth/local/setup/finish',
       permission: null,
       handler: guarded(async (ctx, org) => {
-        const fields = await readFields(ctx.request);
-        const token = text(fields, 'token');
-        const password = text(fields, 'password');
-        const code = text(fields, 'code');
-        const result =
-          token === null || password === null || code === null
-            ? null
-            : await setup.finish(org, { token, password, code }, await sessionMetaOf(ctx.request));
-        if (result !== null && result.ok) {
+        const body = await readFields(ctx.request, localSetupFinishBody);
+        const result = await setup.finish(org, body, await sessionMetaOf(ctx.request));
+        if (result.ok) {
           log({
             level: 'info',
             event: 'auth.local.setup.completed',
@@ -166,7 +176,7 @@ export function createLocalRoutes(deps: {
           return noContent(result.cookies);
         }
         log({ level: 'info', event: 'auth.local.setup.refused', requestId: ctx.requestId });
-        if (result !== null && result.problems !== undefined && result.problems.length > 0) {
+        if (result.problems !== undefined && result.problems.length > 0) {
           const body = {
             error: {
               code: 'weak_password',
@@ -188,15 +198,9 @@ export function createLocalRoutes(deps: {
       path: '/_pb/auth/local/login',
       permission: null,
       handler: guarded(async (ctx, org) => {
-        const fields = await readFields(ctx.request);
-        const email = text(fields, 'email');
-        const password = text(fields, 'password');
-        const code = text(fields, 'code');
-        const result =
-          email === null || password === null || code === null
-            ? null
-            : await local.login(org, { email, password, code }, await sessionMetaOf(ctx.request));
-        if (result !== null && result.ok) {
+        const body = await readFields(ctx.request, localLoginBody);
+        const result = await local.login(org, body, await sessionMetaOf(ctx.request));
+        if (result.ok) {
           log({
             level: 'info',
             event: 'auth.login.succeeded',
@@ -220,17 +224,12 @@ export function createLocalRoutes(deps: {
       path: '/_pb/auth/local/reauth',
       permission: null,
       handler: guarded(async (ctx, org) => {
+        const body = await readFields(ctx.request, localReauthBody);
         const authenticated = await sessions.authenticate(org, ctx.request);
         if (authenticated === null) return unauthorized(ctx);
         await sessions.assertCsrf(ctx.request, authenticated);
-        const fields = await readFields(ctx.request);
-        const password = text(fields, 'password');
-        const code = text(fields, 'code');
-        const result =
-          password === null || code === null
-            ? null
-            : await local.reauth(org, authenticated, { password, code });
-        if (result !== null && result.ok) {
+        const result = await local.reauth(org, authenticated, body);
+        if (result.ok) {
           log({
             level: 'info',
             event: 'auth.reauth.succeeded',

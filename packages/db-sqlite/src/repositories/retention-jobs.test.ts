@@ -3,6 +3,10 @@ import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { blobStorageKey, type ByteStore, type Sha256 } from '@package-broker/core/platform/blob';
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
 import type { JobContext, Jobs } from '@package-broker/core/platform/jobs';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { fixedClock, ulid } from '@package-broker/core/ids';
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
+import { sourceSyncJob } from '@package-broker/core/ingest/source-sync-job';
 import {
   createBlobPurgeJob,
   createRetentionScanJob,
@@ -12,6 +16,7 @@ import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated
 import { createBlobRepository } from './blob.js';
 import { createBlobReferenceReader } from './blob-references.js';
 import { createSourceRepository } from './source.js';
+import { createJobRepository } from './job.js';
 
 const D1 = 'a'.repeat(64) as Sha256;
 const D2 = 'b'.repeat(64) as Sha256;
@@ -135,6 +140,29 @@ async function pastDeadline(): Promise<void> {
 }
 
 describe('scan, schedule, deadline, claim and removal', () => {
+  it('clears an existing schedule once and does not reschedule a reference missing its release stamp', async () => {
+    const h = harness();
+    await publish(h.repo);
+    await reference('tombstoned');
+    await exec(
+      "UPDATE package SET status = 'removed_upstream', removed_upstream_at = NULL WHERE org_id = ?",
+      a.orgId,
+    );
+    await exec(
+      "UPDATE blob SET purge_after = '2999-01-01T00:00:00.000Z' WHERE org_id = ? AND sha256 = ?",
+      a.orgId,
+      D1,
+    );
+    const softDelete = vi.spyOn(h.lifecycle, 'softDelete');
+    const unschedule = vi.spyOn(h.lifecycle, 'unschedule');
+    await h.runScan();
+    await h.runScan();
+    expect(softDelete).not.toHaveBeenCalled();
+    expect(unschedule).toHaveBeenCalledExactlyOnceWith(a, D1);
+    expect((await rowOf(D1))?.purge_after).toBeNull();
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
   it('keeps a removed-upstream blob for the retention, then removes it after the deadline', async () => {
     const h = harness();
     await publish(h.repo);
@@ -343,6 +371,55 @@ describe('source poll', () => {
       )[0]?.next_poll_at ?? null
     );
   }
+
+  it.each(['rejects', 'skips'] as const)(
+    'dedupes the second tick through SQLite when the first deferPoll %s',
+    async (failure) => {
+      const original = '2020-01-01T00:00:00.000Z';
+      await source('s1', a, original);
+      const sources = createSourceRepository(executor);
+      const defer = vi.spyOn(sources, 'deferPoll');
+      if (failure === 'rejects') defer.mockRejectedValueOnce(new Error('down'));
+      else defer.mockResolvedValueOnce(false);
+      const jobs = createRepositoryJobs({
+        store: createJobRepository(executor),
+        jobs: [
+          registerCoreJob({
+            ...sourceSyncJob,
+            handler: (input, job) => sourceSyncJob.handler(sourceSyncJob.validate(input), job),
+          }),
+        ],
+        clock: fixedClock(new Date().toISOString()),
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null });
+      const enqueue = vi.fn(jobs.enqueue);
+      const poll = createSourcePollJob({ sources });
+      const tick = () =>
+        poll.handler(poll.validate({}), {
+          org: a,
+          signal: new AbortController().signal,
+          ports: { platform: { jobs: { ...jobs, enqueue } } },
+          observability: { counter: vi.fn(), histogram: vi.fn(), log: vi.fn() },
+        } as unknown as JobContext);
+
+      await tick();
+      expect(await nextPollAt('s1')).toBe(original);
+      await tick();
+      expect(enqueue).toHaveBeenCalledTimes(2);
+      const first = await enqueue.mock.results[0]?.value;
+      expect(first).toEqual({ id: expect.any(String), created: true });
+      expect(await enqueue.mock.results[1]?.value).toEqual({ id: first?.id, created: false });
+      expect(await nextPollAt('s1')).not.toBe(original);
+      expect(
+        await executor.all({
+          sql: 'SELECT type, payload_json FROM job WHERE org_id = ?',
+          params: [a.orgId],
+        }),
+      ).toEqual([
+        { type: 'core:source-sync:v1', payload_json: '{"reason":"poll","sourceId":"s1"}' },
+      ]);
+    },
+  );
 
   it('defers a source by its interval only while next_poll_at is unchanged, in its own organization', async () => {
     await source('s1', a, '2020-01-01T00:00:00.000Z');

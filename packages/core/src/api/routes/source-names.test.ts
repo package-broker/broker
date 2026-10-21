@@ -1,5 +1,3 @@
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { expect, it, vi } from 'vitest';
 import { SESSION_COOKIE } from '../../auth/cookies.js';
 import { sha256Hex } from '../../auth/primitives.js';
@@ -8,9 +6,9 @@ import {
   patValidationGate,
   type EngineTokenAccess,
 } from '../../authz/engine.js';
-import { orgContext } from '../../db/port.js';
-import type { SourceRecord } from '../../db/source.js';
-import { fixedClock } from '../../ids.js';
+import { orgContext, type OrgContext, type SqlExecutor, type Statement } from '../../db/port.js';
+import type { RegisteredNameRepository, SourceRecord, SourceRepository } from '../../db/source.js';
+import { fixedClock, ulid } from '../../ids.js';
 import { createKernel } from '../../kernel/kernel.js';
 import { createKeyring } from '../../secrets/keyring.js';
 import { formatToken } from '../../secrets/token-format.js';
@@ -271,174 +269,253 @@ const writes = [
   ['PUT', orderPath, { sourceIds: [SOURCE] }],
 ] as const;
 
-function sqliteNameWrite(
+async function sqliteNameWrite(
   method: 'POST' | 'DELETE',
   state: 'active' | 'archived' | 'foreign' | 'missing',
 ) {
-  return JSON.parse(
-    execFileSync(
-      process.execPath,
-      [
-        '--experimental-transform-types',
-        '--input-type=module',
-        '-e',
-        `
-        import { readFileSync } from 'node:fs';
-        import { registerHooks } from 'node:module';
-        import { pathToFileURL } from 'node:url';
-        const root = pathToFileURL(process.cwd() + '/');
-        registerHooks({
-          resolve(specifier, context, nextResolve) {
-            if (specifier.startsWith('@package-broker/core/'))
-              return nextResolve(new URL('packages/core/src/' + specifier.slice('@package-broker/core/'.length) + '.ts', root).href, context);
-            if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL?.includes('/src/'))
-              return nextResolve(specifier.slice(0, -3) + '.ts', context);
-            const resolved = nextResolve(specifier, context);
-            if (resolved.url.startsWith(root.href + 'packages/') && resolved.url.includes('/dist/'))
-              throw new Error('repository tests must run without build artifacts');
-            return resolved;
-          },
-        });
-        const { openMigratedDatabase } = await import('./packages/db-sqlite/src/testing/migrated-database.ts');
-        const { createSourceRepository } = await import('./packages/db-sqlite/src/repositories/source.ts');
-        const { createRegisteredNameRepository } = await import('./packages/db-sqlite/src/repositories/registered-name.ts');
-        const { sourceNameRoutes } = await import('./packages/core/src/api/routes/source-names.ts');
-        const { createSourceService } = await import('./packages/core/src/sources/source-service.ts');
-        const { createKernel } = await import('./packages/core/src/kernel/kernel.ts');
-        const { createAuthorizationEngine, patValidationGate } = await import('./packages/core/src/authz/engine.ts');
-        const { sha256Hex } = await import('./packages/core/src/auth/primitives.ts');
-        const { SESSION_COOKIE } = await import('./packages/core/src/auth/cookies.ts');
-        const { createKeyring } = await import('./packages/core/src/secrets/keyring.ts');
-        const { ulid, fixedClock } = await import('./packages/core/src/ids.ts');
-        const { method, state, projectId, sourceId, nameId } = JSON.parse(readFileSync(0, 'utf8'));
-        const database = await openMigratedDatabase({ twoOrganizations: true });
-        try {
-          const ctx = database.orgs.a;
-          const executor = database.executor;
-          const query = (sql, ...params) => ({ sql, params });
-          const batch = (...queries) => executor.batch(queries);
-          const now = new Date().toISOString();
-          const origin = 'https://broker.test';
-          const csrf = 'B'.repeat(43);
-          const anchors = [{ provider: 'oidc', anchor: 'oidc:https://idp.example.test', emailAuthoritative: true, emailAuthoritativeDomains: ['example.test'] }];
-          await batch(
-            query("INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('writer', ?, 'writer', 'Writer', 'organization', 0)", ctx.orgId),
-            query("INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'writer', 'org:sources:write')", ctx.orgId),
-            query("INSERT INTO user_account (id, org_id, email) VALUES ('writer', ?, 'writer@example.test')", ctx.orgId),
-            query("INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, 'oidc', 'oidc:https://idp.example.test')", ctx.orgId),
-            query("INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES ('identity', ?, 'writer', 'oidc', 'writer', 'writer@example.test', 1, ?)", ctx.orgId, now),
-            query("INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, last_seen_at, expires_at) VALUES ('session', ?, 'writer', ?, ?, ?, ?, '2999-01-01T00:00:00.000Z')", ctx.orgId, 'a'.repeat(64), await sha256Hex(csrf), now, now),
-            query("INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES ('grant', ?, 'email', 'writer@example.test', 'organization', 'writer')", ctx.orgId),
-            query("INSERT INTO project (id, org_id, slug, name, status) VALUES (?, ?, 'owner', 'Owner', 'active')", projectId, ctx.orgId),
-            query("INSERT INTO source (id, org_id, project_id, name, ecosystem, type, url, config_json, status) VALUES (?, ?, ?, 'private', 'composer', 'composer_repository', 'https://repo.example.test', '{}', 'active')", sourceId, ctx.orgId, projectId),
-            query("INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'vendor/*')", nameId, ctx.orgId, sourceId),
-          );
-          if (state === 'archived')
-            await batch(query("UPDATE project SET status = 'archived' WHERE org_id = ? AND id = ?", ctx.orgId, projectId));
-          if (state === 'foreign' || state === 'missing') {
-            await executor.all(query('PRAGMA foreign_keys = OFF'));
-            try {
-              await batch(state === 'foreign'
-                ? query('UPDATE project SET org_id = ? WHERE org_id = ? AND id = ?', database.orgs.b.orgId, ctx.orgId, projectId)
-                : query('DELETE FROM project WHERE org_id = ? AND id = ?', ctx.orgId, projectId));
-            } finally { await executor.all(query('PRAGMA foreign_keys = ON')); }
-          }
-          const sources = createSourceRepository(executor);
-          const registeredNames = createRegisteredNameRepository(executor);
-          const operation = method === 'POST' ? 'add' : 'remove';
-          const write = registeredNames[operation];
-          let writeCalls = 0;
-          registeredNames[operation] = (...args) => { writeCalls++; return write(...args); };
-          const ids = { ulid };
-          const clock = fixedClock(now);
-          const logs = [];
-          const log = (entry) => logs.push(JSON.stringify(entry));
-          const service = createSourceService({
-            sources, registeredNames, ids, log, providerAnchors: anchors,
-            credentials: { prepare: async () => { throw new Error('unused'); } },
-            credentialRepository: { get: async () => null },
-            organizations: { get: async () => null },
-            catalogue: { previewWinners: async () => [] },
-            policy: { runtime: 'node', allowPrivateHosts: [], selfOrigins: [origin] },
-          });
-          const app = await createKernel({
-            platform: 'node', plugins: [],
-            coreRoutes: sourceNameRoutes({
-              service, sources, registeredNames, ids, clock, clientIp: () => '192.0.2.1',
-              visibility: { setOrder: async () => { throw new Error('unused'); } },
-              projectSources: { list: async () => [] }, projects: { get: async () => null },
-            }),
-            ports: { organizations: { get: async () => null }, ids, clock },
-            resolveOrg: async () => ctx, health: async () => true, log,
-            authorization: createAuthorizationEngine({
-              access: {
-                lookupSession: async () => ({
-                  session: { id: 'session', csrfHash: await sha256Hex(csrf) },
-                  user: { id: 'writer' }, identity: null, protectedHolder: false, project: null,
-                  organizationPermissions: ['org:sources:write'], projectPermissions: [],
-                }),
-                lookupToken: async () => null, touchSession: async () => true, touchToken: async () => true,
-              },
-              tokenUse: {
-                keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
-                nowMs: () => clock.now().getTime(), dispatch: (run) => { void run(); }, log,
-              },
-              patValidation: patValidationGate, publicOrigin: origin, providerAnchors: async () => anchors,
-            }),
-          });
-          const snapshot = async () => ({
-            names: await executor.all(query('SELECT * FROM registered_name WHERE org_id = ? ORDER BY id', ctx.orgId)),
-            sources: await executor.all(query('SELECT * FROM source WHERE org_id = ? ORDER BY id', ctx.orgId)),
-            audit: await executor.all(query('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', ctx.orgId)),
-            epoch: await executor.all(query('SELECT * FROM cache_epoch WHERE org_id = ?', ctx.orgId)),
-          });
-          const request = (id) => app.fetch(new Request(origin + '/_pb/sources/' + id + '/names' + (method === 'DELETE' ? '/' + nameId : ''), {
-            method,
-            headers: { origin, 'content-type': 'application/json', cookie: SESSION_COOKIE + '=' + 'A'.repeat(43), 'x-csrf-token': csrf },
-            ...(method === 'POST' ? { body: JSON.stringify({ pattern: 'other/*' }) } : {}),
-          }));
-          const normalize = async (response) => {
-            const text = await response.text();
-            const body = text === '' ? null : JSON.parse(text);
-            if (body?.error) delete body.error.requestId;
-            return { status: response.status, body, headers: [...response.headers].filter(([key]) => key !== 'x-request-id') };
-          };
-          const before = await snapshot();
-          const response = await normalize(await request(sourceId));
-          const after = await snapshot();
-          const absent = await normalize(await request(ulid()));
-          process.stdout.write(JSON.stringify({ before, after, response, absent, logs, writeCalls }));
-        } finally { await database.close(); }
-        `,
-      ],
+  const [{ openMigratedDatabase }, { createSourceRepository }, { createRegisteredNameRepository }] =
+    await Promise.all([
+      vi.importActual<{
+        openMigratedDatabase(options: { twoOrganizations: true }): Promise<{
+          executor: SqlExecutor;
+          orgs: { a: OrgContext; b: OrgContext } | null;
+          close(): Promise<void>;
+        }>;
+      }>('@package-broker/db-sqlite/testing/migrated-database'),
+      vi.importActual<{
+        createSourceRepository(executor: SqlExecutor): SourceRepository;
+      }>('@package-broker/db-sqlite/repositories/source'),
+      vi.importActual<{
+        createRegisteredNameRepository(executor: SqlExecutor): RegisteredNameRepository;
+      }>('@package-broker/db-sqlite/repositories/registered-name'),
+    ]);
+  const projectId = PROJECT;
+  const sourceId = SOURCE;
+  const nameId = NAME;
+  const database = await openMigratedDatabase({ twoOrganizations: true });
+  try {
+    if (database.orgs === null) throw new Error('missing test organizations');
+    const ctx = database.orgs.a;
+    const executor = database.executor;
+    const query = (sql: string, ...params: Statement['params']): Statement => ({ sql, params });
+    const batch = (...queries: Statement[]) => executor.batch(queries);
+    const now = new Date().toISOString();
+    const origin = 'https://broker.test';
+    const csrf = 'B'.repeat(43);
+    const anchors = [
       {
-        cwd: fileURLToPath(new URL('../../../../../', import.meta.url)),
-        input: JSON.stringify({
-          method,
-          state,
-          projectId: PROJECT,
-          sourceId: SOURCE,
-          nameId: NAME,
-        }),
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        provider: 'oidc',
+        anchor: 'oidc:https://idp.example.test',
+        emailAuthoritative: true,
+        emailAuthoritativeDomains: ['example.test'],
       },
-    ),
-  ) as {
-    before: unknown;
-    after: unknown;
-    response: { status: number; body: unknown };
-    absent: unknown;
-    logs: string[];
-    writeCalls: number;
-  };
+    ];
+    await batch(
+      query(
+        "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('writer', ?, 'writer', 'Writer', 'organization', 0)",
+        ctx.orgId,
+      ),
+      query(
+        "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'writer', 'org:sources:write')",
+        ctx.orgId,
+      ),
+      query(
+        "INSERT INTO user_account (id, org_id, email) VALUES ('writer', ?, 'writer@example.test')",
+        ctx.orgId,
+      ),
+      query(
+        "INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, 'oidc', 'oidc:https://idp.example.test')",
+        ctx.orgId,
+      ),
+      query(
+        "INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES ('identity', ?, 'writer', 'oidc', 'writer', 'writer@example.test', 1, ?)",
+        ctx.orgId,
+        now,
+      ),
+      query(
+        "INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, created_at, last_seen_at, expires_at) VALUES ('session', ?, 'writer', ?, ?, ?, ?, '2999-01-01T00:00:00.000Z')",
+        ctx.orgId,
+        'a'.repeat(64),
+        await sha256Hex(csrf),
+        now,
+        now,
+      ),
+      query(
+        "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES ('grant', ?, 'email', 'writer@example.test', 'organization', 'writer')",
+        ctx.orgId,
+      ),
+      query(
+        "INSERT INTO project (id, org_id, slug, name, status) VALUES (?, ?, 'owner', 'Owner', 'active')",
+        projectId,
+        ctx.orgId,
+      ),
+      query(
+        "INSERT INTO source (id, org_id, project_id, name, ecosystem, type, url, config_json, status) VALUES (?, ?, ?, 'private', 'composer', 'composer_repository', 'https://repo.example.test', '{}', 'active')",
+        sourceId,
+        ctx.orgId,
+        projectId,
+      ),
+      query(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'vendor/*')",
+        nameId,
+        ctx.orgId,
+        sourceId,
+      ),
+    );
+    if (state === 'archived')
+      await batch(
+        query(
+          "UPDATE project SET status = 'archived' WHERE org_id = ? AND id = ?",
+          ctx.orgId,
+          projectId,
+        ),
+      );
+    if (state === 'foreign' || state === 'missing') {
+      await executor.all(query('PRAGMA foreign_keys = OFF'));
+      try {
+        await batch(
+          state === 'foreign'
+            ? query(
+                'UPDATE project SET org_id = ? WHERE org_id = ? AND id = ?',
+                database.orgs.b.orgId,
+                ctx.orgId,
+                projectId,
+              )
+            : query('DELETE FROM project WHERE org_id = ? AND id = ?', ctx.orgId, projectId),
+        );
+      } finally {
+        await executor.all(query('PRAGMA foreign_keys = ON'));
+      }
+    }
+    const sources = createSourceRepository(executor);
+    const registeredNames = createRegisteredNameRepository(executor);
+    const write =
+      method === 'POST' ? vi.spyOn(registeredNames, 'add') : vi.spyOn(registeredNames, 'remove');
+    const ids = { ulid };
+    const clock = fixedClock(now);
+    const logs: string[] = [];
+    const log = (entry: unknown) => logs.push(JSON.stringify(entry));
+    const service = createSourceService({
+      sources,
+      registeredNames,
+      ids,
+      log,
+      providerAnchors: anchors,
+      credentials: {
+        prepare: async () => {
+          throw new Error('unused');
+        },
+      },
+      credentialRepository: { get: async () => null },
+      organizations: { get: async () => null },
+      catalogue: { previewWinners: async () => [] },
+      policy: { runtime: 'node', allowPrivateHosts: [], selfOrigins: [origin] },
+    });
+    const app = await createKernel({
+      platform: 'node',
+      plugins: [],
+      coreRoutes: sourceNameRoutes({
+        service,
+        sources,
+        registeredNames,
+        ids,
+        clock,
+        clientIp: () => '192.0.2.1',
+        visibility: {
+          setOrder: async () => {
+            throw new Error('unused');
+          },
+        },
+        projectSources: { list: async () => [] },
+        projects: { get: async () => null },
+      }),
+      ports: { organizations: { get: async () => null }, ids, clock },
+      resolveOrg: async () => ctx,
+      health: async () => true,
+      log,
+      authorization: createAuthorizationEngine({
+        access: {
+          lookupSession: async () => ({
+            session: { id: 'session', csrfHash: await sha256Hex(csrf) },
+            user: { id: 'writer' },
+            identity: null,
+            protectedHolder: false,
+            project: null,
+            organizationPermissions: ['org:sources:write'],
+            projectPermissions: [],
+          }),
+          lookupToken: async () => null,
+          touchSession: async () => true,
+          touchToken: async () => true,
+        },
+        tokenUse: {
+          keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
+          nowMs: () => clock.now().getTime(),
+          dispatch: (run) => {
+            void run();
+          },
+          log,
+        },
+        patValidation: patValidationGate,
+        publicOrigin: origin,
+        providerAnchors: async () => anchors,
+      }),
+    });
+    const snapshot = async () => ({
+      names: await executor.all(
+        query('SELECT * FROM registered_name WHERE org_id = ? ORDER BY id', ctx.orgId),
+      ),
+      sources: await executor.all(
+        query('SELECT * FROM source WHERE org_id = ? ORDER BY id', ctx.orgId),
+      ),
+      audit: await executor.all(
+        query('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', ctx.orgId),
+      ),
+      epoch: await executor.all(query('SELECT * FROM cache_epoch WHERE org_id = ?', ctx.orgId)),
+    });
+    const request = (id: string) =>
+      app.fetch(
+        new Request(
+          origin + '/_pb/sources/' + id + '/names' + (method === 'DELETE' ? '/' + nameId : ''),
+          {
+            method,
+            headers: {
+              origin,
+              'content-type': 'application/json',
+              cookie: SESSION_COOKIE + '=' + 'A'.repeat(43),
+              'x-csrf-token': csrf,
+            },
+            ...(method === 'POST' ? { body: JSON.stringify({ pattern: 'other/*' }) } : {}),
+          },
+        ),
+      );
+    const normalize = async (response: Response) => {
+      const text = await response.text();
+      const body = (text === '' ? null : JSON.parse(text)) as {
+        error?: { requestId?: string };
+      } | null;
+      if (body?.error) delete body.error.requestId;
+      return {
+        status: response.status,
+        body,
+        headers: [...response.headers].filter(([key]) => key !== 'x-request-id'),
+      };
+    };
+    const before = await snapshot();
+    const response = await normalize(await request(sourceId));
+    const after = await snapshot();
+    const absent = await normalize(await request(ulid()));
+    return { before, after, response, absent, logs, writeCalls: write.mock.calls.length };
+  } finally {
+    await database.close();
+  }
 }
 
 for (const method of ['POST', 'DELETE'] as const) {
   it.each(['archived', 'foreign', 'missing'] as const)(
     `uniformly hides a source when its owning project is %s in a SQLite-backed ${method} name write`,
-    (state) => {
-      const result = sqliteNameWrite(method, state);
+    async (state) => {
+      const result = await sqliteNameWrite(method, state);
       expect(result.response.status).toBe(404);
       expect(result.response).toEqual(result.absent);
       expect(result.after).toEqual(result.before);
@@ -448,8 +525,8 @@ for (const method of ['POST', 'DELETE'] as const) {
     },
   );
 
-  it(`allows a SQLite-backed ${method} name write for an active owning project`, () => {
-    const result = sqliteNameWrite(method, 'active');
+  it(`allows a SQLite-backed ${method} name write for an active owning project`, async () => {
+    const result = await sqliteNameWrite(method, 'active');
     expect(result.response.status).toBe(method === 'POST' ? 201 : 200);
     expect(result.after).not.toEqual(result.before);
     expect(result.writeCalls).toBe(1);

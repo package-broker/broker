@@ -52,8 +52,8 @@ async function seed(executor: SqlExecutor, ecosystem: 'npm' | 'composer'): Promi
     [ctx.orgId, ecosystem, packageName(ecosystem), NOW],
   );
   await run(
-    "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, 'package', 'subscription')",
-    [ctx.orgId, actor.projectId],
+    "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, 'package', 'subscription', ?, ?)",
+    [ctx.orgId, actor.projectId, ecosystem, packageName(ecosystem)],
   );
   for (let index = 0; index < VERSIONS; index++) {
     const metadata = {

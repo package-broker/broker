@@ -416,13 +416,15 @@ export interface ProjectSourceTable {
   created_at: Generated<string>;
 }
 
-/** Mirrors `project_package` in `migrations/0001_init.sql`. */
+/** Mirrors `project_package` in `migrations/0024_closure_edge_indexes.sql`. */
 export interface ProjectPackageTable {
   org_id: string;
   project_id: string;
   package_id: string;
   origin: ProjectPackageOrigin;
   created_at: Generated<string>;
+  ecosystem: Ecosystem;
+  name: string;
 }
 
 /** Mirrors `project_package_pattern` in `migrations/0001_init.sql`. */

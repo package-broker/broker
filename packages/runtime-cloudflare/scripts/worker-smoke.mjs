@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -12,6 +12,8 @@ import { DEFAULT_ROLES } from '@package-broker/core/authz/permissions';
 import { DbError } from '@package-broker/core/db/errors';
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
+import { blobStorageKey } from '@package-broker/core/platform/blob';
+import { createScopedCache, defaultEntry } from '@package-broker/core/platform/cache';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
@@ -19,6 +21,7 @@ import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source
 import { planMigrations } from '@package-broker/db-sqlite/migrations/plan';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor } from '@package-broker/runtime-cloudflare/db/d1-executor';
+import { createCacheApiAdapter } from '../dist/cache/cache-api.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEADLINE_MS = 60_000;
@@ -90,6 +93,14 @@ async function waitForAuditLog(predicate, label, limitMs) {
   }
   throw new Error(`audit jobs: missing ${label}`);
 }
+async function bundleFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true, recursive: true });
+  return entries
+    .filter((entry) => entry.isFile() && /\.(?:m?js|json)$/.test(entry.name))
+    .map((entry) => join(entry.parentPath, entry.name))
+    .filter((path) => !path.includes(`${join(directory, 'assets')}/`));
+}
+
 let step = 'startup';
 let mf;
 let cleanupPromise;
@@ -554,7 +565,7 @@ async function run() {
       },
     ]);
     const jobs = createJobRepository(executor);
-    const runAudit = async (type) => {
+    const enqueueAudit = async (type) => {
       const id = ulid();
       await jobs.enqueue(orgContext(orgId), {
         id,
@@ -567,14 +578,17 @@ async function run() {
         projectId: null,
         initiatorTokenId: null,
       });
-      const result = await entry.queue('pb-smoke-jobs', [
-        {
-          id,
-          timestamp: new Date(),
-          attempts: 1,
-          body: { v: 1, org: orgId, job: id },
-        },
-      ]);
+      return id;
+    };
+    const delivery = (id, attempts) => ({
+      id,
+      timestamp: new Date(),
+      attempts,
+      body: { v: 1, org: orgId, job: id },
+    });
+    const runAudit = async (type) => {
+      const id = await enqueueAudit(type);
+      const result = await entry.queue('pb-smoke-jobs', [delivery(id, 1)]);
       assert.equal(result.outcome, 'ok', `queue execution of ${type}`);
       assert.equal((await jobs.status(orgContext(orgId), id))?.state, 'succeeded', type);
       return id;
@@ -592,6 +606,30 @@ async function run() {
       'verification success',
       limitMs,
     );
+    step = 'delivering one queue message more than once';
+    const doubled = await enqueueAudit('core:audit-verify:v1');
+    const firstDelivery = await entry.queue('pb-smoke-jobs', [delivery(doubled, 1)]);
+    assert.equal(firstDelivery.outcome, 'ok', 'first delivery');
+    await waitForAuditLog(
+      (message) => message.includes('audit.verified') && message.includes(doubled),
+      'verification of the duplicated job',
+      limitMs,
+    );
+    const redelivery = await entry.queue('pb-smoke-jobs', [
+      delivery(doubled, 2),
+      delivery(doubled, 3),
+    ]);
+    assert.equal(redelivery.outcome, 'ok', 'redelivery');
+    assert.equal((await jobs.status(orgContext(orgId), doubled))?.state, 'succeeded');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      workerLogs.filter(
+        (message) => message.includes('audit.verified') && message.includes(doubled),
+      ).length,
+      1,
+      'a duplicate queue delivery must run the job once',
+    );
+    console.log('smoke:cloudflare duplicate queue delivery ran the job once');
     step = 'detecting audit tampering through the built Worker';
     await executor.batch([
       {
@@ -614,6 +652,118 @@ async function run() {
     );
     console.log(
       'smoke:cloudflare registered audit schedules, sealed, verified and detected tampering',
+    );
+
+    step = 'reading a stored blob back through the built Worker';
+    const seedRow = (sql, params) => executor.batch([{ sql, params }]);
+    const catalogueProject = ulid();
+    const catalogueSource = ulid();
+    const cataloguePackage = ulid();
+    const catalogueVersion = ulid();
+    const blobId = ulid();
+    const blobBytes = randomBytes(2048);
+    const blobDigest = createHash('sha256').update(blobBytes).digest('hex');
+    const blobKey = blobStorageKey(orgId, blobDigest);
+    await seedRow('INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)', [
+      catalogueProject,
+      orgId,
+      'blobs',
+      'Blobs',
+    ]);
+    await seedRow(
+      "INSERT INTO source (id, org_id, project_id, name, ecosystem, type, url, config_json, removal_policy) VALUES (?, ?, NULL, 'blob-source', 'composer', 'composer_repository', 'https://composer.smoke.test', '{}', 'flag')",
+      [catalogueSource, orgId],
+    );
+    await seedRow(
+      'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 100)',
+      [orgId, catalogueProject, catalogueSource],
+    );
+    await seedRow(
+      "INSERT INTO package (id, org_id, source_id, ecosystem, name, last_synced_at) VALUES (?, ?, ?, 'composer', 'smoke/lib', '2026-10-19T00:00:00.000Z')",
+      [cataloguePackage, orgId, catalogueSource],
+    );
+    await seedRow(
+      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      [orgId, catalogueProject, cataloguePackage],
+    );
+    await seedRow(
+      'INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json) VALUES (?, ?, ?, \'1.0.0\', \'1.0.0.0\', \'2020-01-01T00:00:00.000Z\', \'import_time\', \'{"name":"smoke/lib","source":{"type":"git","url":"https://git.smoke.test/lib.git","reference":"r1"}}\')',
+      [catalogueVersion, orgId, cataloguePackage],
+    );
+    await (await mf.getR2Bucket('STORAGE')).put(blobKey, blobBytes);
+    await seedRow(
+      "INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, media_type) VALUES (?, ?, ?, ?, ?, 'application/zip')",
+      [blobId, orgId, blobDigest, blobBytes.byteLength, blobKey],
+    );
+    await seedRow("UPDATE version SET blob_id = ?, dist_type = 'zip' WHERE id = ?", [
+      blobId,
+      catalogueVersion,
+    ]);
+    const distPath = `/blobs/dist/smoke/lib/${catalogueVersion}.1.zip`;
+    await expectStatus('dist without credentials', await dispatch(distPath, limitMs), 401);
+    const served = await send(distPath, limitMs, { cookie: cookiesOf(loggedIn) });
+    await expectStatus('dist with a session', served, 200);
+    assert.ok(
+      Buffer.from(await served.arrayBuffer()).equals(blobBytes),
+      'the served bytes differ from the stored bytes',
+    );
+    console.log(
+      `smoke:cloudflare blob bytes read back through the Worker (${blobBytes.byteLength} bytes)`,
+    );
+
+    step = 'hitting the metadata cache';
+    const cacheEvents = [];
+    const scoped = createScopedCache(
+      createCacheApiAdapter(await mf.getCaches(), 'pb-smoke-cache'),
+      { read: async () => 'epoch-1' },
+      { deploymentId: 'smoke', onEvent: (code) => cacheEvents.push(code) },
+    );
+    const cacheKey = { projectId: 'p', sourceId: 's', kind: 'metadata', resource: 'smoke' };
+    const cacheCtx = orgContext(orgId);
+    const cachedBytes = Buffer.from(
+      JSON.stringify({ packages: { 'smoke/lib': [] }, marker: ulid() }),
+    );
+    assert.equal((await scoped.get(cacheCtx, cacheKey)).hit, null, 'the cache starts empty');
+    const stored = await scoped.set(
+      cacheCtx,
+      cacheKey,
+      defaultEntry('metadata', cachedBytes, new Date()),
+      {
+        expectedVersion: 'epoch-1',
+        origin: { status: 200, authenticated: true, authorized: true },
+      },
+    );
+    assert.equal(stored, 'stored');
+    const hit = await scoped.get(cacheCtx, cacheKey);
+    assert.equal(hit.hit?.state, 'fresh');
+    assert.ok(Buffer.from(hit.hit.entry.value).equals(cachedBytes), 'the cached bytes differ');
+    assert.deepEqual(cacheEvents, ['cache_miss', 'cache_hit']);
+    console.log('smoke:cloudflare cache miss, store, then fresh hit');
+
+    step = 'checking the bundle excludes vitest';
+    const bundled = await bundleFiles(dirname(workerScript));
+    assert.ok(bundled.includes(workerScript), 'the worker entry was not scanned');
+    for (const path of bundled) {
+      const text = await readFile(path, 'utf8');
+      assert.ok(!/vitest/i.test(text), `${basename(path)} references vitest`);
+    }
+    const metafile = JSON.parse(
+      await readFile(join(dirname(workerScript), 'metafile.json'), 'utf8'),
+    );
+    const inputs = Object.keys(metafile.inputs);
+    assert.ok(
+      inputs.some((input) => input.includes('packages/core/')),
+      'the metafile lists no core inputs',
+    );
+    const leaked = inputs.filter(
+      (input) =>
+        /vitest/.test(input) ||
+        /\.test\.[cm]?[jt]s$/.test(input) ||
+        /\/src\/contract\//.test(input),
+    );
+    assert.deepEqual(leaked, [], 'test-only inputs reached the bundle');
+    console.log(
+      `smoke:cloudflare bundle excludes vitest (${bundled.length} files, ${Object.keys(metafile.inputs).length} inputs)`,
     );
 
     step = 'building the package-route Worker';

@@ -384,7 +384,7 @@ export function createVisibilitySubsetRepository(
       const upsert = compile(
         db
           .insertInto('project_package')
-          .columns(['org_id', 'project_id', 'package_id', 'origin'])
+          .columns(['org_id', 'project_id', 'package_id', 'origin', 'ecosystem', 'name'])
           .expression(
             db
               .selectFrom('package')
@@ -393,6 +393,8 @@ export function createVisibilitySubsetRepository(
                 sql<string>`${input.projectId}`.as('project_id'),
                 'id',
                 sql<'explicit'>`'explicit'`.as('origin'),
+                'ecosystem',
+                'name',
               ])
               .where('id', '=', input.packageId)
               .where('org_id', '=', ctx.orgId),

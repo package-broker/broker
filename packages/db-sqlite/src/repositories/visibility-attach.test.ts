@@ -307,10 +307,10 @@ function seedActors(): Statement[] {
 async function seedDerived(): Promise<void> {
   const derived = oracle().filter((r) => r.origin !== 'explicit');
   if (derived.length === 0) return;
-  await executor.batch(
+  const results = await executor.batch(
     derived.map((r) =>
       stmt(
-        'INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
+        'INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, ? AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1',
         ORG_A,
         r.projectId,
         r.packageId,
@@ -318,6 +318,7 @@ async function seedDerived(): Promise<void> {
       ),
     ),
   );
+  for (const result of results) expect(result.changes).toBe(1);
 }
 
 function repository(on: SqlExecutor = executor) {
@@ -578,7 +579,7 @@ describe('detachSource', () => {
         'v0/*',
       ),
       stmt(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'explicit', 'composer', 'v0/k2')",
         ORG_A,
         PA,
         K2,
@@ -910,7 +911,7 @@ describe('setPackageFlag', () => {
         SB,
       ),
       stmt(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, 'subscription' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
         ORG_A,
         PB,
         KB,
@@ -1405,7 +1406,7 @@ describe('setOrder', () => {
       ),
       ...[p1, p2].map((id) =>
         stmt(
-          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+          "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, 'subscription' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
           ORG_A,
           PB,
           id,

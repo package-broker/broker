@@ -1,3 +1,11 @@
+import { DatabaseSync } from 'node:sqlite';
+import { sql, type RawBuilder } from 'kysely';
+import { compile, db } from '../kysely.js';
+import { migrate } from '../migrations/runner.js';
+import { discoveredMigrations } from '../testing/migrated-database.js';
+import { visibleRowsCondition, winnerOrder } from './catalogue-predicates.js';
+import type { CatalogueReader, EdgePage } from '@package-broker/core/db/catalogue';
+import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { describe, expect, it } from 'vitest';
 import {
   admitProxy,
@@ -8,6 +16,7 @@ import {
 import { patternAdmits } from '@package-broker/core/catalogue/patterns';
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import {
+  validateLimit,
   CATALOGUE_KEY_LIST_MAX,
   CATALOGUE_PAGE_MAX,
   CATALOGUE_WINNER_KEYS_MAX,
@@ -690,11 +699,22 @@ describe('bounded edge pages', () => {
       await seedCatalogue(database.executor, config);
       await seedDerivedRows(database.executor, config);
       let statement: ScalarStatement | undefined;
+      let versionView = false;
       const closure = createClosureEdges({
         ...database.executor,
         all: async (query) => {
           statement = query;
-          return database.executor.all(query);
+          return database.executor.all(
+            versionView
+              ? {
+                  ...query,
+                  sql: query.sql.replace(
+                    'version as ev indexed by version_package_id',
+                    'version as ev',
+                  ),
+                }
+              : query,
+          );
         },
         batch: (queries) => database.executor.batch(queries),
       });
@@ -720,9 +740,10 @@ describe('bounded edge pages', () => {
         sql: `CREATE TEMP VIEW version AS SELECT id, org_id, package_id, version, status,
           CASE WHEN package_id = '${config.packages.at(-1)?.id ?? ''}'
             THEN json_extract('invalid', '$') ELSE metadata_json END AS metadata_json
-          FROM main.version`,
+          FROM main.version indexed by version_package_id`,
         params: [],
       });
+      versionView = true;
       expect(await closure.pageEdges(orgContext(ORG_A), query)).toEqual(page);
     } finally {
       await database.close();
@@ -776,4 +797,364 @@ describe('bounded edge pages', () => {
       }
     }
   });
+});
+
+interface EdgeSqlRow {
+  requirer_key: string;
+  version_id: string;
+  version: string;
+  deps: string | null;
+}
+
+// Frozen pre-0024 SQL oracle.
+const NPM_DEPENDENCY_FIELDS = [
+  'dependencies',
+  'optionalDependencies',
+  'peerDependencies',
+  'peerDependenciesMeta',
+] as const;
+
+function toStatement(raw: RawBuilder<unknown>): ScalarStatement {
+  return compile({ compile: () => raw.compile(db) }) as ScalarStatement;
+}
+
+function visibleFrom(): RawBuilder<unknown> {
+  return sql`from project_package as pp
+    join package as pkg on pkg.id = pp.package_id
+    join source as src on src.id = pkg.source_id
+    join project_source as ps on ps.project_id = pp.project_id and ps.source_id = pkg.source_id`;
+}
+
+function rankedWinners(
+  ctx: OrgContext,
+  projectId: string,
+  ecosystem: NameEcosystem,
+  filter: RawBuilder<unknown>,
+): RawBuilder<unknown> {
+  return sql`select pkg.name as key, pkg.id as package_id, pkg.source_id, src.type as source_type,
+    src.removal_policy,
+    row_number() over (partition by pkg.name order by ${sql.join(winnerOrder({ source: 'src', attachment: 'ps' }))}) as rn
+  ${visibleFrom()}
+  where pp.project_id = ${projectId} and pkg.ecosystem = ${ecosystem} and ${filter}
+    and ${visibleRowsCondition(ctx, { pp: 'pp', pkg: 'pkg', src: 'src', ps: 'ps' })}`;
+}
+
+function depsExpression(ecosystem: NameEcosystem): RawBuilder<unknown> {
+  if (ecosystem === 'composer') {
+    return sql`case when json_type(v.metadata_json, '$.require') in ('object', 'array')
+      then json_extract(v.metadata_json, '$.require') else null end`;
+  }
+  const extract = (field: string) => sql`json_extract(v.metadata_json, ${`$.${field}`})`;
+  const absent = sql.join(
+    NPM_DEPENDENCY_FIELDS.map((field) => sql`${extract(field)} is null`),
+    sql` and `,
+  );
+  const members = sql.join(NPM_DEPENDENCY_FIELDS.map((field) => sql`${field}, ${extract(field)}`));
+  return sql`case when ${absent} then null else json_object(${members}) end`;
+}
+
+function legacyClosure(executor: ScalarSqlExecutor): Pick<CatalogueReader, 'pageEdges'> {
+  return {
+    async pageEdges(ctx, query): Promise<EdgePage> {
+      const limit = validateLimit(query?.limit, CATALOGUE_PAGE_MAX);
+      const { after } = query;
+      if (
+        after !== undefined &&
+        (typeof after.requirerKey !== 'string' || typeof after.versionId !== 'string')
+      ) {
+        throw new TypeError('after must be an edge cursor');
+      }
+      const keyFrom = after === undefined ? sql`1 = 1` : sql`kp.name >= ${after.requirerKey}`;
+      const versionFrom = (key: string, version: string) =>
+        after === undefined
+          ? sql`1 = 1`
+          : sql`(${sql.ref(key)}, ${sql.ref(version)}) > (${after.requirerKey}, ${after.versionId})`;
+      const raw = sql`with key_page as materialized (
+  select kp.name
+  from package as kp indexed by package_by_name
+  where kp.org_id = ${ctx.orgId} and kp.ecosystem = ${query.ecosystem} and ${keyFrom}
+    and exists (
+      select 1
+      from (${rankedWinners(ctx, query.projectId, query.ecosystem, sql`pkg.name = kp.name`)}) as w
+      join version as ev on ev.package_id = w.package_id and ev.org_id = ${ctx.orgId}
+        and (ev.status = 'active' or (ev.status = 'removed_upstream' and w.removal_policy = 'flag'))
+      where w.rn = 1 and ${versionFrom('w.key', 'ev.id')}
+    )
+  group by kp.name
+  order by kp.name
+  limit ${limit + 1}
+), c as materialized (
+  ${rankedWinners(ctx, query.projectId, query.ecosystem, sql`pkg.name in (select name from key_page)`)}
+), edge_page as materialized (
+  select c.key as requirer_key, v.id as version_id
+  from c
+  join version as v on v.id in (
+    select ev.id from version as ev
+    where ev.package_id = c.package_id and ev.org_id = ${ctx.orgId}
+      and (ev.status = 'active' or (ev.status = 'removed_upstream' and c.removal_policy = 'flag'))
+      and ${versionFrom('c.key', 'ev.id')}
+    order by ev.id
+    limit ${limit + 1}
+  )
+  where c.rn = 1
+  order by c.key, v.id
+  limit ${limit + 1}
+)
+select edge_page.requirer_key, edge_page.version_id, v.version,
+  ${depsExpression(query.ecosystem)} as deps
+from edge_page
+join version as v on v.id = edge_page.version_id and v.org_id = ${ctx.orgId}
+order by edge_page.requirer_key, edge_page.version_id`;
+      const rows = await executor.all<EdgeSqlRow>(toStatement(raw));
+      const more = rows.length > limit;
+      const page = (more ? rows.slice(0, limit) : rows).map((row): EdgeRow => ({
+        requirerKey: row.requirer_key,
+        versionId: row.version_id,
+        version: row.version,
+        deps: row.deps,
+      }));
+      const last = page.at(-1);
+      return {
+        rows: page,
+        next: more && last ? { requirerKey: last.requirerKey, versionId: last.versionId } : null,
+      };
+    },
+  };
+}
+
+async function instrumentedDatabase() {
+  const native = new DatabaseSync(':memory:');
+  native.exec('PRAGMA foreign_keys = ON');
+  const run = (statement: Statement) => {
+    const prepared = native.prepare(statement.sql);
+    if (prepared.columns().length === 0) {
+      return { changes: Number(prepared.run(...statement.params).changes), rows: [] };
+    }
+    return { changes: 0, rows: prepared.all(...statement.params) };
+  };
+  const executor: SqlExecutor = {
+    driver: 'node-sqlite',
+    async all<R>(statement: Statement) {
+      return run(statement).rows as R[];
+    },
+    async batch(statements) {
+      native.exec('BEGIN IMMEDIATE');
+      try {
+        const results = statements.map(run);
+        native.exec('COMMIT');
+        return results;
+      } catch (error) {
+        native.exec('ROLLBACK');
+        throw error;
+      }
+    },
+  };
+  await migrate(executor, await discoveredMigrations(), { holder: 'edge-count-test' });
+  return { native, executor };
+}
+
+function largeEdgeConfig(firstVersions = 1000): CatalogueConfig {
+  const base = edgeConfig();
+  const packages = Array.from({ length: 210 }, (_, n) =>
+    pkg(n + 10, ORG_A, ORG_SRC, `edge/p${String(n).padStart(3, '0')}`),
+  );
+  return {
+    ...base,
+    packages,
+    versions: packages.flatMap((p, n) =>
+      Array.from(
+        { length: n === 0 ? firstVersions : n === 1 && firstVersions === 199 ? 1000 : 1 },
+        (_, v) => ({
+          id: `V${String(n).padStart(3, '0')}-${String(v).padStart(4, '0')}`,
+          orgId: ORG_A,
+          packageId: p.id,
+          version: `${v}.0.0`,
+          normalized: `${v}.0.0.0`,
+          stability: 'stable' as const,
+          status: 'active' as const,
+          publishedAt: '2026-01-01T00:00:00.000Z',
+        }),
+      ),
+    ),
+  };
+}
+
+describe('closure edge index bounds', () => {
+  it.each([1000, 199])(
+    'reads only the remaining page budget with %i versions in the first key',
+    async (firstVersions) => {
+      const { native, executor } = await instrumentedDatabase();
+      try {
+        const config = largeEdgeConfig(firstVersions);
+        await seedCatalogue(executor, config, { maxStatements: Infinity });
+        await seedDerivedRows(executor, config);
+        const reads = new Map<string, number>();
+        native.function('count_version', (packageId, status) => {
+          const key = String(packageId);
+          reads.set(key, (reads.get(key) ?? 0) + 1);
+          return status;
+        });
+        native.exec(`CREATE TEMP VIEW version AS SELECT id, org_id, package_id, version,
+        count_version(package_id, status) AS status, metadata_json FROM main.version indexed by version_package_id`);
+        let captured: ScalarStatement | undefined;
+        const closure = createClosureEdges({
+          ...executor,
+          async all(query) {
+            captured = query;
+            return executor.all({
+              ...query,
+              sql: query.sql.replace(
+                'version as ev indexed by version_package_id',
+                'version as ev',
+              ),
+            });
+          },
+        });
+        const page = await closure.pageEdges(orgContext(ORG_A), {
+          projectId: P1,
+          ecosystem: 'composer',
+          limit: 200,
+        });
+        expect(page.rows).toHaveLength(200);
+        expect(page.next).not.toBeNull();
+        const boundary = firstVersions === 1000 ? 0 : 1;
+        expect(reads.get(config.packages[boundary]!.id)).toBe(
+          201 - (boundary === 0 ? 0 : firstVersions),
+        );
+        for (const p of config.packages.slice(boundary + 1)) expect(reads.get(p.id) ?? 0).toBe(0);
+        expect([...reads.values()].reduce((a, b) => a + b, 0)).toBe(201);
+        const statement = captured!;
+        const plan = await executor.all<{ detail: string }>({
+          sql: `EXPLAIN QUERY PLAN ${statement.sql.replaceAll('version as', 'main.version as')}`,
+          params: statement.params,
+        });
+        const details = plan.map((r) => r.detail).join('\n');
+        expect(details).toContain('version_package_id');
+        expect(details).toContain('project_package_name');
+      } finally {
+        native.close();
+      }
+    },
+    120_000,
+  );
+
+  it('does not read package rows for 20000 invisible preceding names', async () => {
+    const { native, executor } = await instrumentedDatabase();
+    try {
+      const base = edgeConfig();
+      const visible = pkg(10, ORG_A, ORG_SRC, 'zz/visible');
+      const config: CatalogueConfig = {
+        ...base,
+        packages: [visible],
+        versions: [{ ...base.versions[0]!, packageId: visible.id }],
+      };
+      await seedCatalogue(executor, config);
+      await seedDerivedRows(executor, config);
+      native.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 20000)
+        INSERT INTO package (id, org_id, source_id, ecosystem, name)
+        SELECT 'hidden-' || x, '${ORG_A}', '${ORG_SRC}', 'composer', printf('aa/p%05d', x) FROM n`);
+      let hiddenReads = 0;
+      native.function('count_package', (id, name) => {
+        if (String(id).startsWith('hidden-')) {
+          hiddenReads++;
+          throw new Error('read an invisible package row');
+        }
+        return name;
+      });
+      const columns = native.prepare("SELECT name FROM pragma_table_info('package')").all() as {
+        name: string;
+      }[];
+      native.exec(
+        `CREATE TEMP VIEW counted_package AS SELECT ${columns.map(({ name }) => (name === 'name' ? 'count_package(id, name) AS name' : name)).join(', ')} FROM main.package`,
+      );
+      const trapped: ScalarSqlExecutor = {
+        ...executor,
+        all(statement) {
+          return executor.all({
+            ...statement,
+            // Hints target tables; each package alias instead reads the counting view.
+            sql: statement.sql.replace(
+              /\bpackage as ("[^"]+"|\w+)(?: indexed by package_by_name)?/gi,
+              'counted_package as $1',
+            ),
+          });
+        },
+      };
+      const page = await createClosureEdges(trapped).pageEdges(orgContext(ORG_A), {
+        projectId: P1,
+        ecosystem: 'composer',
+        limit: 200,
+      });
+      expect(page.rows.map((r) => r.requirerKey)).toEqual(['zz/visible']);
+      expect(hiddenReads).toBe(0);
+    } finally {
+      native.close();
+    }
+  }, 120_000);
+
+  it.each([false, true])(
+    'matches the frozen old SQL byte-for-byte on fixed randomized catalogues (empty version ID: %s)',
+    async (withEmptyVersionId) => {
+      let emptyRows = 0;
+      let emptyCursors = 0;
+      for (let seed = 601; seed <= 606; seed++) {
+        const base = randomCatalogueConfig(seed, 6, { forged: true });
+        const inputs = toVisibilityInputs(base);
+        const emptyVersion = base.projects.flatMap((project) =>
+          ECOSYSTEMS.flatMap((ecosystem) => expectedEdges(base, inputs, project.id, ecosystem)),
+        )[0];
+        if (withEmptyVersionId) expect(emptyVersion).toBeDefined();
+        const config: CatalogueConfig = {
+          ...base,
+          versions: base.versions.map((version) =>
+            withEmptyVersionId && version.id === emptyVersion?.versionId
+              ? { ...version, id: '' }
+              : version,
+          ),
+        };
+        const database = await openMigratedDatabase({ d1PatternLimit: true });
+        try {
+          await seedCatalogue(database.executor, config, { maxStatements: Infinity });
+          await seedDerivedRows(database.executor, config);
+          await seedMetadata(database.executor, config);
+          for (const project of config.projects)
+            for (const ecosystem of ECOSYSTEMS)
+              for (const limit of [1, 3, 200])
+                for (const initialAfter of [
+                  undefined,
+                  { requirerKey: '', versionId: 'past-all-versions' },
+                ]) {
+                  let after: EdgeCursor | undefined = initialAfter;
+                  do {
+                    const query = {
+                      projectId: project.id,
+                      ecosystem,
+                      limit,
+                      ...(after === undefined ? {} : { after }),
+                    };
+                    const expected = await legacyClosure(database.executor).pageEdges(
+                      orgContext(project.orgId),
+                      query,
+                    );
+                    const actual = await createClosureEdges(database.executor).pageEdges(
+                      orgContext(project.orgId),
+                      query,
+                    );
+                    expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+                    emptyRows += expected.rows.filter((row) => row.versionId === '').length;
+                    if (expected.next?.versionId === '') emptyCursors++;
+                    after = actual.next ?? undefined;
+                  } while (after !== undefined);
+                }
+        } finally {
+          await database.close();
+        }
+      }
+      if (withEmptyVersionId) {
+        expect(emptyRows).toBeGreaterThan(0);
+        expect(emptyCursors).toBeGreaterThan(0);
+      }
+    },
+    120_000,
+  );
 });

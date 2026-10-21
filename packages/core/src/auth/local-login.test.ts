@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { createLocalLoginService } from './local-login.js';
-import type { LocalLoginService } from './local-login.js';
+import type { LocalLoginDeps, LocalLoginService } from './local-login.js';
 import { hashPassword, PASSWORD_HASH_PATTERN, verifyPassword } from './password.js';
 import { sha256Hex } from './primitives.js';
-import { createSessionService, SESSION_ABSOLUTE_MS } from './session.js';
+import { createSessionService, SESSION_ABSOLUTE_MS, SESSION_IDLE_MS } from './session.js';
 import type { AuthenticatedSession, SessionMeta } from './session.js';
 import { encodeTotpEnvelope, generateTotpSecret, totpCode } from './totp.js';
 import type { CredentialRecord, CredentialRepository } from '../db/credentials.js';
@@ -13,7 +13,7 @@ import type {
   Reservation,
 } from '../db/local-login.js';
 import { orgContext } from '../db/port.js';
-import type { ActiveSession } from '../db/sessions.js';
+import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { fixedClock, ulid } from '../ids.js';
 import { createSecretCipher } from '../secrets/cipher.js';
 import { createCredentialStore } from '../secrets/credential-store.js';
@@ -236,15 +236,20 @@ async function build(options: Options = {}) {
     clock,
     publicOrigin: ORIGIN,
   });
-  const service: LocalLoginService = createLocalLoginService({
+  const findActiveById = vi.fn<SessionRepository['findActiveById']>(() =>
+    Promise.resolve(activeSession().session),
+  );
+  const deps = {
     reader,
     writer,
     credentials,
-    sessions,
+    sessionCookies: sessions,
+    sessions: { findActiveById },
     keyring,
     clock,
     ids,
-  });
+  };
+  const service: LocalLoginService = createLocalLoginService(deps);
   const code = await totpCode(secret, STEP);
   const windowCodes = await Promise.all(
     [STEP - 1, STEP, STEP + 1].map((step) => totpCode(secret, step)),
@@ -253,6 +258,8 @@ async function build(options: Options = {}) {
     ['000000', '111111', '222222'].find((value) => !windowCodes.includes(value)) ?? '';
   return {
     service,
+    deps,
+    findActiveById,
     reader,
     writer,
     events,
@@ -562,6 +569,57 @@ describe('TOTP window', () => {
 });
 
 describe('reauth', () => {
+  it('requires the session repository read capability', () => {
+    expectTypeOf<Omit<LocalLoginDeps, 'sessions'>>().not.toExtend<LocalLoginDeps>();
+    expectTypeOf<LocalLoginDeps['sessions']>().toEqualTypeOf<
+      Pick<SessionRepository, 'findActiveById'>
+    >();
+  });
+
+  it.each(['revoked', 'expired', 'idle', 'past the absolute cap', 'user inactive'])(
+    'refuses a %s session before password work',
+    async () => {
+      const harness = await build();
+      harness.findActiveById.mockResolvedValue(null);
+      const { counts, value } = await counted(null, () =>
+        harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+      );
+      expect(value).toStrictEqual({ ok: false, reason: 'session_inactive' });
+      expect(counts.pbkdf2).toBe(0);
+      expect(harness.reader.findByEmail).not.toHaveBeenCalled();
+      expect(harness.writer.succeed).not.toHaveBeenCalled();
+      expect(harness.findActiveById).toHaveBeenCalledWith(ORG, SESSION_ID, {
+        now: NOW,
+        idleSince: new Date(NOW_MS - SESSION_IDLE_MS).toISOString(),
+      });
+    },
+  );
+
+  it('refuses a session that becomes inactive during password work', async () => {
+    const harness = await build();
+    harness.findActiveById.mockResolvedValueOnce(activeSession().session).mockResolvedValue(null);
+    const result = await harness.service.reauth(ORG, activeSession(), {
+      password: PASSWORD,
+      code: harness.code,
+    });
+    expect(result).toStrictEqual({ ok: false, reason: 'session_inactive' });
+    expect(harness.reader.reserveAttempt).toHaveBeenCalled();
+    expect(harness.writer.succeed).not.toHaveBeenCalled();
+  });
+
+  it('propagates a failed session read before password work', async () => {
+    const harness = await build();
+    harness.findActiveById.mockRejectedValue(new Error('database down'));
+    await expect(
+      harness.service.reauth(ORG, activeSession(), {
+        password: PASSWORD,
+        code: harness.code,
+      }),
+    ).rejects.toThrow('database down');
+    expect(harness.reader.findByEmail).not.toHaveBeenCalled();
+    expect(harness.writer.succeed).not.toHaveBeenCalled();
+  });
+
   it('accepts a local session and sets reauthSessionId with the reservation snapshot', async () => {
     const harness = await build();
     const result = await harness.service.reauth(ORG, activeSession(), {

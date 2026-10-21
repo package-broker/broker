@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { reauthenticateWithIdentity as reauthenticate } from './identity-reauth.js';
 import type {
   IdentityReauthDeps,
@@ -6,6 +6,7 @@ import type {
   ReauthRefusal,
   ReauthResult,
 } from './identity-reauth.js';
+import { SESSION_IDLE_MS } from './session.js';
 import type { AuthenticatedSession } from './session.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
@@ -152,7 +153,11 @@ function setup(options: Setup = {}) {
     get: unexpected('get'),
     list: unexpected('list'),
   } as unknown as UserRepository;
+  const findActiveById = vi.fn<SessionRepository['findActiveById']>(() =>
+    Promise.resolve(sessionOf().session),
+  );
   const sessions = {
+    findActiveById,
     markReauthenticatedByIdentity: mark,
     findActive: unexpected('findActive'),
     touch: unexpected('touch'),
@@ -171,6 +176,7 @@ function setup(options: Setup = {}) {
   };
   return {
     deps,
+    findActiveById,
     getIdentity,
     mark,
     storedReauthAt: (sessionId: string = SESSION_ID) => reauthAtBySession.get(sessionId) ?? null,
@@ -178,6 +184,50 @@ function setup(options: Setup = {}) {
 }
 
 describe('reauthenticateWithIdentity', () => {
+  it('requires the session repository read capability', () => {
+    expectTypeOf<Omit<IdentityReauthDeps, 'sessions'>>().not.toExtend<IdentityReauthDeps>();
+    expectTypeOf<IdentityReauthDeps['sessions']>().toExtend<
+      Pick<SessionRepository, 'findActiveById'>
+    >();
+  });
+
+  it.each(['revoked', 'expired', 'idle', 'past the absolute cap', 'user inactive'])(
+    'refuses a %s session before identity work',
+    async () => {
+      const fixture = setup();
+      fixture.findActiveById.mockResolvedValue(null);
+      const provider = providerOf({ finish: vi.fn() });
+      const result = await run(fixture.deps, CTX, sessionOf(), provider, verified());
+      expect(result).toEqual({ ok: false, reason: 'session_inactive' });
+      expect(provider.finish).not.toHaveBeenCalled();
+      expect(fixture.getIdentity).not.toHaveBeenCalled();
+      expect(fixture.mark).not.toHaveBeenCalled();
+      expect(fixture.findActiveById).toHaveBeenCalledWith(CTX, SESSION_ID, {
+        now: NOW.toISOString(),
+        idleSince: iso(-SESSION_IDLE_MS),
+      });
+    },
+  );
+
+  it('refuses a session that becomes inactive during identity work', async () => {
+    const fixture = setup();
+    fixture.findActiveById.mockResolvedValueOnce(sessionOf().session).mockResolvedValue(null);
+    const result = await run(fixture.deps, CTX, sessionOf(), providerOf(), verified());
+    expect(result).toEqual({ ok: false, reason: 'session_inactive' });
+    expect(fixture.getIdentity).toHaveBeenCalled();
+    expect(fixture.mark).not.toHaveBeenCalled();
+  });
+
+  it('propagates a failed session read without marking the session', async () => {
+    const fixture = setup();
+    fixture.findActiveById.mockRejectedValue(new Error('database down'));
+    await expect(run(fixture.deps, CTX, sessionOf(), providerOf(), verified())).rejects.toThrow(
+      'database down',
+    );
+    expect(fixture.getIdentity).not.toHaveBeenCalled();
+    expect(fixture.mark).not.toHaveBeenCalled();
+  });
+
   describe('success', () => {
     it('marks the session with the provider authTime, not the clock', async () => {
       const fixture = setup();
@@ -743,6 +793,11 @@ describe('reauthenticateWithIdentity', () => {
     const providerFailure = 'provider said: invalid_grant for ada@example.test';
 
     const everyRefusal: Record<ReauthRefusal, () => Promise<ReauthResult>> = {
+      session_inactive: () => {
+        const fixture = setup();
+        fixture.findActiveById.mockResolvedValue(null);
+        return run(fixture.deps, CTX, sessionOf(), providerOf(), verified());
+      },
       not_sso_session: () => run(setup().deps, CTX, sessionOf(null), providerOf(), verified()),
       not_supported: () =>
         run(setup().deps, CTX, sessionOf(), providerOf({ supportsReauth: false }), verified()),

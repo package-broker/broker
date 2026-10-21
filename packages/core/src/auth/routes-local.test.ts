@@ -75,7 +75,7 @@ interface Harness {
 
 interface Options {
   readonly loginResult?: LocalResult;
-  readonly reauthResult?: { readonly ok: boolean };
+  readonly reauthResult?: Awaited<ReturnType<LocalLoginService['reauth']>>;
   readonly startResult?: Awaited<ReturnType<LocalSetupService['start']>>;
   readonly finishResult?: Awaited<ReturnType<LocalSetupService['finish']>>;
   readonly session?: ActiveSession | null;
@@ -684,6 +684,37 @@ describe('createLocalRoutes', () => {
   });
 
   describe('reauth', () => {
+    it('maps session_inactive to the existing inactive-session refusal byte-for-byte', async () => {
+      const h = await harness({ reauthResult: { ok: false, reason: 'session_inactive' } });
+      const requestId = '00000000-0000-4000-8000-000000000000';
+      const randomUUID = vi.spyOn(crypto, 'randomUUID').mockReturnValue(requestId);
+      try {
+        const response = await h.fetch(post(REAUTH, body, sessionHeaders));
+        h.findActive.mockResolvedValue(null);
+        const inactive = await h.fetch(post(REAUTH, body, sessionHeaders));
+
+        expect(response.status).toBe(401);
+        expect(response.status).toBe(inactive.status);
+        expect([...response.headers]).toEqual([...inactive.headers]);
+        expect(await response.clone().json()).toEqual({
+          error: { code: 'unauthorized', message: 'Unauthorized', requestId },
+        });
+        expect(new Uint8Array(await response.arrayBuffer())).toEqual(
+          new Uint8Array(await inactive.arrayBuffer()),
+        );
+        expect(setCookies(response)).toEqual([]);
+        expect(h.reauth).toHaveBeenCalledTimes(1);
+        expect(h.entries).toContainEqual(
+          expect.objectContaining({
+            event: 'auth.reauth.refused',
+            reason: 'session_inactive',
+          }),
+        );
+      } finally {
+        randomUUID.mockRestore();
+      }
+    });
+
     const body = { password: SENTINEL.password, code: SENTINEL.code };
 
     it('answers 204 for the session resolved through the session service', async () => {

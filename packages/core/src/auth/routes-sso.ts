@@ -1,3 +1,4 @@
+import { isReauthSessionActive } from './identity-reauth.js';
 import {
   START_FAILURE_DETAILS,
   IDENTITY_FAILURES,
@@ -11,6 +12,7 @@ import type { LoginState } from './login-state.js';
 import { sessionMetaOf } from './session.js';
 import type { AuthenticatedSession, SessionMeta, SessionService } from './session.js';
 import type { OrgContext } from '../db/port.js';
+import type { SessionRepository } from '../db/sessions.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import { isValidProviderId } from '../identity/port.js';
@@ -29,6 +31,8 @@ export type ReauthOutcome = { readonly ok: true } | { readonly ok: false; readon
 export interface SsoRouteDeps {
   readonly providers: ProviderMap;
   readonly sessions: SessionService;
+  /** Re-authentication fails closed when the session reader is unavailable. */
+  readonly reauthSessions?: Pick<SessionRepository, 'findActiveById'>;
   readonly login: (
     ctx: OrgContext,
     provider: IdentityProvider,
@@ -201,6 +205,13 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     }
   };
 
+  async function activeReauthSession(ctx: OrgContext, id: string): Promise<boolean> {
+    return (
+      deps.reauthSessions !== undefined &&
+      isReauthSessionActive({ sessions: deps.reauthSessions, clock }, ctx, id)
+    );
+  }
+
   function orgOf(rc: RequestContext): OrgContext {
     if (rc.org === null) throw new TypeError('SSO routes need an organization');
     return rc.org;
@@ -349,6 +360,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
         if (error instanceof CsrfError) return forbidden(rc, provider.id, error);
         throw error;
       }
+      if (!(await activeReauthSession(orgOf(rc), session.session.id))) {
+        return loginFailed(rc, provider.id, 'session_inactive');
+      }
       if (!provider.supportsReauth) {
         return envelopeResponse(
           400,
@@ -443,6 +457,13 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
 
     if (state.purpose === 'reauth' && session === null) {
       return loginFailed(rc, provider.id, 'no_session', cleared);
+    }
+    if (
+      state.purpose === 'reauth' &&
+      session !== null &&
+      !(await activeReauthSession(org, session.session.id))
+    ) {
+      return loginFailed(rc, provider.id, 'session_inactive', cleared);
     }
     const verified = await verify(rc, provider, state.data);
     if ('reason' in verified) {

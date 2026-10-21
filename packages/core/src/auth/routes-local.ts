@@ -241,9 +241,11 @@ export function createLocalRoutes(deps: {
         log({
           level: 'info',
           event: 'auth.reauth.refused',
+          ...(result.reason === 'session_inactive' ? { reason: result.reason } : {}),
           requestId: ctx.requestId,
           sessionId: authenticated.session.id,
         });
+        if (result.reason === 'session_inactive') return unauthorized(ctx);
         return invalidCredentials(ctx);
       }),
     },

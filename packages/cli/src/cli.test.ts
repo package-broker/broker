@@ -21,6 +21,7 @@ it('lists only working commands in --help', async () => {
       'bootstrap',
       'cloudflare provision',
       'cloudflare deploy',
+      'cloudflare smoke',
       'cloudflare migrate',
       'cloudflare bootstrap',
       'secrets generate-master-key',

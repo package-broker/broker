@@ -135,6 +135,7 @@ export interface DeploymentAttempt {
     | 'rolled_back';
   activated_at: string | null;
   smoke: 'pending' | 'passed' | 'failed';
+  smoke_checks?: SmokeCheck[];
   rollback: 'not_needed' | 'pending' | 'succeeded' | 'failed' | 'unknown';
   preview: 'disabled' | 'enable_pending' | 'enabled' | 'cleanup_pending';
   prior_settings: ManagedSettings;
@@ -144,6 +145,23 @@ export interface DeploymentAttempt {
     state: 'pending' | 'applied' | 'unknown';
     restoration: 'not_needed' | 'restored' | 'retained_first_install' | 'failed' | 'unknown';
   }[];
+}
+export interface SmokeCheck {
+  name:
+    | 'canonical_ready'
+    | 'canonical_composer_unauthorized'
+    | 'canonical_npm_unauthorized'
+    | 'canonical_composer_authorized'
+    | 'canonical_npm_authorized'
+    | 'candidate_ready'
+    | 'candidate_composer_unauthorized'
+    | 'candidate_npm_unauthorized'
+    | 'candidate_composer_authorized'
+    | 'candidate_npm_authorized'
+    | 'rollback_ready';
+  status: 'passed' | 'failed' | 'connection' | 'not_ready' | 'rate_limited' | 'timeout';
+  attempt: number;
+  elapsed_ms: number;
 }
 export interface DeploymentJournal {
   attempt: DeploymentAttempt;
@@ -267,6 +285,7 @@ function deploymentValid(raw: unknown): boolean {
   };
   const attempt = (v: unknown): boolean => {
     if (
+      !record(v) ||
       !exact(v, [
         'operation_id',
         'artifact_sha256',
@@ -287,6 +306,7 @@ function deploymentValid(raw: unknown): boolean {
         'phase',
         'activated_at',
         'smoke',
+        ...(Object.hasOwn(v, 'smoke_checks') ? ['smoke_checks'] : []),
         'rollback',
         'preview',
         'prior_settings',
@@ -348,6 +368,25 @@ function deploymentValid(raw: unknown): boolean {
       ].includes(String(v.phase)) &&
       (v.activated_at === null || iso(v.activated_at)) &&
       ['pending', 'passed', 'failed'].includes(String(v.smoke)) &&
+      (v.smoke_checks === undefined ||
+        (Array.isArray(v.smoke_checks) &&
+          v.smoke_checks.length <= 4000 &&
+          v.smoke_checks.every(
+            (c) =>
+              exact(c, ['name', 'status', 'attempt', 'elapsed_ms']) &&
+              /^(?:(?:canonical|candidate)_(?:ready|(?:composer|npm)_(?:un)?authorized)|rollback_ready)$/.test(
+                String(c.name),
+              ) &&
+              ['passed', 'failed', 'connection', 'not_ready', 'rate_limited', 'timeout'].includes(
+                String(c.status),
+              ) &&
+              typeof c.attempt === 'number' &&
+              Number.isSafeInteger(c.attempt) &&
+              c.attempt > 0 &&
+              typeof c.elapsed_ms === 'number' &&
+              Number.isSafeInteger(c.elapsed_ms) &&
+              c.elapsed_ms >= 0,
+          ))) &&
       ['not_needed', 'pending', 'succeeded', 'failed', 'unknown'].includes(String(v.rollback)) &&
       ['disabled', 'enable_pending', 'enabled', 'cleanup_pending'].includes(String(v.preview)) &&
       settings(v.prior_settings) &&

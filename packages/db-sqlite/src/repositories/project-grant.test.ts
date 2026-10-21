@@ -918,6 +918,38 @@ describe('project grant delete', () => {
     expect(await revokeWithCallback()).not.toHaveBeenCalled();
   });
 
+  it('does not retain a user through a same-email organization grant in another organization', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      grant(b, G_NEW, 'target@example.test', ROLE_B, null),
+    ]);
+    expect(
+      await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: OTHER + 'target' });
+  });
+
+  it('does not retain a user through a fresh membership with a different provider', async () => {
+    await executor.batch([
+      user(a, OTHER + 'target', 'target@example.test'),
+      groupGrant(G_NEW, 'oidc', 'team'),
+      member(OTHER + 'target', 'okta', 'team'),
+      identity(a, 'T1', OTHER + 'target', 'target@example.test', { provider: 'okta' }),
+    ]);
+    expect(
+      await repository.delete(a, fence(), {
+        audit: mutationAudit('project_grant.revoke', G_TARGET, P1),
+        id: G_TARGET,
+        projectId: P1,
+        providerAnchors: ANCHORS,
+      }),
+    ).toEqual({ status: 'deleted', offboardedUserId: OTHER + 'target' });
+  });
+
   it('does not retain a user through group membership in another organization', async () => {
     await executor.batch([
       user(a, OTHER + 'target', 'target@example.test'),

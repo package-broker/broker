@@ -11,6 +11,7 @@ import type { OrgContext } from '../db/port.js';
 import { isoTimestamp } from '../ids.js';
 import type { Clock } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
+import { reportableErrorName } from '../kernel/error-name.js';
 import { SecretDecryptError, createSecretCipher } from '../secrets/cipher.js';
 import type { Sealed } from '../secrets/cipher.js';
 import { CredentialNotFoundError } from '../secrets/credential-store.js';
@@ -53,7 +54,7 @@ const REFUSED = Object.freeze({ ok: false as const });
 interface Verified {
   readonly snapshot: LocalLoginSnapshot;
   readonly step: number;
-  readonly rehash: string | null;
+  readonly needsRehash: boolean;
   readonly nowMs: number;
 }
 
@@ -181,9 +182,26 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
     const { snapshot } = reservation;
     const verdict = await check(ctx, snapshot, password, code, nowMs);
     if (!verdict.ok) return null;
-    // A hash under an older key version costs a second PBKDF2 on success only, after valid credentials.
-    const rehash = verdict.needsRehash ? await hashPassword(password, keyring) : null;
-    return { snapshot, step: verdict.step, rehash, nowMs };
+    return { snapshot, step: verdict.step, needsRehash: verdict.needsRehash, nowMs };
+  }
+
+  async function rehashAfterSuccess(
+    ctx: OrgContext,
+    verified: Verified,
+    password: string,
+  ): Promise<void> {
+    if (!verified.needsRehash || verified.snapshot.passwordHash === null) return;
+    try {
+      const newHash = await hashPassword(password, keyring);
+      await writer.replacePasswordHash(ctx, {
+        userId: verified.snapshot.userId,
+        expectedHash: verified.snapshot.passwordHash,
+        newHash,
+        now: isoTimestamp(new Date(verified.nowMs)),
+      });
+    } catch (error) {
+      console.error(reportableErrorName(error));
+    }
   }
 
   return {
@@ -191,13 +209,13 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       if (!strings(input.email, input.password, input.code)) return REFUSED;
       const verified = await attempt(ctx, input.email, input.password, input.code, null);
       if (verified === null) return REFUSED;
-      const { snapshot, step, rehash, nowMs } = verified;
+      const { snapshot, step, nowMs } = verified;
       const secrets = await newSessionSecrets();
       const expiresAt = isoTimestamp(new Date(nowMs + SESSION_ABSOLUTE_MS));
       const succeeded = await writer.succeed(ctx, {
         snapshot,
         step,
-        rehash,
+        rehash: null,
         session: {
           id: ids.ulid(),
           userId: snapshot.userId,
@@ -214,6 +232,7 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
         now: isoTimestamp(new Date(nowMs)),
       });
       if (!succeeded) return REFUSED;
+      await rehashAfterSuccess(ctx, verified, input.password);
       return {
         ok: true,
         cookies: sessions.setCookies(secrets, expiresAt),
@@ -239,13 +258,15 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       const succeeded = await writer.succeed(ctx, {
         snapshot: verified.snapshot,
         step: verified.step,
-        rehash: verified.rehash,
+        rehash: null,
         session: null,
         previousSecretHash: null,
         reauthSessionId: session.id,
         now: isoTimestamp(new Date(verified.nowMs)),
       });
-      return succeeded ? { ok: true } : REFUSED;
+      if (!succeeded) return REFUSED;
+      await rehashAfterSuccess(ctx, verified, input.password);
+      return { ok: true };
     },
   };
 }

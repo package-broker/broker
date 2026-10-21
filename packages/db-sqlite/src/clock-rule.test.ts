@@ -8,7 +8,7 @@ const APPLICATION_CLOCK = /\b(?:require)?[tT]imestamp\(\s*(?:'[^']*'\s*,\s*)?[\w
 const DATABASE_CLOCK = [
   /unixepoch\(\s*'now'/,
   /(?:strftime|datetime|julianday)\([^\n]*?'now'/,
-  /from\s+'\.\/session-liveness\.js'/,
+  /from\s+'\.\/(?:session-liveness|actor-authority)\.js'/,
 ];
 
 const ALLOWED_MIXED: Readonly<Record<string, string>> = {

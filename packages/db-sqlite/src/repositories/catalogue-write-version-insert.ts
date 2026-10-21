@@ -207,7 +207,7 @@ export function versionInsertStatements(
     .where('package.org_id', '=', ctx.orgId)
     .where(
       sql<boolean>`EXISTS (SELECT 1 FROM version
-        WHERE version.package_id = package.id AND version.last_op_id = ${opId})`,
+        WHERE +version.package_id = package.id AND version.last_op_id = ${opId})`,
     );
 
   const statements = [

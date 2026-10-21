@@ -8,6 +8,18 @@ import { SecretsConfigError } from '../secrets/master-key.js';
 import { DbError } from '../db/errors.js';
 import { orgContext } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
+import {
+  BlobAdmissionError,
+  BlobBusyError,
+  BlobBytesVanishedError,
+  BlobConflictError,
+  BlobDeadlineError,
+  BlobDigestMismatchError,
+  BlobIdleTimeoutError,
+  BlobRangeError,
+  BlobSizeMismatchError,
+  BlobValidationError,
+} from '../platform/blob.js';
 
 interface Envelope {
   readonly error: { readonly code: string; readonly message: string; readonly requestId: string };
@@ -51,6 +63,50 @@ describe('envelopeResponse', () => {
 });
 
 describe('errorResponse', () => {
+  it.each(['nested', 'npm'] as const)(
+    'maps BlobBusyError to 503 unavailable with a bounded retry hint (%s)',
+    async (format) => {
+      const { log, entries } = recorder();
+      const error = new BlobBusyError();
+      error.message = 'private request details';
+      const response = errorResponse(error, 'req-blob', log, format);
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get('Retry-After')).toBe('5');
+      expect(Number(response.headers.get('Retry-After'))).toBeLessThanOrEqual(300);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(responseReason(response)).toBe('error.unavailable');
+      expect(await response.json()).toEqual(
+        format === 'npm'
+          ? { error: 'Try again later', code: 'unavailable', requestId: 'req-blob' }
+          : {
+              error: { code: 'unavailable', message: 'Try again later', requestId: 'req-blob' },
+            },
+      );
+      expect(JSON.stringify(entries)).not.toContain(error.message);
+    },
+  );
+
+  it.each([
+    new BlobAdmissionError(),
+    new BlobBytesVanishedError(),
+    new BlobConflictError(),
+    new BlobDeadlineError(),
+    new BlobDigestMismatchError('private expected digest', 'private actual digest'),
+    new BlobIdleTimeoutError(),
+    new BlobRangeError(),
+    new BlobSizeMismatchError(),
+    new BlobValidationError(),
+  ])('keeps $name at 500 internal without a retry hint', async (error) => {
+    const response = errorResponse(error, 'req-other-blob', () => undefined);
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get('Retry-After')).toBeNull();
+    expect(await response.json()).toEqual({
+      error: { code: 'internal', message: 'Internal error', requestId: 'req-other-blob' },
+    });
+  });
+
   it('maps an unknown error to 500 internal without leaking its message', async () => {
     const { log, entries } = recorder();
 

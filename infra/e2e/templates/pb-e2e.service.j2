@@ -1,0 +1,18 @@
+[Unit]
+Description=Package Broker release candidate
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/pb-data
+
+[Service]
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+TimeoutStopSec=30
+ExecStartPre=-/usr/bin/docker rm -f pb-e2e
+ExecStart=/usr/bin/docker run --rm --name pb-e2e --pull=never --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --publish 127.0.0.1:8787:8787 --mount type=bind,src=/srv/pb-data,dst=/data --mount type=bind,src=/etc/pb-e2e/master.key,dst=/run/secrets/master.key,readonly --env PB_MASTER_KEY_FILE=/run/secrets/master.key --env PB_ORG_SLUG=pb-e2e --env PB_ORG_NAME=pb-e2e --env PB_PUBLIC_URL={{ e2e_public_url }} --env DEPLOYMENT_ID={{ e2e_run_id }} {{ e2e_image_reference }}
+ExecStop=/usr/bin/docker stop --time 20 pb-e2e
+
+[Install]
+WantedBy=multi-user.target

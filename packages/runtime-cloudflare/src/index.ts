@@ -1,3 +1,4 @@
+import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
 import {
   createProviderRegistry,
@@ -25,7 +26,6 @@ import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
 import { JobError } from '@package-broker/core/platform/jobs';
 import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
 import { jobLeaseGuard } from '@package-broker/db-sqlite/repositories/job-lease-guard';
-import { createOrganizationAdministration } from './organization-administration.js';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { packageSyncJob } from '@package-broker/core/ingest/package-sync-job';
 import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
@@ -40,36 +40,16 @@ import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
-import { createAuthModule } from '@package-broker/core/auth/module';
 import type { AuthModule } from '@package-broker/core/auth/module';
 import type { SessionService } from '@package-broker/core/auth/session';
-import {
-  createPersonalTokenService,
-  type PersonalTokenService,
-} from '@package-broker/core/authz/pat-service';
-import {
-  createProjectAdministration,
-  type ProjectAdministration,
-} from '@package-broker/core/authz/project-administration';
-import { createProjectLister, type ProjectLister } from '@package-broker/core/authz/project-list';
-import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
-import {
-  createProjectService,
-  type ProjectService,
-} from '@package-broker/core/authz/project-service';
-import {
-  createServicePrincipalService,
-  type ServicePrincipalService,
-} from '@package-broker/core/authz/service-principal-service';
-import {
-  createServiceTokenService,
-  type ServiceTokenService,
-} from '@package-broker/core/authz/service-token-service';
+import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
+import type { ProjectAdministration } from '@package-broker/core/authz/project-administration';
+import type { ProjectLister } from '@package-broker/core/authz/project-list';
+import type { ProjectService } from '@package-broker/core/authz/project-service';
+import type { ServicePrincipalService } from '@package-broker/core/authz/service-principal-service';
+import type { ServiceTokenService } from '@package-broker/core/authz/service-token-service';
 import type { TokenReader } from '@package-broker/core/authz/token-read';
-import {
-  createTokenRevokeService,
-  type TokenRevokeService,
-} from '@package-broker/core/authz/token-revoke';
+import type { TokenRevokeService } from '@package-broker/core/authz/token-revoke';
 import {
   buildClosureReport,
   type DependencyClosureReport,
@@ -148,10 +128,9 @@ import {
 } from '@package-broker/core/kernel/obs-codes';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
-import {
-  providerAnchorsOf,
-  type ConfiguredProviderAnchor,
-  type ProviderAnchorReader,
+import type {
+  ConfiguredProviderAnchor,
+  ProviderAnchorReader,
 } from '@package-broker/core/identity/provider-anchors';
 import { buildIdentityProviders, scopedEnv } from '@package-broker/core/identity/providers';
 import { createOrgResolver, NotBootstrappedError } from '@package-broker/core/kernel/org';
@@ -202,8 +181,6 @@ import {
   verifyKeyring,
 } from '@package-broker/core/secrets/keyring-verifier';
 import { SecretsConfigError, readMasterKeys } from '@package-broker/core/secrets/master-key';
-import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
-import { createAuthRepositories } from '@package-broker/db-sqlite/repositories/auth';
 import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue';
 import {
   createCatalogueWriter,
@@ -235,14 +212,6 @@ import {
   createOrganizationBootstrap,
   createOrganizationRepository,
 } from '@package-broker/db-sqlite/repositories/organization';
-import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
-import { createProjectGrantRepository } from '@package-broker/db-sqlite/repositories/project-grant';
-import { createReadableProjectRepository } from '@package-broker/db-sqlite/repositories/project-readable';
-import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
-import { createServicePrincipalAuthority } from '@package-broker/db-sqlite/repositories/service-principal-authority';
-import { createTokenRepository } from '@package-broker/db-sqlite/repositories/token';
-import { createTokenReader } from '@package-broker/db-sqlite/repositories/token-read';
-import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
 import { workersCodecs } from './codec/workers-codec.js';
 import { createR2ByteStore } from './blob/r2.js';
 import type { R2BucketLike } from './blob/r2.js';
@@ -374,17 +343,6 @@ export function publicOriginOf(raw: string | undefined): string {
   }
 }
 
-function wired<T>(name: string, value: T | undefined): T {
-  if (typeof value !== 'object' || value === null) {
-    throw new TypeError(`${name} is not wired`);
-  }
-  return value;
-}
-
-function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchorReader {
-  return Object.freeze({ anchors: () => Promise.resolve(list) });
-}
-
 async function verifyMasterKey(
   keyring: Keyring,
   executor: ScalarSqlExecutor,
@@ -449,128 +407,27 @@ async function buildAuth(
     clock: systemClock,
     env: scopedEnv(env),
   });
-  const anchorList = providerAnchorsOf(providers);
-  const providerAnchors = anchorReader(anchorList);
-  const ids = { ulid };
   await verifyMasterKey(keyring, executor, env, log);
-  const auth = createAuthModule({
-    repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
+  const built = createAccessServices({
+    executor,
     keyring,
-    clock: systemClock,
-    ids,
     publicOrigin,
     providers,
-    hooks: registration.hooks,
+    clock: systemClock,
+    ids: { ulid },
     log,
-    access: {
-      access: wired('access repository', createAccessRepository(executor)),
-      providerAnchors: providerAnchors.anchors,
-      dispatch,
-    },
-    unlink: {
-      unlinks: wired(
-        'unlink repository',
-        createUnlinkRepository(executor, {
-          holderInput: () => ({
-            kind: 'fresh',
-            providers: anchorList,
-          }),
-        }),
-      ),
-      providers: providerAnchors,
-    },
+    dispatch,
+    registration,
+    tokens,
   });
-
-  const projectRepository = wired(
-    'project repository',
-    createProjectRepository(executor, {
-      reservedSlugs: reservedFirstSegments([...registration.routes, ...auth.coreRoutes]),
-      providerAnchors: anchorList,
-    }),
-  );
-  const tokenRepository = wired('token repository', createTokenRepository(executor));
-  const principalRepository = wired(
-    'service principal repository',
-    createServicePrincipalRepository(executor),
-  );
-  const authority = wired(
-    'service principal authority',
-    createServicePrincipalAuthority({ executor, providerAnchors: anchorList }),
-  );
-  const organizations = wired('organization repository', createOrganizationRepository(executor));
-  const common = { clock: systemClock, ids, log };
-  const servicePrincipals = createServicePrincipalService({
-    sessions: auth.sessions,
-    principals: principalRepository,
-    authority,
-    directory: principalRepository,
-    ...common,
-  });
-  const onCreatorOffboarded = servicePrincipals.creatorOffboarded;
-
-  const access: WorkerAccessServices = Object.freeze({
-    engine: auth.authorization,
-    sessions: auth.sessions,
-    projects: createProjectService({ projects: projectRepository, ...common }),
-    lifetime: tokens.lifetime,
-    administration: createOrganizationAdministration(executor, anchorList, {
-      providers,
-      onCreatorOffboarded,
-      ...(tokens.offboarding.onUserOffboarded === undefined
-        ? {}
-        : { onUserOffboarded: tokens.offboarding.onUserOffboarded }),
-      ...common,
-    }),
-    projectGrants: createProjectAdministration({
-      grants: wired(
-        'project grant repository',
-        createProjectGrantRepository(executor, { ...tokens.offboarding, log }),
-      ),
-      providers,
-      providerAnchors: anchorList,
-      onCreatorOffboarded,
-      ...tokens.offboarding,
-      ...common,
-    }),
-    projectList: createProjectLister({
-      source: projectRepository,
-      readable: wired(
-        'readable project repository',
-        createReadableProjectRepository(executor, { providerAnchors: anchorList }),
-      ),
-    }),
-    personalTokens: createPersonalTokenService({
-      tokens: tokenRepository,
-      sessions: auth.sessions,
-      organizations,
-      providers: providerAnchors,
-      keyring,
-      lifetime: tokens.lifetime,
-      ...common,
-    }),
-    servicePrincipals,
-    serviceTokens: createServiceTokenService({
-      tokens: tokenRepository,
-      principals: principalRepository,
-      authority,
-      sessions: auth.sessions,
-      organizations,
-      providers: providerAnchors,
-      keyring,
-      lifetime: tokens.lifetime,
-      ...common,
-    }),
-    tokenRevoke: createTokenRevokeService({
-      ids,
-      tokens: tokenRepository,
-      authority,
-      ownership: tokenRepository,
-      clock: systemClock,
-      log,
-    }),
-    tokenList: wired('token reader', createTokenReader(executor)),
-  });
-  return { auth, registration, providerAnchors, anchors: anchorList, access, keyring };
+  return {
+    auth: built.module,
+    registration,
+    providerAnchors: built.providerAnchors,
+    anchors: built.anchors,
+    access: built.services,
+    keyring,
+  };
 }
 
 function buildPackageReads(executor: SqlExecutor) {

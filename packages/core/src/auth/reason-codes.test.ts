@@ -55,6 +55,7 @@ describe('auth reason sets', () => {
 
   it('pins REAUTH_REFUSALS', () => {
     expect([...REAUTH_REFUSALS].sort()).toEqual([
+      'anchor_mismatch',
       'hook_denied',
       'identity_mismatch',
       'no_auth_time',
@@ -71,6 +72,7 @@ describe('auth reason sets', () => {
   it('pins AUTH_REASON_CODES', () => {
     expect([...AUTH_REASON_CODES].sort()).toEqual([
       'already_linked',
+      'anchor_mismatch',
       'attempts',
       'callback_invalid',
       'conflict',

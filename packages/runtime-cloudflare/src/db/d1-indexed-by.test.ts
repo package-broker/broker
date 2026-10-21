@@ -17,7 +17,7 @@ import { createClosureEdges } from '@package-broker/db-sqlite/repositories/closu
 import { createCatalogueLookup } from '@package-broker/db-sqlite/repositories/catalogue-lookup';
 import { proxyEligibleCondition } from '@package-broker/db-sqlite/repositories/catalogue-predicates';
 import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
-import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
+import { createVersionReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
 const mf = new Miniflare(
@@ -92,7 +92,7 @@ beforeAll(async () => {
       params: [a.orgId],
     },
     {
-      sql: "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P1', 'K1', 'subscription')",
+      sql: "INSERT INTO project_package (org_id, project_id, package_id, ecosystem, name, origin) VALUES (?, 'P1', 'K1', 'composer', 'acme/a', 'subscription')",
       params: [a.orgId],
     },
     {
@@ -155,7 +155,7 @@ describe('INDEXED BY statements on D1', () => {
   });
 
   it('catalogue version pagination (version_by_published)', async () => {
-    const result = await createCatalogueReader(executor).resolveVersions(a, {
+    const result = await createVersionReader(executor).resolveVersions(a, {
       ...PACKAGE,
       ...PAGE,
     });
@@ -210,7 +210,7 @@ describe('INDEXED BY statements on D1', () => {
     return plan.map((row) => row.detail).join('\n');
   }
 
-  it('closure edges page (package_by_name)', async () => {
+  it('closure edges page (project_package_name)', async () => {
     let page: Awaited<ReturnType<ReturnType<typeof createClosureEdges>['pageEdges']>> | undefined;
     const details = await planOf(async (recording) => {
       page = await createClosureEdges(recording).pageEdges(a, {
@@ -220,7 +220,20 @@ describe('INDEXED BY statements on D1', () => {
       });
     });
     expect(page?.rows.map((row) => row.versionId)).toEqual(['V1']);
-    expect(details).toContain('USING INDEX package_by_name');
+    expect(details).toMatch(/USING (?:COVERING )?INDEX project_package_name/);
+  });
+
+  it('closure edges page (version_package_id)', async () => {
+    let page: Awaited<ReturnType<ReturnType<typeof createClosureEdges>['pageEdges']>> | undefined;
+    const details = await planOf(async (recording) => {
+      page = await createClosureEdges(recording).pageEdges(a, {
+        projectId: 'P1',
+        ecosystem: 'composer',
+        limit: 10,
+      });
+    });
+    expect(page?.rows.map((row) => row.versionId)).toEqual(['V1']);
+    expect(details).toMatch(/USING (?:COVERING )?INDEX version_package_id/);
   });
 
   it('closure edges classify (package_by_name)', async () => {

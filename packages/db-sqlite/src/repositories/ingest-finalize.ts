@@ -159,18 +159,21 @@ export function createIngestFinalizer(
       }
 
       const statements: Statement[] = [...ingestSessionGuard(ctx, session)];
+      let leaseHeldBackIndex: number | undefined;
       if (expectedCount >= 1) {
         const guard = callerGuard ?? createIngestSessionWriteGuard(ctx, session);
         const listing =
           scope.kind === 'source'
             ? completeSourceListing({ sourceId: scope.sourceId, stamp, count: expectedCount })
             : completeVersionListing({ packageId: scope.packageId, stamp, count: expectedCount });
-        statements.push(
-          ...finalizeListingStatements(ctx, guard, listing, input, {
-            ...options,
-            countUnseen: true,
-          }).statements,
-        );
+        const finalized = finalizeListingStatements(ctx, guard, listing, input, {
+          ...options,
+          countUnseen: true,
+        });
+        if (finalized.leaseHeldBackIndex !== undefined) {
+          leaseHeldBackIndex = statements.length + finalized.leaseHeldBackIndex;
+        }
+        statements.push(...finalized.statements);
       } else {
         const openStamp =
           scope.kind === 'source'
@@ -200,8 +203,13 @@ export function createIngestFinalizer(
       statements.push(removedBlobs(ctx, scope), ...completeSession(ctx, session));
 
       let validatorsPublished: number;
+      let leaseHeldBack: number;
       try {
         const results = await executor.batch(statements);
+        leaseHeldBack =
+          leaseHeldBackIndex === undefined
+            ? 0
+            : Number(results[leaseHeldBackIndex]?.rows[0]?.['held'] ?? 0);
         validatorsPublished = validatorIndices.reduce(
           (count, index) => count + (results[index]?.changes ?? 0),
           0,
@@ -245,6 +253,7 @@ export function createIngestFinalizer(
         status: 'complete',
         empty: expectedCount === 0,
         validatorsPublished,
+        leaseHeldBack,
       };
     },
   };

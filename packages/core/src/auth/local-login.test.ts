@@ -703,7 +703,41 @@ describe('reauth', () => {
 });
 
 describe('non-string body fields', () => {
-  const NON_STRINGS: readonly unknown[] = [42, { value: 'x' }, ['x'], null];
+  const NON_STRINGS: readonly unknown[] = [42, { value: 'x' }, ['x'], null, undefined];
+
+  it.each([null, undefined, 42, true, 'input', Symbol('input'), () => undefined])(
+    'login refuses a non-object input (%s)',
+    async (input) => {
+      const harness = await build();
+      expect(
+        await harness.service.login(
+          ORG,
+          input as unknown as Parameters<LocalLoginService['login']>[1],
+          META,
+        ),
+      ).toStrictEqual({ ok: false });
+      expect(harness.reader.findByEmail).not.toHaveBeenCalled();
+      expect(harness.reader.reserveAttempt).not.toHaveBeenCalled();
+      expect(harness.writer.succeed).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, undefined, 42, true, 'input', Symbol('input'), () => undefined])(
+    'reauth refuses a non-object input (%s)',
+    async (input) => {
+      const harness = await build();
+      expect(
+        await harness.service.reauth(
+          ORG,
+          activeSession(),
+          input as unknown as Parameters<LocalLoginService['reauth']>[2],
+        ),
+      ).toStrictEqual({ ok: false });
+      expect(harness.reader.findByEmail).not.toHaveBeenCalled();
+      expect(harness.reader.reserveAttempt).not.toHaveBeenCalled();
+      expect(harness.writer.succeed).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(
     (['email', 'password', 'code'] as const).flatMap((field) =>

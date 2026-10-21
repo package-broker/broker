@@ -139,7 +139,7 @@ const cases: readonly IsolationCase[] = [
         own.orgId,
       );
       await seed(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'explicit')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P' AS project_id, 'K' AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.org_id = input.org_id AND p.id = input.package_id",
         own.orgId,
       );
       await seed(
@@ -184,7 +184,8 @@ async function run(contractCase: IsolationCase, strip: boolean): Promise<void> {
       batch: (statements) => executor.batch(statements.map(mutate)),
     },
     async seed(sql, ...params) {
-      await executor.batch([{ sql, params }]);
+      const [result] = await executor.batch([{ sql, params }]);
+      if (/^INSERT INTO project_package \(/i.test(sql)) expect(result?.changes).toBe(1);
     },
   });
   expect(seen).toBe(1);

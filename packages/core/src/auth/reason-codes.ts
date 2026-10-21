@@ -51,6 +51,7 @@ export const REAUTH_REFUSALS = reasonSet({
   not_supported: true,
   state_mismatch: true,
   identity_mismatch: true,
+  anchor_mismatch: true,
   no_auth_time: true,
   stale_auth_time: true,
   policy: true,

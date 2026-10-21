@@ -65,6 +65,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     resume: vi.fn().mockResolvedValue('resumed'),
     pause: vi.fn().mockResolvedValue('paused'),
     list: vi.fn().mockResolvedValue([]),
+    getVisible: vi.fn().mockResolvedValue(null),
     delete: vi.fn().mockResolvedValue('deleted'),
   };
   const registeredNames = {
@@ -113,6 +114,65 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     log,
   };
 }
+
+describe('source visibility for mutation preflight', () => {
+  const writer = {
+    ...project,
+    actor: { ...project.actor, permissions: new Set(['project:sources:write']) },
+  };
+  const target = { projectId: 'project-a', sourceId: 'source' };
+
+  it.each(['project-owned', 'attached organization'] as const)(
+    'returns a safe DTO for a %s source with write permission alone',
+    async (owner) => {
+      const { service, sources } = setup();
+      sources.getVisible.mockResolvedValue({
+        ...input,
+        id: 'source',
+        projectId: owner === 'project-owned' ? target.projectId : null,
+        credentialId: 'hidden',
+        configJson: 'hidden',
+        lastError: 'hidden',
+      } as SourceRecord);
+      const result = await service.getVisible(ctx, writer, target);
+      expect(result).toMatchObject({
+        ok: true,
+        value: {
+          id: 'source',
+          projectId: owner === 'project-owned' ? target.projectId : null,
+          hasCredential: true,
+        },
+      });
+      if (result.ok) {
+        expect(result.value).not.toHaveProperty('credentialId');
+        expect(result.value).not.toHaveProperty('configJson');
+        expect(result.value).not.toHaveProperty('lastError');
+      }
+      expect(sources.getVisible).toHaveBeenCalledExactlyOnceWith(ctx, target);
+      expect(sources.list).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns not_found when the repository cannot resolve a visible source', async () => {
+    const { service, sources } = setup();
+    expect(await service.getVisible(ctx, writer, target)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(sources.getVisible).toHaveBeenCalledExactlyOnceWith(ctx, target);
+  });
+
+  it.each([
+    { ...writer, actor: { ...writer.actor, permissions: new Set(['project:sources:read']) } },
+    { ...writer, actor: { ...writer.actor, projectId: 'other-project' } },
+    { ...writer, actor: { ...writer.actor, orgId: orgContext('other-org').orgId } },
+    org,
+  ])('denies an unauthorized actor before lookup (%#)', async (actor) => {
+    const { service, sources } = setup();
+    expect(await service.getVisible(ctx, actor, target)).toEqual({ ok: false, error: 'forbidden' });
+    expect(sources.getVisible).not.toHaveBeenCalled();
+  });
+});
 
 describe('source administration', () => {
   it('links an existing credential id without preparing a credential', async () => {

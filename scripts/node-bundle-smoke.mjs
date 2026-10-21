@@ -1,14 +1,24 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
-import { cp, mkdtemp, readFile, realpath, rename, rm } from 'node:fs/promises';
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SOURCE = join(REPO_ROOT, '.pb', 'node');
@@ -255,6 +265,30 @@ async function checkAuditJobs(database) {
         ),
       'verification success',
     );
+    const doubled = randomUUID();
+    const insertJob = () =>
+      db
+        .prepare(
+          'INSERT INTO job (id, org_id, type, payload_json, idempotency_key) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(randomUUID(), orgId, 'core:audit-verify:v1', '{}', doubled);
+    insertJob();
+    assert.throws(insertJob, /UNIQUE/, 'a repeated enqueue must be refused');
+    const doubledRow = () =>
+      db
+        .prepare('SELECT id, state FROM job WHERE org_id = ? AND idempotency_key = ?')
+        .all(orgId, doubled);
+    assert.equal(doubledRow().length, 1, 'the repeated enqueue must leave one job');
+    const doubledId = doubledRow()[0].id;
+    await waitForAudit(() => doubledRow()[0].state === 'succeeded', 'the repeated enqueue');
+    await delay(1_500);
+    assert.equal(
+      auditLogs().filter((row) => row.event === 'audit.verified' && row.job_id === doubledId)
+        .length,
+      1,
+      'a repeated enqueue must run the job once',
+    );
+    console.log('smoke:node repeated enqueue ran the job once');
     db.prepare("UPDATE audit_event SET action = 'org.delete' WHERE org_id = ? AND id = ?").run(
       orgId,
       'smoke-audit',
@@ -429,7 +463,7 @@ function seedPackageCatalogue(database) {
       ).run(randomUUID(), orgId, id, new Date().toISOString());
     }
     db.prepare(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'npm', 'visible')",
     ).run(orgId, ids.project, ids.visible);
     return ids;
   } finally {
@@ -486,6 +520,133 @@ async function checkPackageRoute() {
   child.kill('SIGTERM');
   const code = await waitExit(child, EXIT_TIMEOUT_MS);
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
+}
+
+async function checkPlatformPorts(base, cookie, env) {
+  step = 'reading a stored blob back through the server';
+  const database = new DatabaseSync(env['PB_SQLITE_PATH']);
+  const bytes = randomBytes(2048);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const versionId = `01HZ${randomUUID().replaceAll('-', '').toUpperCase().slice(0, 22)}`;
+  try {
+    database.exec('PRAGMA busy_timeout = 5000');
+    const orgId = database.prepare('SELECT id FROM organization LIMIT 1').get().id;
+    const storageKey = `sha256/${Buffer.from(orgId).toString('hex')}/${digest.slice(0, 2)}/${digest}`;
+    const file = join(env['PB_BLOB_ROOT'], ...storageKey.split('/'));
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, bytes);
+    await writeFile(`${file}.media`, 'application/zip');
+    const ids = Object.fromEntries(
+      ['project', 'source', 'package', 'blob'].map((name) => [name, randomUUID()]),
+    );
+    database
+      .prepare("INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'blobs', 'Blobs')")
+      .run(ids.project, orgId);
+    database
+      .prepare(
+        "INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json, removal_policy) VALUES (?, ?, 'blob-source', 'composer', 'composer_repository', 'https://composer.smoke.test', '{}', 'flag')",
+      )
+      .run(ids.source, orgId);
+    database
+      .prepare(
+        'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 100)',
+      )
+      .run(orgId, ids.project, ids.source);
+    database
+      .prepare(
+        "INSERT INTO package (id, org_id, source_id, ecosystem, name, last_synced_at) VALUES (?, ?, ?, 'composer', 'smoke/lib', '2026-10-19T00:00:00.000Z')",
+      )
+      .run(ids.package, orgId, ids.source);
+    database
+      .prepare(
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'composer', 'smoke/lib')",
+      )
+      .run(orgId, ids.project, ids.package);
+    database
+      .prepare(
+        'INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json) VALUES (?, ?, ?, \'1.0.0\', \'1.0.0.0\', \'2020-01-01T00:00:00.000Z\', \'import_time\', \'{"name":"smoke/lib","source":{"type":"git","url":"https://git.smoke.test/lib.git","reference":"r1"}}\')',
+      )
+      .run(versionId, orgId, ids.package);
+    database
+      .prepare(
+        "INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, media_type) VALUES (?, ?, ?, ?, ?, 'application/zip')",
+      )
+      .run(ids.blob, orgId, digest, bytes.byteLength, storageKey);
+    database
+      .prepare("UPDATE version SET blob_id = ?, dist_type = 'zip' WHERE id = ?")
+      .run(ids.blob, versionId);
+    const path = `/blobs/dist/smoke/lib/${versionId}.1.zip`;
+    await expectStatus(
+      await fetch(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
+      401,
+      `GET ${path} without credentials`,
+    );
+    const served = await fetch(`${base}${path}`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(served, 200, `GET ${path} with a session`);
+    assert.ok(
+      Buffer.from(await served.arrayBuffer()).equals(bytes),
+      'the served bytes differ from the stored bytes',
+    );
+    console.log(`smoke:node blob bytes read back through the server (${bytes.byteLength} bytes)`);
+  } finally {
+    database.close();
+  }
+
+  step = 'hitting the metadata cache';
+  const load = (path) => import(pathToFileURL(join(REPO_ROOT, 'packages', path)).href);
+  const { createScopedCache, defaultEntry } = await load('core/dist/platform/cache.js');
+  const { createLruCache } = await load('runtime-node/dist/cache/lru.js');
+  const events = [];
+  const scoped = createScopedCache(
+    createLruCache({ maxBytes: 1_000_000 }),
+    { read: async () => 'epoch-1' },
+    { deploymentId: 'smoke', onEvent: (code) => events.push(code) },
+  );
+  const key = { projectId: 'p', sourceId: 's', kind: 'metadata', resource: 'smoke' };
+  const ctx = { orgId: 'smoke-org' };
+  const cached = Buffer.from(
+    JSON.stringify({ packages: { 'smoke/lib': [] }, marker: randomUUID() }),
+  );
+  assert.equal((await scoped.get(ctx, key)).hit, null, 'the cache starts empty');
+  assert.equal(
+    await scoped.set(ctx, key, defaultEntry('metadata', cached, new Date()), {
+      expectedVersion: 'epoch-1',
+      origin: { status: 200, authenticated: true, authorized: true },
+    }),
+    'stored',
+  );
+  const hit = await scoped.get(ctx, key);
+  assert.equal(hit.hit?.state, 'fresh');
+  assert.ok(Buffer.from(hit.hit.entry.value).equals(cached), 'the cached bytes differ');
+  assert.deepEqual(events, ['cache_miss', 'cache_hit']);
+  console.log('smoke:node cache miss, store, then fresh hit');
+
+  step = 'checking the bundle excludes vitest';
+  const files = (await readdir(SOURCE, { withFileTypes: true, recursive: true }))
+    .filter((entry) => entry.isFile() && /\.(?:m?js|json)$/.test(entry.name))
+    .map((entry) => join(entry.parentPath, entry.name))
+    .filter((path) => !path.startsWith(join(SOURCE, 'assets') + '/'));
+  assert.ok(files.includes(join(SOURCE, 'server.js')), 'the server entry was not scanned');
+  for (const path of files) {
+    assert.ok(!/vitest/i.test(await readFile(path, 'utf8')), `${path} references vitest`);
+  }
+  const metafile = JSON.parse(await readFile(join(SOURCE, 'metafile.json'), 'utf8'));
+  const inputs = Object.keys(metafile.inputs);
+  assert.ok(
+    inputs.some((input) => input.includes('packages/core/')),
+    'the metafile lists no core inputs',
+  );
+  const leaked = inputs.filter(
+    (input) =>
+      /vitest/.test(input) || /\.test\.[cm]?[jt]s$/.test(input) || /\/src\/contract\//.test(input),
+  );
+  assert.deepEqual(leaked, [], 'test-only inputs reached the bundle');
+  console.log(
+    `smoke:node bundle excludes vitest (${files.length} files, ${Object.keys(metafile.inputs).length} inputs)`,
+  );
 }
 
 async function run() {
@@ -566,6 +727,8 @@ async function run() {
   console.log(
     `smoke:node UI document, manifest and ${uiPaths.length - 2} assets require a session and match the staged output`,
   );
+
+  await checkPlatformPorts(base, cookie, env);
 
   step = 'checking audit jobs';
   await checkAuditJobs(env['PB_SQLITE_PATH']);

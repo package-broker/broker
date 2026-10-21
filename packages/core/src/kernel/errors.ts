@@ -1,5 +1,6 @@
 import { DbError } from '../db/errors.js';
 import { errorEnvelope } from '../envelope.js';
+import { BlobBusyError } from '../platform/blob.js';
 import { SecretsConfigError } from '../secrets/master-key.js';
 import { reportableErrorName } from './error-name.js';
 import { dbReason, envelopeReason } from './obs-codes.js';
@@ -49,6 +50,7 @@ interface Mapping {
   readonly status: number;
   readonly code: string;
   readonly message: string;
+  readonly retryAfterSeconds?: number;
 }
 
 function mappingOf(error: unknown): Mapping {
@@ -60,6 +62,15 @@ function mappingOf(error: unknown): Mapping {
   }
   if (error instanceof DbError && error.kind === 'busy') {
     return { status: 503, code: 'unavailable', message: 'Try again later' };
+  }
+  if (error instanceof BlobBusyError) {
+    return {
+      status: 503,
+      code: 'unavailable',
+      message: 'Try again later',
+      // Stay within the filesystem sidecar's five-minute freshness window.
+      retryAfterSeconds: 5,
+    };
   }
   return { status: 500, code: 'internal', message: 'Internal error' };
 }
@@ -85,7 +96,10 @@ export function errorResponse(
   log: KernelLog,
   format: ErrorFormat = 'nested',
 ): Response {
-  const { status, code, message } = mappingOf(error);
+  const { status, code, message, retryAfterSeconds } = mappingOf(error);
   if (status >= 500) logError(log, requestId, error);
-  return envelopeResponse(status, code, message, requestId, envelopeReason(code), format);
+  const response = envelopeResponse(status, code, message, requestId, envelopeReason(code), format);
+  if (retryAfterSeconds !== undefined)
+    response.headers.set('Retry-After', String(retryAfterSeconds));
+  return response;
 }

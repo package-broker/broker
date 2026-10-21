@@ -513,7 +513,7 @@ function statements(config: CatalogueConfig): ScalarStatement[] {
   }
   for (const e of config.explicit) {
     add(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
       [e.orgId, e.projectId, e.packageId],
     );
   }
@@ -522,6 +522,18 @@ function statements(config: CatalogueConfig): ScalarStatement[] {
 
 export function catalogueStatementCount(config: CatalogueConfig): number {
   return statements(config).length;
+}
+
+async function insertFixtureBatch(
+  executor: ScalarSqlExecutor,
+  statements: readonly ScalarStatement[],
+): Promise<void> {
+  const results = await executor.batch(statements);
+  for (const [index, statement] of statements.entries()) {
+    if (/^INSERT INTO project_package \(/i.test(statement.sql) && results[index]?.changes !== 1) {
+      throw new Error('project_package fixture must change exactly one row');
+    }
+  }
 }
 
 export interface SeedOptions {
@@ -550,7 +562,7 @@ export async function seedCatalogue(
   }
   const insert = async (): Promise<void> => {
     for (let at = 0; at < all.length; at += STATEMENTS_PER_BATCH) {
-      await executor.batch(all.slice(at, at + STATEMENTS_PER_BATCH));
+      await insertFixtureBatch(executor, all.slice(at, at + STATEMENTS_PER_BATCH));
     }
   };
   if (hasCrossOrgRows(config)) await withForeignKeysOff(executor, insert);
@@ -620,11 +632,11 @@ export async function seedDerivedRows(
     );
   }
   const all: ScalarStatement[] = rows.map((r) => ({
-    sql: 'INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
+    sql: 'INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, ? AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1',
     params: [orgOf.get(r.packageId) as string, r.projectId, r.packageId, r.origin],
   }));
   for (let at = 0; at < all.length; at += STATEMENTS_PER_BATCH) {
-    await executor.batch(all.slice(at, at + STATEMENTS_PER_BATCH));
+    await insertFixtureBatch(executor, all.slice(at, at + STATEMENTS_PER_BATCH));
   }
 }
 

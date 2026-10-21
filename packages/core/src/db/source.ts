@@ -137,6 +137,11 @@ export type PollOutcome =
  * re-read. `conflict` also covers a failure that could not be classified.
  */
 export interface SourceRepository {
+  /** Project-owned or attached organization source of an active project, within this organization. */
+  getVisible(
+    ctx: OrgContext,
+    input: { readonly projectId: string; readonly sourceId: string },
+  ): Promise<SourceRecord | null>;
   /** Organization sources, or project-owned and attached organization sources of an active project.
    * Returns up to limit + 1 rows in id order; limit is an integer from 1 to 100.
    */

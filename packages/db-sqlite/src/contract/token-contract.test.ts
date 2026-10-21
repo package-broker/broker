@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { EngineTokenAccess } from '@package-broker/core/authz/engine';
+import type { TokenAccess, createAccessRepository } from '../repositories/access.js';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import * as grants from '../repositories/grant.js';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import * as scope from '@package-broker/core/authz/scope';
@@ -86,5 +88,14 @@ describe('token lookup negative contract coverage', () => {
     expect(tokenContractCases).toHaveProperty(name);
     const run = Reflect.get(tokenContractCases, name) as typeof tokenContractCases.nullSlug;
     await run(() => openMigratedDatabase());
+  });
+});
+
+describe('token access engine contract', () => {
+  it('assigns the SQLite token view and lookup result to EngineTokenAccess without casts', () => {
+    expectTypeOf<TokenAccess>().toExtend<EngineTokenAccess>();
+    expectTypeOf<ReturnType<ReturnType<typeof createAccessRepository>['lookupToken']>>().toExtend<
+      Promise<EngineTokenAccess | null>
+    >();
   });
 });

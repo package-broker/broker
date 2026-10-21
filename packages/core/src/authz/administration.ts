@@ -18,6 +18,7 @@ import { normalizeEmail } from '../identity/policy.js';
 import { isPermissionView, type PermissionView } from './actor.js';
 import type { MutationFence } from './fence.js';
 import { DEFAULT_ROLES, isPermission, rolePermissionProblems } from './permissions.js';
+import { creatorOffboarded } from './creator-offboarded.js';
 import type { CreatorOffboardingCause } from './service-principal-service.js';
 
 export type AdminError =
@@ -309,31 +310,6 @@ export function createAdministration(deps: AdministrationDeps): Administration {
 
   const userEvent = (ctx: OrgContext, actor: Actor, action: string, userId: string): void =>
     emit({ event: 'user.changed', action, orgId: ctx.orgId, userId, actorUserId: actor.userId });
-
-  async function creatorOffboarded(
-    ctx: OrgContext,
-    userId: string,
-    cause: CreatorOffboardingCause,
-  ): Promise<void> {
-    const callback = deps.onCreatorOffboarded;
-    if (callback === undefined) return;
-    try {
-      await callback(ctx, { userId, cause });
-    } catch (error) {
-      try {
-        deps.log({
-          level: 'warn',
-          event: 'user.offboarding_callback_failed',
-          orgId: ctx.orgId,
-          userId,
-          cause,
-          error: error instanceof Error ? error.name : typeof error,
-        });
-      } catch {
-        // The change is stored; neither the callback nor the sink may report it as failed.
-      }
-    }
-  }
 
   async function userOffboarded(
     ctx: OrgContext,
@@ -672,7 +648,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
       if (typeof result === 'string') return fail(result);
       grantEvent(ctx, actor, 'revoked', id, grant.roleId);
       if (result.offboardedUserId !== null) {
-        await creatorOffboarded(ctx, result.offboardedUserId, 'membership_removed');
+        await creatorOffboarded(deps, ctx, result.offboardedUserId, 'membership_removed');
         await userOffboarded(ctx, result.offboardedUserId, 'membership_removed', stamp);
         try {
           await deps.onProjectAccessLost?.(ctx, { userId: result.offboardedUserId, at: stamp });
@@ -749,7 +725,7 @@ export function createAdministration(deps: AdministrationDeps): Administration {
         if (result === 'unchanged') return OK;
         if (result !== 'suspended') return fail(result);
         userEvent(ctx, actor, 'suspended', userId);
-        await creatorOffboarded(ctx, userId, 'suspended');
+        await creatorOffboarded(deps, ctx, userId, 'suspended');
         await userOffboarded(ctx, userId, 'suspended', stamp);
         return OK;
       }),

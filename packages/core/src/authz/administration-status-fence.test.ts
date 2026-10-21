@@ -29,7 +29,9 @@ function userOf(status: 'active' | 'suspended'): User {
 
 function setup(options: { answer?: unknown; status?: 'active' | 'suspended' } = {}) {
   const grants = {
-    isProtectedHolder: vi.fn(async () => false),
+    isProtectedHolder: vi.fn(
+      async (_ctx: unknown, userId: string) => userId === 'fresh-group-holder',
+    ),
     listOrganization: vi.fn(async () => []),
     suspendUser: vi.fn(async () => options.answer ?? 'suspended'),
     reactivateUser: vi.fn(async () => options.answer ?? 'reactivated'),
@@ -38,7 +40,12 @@ function setup(options: { answer?: unknown; status?: 'active' | 'suspended' } = 
   const admin = createAdministration({
     roles: { list: vi.fn(async () => []), get: vi.fn() } as unknown as RoleRepository,
     grants: grants as unknown as GrantRepository,
-    users: { get: vi.fn(async () => userOf(options.status ?? 'active')) },
+    users: {
+      get: vi.fn(async (_ctx: unknown, id: string) => ({
+        ...userOf(options.status ?? 'active'),
+        id,
+      })),
+    },
     providers: new Map<string, IdentityProvider>(),
     clock: fixedClock(NOW),
     ids: { ulid: () => 'ID00' },
@@ -101,6 +108,19 @@ describe('user status mutators carry the fence', () => {
       expect(log.mock.calls.map(([entry]) => entry.event)).toContain('admin.denied');
     });
   }
+});
+
+describe('status changes distinguish holder targets', () => {
+  it.each(['suspendUser', 'reactivateUser'] as const)(
+    '%s refuses the seeded holder before any write',
+    async (name) => {
+      const { admin, grants } = setup();
+      expect(
+        await admin[name](ctx, actor, fenceOf('actor-1'), 'fresh-group-holder', apiCall),
+      ).toEqual({ ok: false, error: 'forbidden' });
+      expect(grants[name]).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('status changes are idempotent', () => {

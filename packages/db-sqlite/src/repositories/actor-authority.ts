@@ -6,24 +6,29 @@ import { existsGuard, type Guard, type ProtectedHolderProvider } from '../kysely
 import { holdsPermission } from './access.js';
 import { liveSessionCondition, requireIdleSeconds } from './session-liveness.js';
 
-export interface ActorHoldsInput {
+export interface LiveActorOptions {
+  /** Defaults to the session idle timeout. */
+  readonly idleSeconds?: number;
+  readonly sessionCondition?: (alias: string) => Guard;
+}
+
+export interface ActorHoldsInput extends LiveActorOptions {
   readonly permission: string;
   /** Null checks an organization-scope permission; an id adds that project's grants. */
   readonly projectId: string | null;
   readonly allowArchived?: boolean;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
-  /** Defaults to the session idle timeout. */
-  readonly idleSeconds?: number;
 }
 
-/**
- * True only while the fence's session is live and owned by the fence's user, the user is active and
- * holds the permission now, and (for a project) the project is active unless `allowArchived`.
- */
-export function actorHolds(ctx: OrgContext, fence: MutationFence, input: ActorHoldsInput): Guard {
-  const idleSeconds = requireIdleSeconds(input.idleSeconds ?? SESSION_IDLE_MS / 1000);
-  const session = existsGuard((database) =>
-    database
+/** The fence owns a live session whose identity, if present, belongs to the same user and org. */
+export function liveActorSession(
+  ctx: OrgContext,
+  fence: MutationFence,
+  options: LiveActorOptions = {},
+): Guard {
+  const idleSeconds = requireIdleSeconds(options.idleSeconds ?? SESSION_IDLE_MS / 1000);
+  return existsGuard((database) => {
+    const session = database
       .selectFrom('session as s')
       .innerJoin('user_account as actor', (join) =>
         join.onRef('actor.id', '=', 's.user_id').onRef('actor.org_id', '=', 's.org_id'),
@@ -38,10 +43,22 @@ export function actorHolds(ctx: OrgContext, fence: MutationFence, input: ActorHo
       .where('s.org_id', '=', ctx.orgId)
       .where('s.id', '=', fence.sessionId)
       .where('s.user_id', '=', fence.userId)
-      .where('actor.status', '=', 'active')
+      .where('actor.status', '=', sql.lit('active'))
       .where(sql<SqlBool>`(s.identity_id is null or i.id is not null)`)
-      .where(liveSessionCondition('s', idleSeconds)),
-  );
+      .where(liveSessionCondition('s', idleSeconds));
+    return options.sessionCondition === undefined
+      ? session
+      : session.where(options.sessionCondition('s'));
+  });
+}
+
+/** Live actor permission evidence, including project existence and archive policy. */
+export function actorAuthority(
+  ctx: OrgContext,
+  fence: MutationFence,
+  input: ActorHoldsInput,
+): Guard {
+  const session = liveActorSession(ctx, fence, input);
   const projectExists =
     input.projectId !== null && input.allowArchived === true
       ? existsGuard((database) =>
@@ -61,4 +78,9 @@ export function actorHolds(ctx: OrgContext, fence: MutationFence, input: ActorHo
     session: fence.sessionId,
   });
   return sql<SqlBool>`(${session} and ${projectExists} and ${held})`;
+}
+
+/** The actor holds the permission at the instant the fenced batch runs. */
+export function actorHolds(ctx: OrgContext, fence: MutationFence, input: ActorHoldsInput): Guard {
+  return actorAuthority(ctx, fence, input);
 }

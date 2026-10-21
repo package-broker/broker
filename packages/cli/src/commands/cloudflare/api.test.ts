@@ -296,3 +296,33 @@ it.each(['PUT', 'PATCH'] as const)(
     expect(h.fetch).toHaveBeenCalledTimes(1);
   },
 );
+
+it('keeps preview cleanup within the caller-owned absolute recovery deadline', async () => {
+  let time = 120_000;
+  let recoveryEnd: number | undefined;
+  const transport = vi.fn(async () => json({}));
+  const api = new CloudflareApi({
+    accountId,
+    apiToken,
+    fetch: transport,
+    now: () => time,
+    sleep: async (ms) => {
+      time += ms;
+    },
+    deadline: time,
+    recoveryDeadline: () => (recoveryEnd ??= time + 60_000),
+  });
+  await expect(api.request('/workers/scripts/broker/subdomain')).rejects.toMatchObject({
+    code: 'provider_failure',
+  });
+  api.reserveRecovery(20);
+  expect(api.deadline).toBe(180_000);
+  await api.request('/workers/scripts/broker/subdomain', 'POST', { previews_enabled: false });
+  time = 180_000;
+  api.reserveRecovery(20);
+  expect(api.deadline).toBe(180_000);
+  await expect(api.request('/workers/scripts/broker/subdomain')).rejects.toMatchObject({
+    code: 'provider_failure',
+  });
+  expect(transport).toHaveBeenCalledTimes(1);
+});

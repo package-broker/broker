@@ -419,6 +419,24 @@ describe('kernel authorization records', () => {
     expect(JSON.stringify(logs)).not.toContain(FREE_TEXT);
   });
 
+  it('never sends the raw hook reason to the observability sink', async () => {
+    const reason = 'publisher-request-detail-731';
+    const { sink, records } = countingSink();
+    const kernel = await createKernel(
+      options(
+        [plugin('alpha', [protectedItem]), denyingHook('guard', () => ({ deny: true, reason }))],
+        [],
+        { authorization: allowWithToken, observability: { sink, deploymentId: 'test' } },
+      ),
+    );
+    expect((await kernel.fetch(new Request(`${BASE}/secure/7`))).status).toBe(403);
+    const logs = records.flatMap((record) => (record.kind === 'log' ? [record.record] : []));
+    expect(logs.filter((record) => record.event === 'authz.denied')).toEqual([
+      expect.objectContaining({ reason_code: 'hook.denied', plugin: 'guard' }),
+    ]);
+    expect(JSON.stringify(records)).not.toContain(reason);
+  });
+
   it('maps an invalid hook result to hook.invalid_result', async () => {
     const logs: Entry[] = [];
     const kernel = await createKernel(

@@ -96,6 +96,14 @@ afterAll(async () => {
 });
 
 describe('registry table types match the migrated database', () => {
+  it('indexes version statuses by package', async () => {
+    const columns = await opened.executor.all<{ name: string }>({
+      sql: "SELECT name FROM pragma_index_info('version_package_status') ORDER BY seqno",
+      params: [],
+    });
+    expect(columns.map((column) => column.name)).toEqual(['package_id', 'status']);
+  });
+
   for (const [table, expected] of Object.entries(declared)) {
     it(`${table}: declared columns and NOT NULL equal PRAGMA table_info`, async () => {
       const found = await opened.executor.all<{ name: string; notnull: number }>({

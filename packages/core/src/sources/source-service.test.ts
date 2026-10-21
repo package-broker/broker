@@ -63,6 +63,8 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
       credentialId: null,
     } as SourceRecord),
     resume: vi.fn().mockResolvedValue('resumed'),
+    pause: vi.fn().mockResolvedValue('paused'),
+    list: vi.fn().mockResolvedValue([]),
     delete: vi.fn().mockResolvedValue('deleted'),
   };
   const registeredNames = {
@@ -1032,4 +1034,237 @@ it.each([
     value: { paused },
   });
   expect(registeredNames.remove).toHaveBeenCalledOnce();
+});
+
+describe('source list and pause', () => {
+  const reader = {
+    ...org,
+    actor: { ...org.actor, permissions: new Set(['org:sources:read']) },
+  };
+
+  it('returns a safe DTO and an opaque continuation scoped to the organization and owner', async () => {
+    const { service, sources } = setup();
+    sources.list.mockResolvedValue([
+      {
+        ...input,
+        id: 'a',
+        credentialId: 'credential',
+        url: 'https://user:secret@packages.example.com/path?token=secret#secret',
+        status: 'active',
+        removalPolicy: 'flag',
+        pollIntervalSeconds: 60,
+        lastSuccessAt: null,
+        lastError: 'secret',
+        configJson: '{"secret":"secret"}',
+      },
+      { ...input, id: 'b', credentialId: null },
+    ]);
+    const first = await service.list(ctx, reader, { cursor: null, limit: 1 });
+    expect(first).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ id: 'a', hasCredential: true, url: 'https://packages.example.com/path' }],
+      },
+    });
+    expect(JSON.stringify(first)).not.toMatch(/secret|credentialId|configJson|lastError/);
+    if (!first.ok) throw new Error('expected page');
+    expect(first.value.next).toEqual(expect.any(String));
+    expect(first.value.next).not.toBe('a');
+    sources.list.mockResolvedValue([]);
+    expect(await service.list(ctx, reader, { cursor: first.value.next, limit: 1 })).toEqual({
+      ok: true,
+      value: { items: [], next: null },
+    });
+    expect(sources.list).toHaveBeenLastCalledWith(ctx, { projectId: null, after: 'a', limit: 1 });
+    expect(
+      await service.list(orgContext('org-b'), reader, { cursor: first.value.next, limit: 1 }),
+    ).toMatchObject({ error: 'invalid_config' });
+  });
+
+  it.each([
+    ['https://packages.example.com/repo;token=secret', 'https://packages.example.com/repo'],
+    [
+      'https://user:secret@packages.example.com/repo;token=secret/index;password=secret?token=secret#secret',
+      'https://packages.example.com/repo/index',
+    ],
+    ['https://packages.example.com/token=secret/repo', null],
+    ['https://packages.example.com/ghp_abcdefghijklmnop/repo', null],
+    ['https://packages.example.com/%74oken%3Dsecret/repo', null],
+    ['https://packages.example.com/repo%3Btoken%3Dsecret/index', null],
+    ['https://packages.example.com/repo%3Ftoken%3Dsecret', null],
+    ['https://packages.example.com/repo%23secret', null],
+    ['https://packages.example.com/my%20packages', 'https://packages.example.com/my%20packages'],
+    ['https://packages.example.com/caf%C3%A9', 'https://packages.example.com/caf%C3%A9'],
+    ['https://packages.example.com/repo', 'https://packages.example.com/repo'],
+    ['invalid', null],
+    ['file:///repo;token=secret', null],
+    [null, null],
+  ])('sanitizes path credentials in source DTOs (%s)', async (url, expected) => {
+    const { service, sources } = setup();
+    sources.list.mockResolvedValue([{ ...input, id: 'source', url, credentialId: null }]);
+    const result = await service.list(ctx, reader, { cursor: null, limit: 10 });
+    expect(result).toMatchObject({ ok: true, value: { items: [{ url: expected }] } });
+    expect(JSON.stringify(result)).not.toMatch(/secret|ghp_/);
+  });
+
+  it.each([false, true])('preserves optional pause idempotency (%s)', async (supplied) => {
+    const { service, sources } = setup();
+    const idempotency: NonNullable<ApiCall['idempotency']> = {
+      principalKey: 'user:user',
+      key: 'pause-operation',
+      route: '/sources/source/pause',
+      requestHash: 'a'.repeat(64),
+      status: 200,
+      responseJson: '{"ok":true}',
+      createdAt: '2026-10-21T00:00:00.000Z',
+      expiresAt: '2026-10-22T00:00:00.000Z',
+    };
+    expect(
+      await service.pause(ctx, org, fence, 'source', {
+        ...call,
+        ...(supplied ? { idempotency } : {}),
+      }),
+    ).toEqual({ ok: true, value: null });
+    const payload = sources.pause.mock.calls[0]![2];
+    if (supplied) expect(payload.idempotency).toBe(idempotency);
+    else expect(Object.hasOwn(payload, 'idempotency')).toBe(false);
+  });
+
+  it.each([0, 101, 1.5, NaN])('rejects invalid page limit %s', async (limit) => {
+    const { service, sources } = setup();
+    expect(await service.list(ctx, reader, { cursor: null, limit })).toMatchObject({
+      error: 'invalid_config',
+    });
+    expect(sources.list).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed cursors without echoing them', async () => {
+    const { service, sources } = setup();
+    const answer = await service.list(ctx, reader, { cursor: 'secret', limit: 10 });
+    expect(answer).toMatchObject({ error: 'invalid_config' });
+    expect(JSON.stringify(answer)).not.toContain('secret');
+    expect(sources.list).not.toHaveBeenCalled();
+  });
+
+  it('restricts project listing to the acting project and organization', async () => {
+    const { service, sources } = setup();
+    sources.list.mockResolvedValue([]);
+    expect(
+      (await service.list(ctx, project, { projectId: 'project-a', cursor: null, limit: 100 })).ok,
+    ).toBe(true);
+    expect(sources.list).toHaveBeenCalledWith(ctx, {
+      projectId: 'project-a',
+      after: null,
+      limit: 100,
+    });
+    expect(
+      await service.list(ctx, project, { projectId: 'project-b', cursor: null, limit: 1 }),
+    ).toMatchObject({ error: 'forbidden' });
+    expect(
+      await service.list(orgContext('org-b'), project, {
+        projectId: 'project-a',
+        cursor: null,
+        limit: 1,
+      }),
+    ).toMatchObject({ error: 'forbidden' });
+    expect(sources.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires read permission', async () => {
+    const { service, sources } = setup();
+    expect(await service.list(ctx, org, { cursor: null, limit: 10 })).toMatchObject({
+      error: 'forbidden',
+    });
+    expect(sources.list).not.toHaveBeenCalled();
+  });
+
+  it('rejects reuse of a cursor under a different project', async () => {
+    const { service, sources } = setup();
+    sources.list.mockResolvedValue([
+      { ...input, id: 'a', credentialId: null },
+      { ...input, id: 'b', credentialId: null },
+    ]);
+    const page = await service.list(ctx, reader, { cursor: null, limit: 1 });
+    if (!page.ok) throw new Error('expected page');
+    expect(
+      await service.list(ctx, project, {
+        projectId: 'project-a',
+        cursor: page.value.next,
+        limit: 1,
+      }),
+    ).toMatchObject({ error: 'invalid_config' });
+    expect(sources.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes a pause audit and fence to the repository', async () => {
+    const { service, sources } = setup();
+    expect(await service.pause(ctx, org, fence, 'source', call)).toEqual({ ok: true, value: null });
+    expect(sources.pause).toHaveBeenCalledWith(
+      ctx,
+      fence,
+      expect.objectContaining({
+        id: 'source',
+        providerAnchors: [],
+        audit: expect.objectContaining({
+          action: 'source.pause',
+          actor: { type: 'user', id: 'user' },
+          target: { type: 'source', id: 'source' },
+          projectId: null,
+        }),
+      }),
+    );
+  });
+
+  it('lets a project writer pause an owned source without organization write permission', async () => {
+    const { service, sources } = setup();
+    const writer = {
+      ...project,
+      actor: { ...project.actor, permissions: new Set(['project:sources:write']) },
+    };
+    sources.get.mockResolvedValue({ ...input, id: 'source', projectId: 'project-a' });
+    expect(await service.pause(ctx, writer, fence, 'source', call)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(sources.pause).toHaveBeenCalledWith(
+      ctx,
+      fence,
+      expect.objectContaining({
+        audit: expect.objectContaining({ projectId: 'project-a' }),
+      }),
+    );
+  });
+
+  it.each([null, { ...input, id: 'source', projectId: 'project-b' }])(
+    'hides missing or invisible pause targets %j',
+    async (record) => {
+      const { service, sources } = setup();
+      sources.get.mockResolvedValue(record);
+      expect(await service.pause(ctx, project, fence, 'source', call)).toEqual({
+        ok: false,
+        error: 'not_found',
+      });
+      expect(sources.pause).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['forbidden', 'conflict', 'indeterminate', 'not_found'])(
+    'preserves pause error %s',
+    async (error) => {
+      const { service, sources } = setup();
+      sources.pause.mockResolvedValue(error);
+      expect(await service.pause(ctx, org, fence, 'source', call)).toEqual({ ok: false, error });
+    },
+  );
+
+  it('requires write authority and a fence belonging to the actor', async () => {
+    const { service, sources } = setup();
+    expect(await service.pause(ctx, reader, fence, 'source', call)).toMatchObject({
+      error: 'forbidden',
+    });
+    await expect(
+      service.pause(ctx, org, { ...fence, userId: 'other' }, 'source', call),
+    ).rejects.toThrow(TypeError);
+    expect(sources.pause).not.toHaveBeenCalled();
+  });
 });

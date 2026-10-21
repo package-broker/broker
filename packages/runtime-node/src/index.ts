@@ -168,7 +168,11 @@ import { collectRegistrations, KernelConfigError } from '@package-broker/core/ke
 import type { BrokerConfig } from '@package-broker/core/config';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
-import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
+import type {
+  PluginDefinition,
+  PluginPorts,
+  SourceProviderContext,
+} from '@package-broker/core/plugin';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
 import type { UpstreamCredential } from '@package-broker/core/sources/policy-fetch';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
@@ -640,7 +644,8 @@ function credentialAccess(
         const probe = credentialEchoProbe(opened);
         return {
           credential:
-            opened.kind === 'ssh_key' && origins.length === 0
+            (opened.kind === 'ssh_key' && origins.length === 0) ||
+            (opened.kind === 'github_app' && record.type === 'vcs' && origins[0] === GITHUB_API)
               ? INERT_CREDENTIAL
               : bindCredential(opened, origins),
           probe,
@@ -663,6 +668,24 @@ function credentialAccess(
       if (opened.kind !== 'ssh_key') throw new CredentialError('invalid', 'kind');
       return opened;
     },
+
+    async githubApp(ctx: OrgContext, credentialId: string | null) {
+      if (credentialId === null) return null;
+      try {
+        const row = await repository.get(ctx, credentialId);
+        if (row === null || row.projectId !== null || row.kind !== 'github_app') return null;
+        const opened = await material(ctx, credentialId);
+        return opened.kind === 'github_app' ? opened : null;
+      } catch (error) {
+        if (
+          error instanceof CredentialError ||
+          error instanceof SecretDecryptError ||
+          error instanceof CredentialNotFoundError
+        )
+          return null;
+        throw error;
+      }
+    },
   };
 }
 
@@ -672,6 +695,7 @@ function registryJobDependencies(input: {
   readonly policy: Parameters<typeof parseSourceConfig>[4]['policy'];
   readonly fetch: (record: SourceRecord) => ProviderContext['fetch'];
   readonly credential: (ctx: OrgContext, record: SourceRecord) => Promise<SourceCredential | null>;
+  readonly webhook: Pick<RegistryJobsDeps['webhook'], 'loadCredential' | 'verifier'>;
 }): RegistryJobsDeps {
   const { executor } = input;
   const sources = createSourceRepository(executor);
@@ -751,10 +775,8 @@ function registryJobDependencies(input: {
       ...createSourceSyncReads(executor),
     },
     sourcePoll: { sources },
-    // The jobs module requires webhook ports; no webhook route is mounted by this assembly.
     webhook: {
-      loadCredential: async () => null,
-      verifier: { verify: async () => false },
+      ...input.webhook,
       deliveries: createWebhookDeliveryRepository(executor),
     },
   };
@@ -763,6 +785,7 @@ function registryJobDependencies(input: {
 interface RegistryAssembly {
   readonly module: RegistryModule;
   readonly services: NodeRegistryServices;
+  readonly sourceProviderContext: SourceProviderContext;
   bindJobs(factory: JobsFactory): void;
   bindSourceProviders(providers: Iterable<SourceProvider>): void;
   drain(): Promise<void>;
@@ -791,6 +814,14 @@ function assembleRegistry(input: {
   const outboundFetch = seams.transport ?? createGuardedFetch(policy, guardOptions);
 
   const credentials = credentialAccess(executor, auth.keyring, policy);
+  const discoveryBindings = new WeakMap<
+    UpstreamCredential,
+    {
+      orgId: string;
+      credentialId: string;
+      installationId: string;
+    }
+  >();
   seams.observeCredentials?.(credentials);
   const sources = createSourceRepository(executor);
   const reads = createRegistryReads(executor);
@@ -859,6 +890,15 @@ function assembleRegistry(input: {
       providers: providerRegistry,
       policy,
       credential: credentials.forSource,
+      webhook: {
+        loadCredential: credentials.githubApp,
+        verifier: {
+          verify: async (...args) =>
+            (await providers
+              .find((provider) => provider.id === 'github')
+              ?.webhookVerifier?.verify(...args)) ?? false,
+        },
+      },
       fetch: (record) =>
         policyFetch(
           record.userAgent ??
@@ -923,6 +963,60 @@ function assembleRegistry(input: {
   return {
     module,
     services: Object.freeze({ outboundFetch }),
+    sourceProviderContext: {
+      runtime: 'docker',
+      async discoveryCredential(org, credentialId, installationId) {
+        if (!/^[1-9][0-9]{0,19}$/.test(installationId)) return null;
+        if ((await credentials.githubApp(org, credentialId)) === null) return null;
+        const credential = { ...INERT_CREDENTIAL };
+        discoveryBindings.set(credential, { orgId: org.orgId, credentialId, installationId });
+        return credential;
+      },
+      async tokensFor(org, source, create) {
+        let credentialId: string;
+        let installationId: string;
+        if ('type' in source) {
+          if (source.type !== 'vcs' || source.config.provider !== 'github') return null;
+          const record = await sources.get(org, source.id);
+          if (record === null || record.type !== 'vcs' || record.credentialId === null) return null;
+          const parsed = parseSourceConfig(
+            record.type,
+            record.ecosystem,
+            record.url,
+            record.configJson,
+            {
+              runtime: 'node',
+              policy,
+              hasCredential: true,
+            },
+          );
+          if (
+            !parsed.ok ||
+            !('provider' in parsed.config) ||
+            parsed.config.provider !== 'github' ||
+            parsed.config.installationId !== source.config.installationId ||
+            parsed.config.repository !== source.config.repository ||
+            !Number.isSafeInteger(parsed.config.installationId) ||
+            (parsed.config.installationId ?? 0) <= 0
+          )
+            return null;
+          credentialId = record.credentialId;
+          installationId = String(parsed.config.installationId);
+        } else {
+          const binding = discoveryBindings.get(source);
+          if (binding === undefined || binding.orgId !== org.orgId) return null;
+          ({ credentialId, installationId } = binding);
+        }
+        const app = await credentials.githubApp(org, credentialId);
+        return app === null
+          ? null
+          : create(
+              { appId: app.appId, privateKeyPem: app.privateKeyPem },
+              installationId,
+              credentialId,
+            );
+      },
+    },
     bindSourceProviders,
     bindJobs: (factory) => {
       jobsFactory = factory;
@@ -1086,6 +1180,7 @@ export function createNodeServer(
         (PlatformServices & { readonly retention?: RetentionStorage }) | undefined
     )?.retention;
     const registration = collectRegistrations(plugins, {
+      ...(registry === undefined ? {} : { sourceProviderContext: registry.sourceProviderContext }),
       ...(packageResolver === undefined ? {} : { packageResolver }),
       coreJobs:
         options.platformServices === undefined
@@ -1200,6 +1295,13 @@ export function createNodeServer(
         : { platformServices: options.platformServices }),
       coreRoutes: [
         ...(access?.module.coreRoutes ?? []),
+        ...(registry?.module.coreRoutes ?? []).map((route) => ({
+          ...route,
+          async handler(context: Parameters<typeof route.handler>[0]) {
+            const response = await route.handler(context);
+            return response.status === 401 ? new Response(null, { status: 404 }) : response;
+          },
+        })),
         ...(assets === null ? [] : [...setupRoutes, ...uiRoutes]),
       ],
       ...(authorization === undefined ? {} : { authorization }),

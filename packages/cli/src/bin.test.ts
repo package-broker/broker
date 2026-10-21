@@ -118,3 +118,42 @@ async function deployJsonFailure(flags: string[]) {
     process.argv = previous;
   }
 }
+
+it.each([9, 10, 11, 12])('preserves smoke exit %i through the binary', async (code) => {
+  vi.doMock('./cli.js', () => ({ run: () => Promise.resolve(code) }));
+  const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  await import('./bin.js');
+  await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(code));
+});
+
+it.each(
+  [
+    [],
+    ['--worker-name', 'broker', '--deadline-seconds', '0'],
+    ['--worker-name', 'broker', '--deadline-seconds', '301'],
+    ['--worker-name', 'broker', '--deadline-seconds', '1e2'],
+    ['--worker-name', 'broker', '--smoke-token', 'TOKEN_SENTINEL'],
+  ].map((flags) => ({ flags })),
+)('keeps smoke usage failures to one safe JSON object: $flags', async ({ flags }) => {
+  const previous = process.argv;
+  process.argv = ['node', 'pb', 'cloudflare', 'smoke', '--json', ...flags];
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  try {
+    await import('./bin.js');
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(2));
+    expect(log).toHaveBeenCalledTimes(1);
+    const text = String(log.mock.calls[0]![0]);
+    expect(JSON.parse(text)).toMatchObject({
+      schema_version: 1,
+      command: 'smoke',
+      status: 'error',
+      error: { code: 'invalid_input', stage: 'smoke' },
+    });
+    expect(text).not.toContain('TOKEN_SENTINEL');
+    expect(error).not.toHaveBeenCalled();
+  } finally {
+    process.argv = previous;
+  }
+});

@@ -5,7 +5,7 @@ import { ulid } from '@package-broker/core/ids';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   mutationFence,
   type AuthenticatedActor,
@@ -3744,6 +3744,129 @@ it('requires explicit grant provider anchors at construction', () => {
   expect(() =>
     createFencedGrantRepository(executor, { holderInput, providerAnchors: [] }),
   ).not.toThrow();
+});
+
+describe('administration with seeded fresh protected holders', () => {
+  async function setupHolder() {
+    await seed([
+      groupGrant(a, G1, 'oidc', 'admins', ADMIN),
+      membership(a, U1, 'oidc', 'admins'),
+      role(a, 'writer-role', 'users_writer', 'organization', 0),
+      stmt(
+        'INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, ?, ?)',
+        a.orgId,
+        'writer-role',
+        'org:users:write',
+      ),
+      emailGrant(a, G2, 'u2@example.test', 'writer-role'),
+      stmt(
+        'INSERT INTO session (id, org_id, user_id, identity_id, secret_hash, csrf_hash, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'writer-session',
+        a.orgId,
+        U2,
+        `ID-oidc-${U2}`,
+        'a'.repeat(64),
+        'b'.repeat(64),
+        new Date().toISOString(),
+        new Date(Date.now() + 3600_000).toISOString(),
+        new Date().toISOString(),
+      ),
+    ]);
+    const holders = holderInput();
+    if (holders.kind !== 'fresh') throw new Error('fresh holder input expected');
+    const repository = createFencedGrantRepository(executor, {
+      holderInput,
+      providerAnchors: holders.providers,
+    });
+    expect(await repository.isProtectedHolder(a, U1)).toBe(true);
+    expect(await repository.isProtectedHolder(a, U3)).toBe(false);
+    const suspendUser = vi.spyOn(repository, 'suspendUser');
+    const reactivateUser = vi.spyOn(repository, 'reactivateUser');
+    const admin = createAdministration({
+      roles: createRoleRepository(executor, { providerAnchors: holders.providers }),
+      grants: repository,
+      users: {
+        get: async (ctx, id) => {
+          const [row] = await executor.all<{
+            id: string;
+            email: string;
+            status: 'active' | 'suspended';
+          }>(
+            stmt(
+              'SELECT id, email, status FROM user_account WHERE org_id = ? AND id = ?',
+              ctx.orgId,
+              id,
+            ),
+          );
+          return row === undefined
+            ? null
+            : { ...row, displayName: null, lastLoginAt: null, createdAt: NOW };
+        },
+      },
+      providers: new Map(),
+      clock: fixedClock(new Date().toISOString()),
+      ids: { ulid },
+      log: () => undefined,
+    });
+    const actor = {
+      kind: 'organization' as const,
+      userId: U2,
+      permissions: new Set(['org:users:write']),
+      isOrganizationAdmin: false,
+    };
+    const fence = mutationFence(
+      { userId: U2, sessionId: 'writer-session' } as AuthenticatedActor,
+      {},
+    );
+    return { admin, actor, fence, suspendUser, reactivateUser };
+  }
+
+  it('suspends a non-holder while a different fresh group holder remains protected', async () => {
+    const { admin, actor, fence, suspendUser } = await setupHolder();
+    expect(await admin.suspendUser(a, actor, fence, U3, apiCall)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(suspendUser).toHaveBeenCalledExactlyOnceWith(
+      a,
+      fence,
+      expect.objectContaining({ userId: U3 }),
+    );
+    expect(await statusOf(U3)).toBe('suspended');
+    expect(await statusOf(U1)).toBe('active');
+  });
+
+  it('reactivates a non-holder through the same fence while a fresh group holder exists', async () => {
+    const { admin, actor, fence, reactivateUser } = await setupHolder();
+    await executor.batch([
+      stmt("UPDATE user_account SET status = 'suspended' WHERE org_id = ? AND id = ?", a.orgId, U3),
+    ]);
+    expect(await admin.reactivateUser(a, actor, fence, U3, apiCall)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(reactivateUser).toHaveBeenCalledExactlyOnceWith(
+      a,
+      fence,
+      expect.objectContaining({ userId: U3 }),
+    );
+    expect(await statusOf(U3)).toBe('active');
+  });
+
+  it.each(['suspendUser', 'reactivateUser'] as const)(
+    '%s refuses a fresh group holder without calling the writer',
+    async (name) => {
+      const { admin, actor, fence, suspendUser, reactivateUser } = await setupHolder();
+      const before = await snapshot();
+      expect(await admin[name](a, actor, fence, U1, apiCall)).toEqual({
+        ok: false,
+        error: 'forbidden',
+      });
+      expect(suspendUser).not.toHaveBeenCalled();
+      expect(reactivateUser).not.toHaveBeenCalled();
+      expect(await snapshot()).toBe(before);
+    },
+  );
 });
 
 it('checks holders with database time, matching anchors and at most 100 parameters', async () => {

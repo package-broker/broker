@@ -1,9 +1,5 @@
 import { sql, type Compilable, type Kysely, type SqlBool } from 'kysely';
-import {
-  REAUTH_WINDOW_MS,
-  SESSION_ABSOLUTE_MS,
-  SESSION_IDLE_MS,
-} from '@package-broker/core/auth/session';
+import { REAUTH_WINDOW_MS } from '@package-broker/core/auth/session';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import type { UnblockStoreOutcome } from '@package-broker/core/authz/unlink-service';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
@@ -22,7 +18,8 @@ import {
   type Guard,
   type ProtectedHolderInput,
 } from '../kysely.js';
-import { holdsPermission, permissionRows } from './access.js';
+import { permissionRows } from './access.js';
+import { actorAuthority } from './actor-authority.js';
 
 type LooseDatabase = Record<string, Record<string, unknown>>;
 
@@ -80,7 +77,7 @@ function requireKey(key: IdentityBlockKey): IdentityBlockKey {
   return { provider, issuer, subject };
 }
 
-function actorAuthority(
+function unblockAuthority(
   ctx: OrgContext,
   fence: MutationFence,
   holders: ProtectedHolderInput,
@@ -93,26 +90,14 @@ function actorAuthority(
     .where('la_session.id', '=', fence.sessionId)
     .where('la_session.revoked_at', 'is', null)
     .where('la_session.identity_id', 'is', null)}`;
-  const live = sql<SqlBool>`(
-    exists (
-      select 1 from user_account au
-      join session s on s.org_id = au.org_id and s.user_id = au.id
-      where au.org_id = ${ctx.orgId} and au.id = ${fence.userId} and au.status = 'active'
-        and s.id = ${fence.sessionId} and s.revoked_at is null
-        and s.expires_at > ${DB_TIME}
-        and s.created_at > ${dbTimeAgo(SESSION_ABSOLUTE_MS)}
-        and coalesce(s.last_seen_at, s.created_at) > ${dbTimeAgo(SESSION_IDLE_MS)}
-        and s.reauth_at is not null
-        and s.reauth_at >= ${dbTimeAgo(REAUTH_WINDOW_MS)}
-        and s.reauth_at <= ${DB_TIME})
-    and ${holdsPermission(ctx, {
-      userId: fence.userId,
-      permission: 'org:users:write',
-      projectId: null,
-      providerAnchors: providers,
-      projectState: 'any',
-      session: fence.sessionId,
-    })})`;
+  const live = actorAuthority(ctx, fence, {
+    permission: 'org:users:write',
+    projectId: null,
+    providerAnchors: providers,
+    sessionCondition: (alias) => sql<SqlBool>`(${sql.ref(`${alias}.reauth_at`)} is not null
+      and ${sql.ref(`${alias}.reauth_at`)} >= ${dbTimeAgo(REAUTH_WINDOW_MS)}
+      and ${sql.ref(`${alias}.reauth_at`)} <= ${DB_TIME})`,
+  });
   const reach = sql<SqlBool>`exists ${loose
     .selectFrom(
       permissionRows(ctx, fence.userId, null, providers, { localAdmin }).as('lr') as never,
@@ -147,7 +132,7 @@ export async function unblockIdentity(
   holders: ProtectedHolderInput,
 ): Promise<UnblockIdentityOutcome> {
   const { provider, issuer, subject } = requireKey(key);
-  const { live, reach } = actorAuthority(ctx, fence, holders);
+  const { live, reach } = unblockAuthority(ctx, fence, holders);
   const present = existsGuard((database) =>
     database
       .selectFrom('identity_block as present')

@@ -1,4 +1,5 @@
 import type { ApiCall } from '../api/idempotency.js';
+import { redactValue } from '../audit/redact.js';
 import { auditEvent, type AuditAction } from '../audit/actions.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 import type { ActorContext, AdminLog } from '../authz/administration.js';
@@ -64,7 +65,30 @@ export type SourceServiceResult<T> =
     };
 
 type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: MutationFence];
+
+export type SourceDto = Pick<
+  SourceRecord,
+  | 'id'
+  | 'projectId'
+  | 'name'
+  | 'ecosystem'
+  | 'type'
+  | 'url'
+  | 'status'
+  | 'removalPolicy'
+  | 'pollIntervalSeconds'
+  | 'lastSuccessAt'
+> & { readonly hasCredential: boolean };
+
 export interface SourceService {
+  list(
+    ctx: OrgContext,
+    actor: SourceActor,
+    input: { readonly projectId?: string; readonly cursor: string | null; readonly limit: number },
+  ): Promise<
+    SourceServiceResult<{ readonly items: readonly SourceDto[]; readonly next: string | null }>
+  >;
+  pause(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   create(
     ...args: [...WriteArgs, input: SourceCreateInput]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
@@ -101,7 +125,10 @@ export interface SourceService {
 }
 
 export interface SourceServiceDeps {
-  readonly sources: Pick<SourceRepository, 'create' | 'update' | 'get' | 'delete' | 'resume'>;
+  readonly sources: Pick<
+    SourceRepository,
+    'create' | 'update' | 'get' | 'delete' | 'resume' | 'list' | 'pause'
+  >;
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly registeredNames: RegisteredNameRepository;
   readonly credentials: Pick<CredentialStore, 'prepare'>;
@@ -119,6 +146,61 @@ const invalid = (field: string, message: string): SourceServiceResult<never> => 
   error: 'invalid_config',
   problems: [{ field, message }],
 });
+
+function sourceDto(source: SourceRecord): SourceDto {
+  let url: string | null = null;
+  if (source.url !== null) {
+    try {
+      const parsed = new URL(source.url);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        const redacted = redactValue(source.url, 2048, 'url');
+        if (redacted.ok) {
+          // Scan decoded path material too; keep the sanitized URL's original escaping.
+          const decoded = decodeURIComponent(redacted.value);
+          const checked = redactValue(decoded, 2048, 'url');
+          if (checked.ok && checked.value === new URL(decoded).href) url = redacted.value;
+        }
+      }
+    } catch {
+      // Invalid stored URLs have no public representation.
+    }
+  }
+  return {
+    id: source.id,
+    projectId: source.projectId,
+    name: source.name,
+    ecosystem: source.ecosystem,
+    type: source.type,
+    url,
+    status: source.status,
+    removalPolicy: source.removalPolicy,
+    pollIntervalSeconds: source.pollIntervalSeconds,
+    lastSuccessAt: source.lastSuccessAt,
+    hasCredential: source.credentialId !== null,
+  };
+}
+
+function sourceCursor(ctx: OrgContext, projectId: string | null, id: string): string {
+  return btoa(encodeURIComponent(JSON.stringify([1, ctx.orgId, projectId, id])));
+}
+
+function cursorAfter(ctx: OrgContext, projectId: string | null, cursor: string): string {
+  if (cursor.length > 4096) throw new TypeError('Invalid source cursor');
+  const decoded: unknown = JSON.parse(decodeURIComponent(atob(cursor)));
+  if (
+    !Array.isArray(decoded) ||
+    decoded.length !== 4 ||
+    decoded[0] !== 1 ||
+    decoded[1] !== ctx.orgId ||
+    decoded[2] !== projectId ||
+    typeof decoded[3] !== 'string' ||
+    decoded[3].length === 0 ||
+    decoded[3].length > 256 ||
+    sourceCursor(ctx, projectId, decoded[3]) !== cursor
+  )
+    throw new TypeError('Invalid source cursor');
+  return decoded[3];
+}
 
 export function createSourceService(deps: SourceServiceDeps): SourceService {
   function permitted(ctx: OrgContext, who: SourceActor, projectId: string | null): boolean {
@@ -360,6 +442,53 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
   }
 
   return {
+    async list(ctx, who, input) {
+      const projectId = input.projectId ?? null;
+      if (
+        !who.actor.permissions.has(
+          projectId === null ? 'org:sources:read' : 'project:sources:read',
+        ) ||
+        (who.kind === 'org'
+          ? who.actor.kind !== 'organization'
+          : who.actor.kind !== 'project' ||
+            who.actor.orgId !== ctx.orgId ||
+            who.actor.projectId !== projectId)
+      )
+        return fail('forbidden');
+      if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
+        return invalid('limit', 'must be an integer from 1 to 100');
+      let after: string | null = null;
+      if (input.cursor !== null) {
+        try {
+          after = cursorAfter(ctx, projectId, input.cursor);
+        } catch {
+          return invalid('cursor', 'invalid');
+        }
+      }
+      const rows = await deps.sources.list(ctx, { projectId, after, limit: input.limit });
+      const items = rows.slice(0, input.limit).map(sourceDto);
+      const last = items.at(-1);
+      return success({
+        items,
+        next:
+          rows.length > input.limit && last !== undefined
+            ? sourceCursor(ctx, projectId, last.id)
+            : null,
+      });
+    },
+    async pause(ctx, who, fence, id, call) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await owned(ctx, who, id);
+      if (source === null) return fail('not_found');
+      const answer = await deps.sources.pause(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+        ...mutationAudit(call, who, 'source.pause', 'source', id, source.projectId),
+      });
+      return answer === 'paused' ? success(null) : fail(answer);
+    },
     async create(ctx, who, fence, input) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       requireFence(who, fence);

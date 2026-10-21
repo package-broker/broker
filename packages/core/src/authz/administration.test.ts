@@ -94,6 +94,7 @@ function setup(
     storedGrants?: readonly OrganizationGrant[];
     onCreatorOffboarded?: unknown;
     onUserOffboarded?: unknown;
+    protectedHolderIds?: readonly string[];
   } = {},
 ) {
   const stored = overrides.stored ?? [customRole(), adminRole];
@@ -115,6 +116,8 @@ function setup(
     reactivateUser: vi.fn(async () => 'reactivated'),
     countProtectedHolders: vi.fn(async () => 1),
     isProtectedHolder: vi.fn(async (_ctx: OrgContext, userId: string) => {
+      if (overrides.protectedHolderIds !== undefined)
+        return overrides.protectedHolderIds.includes(userId);
       const target = userOf();
       return (
         userId === target.id &&
@@ -2630,7 +2633,7 @@ describe('repository holder checks and retired permissions', () => {
           subject: { type: 'group', provider: 'corp', value: 'admins' },
         },
       ],
-      grants: { isProtectedHolder: vi.fn(async () => false) },
+      protectedHolderIds: ['fresh-group-holder'],
     });
     expect(await admin.suspendUser(ctx, usersWriter, fenceFor(usersWriter), 'u1', apiCall)).toEqual(
       {

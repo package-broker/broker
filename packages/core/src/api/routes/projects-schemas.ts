@@ -108,6 +108,7 @@ export const PROJECT_API_SPECS = [
     path: '/_pb/projects/:project/archive',
     permission: 'org:projects:archive',
     boundary: 'organization',
+    concurrency: 'if-match',
     service: 'ProjectError',
     api: {
       operationId: 'archiveProject',
@@ -122,6 +123,7 @@ export const PROJECT_API_SPECS = [
     path: '/_pb/projects/:project/restore',
     permission: 'org:projects:archive',
     boundary: 'organization',
+    concurrency: 'if-match',
     service: 'ProjectError',
     api: {
       operationId: 'restoreProject',

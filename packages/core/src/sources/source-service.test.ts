@@ -69,6 +69,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     delete: vi.fn().mockResolvedValue('deleted'),
   };
   const registeredNames = {
+    list: vi.fn().mockResolvedValue({ items: [], next: null }),
     owner: vi.fn().mockResolvedValue({ sourceId: 'source', projectId: 'project-a' }),
     add: vi.fn().mockResolvedValue('added'),
     remove: vi.fn().mockResolvedValue('removed_and_paused'),
@@ -1326,5 +1327,79 @@ describe('source list and pause', () => {
       service.pause(ctx, org, { ...fence, userId: 'other' }, 'source', call),
     ).rejects.toThrow(TypeError);
     expect(sources.pause).not.toHaveBeenCalled();
+  });
+});
+
+describe('registered-name listing', () => {
+  const reader = { ...org, actor: { ...org.actor, permissions: new Set(['org:sources:read']) } };
+  const query = { sourceId: 'source', limit: 1 };
+  it('uses the org-scoped source lookup and returns the repository page', async () => {
+    const { service, sources, registeredNames } = setup();
+    const page = {
+      items: [{ id: 'name', sourceId: 'source', ecosystem: 'composer', pattern: 'acme/*' }],
+      next: 'name',
+    };
+    registeredNames.list.mockResolvedValue(page);
+    expect(await service.listRegisteredNames(ctx, reader, query)).toEqual({
+      ok: true,
+      value: page,
+    });
+    expect(sources.get).toHaveBeenCalledWith(ctx, 'source');
+    expect(registeredNames.list).toHaveBeenCalledWith(ctx, query);
+  });
+  it('uses the visibility lookup for the matching project reader', async () => {
+    const { service, sources, registeredNames } = setup();
+    sources.getVisible.mockResolvedValue({
+      ...input,
+      id: 'source',
+      projectId: null,
+      credentialId: null,
+    } as SourceRecord);
+    expect((await service.listRegisteredNames(ctx, project, query)).ok).toBe(true);
+    expect(sources.getVisible).toHaveBeenCalledWith(ctx, {
+      projectId: 'project-a',
+      sourceId: 'source',
+    });
+    expect(sources.get).not.toHaveBeenCalled();
+    expect(registeredNames.list).toHaveBeenCalledWith(ctx, query);
+  });
+  it.each(['absent', 'foreign', 'invisible', 'archived'])('hides a %s project source', async () => {
+    const { service, registeredNames } = setup();
+    expect(await service.listRegisteredNames(ctx, project, query)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+  it('hides an absent organization source', async () => {
+    const { service, sources, registeredNames } = setup();
+    sources.get.mockResolvedValue(null);
+    expect(await service.listRegisteredNames(ctx, reader, query)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+  it.each([
+    { ...reader, actor: { ...reader.actor, permissions: new Set<string>() } },
+    { ...project, actor: { ...project.actor, orgId: orgContext('foreign').orgId } },
+    { ...project, actor: { ...project.actor, permissions: new Set(['project:sources:write']) } },
+  ])('denies unauthorized readers before a source lookup (%#)', async (actor) => {
+    const { service, sources, registeredNames } = setup();
+    expect(await service.listRegisteredNames(ctx, actor, query)).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(sources.get).not.toHaveBeenCalled();
+    expect(sources.getVisible).not.toHaveBeenCalled();
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+  it.each([0, 101, 1.5, NaN])('rejects invalid page size %s', async (limit) => {
+    const { service, registeredNames } = setup();
+    expect(await service.listRegisteredNames(ctx, reader, { ...query, limit })).toMatchObject({
+      ok: false,
+      error: 'invalid_config',
+    });
+    expect(registeredNames.list).not.toHaveBeenCalled();
   });
 });

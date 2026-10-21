@@ -254,6 +254,24 @@ export interface RegisteredNameTarget {
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
+export interface RegisteredNameRecord {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly ecosystem: SourceEcosystem;
+  readonly pattern: string;
+}
+
+export interface RegisteredNameListQuery {
+  readonly sourceId: string;
+  readonly after?: string;
+  readonly limit: number;
+}
+
+export interface RegisteredNamePage {
+  readonly items: readonly RegisteredNameRecord[];
+  readonly next: string | null;
+}
+
 /**
  * Every registered-name write needs `org:sources:write`, also for project-level sources, and
  * `forbidden` is answered before existence is revealed. `pattern_taken`: another source of the
@@ -261,6 +279,8 @@ export interface RegisteredNameTarget {
  * `indeterminate`: the response was lost and the write may have committed; re-read.
  */
 export interface RegisteredNameRepository {
+  /** Id-ordered page within the organization and source; limit is an integer from 1 to 100. */
+  list(ctx: OrgContext, input: RegisteredNameListQuery): Promise<RegisteredNamePage>;
   owner(
     ctx: OrgContext,
     id: string,

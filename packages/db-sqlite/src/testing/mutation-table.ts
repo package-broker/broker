@@ -1,5 +1,6 @@
 import { entries as accessServicesEntries } from './mutation-table/access-services.js';
 import { entries as sourceVisibleEntries } from './mutation-table/source-visible.js';
+import { entries as packageAdminReadEntries } from './mutation-table/package-admin-read.js';
 import { entries as sourceListEntries } from './mutation-table/source-list.js';
 import { entries as sourcePauseEntries } from './mutation-table/source-pause.js';
 import { entries as vulnerabilityEntries } from './mutation-table/vulnerability.js';
@@ -105,6 +106,7 @@ export { builderAllowlist, exportedBuilders, builderNames } from './mutation-tab
 
 export const mutationTable: readonly MutationEntry[] = [
   ...sourceVisibleEntries,
+  ...packageAdminReadEntries,
   ...sourceListEntries,
   ...sourcePauseEntries,
   ...fixtureVersionListingsEntries,

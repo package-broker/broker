@@ -28,7 +28,10 @@ export type ErrorCode =
   | 'rollback_blocked_contract'
   | 'rollback_unavailable_first_deploy'
   | 'rollback_failed'
-  | 'organization_slug_mismatch';
+  | 'organization_slug_mismatch'
+  | 'organization_not_found'
+  | 'key_recovery_required'
+  | 'token_refresh_required';
 
 const GUIDANCE =
   'Workers Paid with Queues is the supported target. Enable the required service, verify token permissions, then rerun pb cloudflare setup. Resources were not created. For a different deployment target, use the documented single-replica Node installation.';
@@ -72,6 +75,11 @@ const MESSAGES: Record<ErrorCode, string> = {
     'Smoke failed on the first deployment; retain the candidate and resources for forward repair.',
   rollback_failed: 'Rollback activation, configuration or readiness could not be verified.',
   organization_slug_mismatch: 'The existing organization has a different slug.',
+  organization_not_found: 'Organization not found; bootstrap the organization first.',
+  key_recovery_required:
+    'Key delivery or installation is uncertain. Supply the saved --key-file or --master-key-env; setup will not generate another key.',
+  token_refresh_required:
+    'Token issuance is uncertain. Use the saved token or explicitly request --refresh-setup-token with safe delivery.',
 };
 
 export class CloudflareError extends Error {

@@ -1,0 +1,21 @@
+---
+- name: Refresh the target package index
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Detect whether this release splits the Docker CLI package
+  ansible.builtin.command:
+    argv: [apt-cache, show, docker-cli]
+  register: e2e_docker_cli_package
+  changed_when: false
+  failed_when: e2e_docker_cli_package.rc not in [0, 100]
+
+- name: Install exact runtime pins and builder tooling only for target builds
+  ansible.builtin.apt:
+    name: >-
+      {{ ['docker.io=' + e2e_docker_version,
+      'containerd=' + e2e_containerd_version, 'runc=' + e2e_runc_version]
+      + (['docker-cli=' + e2e_docker_version] if e2e_docker_cli_package.rc == 0 else [])
+      + (['docker-buildx=' + e2e_docker_buildx_version]
+      if e2e_image_source | default('target_build') == 'target_build' else []) }}
+    state: present

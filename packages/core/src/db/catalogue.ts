@@ -9,6 +9,7 @@ import type {
   CompleteVersionListing,
   HistoryBasis,
   StatusReason,
+  VersionStatus,
 } from '../catalogue/version-rules.js';
 import type { VersionStability } from '../catalogue/versions.js';
 import type { Sha256 } from '../platform/blob.js';
@@ -455,6 +456,17 @@ export interface VisibilityAudit {
   readonly idempotency?: IdempotencyRecord;
 }
 
+export type PackageManageScope =
+  { readonly kind: 'organization' } | { readonly kind: 'project'; readonly projectId: string };
+
+interface PackageManageWrite {
+  readonly packageId?: string;
+  readonly expectedStatus?: VersionStatus;
+  readonly manage?: PackageManageScope;
+  readonly audit?: AuditEvent;
+  readonly idempotency?: IdempotencyRecord;
+}
+
 /** Every method checks the fence actor's authority inside its own batch. */
 export interface VisibilityStore {
   attachSource(
@@ -527,7 +539,7 @@ export interface VisibilityStore {
   quarantineVersion(
     ctx: OrgContext,
     fence: MutationFence,
-    input: {
+    input: PackageManageWrite & {
       readonly versionId: string;
       readonly reason: Extract<StatusReason, 'admin_quarantine'>;
     },
@@ -535,12 +547,12 @@ export interface VisibilityStore {
   releaseQuarantine(
     ctx: OrgContext,
     fence: MutationFence,
-    input: { readonly versionId: string },
+    input: PackageManageWrite & { readonly versionId: string },
   ): Promise<VisibilityWriteResult>;
   tombstoneVersion(
     ctx: OrgContext,
     fence: MutationFence,
-    input: {
+    input: PackageManageWrite & {
       readonly versionId: string;
       readonly reason: Extract<StatusReason, 'admin_tombstone'>;
     },

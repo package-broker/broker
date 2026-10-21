@@ -1,0 +1,24 @@
+---
+- name: Refuse malformed recovered ids
+  ansible.builtin.assert:
+    that: e2e_recovered_resource.id | string is match('^[1-9][0-9]*$')
+    quiet: true
+  no_log: true
+
+- name: Preserve all accepted ids for this kind
+  ansible.builtin.set_fact:
+    e2e_state: >-
+      {{ e2e_state | combine({
+      'resources': e2e_state.resources | combine({e2e_resource_kind:
+      (((e2e_state.resources[e2e_resource_kind]
+      if e2e_state.resources[e2e_resource_kind] is sequence
+      and e2e_state.resources[e2e_resource_kind] is not string
+      else [e2e_state.resources[e2e_resource_kind]])
+      if e2e_resource_kind in e2e_state.resources else [])
+      + [e2e_recovered_resource.id | int]) | map('int') | unique | list}),
+      'created_at': e2e_state.created_at | combine({e2e_resource_kind:
+      lookup('ansible.builtin.pipe', 'date +%s') | int})
+      }) }}
+
+- name: Save each recovered id before proceeding
+  ansible.builtin.include_tasks: record.yml

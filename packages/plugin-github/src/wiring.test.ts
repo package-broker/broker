@@ -29,6 +29,7 @@ import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadat
 import * as gitFetch from '@package-broker/core/sources/git/fetch';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { verifyKeyring } from '@package-broker/core/secrets/keyring-verifier';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { createSecretCipher } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
@@ -802,6 +803,9 @@ async function runtimeFixture(runtime: 'node' | 'cloudflare') {
   const { createCredentialRepository } = await load(
     '../../db-sqlite/src/repositories/credential.ts',
   );
+  const { createKeyringVerifierStore } = await load(
+    '../../db-sqlite/src/repositories/keyring-verifier.ts',
+  );
   const db = await openMigratedDatabase();
   const executor: SqlExecutor = db.executor;
   const orgRow = await createOrganizationBootstrap(executor).bootstrap({
@@ -814,6 +818,7 @@ async function runtimeFixture(runtime: 'node' | 'cloudflare') {
   const keyring = createKeyring([
     parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
   ]);
+  await verifyKeyring(keyring, createKeyringVerifierStore(executor));
   const app = await fixtureApp();
   const store = createCredentialStore({
     repository: createCredentialRepository(executor),

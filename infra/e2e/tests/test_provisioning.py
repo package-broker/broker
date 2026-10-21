@@ -16,9 +16,10 @@ class ProvisioningTests(unittest.TestCase):
     def test_server_uses_the_journaled_firewall_id(self):
         plays = yaml.safe_load((ROOT / "site.yml").read_text())
         server = next(
-            task["hetzner.hcloud.server"]
+            child["hetzner.hcloud.server"]
             for task in plays[0]["tasks"]
-            if "hetzner.hcloud.server" in task
+            for child in task.get("block", [task])
+            if "hetzner.hcloud.server" in child
         )
         self.assertEqual(len(server["firewalls"]), 1)
         # The module resolves each list element as a name or ID, not an API object.

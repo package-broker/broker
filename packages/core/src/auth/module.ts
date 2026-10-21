@@ -160,7 +160,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
           level: 'warn',
           event: 'auth.local.locked',
           reason: 'attempts',
-          userId: scope.lockedUserId,
+          user_id: scope.lockedUserId,
         });
       }
     }

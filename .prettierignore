@@ -4,3 +4,5 @@ dist
 .pb
 .release-please-manifest.json
 CHANGELOG.md
+infra/e2e/runs
+infra/e2e/inventory.local.yml

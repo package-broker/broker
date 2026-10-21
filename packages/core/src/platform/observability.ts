@@ -47,6 +47,7 @@ export interface SafeLogRecord {
   readonly head_hash?: string;
   readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
   readonly package_key?: string;
+  readonly source_id?: string;
 }
 
 export const LOG_FIELDS = [
@@ -78,6 +79,7 @@ export const LOG_FIELDS = [
   'head_hash',
   'reason',
   'package_key',
+  'source_id',
 ] as const satisfies readonly (keyof SafeLogRecord)[];
 
 export type LogField = (typeof LOG_FIELDS)[number];
@@ -308,6 +310,7 @@ const FIELD_CHECKS: Readonly<
   head_hash: matches(/^[0-9a-f]{64}$/),
   reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
   package_key: packageKey,
+  source_id: matches(ENTITY_ID),
 };
 
 const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;

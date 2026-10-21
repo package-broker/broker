@@ -355,6 +355,7 @@ export async function applyChunk(
       event: 'ingest.budget_exhausted',
       reason_code: 'budget_exhausted',
       package_key: source.key,
+      source_id: source.id,
       seq: ordinal ?? 0,
     });
     return abandon('refused', { refusal: 'budget_exhausted' });

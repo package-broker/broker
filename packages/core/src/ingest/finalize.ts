@@ -18,6 +18,7 @@ export type IngestFinalizeResult =
       readonly status: 'complete';
       readonly empty: boolean;
       readonly validatorsPublished: number;
+      readonly leaseHeldBack: number;
     }
   | { readonly status: 'refused'; readonly reason: IngestFinalizeRefusal };
 

@@ -1,0 +1,34 @@
+---
+- name: Start the tunnel for this boot
+  ansible.builtin.systemd_service:
+    name: pb-e2e-tunnel
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Identify the current tunnel process invocation
+  ansible.builtin.command:
+    argv: [systemctl, show, pb-e2e-tunnel, --property=InvocationID, --value]
+  register: e2e_tunnel_invocation
+  changed_when: false
+
+- name: Require a concrete invocation to exclude stale URLs
+  ansible.builtin.assert:
+    that: e2e_tunnel_invocation.stdout is match('^[a-f0-9]{32}$')
+    quiet: true
+
+- name: Wait at most one minute for this invocation's quick tunnel URL
+  ansible.builtin.command:
+    argv:
+      - journalctl
+      - --no-pager
+      - --boot
+      - --unit=pb-e2e-tunnel
+      - --output=cat
+      - '_SYSTEMD_INVOCATION_ID={{ e2e_tunnel_invocation.stdout }}'
+  register: e2e_tunnel_log
+  until: e2e_tunnel_log.stdout | regex_findall(e2e_tunnel_url_pattern) | length > 0
+  retries: 30
+  delay: 2
+  changed_when: false
+  no_log: true

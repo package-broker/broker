@@ -84,7 +84,15 @@ const declared: { [T in CatalogueTable]: ExpectedNotNull<T> } = {
     updated_at: 1,
   },
   project_source: { org_id: 1, project_id: 1, source_id: 1, precedence: 1, created_at: 1 },
-  project_package: { org_id: 1, project_id: 1, package_id: 1, origin: 1, created_at: 1 },
+  project_package: {
+    org_id: 1,
+    project_id: 1,
+    package_id: 1,
+    origin: 1,
+    created_at: 1,
+    ecosystem: 1,
+    name: 1,
+  },
   project_package_pattern: {
     id: 1,
     org_id: 1,

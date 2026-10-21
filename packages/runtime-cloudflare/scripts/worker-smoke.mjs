@@ -865,7 +865,7 @@ async function run() {
       ]);
     }
     seed.push([
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'npm', 'visible')",
       [routeOrgId, projectId, visibleId],
     ]);
     await routeExecutor.batch(seed.map(([sql, params]) => ({ sql, params })));

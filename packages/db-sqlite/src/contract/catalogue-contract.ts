@@ -63,7 +63,7 @@ export function describeCatalogueContract(
           orgs.a.orgId,
         ),
         st(
-          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'subscription')",
+          "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, 'P', 'K', 'subscription', 'npm', 'widget')",
           orgs.a.orgId,
         ),
         st(

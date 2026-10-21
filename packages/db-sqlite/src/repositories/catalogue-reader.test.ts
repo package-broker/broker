@@ -11,7 +11,8 @@ let ctx: OrgContext;
 const T0 = '2020-01-01T00:00:00.000Z';
 
 async function exec(sql: string, params: (string | number | null)[] = []): Promise<void> {
-  await database.executor.batch([{ sql, params }]);
+  const [result] = await database.executor.batch([{ sql, params }]);
+  if (/^INSERT INTO project_package \(/i.test(sql)) expect(result?.changes).toBe(1);
 }
 
 async function seed(): Promise<void> {
@@ -34,7 +35,7 @@ async function seed(): Promise<void> {
     ['K1', ctx.orgId, 'S1', 'npm', 'left-pad'],
   );
   await exec(
-    'INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, ?)',
+    'INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, ? AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1',
     [ctx.orgId, 'P1', 'K1', 'subscription'],
   );
   await exec(

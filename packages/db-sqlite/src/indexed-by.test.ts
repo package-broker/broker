@@ -37,8 +37,18 @@ const COVERAGE: readonly Coverage[] = [
   },
   {
     file: 'repositories/closure-edges.ts',
-    index: 'package_by_name',
-    d1Cases: ['closure edges page (package_by_name)'],
+    index: 'project_package_name',
+    d1Cases: ['closure edges page (project_package_name)'],
+  },
+  {
+    file: 'repositories/closure-edges.ts',
+    index: 'project_package_name',
+    d1Cases: ['closure edges page (project_package_name)'],
+  },
+  {
+    file: 'repositories/closure-edges.ts',
+    index: 'version_package_id',
+    d1Cases: ['closure edges page (version_package_id)'],
   },
   {
     file: 'repositories/closure-edges.ts',

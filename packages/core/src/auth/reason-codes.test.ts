@@ -62,6 +62,7 @@ describe('auth reason sets', () => {
       'not_supported',
       'not_updated',
       'policy',
+      'session_inactive',
       'stale_auth_time',
       'state_mismatch',
     ]);
@@ -109,6 +110,7 @@ describe('auth reason sets', () => {
       'purpose_invalid',
       'reauth_refused',
       'secret_missing',
+      'session_inactive',
       'stale_auth_time',
       'state_invalid',
       'state_mismatch',

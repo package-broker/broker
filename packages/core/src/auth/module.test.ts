@@ -3,6 +3,7 @@ import { createAuthModule, type AuthModuleOptions, type AuthRepositories } from 
 import { sealLoginState } from './login-state.js';
 import type { LocalLoginSnapshot } from '../db/local-login.js';
 import { orgContext } from '../db/port.js';
+import type { ActiveSession } from '../db/sessions.js';
 import { fixedClock } from '../ids.js';
 import type { IdentityProvider, VerifiedIdentity } from '../identity/port.js';
 import type { HookMap, RequestContext } from '../plugin.js';
@@ -57,11 +58,23 @@ function deferred() {
 
 function fixture(resolve?: HookMap['auth.resolveIdentity'], map?: HookMap['auth.mapGroups']) {
   const log = vi.fn<(entry: Readonly<Record<string, unknown>>) => void>();
+  const session: ActiveSession = {
+    id: 'session-1',
+    userId: 'user-1',
+    identityId: 'identity-1',
+    csrfHash: '',
+    createdAt: new Date(clock.now().getTime() - 60_000).toISOString(),
+    expiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
+    lastSeenAt: clock.now().toISOString(),
+    reauthAt: null,
+    user: { id: 'user-1', email: identity.email, displayName: null },
+  };
   const reserveAttempt = vi.fn<AuthRepositories['localReader']['reserveAttempt']>(
     (_ctx, _userId, _now, lockedUntil) =>
       Promise.resolve({ reserved: true, snapshot: { ...snapshot, failedCount: 5, lockedUntil } }),
   );
   const repositories = {
+    sessions: { findActiveById: () => Promise.resolve(session) },
     localReader: {
       findByEmail: () => Promise.resolve(snapshot),
       reserveAttempt,
@@ -138,17 +151,7 @@ function fixture(resolve?: HookMap['auth.resolveIdentity'], map?: HookMap['auth.
   const reauth = async (requestId: string) => {
     vi.spyOn(auth.sessions, 'authenticate').mockResolvedValue({
       principal: { kind: 'user', id: 'user-1' },
-      session: {
-        id: 'session-1',
-        userId: 'user-1',
-        identityId: 'identity-1',
-        csrfHash: '',
-        createdAt: new Date(clock.now().getTime() - 60_000).toISOString(),
-        expiresAt: new Date(clock.now().getTime() + 60_000).toISOString(),
-        lastSeenAt: clock.now().toISOString(),
-        reauthAt: null,
-        user: { id: 'user-1', email: identity.email, displayName: null },
-      },
+      session,
     });
     const cookie = await sealLoginState(createSecretCipher(options.keyring, 'login-state'), {
       provider: provider.id,

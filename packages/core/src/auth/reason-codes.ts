@@ -46,6 +46,7 @@ export const LOGIN_REFUSALS = reasonSet({
 } satisfies Record<LoginRefusal, true>);
 
 export const REAUTH_REFUSALS = reasonSet({
+  session_inactive: true,
   not_sso_session: true,
   not_supported: true,
   state_mismatch: true,

@@ -9,6 +9,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import type {
   NewRegisteredName as CoreNewRegisteredName,
   RegisteredNameRepository as CoreRegisteredNameRepository,
+  RegisteredNameRecord,
   RegisteredNameTarget as CoreRegisteredNameTarget,
 } from '@package-broker/core/db/source';
 import {
@@ -141,6 +142,30 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
   }
 
   return {
+    async list(ctx, input) {
+      if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
+        throw new RangeError('invalid registered-name page limit');
+      let query = db
+        .selectFrom('registered_name as names')
+        .select(['names.id', 'names.source_id as sourceId', 'names.ecosystem', 'names.pattern'])
+        .where('names.org_id', '=', ctx.orgId)
+        .where('names.source_id', '=', input.sourceId)
+        .where((eb) =>
+          eb.exists(
+            eb
+              .selectFrom('source as owner')
+              .select('owner.id')
+              .whereRef('owner.id', '=', 'names.source_id')
+              .where('owner.org_id', '=', ctx.orgId),
+          ),
+        );
+      if (input.after !== undefined) query = query.where('names.id', '>', input.after);
+      const rows = await executor.all<RegisteredNameRecord>(
+        compile(query.orderBy('names.id', 'asc').limit(input.limit + 1)),
+      );
+      const items = rows.slice(0, input.limit);
+      return { items, next: rows.length > input.limit ? items.at(-1)!.id : null };
+    },
     async owner(ctx, id) {
       const [row] = await executor.all<{ sourceId: string; projectId: string | null }>(
         compile(

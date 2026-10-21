@@ -130,7 +130,13 @@ async function fixture(
     organizations: {
       get: vi.fn().mockResolvedValue({ settings: { retentionRemovedUpstreamDays: 30 } }),
     },
-    registeredNames: { owner: vi.fn(), add: vi.fn(), remove: vi.fn(), enable: vi.fn() },
+    registeredNames: {
+      list: vi.fn(),
+      owner: vi.fn(),
+      add: vi.fn(),
+      remove: vi.fn(),
+      enable: vi.fn(),
+    },
     credentialRepository: { get: vi.fn().mockResolvedValue(null) },
     catalogue: { previewWinners: vi.fn() },
     policy: { runtime: 'node', allowPrivateHosts: [], selfOrigins: [ORIGIN] },

@@ -1,5 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sql } from 'kysely';
+import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
+import { sha256Hex } from '@package-broker/core/auth/primitives';
+import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
+import { sourceNameRoutes } from '@package-broker/core/api/routes/source-names';
+import { createVisibilityService } from '@package-broker/core/catalogue/visibility-service';
+import { fixedClock, ulid } from '@package-broker/core/ids';
+import { createKernel } from '@package-broker/core/kernel/kernel';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { createSourceService, type SourceActor } from '@package-broker/core/sources/source-service';
+import { createVisibilityStore } from './catalogue-writer.js';
+import { createSourceRepository } from './source.js';
+import { createOrganizationRepository } from './organization.js';
 import {
   settleIdempotent,
   replayResponse,
@@ -1457,4 +1469,272 @@ describe('registered-name idempotency', () => {
       ).toEqual(saved);
     },
   );
+});
+
+describe('registered-name pages', () => {
+  async function name(id: string, org: OrgContext, sourceId: string) {
+    await batchForged([
+      stmt(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', ?)",
+        id,
+        org.orgId,
+        sourceId,
+        `acme/${id.toLowerCase()}`,
+      ),
+    ]);
+  }
+  it('orders by id, bounds pages and resumes strictly after the cursor', async () => {
+    for (const id of ['c', 'a', 'e']) await name(id, a, SRC_ORG);
+    await name('b', a, SRC_P1);
+    const first = await names.list(a, { sourceId: SRC_ORG, limit: 2 });
+    expect(first).toEqual({
+      items: [
+        { id: 'a', sourceId: SRC_ORG, ecosystem: 'composer', pattern: 'acme/a' },
+        { id: 'c', sourceId: SRC_ORG, ecosystem: 'composer', pattern: 'acme/c' },
+      ],
+      next: 'c',
+    });
+    expect(await names.list(a, { sourceId: SRC_ORG, limit: 2, after: first.next! })).toEqual({
+      items: [{ id: 'e', sourceId: SRC_ORG, ecosystem: 'composer', pattern: 'acme/e' }],
+      next: null,
+    });
+    expect(await names.list(a, { sourceId: SRC_ORG, limit: 2, after: 'z' })).toEqual({
+      items: [],
+      next: null,
+    });
+  });
+  it('excludes a foreign registered name referencing an own source', async () => {
+    await name('foreign-name', b, SRC_ORG);
+    expect(await names.list(a, { sourceId: SRC_ORG, limit: 10 })).toEqual({
+      items: [],
+      next: null,
+    });
+  });
+  it('excludes an own registered name referencing a foreign source', async () => {
+    const source = seedSource('foreign-source', 'foreign-source');
+    await executor.batch([
+      { ...source, params: source.params.map((p) => (p === seedOrg.orgId ? b.orgId : p)) },
+    ]);
+    await name('own-name', a, 'foreign-source');
+    expect(await names.list(a, { sourceId: 'foreign-source', limit: 10 })).toEqual({
+      items: [],
+      next: null,
+    });
+  });
+  it.each([0, 101, 1.5, NaN, Infinity])('rejects invalid limit %s', async (limit) => {
+    await expect(names.list(a, { sourceId: SRC_ORG, limit })).rejects.toThrow(RangeError);
+  });
+});
+
+describe('registered-name route regressions with SQLite', () => {
+  function sourceService() {
+    return createSourceService({
+      sources: createSourceRepository(executor),
+      registeredNames: names,
+      organizations: createOrganizationRepository(executor),
+      credentials: { prepare: vi.fn() },
+      credentialRepository: { get: vi.fn() },
+      catalogue: { previewWinners: async () => [] },
+      policy: { runtime: 'node', allowPrivateHosts: [], selfOrigins: [] },
+      providerAnchors: ANCHORS,
+      ids: { ulid },
+      log: () => {},
+    });
+  }
+
+  for (const kind of ['org', 'project'] as const) {
+    it.each(['archived', 'foreign', 'missing'] as const)(
+      `hides names when the owning project is %s for a ${kind} reader`,
+      async (state) => {
+        expect(await add(orgFence(), NAME_1, SRC_P1, 'acme/*')).toBe('added');
+        const service = sourceService();
+        const reader: SourceActor =
+          kind === 'org'
+            ? {
+                kind,
+                actor: {
+                  kind: 'organization',
+                  userId: ORG_ADMIN,
+                  isOrganizationAdmin: true,
+                  permissions: new Set(['org:sources:read']),
+                },
+              }
+            : {
+                kind,
+                actor: {
+                  kind: 'project',
+                  userId: P1_MAINTAINER,
+                  orgId: a.orgId,
+                  projectId: P1,
+                  permissions: new Set(['project:sources:read']),
+                },
+              };
+        const query = { sourceId: SRC_P1, limit: 10 };
+        expect(await service.listRegisteredNames(a, reader, query)).toMatchObject({
+          ok: true,
+          value: { items: [{ id: NAME_1, pattern: 'acme/*' }] },
+        });
+        if (state === 'archived')
+          await executor.batch([
+            stmt("UPDATE project SET status = 'archived' WHERE org_id = ? AND id = ?", a.orgId, P1),
+          ]);
+        else
+          await batchForged([
+            state === 'foreign'
+              ? stmt(
+                  'UPDATE project SET org_id = ? WHERE org_id = ? AND id = ?',
+                  b.orgId,
+                  a.orgId,
+                  P1,
+                )
+              : stmt('DELETE FROM project WHERE org_id = ? AND id = ?', a.orgId, P1),
+          ]);
+        const list = vi.spyOn(names, 'list');
+        expect(await service.listRegisteredNames(a, reader, query)).toEqual({
+          ok: false,
+          error: 'not_found',
+        });
+        expect(list).not.toHaveBeenCalled();
+      },
+    );
+  }
+
+  it('returns conflict when an attachment is detached between ordering preflight and write', async () => {
+    const origin = 'https://broker.test';
+    const projectId = ulid();
+    const sourceId = ulid();
+    const otherId = ulid();
+    const csrf = 'B'.repeat(43);
+    const clock = fixedClock(NOW);
+    const ids = { ulid };
+    const store = createVisibilityStore(executor, { providerAnchors: ANCHORS });
+    const visibility = createVisibilityService({ store, log: () => {} });
+    await executor.batch([
+      stmt(
+        "INSERT INTO project (id, org_id, slug, name, status) VALUES (?, ?, 'order-race', 'Order race', 'active')",
+        projectId,
+        a.orgId,
+      ),
+      seedSource(sourceId, 'race-one'),
+      seedSource(otherId, 'race-two'),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 1)',
+        a.orgId,
+        projectId,
+        sourceId,
+      ),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 2)',
+        a.orgId,
+        projectId,
+        otherId,
+      ),
+    ]);
+    const setOrder = vi.spyOn(visibility, 'setOrder');
+    const projectSources = {
+      async list(ctx: OrgContext, input: { projectId: string }) {
+        const snapshot = await executor.all<{ sourceId: string }>(
+          stmt(
+            'SELECT source_id AS sourceId FROM project_source WHERE org_id = ? AND project_id = ?',
+            ctx.orgId,
+            input.projectId,
+          ),
+        );
+        await executor.batch([
+          stmt(
+            'DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?',
+            ctx.orgId,
+            input.projectId,
+            sourceId,
+          ),
+        ]);
+        return snapshot;
+      },
+    };
+    const app = await createKernel({
+      platform: 'node',
+      plugins: [],
+      coreRoutes: sourceNameRoutes({
+        service: sourceService(),
+        sources: createSourceRepository(executor),
+        registeredNames: names,
+        visibility,
+        projectSources,
+        projects: {
+          async get(ctx, id) {
+            const [project] = await executor.all<{
+              status: 'active' | 'archived';
+              revision: number;
+            }>(
+              stmt(
+                'SELECT status, revision FROM project WHERE org_id = ? AND id = ?',
+                ctx.orgId,
+                id,
+              ),
+            );
+            return project ?? null;
+          },
+        },
+        ids,
+        clock,
+        clientIp: () => '192.0.2.1',
+      }),
+      ports: { organizations: { get: async () => null }, ids, clock },
+      resolveOrg: async () => a,
+      health: async () => true,
+      log: () => {},
+      authorization: createAuthorizationEngine({
+        access: {
+          lookupSession: async () => ({
+            session: { id: S_P1, csrfHash: await sha256Hex(csrf) },
+            user: { id: P1_MAINTAINER },
+            identity: null,
+            protectedHolder: false,
+            project: { id: projectId },
+            organizationPermissions: [],
+            projectPermissions: ['project:sources:write'],
+          }),
+          lookupToken: async () => null,
+          touchSession: async () => true,
+          touchToken: async () => true,
+        },
+        tokenUse: {
+          keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
+          nowMs: () => clock.now().getTime(),
+          dispatch: (run) => {
+            void run();
+          },
+          log: () => {},
+        },
+        patValidation: patValidationGate,
+        publicOrigin: origin,
+        providerAnchors: async () => ANCHORS,
+      }),
+    });
+    const response = await app.fetch(
+      new Request(origin + '/_pb/projects/order-race/sources/order', {
+        method: 'PUT',
+        headers: {
+          origin,
+          'content-type': 'application/json',
+          cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}`,
+          'x-csrf-token': csrf,
+          'if-match': '"r1"',
+        },
+        body: JSON.stringify({ sourceIds: [otherId, sourceId] }),
+      }),
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'conflict' } });
+    expect(setOrder).toHaveBeenCalledTimes(1);
+    await expect(setOrder.mock.results[0]!.value).rejects.toThrow('invalid visibility order size');
+    expect(
+      await rows(
+        'SELECT source_id, precedence FROM project_source WHERE org_id = ? AND project_id = ?',
+        a.orgId,
+        projectId,
+      ),
+    ).toEqual([{ source_id: otherId, precedence: 2 }]);
+    expect(await rows('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([]);
+  });
 });

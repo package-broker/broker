@@ -23,7 +23,7 @@ import {
 } from '../testing/mutation-table/fixtures.js';
 import { actorHolds } from './actor-authority.js';
 import { createCatalogueEpochReader } from './catalogue-epoch.js';
-import { createCatalogueReader } from './catalogue-read.js';
+import { createVersionReader as createCatalogueReader } from './catalogue-read.js';
 import { quarantineStatements } from './catalogue-status.js';
 import { createCatalogueWriteGuard } from './catalogue-write-package.js';
 import { createVisibilityAttachRepository } from './visibility-attach.js';

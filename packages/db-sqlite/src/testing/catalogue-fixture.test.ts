@@ -25,7 +25,7 @@ import {
 import { openNodeSqliteExecutor } from './node-sqlite-executor.js';
 import { openMigratedDatabase } from './migrated-database.js';
 import { orgContext } from '@package-broker/core/db/port';
-import { createCatalogueReader } from '../repositories/catalogue-read.js';
+import { createVersionReader } from '../repositories/catalogue-read.js';
 import { createProxyAdmission } from '../repositories/proxy-admission.js';
 import { rederiveStatements } from '../repositories/visibility-derive.js';
 
@@ -649,7 +649,7 @@ describe('catalogue fixture', () => {
         expect(derived.sort(byJson)).toEqual(
           oracle.filter((r) => r.origin !== 'explicit').sort(byJson),
         );
-        const reader = createCatalogueReader(database.executor);
+        const reader = createVersionReader(database.executor);
         const proxies = createProxyAdmission(database.executor);
         for (const project of config.projects) {
           const ctx = orgContext(project.orgId);

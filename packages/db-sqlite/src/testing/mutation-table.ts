@@ -1,3 +1,4 @@
+import { entries as accessServicesEntries } from './mutation-table/access-services.js';
 import { entries as sourceVisibleEntries } from './mutation-table/source-visible.js';
 import { entries as sourceListEntries } from './mutation-table/source-list.js';
 import { entries as sourcePauseEntries } from './mutation-table/source-pause.js';
@@ -171,6 +172,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueWriteTagsEntries,
   ...accessEntries,
   ...accessBuilderEntries,
+  ...accessServicesEntries,
   ...actorAuthorityEntries,
   ...servicePrincipalAuthorityEntries,
   ...blobReferencesEntries,

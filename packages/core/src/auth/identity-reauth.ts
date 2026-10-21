@@ -6,6 +6,7 @@ import type { UserRepository } from '../db/users.js';
 import type { Clock } from '../ids.js';
 import { runResolveIdentityHooks } from '../identity/hooks.js';
 import { evaluateDomainPolicy, normalizeEmail } from '../identity/policy.js';
+import { isValidTrustAnchor } from '../identity/port.js';
 import type { IdentityProvider, VerifiedIdentity } from '../identity/port.js';
 import type { HookErrorHandler } from '../kernel/access.js';
 import type { Registration } from '../kernel/registry.js';
@@ -16,6 +17,7 @@ export type ReauthRefusal =
   | 'not_supported'
   | 'state_mismatch'
   | 'identity_mismatch'
+  | 'anchor_mismatch'
   | 'no_auth_time'
   | 'stale_auth_time'
   | 'policy'
@@ -74,6 +76,18 @@ function canonicalTimestampMs(value: string): number | null {
   return Number.isNaN(ms) || new Date(ms).toISOString() !== value ? null : ms;
 }
 
+function snapshotTrustAnchor(provider: IdentityProvider): string {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(provider, 'trustAnchor');
+    const anchor: unknown =
+      descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+    if (typeof anchor !== 'string' || !isValidTrustAnchor(anchor)) throw new TypeError();
+    return anchor;
+  } catch {
+    throw new TypeError('identity provider has an invalid trust anchor');
+  }
+}
+
 /**
  * Moves `reauth_at` to the provider's own `authTime`, only for the identity the session was created
  * with, and only when the opened login state belongs to this session's re-authentication. A
@@ -119,6 +133,7 @@ export async function reauthenticateWithIdentity(
     return refuse('identity_mismatch');
   }
 
+  const trustAnchor = snapshotTrustAnchor(provider);
   const authTime = identity.authTime;
   if (authTime === null) return refuse('no_auth_time');
 
@@ -153,6 +168,14 @@ export async function reauthenticateWithIdentity(
     }
     return refuse('hook_denied');
   }
+
+  const { boundAnchor } = await deps.users.lookupForLogin(ctx, {
+    provider: provider.id,
+    subject: identity.subject,
+    email,
+    groups: identity.groups,
+  });
+  if (boundAnchor === null || boundAnchor !== trustAnchor) return refuse('anchor_mismatch');
 
   if (!(await isReauthSessionActive(deps, ctx, session.session.id))) {
     return refuse('session_inactive');

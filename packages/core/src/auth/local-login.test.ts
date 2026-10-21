@@ -214,6 +214,10 @@ async function build(options: Options = {}) {
     }),
   };
   const writer = {
+    replacePasswordHash: vi.fn<LocalLoginSuccessWriter['replacePasswordHash']>(() => {
+      events.push('replacePasswordHash');
+      return Promise.resolve(true);
+    }),
     succeed: vi.fn<LocalLoginSuccessWriter['succeed']>(() => {
       events.push('succeed');
       return Promise.resolve(options.succeed ?? true);
@@ -332,6 +336,7 @@ describe('login success', () => {
     expect(value.ok).toBe(true);
     expect(counts).toEqual(UNIFORM);
     expect(harness.events).toEqual(['findByEmail', 'reserveAttempt', 'pbkdf2', 'succeed']);
+    expect(harness.writer.replacePasswordHash).not.toHaveBeenCalled();
   });
 
   it('normalizes the e-mail before the lookup', async () => {
@@ -341,11 +346,29 @@ describe('login success', () => {
     expect(harness.reader.findByEmail).toHaveBeenCalledWith(ORG, EMAIL);
   });
 
-  it('passes a rehash for a hash made under an older key version', async () => {
+  it('rehashes an older hash only after succeed accepts the login', async () => {
     const harness = await build({ passwordHashKeys: [V1()] });
-    const result = await login(harness);
-    expect(result.ok).toBe(true);
-    const rehash = harness.writer.succeed.mock.calls[0]?.[1].rehash ?? '';
+    const { counts, value } = await counted(harness.events, () => login(harness));
+    expect(value.ok).toBe(true);
+    expect(counts.pbkdf2).toBe(2);
+    expect(harness.events).toEqual([
+      'findByEmail',
+      'reserveAttempt',
+      'pbkdf2',
+      'succeed',
+      'pbkdf2',
+      'replacePasswordHash',
+    ]);
+    expect(harness.writer.succeed.mock.calls[0]?.[1].rehash).toBeNull();
+    expect(harness.writer.replacePasswordHash).toHaveBeenCalledTimes(1);
+    const replacement = harness.writer.replacePasswordHash.mock.calls[0];
+    expect(replacement?.[0]).toBe(ORG);
+    expect(replacement?.[1]).toMatchObject({
+      userId: USER_ID,
+      expectedHash: harness.reservedSnapshot.passwordHash,
+      now: NOW,
+    });
+    const rehash = replacement?.[1].newHash ?? '';
     expect(rehash).toMatch(PASSWORD_HASH_PATTERN);
     expect(rehash).toContain('$v=2$');
     expect(await verifyPassword(rehash, PASSWORD, createKeyring([V2(), V1()]))).toEqual({
@@ -656,5 +679,74 @@ describe('non-string body fields', () => {
     expect(result).toStrictEqual({ ok: false });
     expect(harness.reader.reserveAttempt).not.toHaveBeenCalled();
     expect(harness.writer.succeed).not.toHaveBeenCalled();
+  });
+});
+
+describe('password rehash after success', () => {
+  it('does one PBKDF2 when succeed refuses an older hash', async () => {
+    const harness = await build({ passwordHashKeys: [V1()], succeed: false });
+    const { counts, value } = await counted(null, () => login(harness));
+    expect(value).toStrictEqual({ ok: false });
+    expect(counts.pbkdf2).toBe(1);
+    expect(harness.writer.replacePasswordHash).not.toHaveBeenCalled();
+  });
+
+  it('does one PBKDF2 when succeed throws for an older hash', async () => {
+    const harness = await build({ passwordHashKeys: [V1()] });
+    harness.writer.succeed.mockRejectedValueOnce(new Error('write failed'));
+    const { counts } = await counted(null, async () => {
+      await expect(login(harness)).rejects.toThrow('write failed');
+    });
+    expect(counts.pbkdf2).toBe(1);
+    expect(harness.writer.replacePasswordHash).not.toHaveBeenCalled();
+  });
+
+  it('keeps the successful login when a concurrent hash change wins', async () => {
+    const harness = await build({ passwordHashKeys: [V1()] });
+    harness.writer.replacePasswordHash.mockResolvedValueOnce(false);
+    const result = await login(harness);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.cookies).toHaveLength(2);
+    expect(harness.writer.replacePasswordHash).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the successful login and logs only an approved name when the CAS throws', async () => {
+    const harness = await build({ passwordHashKeys: [V1()] });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const error = new TypeError('private database detail');
+    harness.writer.replacePasswordHash.mockRejectedValueOnce(error);
+    const result = await login(harness);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.cookies).toHaveLength(2);
+    expect(harness.writer.replacePasswordHash).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls).toEqual([['TypeError']]);
+  });
+
+  it('does one PBKDF2 when reauth succeed refuses an older hash', async () => {
+    const harness = await build({ passwordHashKeys: [V1()], succeed: false });
+    const { counts, value } = await counted(null, () =>
+      harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+    );
+    expect(value).toStrictEqual({ ok: false });
+    expect(counts.pbkdf2).toBe(1);
+    expect(harness.writer.replacePasswordHash).not.toHaveBeenCalled();
+  });
+
+  it('rehashes after successful reauth', async () => {
+    const harness = await build({ passwordHashKeys: [V1()] });
+    const { counts, value } = await counted(harness.events, () =>
+      harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+    );
+    expect(value).toStrictEqual({ ok: true });
+    expect(counts.pbkdf2).toBe(2);
+    expect(harness.events).toEqual([
+      'findByEmail',
+      'reserveAttempt',
+      'pbkdf2',
+      'succeed',
+      'pbkdf2',
+      'replacePasswordHash',
+    ]);
+    expect(harness.writer.succeed.mock.calls[0]?.[1].rehash).toBeNull();
   });
 });

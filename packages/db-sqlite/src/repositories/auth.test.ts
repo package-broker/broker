@@ -150,6 +150,7 @@ async function build(
   const repositories: AuthRepositories = {
     ...base,
     localSuccess: {
+      replacePasswordHash: (ctx, input) => base.localSuccess.replacePasswordHash(ctx, input),
       succeed: (ctx, input) =>
         failure?.active === true
           ? Promise.reject(new Error('writer down'))

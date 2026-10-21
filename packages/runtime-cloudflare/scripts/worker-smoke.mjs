@@ -683,7 +683,7 @@ async function run() {
       [cataloguePackage, orgId, catalogueSource],
     );
     await seedRow(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'composer', 'smoke/lib')",
       [orgId, catalogueProject, cataloguePackage],
     );
     await seedRow(

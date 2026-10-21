@@ -559,7 +559,7 @@ async function checkPlatformPorts(base, cookie, env) {
       .run(ids.package, orgId, ids.source);
     database
       .prepare(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'subscription')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'subscription', 'composer', 'smoke/lib')",
       )
       .run(orgId, ids.project, ids.package);
     database

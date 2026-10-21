@@ -534,7 +534,7 @@ async function seedStore(context: CaseContext, method: keyof typeof storeCalls) 
       );
     if (method === 'removeExplicit')
       await seed(
-        "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, ? AS project_id, ? AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
         ctx.orgId,
         `P-${suffix}`,
         `K-${suffix}`,
@@ -588,7 +588,7 @@ function foreignSubsetCase(method: 'removePattern' | 'removeExplicit'): Contract
         );
       } else {
         await seed.forged(
-          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P-O', 'K-O', 'explicit') ON CONFLICT(project_id, package_id) DO UPDATE SET org_id = excluded.org_id",
+          "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P-O' AS project_id, 'K-O' AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1 ON CONFLICT(project_id, package_id) DO UPDATE SET org_id = excluded.org_id",
           foreign.orgId,
         );
       }

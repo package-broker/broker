@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SqlValue } from '@package-broker/core/db/port';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { BACKUP_SCOPE } from '../backup-scope.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
 import { migrate } from './runner.js';
@@ -172,7 +173,7 @@ describe('migration 0023 version package status index', () => {
   const migrationId = 'core:0023_version_package_status';
 
   it.each(['fresh', 'upgrade'])('applies to a %s database', async (mode) => {
-    const sources = await loadCore();
+    const sources = await loadCore((name) => name < '0024_');
     if (mode === 'upgrade') {
       await migrate(
         opened.executor,
@@ -501,5 +502,201 @@ describe.each([
       await run('DELETE FROM project WHERE id = ?', [PROJECT]);
       expect(await rows('SELECT project_id FROM representation_clock')).toEqual([]);
     });
+  });
+});
+
+describe('migration 0024 closure edge indexes', () => {
+  const migrationId = 'core:0024_closure_edge_indexes';
+  it.each(['fresh', 'upgrade'])(
+    'applies on %s databases and preserves org-consistent keys',
+    async (mode) => {
+      if (mode === 'upgrade') {
+        await migrateTo('0024_');
+        await seed();
+        await run('DROP INDEX organization_singleton');
+        await insert('organization', { id: 'OTHER', slug: 'other', name: 'Other' });
+        await insert('project', { id: 'OTHER-P', org_id: 'OTHER', slug: 'other', name: 'Other' });
+        await insert('source', {
+          id: 'OTHER-S',
+          org_id: 'OTHER',
+          name: 'npm',
+          ecosystem: 'npm',
+          type: 'npm_registry',
+        });
+        await insert('package', {
+          id: 'OTHER-K',
+          org_id: 'OTHER',
+          source_id: 'OTHER-S',
+          ecosystem: 'npm',
+          name: '@other/lib',
+        });
+        await insert('project_package', {
+          org_id: 'OTHER',
+          project_id: 'OTHER-P',
+          package_id: 'OTHER-K',
+          origin: 'pattern',
+          created_at: NOW,
+        });
+        await run(
+          "INSERT INTO project_package (org_id, project_id, package_id, origin, created_at) VALUES (?, ?, ?, 'explicit', ?)",
+          [ORG, PROJECT, PACKAGE, NOW],
+        );
+      }
+      const result = await migrate(opened.executor, await loadCore(), {
+        holder: 'edge-index-test',
+      });
+      expect(result.applied.at(-1)).toBe(migrationId);
+      if (mode === 'upgrade') {
+        expect(result.applied).toEqual([migrationId]);
+        expect(
+          await rows(
+            'SELECT org_id, project_id, package_id, origin, created_at, ecosystem, name FROM project_package ORDER BY org_id',
+          ),
+        ).toEqual([
+          {
+            org_id: ORG,
+            project_id: PROJECT,
+            package_id: PACKAGE,
+            origin: 'explicit',
+            created_at: NOW,
+            ecosystem: 'composer',
+            name: 'acme/lib',
+          },
+          {
+            org_id: 'OTHER',
+            project_id: 'OTHER-P',
+            package_id: 'OTHER-K',
+            origin: 'pattern',
+            created_at: NOW,
+            ecosystem: 'npm',
+            name: '@other/lib',
+          },
+        ]);
+      }
+      expect(await rows('PRAGMA foreign_key_check')).toEqual([]);
+      expect(
+        await rows(`SELECT id, seq, "table", "from", "to", on_update, on_delete, match
+        FROM pragma_foreign_key_list('project_package') ORDER BY id, seq`),
+      ).toEqual([
+        {
+          id: 0,
+          seq: 0,
+          table: 'package',
+          from: 'org_id',
+          to: 'org_id',
+          on_update: 'NO ACTION',
+          on_delete: 'NO ACTION',
+          match: 'NONE',
+        },
+        {
+          id: 0,
+          seq: 1,
+          table: 'package',
+          from: 'package_id',
+          to: 'id',
+          on_update: 'NO ACTION',
+          on_delete: 'NO ACTION',
+          match: 'NONE',
+        },
+        {
+          id: 1,
+          seq: 0,
+          table: 'project',
+          from: 'org_id',
+          to: 'org_id',
+          on_update: 'NO ACTION',
+          on_delete: 'NO ACTION',
+          match: 'NONE',
+        },
+        {
+          id: 1,
+          seq: 1,
+          table: 'project',
+          from: 'project_id',
+          to: 'id',
+          on_update: 'NO ACTION',
+          on_delete: 'NO ACTION',
+          match: 'NONE',
+        },
+        {
+          id: 2,
+          seq: 0,
+          table: 'organization',
+          from: 'org_id',
+          to: 'id',
+          on_update: 'NO ACTION',
+          on_delete: 'NO ACTION',
+          match: 'NONE',
+        },
+      ]);
+      if (mode === 'fresh') await seed();
+      await expect(
+        insert('project_package', {
+          org_id: ORG,
+          project_id: PROJECT,
+          package_id: PACKAGE,
+          origin: 'invalid',
+          ecosystem: 'composer',
+          name: 'acme/lib',
+        }),
+      ).rejects.toThrow(CHECK);
+
+      expect(await tableList('project_package')).toMatchObject({ strict: 1, wr: 1 });
+      expect(
+        (await columns('project_package'))
+          .filter((c) => ['ecosystem', 'name'].includes(c.name))
+          .map((c) => [c.name, c.notnull]),
+      ).toEqual([
+        ['ecosystem', 1],
+        ['name', 1],
+      ]);
+      expect(await indexNames('project_package')).toEqual([
+        { name: 'project_package_name', unique: 0, partial: 0 },
+        { name: 'project_package_package', unique: 0, partial: 0 },
+      ]);
+    },
+  );
+
+  it.each(['missing', 'foreign'])(
+    'aborts when the linked package is %s in the row organization',
+    async (kind) => {
+      await migrateTo('0024_');
+      await seed();
+      await run('DROP INDEX organization_singleton');
+      await insert('organization', { id: 'OTHER', slug: 'other', name: 'Other' });
+      await insert('project', { id: 'OTHER-P', org_id: 'OTHER', slug: 'other', name: 'Other' });
+      await withForeignKeysOff(opened.executor, () =>
+        insert('project_package', {
+          org_id: 'OTHER',
+          project_id: 'OTHER-P',
+          package_id: kind === 'missing' ? 'missing' : PACKAGE,
+          origin: 'explicit',
+          created_at: NOW,
+        }),
+      );
+      await expect(
+        migrate(opened.executor, await loadCore(), { holder: 'edge-index-test' }),
+      ).rejects.toThrow(/project_package.package_id.*1/);
+      expect(await rows('SELECT package_id FROM project_package')).toEqual([
+        { package_id: kind === 'missing' ? 'missing' : PACKAGE },
+      ]);
+      expect((await columns('project_package')).map((c) => c.name)).not.toContain('ecosystem');
+      expect(await rows('SELECT id FROM schema_migration WHERE id = ?', [migrationId])).toEqual([]);
+    },
+  );
+
+  it('skips 0024 on rerun and its index statements are schema no-ops', async () => {
+    const sources = await loadCore();
+    await migrate(opened.executor, sources, { holder: 'edge-index-test' });
+    const result = await migrate(opened.executor, sources, { holder: 'edge-index-test' });
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toContain(migrationId);
+    const before = await rows('PRAGMA schema_version');
+    const source = sources.find((s) => s.id === migrationId)!;
+    for (const statement of source.sql
+      .split(';')
+      .filter((s) => /CREATE INDEX IF NOT EXISTS/i.test(s)))
+      await run(statement);
+    expect(await rows('PRAGMA schema_version')).toEqual(before);
   });
 });

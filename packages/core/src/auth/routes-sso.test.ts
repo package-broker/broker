@@ -1022,7 +1022,10 @@ describe('callback failures clear the login state', () => {
 
     expect(response.status).toBe(500);
     expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
-    expect(await response.text()).not.toContain(PROVIDER_ERROR_TEXT);
+    const text = await response.text();
+    expect(JSON.parse(text)).toMatchObject({ error: { code: 'internal' } });
+    expect(text).not.toContain(PROVIDER_ERROR_TEXT);
+    expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
   });
 
   it('clears the cookie when authenticate throws', async () => {
@@ -1318,22 +1321,23 @@ describe('re-authentication', () => {
     expect(refusals(app)).toEqual([expect.objectContaining({ reason: 'session_inactive' })]);
   });
 
-  it('answers the generic 401 when the reauth service refuses', async () => {
-    const app = await build({ reauthRefusal: 'stale_auth_time' });
-    const { cookie, csrf } = await app.seed();
-    const start = await app.kernel.fetch(
-      startRequest('dex', reauthBody, { cookie, 'x-csrf-token': csrf }),
-    );
-    const login = `${LOGIN_COOKIE}=${cookieValue(start, LOGIN_COOKIE) ?? ''}`;
+  it.each(['stale_auth_time', 'anchor_mismatch'])(
+    'answers the generic 401 when the reauth service refuses %s',
+    async (reason) => {
+      const app = await build({ reauthRefusal: reason });
+      const { cookie, csrf } = await app.seed();
+      const start = await app.kernel.fetch(
+        startRequest('dex', reauthBody, { cookie, 'x-csrf-token': csrf }),
+      );
+      const login = `${LOGIN_COOKIE}=${cookieValue(start, LOGIN_COOKIE) ?? ''}`;
 
-    const response = await app.kernel.fetch(callback('dex', `${login}; ${cookie}`));
+      const response = await app.kernel.fetch(callback('dex', `${login}; ${cookie}`));
 
-    expect(response.status).toBe(401);
-    expect(await bodyOf(response)).toMatchObject({ error: { code: 'login_failed' } });
-    expect(refusals(app)).toEqual([
-      expect.objectContaining({ provider: 'dex', reason: 'stale_auth_time' }),
-    ]);
-  });
+      expect(response.status).toBe(401);
+      expect(await bodyOf(response)).toMatchObject({ error: { code: 'login_failed' } });
+      expect(refusals(app)).toEqual([expect.objectContaining({ provider: 'dex', reason })]);
+    },
+  );
 
   it.each([
     ['ok is not the boolean true', { ok: 'yes' }],

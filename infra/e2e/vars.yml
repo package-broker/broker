@@ -1,0 +1,8 @@
+---
+e2e_run_dir: '{{ playbook_dir }}/runs/{{ e2e_run_id }}'
+e2e_inventory_file: '{{ e2e_run_dir }}/resources.json'
+e2e_labels:
+  pb_e2e: 'true'
+  run_id: '{{ e2e_run_id }}'
+  expires_at: '{{ e2e_expires_at | string }}'
+e2e_tunnel_url_pattern: '(?m)^.*\bINF\s+\|\s+(https://[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com)\s+\|\s*$'

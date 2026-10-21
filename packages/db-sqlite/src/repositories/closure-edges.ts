@@ -56,12 +56,22 @@ function rankedWinners(
   projectId: string,
   ecosystem: NameEcosystem,
   filter: RawBuilder<unknown>,
+  pageKey?: RawBuilder<unknown>,
 ): RawBuilder<unknown> {
+  const from =
+    pageKey === undefined
+      ? visibleFrom()
+      : sql`from project_package as pp indexed by project_package_name
+    cross join package as pkg on pkg.id = pp.package_id
+    cross join source as src on src.id = pkg.source_id
+    cross join project_source as ps on ps.project_id = pp.project_id and ps.source_id = pkg.source_id`;
+  const nameScope =
+    pageKey === undefined ? sql`1 = 1` : sql`pp.ecosystem = ${ecosystem} and pp.name = ${pageKey}`;
   return sql`select pkg.name as key, pkg.id as package_id, pkg.source_id, src.type as source_type,
     src.removal_policy,
     row_number() over (partition by pkg.name order by ${sql.join(winnerOrder({ source: 'src', attachment: 'ps' }))}) as rn
-  ${visibleFrom()}
-  where pp.project_id = ${projectId} and pkg.ecosystem = ${ecosystem} and ${filter}
+  ${from}
+  where ${nameScope} and pp.project_id = ${projectId} and pkg.ecosystem = ${ecosystem} and ${filter}
     and ${visibleRowsCondition(ctx, { pp: 'pp', pkg: 'pkg', src: 'src', ps: 'ps' })}`;
 }
 
@@ -130,47 +140,56 @@ export function createClosureEdges(
       ) {
         throw new TypeError('after must be an edge cursor');
       }
-      const keyFrom = after === undefined ? sql`1 = 1` : sql`kp.name >= ${after.requirerKey}`;
-      const versionFrom = (key: string, version: string) =>
+      const consumed = sql`kp.used + (json_extract(kp.batch, '$.id') is not null)`;
+      const firstVersion =
         after === undefined
-          ? sql`1 = 1`
-          : sql`(${sql.ref(key)}, ${sql.ref(version)}) > (${after.requirerKey}, ${after.versionId})`;
-      const raw = sql`with key_page as materialized (
-  select kp.name
-  from package as kp indexed by package_by_name
-  where kp.org_id = ${ctx.orgId} and kp.ecosystem = ${query.ecosystem} and ${keyFrom}
-    and exists (
-      select 1
-      from (${rankedWinners(ctx, query.projectId, query.ecosystem, sql`pkg.name = kp.name`)}) as w
-      join version as ev on ev.package_id = w.package_id and ev.org_id = ${ctx.orgId}
-        and (ev.status = 'active' or (ev.status = 'removed_upstream' and w.removal_policy = 'flag'))
-      where w.rn = 1 and ${versionFrom('w.key', 'ev.id')}
+          ? sql`null`
+          : sql`case when json_extract(kp.batch, '$.key') = ${after.requirerKey} then ${after.versionId} else null end`;
+      const versionAfter = sql`coalesce(json_extract(kp.batch, '$.id'), ${firstVersion})`;
+      const raw = sql`with recursive key_page as materialized (
+  select json_object('mode', 'edge') as batch, 0 as used
+  union all
+  select case
+    when json_extract(kp.batch, '$.mode') = 'edge' and json_extract(kp.batch, '$.id') is null then (
+      select json_object('key', nk.name, 'mode', 'versions', 'winner', json((
+        select json_object('package_id', w.package_id, 'removal_policy', w.removal_policy)
+        from (${rankedWinners(ctx, query.projectId, query.ecosystem, sql`pkg.name = nk.name`, sql`nk.name`)}) as w
+        where w.rn = 1
+      )))
+      from (
+        select pp.name from project_package as pp indexed by project_package_name
+        where pp.org_id = ${ctx.orgId} and pp.project_id = ${query.projectId}
+          and pp.ecosystem = ${query.ecosystem}
+          and pp.name >= coalesce(json_extract(kp.batch, '$.key'), ${after?.requirerKey ?? ''})
+          and (json_extract(kp.batch, '$.key') is null or pp.name > json_extract(kp.batch, '$.key'))
+        group by pp.name
+        order by pp.name
+        limit 1
+      ) as nk
     )
-  group by kp.name
-  order by kp.name
-  limit ${limit + 1}
-), c as materialized (
-  ${rankedWinners(ctx, query.projectId, query.ecosystem, sql`pkg.name in (select name from key_page)`)}
+    else json_set(kp.batch, '$.mode', 'edge', '$.id', (
+      select ev.id from version as ev indexed by version_package_id
+      where ev.package_id = json_extract(kp.batch, '$.winner.package_id') and ev.org_id = ${ctx.orgId}
+        and ev.id >= coalesce(${versionAfter}, '')
+        and (${versionAfter} is null or ev.id > ${versionAfter})
+        and (ev.status = 'active' or (ev.status = 'removed_upstream' and json_extract(kp.batch, '$.winner.removal_policy') = 'flag'))
+      order by ev.id
+      limit 1
+    ))
+  end, ${consumed}
+  from key_page as kp
+  where kp.batch is not null and ${consumed} < ${limit + 1}
 ), edge_page as materialized (
-  select c.key as requirer_key, v.id as version_id
-  from c
-  join version as v on v.id in (
-    select ev.id from version as ev
-    where ev.package_id = c.package_id and ev.org_id = ${ctx.orgId}
-      and (ev.status = 'active' or (ev.status = 'removed_upstream' and c.removal_policy = 'flag'))
-      and ${versionFrom('c.key', 'ev.id')}
-    order by ev.id
-    limit ${limit + 1}
-  )
-  where c.rn = 1
-  order by c.key, v.id
-  limit ${limit + 1}
+  select json_extract(kp.batch, '$.key') as requirer_key, json_extract(kp.batch, '$.id') as version_id
+  from key_page as kp
+  where json_extract(kp.batch, '$.id') is not null
 )
 select edge_page.requirer_key, edge_page.version_id, v.version,
   ${depsExpression(query.ecosystem)} as deps
 from edge_page
 join version as v on v.id = edge_page.version_id and v.org_id = ${ctx.orgId}
 order by edge_page.requirer_key, edge_page.version_id`;
+
       const rows = await executor.all<EdgeSqlRow>(toStatement(raw));
       const more = rows.length > limit;
       const page = (more ? rows.slice(0, limit) : rows).map((row): EdgeRow => ({

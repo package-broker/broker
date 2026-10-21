@@ -1,3 +1,4 @@
+import { createLocalLoginSeed } from './testing/local-login.js';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -331,19 +332,30 @@ describe('registry clients against the Node runtime', { timeout: TEST_TIMEOUT_MS
     const credentialId = ulid();
     const secrets = await newSessionSecrets();
     cookie = `__Host-pb_session=${secrets.secret}; __Host-pb_csrf=${secrets.csrf}`;
-    const now = new Date().toISOString();
     await sql('INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)', [
       userId,
       org.id,
       'reader@example.test',
     ]);
-    await sql(
-      "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', ?, zeroblob(12), 1, 'fixture')",
-      [credentialId, org.id, new Uint8Array([1])],
+    const { sealed, aad, passwordHash } = await createLocalLoginSeed(
+      db.executor,
+      createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
+      { orgId: org.id, userId, credentialId },
     );
     await sql(
-      "INSERT INTO local_login (user_id, org_id, password_hash, totp_credential_id, totp_enabled_at, last_login_at) VALUES (?, ?, 'pbkdf2-sha256$fixture', ?, ?, ?)",
-      [userId, org.id, credentialId, now, now],
+      "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', ?, ?, ?, ?)",
+      [credentialId, org.id, sealed.ciphertext, sealed.nonce, sealed.keyVersion, aad],
+    );
+    await sql(
+      'INSERT INTO local_login (user_id, org_id, password_hash, totp_credential_id, totp_enabled_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [
+        userId,
+        org.id,
+        passwordHash,
+        credentialId,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
     );
     await sql(
       "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES (?, ?, 'fixture', 'Fixture', 'organization', 1)",

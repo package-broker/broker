@@ -31,7 +31,7 @@ function deriveCase(kind: 'remove' | 'retag' | 'stay' | 'insert'): ContractCase 
         );
       if (kind !== 'insert')
         await seed.forged(
-          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'subscription')",
+          "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P' AS project_id, 'K' AS package_id, 'subscription' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
           kind === 'remove' || kind === 'retag' ? foreign.orgId : own.orgId,
         );
       await context.executor.batch(
@@ -69,7 +69,7 @@ function foreignOriginCase(existing: boolean): ContractCase {
       );
       if (existing) {
         await seed(
-          "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, 'P', 'K', 'pattern')",
+          "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P' AS project_id, 'K' AS package_id, 'pattern' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
           own.orgId,
         );
       }

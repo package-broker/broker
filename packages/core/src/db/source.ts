@@ -105,6 +105,12 @@ export interface SourceTarget {
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
+export interface SourceListQuery {
+  readonly projectId: string | null;
+  readonly after: string | null;
+  readonly limit: number;
+}
+
 export interface SourceUpdate extends SourceTarget {
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
@@ -131,6 +137,15 @@ export type PollOutcome =
  * re-read. `conflict` also covers a failure that could not be classified.
  */
 export interface SourceRepository {
+  /** Organization sources, or project-owned and attached organization sources of an active project.
+   * Returns up to limit + 1 rows in id order; limit is an integer from 1 to 100.
+   */
+  list(ctx: OrgContext, input: SourceListQuery): Promise<SourceRecord[]>;
+  pause(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
+  ): Promise<'paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'>;
   /**
    * Non-proxy sources are created paused, proxies active; nothing is attached to a project.
    * `credential_scope_mismatch`: the credential does not belong to the source's owner. `forbidden`:

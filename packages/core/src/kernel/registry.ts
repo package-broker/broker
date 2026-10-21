@@ -7,6 +7,7 @@ import {
   type PluginDefinition,
   type PortName,
   type SourceProviderFactory,
+  type SourceProviderContext,
   type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
@@ -120,6 +121,7 @@ export interface Registration {
 }
 
 export interface RegistrationOptions {
+  readonly sourceProviderContext?: SourceProviderContext;
   readonly packageResolver?: PackageVisibilityPort;
   readonly coreJobs?: readonly RegisteredCoreJob[];
 }
@@ -280,6 +282,7 @@ export function collectRegistrations(
         id,
         sourceFactory as SourceProviderFactory,
         problems,
+        options.sourceProviderContext,
       )) {
         const holder = sourceProviderOwners.get(provider.id);
         if (holder !== undefined) {
@@ -449,10 +452,11 @@ function invokeSourceFactory(
   id: string,
   factory: SourceProviderFactory,
   problems: string[],
+  context?: SourceProviderContext,
 ): readonly SourceProvider[] {
   let returned: unknown;
   try {
-    returned = factory();
+    returned = context === undefined ? factory() : factory(context);
   } catch (error) {
     problems.push(`plugin "${id}" sourceProviders threw ${reportableErrorName(error)}`);
     return [];

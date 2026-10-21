@@ -116,7 +116,10 @@ import {
   type CredentialKind,
 } from '@package-broker/core/sources/credentials';
 import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
-import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
+import {
+  type UpstreamCredential,
+  createPolicyFetch,
+} from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { SecretDecryptError, createSecretCipher } from '@package-broker/core/secrets/cipher';
 import {
@@ -167,7 +170,11 @@ import {
 } from './token-jobs.js';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
-import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
+import type {
+  PluginDefinition,
+  PluginPorts,
+  SourceProviderContext,
+} from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
 import { completionSpan } from '@package-broker/core/platform/completion-span';
@@ -642,7 +649,10 @@ function openSourceCredential(
       try {
         const material = parseCredentialMaterial(row.kind as CredentialKind, plaintext);
         return {
-          credential: bindCredential(material, origins),
+          credential:
+            material.kind === 'github_app' && source.type === 'vcs' && origins[0] === GITHUB_API
+              ? { origins: [], queryParams: [], apply: (headers, url) => ({ headers, url }) }
+              : bindCredential(material, origins),
           probe: credentialEchoProbe(material),
         };
       } finally {
@@ -789,7 +799,11 @@ function buildRegistryModule(input: {
   readonly registry: RegistryConfig;
   readonly publicUrl: string;
   readonly dispatch: (run: () => Promise<void>) => void;
-}): { readonly module: RegistryModule; readonly recorder: AccessRecorder } {
+}): {
+  readonly module: RegistryModule;
+  readonly recorder: AccessRecorder;
+  readonly sourceProviderContext: SourceProviderContext;
+} {
   const { executor, reads, platformServices, observability, registry, dispatch } = input;
   const outboundPolicy = createOutboundPolicy({
     allowPrivateHosts: [],
@@ -893,7 +907,102 @@ function buildRegistryModule(input: {
   };
   const module = createRegistryModule(dependencies);
   const job = module.packageSyncJob;
+  const credentialRepository = createCredentialRepository(executor);
+  const credentialStore = createCredentialStore({
+    repository: credentialRepository,
+    cipher: createSecretCipher(input.keyring, 'credential-encryption'),
+    ids: { ulid },
+    clock: systemClock,
+  });
+  const sources = createSourceRepository(executor);
+  const discoveryBindings = new WeakMap<
+    UpstreamCredential,
+    {
+      orgId: string;
+      credentialId: string;
+      installationId: string;
+    }
+  >();
+  async function githubApp(org: OrgContext, credentialId: string) {
+    try {
+      const row = await credentialRepository.get(org, credentialId);
+      if (row === null || row.projectId !== null || row.kind !== 'github_app') return null;
+      const plaintext = await credentialStore.read(org, row.id);
+      try {
+        const material = parseCredentialMaterial('github_app', plaintext);
+        return material.kind === 'github_app' ? material : null;
+      } finally {
+        plaintext.fill(0);
+      }
+    } catch (error) {
+      if (
+        error instanceof CredentialError ||
+        error instanceof SecretDecryptError ||
+        error instanceof CredentialNotFoundError
+      )
+        return null;
+      throw error;
+    }
+  }
   return {
+    sourceProviderContext: {
+      runtime: 'cloudflare',
+      async discoveryCredential(org, credentialId, installationId) {
+        if (!/^[1-9][0-9]{0,19}$/.test(installationId)) return null;
+        if ((await githubApp(org, credentialId)) === null) return null;
+        const credential: UpstreamCredential = {
+          origins: [],
+          queryParams: [],
+          apply: (headers, url) => ({ headers, url }),
+        };
+        discoveryBindings.set(credential, { orgId: org.orgId, credentialId, installationId });
+        return credential;
+      },
+      async tokensFor(org, source, create) {
+        let credentialId: string;
+        let installationId: string;
+        if ('type' in source) {
+          if (source.type !== 'vcs' || source.config.provider !== 'github') return null;
+          const record = await sources.get(org, source.id);
+          if (record === null || record.type !== 'vcs' || record.credentialId === null) return null;
+          const parsed = parseSourceConfig(
+            record.type,
+            record.ecosystem,
+            record.url,
+            record.configJson,
+            {
+              runtime: 'cloudflare',
+              policy: outboundPolicy,
+              hasCredential: true,
+            },
+          );
+          if (
+            !parsed.ok ||
+            !('provider' in parsed.config) ||
+            parsed.config.provider !== 'github' ||
+            parsed.config.installationId !== source.config.installationId ||
+            parsed.config.repository !== source.config.repository ||
+            !Number.isSafeInteger(parsed.config.installationId) ||
+            (parsed.config.installationId ?? 0) <= 0
+          )
+            return null;
+          credentialId = record.credentialId;
+          installationId = String(parsed.config.installationId);
+        } else {
+          const binding = discoveryBindings.get(source);
+          if (binding === undefined || binding.orgId !== org.orgId) return null;
+          ({ credentialId, installationId } = binding);
+        }
+        const app = await githubApp(org, credentialId);
+        return app === null
+          ? null
+          : create(
+              { appId: app.appId, privateKeyPem: app.privateKeyPem },
+              installationId,
+              credentialId,
+            );
+      },
+    },
     module:
       job === undefined
         ? module
@@ -1631,6 +1740,17 @@ export function createWorker(
     const reads = db === undefined ? undefined : buildPackageReads(executor as SqlExecutor);
     const collectRegistration = (): Registration =>
       collectRegistrations(plugins, {
+        sourceProviderContext: {
+          runtime: 'cloudflare',
+          discoveryCredential: async (org, credentialId, installationId) =>
+            coreJobBindings.registry?.sourceProviderContext.discoveryCredential?.(
+              org,
+              credentialId,
+              installationId,
+            ) ?? null,
+          tokensFor: async (org, source, create) =>
+            coreJobBindings.registry?.sourceProviderContext.tokensFor(org, source, create) ?? null,
+        },
         ...(reads === undefined ? {} : { packageResolver: reads.resolver }),
         coreJobs:
           config === null

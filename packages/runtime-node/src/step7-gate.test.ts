@@ -11,9 +11,11 @@ import type { PluginDefinition } from '@package-broker/core/plugin';
 import { createSecretCipher } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { verifyKeyring } from '@package-broker/core/secrets/keyring-verifier';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -428,6 +430,7 @@ async function boot(remote: ReturnType<typeof upstream>) {
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   const db = await openMigratedDatabase();
   cleanup.push(() => db.close());
+  await verifyKeyring(keyring(), createKeyringVerifierStore(db.executor));
   const fixture = await seed(db.executor);
   const logged: unknown[] = [];
   const broker = createNodeServerWithSeams(

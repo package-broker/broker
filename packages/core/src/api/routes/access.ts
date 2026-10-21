@@ -2,7 +2,7 @@ import type { Administration, AdminResult } from '../../authz/administration.js'
 import type { GrantRepository, OrganizationGrant } from '../../db/grants.js';
 import type { RouteDefinition } from '../../plugin.js';
 import { apiRoute } from '../route.js';
-import { callContext, type ApiRouteDeps } from './context.js';
+import { callContext, hasOrganizationAdminAuthority, type ApiRouteDeps } from './context.js';
 import { ACCESS_SPECS } from './access-schemas.js';
 
 export interface AccessRouteDeps extends ApiRouteDeps {
@@ -24,8 +24,8 @@ function paged<T extends { readonly id: string }>(
   return { items, next: ordered.length > limit ? items[limit - 1]!.id : null };
 }
 
-function listedSubject(subject: OrganizationGrant['subject']) {
-  if (subject.type === 'email') return { type: 'email' } as const;
+function listedSubject(subject: OrganizationGrant['subject'], includeEmail: boolean) {
+  if (subject.type === 'email') return includeEmail ? subject : ({ type: 'email' } as const);
   return subject.value.includes('@')
     ? ({ type: 'group', provider: subject.provider } as const)
     : subject;
@@ -73,12 +73,13 @@ export function accessRoutes(deps: AccessRouteDeps): readonly RouteDefinition[] 
       if (ctx.org === null) return { error: 'unavailable' };
       const grants = await deps.grants.listOrganization(ctx.org);
       const { items, next } = paged(grants, query);
+      const includeEmail = hasOrganizationAdminAuthority(ctx);
       return {
         status: 200,
         body: {
           items: items.map(({ id, subject, roleId, createdAt, revision }) => ({
             id,
-            subject: listedSubject(subject),
+            subject: listedSubject(subject, includeEmail),
             roleId,
             createdAt,
             revision,

@@ -658,7 +658,7 @@ describe('finish token endpoint failures', () => {
         { status },
       ),
     );
-    expect(result).toEqual({ ok: false, reason: 'provider_error' });
+    expect(result).toEqual({ ok: false, reason: 'provider_error', detail: 'invalid_grant' });
   });
 
   it('refuses a response that is not JSON', async () => {
@@ -762,7 +762,7 @@ describe('token endpoint error bodies', () => {
     const result = await failWith(() =>
       json({ error: 'invalid_grant', error_description: DESCRIPTION }, { status: 400 }),
     );
-    expect(result).toEqual({ ok: false, reason: 'provider_error' });
+    expect(result).toEqual({ ok: false, reason: 'provider_error', detail: 'invalid_grant' });
     expect(mapped.results).toEqual(['invalid_grant']);
     expect(JSON.stringify(result)).not.toContain('refresh-secret');
     expect(JSON.stringify(records)).not.toContain('refresh-secret');
@@ -780,11 +780,21 @@ describe('token endpoint error bodies', () => {
     'unauthorized_client',
     'unsupported_grant_type',
     'invalid_scope',
-  ])('maps the %s error code to itself', (code) => {
+  ])('carries the %s error code through finish', async (code) => {
+    const result = await failWith(() =>
+      json({ error: code, error_description: DESCRIPTION, extra: DESCRIPTION }, { status: 400 }),
+    );
+    expect(result).toEqual({ ok: false, reason: 'provider_error', detail: code });
     expect(tokenEndpointError({ error: code, error_description: DESCRIPTION })).toBe(code);
   });
 
-  it('maps an unknown error code to token_endpoint_error', () => {
+  it('carries an unknown error code through finish as token_endpoint_error', async () => {
+    const records = captureConsole();
+    const result = await failWith(() =>
+      json({ error: DESCRIPTION, error_description: DESCRIPTION }, { status: 400 }),
+    );
+    expect(result).toEqual({ ok: false, reason: 'provider_error', detail: 'token_endpoint_error' });
+    expect(records).toEqual([]);
     expect(tokenEndpointError({ error: 'temporarily_unavailable' })).toBe('token_endpoint_error');
     expect(tokenEndpointError({ error: DESCRIPTION })).toBe('token_endpoint_error');
   });
@@ -805,7 +815,6 @@ describe('token endpoint error bodies', () => {
       'an over-cap body',
       () => json({ error: 'invalid_grant', pad: 'x'.repeat(70 * 1024) }, { status: 400 }),
     ],
-    ['an unknown error code', () => json({ error: 'slow_down' }, { status: 400 })],
   ])('refuses %s as provider_error', async (_name, response) => {
     const records = captureConsole();
     expect(await failWith(response)).toEqual({ ok: false, reason: 'provider_error' });

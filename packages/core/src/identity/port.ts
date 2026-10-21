@@ -104,9 +104,27 @@ export type StartResult =
 export type IdentityFailure =
   'missing_credentials' | 'invalid_token' | 'state_mismatch' | 'provider_error' | 'email_missing';
 
+export type IdentityFailureDetail =
+  | 'invalid_grant'
+  | 'invalid_client'
+  | 'invalid_request'
+  | 'unauthorized_client'
+  | 'unsupported_grant_type'
+  | 'invalid_scope'
+  | 'token_endpoint_error';
+
 export type IdentityResult =
   | { readonly ok: true; readonly identity: VerifiedIdentity }
-  | { readonly ok: false; readonly reason: IdentityFailure };
+  | {
+      readonly ok: false;
+      readonly reason: 'provider_error';
+      readonly detail?: IdentityFailureDetail;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: Exclude<IdentityFailure, 'provider_error'>;
+      readonly detail?: never;
+    };
 
 export interface IdentityProvider {
   readonly id: string;

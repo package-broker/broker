@@ -15,6 +15,7 @@ export const METRIC_LABEL_KEYS = [
   'signal',
   'adapter',
   'provider',
+  'detail',
 ] as const;
 
 export type MetricLabelKey = (typeof METRIC_LABEL_KEYS)[number];

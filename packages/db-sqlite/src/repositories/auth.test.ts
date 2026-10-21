@@ -443,6 +443,7 @@ describe('local setup, session and logout (criterion 1)', () => {
       {
         level: 'warn',
         event: 'auth.local.locked',
+        request_id: expect.any(String),
         reason: 'attempts',
         userId: '01J0USERADMIN00000000000U1',
       },
@@ -549,6 +550,7 @@ describe('local setup, session and logout (criterion 1)', () => {
       {
         level: 'warn',
         event: 'auth.local.locked',
+        request_id: expect.any(String),
         reason: 'attempts',
         userId: '01J0USERADMIN00000000000U1',
       },
@@ -596,6 +598,7 @@ describe('local setup, session and logout (criterion 1)', () => {
       {
         level: 'warn',
         event: 'auth.local.locked',
+        request_id: expect.any(String),
         reason: 'attempts',
         userId: '01J0USERADMIN00000000000U1',
       },
@@ -721,6 +724,38 @@ describe('SSO login and re-authentication (criteria 2 and 3)', () => {
 });
 
 describe('hooks', () => {
+  it('stores null for an auth record emitted without a request context', async () => {
+    const { createObservability } = await import('@package-broker/core/platform/observability');
+    const records: unknown[] = [];
+    const log = createObservability(
+      { emit: (record) => void records.push(record) },
+      { deploymentId: 'test-deployment', runtime: 'node', requestId: null },
+      {
+        events: new Set(['auth.hook.error']),
+        reasonCodes: new Set(),
+        routeTemplates: new Set(),
+      },
+    );
+
+    log.log({ level: 'warn', event: 'auth.hook.error', error_name: 'TypeError' });
+
+    expect(records).toEqual([
+      {
+        kind: 'log',
+        record: {
+          level: 'warn',
+          event: 'auth.hook.error',
+          error_name: 'TypeError',
+          service: 'package-broker',
+          deployment_id: 'test-deployment',
+          runtime: 'node',
+          request_id: null,
+          timestamp: expect.any(String),
+        },
+      },
+    ]);
+  });
+
   async function loginWithHook(error: Error): Promise<Harness> {
     const harness = await build({
       hooks: [
@@ -741,6 +776,7 @@ describe('hooks', () => {
     expect(harness.logs).toContainEqual({
       level: 'warn',
       event: 'auth.hook.error',
+      request_id: expect.any(String),
       pluginId: 'hook-0',
       error: 'TypeError',
     });
@@ -758,6 +794,7 @@ describe('hooks', () => {
     expect(harness.logs).toContainEqual({
       level: 'warn',
       event: 'auth.hook.error',
+      request_id: expect.any(String),
       pluginId: 'hook-0',
       error: 'Error',
     });
@@ -792,6 +829,7 @@ describe('hooks', () => {
     expect(harness.logs).toContainEqual({
       level: 'warn',
       event: 'auth.hook.error',
+      request_id: expect.any(String),
       pluginId: 'hook-0',
       error: 'RangeError',
     });
@@ -819,7 +857,13 @@ describe('hooks', () => {
     expect(callback.status).toBe(401);
     expect(await callback.json()).toMatchObject({ error: { code: 'login_failed' } });
     expect(deniedEvents(harness)).toEqual([
-      { level: 'warn', event: 'auth.hook.denied', pluginId: 'hook-0', code },
+      {
+        level: 'warn',
+        event: 'auth.hook.denied',
+        pluginId: 'hook-0',
+        code,
+        request_id: expect.any(String),
+      },
     ]);
     expect(harness.logs).toContainEqual(
       expect.objectContaining({ event: 'auth.login.refused', reason: 'hook_denied' }),
@@ -852,7 +896,13 @@ describe('hooks', () => {
 
     expect(callback.status).toBe(401);
     expect(deniedEvents(harness)).toEqual([
-      { level: 'warn', event: 'auth.hook.denied', pluginId: 'hook-1', code: 'denied' },
+      {
+        level: 'warn',
+        event: 'auth.hook.denied',
+        pluginId: 'hook-1',
+        code: 'denied',
+        request_id: expect.any(String),
+      },
     ]);
     expect(logged(harness)).not.toContain('free text');
     expect(logged(harness)).not.toContain('abc123');
@@ -888,7 +938,13 @@ describe('hooks', () => {
     });
 
     expect(deniedEvents(harness)).toEqual([
-      { level: 'warn', event: 'auth.hook.denied', pluginId: 'hook-0', code: 'denied' },
+      {
+        level: 'warn',
+        event: 'auth.hook.denied',
+        pluginId: 'hook-0',
+        code: 'denied',
+        request_id: expect.any(String),
+      },
     ]);
     expect(harness.logs).toContainEqual(
       expect.objectContaining({ event: 'auth.login.refused', reason: 'hook_denied' }),
@@ -902,7 +958,13 @@ describe('hooks', () => {
     const harness = await reauthWithHook({ deny: 'yes', note: 'secret text abc123' });
 
     expect(deniedEvents(harness)).toEqual([
-      { level: 'warn', event: 'auth.hook.denied', pluginId: 'hook-0', code: 'invalid_hook_result' },
+      {
+        level: 'warn',
+        event: 'auth.hook.denied',
+        pluginId: 'hook-0',
+        code: 'invalid_hook_result',
+        request_id: expect.any(String),
+      },
     ]);
     expect(logged(harness)).not.toContain('secret text');
     expect(logged(harness)).not.toContain('abc123');

@@ -88,6 +88,10 @@ interface LockScope {
   lockedUserId: string | null;
 }
 
+const REQUEST_LOG = Symbol('auth.requestLog');
+
+type AuthOrgContext = OrgContext & { readonly [REQUEST_LOG]?: KernelLog };
+
 function withNeedsOrg(route: RouteDefinition): RouteDefinition {
   const key = `${route.method} ${route.path}`;
   const needsOrg = ROUTE_NEEDS_ORG[key];
@@ -104,29 +108,36 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
 
   const log: KernelLog = (entry) => {
     try {
-      options.log(entry);
+      const { requestId, ...record } = entry;
+      options.log(typeof requestId === 'string' ? { ...record, request_id: requestId } : entry);
     } catch {
       return;
     }
   };
 
-  const onHookError: HookErrorHandler = (event) => {
-    log({
-      level: 'warn',
-      event: 'auth.hook.error',
-      pluginId: event.plugin,
-      error: reportableErrorName(event.error),
-    });
-  };
+  const logFor = (ctx: AuthOrgContext): KernelLog => ctx[REQUEST_LOG] ?? log;
 
-  const onDenied: NonNullable<IdentityLoginDeps['onDenied']> = (denial) => {
-    log({
-      level: 'warn',
-      event: 'auth.hook.denied',
-      pluginId: denial.plugin,
-      code: denial.code,
-    });
-  };
+  const onHookError =
+    (ctx: OrgContext): HookErrorHandler =>
+    (event) => {
+      logFor(ctx)({
+        level: 'warn',
+        event: 'auth.hook.error',
+        pluginId: event.plugin,
+        error: reportableErrorName(event.error),
+      });
+    };
+
+  const onDenied =
+    (ctx: OrgContext): NonNullable<IdentityLoginDeps['onDenied']> =>
+    (denial) => {
+      logFor(ctx)({
+        level: 'warn',
+        event: 'auth.hook.denied',
+        pluginId: denial.plugin,
+        code: denial.code,
+      });
+    };
 
   const scopes = new WeakMap<OrgContext, LockScope>();
 
@@ -145,7 +156,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
       return result;
     } finally {
       if (!succeeded && scope.lockedUserId !== null) {
-        log({
+        logFor(ctx)({
           level: 'warn',
           event: 'auth.local.locked',
           reason: 'attempts',
@@ -217,16 +228,12 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     hooks,
     clock,
     ids,
-    onHookError,
-    onDenied,
   };
   const reauthDeps: IdentityReauthDeps = {
     users: repositories.users,
     sessions: repositories.sessions,
     clock,
     hooks,
-    onHookError,
-    onDenied,
   };
 
   const localService = createLocalLoginService({
@@ -276,9 +283,22 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     providers,
     sessions,
     login: (ctx, provider, identity, meta) =>
-      completeIdentityLogin(loginDeps, ctx, provider, identity, meta),
+      completeIdentityLogin(
+        { ...loginDeps, onHookError: onHookError(ctx), onDenied: onDenied(ctx) },
+        ctx,
+        provider,
+        identity,
+        meta,
+      ),
     reauth: (ctx, session, provider, identity, loginState) =>
-      reauthenticateWithIdentity(reauthDeps, ctx, session, provider, identity, loginState),
+      reauthenticateWithIdentity(
+        { ...reauthDeps, onHookError: onHookError(ctx), onDenied: onDenied(ctx) },
+        ctx,
+        session,
+        provider,
+        identity,
+        loginState,
+      ),
     stateCipher,
     clock,
     publicOrigin,
@@ -288,7 +308,19 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   const localRoutes = createLocalRoutes({ local, setup, sessions, publicOrigin, log });
 
   return Object.freeze({
-    coreRoutes: Object.freeze([...sso, ...localRoutes].map(withNeedsOrg)),
+    coreRoutes: Object.freeze(
+      [...sso, ...localRoutes].map((route) =>
+        withNeedsOrg({
+          ...route,
+          handler: (ctx) => {
+            const scopedLog: KernelLog = (entry) => log({ ...entry, request_id: ctx.requestId });
+            const org: AuthOrgContext | null =
+              ctx.org === null ? null : Object.freeze({ ...ctx.org, [REQUEST_LOG]: scopedLog });
+            return route.handler({ ...ctx, org });
+          },
+        }),
+      ),
+    ),
     sessions,
     credentials,
     authorization,

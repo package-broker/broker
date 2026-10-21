@@ -26,7 +26,9 @@ export type VisibilityResult =
 type Operation = keyof VisibilityStore;
 type AuditedOperation =
   'attachSource' | 'detachSource' | 'setPrecedence' | 'setOrder' | 'addPattern' | 'removePattern';
-type Input<K extends Operation> = Omit<Parameters<VisibilityStore[K]>[2], 'audit' | 'idempotency'>;
+type Input<K extends Operation> = K extends AuditedOperation
+  ? Omit<Parameters<VisibilityStore[K]>[2], 'audit' | 'idempotency'>
+  : Parameters<VisibilityStore[K]>[2];
 export type VisibilityService = {
   [K in Operation]: (
     ctx: OrgContext,
@@ -46,9 +48,9 @@ const ID_FIELDS = {
   removePattern: ['projectId', 'sourceId'],
   addExplicit: ['projectId', 'packageId'],
   removeExplicit: ['projectId', 'packageId'],
-  quarantineVersion: ['versionId'],
-  releaseQuarantine: ['versionId'],
-  tombstoneVersion: ['versionId'],
+  quarantineVersion: ['versionId', 'packageId'],
+  releaseQuarantine: ['versionId', 'packageId'],
+  tombstoneVersion: ['versionId', 'packageId'],
 } as const satisfies Record<Operation, readonly string[]>;
 
 function validate(operation: Operation, input: unknown): asserts input is Record<string, unknown> {

@@ -460,10 +460,10 @@ export type PackageManageScope =
   { readonly kind: 'organization' } | { readonly kind: 'project'; readonly projectId: string };
 
 interface PackageManageWrite {
-  readonly packageId?: string;
-  readonly expectedStatus?: VersionStatus;
-  readonly manage?: PackageManageScope;
-  readonly audit?: AuditEvent;
+  readonly packageId: string;
+  readonly expectedStatus: VersionStatus;
+  readonly manage: PackageManageScope;
+  readonly audit: AuditEvent;
   readonly idempotency?: IdempotencyRecord;
 }
 

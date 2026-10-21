@@ -245,7 +245,20 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
             async finalize(finalizeCtx, finalizing, finalInput, finalGuard) {
               if (!(await deps.sessions.setPendingValidators(finalizeCtx, finalizing, validators)))
                 return { status: 'refused', reason: 'superseded' };
-              return deps.apply.finalizer.finalize(finalizeCtx, finalizing, finalInput, finalGuard);
+              const result = await deps.apply.finalizer.finalize(
+                finalizeCtx,
+                finalizing,
+                finalInput,
+                finalGuard,
+              );
+              if (result.status === 'complete') {
+                context.observability.counter(
+                  'pb.ingest.lease_held_back',
+                  undefined,
+                  result.leaseHeldBack,
+                );
+              }
+              return result;
             },
           },
         };

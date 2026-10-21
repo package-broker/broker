@@ -361,7 +361,12 @@ class Model {
       s.state = 'complete';
       s.held = false;
       this.finalizes.push(input);
-      return { status: 'complete', empty: input.expectedCount === 0, validatorsPublished: 0 };
+      return {
+        status: 'complete',
+        empty: input.expectedCount === 0,
+        validatorsPublished: 0,
+        leaseHeldBack: 0,
+      };
     },
   };
 }

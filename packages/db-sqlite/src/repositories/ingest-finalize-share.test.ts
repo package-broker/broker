@@ -245,7 +245,7 @@ describe('source finalize applies the mass-removal share inside the batch', () =
     const { handle } = await openSession(1500);
     expect(
       await createIngestFinalizer(database.executor).finalize(ctx, handle, lying(1500)),
-    ).toEqual({ status: 'complete', empty: false, validatorsPublished: 0 });
+    ).toEqual({ status: 'complete', empty: false, validatorsPublished: 0, leaseHeldBack: 0 });
     expect(await statuses()).toEqual([
       { status: 'active', n: 1500 },
       { status: 'removed_upstream', n: 500 },

@@ -1,3 +1,4 @@
+import { isReauthSessionActive } from './identity-reauth.js';
 import { hashPassword, verifyDummy, verifyPassword } from './password.js';
 import { SESSION_ABSOLUTE_MS, newSessionSecrets } from './session.js';
 import type { AuthenticatedSession, SessionMeta, SessionService } from './session.js';
@@ -8,6 +9,7 @@ import type {
   LocalLoginSuccessWriter,
 } from '../db/local-login.js';
 import type { OrgContext } from '../db/port.js';
+import type { SessionRepository } from '../db/sessions.js';
 import { isoTimestamp } from '../ids.js';
 import type { Clock } from '../ids.js';
 import { normalizeEmail } from '../identity/policy.js';
@@ -22,6 +24,9 @@ export type LocalResult =
   | { readonly ok: true; readonly cookies: readonly string[]; readonly userId: string }
   | { readonly ok: false };
 
+export type LocalReauthResult =
+  { readonly ok: true } | { readonly ok: false; readonly reason?: 'session_inactive' };
+
 export interface LocalLoginService {
   login(
     ctx: OrgContext,
@@ -32,14 +37,15 @@ export interface LocalLoginService {
     ctx: OrgContext,
     session: AuthenticatedSession,
     input: { readonly password: string; readonly code: string },
-  ): Promise<{ readonly ok: boolean }>;
+  ): Promise<LocalReauthResult>;
 }
 
 export interface LocalLoginDeps {
   readonly reader: LocalLoginReader;
   readonly writer: LocalLoginSuccessWriter;
   readonly credentials: CredentialStore;
-  readonly sessions: SessionService;
+  readonly sessionCookies: Pick<SessionService, 'setCookies'>;
+  readonly sessions: Pick<SessionRepository, 'findActiveById'>;
   readonly keyring: Keyring;
   readonly clock: Clock;
   readonly ids: { ulid(): string };
@@ -73,7 +79,7 @@ function usable(snapshot: LocalLoginSnapshot): boolean {
 }
 
 export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService {
-  const { reader, writer, credentials, sessions, keyring, clock, ids } = deps;
+  const { reader, writer, credentials, sessionCookies, keyring, clock, ids } = deps;
   const cipher = createSecretCipher(keyring, 'credential-encryption');
   const dummyEnvelope: Promise<Sealed> = cipher.seal(
     encodeTotpEnvelope('dummy', DUMMY_SECRET),
@@ -235,12 +241,15 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       await rehashAfterSuccess(ctx, verified, input.password);
       return {
         ok: true,
-        cookies: sessions.setCookies(secrets, expiresAt),
+        cookies: sessionCookies.setCookies(secrets, expiresAt),
         userId: snapshot.userId,
       };
     },
 
     async reauth(ctx, authenticated, input) {
+      if (!(await isReauthSessionActive(deps, ctx, authenticated.session.id))) {
+        return { ok: false, reason: 'session_inactive' };
+      }
       if (!strings(input.password, input.code)) return REFUSED;
       const { session } = authenticated;
       if (session.identityId !== null) {
@@ -255,6 +264,9 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
         session.userId,
       );
       if (verified === null) return REFUSED;
+      if (!(await isReauthSessionActive(deps, ctx, session.id))) {
+        return { ok: false, reason: 'session_inactive' };
+      }
       const succeeded = await writer.succeed(ctx, {
         snapshot: verified.snapshot,
         step: verified.step,

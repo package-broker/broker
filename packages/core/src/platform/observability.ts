@@ -229,6 +229,15 @@ export const PACKAGE_KEY_MAX_LENGTH = 428;
 const PACKAGE_KEY_FORBIDDEN = /[\u0000-\u0020\u007f-\u009f:?#\\]/;
 const STATUS_CLASS = /^[1-5]xx$/;
 export const MAX_METRIC_LABELS = 8;
+export const FINISH_FAILURE_DETAIL_LABELS = Object.freeze({
+  invalid_grant: true,
+  invalid_client: true,
+  invalid_request: true,
+  unauthorized_client: true,
+  unsupported_grant_type: true,
+  invalid_scope: true,
+  token_endpoint_error: true,
+} as const);
 const LABEL_KEYS = new Set([
   'method',
   'route',
@@ -239,6 +248,7 @@ const LABEL_KEYS = new Set([
   'kind',
   'adapter',
   'provider',
+  'detail',
 ]);
 const ENCODER = new TextEncoder();
 const MAX_PROTOTYPE_STEPS = 32;
@@ -399,6 +409,8 @@ export function metricLabelValueAllowed(
   routeTemplates: ReadonlySet<string>,
 ): boolean {
   switch (key) {
+    case 'detail':
+      return Object.hasOwn(FINISH_FAILURE_DETAIL_LABELS, value);
     case 'method':
       return METHODS.has(value);
     case 'route':

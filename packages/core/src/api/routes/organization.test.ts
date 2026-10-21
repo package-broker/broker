@@ -68,6 +68,8 @@ interface Options {
   expired?: boolean;
   administration?: Pick<Administration, 'suspendUser' | 'reactivateUser'>;
   tokenScope?: 'read' | 'full';
+  admin?: boolean;
+  projectPermissions?: readonly string[];
   permissions?: readonly string[];
   users?: readonly User[];
   me?: User | null;
@@ -98,6 +100,7 @@ async function fixture(options: Options = {}) {
   );
   const clientIp = vi.fn(() => '203.0.113.7');
   const ids = { ulid: vi.fn(() => '01JAOPID00000000000000000A') };
+  const log = vi.fn();
   const app = await createKernel({
     platform: 'node',
     plugins: [],
@@ -113,17 +116,17 @@ async function fixture(options: Options = {}) {
     ports: { organizations: { get: async () => null }, clock, ids },
     resolveOrg: async () => orgContext('org-1'),
     health: async () => true,
-    log: () => undefined,
+    log,
     authorization: createAuthorizationEngine({
       access: {
         lookupSession: async () => ({
           session: { id: SESSION_ID, csrfHash: await sha256Hex(CSRF) },
           user: { id: USER_ID },
           identity: null,
-          protectedHolder: true,
+          protectedHolder: options.admin ?? true,
           project: null,
           organizationPermissions: permissions,
-          projectPermissions: [],
+          projectPermissions: options.projectPermissions ?? [],
         }),
         lookupToken: async () => {
           const service = credential === 'svc';
@@ -144,6 +147,7 @@ async function fixture(options: Options = {}) {
                   readOnly: options.tokenScope === 'read',
                 },
               },
+              protectedHolder: options.admin ?? true,
               principalStatus: 'active',
               projectVisible: true,
               validation: service
@@ -151,7 +155,7 @@ async function fixture(options: Options = {}) {
                 : { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
               project: null,
               organizationPermissions: permissions,
-              projectPermissions: [],
+              projectPermissions: options.projectPermissions ?? [],
             },
             'verifier',
             {
@@ -171,7 +175,7 @@ async function fixture(options: Options = {}) {
         dispatch: (run) => {
           void run();
         },
-        log: () => undefined,
+        log,
       },
       patValidation: patValidationGate,
       publicOrigin: ORIGIN,
@@ -201,7 +205,7 @@ async function fixture(options: Options = {}) {
       }),
     );
   };
-  return { request, suspendUser, reactivateUser, list, get, getOrganization, clientIp, ids };
+  return { request, suspendUser, reactivateUser, list, get, getOrganization, clientIp, ids, log };
 }
 
 async function normalized(response: Response) {
@@ -370,11 +374,47 @@ describe('GET /_pb/users', () => {
     expect(f.list).toHaveBeenLastCalledWith(orgContext('org-1'), { afterId: null, limit: 51 });
   });
 
-  it('does not serialize e-mail addresses', async () => {
-    const f = await fixture({ users: five });
-    const text = await (await f.request('GET', '/_pb/users')).text();
+  it.each([
+    ['project admin', { admin: false, projectPermissions: PERMISSIONS.map((p) => p.name) }],
+    ['organization reader', { admin: false, permissions: ['org:users:read'] }],
+    ['custom role with every permission', { admin: false }],
+    ['read-only admin token', { credential: 'pat', tokenScope: 'read' }],
+    ['non-admin full token', { credential: 'pat', tokenScope: 'full', admin: false }],
+    ['service token', { credential: 'svc' }],
+  ] as const)('omits e-mail fields for a %s', async (_name, options) => {
+    const f = await fixture({ ...options, users: five });
+    const response = await f.request('GET', '/_pb/users');
+    expect(response.status).toBe(200);
+    const text = await response.text();
     expect(text).not.toContain('@');
     expect(text).not.toContain('"email"');
+  });
+
+  it.each(['session', 'pat'] as const)(
+    'returns account e-mails for an organization admin %s',
+    async (credential) => {
+      const f = await fixture({ credential, users: five });
+      const response = await f.request('GET', '/_pb/users');
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { items: { email: string }[] };
+      expect(body.items.map((item) => item.email)).toEqual(five.map((item) => item.email));
+      expect(ORGANIZATION_API_SPECS[1].api.responses[200].safeParse(body).success).toBe(true);
+    },
+  );
+
+  it('keeps list responses out of logs and makes no audit-producing service call', async () => {
+    const f = await fixture({ users: five });
+    expect((await f.request('GET', '/_pb/users')).status).toBe(200);
+    expect(f.log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'http.request', status: 200 }),
+    );
+    f.list.mockRejectedValueOnce(new Error(five[0]!.email));
+    const failure = await f.request('GET', '/_pb/users');
+    expect(failure.status).toBe(500);
+    expect(await failure.text()).not.toContain('@');
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain('@');
+    expect(f.suspendUser).not.toHaveBeenCalled();
+    expect(f.reactivateUser).not.toHaveBeenCalled();
   });
 
   it('returns only the documented item keys', async () => {
@@ -383,7 +423,7 @@ describe('GET /_pb/users', () => {
       items: Record<string, unknown>[];
     };
     expect(Object.keys(body.items[0]!).sort()).toEqual(
-      ['createdAt', 'displayName', 'id', 'lastLoginAt', 'status'].sort(),
+      ['createdAt', 'displayName', 'email', 'id', 'lastLoginAt', 'status'].sort(),
     );
     expect(body.items[0]!['lastLoginAt']).toBe('2026-03-01T00:00:00.000Z');
   });

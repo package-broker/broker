@@ -3,6 +3,7 @@ import { mkdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   AUTH_REASON_CODES,
+  FINISH_FAILURE_DETAILS,
   isAuthReasonCode,
   type AuthReasonCode,
 } from '@package-broker/core/auth/reason-codes';
@@ -345,10 +346,9 @@ export function sinkLog(observe: (scope?: ObserveScope) => Observability): Kerne
       }
     }
     const error = entry['error_name'] ?? entry['error'];
+    const detail = registeredAuthReason(entry['detail']);
     const reason =
-      registeredAuthReason(entry['detail']) ??
-      registeredAuthReason(entry['reason']) ??
-      registeredAuthReason(entry['code']);
+      detail ?? registeredAuthReason(entry['reason']) ?? registeredAuthReason(entry['code']);
     const event = entry['event'] as string;
     observability.log({
       level: entry['level'] as LogLevel,
@@ -359,7 +359,16 @@ export function sinkLog(observe: (scope?: ObserveScope) => Observability): Kerne
     const outcome = LOGIN_OUTCOMES[event];
     const provider = entry['provider'];
     if (outcome !== undefined && typeof provider === 'string') {
-      observability.counter('pb.auth.login', { provider, outcome });
+      const finishDetail =
+        outcome === 'refused' &&
+        entry['reason'] === 'provider_error' &&
+        detail !== undefined &&
+        (FINISH_FAILURE_DETAILS as ReadonlySet<string>).has(detail);
+      observability.counter('pb.auth.login', {
+        provider,
+        outcome,
+        ...(finishDetail ? { detail } : {}),
+      });
     }
   };
 }

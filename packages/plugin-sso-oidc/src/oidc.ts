@@ -547,7 +547,10 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
     code: string,
     login: StoredLogin,
     callbackUrl: string,
-  ): Promise<{ readonly idToken: string; readonly keys: KeySource }> {
+  ): Promise<
+    | { readonly ok: true; readonly idToken: string; readonly keys: KeySource }
+    | { readonly ok: false; readonly detail: TokenEndpointError }
+  > {
     checkCallbackUrl(callbackUrl);
     const secret = readSecret();
     const endpoints = await discover();
@@ -575,14 +578,15 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
     );
     if (status < 200 || status >= 300) {
       const refusal = tokenEndpointError(json);
-      throw refusal === 'status' ? new BoundedFetchError('status') : new OidcProviderError(refusal);
+      if (refusal === 'status') throw new BoundedFetchError('status');
+      return { ok: false, detail: refusal };
     }
     const idToken = isPlainContainer(json) ? (json as Record<string, unknown>)['id_token'] : null;
     if (typeof idToken !== 'string' || idToken === '') {
       throw new OidcProviderError('token_response_invalid');
     }
     keys ??= createJwksCache({ url: endpoints.jwks, ctx });
-    return { idToken, keys };
+    return { ok: true, idToken, keys };
   }
 
   function audienceAccepted(claims: VerifiedClaims): boolean {
@@ -694,7 +698,11 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
       }
       let exchanged: { readonly idToken: string; readonly keys: KeySource };
       try {
-        exchanged = await exchangeCode(codes[0] as string, login, input.callbackUrl);
+        const result = await exchangeCode(codes[0] as string, login, input.callbackUrl);
+        if (!result.ok) {
+          return { ok: false, reason: 'provider_error', detail: result.detail };
+        }
+        exchanged = result;
       } catch {
         return refuse('provider_error');
       }

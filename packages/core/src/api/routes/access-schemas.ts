@@ -25,7 +25,7 @@ const subject = z.union([
 ]);
 
 const listedSubject = z.union([
-  z.strictObject({ type: z.literal('email') }),
+  z.strictObject({ type: z.literal('email'), value: z.string().optional() }),
   z.strictObject({
     type: z.literal('group'),
     provider: z.string(),

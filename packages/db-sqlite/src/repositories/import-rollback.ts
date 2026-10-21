@@ -41,7 +41,7 @@ interface RollbackEntity {
 
 const LOOKUP_CHUNK = 40;
 const BASES: ReadonlySet<unknown> = new Set(['source_release', 'packagist_added', 'import_time']);
-const RUN_STATES = "('applied', 'verifying', 'verified')";
+const RUN_STATES = "('failed', 'applied', 'verifying', 'verified')";
 const SOURCE_DOMAIN = [
   'name',
   'ecosystem',
@@ -260,7 +260,7 @@ export function createImportRollbackStore(options: {
     return sql<SqlBool>`(${fence.runId === runId ? 1 : 0} = 1 and exists (
       select 1 from import_run as rbrun join job as rbjob on rbjob.id = ${fence.job.id} and rbjob.org_id = ${ctx.orgId}
       where rbrun.org_id = ${ctx.orgId} and rbrun.id = ${runId}
-        and rbrun.state in ('applied', 'verifying', 'verified') and ${approver}
+        and rbrun.state in ${sql.raw(RUN_STATES)} and ${approver}
         and rbjob.type = ${IMPORT_RUN_JOB.rollback}
         and rbjob.resource_key = ${IMPORT_RUN_JOB.resourceKey(runId)}
         and json_extract(rbjob.payload_json, '$.runId') = rbrun.id

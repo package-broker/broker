@@ -17,6 +17,11 @@ interface Coverage {
 
 const COVERAGE: readonly Coverage[] = [
   {
+    file: 'repositories/package-admin-read.ts',
+    index: 'version_package_status',
+    d1Cases: ['package admin status (version_package_status)'],
+  },
+  {
     file: 'repositories/keyring-verifier.ts',
     index: 'credential_version_in_use',
     d1Cases: ['keyring credential versions (credential_version_in_use)'],

@@ -288,6 +288,8 @@ const API_EXEMPT_PATHS: ReadonlySet<string> = new Set([
   '/_pb/ui',
   '/_pb/ui/assets/:file',
   '/_pb/ui/:file',
+  '/_pb/ui/setup/document',
+  '/_pb/ui/setup/assets/:file',
   '/_pb/mcp',
   '/_pb/openapi.json',
   '/_pb/hooks/github/:credentialId',

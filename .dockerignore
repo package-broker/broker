@@ -16,6 +16,8 @@
 **/.agents
 **/.codex
 **/secrets
+!packages/*/src/secrets
+!packages/*/src/secrets/**
 **/*.key
 **/*.pem
 **/*.p12

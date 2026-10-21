@@ -24,14 +24,15 @@ function flag(name, fallback) {
 
 const outDir = flag('--out', path.join(packageRoot, 'dist/assets'));
 const entryPath = flag('--entry', path.join(packageRoot, 'src/main.tsx'));
+const setupEntryPath = flag('--setup-entry', path.join(packageRoot, 'src/setup.tsx'));
 const budgetPath = flag('--budget', path.join(packageRoot, 'bundle-budget.json'));
 const metafilePath = flag('--metafile', undefined);
 
 const hashOf = (bytes) => createHash('sha256').update(bytes).digest('hex').slice(0, 12);
 
-async function bundleScript() {
+async function bundleScript(entry) {
   const { outputFiles, metafile } = await build({
-    entryPoints: [entryPath],
+    entryPoints: [entry],
     bundle: true,
     write: false,
     metafile: true,
@@ -85,20 +86,52 @@ function renderIndex(scriptName, styleName) {
 `;
 }
 
-const { script, metafile } = await bundleScript();
+const SETUP_ASSET_PREFIX = '/_pb/ui/setup/assets/';
+
+function renderSetup(scriptName, styleName) {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Package Broker setup</title>
+    <link rel="stylesheet" href="${SETUP_ASSET_PREFIX}${styleName}" />
+    <script type="module" src="${SETUP_ASSET_PREFIX}${scriptName}"></script>
+  </head>
+  <body>
+    <main id="root" class="mx-auto max-w-xl p-6"></main>
+  </body>
+</html>
+`;
+}
+
+const { script, metafile } = await bundleScript(entryPath);
+const { script: setupScript, metafile: setupMetafile } = await bundleScript(setupEntryPath);
 const styles = await compileStyles();
 const scriptName = `app.${hashOf(script)}.js`;
 const styleName = `app.${hashOf(styles)}.css`;
+const setupScriptName = `setup.${hashOf(setupScript)}.js`;
 const html = Buffer.from(renderIndex(scriptName, styleName));
+const setupHtml = Buffer.from(renderSetup(setupScriptName, styleName));
 
-const inline = findInlineCode(html.toString('utf8'));
-if (inline.length > 0) throw new Error(`index.html must not contain: ${inline.join(', ')}`);
-const scriptText = script.toString('utf8');
-if (/\b(?:eval|Function)\s*\(/.test(scriptText)) {
-  throw new Error('bundle contains eval or Function calls, which the CSP forbids');
+for (const [label, document] of [
+  ['index.html', html],
+  ['setup.html', setupHtml],
+]) {
+  const inline = findInlineCode(document.toString('utf8'));
+  if (inline.length > 0) throw new Error(`${label} must not contain: ${inline.join(', ')}`);
+}
+for (const bundled of [script, setupScript]) {
+  if (/\b(?:eval|Function)\s*\(/.test(bundled.toString('utf8'))) {
+    throw new Error('bundle contains eval or Function calls, which the CSP forbids');
+  }
 }
 
-const total = gzipSync(script).length + gzipSync(styles).length;
+const total = [html, setupHtml, script, setupScript, styles].reduce(
+  (sum, bytes) => sum + gzipSync(bytes).length,
+  0,
+);
 if (process.argv.includes('--init-budget')) {
   await writeFile(budgetPath, `${JSON.stringify({ gzipBytes: total }, null, 2)}\n`);
   console.log(`bundle budget initialized at ${total} gzip bytes`);
@@ -118,6 +151,9 @@ if (!Number.isSafeInteger(budget) || budget <= 0) {
   throw new Error('Bundle budget gzipBytes must be a positive safe integer');
 }
 const { ok, limit } = checkBudget(total, budget);
+console.log(
+  `bundle gzip: app HTML ${gzipSync(html).length}, setup HTML ${gzipSync(setupHtml).length}, app script ${gzipSync(script).length}, setup script ${gzipSync(setupScript).length}, styles ${gzipSync(styles).length}`,
+);
 console.log(`bundle gzip total ${total} bytes, budget ${budget} bytes, limit ${limit} bytes`);
 if (!ok) {
   throw new Error(
@@ -127,7 +163,9 @@ if (!ok) {
 
 const files = {
   'index.html': { contentType: 'text/html', bytes: html.length },
+  'setup.html': { contentType: 'text/html', bytes: setupHtml.length },
   [scriptName]: { contentType: 'text/javascript', bytes: script.length },
+  [setupScriptName]: { contentType: 'text/javascript', bytes: setupScript.length },
   [styleName]: { contentType: 'text/css', bytes: styles.length },
 };
 const manifestText = `${JSON.stringify({ version: 1, entry: 'index.html', files }, null, 2)}\n`;
@@ -136,8 +174,16 @@ await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 await Promise.all([
   writeFile(`${outDir}/index.html`, html),
+  writeFile(`${outDir}/setup.html`, setupHtml),
   writeFile(`${outDir}/${scriptName}`, script),
+  writeFile(`${outDir}/${setupScriptName}`, setupScript),
   writeFile(`${outDir}/${styleName}`, styles),
   writeFile(`${outDir}/manifest.json`, manifestText),
 ]);
-if (metafilePath) await writeFile(metafilePath, `${JSON.stringify(metafile, null, 2)}\n`);
+if (metafilePath) {
+  const combined = {
+    inputs: { ...metafile.inputs, ...setupMetafile.inputs },
+    outputs: { ...metafile.outputs, ...setupMetafile.outputs },
+  };
+  await writeFile(metafilePath, `${JSON.stringify(combined, null, 2)}\n`);
+}

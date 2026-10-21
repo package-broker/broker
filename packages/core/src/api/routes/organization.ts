@@ -5,7 +5,7 @@ import type { OrganizationRepository } from '../../db/organization.js';
 import type { UserRepository } from '../../db/users.js';
 import type { RouteDefinition } from '../../plugin.js';
 import { apiRoute, type ApiOutcome } from '../route.js';
-import { callContext, type ApiRouteDeps } from './context.js';
+import { callContext, hasOrganizationAdminAuthority, type ApiRouteDeps } from './context.js';
 import {
   getMeSpec,
   getOrganizationSpec,
@@ -57,11 +57,13 @@ export function organizationRoutes(deps: OrganizationRouteDeps): readonly RouteD
         limit: limit + 1,
       });
       const page = rows.slice(0, limit);
+      const includeEmail = hasOrganizationAdminAuthority(ctx);
       return {
         status: 200,
         body: {
           items: page.map((user) => ({
             id: user.id,
+            ...(includeEmail ? { email: user.email } : {}),
             displayName: user.displayName,
             status: user.status,
             lastLoginAt: user.lastLoginAt,

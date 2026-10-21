@@ -17,6 +17,21 @@ export interface ApiRouteDeps {
   readonly clientIp: (request: Request) => string | null;
 }
 
+export function hasOrganizationAdminAuthority(ctx: RequestContext): boolean {
+  const access = accessContextOf(ctx);
+  if (ctx.org === null || access?.boundary !== 'organization') return false;
+  if (organizationActorOf(ctx)?.isOrganizationAdmin === true) return true;
+  const token = access.token;
+  return (
+    access.principal?.kind === 'user' &&
+    token?.kind === 'pat' &&
+    token.scope === 'full' &&
+    !token.readOnly &&
+    token.projectMode === 'all' &&
+    token.organizationAdmin === true
+  );
+}
+
 export function auditCall(ctx: RequestContext, deps: ApiRouteDeps): ApiCall {
   const access = accessContextOf(ctx);
   if (access === null) throw new TypeError('route requires an access context');

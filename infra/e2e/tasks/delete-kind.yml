@@ -1,0 +1,10 @@
+---
+- name: Attempt every recorded id for this kind
+  ansible.builtin.include_tasks: delete-resource.yml
+  loop: >-
+    {{ e2e_state.resources[e2e_delete.kind]
+    if e2e_state.resources[e2e_delete.kind] is sequence
+    and e2e_state.resources[e2e_delete.kind] is not string
+    else [e2e_state.resources[e2e_delete.kind]] }}
+  loop_control:
+    loop_var: e2e_delete_id

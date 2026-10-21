@@ -1,0 +1,30 @@
+---
+- name: List only resources labelled for this run after a failed create
+  ansible.builtin.uri:
+    url: 'https://api.hetzner.cloud/v1/{{ e2e_resource_kind }}?label_selector=run_id%3D{{ e2e_run_id }}&per_page=50&page={{ e2e_recovery_page | default(1) }}'
+    headers:
+      Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
+    status_code: 200
+    follow_redirects: none
+    use_proxy: false
+    timeout: 30
+  register: e2e_recovered
+  no_log: true
+
+- name: Journal every ownership-verified id before failing
+  ansible.builtin.include_tasks: record-recovered-resource.yml
+  loop: '{{ e2e_recovered.json[e2e_resource_kind] }}'
+  loop_control:
+    loop_var: e2e_recovered_resource
+    label: '{{ e2e_resource_kind }}'
+  when:
+    - e2e_recovered_resource.labels.pb_e2e | default('') == 'true'
+    - e2e_recovered_resource.labels.run_id | default('') == e2e_run_id
+    - e2e_recovered_resource.labels.expires_at | default('') == e2e_expires_at | string
+  no_log: true
+
+- name: Recover the remaining labelled resources
+  ansible.builtin.include_tasks: recover-create.yml
+  vars:
+    e2e_recovery_page: '{{ e2e_recovered.json.meta.pagination.next_page }}'
+  when: e2e_recovered.json.meta.pagination.next_page is not none

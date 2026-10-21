@@ -446,7 +446,7 @@ describe('local setup, session and logout (criterion 1)', () => {
         event: 'auth.local.locked',
         request_id: expect.any(String),
         reason: 'attempts',
-        userId: '01J0USERADMIN00000000000U1',
+        user_id: '01J0USERADMIN00000000000U1',
       },
     ]);
     const blocked = await harness.call('POST', '/_pb/auth/local/login', {
@@ -553,7 +553,7 @@ describe('local setup, session and logout (criterion 1)', () => {
         event: 'auth.local.locked',
         request_id: expect.any(String),
         reason: 'attempts',
-        userId: '01J0USERADMIN00000000000U1',
+        user_id: '01J0USERADMIN00000000000U1',
       },
     ]);
     await wrongReauth();
@@ -601,7 +601,7 @@ describe('local setup, session and logout (criterion 1)', () => {
         event: 'auth.local.locked',
         request_id: expect.any(String),
         reason: 'attempts',
-        userId: '01J0USERADMIN00000000000U1',
+        user_id: '01J0USERADMIN00000000000U1',
       },
     ]);
     expect(logged(harness)).not.toContain(ADMIN_EMAIL);

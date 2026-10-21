@@ -1,6 +1,6 @@
 import type { LoginRefusal } from './identity-login.js';
 import type { ReauthRefusal } from './identity-reauth.js';
-import type { IdentityFailure } from '../identity/port.js';
+import type { IdentityFailure, IdentityFailureDetail } from '../identity/port.js';
 
 function reasonSet<const T extends string>(reasons: Record<T, true>): ReadonlySet<T> {
   return new Set(Object.keys(reasons) as T[]);
@@ -20,6 +20,16 @@ export const START_FAILURE_DETAILS = reasonSet({
   discovery_network: true,
   discovery_bad_json: true,
 });
+
+export const FINISH_FAILURE_DETAILS = reasonSet({
+  invalid_grant: true,
+  invalid_client: true,
+  invalid_request: true,
+  unauthorized_client: true,
+  unsupported_grant_type: true,
+  invalid_scope: true,
+  token_endpoint_error: true,
+} satisfies Record<IdentityFailureDetail, true>);
 
 export const IDENTITY_FAILURES = reasonSet({
   missing_credentials: true,
@@ -61,6 +71,7 @@ export const REAUTH_REFUSALS = reasonSet({
 
 export const AUTH_REASON_CODES = readonlySet([
   ...START_FAILURE_DETAILS,
+  ...FINISH_FAILURE_DETAILS,
   ...IDENTITY_FAILURES,
   ...LOGIN_REFUSALS,
   ...REAUTH_REFUSALS,

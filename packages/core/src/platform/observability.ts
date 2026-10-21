@@ -1,3 +1,5 @@
+import { FINISH_FAILURE_DETAILS } from '../auth/reason-codes.js';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface LogRecord {
@@ -235,6 +237,7 @@ const LABEL_KEYS = new Set([
   'kind',
   'adapter',
   'provider',
+  'detail',
 ]);
 const ENCODER = new TextEncoder();
 const MAX_PROTOTYPE_STEPS = 32;
@@ -393,6 +396,8 @@ export function metricLabelValueAllowed(
   routeTemplates: ReadonlySet<string>,
 ): boolean {
   switch (key) {
+    case 'detail':
+      return (FINISH_FAILURE_DETAILS as ReadonlySet<string>).has(value);
     case 'method':
       return METHODS.has(value);
     case 'route':

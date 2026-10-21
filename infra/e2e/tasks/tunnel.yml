@@ -1,0 +1,69 @@
+---
+- name: Discover the quick tunnel with one startup retry
+  block:
+    - name: Try tunnel startup and bounded URL discovery
+      block:
+        - name: Attempt startup
+          ansible.builtin.include_tasks: tunnel-attempt.yml
+      rescue:
+        - name: Stop the failed tunnel before the only retry
+          ansible.builtin.systemd_service:
+            name: pb-e2e-tunnel
+            state: stopped
+
+        - name: Retry startup once
+          ansible.builtin.include_tasks: tunnel-attempt.yml
+  rescue:
+    - name: Refuse acceptance without a tunnel URL
+      ansible.builtin.fail:
+        msg: 'NOT RUN: no current quick tunnel URL after two bounded startup attempts.'
+
+- name: Publish the single discovered origin as a host fact
+  ansible.builtin.set_fact:
+    e2e_public_url: '{{ e2e_tunnel_log.stdout | regex_findall(e2e_tunnel_url_pattern) | last }}'
+
+- name: Configure the broker with the discovered origin
+  ansible.builtin.template:
+    src: pb-e2e.service.j2
+    dest: /etc/systemd/system/pb-e2e.service
+    mode: '0644'
+
+- name: Restart the broker before any acceptance request
+  ansible.builtin.systemd_service:
+    name: pb-e2e
+    daemon_reload: true
+    state: restarted
+
+- name: Share the current origin and its phase on the controller
+  ansible.builtin.set_fact:
+    e2e_public_url: '{{ e2e_public_url }}'
+    e2e_state: >-
+      {{ hostvars['localhost'].e2e_state | combine({
+      'public_url': e2e_public_url,
+      'urls': (hostvars['localhost'].e2e_state.urls | default([])) + [{
+      'phase': e2e_phase, 'public_url': e2e_public_url,
+      'discovered_at': lookup('ansible.builtin.pipe', 'date +%s') | int
+      }]}) }}
+  delegate_to: localhost
+  delegate_facts: true
+
+- name: Save URL history in the run journal
+  ansible.builtin.copy:
+    content: "{{ hostvars['localhost'].e2e_state | to_nice_json }}\n"
+    dest: '{{ e2e_inventory_file }}'
+    mode: '0600'
+  delegate_to: localhost
+
+- name: Write the current origin and candidate identity for every harness layer
+  ansible.builtin.copy:
+    content: >-
+      {{ {'PB_PUBLIC_URL': e2e_public_url,
+      'candidate_commit': e2e_candidate_commit,
+      'image_digest': hostvars['localhost'].e2e_state.image_digest,
+      'image_digest_kind': hostvars['localhost'].e2e_state.image_digest_kind,
+      'image_id': e2e_image_id,
+      'image_reference': e2e_image_reference,
+      'phase': e2e_phase} | to_nice_json }}
+    dest: '{{ e2e_run_dir }}/outputs.json'
+    mode: '0600'
+  delegate_to: localhost

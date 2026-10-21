@@ -1,18 +1,18 @@
 import { expect } from 'vitest';
-import { createCatalogueReader } from '../../repositories/catalogue-read.js';
+import { createVersionReader } from '../../repositories/catalogue-read.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { executing, factoryEntry, winnerWaivers } from './factory-cases.js';
 import { visiblePackage, packageQuery } from './catalogue-factory-fixture.js';
 
 const foreignChild: ContractCase = {
-  name: 'createCatalogueReader rejects a foreign version child of an own package',
+  name: 'createVersionReader rejects a foreign version child of an own package',
   async run(context) {
     await visiblePackage(context, false);
     const { own } = orgOf(context);
     const seed = seeder(context.executor);
     await seed.forged("UPDATE version SET org_id = ? WHERE id = 'V'", orgOf(context).foreign.orgId);
     expect(
-      await createCatalogueReader(executing(context)).resolveVersions(own, {
+      await createVersionReader(executing(context)).resolveVersions(own, {
         ...packageQuery,
         limit: 10,
       }),
@@ -20,7 +20,7 @@ const foreignChild: ContractCase = {
   },
 };
 export const entries: readonly MutationEntry[] = [
-  factoryEntry('catalogue-read', 'createCatalogueReader', foreignChild, /v\.org_id = \?/, [
+  factoryEntry('catalogue-read', 'createVersionReader', foreignChild, /v\.org_id = \?/, [
     ...winnerWaivers,
     {
       locate: /"pp"\."org_id" = \?|e\.org_id = \?/,

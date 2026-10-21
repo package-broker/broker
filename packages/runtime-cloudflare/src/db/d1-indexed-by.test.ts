@@ -17,7 +17,7 @@ import { createClosureEdges } from '@package-broker/db-sqlite/repositories/closu
 import { createCatalogueLookup } from '@package-broker/db-sqlite/repositories/catalogue-lookup';
 import { proxyEligibleCondition } from '@package-broker/db-sqlite/repositories/catalogue-predicates';
 import { createKeyringVerifierStore } from '@package-broker/db-sqlite/repositories/keyring-verifier';
-import { createCatalogueReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
+import { createVersionReader } from '@package-broker/db-sqlite/repositories/catalogue-read';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
 const mf = new Miniflare(
@@ -155,7 +155,7 @@ describe('INDEXED BY statements on D1', () => {
   });
 
   it('catalogue version pagination (version_by_published)', async () => {
-    const result = await createCatalogueReader(executor).resolveVersions(a, {
+    const result = await createVersionReader(executor).resolveVersions(a, {
       ...PACKAGE,
       ...PAGE,
     });

@@ -1,4 +1,13 @@
-import { type Dirent, existsSync, readdirSync, readFileSync } from 'node:fs';
+import {
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { builtinModules } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +22,7 @@ interface Rule {
   readonly kitAndTests?: readonly string[];
   readonly testsAndScripts?: readonly string[];
   readonly onlyIn?: Readonly<Record<string, readonly string[]>>;
+  readonly onlySpecifiersIn?: Readonly<Record<string, readonly string[]>>;
 }
 
 const ANY_WORKSPACE = 'workspace:*';
@@ -79,8 +89,16 @@ const RULES: Readonly<Record<string, Rule>> = {
   ui: {
     allow: ['react', 'react-dom', 'class-variance-authority', 'clsx', 'tailwind-merge'],
     testOnly: ['vitest', '@package-broker/core'],
-    testsAndScripts: ['node', 'esbuild'],
-    onlyIn: { '@package-broker/core': ['packages/ui/src/manifest.ts'] },
+    testsAndScripts: ['node', 'esbuild', 'openapi-typescript', 'prettier'],
+    onlySpecifiersIn: {
+      '@package-broker/core/platform/ui-manifest': [
+        'packages/ui/src/manifest.ts',
+        'packages/ui/scripts/build.mjs',
+        ...['js', 'mjs', 'cjs', 'ts', 'mts', 'cts', 'tsx'].map(
+          (extension) => `packages/ui/build.${extension}`,
+        ),
+      ],
+    },
   },
   'ui-assets': { allow: [...ws('core', 'ui'), 'node'], testOnly: ['vitest'] },
 };
@@ -106,7 +124,10 @@ function fileKind(relativePath: string): FileKind {
   ) {
     return 'script';
   }
-  if (inPackage.startsWith('scripts/') || (pkg === 'ui' && /^build\.[cm]?js$/.test(inPackage))) {
+  if (
+    inPackage.startsWith('scripts/') ||
+    (pkg === 'ui' && /^build\.(?:[cm]?[jt]s|tsx)$/.test(inPackage))
+  ) {
     return 'script';
   }
   return 'source';
@@ -127,7 +148,14 @@ function classify(specifier: string): string {
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] ?? specifier);
 }
 
-function isAllowed(rule: Rule, dependency: string, kind: FileKind, file: string): boolean {
+function isAllowed(
+  rule: Rule,
+  dependency: string,
+  kind: FileKind,
+  file: string,
+  specifier: string,
+): boolean {
+  if (rule.onlySpecifiersIn?.[specifier]?.includes(file)) return true;
   if (rule.onlyIn?.[dependency]?.includes(file)) return true;
   if (rule.allow.includes(ANY_WORKSPACE) && WORKSPACE_PACKAGES.has(dependency)) return true;
   if (rule.allow.includes(dependency)) return true;
@@ -249,7 +277,7 @@ function findViolations(
     ) {
       return report(`${pkg} may import only ${CORE_SPECIFIER} and ${CORE_SPECIFIER}/plugin`);
     }
-    if (!rule || !isAllowed(rule, dependency, kind, relativePath)) {
+    if (!rule || !isAllowed(rule, dependency, kind, relativePath, specifier)) {
       report(`${pkg} must not import ${dependency || specifier} from a ${kind} file`);
     }
   };
@@ -277,23 +305,23 @@ function walk(directory: string, extensions: readonly string[], found: string[])
   }
 }
 
-function sourceFiles(pkg: string): string[] {
-  const root = path.join(REPO_ROOT, 'packages', pkg);
+function sourceFiles(pkg: string, repoRoot: string = REPO_ROOT): string[] {
+  const root = path.join(repoRoot, 'packages', pkg);
   const files: string[] = [];
   if (pkg.startsWith('plugin-')) {
     walk(root, ['.ts', '.tsx', '.js', '.mjs', '.cjs'], files);
-    return files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/')).sort();
+    return files.map((file) => path.relative(repoRoot, file).split(path.sep).join('/')).sort();
   }
   walk(path.join(root, 'src'), ['.ts', '.tsx'], files);
   walk(path.join(root, 'scripts'), ['.mjs'], files);
   if (pkg === 'ui') {
     for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (entry.isFile() && /\.(?:[cm]?js|tsx?)$/.test(entry.name)) {
+      if (entry.isFile() && /\.(?:[cm]?[jt]s|tsx)$/.test(entry.name)) {
         files.push(path.join(root, entry.name));
       }
     }
   }
-  return files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/')).sort();
+  return files.map((file) => path.relative(repoRoot, file).split(path.sep).join('/')).sort();
 }
 
 function format(violations: Violation[]): string[] {
@@ -518,6 +546,107 @@ describe('classifier', () => {
       [],
     );
     expect(findViolations('packages/ui/build.mjs', "import 'better-sqlite3';")).toHaveLength(1);
+  });
+
+  it('discovers ui root build modules without losing source and script coverage', () => {
+    const root = mkdtempSync(path.join(REPO_ROOT, '.ui-architecture-'));
+    const modules = [
+      ...['js', 'mjs', 'cjs', 'ts', 'mts', 'cts', 'tsx'].map((extension) => `build.${extension}`),
+      'tailwind.config.js',
+      'src/main.tsx',
+      'src/manifest.ts',
+      'scripts/build.mjs',
+    ];
+    try {
+      for (const file of [...modules, 'dist/build.mjs', 'node_modules/build.mjs']) {
+        const target = path.join(root, 'packages/ui', file);
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, "import 'better-sqlite3';");
+      }
+      writeFileSync(path.join(root, 'packages/ui/package.json'), '{}');
+      const files = sourceFiles('ui', root);
+      expect(files).toEqual(modules.map((file) => `packages/ui/${file}`).sort());
+      for (const file of files) {
+        expect(
+          findViolations(file, readFileSync(path.join(root, file), 'utf8')),
+          file,
+        ).toHaveLength(1);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['js', 'mjs', 'cjs', 'ts', 'mts', 'cts', 'tsx'])(
+    'allows named ui build tooling in a root build.%s module',
+    (extension) => {
+      const file = `packages/ui/build.${extension}`;
+      expect(fileKind(file)).toBe('script');
+      for (const specifier of ['node:fs', 'esbuild', 'openapi-typescript', 'prettier']) {
+        expect(findViolations(file, `import '${specifier}';`), specifier).toEqual([]);
+      }
+      for (const specifier of ['better-sqlite3', 'kysely', 'lodash', 'vitest']) {
+        expect(findViolations(file, `import '${specifier}';`), specifier).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each(['src/api.test.ts', 'scripts/gen-api.mjs'])(
+    'allows named ui test and script tooling in %s',
+    (module) => {
+      for (const specifier of ['node:fs', 'esbuild', 'openapi-typescript', 'prettier']) {
+        expect(findViolations(`packages/ui/${module}`, `import '${specifier}';`)).toEqual([]);
+      }
+    },
+  );
+
+  it.each(['src/main.tsx', 'src/setup.tsx', 'src/build.ts', 'tailwind.config.js'])(
+    'rejects tooling and core imports in ui source %s',
+    (module) => {
+      const file = `packages/ui/${module}`;
+      expect(fileKind(file)).toBe('source');
+      for (const specifier of [
+        'node:fs',
+        'esbuild',
+        'openapi-typescript',
+        'prettier',
+        '@package-broker/core/platform/ui-manifest',
+      ]) {
+        expect(findViolations(file, `import '${specifier}';`), specifier).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each([
+    'src/manifest.ts',
+    'scripts/build.mjs',
+    ...['js', 'mjs', 'cjs', 'ts', 'mts', 'cts', 'tsx'].map((extension) => `build.${extension}`),
+  ])('allows only the approved core parser import in ui tooling %s', (module) => {
+    const file = `packages/ui/${module}`;
+    const parser = '@package-broker/core/platform/ui-manifest';
+    expect(findViolations(file, `import { parseUiManifest } from '${parser}';`)).toEqual([]);
+    expect(
+      findViolations(file, "export { parseUiManifest } from '#parser';", {
+        '#parser': parser,
+      }),
+    ).toEqual([]);
+    for (const specifier of [
+      '@package-broker/core',
+      '@package-broker/core/plugin',
+      '@package-broker/core/authz/engine',
+      `${parser}/other`,
+    ]) {
+      expect(findViolations(file, `import '${specifier}';`), specifier).toHaveLength(1);
+    }
+  });
+
+  it('keeps the core parser exception out of other ui build scripts', () => {
+    expect(
+      findViolations(
+        'packages/ui/scripts/other.mjs',
+        "import '@package-broker/core/platform/ui-manifest';",
+      ),
+    ).toHaveLength(1);
   });
 
   it('applies the cli workspace wildcard to workspace packages only', () => {

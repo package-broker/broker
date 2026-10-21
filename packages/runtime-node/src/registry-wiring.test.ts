@@ -1,3 +1,4 @@
+import { createLocalLoginSeed } from './testing/local-login.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -172,13 +173,25 @@ describe('node registry wiring', () => {
       'reader@example.test',
     ]);
     const credentialId = ulid();
-    await sql(
-      "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', ?, zeroblob(12), 1, 'fixture')",
-      [credentialId, orgId, new Uint8Array([1])],
+    const { sealed, aad, passwordHash } = await createLocalLoginSeed(
+      db.executor,
+      createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
+      { orgId, userId, credentialId },
     );
     await sql(
-      "INSERT INTO local_login (user_id, org_id, password_hash, totp_credential_id, totp_enabled_at, last_login_at) VALUES (?, ?, 'pbkdf2-sha256$fixture', ?, ?, ?)",
-      [userId, orgId, credentialId, new Date().toISOString(), new Date().toISOString()],
+      "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', ?, ?, ?, ?)",
+      [credentialId, orgId, sealed.ciphertext, sealed.nonce, sealed.keyVersion, aad],
+    );
+    await sql(
+      'INSERT INTO local_login (user_id, org_id, password_hash, totp_credential_id, totp_enabled_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [
+        userId,
+        orgId,
+        passwordHash,
+        credentialId,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
     );
     await sql(
       "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES (?, ?, 'fixture', 'Fixture', 'organization', 1)",

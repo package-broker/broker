@@ -1302,3 +1302,62 @@ describe('atomic principal audit', () => {
     },
   );
 });
+
+describe('service principal list pages', () => {
+  it('pages principals before loading all their permissions and scopes rows by organization', async () => {
+    await create({
+      id: SP1,
+      name: 'first',
+      permissions: ['project:read', 'project:packages:read'],
+    });
+    await create({ id: SP2, name: 'second', projectId: null, permissions: [] });
+    await create({ id: SP3, name: 'foreign', projectId: null, permissions: [] });
+    await executor.batch([
+      stmt(
+        'UPDATE service_principal SET org_id = ?, created_by_user_id = ? WHERE id = ?',
+        b.orgId,
+        UB,
+        SP3,
+      ),
+    ]);
+    const page = await principals.list(a, { limit: 1, includeProjects: true });
+    expect(page.items.map((p) => p.id)).toEqual([SP1]);
+    expect(page.items[0]?.permissions).toEqual(['project:packages:read', 'project:read']);
+    expect(page.next).toBe(SP1);
+    const last = await principals.list(a, { limit: 1, after: page.next!, includeProjects: true });
+    expect(last.items.map((p) => p.id)).toEqual([SP2]);
+    expect(last.next).toBeNull();
+    expect(
+      (await principals.list(b, { limit: 10, includeProjects: true })).items.map((p) => p.id),
+    ).toEqual([SP3]);
+  });
+
+  it('filters a project and excludes archived projects and non-admin project rows', async () => {
+    await create({ id: SP1, name: 'project' });
+    await create({ id: SP2, name: 'org', projectId: null });
+    expect(
+      (
+        await principals.list(a, { limit: 10, projectId: PROJECT, includeProjects: true })
+      ).items.map((p) => p.id),
+    ).toEqual([SP1]);
+    expect(
+      (await principals.list(a, { limit: 10, includeProjects: false })).items.map((p) => p.id),
+    ).toEqual([SP2]);
+    expect(
+      (await principals.list(a, { limit: 10, projectId: PROJECT_B, includeProjects: true })).items,
+    ).toEqual([]);
+    await executor.batch([
+      stmt('UPDATE service_principal SET project_id = ? WHERE id = ?', PROJECT_B, SP1),
+    ]);
+    expect(
+      (await principals.list(a, { limit: 10, includeProjects: true })).items.map((p) => p.id),
+    ).toEqual([SP2]);
+    await executor.batch([
+      stmt('UPDATE service_principal SET project_id = ? WHERE id = ?', PROJECT, SP1),
+    ]);
+    await executor.batch([stmt("UPDATE project SET status = 'archived' WHERE id = ?", PROJECT)]);
+    expect(
+      (await principals.list(a, { limit: 10, includeProjects: true })).items.map((p) => p.id),
+    ).toEqual([SP2]);
+  });
+});

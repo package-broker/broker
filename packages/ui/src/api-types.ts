@@ -1039,6 +1039,41 @@ export interface paths {
     patch: operations['updateRole'];
     trace?: never;
   };
+  '/_pb/service-principals': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List service principals */
+    get: operations['listServicePrincipals'];
+    put?: never;
+    /** Add a service principal; requires Idempotency-Key and returns ETag */
+    post: operations['createServicePrincipal'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/service-principals/{principal}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a service principal */
+    get: operations['getServicePrincipal'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/service-principals/{principal}/permissions': {
     parameters: {
       query?: never;
@@ -7455,6 +7490,306 @@ export interface operations {
       };
       /** @description Precondition required */
       428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listServicePrincipals: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+        project?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              createdByUserId: string;
+              id: string;
+              name: string;
+              permissions: string[];
+              projectId: string | null;
+              revision: number;
+              /** @enum {string} */
+              status: 'active' | 'suspended';
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createServicePrincipal: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          name: string;
+          permissions: (
+            | 'org:read'
+            | 'org:settings:write'
+            | 'org:users:read'
+            | 'org:users:write'
+            | 'org:roles:read'
+            | 'org:roles:write'
+            | 'org:grants:read'
+            | 'org:grants:write'
+            | 'org:projects:create'
+            | 'org:projects:archive'
+            | 'org:sources:read'
+            | 'org:sources:write'
+            | 'org:tokens:read'
+            | 'org:tokens:revoke'
+            | 'org:service-principals:write'
+            | 'org:packages:manage'
+            | 'org:import:write'
+            | 'org:import:approve'
+            | 'org:audit:read'
+            | 'project:read'
+            | 'project:settings:write'
+            | 'project:grants:read'
+            | 'project:grants:write'
+            | 'project:packages:read'
+            | 'project:packages:write'
+            | 'project:packages:manage'
+            | 'project:sources:read'
+            | 'project:sources:write'
+            | 'project:service-principals:write'
+            | 'project:tokens:create'
+            | 'project:tokens:read'
+            | 'project:tokens:revoke'
+            | 'project:audit:read'
+          )[];
+          project?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdByUserId: string;
+            id: string;
+            name: string;
+            permissions: string[];
+            projectId: string | null;
+            revision: number;
+            /** @enum {string} */
+            status: 'active' | 'suspended';
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getServicePrincipal: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        principal: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdByUserId: string;
+            id: string;
+            name: string;
+            permissions: string[];
+            projectId: string | null;
+            revision: number;
+            /** @enum {string} */
+            status: 'active' | 'suspended';
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
         headers: {
           [name: string]: unknown;
         };

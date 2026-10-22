@@ -101,6 +101,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
   ...sourceSyncReadsAllowlist,
   'repositories/package-id.ts#createPackageIdReads':
     'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of packageIdStatement, registered separately in package-id.ts.',
+  'repositories/project-source-read.ts#createProjectSourceReader':
+    'NOT_A_MUTATION: adds no SQL; validates the project id and maps rows of projectSourceIdsStatement, registered separately in project-source-read.ts.',
   'repositories/registry-reads.ts#createRegistryReads':
     'NOT_A_MUTATION: adds no SQL; validates arguments and maps rows of coversStatement and versionByIdStatement, both registered separately in registry-reads.ts.',
   'repositories/organization.ts#createOrganizationBootstrap':

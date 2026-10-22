@@ -10,6 +10,7 @@ import {
   type MutationEntry,
 } from './harness.js';
 import { HASH, OWNER, NOT_NULL, seedSource, seedPackage, seedVersion } from './fixtures.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 const STAMP = 'finalize-stamp';
 const INPUT = {
@@ -149,6 +150,7 @@ export const entries: readonly MutationEntry[] = [
       })),
     ],
     waivers: [
+      ...selectionOrgWaivers,
       {
         locate: /ingest_session\.org_id = \?/,
         reason:
@@ -157,7 +159,7 @@ export const entries: readonly MutationEntry[] = [
       {
         locate: /(?<![\w.])org_id = \?/,
         reason:
-          'The empty-listing open-stamp assertion uses the same source id as the guarded session; source ids are PRIMARY KEY. Completion uses that same guarded session id.',
+          'The empty-listing open-stamp assertion uses the same source id as the guarded session; source ids are PRIMARY KEY. Completion uses that same guarded session id. The armed-acceptance read, the refusal record and the refusal clearing address the source by that same primary key.',
       },
     ],
   },

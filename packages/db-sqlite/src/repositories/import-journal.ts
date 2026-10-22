@@ -371,6 +371,11 @@ export function createImportJournalStore(options: {
               last_error: null,
               listing_open_stamp: null,
               listing_opened_at: null,
+              last_refusal_at: null,
+              last_refusal_absent: null,
+              last_refusal_listed: null,
+              last_refusal_successful: null,
+              removal_accepted: 0,
             };
             break;
           case 'name': {

@@ -2,6 +2,7 @@ import { expect } from 'vitest';
 import { removedBlobs } from '../../repositories/catalogue-reconcile.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { HASH, NOT_NULL, seedSource, seedPackage, seedVersion } from './fixtures.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 function foreignCase(table: 'blob' | 'version' | 'package', operation: boolean): ContractCase {
   return {
@@ -61,6 +62,7 @@ export const entries: readonly MutationEntry[] = [
     builder: 'removedBlobs',
     file: 'repositories/catalogue-reconcile.ts',
     cases: variants.map(({ table, operation }) => foreignCase(table, operation)),
+    waivers: selectionOrgWaivers,
     predicates: variants.map(({ table, operation }) => ({
       name: `${operation ? 'operation' : 'scope'} ${table} organization`,
       locate: new RegExp(`${table}\\.org_id = \\?`),

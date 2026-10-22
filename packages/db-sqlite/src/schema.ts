@@ -368,6 +368,11 @@ export interface SourceTable {
   listing_hash: string | null;
   listing_open_stamp: string | null;
   listing_opened_at: string | null;
+  last_refusal_at: string | null;
+  last_refusal_absent: number | null;
+  last_refusal_listed: number | null;
+  last_refusal_successful: number | null;
+  removal_accepted: Generated<number>;
   consecutive_failures: Generated<number>;
   last_error: string | null;
   created_at: Generated<string>;

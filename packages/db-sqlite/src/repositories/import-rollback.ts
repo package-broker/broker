@@ -69,6 +69,11 @@ const SOURCE_DOMAIN = [
   'last_error',
   'listing_open_stamp',
   'listing_opened_at',
+  'last_refusal_at',
+  'last_refusal_absent',
+  'last_refusal_listed',
+  'last_refusal_successful',
+  'removal_accepted',
 ] as const;
 const PROJECT_DOMAIN = [
   'slug',

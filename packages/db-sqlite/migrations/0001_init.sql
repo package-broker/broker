@@ -458,7 +458,16 @@ CREATE TABLE source (
   created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   listing_open_stamp              TEXT,
-  listing_opened_at               TEXT
+  listing_opened_at               TEXT,
+  last_refusal_at                 TEXT,
+  last_refusal_absent             INTEGER CHECK (last_refusal_absent IS NULL OR last_refusal_absent >= 0),
+  last_refusal_listed             INTEGER CHECK (last_refusal_listed IS NULL OR last_refusal_listed >= 0),
+  last_refusal_successful         INTEGER CHECK (last_refusal_successful IS NULL OR last_refusal_successful >= 0),
+  removal_accepted                INTEGER NOT NULL DEFAULT 0 CHECK (removal_accepted IN (0, 1)),
+  CHECK ((last_refusal_at IS NULL) = (last_refusal_absent IS NULL)
+    AND (last_refusal_at IS NULL) = (last_refusal_listed IS NULL)
+    AND (last_refusal_at IS NULL) = (last_refusal_successful IS NULL)),
+  CHECK (removal_accepted = 0 OR last_refusal_at IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE token (

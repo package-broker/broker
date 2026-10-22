@@ -69,6 +69,7 @@ const runtimeError = (code: string, status: number, format: 'nested' | 'npm' = '
 const unauthorized = (url: globalThis.URL) =>
   runtimeError('unauthorized', 401, url.pathname.endsWith('/npm/-/ping') ? 'npm' : 'nested');
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+const snap = (result: unknown) => json({ success: true, result });
 const ok = (result: unknown) => json({ success: true, result, result_info: { total_pages: 1 } });
 let root: string, store: InventoryStore;
 beforeEach(async () => {
@@ -192,8 +193,8 @@ function harness() {
       return ok({ schedules: h.schedules.map((cron) => ({ cron })) });
     }
     if (path === '/workers/domains') return ok(h.domain ? [h.domain] : []);
-    if (path === `/queues/${'5'.repeat(32)}/consumers`) return ok(h.consumers);
-    if (path === `/queues/${'6'.repeat(32)}/consumers`) return ok([]);
+    if (path === `/queues/${'5'.repeat(32)}/consumers`) return snap(h.consumers);
+    if (path === `/queues/${'6'.repeat(32)}/consumers`) return snap([]);
     throw new Error(`Unexpected fake request: ${path}`);
   }) as typeof fetch;
   return h;
@@ -1135,6 +1136,9 @@ it('R3 verifies a restored queue consumer and detects settings drift without rep
   const { consumer_id, script_name, dead_letter_queue, ...settings } = consumer;
   h.consumers = [{ consumer_id, type: 'worker', script_name, dead_letter_queue, settings }];
   expect((await smoke(options(h))).exitCode).toBe(9);
+  const consumerReads = h.calls.filter((c) => c.url.includes('/consumers'));
+  expect(consumerReads.length).toBeGreaterThan(0);
+  expect(consumerReads.every((c) => !c.url.includes('?'))).toBe(true);
   settings.max_retries = 9;
   const result = await smoke(options(h));
   expect(result.exitCode).toBe(10);
@@ -1315,3 +1319,34 @@ it.each([3999, 4000])(
     expect(rollbacks(h)).toHaveLength(1);
   },
 );
+
+it('refuses a restored-consumer snapshot that advertises more pages', async () => {
+  const j = (await store.read())!;
+  j.resources.jobs = {
+    ...j.resources.d1!,
+    id: '5'.repeat(32),
+    name: `${identity.script_name}-jobs`,
+  };
+  j.resources.dlq = {
+    ...j.resources.d1!,
+    id: '6'.repeat(32),
+    name: `${identity.script_name}-jobs-dlq`,
+  };
+  const a = j.deployment!.attempt;
+  a.phase = 'rolled_back';
+  a.rollback = 'succeeded';
+  a.smoke = 'failed';
+  await store.write(j);
+  const h = harness();
+  h.live = [{ version_id: OLD, percentage: 100 }];
+  const inner = h.fetch;
+  let consumerReads = 0;
+  h.fetch = (async (input: unknown, init?: RequestInit) => {
+    if (!String(input).includes('/consumers')) return inner(input as never, init);
+    consumerReads++;
+    return json({ success: true, result: [], result_info: { total_pages: 2 } });
+  }) as typeof fetch;
+  const result = await smoke(options(h));
+  expect(result.exitCode).toBe(10);
+  expect(consumerReads).toBe(1);
+});

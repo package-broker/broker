@@ -11,6 +11,7 @@ import {
 } from './harness.js';
 import { FUTURE, NOT_NULL, seedSource } from './fixtures.js';
 import { executing } from './factory-cases.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 const OLD = '2020-01-01T00:00:00.000Z';
 
@@ -116,18 +117,21 @@ export const entries: readonly MutationEntry[] = [
   {
     file: 'repositories/source-sync-counts.ts',
     builder: 'markedCountStatement',
+    waivers: selectionOrgWaivers,
     cases: [foreignMarked],
     predicates: [markedPredicate],
   },
   {
     file: 'repositories/source-sync-counts.ts',
     builder: 'unseenExistingCountStatement',
+    waivers: selectionOrgWaivers,
     cases: [foreignUnseen, foreignListing],
     predicates: [unseenPredicate, openPredicate, boundaryPredicate],
   },
   {
     file: 'repositories/source-sync-counts.ts',
     builder: 'createSourceSyncCounts',
+    waivers: selectionOrgWaivers,
     cases: [foreignMarked, foreignUnseen, foreignListing],
     predicates: [markedPredicate, unseenPredicate, openPredicate, boundaryPredicate],
   },

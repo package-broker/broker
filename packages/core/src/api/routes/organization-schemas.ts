@@ -107,6 +107,7 @@ export const getMeSpec = {
   permission: null,
   api: {
     operationId: 'getMe',
+    mcp: true,
     summary: 'Get the caller identity',
     tags: ['me'],
     responses: { 200: meResponse },

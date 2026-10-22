@@ -42,6 +42,7 @@ const EXPECTED_ROUTES = [
   'POST /_pb/grants',
   'PATCH /_pb/grants/:grant',
   'DELETE /_pb/grants/:grant',
+  'GET /_pb/projects/:project/grants',
   'POST /_pb/projects/:project/grants',
   'PATCH /_pb/projects/:project/grants/:grant',
   'DELETE /_pb/projects/:project/grants/:grant',
@@ -59,6 +60,9 @@ const EXPECTED_ROUTES = [
   'GET /_pb/tokens/:token',
   'DELETE /_pb/tokens/:token',
   'POST /_pb/tokens/:token/rotate',
+  'POST /_pb/service-principals',
+  'GET /_pb/service-principals',
+  'GET /_pb/service-principals/:principal',
   'PUT /_pb/service-principals/:principal/permissions',
   'POST /_pb/service-principals/:principal/suspend',
   'POST /_pb/service-principals/:principal/restore',
@@ -166,6 +170,7 @@ function dependencies(): ApiModuleDeps {
     projectAccess: {
       ...common(),
       projectAdministration: unused('grant', 'changeRole', 'revoke'),
+      reader: unused('list'),
       roles: unused('get'),
     },
     tokens: {
@@ -190,13 +195,14 @@ function dependencies(): ApiModuleDeps {
     },
     servicePrincipals: {
       ...common(),
-      servicePrincipals: unused('setPermissions', 'suspend', 'restore'),
-      principals: unused('get'),
+      servicePrincipals: unused('create', 'setPermissions', 'suspend', 'restore'),
+      principals: unused('get', 'list'),
     },
     sources: {
       ...common(),
       service: unused('getVisible', 'list', 'create', 'update', 'pause', 'resume'),
       sources: unused('get'),
+      projectSources: unused('list'),
       projects: unused('get'),
       sessions: unused('authenticate', 'isReauthFresh'),
     },

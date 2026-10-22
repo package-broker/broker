@@ -8,6 +8,7 @@ import type { ActorContext, AdminLog } from './administration.js';
 import { catalogueTokenEligible } from './catalogue.js';
 import type { FenceGuard, MutationFence } from './fence.js';
 import { isPermission } from './permissions.js';
+import { isValidServicePrincipalName } from './service-principal-name.js';
 
 export type ServicePrincipalError =
   | 'forbidden'
@@ -151,7 +152,11 @@ export interface ServicePrincipalService {
     authenticated: AuthenticatedSession,
     actor: ActorContext,
     fence: MutationFence,
-    input: { readonly name: string; readonly projectId: string | null },
+    input: {
+      readonly name: string;
+      readonly projectId: string | null;
+      readonly permissions?: readonly string[];
+    },
     call: ApiCall,
   ): Promise<
     ServicePrincipalResult<{ readonly id: string; readonly permissions: readonly string[] }>
@@ -185,8 +190,6 @@ export interface ServicePrincipalService {
   ): Promise<void>;
 }
 
-const NAME_MAX_LENGTH = 100;
-const FORBIDDEN_NAME_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
 const PROJECT_MANAGE = 'project:service-principals:write';
 const ORG_MANAGE = 'org:service-principals:write';
 
@@ -194,12 +197,6 @@ const OK: ServicePrincipalResult<null> = Object.freeze({ ok: true, value: null }
 
 function fail(error: ServicePrincipalError): ServicePrincipalResult<never> {
   return { ok: false, error };
-}
-
-function isValidName(name: unknown): name is string {
-  if (typeof name !== 'string' || FORBIDDEN_NAME_CHARACTER.test(name)) return false;
-  const length = Array.from(name).length;
-  return length >= 1 && length <= NAME_MAX_LENGTH;
 }
 
 /** An organization-wide principal also carries the project: permissions of the admin's organization grants. */
@@ -430,14 +427,29 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
         return deny(ctx, actor, 'created');
       }
       if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
-      if (!isValidName(input.name)) return fail('invalid_name');
+      if (!isValidServicePrincipalName(input.name)) return fail('invalid_name');
       const { projectId } = input;
       if (projectId !== null && (typeof projectId !== 'string' || projectId === '')) {
         return fail('project_mismatch');
       }
       const live = await manageable(ctx, actor, held, projectId);
       if (live === null) return deny(ctx, actor, 'created');
-      const snapshot = [...live].filter((name) => inBoundary(projectId, name)).sort();
+      if (
+        input.permissions !== undefined &&
+        (!Array.isArray(input.permissions) ||
+          new Set(input.permissions).size !== input.permissions.length ||
+          !input.permissions.every(
+            (name) => typeof name === 'string' && isPermission(name) && inBoundary(projectId, name),
+          ))
+      )
+        return fail('invalid_permission');
+      if (input.permissions !== undefined && !input.permissions.every((name) => live.has(name))) {
+        return deny(ctx, actor, 'created');
+      }
+      const snapshot =
+        input.permissions === undefined
+          ? [...live].filter((name) => inBoundary(projectId, name)).sort()
+          : [...input.permissions].sort();
       const guard = authority.guard(ctx, held, {
         ...requirementFor(projectId),
         projectId,
@@ -447,6 +459,11 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
       const id = ids.ulid();
       const stamp = now();
       const opId = ids.ulid();
+      const staged = mutationAudit(call, actor, 'service_principal.create', id, projectId, stamp, {
+        name: { new: input.name },
+        project_id: { new: projectId },
+        permissions: { new: snapshot },
+      });
       const result = await principals.create(ctx, held, guard, {
         id,
         name: input.name,
@@ -455,11 +472,23 @@ export function createServicePrincipalService(deps: ServicePrincipalDeps): Servi
         permissions: snapshot,
         now: stamp,
         opId,
-        ...mutationAudit(call, actor, 'service_principal.create', id, projectId, stamp, {
-          name: { new: input.name },
-          project_id: { new: projectId },
-          permissions: { new: snapshot },
-        }),
+        audit: staged.audit,
+        ...(staged.idempotency === undefined
+          ? {}
+          : {
+              idempotency: {
+                ...staged.idempotency,
+                responseJson: JSON.stringify({
+                  id,
+                  name: input.name,
+                  projectId,
+                  createdByUserId: actor.userId,
+                  status: 'active',
+                  revision: 1,
+                  permissions: snapshot,
+                }),
+              },
+            }),
       });
       if (result !== 'created') return refusal(ctx, actor, 'created', result);
       changed(ctx, actor, 'created', id, projectId);

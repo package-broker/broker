@@ -1,4 +1,6 @@
-import { projectActorOf } from '../../authz/access-context.js';
+import { sha256Hex } from '../../auth/primitives.js';
+import type { ProjectGrantReader } from '../../db/grants.js';
+import { accessContextOf, projectActorOf } from '../../authz/access-context.js';
 import type { MutationFence } from '../../authz/fence.js';
 import { accessGrantFenceKey, roleFenceKey, type ProjectActor } from '../../authz/project-actor.js';
 import type { ProjectAdministration } from '../../authz/project-administration.js';
@@ -8,10 +10,14 @@ import type { RequestContext, RouteDefinition } from '../../plugin.js';
 import type { ApiCall } from '../idempotency.js';
 import { apiRoute } from '../route.js';
 import { projectSessionCallContext, type ApiRouteDeps } from './context.js';
-import { PROJECT_ACCESS_API_SPECS } from './project-access-schemas.js';
+import {
+  PROJECT_ACCESS_API_SPECS,
+  PROJECT_GRANTS_LIST_API_SPEC,
+} from './project-access-schemas.js';
 
 export interface ProjectAccessRouteDeps extends ApiRouteDeps {
   readonly projectAdministration: ProjectAdministration;
+  readonly reader: ProjectGrantReader;
   readonly roles: Pick<RoleRepository, 'get'>;
 }
 
@@ -41,6 +47,17 @@ export function projectAccessRoutes(deps: ProjectAccessRouteDeps): readonly Rout
   const { projectAdministration: service } = deps;
 
   return [
+    apiRoute(PROJECT_GRANTS_LIST_API_SPEC, async ({ ctx, query }) => {
+      if (ctx.org === null || ctx.projectId === null) return { error: 'not_found' };
+      const body = await deps.reader.list(ctx.org, {
+        projectId: ctx.projectId,
+        limit: query.limit === undefined ? 50 : Number(query.limit),
+        ...(query.after === undefined ? {} : { after: query.after }),
+        includeEmail: accessContextOf(ctx)?.actor?.protectedHolder === true,
+      });
+      const digest = await sha256Hex(JSON.stringify([ctx.org.orgId, ctx.projectId, body]));
+      return { status: 200, body, etag: Number.parseInt(digest.slice(0, 12), 16) + 1 };
+    }),
     apiRoute(create, async ({ ctx, body }) => {
       const c = projectGrantCall(ctx, deps, {});
       const result = await service.grant(c.org, c.actor, c.fence, c.projectId, body, c.call);

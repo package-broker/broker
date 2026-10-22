@@ -15,9 +15,12 @@ const EXPECTED_MATCHES: Record<string, number> = {
   'db-sqlite/src/repositories/catalogue-predicates.ts': 4,
   'db-sqlite/src/repositories/job-schedule.ts': 2,
   'db-sqlite/src/repositories/registered-name.ts': 2,
+  'db-sqlite/src/repositories/source-selection.ts': 2,
 };
 
 const DYNAMIC: Record<string, string> = {
+  'db-sqlite/src/repositories/source-selection.ts:selected_pattern.value':
+    'current source-selection pattern; restricted to ASCII and MAX_PATTERN_BYTES with MAX_PATTERN_WILDCARDS before matching',
   'db-sqlite/src/repositories/catalogue-list.ts:${pattern}':
     'escaped search pattern; UTF-8 byte length checked <= 50, otherwise instr() fallback',
   "db-sqlite/src/repositories/catalogue-predicates.ts:${at(a.r, 'pattern')}":

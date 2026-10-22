@@ -23,6 +23,8 @@ it('lists only working commands in --help', async () => {
       'cloudflare provision',
       'cloudflare deploy',
       'cloudflare smoke',
+      'cloudflare teardown',
+      'cloudflare janitor',
       'cloudflare migrate',
       'cloudflare bootstrap',
       'secrets generate-master-key',

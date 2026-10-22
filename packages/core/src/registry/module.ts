@@ -1,3 +1,4 @@
+import { isSelected } from '../ingest/composer/v1-index.js';
 import { displayName } from '../catalogue/names.js';
 import { createPackageAccess } from '../catalogue/package-access.js';
 import type {
@@ -272,6 +273,19 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     if (record === null) return null;
     const bound = await bind(ctx, record);
     if (bound === null) return null;
+    if (
+      bound.source.type === 'composer_repository' &&
+      !isSelected(key, bound.source.config.selection)
+    )
+      return null;
+    if (
+      bound.source.type === 'npm_registry' &&
+      !bound.source.config.scopes.some((scope) => key.startsWith(`${scope}/`))
+    )
+      return null;
+    const proxy = PROXY_TYPES.has(record.type);
+    const covered = proxy ? false : await catalogue.covers(ctx, record.id, key);
+    if (!proxy && !covered) return null;
     const publishedValidators: DocumentValidators = {};
     if (sync !== undefined) {
       const packageId = await sync.packageId(ctx, record.id, key);
@@ -293,7 +307,6 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
         }
       }
     }
-    const proxy = PROXY_TYPES.has(record.type);
     const probe = bound.credential?.probe ?? NO_PROBE;
     const toVersion: ApplyInput['toVersion'] = (candidate) => {
       let object: unknown;
@@ -322,7 +335,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
         key,
         type: record.type,
         ecosystem: record.ecosystem,
-        covered: proxy ? false : await catalogue.covers(ctx, record.id, key),
+        covered,
       },
       toVersion,
       packageDescription: null,

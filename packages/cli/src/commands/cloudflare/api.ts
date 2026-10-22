@@ -276,8 +276,13 @@ export class CloudflareApi {
     if (ms > 0) await this.sleep(ms);
     if (this.now() >= this.deadline) throw new CloudflareError('provider_failure', 1, true);
   }
-  request(path: string, method: ApiMethod = 'GET', body?: unknown): Promise<ApiResponse> {
-    return this.enqueue(path, method, body);
+  request(
+    path: string,
+    method: ApiMethod = 'GET',
+    body?: unknown,
+    headers?: Record<string, string>,
+  ): Promise<ApiResponse> {
+    return this.enqueue(path, method, body, undefined, undefined, headers);
   }
   requestZone(
     zone: string,
@@ -304,8 +309,11 @@ export class CloudflareApi {
     body?: unknown,
     prefix?: string,
     token?: string,
+    headers?: Record<string, string>,
   ): Promise<ApiResponse> {
-    const task = this.scheduler.tail.then(() => this.send(path, method, body, prefix, token));
+    const task = this.scheduler.tail.then(() =>
+      this.send(path, method, body, prefix, token, headers),
+    );
     this.scheduler.tail = task.catch(() => undefined);
     return task;
   }
@@ -315,6 +323,7 @@ export class CloudflareApi {
     body?: unknown,
     prefix?: string,
     token?: string,
+    extraHeaders?: Record<string, string>,
   ): Promise<ApiResponse> {
     if (
       !['GET', 'POST', 'PUT', 'PATCH'].includes(method) ||
@@ -350,6 +359,7 @@ export class CloudflareApi {
               redirect: 'manual',
               signal: controller.signal,
               headers: {
+                ...extraHeaders,
                 authorization: `Bearer ${token ?? this.options.apiToken}`,
                 ...(body instanceof FormData ? {} : { 'content-type': 'application/json' }),
               },
@@ -420,6 +430,21 @@ export class CloudflareApi {
       }
     }
     throw new CloudflareError('provider_failure', 1, true);
+  }
+  /** A collection whose documented response is one array without pagination metadata. */
+  async snapshot(path: string): Promise<Record<string, unknown>[]> {
+    const { result, result_info: info } = await this.request(path);
+    if (!Array.isArray(result)) throw new CloudflareError('provider_failure');
+    if (
+      info &&
+      ((info.total_pages !== undefined &&
+        info.total_pages !== 1 &&
+        !(info.total_pages === 0 && result.length === 0)) ||
+        (info.cursor !== undefined && info.cursor !== '') ||
+        (info.total_count !== undefined && info.total_count !== result.length))
+    )
+      throw new CloudflareError('capability_unknown');
+    return result.map(object);
   }
   async list(path: string, field?: string): Promise<Record<string, unknown>[]> {
     const all: Record<string, unknown>[] = [];

@@ -10,6 +10,7 @@ import {
   type MutationEntry,
 } from './harness.js';
 import { HASH, OWNER, NOT_NULL, seedSource, seedPackage, seedVersion } from './fixtures.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 const STAMP = 'finalize-stamp';
 const INPUT = {
@@ -149,6 +150,7 @@ export const entries: readonly MutationEntry[] = [
       })),
     ],
     waivers: [
+      ...selectionOrgWaivers,
       {
         locate: /ingest_session\.org_id = \?/,
         reason:

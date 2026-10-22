@@ -305,6 +305,10 @@ describe('GitHub plugin wiring', () => {
     it(`${runtime}: binds App credentials through registry fill and dist planners`, async () => {
       const h = await runtimeFixture(runtime);
       try {
+        await h.executor.all({
+          sql: "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'acme/lib')",
+          params: [ulid(), h.org.orgId, h.record.id],
+        });
         const bound = await h.deps.ingest.credential(h.org, h.record);
         expect(bound).not.toBeNull();
         expect(bound!.probe.secrets).toContain(h.app.privateKeyPem + '\n');

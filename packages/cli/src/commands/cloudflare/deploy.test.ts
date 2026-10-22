@@ -169,6 +169,9 @@ afterEach(async () => {
   await rm(project, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
+function snap(result: unknown) {
+  return new Response(JSON.stringify({ success: true, result }));
+}
 function ok(result: unknown, result_info: unknown = { total_pages: 1 }) {
   return new Response(JSON.stringify({ success: true, result, result_info }));
 }
@@ -225,7 +228,7 @@ function harness() {
     h.calls.push({ path, method, body, auth: new Headers(init?.headers).get('authorization') });
     if (method === 'DELETE') throw new Error('forbidden deletion');
     if (path === '/workers/scripts')
-      return ok(
+      return snap(
         h.exists
           ? [{ id: script, tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`] }]
           : [],
@@ -236,10 +239,10 @@ function harness() {
       return ok({ name: `${script}-blobs`, jurisdiction: 'eu' });
     if (path === '/queues/' + JOBS) return ok({ queue_id: JOBS, queue_name: `${script}-jobs` });
     if (path === '/queues/' + DLQ) return ok({ queue_id: DLQ, queue_name: `${script}-jobs-dlq` });
-    if (path === `/queues/${DLQ}/consumers`) return ok([]);
+    if (path === `/queues/${DLQ}/consumers`) return snap([]);
     if (path.startsWith(`/queues/${JOBS}/consumers`)) {
       if (method === 'GET')
-        return ok(
+        return snap(
           h.consumer
             ? [
                 {
@@ -527,6 +530,30 @@ it('dry run sends only reads and writes no journal, lock, asset session, secret 
   expect(mutations(h)).toEqual([]);
   expect(await readFile(store.path)).toEqual(before);
 });
+it('reads the Worker scripts collection as a documented snapshot', async () => {
+  const h = harness();
+  const urls: string[] = [];
+  const inner = h.fetch;
+  h.fetch = (async (input: unknown, init?: RequestInit) => {
+    urls.push(String(input));
+    return inner(input as never, init);
+  }) as typeof fetch;
+  expect((await deploy(options(h, { dryRun: true }))).exitCode).toBe(0);
+  const reads = urls.filter((u) => new URL(u).pathname.endsWith('/workers/scripts'));
+  expect(reads.length).toBeGreaterThan(0);
+  expect(reads.every((u) => !u.includes('?'))).toBe(true);
+});
+it('refuses a Worker scripts snapshot that advertises more pages', async () => {
+  const h = harness();
+  const inner = h.fetch;
+  h.fetch = (async (input: unknown, init?: RequestInit) =>
+    new URL(String(input)).pathname.endsWith('/workers/scripts')
+      ? new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 2 } }))
+      : inner(input as never, init)) as typeof fetch;
+  const r = await deploy(options(h, { dryRun: true }));
+  expect(r.exitCode).not.toBe(0);
+  expect(mutations(h)).toEqual([]);
+});
 it('first install records no prior and requires 100 percent', async () => {
   const h = harness();
   h.exists = false;
@@ -659,6 +686,32 @@ it('uploads no new version for an identical verified receipt, but mutable secret
   expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toHaveLength(
     2,
   );
+});
+it('journals every uploaded version across successive deployments', async () => {
+  const h = harness();
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const j = (await store.read())!;
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  await store.write(j);
+  expect((await deploy(options(h, { secret: ['PB_IDP_TEST_CLIENT_SECRET'] }))).exitCode).toBe(0);
+  const history = (await store.read())!.deployment!.history!;
+  expect(history.version_ids).toEqual([CANDIDATE, NEWEST]);
+  expect(history.plain_bindings).toEqual([]);
+});
+it('journals the telemetry endpoint binding it uploads', async () => {
+  const file = join(out, 'generated/manifest.json'),
+    manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.platformPorts.observability.endpointEnv = 'OTEL_ENDPOINT';
+  await writeFile(file, JSON.stringify(manifest));
+  const h = harness(),
+    o = options(h);
+  o.env = { ...o.env, OTEL_ENDPOINT: 'https://telemetry.example.test' };
+  expect((await deploy(o)).exitCode).toBe(0);
+  expect((await store.read())!.deployment!.history).toEqual({
+    version_ids: [CANDIDATE],
+    plain_bindings: [{ name: 'OTEL_ENDPOINT', text: 'https://telemetry.example.test' }],
+  });
 });
 it.each(['success', 'failure', 'timeout', 'interruption'])(
   'smoke preview finally disables exposure after %s',

@@ -393,6 +393,34 @@ describe('create', () => {
     expect(authority.livePermissions).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['broker token', `pb_pat_abcdefghijkl_${'Q'.repeat(43)}`],
+    ['URL with userinfo', 'https://deploy:password@broker.example.test/repo'],
+    ['high-entropy string', 'a8K2mQ7xR4vN9zB3pL6wT1yH5cD0sF8j'],
+  ])(
+    'rejects a credential-bearing name (%s) before staging a response or replay',
+    async (_kind, name) => {
+      const { service, principals, authority, log } = setup();
+      const call = { ...apiCall, idempotency: { ...principalRecord } };
+      const original = structuredClone(call);
+      expect(
+        await service.create(
+          ctx,
+          authenticated(),
+          actor,
+          fenceOf({}),
+          { name, projectId: PROJECT },
+          call,
+        ),
+      ).toEqual({ ok: false, error: 'invalid_name' });
+      expect(authority.livePermissions).not.toHaveBeenCalled();
+      expect(authority.guard).not.toHaveBeenCalled();
+      expect(principals.create).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(call).toEqual(original);
+    },
+  );
+
   it('throws when the fence belongs to another user', async () => {
     const { service, principals } = setup();
     await expect(
@@ -1032,7 +1060,22 @@ describe('lifecycle audit and idempotency', () => {
         request_id: call.audit.requestId,
         ...(changes === undefined ? {} : { changes }),
       });
-      expect(stored.idempotency).toBe(principalRecord);
+      if (method === 'create') {
+        expect(stored.idempotency).toEqual({
+          ...principalRecord,
+          responseJson: expect.any(String),
+        });
+        expect(JSON.parse(stored.idempotency!.responseJson)).toEqual({
+          id: 'ID00',
+          name: 'ci',
+          projectId: PROJECT,
+          createdByUserId: actor.userId,
+          status: 'active',
+          revision: 1,
+          permissions: ['project:packages:read', 'project:packages:write', 'project:read'],
+        });
+        expect(principalRecord.responseJson).toBe('{}');
+      } else expect(stored.idempotency).toBe(principalRecord);
     },
   );
 
@@ -1155,5 +1198,67 @@ describe('project session identity actor', () => {
     ]) {
       expect(write).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('explicit creation permissions', () => {
+  it('stores only the requested sorted subset and guards exactly that subset', async () => {
+    const f = setup();
+    const held = fenceOf({});
+    const result = await f.service.create(
+      ctx,
+      authenticated(),
+      actor,
+      held,
+      { name: 'ci', projectId: PROJECT, permissions: ['project:read', 'project:packages:read'] },
+      apiCall,
+    );
+    expect(result).toEqual({
+      ok: true,
+      value: { id: 'ID00', permissions: ['project:packages:read', 'project:read'] },
+    });
+    expect(f.principals.create).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      held,
+      f.guard,
+      expect.objectContaining({ permissions: ['project:packages:read', 'project:read'] }),
+    );
+    expect(f.authority.guard).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      held,
+      expect.objectContaining({
+        covers: ['project:packages:read', 'project:read'],
+        freshReauth: true,
+      }),
+    );
+  });
+
+  it('accepts an empty subset without inheriting permissions', async () => {
+    const f = setup();
+    expect(
+      await f.service.create(
+        ctx,
+        authenticated(),
+        actor,
+        fenceOf({}),
+        { name: 'ci', projectId: PROJECT, permissions: [] },
+        apiCall,
+      ),
+    ).toMatchObject({ ok: true, value: { permissions: [] } });
+  });
+
+  it('rejects organization permissions for a project principal', async () => {
+    const f = setup();
+    expect(
+      await f.service.create(
+        ctx,
+        authenticated(),
+        actor,
+        fenceOf({}),
+        { name: 'ci', projectId: PROJECT, permissions: ['org:read'] },
+        apiCall,
+      ),
+    ).toEqual({ ok: false, error: 'invalid_permission' });
+    expect(f.principals.create).not.toHaveBeenCalled();
   });
 });

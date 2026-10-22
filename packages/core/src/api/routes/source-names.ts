@@ -194,6 +194,7 @@ export function sourceNameRoutes(deps: SourceNameRouteDeps): readonly RouteDefin
           { projectId, sourceIds: body.sourceIds },
           c.call,
         );
+        if (!result.ok && result.error === 'conflict') return { error: 'precondition_failed' };
         return result.ok ? { status: 204 } : { serviceError: result.error };
       } catch (error) {
         if (error instanceof TypeError && error.message === 'invalid visibility order size')

@@ -144,6 +144,19 @@ describe('createStdioSink', () => {
 });
 
 describe('createStdioSink field allowlist', () => {
+  it('keeps the package key and opaque source id', () => {
+    const stderr = fakeStream();
+    const sink = createStdioSink({ deploymentId: 'dep-1', stdout: fakeStream(), stderr });
+    const record = {
+      level: 'warn',
+      event: 'ingest.budget_exhausted',
+      package_key: 'vendor/name',
+      source_id: '01JA0000000000000000000000',
+    } as const;
+    sink.emit({ kind: 'log', record });
+    expect(JSON.parse(stderr.lines.join(''))).toEqual(record);
+  });
+
   it('drops fields outside the shared allowlist', () => {
     const stdout = fakeStream();
     const sink = createStdioSink({ deploymentId: 'dep-1', stdout, stderr: fakeStream() });

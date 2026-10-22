@@ -546,8 +546,39 @@ describe('runImportRollback', () => {
     ]);
   });
 
+  it('rolls back recorded after-images of a failed import and marks other refs conflict', async () => {
+    const s = setup(
+      [
+        ref({ id: 'restore' }),
+        ref({ id: 'delete', action: 'create', beforeImageJson: null }),
+        ref({ id: 'drifted' }),
+        ref({ id: 'unrecorded', contentHash: null }),
+      ],
+      { state: 'failed' },
+    );
+    s.live.get('e-drifted')!.hash = 'edited';
+    expect(await s.execute()).toEqual({
+      status: 'rolled_back',
+      counts: { restored: 2, conflict: 2, expired: 0 },
+    });
+    expect(s.live.get('e-restore')!.columns.name).toBe('old-restore');
+    expect(s.live.get('e-delete')!.exists).toBe(false);
+    expect(s.live.get('e-drifted')!.columns.name).toBe('imported-drifted');
+    expect(s.live.get('e-unrecorded')!.columns.name).toBe('imported-unrecorded');
+  });
+
+  it('successfully rolls back a failed import with no committed refs', async () => {
+    const s = setup([], { state: 'failed' });
+    expect(await s.execute()).toEqual({
+      status: 'rolled_back',
+      counts: { restored: 0, conflict: 0, expired: 0 },
+    });
+    expect(s.store.applyChunk).not.toHaveBeenCalled();
+    expect(s.finished()).toMatchObject({ outcome: 'rolled_back' });
+  });
+
   it('refuses a run that cannot be rolled back and touches nothing', async () => {
-    for (const state of ['planned', 'failed', 'rolled_back', 'cancelled', 'applying'] as const) {
+    for (const state of ['planned', 'rolled_back', 'cancelled', 'applying'] as const) {
       const s = setup([ref({ id: 'a' })], { state });
       expect(await s.execute()).toEqual({ status: 'not_rollbackable' });
       expect(s.store.rollbackRefs).not.toHaveBeenCalled();

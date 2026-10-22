@@ -97,7 +97,7 @@ export type ImportRollbackOutcome = 'restored' | 'conflict' | 'expired';
  * applyChunk runs one batch under a delegated fence whose approverUserId is the requesting user
  * and whose expected map holds the guard revision of each action keyed by entityId. In the batch it
  * checks, atomically: the requester's and approvedByUserId's live authority, the run state is one of
- * applied, verifying or verified, the job lease, and no other rollback runs for the run. Per
+ * failed, applied, verifying or verified, the job lease, and no other rollback runs for the run. Per
  * restore or delete it requires the live row to still match its guard (revision, or the exact
  * domain values for tables without a revision) and to still exist. A delete additionally requires
  * an in-batch NOT EXISTS over every dependent. Any action whose condition fails is recorded as
@@ -109,7 +109,7 @@ export type ImportRollbackOutcome = 'restored' | 'conflict' | 'expired';
  * or byte budget and nothing was written.
  *
  * finish guards only the lease and the run. A failed rollback keeps the prior run state
- * (applied, verifying or verified) and records only last_error, so a retry resumes. A successful
+ * (failed, applied, verifying or verified) and records only last_error, so a retry resumes. A successful
  * one stores the counts on the run. Both persist the audits. While a rollback job holds the run,
  * verification refuses to start.
  */
@@ -152,7 +152,12 @@ export interface ImportRollbackDeps {
   readonly ids: { ulid(): string };
 }
 
-const ROLLBACKABLE: ReadonlySet<ImportRunState> = new Set(['applied', 'verifying', 'verified']);
+const ROLLBACKABLE: ReadonlySet<ImportRunState> = new Set([
+  'failed',
+  'applied',
+  'verifying',
+  'verified',
+]);
 const CHUNK_SIZE = 50;
 const MAX_CHUNK_COST = 200;
 const ORDER = [

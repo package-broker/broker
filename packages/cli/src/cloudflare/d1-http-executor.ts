@@ -1,4 +1,4 @@
-import { DbError } from '@package-broker/core/db/errors';
+import { DbError, assertBatchStatementCount } from '@package-broker/core/db/errors';
 import type {
   ScalarSqlExecutor,
   ScalarStatement,
@@ -222,6 +222,7 @@ export function createD1HttpExecutor(options: D1HttpOptions): ScalarSqlExecutor 
       return (result?.rows ?? []) as R[];
     },
     async batch(statements: readonly ScalarStatement[]): Promise<StatementResult[]> {
+      assertBatchStatementCount(statements.length);
       if (statements.length === 0) return [];
       const batch: WireStatement[] = [];
       for (let index = 0; index < statements.length; index += 1) {

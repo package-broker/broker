@@ -14,6 +14,7 @@ import {
   type ProtectedHolderProvider,
   type TokenLookupInput,
 } from './access.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 const HOUR = 3600_000;
 
@@ -91,7 +92,7 @@ function seq(prefix: string): string {
 }
 
 async function seed(...statements: Statement[]): Promise<void> {
-  await executor.batch(statements);
+  await batchInChunks(executor, statements);
 }
 
 function role(

@@ -17,6 +17,7 @@ import {
   createReadableProjectRepository,
   listReadableProjectsStatement,
 } from './project-readable.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 const HOUR = 3600_000;
 const ANCHOR = 'https://idp.example.test';
@@ -72,9 +73,7 @@ function projectId(n: number): string {
 }
 
 async function seed(...statements: Statement[]): Promise<void> {
-  for (let i = 0; i < statements.length; i += 500) {
-    await executor.batch(statements.slice(i, i + 500));
-  }
+  await batchInChunks(executor, statements);
 }
 
 function role(

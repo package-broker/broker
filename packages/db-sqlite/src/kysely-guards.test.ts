@@ -14,6 +14,7 @@ import {
   type ProtectedHolderInput,
 } from './kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from './testing/migrated-database.js';
+import { batchInChunks } from './testing/chunked-batch.js';
 
 interface Fixture {
   readonly database: MigratedDatabase;
@@ -146,7 +147,7 @@ function identity(
 }
 
 async function seed(statements: readonly Statement[]): Promise<void> {
-  await fixture.database.executor.batch(statements);
+  await batchInChunks(fixture.database.executor, statements);
 }
 
 async function holds(guard: Expression<SqlBool>, org: OrgContext = fixture.a): Promise<boolean> {

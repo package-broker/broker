@@ -69,6 +69,7 @@ async function fixture(
     status: 'paused',
   } as SourceRecord;
   const sources = {
+    acceptRemoval: vi.fn().mockResolvedValue('accepted'),
     get: vi.fn(async (_org: unknown, id: string) =>
       options.sourceState
         ? null

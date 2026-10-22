@@ -72,6 +72,7 @@ const EXPECTED_ROUTES = [
   'POST /_pb/sources/:source/names',
   'DELETE /_pb/sources/:source/names/:name',
   'POST /_pb/sources/:source/enable',
+  'POST /_pb/sources/:source/accept-removal',
   'PUT /_pb/projects/:project/sources/order',
   'GET /_pb/projects/:project/resolve',
   'GET /_pb/packages',

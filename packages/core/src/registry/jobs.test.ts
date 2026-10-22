@@ -57,6 +57,8 @@ function setup() {
     listingHash: null,
     pollEtag: null,
     pollLastModified: null,
+    removalRefusal: null,
+    removalAccepted: false,
   };
   const jobs = {
     enqueue: vi.fn<Jobs['enqueue']>().mockResolvedValue({ id: 'job', created: true }),

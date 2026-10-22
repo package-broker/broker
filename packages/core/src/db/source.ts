@@ -34,6 +34,13 @@ export type SourceType =
 export type SourceStatus = 'active' | 'degraded' | 'failing' | 'paused';
 export type RemovalPolicy = 'flag' | 'exclude';
 
+export interface RemovalRefusal {
+  readonly at: string;
+  readonly absent: number;
+  readonly listed: number;
+  readonly successful: number;
+}
+
 export interface SourceRecord {
   readonly id: string;
   readonly projectId: string | null;
@@ -58,6 +65,8 @@ export interface SourceRecord {
   readonly listingHash: string | null;
   readonly pollEtag: string | null;
   readonly pollLastModified: string | null;
+  readonly removalRefusal: RemovalRefusal | null;
+  readonly removalAccepted: boolean;
 }
 
 export interface NewSource {
@@ -137,6 +146,12 @@ export type PollOutcome =
  * re-read. `conflict` also covers a failure that could not be classified.
  */
 export interface SourceRepository {
+  acceptRemoval(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: SourceTarget & { readonly refusal: RemovalRefusal; readonly audit: AuditEvent },
+  ): Promise<'accepted' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'>;
+
   /** Project-owned or attached organization source of an active project, within this organization. */
   getVisible(
     ctx: OrgContext,

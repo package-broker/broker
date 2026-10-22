@@ -21,7 +21,7 @@ import type {
 } from '../../sources/source-service.js';
 import { apiRoute } from '../route.js';
 import { callContext, projectSessionCallContext, type ApiRouteDeps } from './context.js';
-import { SOURCE_API_SPECS } from './sources-schemas.js';
+import { ACCEPT_REMOVAL_API_SPEC, SOURCE_API_SPECS } from './sources-schemas.js';
 
 export interface SourceRouteDeps extends ApiRouteDeps {
   readonly service: SourceService;
@@ -265,6 +265,19 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
       }),
     ];
   });
+  routes.push(
+    apiRoute(ACCEPT_REMOVAL_API_SPEC, async ({ ctx, params }) => {
+      const c = callContext(ctx, deps);
+      const result = await deps.service.acceptRemoval(
+        c.org,
+        { kind: 'org', actor: c.actor },
+        c.fence,
+        params.source,
+        c.call,
+      );
+      return result.ok ? { status: 204 } : failure(result);
+    }),
+  );
   return routes.map((route) => ({
     ...route,
     handler: async (ctx) => {

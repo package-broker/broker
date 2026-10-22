@@ -111,6 +111,46 @@ describe('source finalize applies the mass-removal share inside the batch', () =
     await seedPackages(ctx.orgId, 'S', 4, 'acme');
     const { handle } = await openSession(4);
     const before = await tables();
+    let raced = false;
+    const racing: SqlExecutor = {
+      ...database.executor,
+      async batch(statements) {
+        if (!raced) {
+          raced = true;
+          await database.executor.batch([
+            stmt(
+              `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4)
+               INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at)
+               SELECT 'late' || i, ?, 'S', 'composer', 'late/p' || i, ? FROM n`,
+              ctx.orgId,
+              OLD,
+            ),
+          ]);
+        }
+        return database.executor.batch(statements);
+      },
+    };
+    const observability = { counter: vi.fn(), log: vi.fn() };
+    expect(
+      await createIngestFinalizer(racing, { observability, minPackages: 0 }).finalize(
+        ctx,
+        handle,
+        honest(4, 0),
+      ),
+    ).toEqual({ status: 'refused', reason: 'mass_absence' });
+    const after = await statuses();
+    expect(after).toEqual([{ status: 'active', n: 8 }]);
+    expect((await tables()).map((rows, index) => (index === 0 ? rows.length : rows))).toEqual([
+      8,
+      ...before.slice(1),
+    ]);
+    expect(observability.counter).toHaveBeenCalledTimes(1);
+  });
+
+  it('exempts a source still below the minimum after rows become unseen inside the batch', async () => {
+    await seedPackages(ctx.orgId, 'S', 4, 'acme');
+    const { handle } = await openSession(4);
+    const before = await tables();
     const racing: SqlExecutor = {
       ...database.executor,
       async batch(statements) {
@@ -129,14 +169,17 @@ describe('source finalize applies the mass-removal share inside the batch', () =
     const observability = { counter: vi.fn(), log: vi.fn() };
     expect(
       await createIngestFinalizer(racing, { observability }).finalize(ctx, handle, honest(4, 0)),
-    ).toEqual({ status: 'refused', reason: 'mass_absence' });
+    ).toMatchObject({ status: 'complete' });
     const after = await statuses();
-    expect(after).toEqual([{ status: 'active', n: 8 }]);
+    expect(after).toEqual([
+      { status: 'active', n: 4 },
+      { status: 'removed_upstream', n: 4 },
+    ]);
     expect((await tables()).map((rows, index) => (index === 0 ? rows.length : rows))).toEqual([
       8,
       ...before.slice(1),
     ]);
-    expect(observability.counter).toHaveBeenCalledTimes(1);
+    expect(observability.counter).not.toHaveBeenCalled();
   });
 
   const lateRows = (count: number) =>
@@ -172,7 +215,11 @@ describe('source finalize applies the mass-removal share inside the batch', () =
       };
       const observability = { counter: vi.fn(), log: vi.fn() };
       expect(
-        await createIngestFinalizer(racing, { observability }).finalize(ctx, handle, honest(4, 0)),
+        await createIngestFinalizer(racing, { observability, minPackages: 0 }).finalize(
+          ctx,
+          handle,
+          honest(4, 0),
+        ),
       ).toEqual({ status: 'refused', reason: 'superseded' });
       expect(observability.counter).not.toHaveBeenCalled();
       expect(await statuses()).toEqual([{ status: 'active', n: 8 }]);
@@ -180,6 +227,30 @@ describe('source finalize applies the mass-removal share inside the batch', () =
   );
 
   it('classifies the re-probe with a non-default share', async () => {
+    await seedPackages(ctx.orgId, 'S', 4, 'acme');
+    const { handle } = await openSession(4);
+    let raced = false;
+    const racing: SqlExecutor = {
+      ...database.executor,
+      async batch(statements) {
+        if (!raced) {
+          raced = true;
+          await database.executor.batch([lateRows(5)]);
+        }
+        return database.executor.batch(statements);
+      },
+    };
+    expect(
+      await createIngestFinalizer(racing, { maxAbsenceShare: 0.5, minPackages: 0 }).finalize(
+        ctx,
+        handle,
+        honest(4, 0),
+      ),
+    ).toEqual({ status: 'refused', reason: 'mass_absence' });
+    expect(await statuses()).toEqual([{ status: 'active', n: 9 }]);
+  });
+
+  it('exempts a source below the minimum with a non-default share', async () => {
     await seedPackages(ctx.orgId, 'S', 4, 'acme');
     const { handle } = await openSession(4);
     const racing: SqlExecutor = {
@@ -195,8 +266,11 @@ describe('source finalize applies the mass-removal share inside the batch', () =
         handle,
         honest(4, 0),
       ),
-    ).toEqual({ status: 'refused', reason: 'mass_absence' });
-    expect(await statuses()).toEqual([{ status: 'active', n: 9 }]);
+    ).toMatchObject({ status: 'complete' });
+    expect(await statuses()).toEqual([
+      { status: 'active', n: 4 },
+      { status: 'removed_upstream', n: 5 },
+    ]);
   });
 
   it('a listing change between the pre-check and the batch refuses as superseded', async () => {

@@ -676,15 +676,21 @@ export async function registryScenario(
     const betaArchive = await status(await get(betaPath, true, betaToken), 200, 'beta-archive');
     assert.deepEqual(new Uint8Array(await betaArchive.arrayBuffer()), ZIP);
     const deniedCalls = remote.calls.length;
-    const beta = await envelope(betaPath, 403, 'forbidden');
-    await envelope('/beta/p2/acme/proxy.json', 403, 'forbidden');
+    const beta = await envelope(betaPath, 404, 'not_found');
+    await envelope('/beta/p2/acme/proxy.json', 404, 'not_found');
     await envelope('/gamma/p2/acme/proxy.json', 404, 'not_found');
     const missing = await envelope(
       proxy.path.replace('acme/proxy', 'acme/other'),
       404,
       'not_found',
     );
-    assert.notEqual(beta.code, missing.code);
+    const absentProject = await envelope(
+      proxy.path.replace('/alpha/', '/missing/'),
+      404,
+      'not_found',
+    );
+    assert.equal(beta.code, missing.code);
+    assert.deepEqual(beta, absentProject);
     assert.equal(remote.calls.length, deniedCalls);
     stage = 're-mirror';
     await local.loseBlob(orgId, hash(ZIP));

@@ -70,3 +70,43 @@ export const PROJECT_ACCESS_API_SPECS = [
     },
   },
 ] as const satisfies readonly ApiRouteSpec[];
+
+export const PROJECT_GRANTS_LIST_API_SPEC = {
+  method: 'GET',
+  path: '/_pb/projects/:project/grants',
+  boundary: 'project',
+  permission: 'project:grants:read',
+  api: {
+    operationId: 'listProjectGrants',
+    summary: 'List project grants and their principals',
+    tags: ['project-access'],
+    params: collectionParams,
+    query: z.strictObject({
+      limit: z
+        .string()
+        .regex(/^(?:[1-9][0-9]?|100)$/)
+        .optional(),
+      after: ulid.optional(),
+    }),
+    responses: {
+      200: z.strictObject({
+        items: z.array(
+          z.strictObject({
+            id: ulid,
+            revision: z.number().int().positive(),
+            createdAt: z.string(),
+            principal: z.strictObject({
+              kind: z.enum(['user', 'email', 'group']),
+              id: z.string(),
+              displayName: z.string(),
+              provider: z.string().optional(),
+              email: z.string().optional(),
+            }),
+            role: z.strictObject({ id: ulid, name: z.string(), permissions: z.array(z.string()) }),
+          }),
+        ),
+        next: ulid.nullable(),
+      }),
+    },
+  },
+} as const satisfies ApiRouteSpec;

@@ -1,3 +1,4 @@
+import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
 import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
@@ -678,6 +679,7 @@ function buildApiRoutes(input: {
       projectAccess: {
         ...common,
         projectAdministration: services.projectGrants,
+        reader: createProjectGrantReader(executor),
         roles: {
           get: async (ctx, id) =>
             (await services.administration.listRoles(ctx)).find((role) => role.id === id) ?? null,
@@ -705,6 +707,7 @@ function buildApiRoutes(input: {
         ...common,
         service: sourceService,
         sources,
+        projectSources: createProjectSourceReader(executor),
         projects,
         sessions: services.sessions,
       },

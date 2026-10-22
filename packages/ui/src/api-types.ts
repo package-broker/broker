@@ -613,7 +613,8 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /** List project grants and their principals */
+    get: operations['listProjectGrants'];
     put?: never;
     /** Grant project access */
     post: operations['createProjectGrant'];
@@ -4421,6 +4422,87 @@ export interface operations {
       };
     };
   };
+  listProjectGrants: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              createdAt: string;
+              id: string;
+              principal: {
+                displayName: string;
+                email?: string;
+                id: string;
+                /** @enum {string} */
+                kind: 'user' | 'email' | 'group';
+                provider?: string;
+              };
+              revision: number;
+              role: {
+                id: string;
+                name: string;
+                permissions: string[];
+              };
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   createProjectGrant: {
     parameters: {
       query?: never;
@@ -5723,36 +5805,73 @@ export interface operations {
         };
         content: {
           'application/json': {
-            items: {
-              /** @enum {string} */
-              ecosystem: 'composer' | 'npm';
-              hasCredential: boolean;
-              id: string;
-              lastRemovalRefusal: {
-                absent: number;
-                at: string;
-                listed: number;
-                successful: number;
-              } | null;
-              lastSuccessAt: string | null;
-              name: string;
-              pollIntervalSeconds: number;
-              projectId: string | null;
-              removalAcceptanceArmed: boolean;
-              /** @enum {string} */
-              removalPolicy: 'flag' | 'exclude';
-              /** @enum {string} */
-              status: 'active' | 'degraded' | 'failing' | 'paused';
-              /** @enum {string} */
-              type:
-                | 'vcs'
-                | 'composer_repository'
-                | 'npm_registry'
-                | 'packagist_proxy'
-                | 'npmjs_proxy'
-                | 'hosted';
-              url: string | null;
-            }[];
+            items: (
+              | {
+                  /** @constant */
+                  attached: true;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm';
+                  hasCredential: boolean;
+                  id: string;
+                  lastRemovalRefusal: {
+                    absent: number;
+                    at: string;
+                    listed: number;
+                    successful: number;
+                  } | null;
+                  lastSuccessAt: string | null;
+                  name: string;
+                  pollIntervalSeconds: number;
+                  precedence: number;
+                  projectId: string | null;
+                  removalAcceptanceArmed: boolean;
+                  /** @enum {string} */
+                  removalPolicy: 'flag' | 'exclude';
+                  /** @enum {string} */
+                  status: 'active' | 'degraded' | 'failing' | 'paused';
+                  /** @enum {string} */
+                  type:
+                    | 'vcs'
+                    | 'composer_repository'
+                    | 'npm_registry'
+                    | 'packagist_proxy'
+                    | 'npmjs_proxy'
+                    | 'hosted';
+                  url: string | null;
+                }
+              | {
+                  /** @constant */
+                  attached: false;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm';
+                  hasCredential: boolean;
+                  id: string;
+                  lastRemovalRefusal: {
+                    absent: number;
+                    at: string;
+                    listed: number;
+                    successful: number;
+                  } | null;
+                  lastSuccessAt: string | null;
+                  name: string;
+                  pollIntervalSeconds: number;
+                  projectId: string | null;
+                  removalAcceptanceArmed: boolean;
+                  /** @enum {string} */
+                  removalPolicy: 'flag' | 'exclude';
+                  /** @enum {string} */
+                  status: 'active' | 'degraded' | 'failing' | 'paused';
+                  /** @enum {string} */
+                  type:
+                    | 'vcs'
+                    | 'composer_repository'
+                    | 'npm_registry'
+                    | 'packagist_proxy'
+                    | 'npmjs_proxy'
+                    | 'hosted';
+                  url: string | null;
+                }
+            )[];
             next: string | null;
           };
         };

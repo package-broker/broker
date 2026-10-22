@@ -183,6 +183,17 @@ export function createVisibilityAttachRepository(
     return outcome.ok ? { ok: true, opId } : { ok: false, reason: outcome.reason };
   }
 
+  function projectRevision(ctx: OrgContext, projectId: string, changed?: Guard): Statement {
+    return compile(
+      db
+        .updateTable('project')
+        .set({ revision: sql<number>`revision + 1` })
+        .where('org_id', '=', ctx.orgId)
+        .where('id', '=', projectId)
+        .where(changed ?? sql<SqlBool>`1`),
+    );
+  }
+
   const notFound: VisibilityWriteResult = { ok: false, reason: 'not_found' };
 
   return {
@@ -220,12 +231,17 @@ export function createVisibilityAttachRepository(
                 .doUpdateSet({ precedence: (eb) => eb.ref('excluded.precedence') })
                 .where(sql<SqlBool>`project_source.precedence is not excluded.precedence`),
         );
+      const changed = sql<SqlBool>`not ${isAttached(ctx, input.projectId, input.sourceId)} or exists (
+          select 1 from project_source where org_id = ${ctx.orgId}
+          and project_id = ${input.projectId} and source_id = ${input.sourceId}
+          and ${precedence === undefined ? sql<SqlBool>`0` : sql<SqlBool>`precedence is not ${precedence}`})`;
       const result = await run(
         ctx,
         fence,
         authority,
         sourceServes(ctx, input.sourceId, found.owner, input.projectId),
         [
+          projectRevision(ctx, input.projectId, changed),
           compile(insert),
           ...visibilityAuditStatements(ctx, input),
           ...rederiveStatements(ctx, {
@@ -234,10 +250,7 @@ export function createVisibilityAttachRepository(
             sourceId: input.sourceId,
           }),
         ],
-        sql<SqlBool>`not ${isAttached(ctx, input.projectId, input.sourceId)} or exists (
-          select 1 from project_source where org_id = ${ctx.orgId}
-          and project_id = ${input.projectId} and source_id = ${input.sourceId}
-          and ${precedence === undefined ? sql<SqlBool>`0` : sql<SqlBool>`precedence is not ${precedence}`})`,
+        changed,
       );
       return found.owner === null && !result.ok && result.reason === 'authority'
         ? notFound
@@ -280,6 +293,7 @@ export function createVisibilityAttachRepository(
           isAttached(ctx, projectId, sourceId),
         ),
         [
+          projectRevision(ctx, projectId),
           compile(rows),
           compile(patterns),
           compile(attachment),
@@ -301,6 +315,9 @@ export function createVisibilityAttachRepository(
         .where('project_id', '=', input.projectId)
         .where('source_id', '=', input.sourceId)
         .where('precedence', 'is not', precedence);
+      const changed = sql<SqlBool>`exists (select 1 from project_source where org_id = ${ctx.orgId}
+          and project_id = ${input.projectId} and source_id = ${input.sourceId}
+          and precedence is not ${precedence})`;
       return run(
         ctx,
         fence,
@@ -309,10 +326,12 @@ export function createVisibilityAttachRepository(
           sourceServes(ctx, input.sourceId, found.owner, input.projectId),
           isAttached(ctx, input.projectId, input.sourceId),
         ),
-        [compile(update), ...visibilityAuditStatements(ctx, input)],
-        sql<SqlBool>`exists (select 1 from project_source where org_id = ${ctx.orgId}
-          and project_id = ${input.projectId} and source_id = ${input.sourceId}
-          and precedence is not ${precedence})`,
+        [
+          projectRevision(ctx, input.projectId, changed),
+          compile(update),
+          ...visibilityAuditStatements(ctx, input),
+        ],
+        changed,
       );
     },
 
@@ -382,14 +401,7 @@ export function createVisibilityAttachRepository(
         join json_each(${order}) as wanted on wanted.value = ps.source_id
         where ps.org_id = ${ctx.orgId} and ps.project_id = ${projectId}
           and ps.precedence is not cast(wanted.key as integer))`;
-      const revision = compile(
-        db
-          .updateTable('project')
-          .set({ revision: sql<number>`revision + 1` })
-          .where('org_id', '=', ctx.orgId)
-          .where('id', '=', projectId)
-          .where(changed),
-      );
+      const revision = projectRevision(ctx, projectId, changed);
       const precedence = sql<number>`(select cast(wanted.key as integer)
         from json_each(${order}) as wanted where wanted.value = project_source.source_id)`;
       const update = compile(

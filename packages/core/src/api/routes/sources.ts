@@ -36,6 +36,12 @@ export interface SourceRouteDeps extends ApiRouteDeps {
       readonly revision: number;
     } | null>;
   };
+  readonly projectSources: {
+    list(
+      ctx: OrgContext,
+      input: { readonly projectId: string },
+    ): Promise<readonly { readonly sourceId: string; readonly precedence: number }[]>;
+  };
   readonly sessions: Pick<SessionService, 'authenticate' | 'isReauthFresh'>;
 }
 
@@ -191,9 +197,28 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
         });
         if (!result.ok) return failure(result);
         const next = result.value.next === null ? null : (result.value.items.at(-1)?.id ?? null);
+        const attached =
+          ctx.projectId === null
+            ? null
+            : new Map(
+                (await deps.projectSources.list(org, { projectId: ctx.projectId })).map(
+                  ({ sourceId, precedence }) => [sourceId, precedence],
+                ),
+              );
+        const items =
+          attached === null
+            ? result.value.items
+            : result.value.items.map((source) => {
+                const precedence = attached.get(source.id);
+                return {
+                  ...source,
+                  attached: precedence !== undefined,
+                  ...(precedence === undefined ? {} : { precedence }),
+                };
+              });
         return {
           status: 200,
-          body: { items: result.value.items, next },
+          body: { items, next },
           ...(project === null ? {} : { etag: project.revision }),
         };
       }),

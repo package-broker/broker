@@ -1,3 +1,4 @@
+import type { ProjectGrantReader } from '../../db/grants.js';
 import { describe, expect, it, vi } from 'vitest';
 import { SESSION_COOKIE } from '../../auth/cookies.js';
 import { sha256Hex } from '../../auth/primitives.js';
@@ -20,7 +21,10 @@ import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { defineApi } from '../route.js';
-import { PROJECT_ACCESS_API_SPECS } from './project-access-schemas.js';
+import {
+  PROJECT_ACCESS_API_SPECS,
+  PROJECT_GRANTS_LIST_API_SPEC,
+} from './project-access-schemas.js';
 import { projectAccessRoutes } from './project-access.js';
 
 const ORIGIN = 'https://broker.test';
@@ -46,13 +50,15 @@ const cases = [
   },
   { name: 'DELETE', method: 'DELETE', path: `/_pb/projects/demo/grants/${GRANT}`, body: undefined },
 ] as const;
-type RouteCase = (typeof cases)[number];
+type RouteCase = { readonly method: string; readonly path: string; readonly body?: unknown };
+type GrantPage = Awaited<ReturnType<ProjectGrantReader['list']>>;
 
 async function fixture(
   options: {
     visible?: boolean;
     archived?: boolean;
     tokenScope?: 'read' | 'full';
+    admin?: boolean;
     permissions?: readonly string[];
     organizationPermissions?: readonly string[];
     userId?: string;
@@ -105,10 +111,24 @@ async function fixture(
   const authority = options.visible ?? true;
   const resolves = (allowArchived: boolean | undefined) =>
     authority && (options.archived !== true || allowArchived === true);
+  const reader = {
+    list: vi.fn<ProjectGrantReader['list']>(async (_org, input) => {
+      const all = [GRANT, OTHER_PROJECT].sort().map((id) => ({
+        id,
+        revision: 3,
+        createdAt: '2026-10-22T00:00:00.000Z',
+        principal: { kind: 'user' as const, id: 'user-2', displayName: 'Member' },
+        role: { id: ROLE, name: 'Developer', permissions: ['project:read'] },
+      }));
+      const remaining = all.filter((row) => input.after === undefined || row.id > input.after);
+      const items = remaining.slice(0, input.limit);
+      return { items, next: remaining.length > input.limit ? items.at(-1)!.id : null };
+    }),
+  };
   const app = await createKernel({
     platform: 'node',
     plugins: [],
-    coreRoutes: projectAccessRoutes({ projectAdministration, roles, clock, ids, clientIp }),
+    coreRoutes: projectAccessRoutes({ projectAdministration, roles, reader, clock, ids, clientIp }),
     ports: { organizations: { get: async () => null }, clock, ids },
     resolveOrg: async () => orgContext('org-1'),
     health: async () => true,
@@ -119,7 +139,7 @@ async function fixture(
           session: { id: 'session-1', csrfHash: await sha256Hex(CSRF) },
           user: { id: options.userId ?? 'user-1' },
           identity: null,
-          protectedHolder: false,
+          protectedHolder: options.admin ?? false,
           project:
             input.boundary === 'project' && resolves(input.allowArchived) ? { id: PROJECT } : null,
           organizationPermissions: options.organizationPermissions ?? [],
@@ -200,7 +220,7 @@ async function fixture(
       }),
     );
   };
-  return { request, store, roles, audits, grant, changeRole, revoke, clientIp };
+  return { request, store, roles, reader, audits, grant, changeRole, revoke, clientIp };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -589,6 +609,7 @@ describe('allowArchived registry', () => {
   const deps = {
     projectAdministration: {} as never,
     roles: { get: async () => null },
+    reader: { list: async () => ({ items: [], next: null }) },
     clock,
     ids: { ulid: () => '01JB0000000000000000000001' },
     clientIp: () => null,
@@ -616,4 +637,103 @@ describe('allowArchived registry', () => {
       .sort();
     expect(users).toEqual(['project-access-schemas.ts']);
   });
+});
+
+describe('GET project grants', () => {
+  const read = { method: 'GET', path: '/_pb/projects/demo/grants' } as RouteCase;
+
+  it('paginates by grant id and supplies a stable ETag', async () => {
+    const f = await fixture({ permissions: ['project:read', 'project:grants:read'] });
+    const first = await f.request(read, { path: read.path + '?limit=1' });
+    expect(first.status).toBe(200);
+    const page = (await first.json()) as GrantPage;
+    expect(page.items).toHaveLength(1);
+    expect(page.next).toBe(page.items[0]!.id);
+    expect(page.items[0]).toMatchObject({
+      principal: { kind: 'user', displayName: 'Member' },
+      role: { permissions: ['project:read'] },
+    });
+    expect(first.headers.get('etag')).toMatch(/^"r[1-9][0-9]*"$/);
+    const again = await f.request(read, { path: read.path + '?limit=1' });
+    expect(again.headers.get('etag')).toBe(first.headers.get('etag'));
+    const second = await f.request(read, { path: read.path + '?limit=1&after=' + page.next });
+    expect(second.status).toBe(200);
+    const last = (await second.json()) as GrantPage;
+    expect(last.items).toHaveLength(1);
+    expect(last.items[0]!.id).not.toBe(page.items[0]!.id);
+    expect(last.next).toBeNull();
+    expect(f.reader.list.mock.calls[0]![1].projectId).toBe(PROJECT);
+  });
+
+  it('denies a visible project without permission before reading grants', async () => {
+    const f = await fixture({ permissions: ['project:read'] });
+    expect((await f.request(read)).status).toBe(403);
+    expect(f.reader.list).not.toHaveBeenCalled();
+  });
+
+  it('hides a project before reading grants', async () => {
+    const f = await fixture({ visible: false });
+    expect((await f.request(read)).status).toBe(404);
+    expect(f.reader.list).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid cursor without reading grants', async () => {
+    const f = await fixture({ permissions: ['project:read', 'project:grants:read'] });
+    expect((await f.request(read, { path: read.path + '?after=bad' })).status).toBe(400);
+    expect(f.reader.list).not.toHaveBeenCalled();
+  });
+});
+
+it.each([false, true])(
+  'project grant reads derive e-mail disclosure from organization admin authority (%s)',
+  async (admin) => {
+    const f = await fixture({ admin });
+    const response = await f.request({
+      method: 'GET',
+      path: '/_pb/projects/demo/grants',
+    } as RouteCase);
+    expect(response.status).toBe(200);
+    expect(f.reader.list).toHaveBeenCalledWith(
+      orgContext('org-1'),
+      expect.objectContaining({ includeEmail: admin }),
+    );
+  },
+);
+
+it('changes the grant list ETag when the returned grant revision changes', async () => {
+  const f = await fixture();
+  const read = { method: 'GET', path: '/_pb/projects/demo/grants' } as RouteCase;
+  const before = await f.request(read);
+  const page = (await before.json()) as GrantPage;
+  f.reader.list.mockResolvedValueOnce({
+    ...page,
+    items: page.items.map((item) => ({
+      ...item,
+      revision: item.revision + 1,
+    })),
+  });
+  const after = await f.request(read);
+  expect(after.status).toBe(200);
+  expect(after.headers.get('etag')).not.toBe(before.headers.get('etag'));
+});
+
+it('declares the project grants read contract', () => {
+  expect(() => defineApi(PROJECT_GRANTS_LIST_API_SPEC)).not.toThrow();
+  expect(PROJECT_GRANTS_LIST_API_SPEC.permission).toBe('project:grants:read');
+});
+
+it('hides an archived project without querying grants', async () => {
+  const f = await fixture({ archived: true });
+  expect((await f.request({ method: 'GET', path: '/_pb/projects/demo/grants' })).status).toBe(404);
+  expect(f.reader.list).not.toHaveBeenCalled();
+});
+
+it('returns an empty terminal grant page', async () => {
+  const f = await fixture();
+  const response = await f.request({
+    method: 'GET',
+    path: '/_pb/projects/demo/grants?after=' + GRANT,
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ items: [], next: null });
 });

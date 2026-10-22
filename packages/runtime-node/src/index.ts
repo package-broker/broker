@@ -1,3 +1,6 @@
+import { openApiRoute } from '@package-broker/core/api/openapi-route';
+import { openApiDocument } from '@package-broker/core/api/openapi-document';
+import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
 import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
@@ -1048,6 +1051,7 @@ function buildApiRoutes(input: {
       projectAccess: {
         ...common,
         projectAdministration: services.projectGrants,
+        reader: createProjectGrantReader(executor),
         roles: {
           get: async (ctx, id) =>
             (await services.administration.listRoles(ctx)).find((role) => role.id === id) ?? null,
@@ -1075,6 +1079,7 @@ function buildApiRoutes(input: {
         ...common,
         service: sourceService,
         sources,
+        projectSources: createProjectSourceReader(executor),
         projects,
         sessions: services.sessions,
       },
@@ -1464,6 +1469,7 @@ export function createNodeServer(
       coreRoutes: [
         ...(access?.module.coreRoutes ?? []),
         ...apiRoutes,
+        openApiRoute(openApiDocument),
         ...(registry?.module.coreRoutes ?? []).map((route) => ({
           ...route,
           async handler(context: Parameters<typeof route.handler>[0]) {

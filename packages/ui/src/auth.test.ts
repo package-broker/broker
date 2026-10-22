@@ -11,9 +11,11 @@ import {
   createSetupController,
   isNavigableLocation,
   startSso,
+  reauthReturnHash,
   type AuthClient,
 } from './auth.js';
 import type { PendingStorage } from './pending.js';
+import { buildListFilterHash } from './page-hash.js';
 
 const SENTINEL = 'sentinel-pass-9f3a';
 const CODE = '483920';
@@ -579,4 +581,82 @@ it('retains project scope when starting SSO on the login route', async () => {
       body: { purpose: 'login', returnTo: '/_pb/ui#/projects?project=acme' },
     }),
   );
+});
+
+describe('package reauth integration', () => {
+  it.each([
+    { project: 'web', source: '01ARZ3NDEKTSV4RRFFQ69G5FAV' },
+    { projectId: '01ARZ3NDEKTSV4RRFFQ69G5FAV', source: '01ARZ3NDEKTSV4RRFFQ69G5FAV' },
+  ])('keeps package-specific filters through reauth and SSO: %j', async (scope) => {
+    const hash = buildListFilterHash('packages', {
+      ...scope,
+      status: 'active',
+      q: '@scope/pkg & tool',
+      after: 'opaque/+=',
+    });
+    const navigate = vi.fn();
+    const { client, request } = fakeClient(
+      ok(200, { location: '/idp' }),
+      ok(200, { location: '/idp' }),
+    );
+    const reauthHash = `#/reauth?return=${encodeURIComponent(hash.slice(1))}`;
+    expect(reauthReturnHash(reauthHash)).toBe(hash);
+    expect(Object.fromEntries(new URLSearchParams(hash.split('?')[1]))).toMatchObject(scope);
+    await startSso(client, 'corp', 'login', navigate, hash);
+    expect(request.mock.calls[0]![2]).toMatchObject({ body: { returnTo: `/_pb/ui${hash}` } });
+    await startSso(client, 'corp', 'reauth', navigate, reauthHash);
+    const returnTo = (request.mock.calls[1]![2] as { body: { returnTo: string } }).body.returnTo;
+    expect(reauthReturnHash(returnTo.slice(returnTo.indexOf('#')))).toBe(hash);
+  });
+  it.each(['source=unknown', 'projectId=unknown'])(
+    'drops an invalid package return filter: %s',
+    (query) => {
+      expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(`/packages?${query}`)}`)).toBe(
+        '#/packages',
+      );
+    },
+  );
+  it('preserves package filters and opaque cursor through the reauth return URL', () => {
+    const hash =
+      '#/packages?project=web&status=active&source=01ARZ3NDEKTSV4RRFFQ69G5FAV&q=%40example&after=npm%3A%2B%2F%25%3F%3D';
+    expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(hash.slice(1))}`)).toBe(hash);
+  });
+  it.each([200, 404, 409])(
+    'publishes only path and outcome after a replay returns %s',
+    async (status) => {
+      const { storage } = memoryStorage();
+      const { client } = fakeClient(status === 200 ? ok(200) : fail(status), ok(200));
+      const flow = createReauthFlow({ client, storage, now: Date.now, navigate: vi.fn() });
+      const listener = vi.fn();
+      const unsubscribe = flow.subscribeReplay(listener);
+      flow.requireReauth(
+        { method: 'POST', path: '/_pb/packages/p/versions/v/tombstone', body: {} },
+        { credential: false, secretFields: [] },
+        '#/packages',
+      );
+      flow.restore();
+      expect(listener).not.toHaveBeenCalled();
+      await flow.confirm();
+      expect(listener).toHaveBeenCalledExactlyOnceWith({
+        path: '/_pb/packages/p/versions/v/tombstone',
+        ok: status === 200,
+        status,
+      });
+      unsubscribe();
+      listener.mockClear();
+      flow.requireReauth(
+        { method: 'POST', path: '/_pb/packages/p/versions/v/tombstone', body: {} },
+        { credential: false, secretFields: [] },
+        '#/packages',
+      );
+      flow.restore();
+      await flow.confirm();
+      expect(listener).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it('drops unknown package return filters and invalid project scopes', () => {
+  const target = '/packages?project=%2F%2Foutside.invalid&redirect=https%3A%2F%2Foutside.invalid';
+  expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(target)}`)).toBe('#/packages');
 });

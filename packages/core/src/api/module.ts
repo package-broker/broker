@@ -24,7 +24,10 @@ export interface ApiModuleDeps {
   readonly access: Parameters<typeof accessRoutes>[0];
   readonly projectAccess: Parameters<typeof projectAccessRoutes>[0];
   readonly tokens: Parameters<typeof tokenRoutes>[0];
-  readonly servicePrincipals: Parameters<typeof servicePrincipalRoutes>[0];
+  readonly servicePrincipals: Omit<
+    Parameters<typeof servicePrincipalRoutes>[0],
+    'sessions' | 'projects' | 'idempotency'
+  >;
   readonly sources: Parameters<typeof sourceRoutes>[0];
   readonly sourceNames: Parameters<typeof sourceNameRoutes>[0];
   readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
@@ -88,6 +91,7 @@ const REQUIRED_DEPENDENCIES = {
   projectAccess: {
     ...CONTEXT_METHODS,
     projectAdministration: { grant: true, changeRole: true, revoke: true },
+    reader: { list: true },
     roles: { get: true },
   },
   tokens: {
@@ -112,8 +116,8 @@ const REQUIRED_DEPENDENCIES = {
   },
   servicePrincipals: {
     ...CONTEXT_METHODS,
-    servicePrincipals: { setPermissions: true, suspend: true, restore: true },
-    principals: { get: true },
+    servicePrincipals: { create: true, setPermissions: true, suspend: true, restore: true },
+    principals: { get: true, list: true },
   },
   sources: {
     ...CONTEXT_METHODS,
@@ -126,6 +130,7 @@ const REQUIRED_DEPENDENCIES = {
       resume: true,
     },
     sources: { get: true },
+    projectSources: { list: true },
     projects: { get: true },
     sessions: { authenticate: true, isReauthFresh: true },
   },
@@ -230,7 +235,12 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...accessRoutes(deps.access),
     ...projectAccessRoutes(deps.projectAccess),
     ...tokenRoutes(deps.tokens),
-    ...servicePrincipalRoutes(deps.servicePrincipals),
+    ...servicePrincipalRoutes({
+      ...deps.servicePrincipals,
+      sessions: deps.tokens.sessions,
+      projects: deps.projects.projects,
+      idempotency: deps.tokens.idempotency,
+    }),
     ...sourceRoutes(deps.sources),
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),

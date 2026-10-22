@@ -372,6 +372,16 @@ async function run() {
     step = 'GET /health/live';
     await expectStatus('/health/live', await dispatch('/health/live', limitMs), 200);
 
+    step = 'GET /_pb/openapi.json without credentials';
+    const openapi = await dispatch('/_pb/openapi.json', limitMs);
+    await expectStatus('/_pb/openapi.json', openapi, 200);
+    assert.equal(openapi.headers.get('content-type'), 'application/json');
+    assert.equal(openapi.headers.get('cache-control'), 'no-store');
+    assert.equal(
+      await openapi.text(),
+      await readFile(join(repoRoot, 'packages/ui/openapi.json'), 'utf8'),
+    );
+
     step = 'GET /nope';
     const missing = await dispatch('/nope', limitMs);
     await expectStatus('/nope', missing, 404);

@@ -359,13 +359,32 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     }
     const principal = principalOf(found);
     if (principal === undefined) return UNAUTHORIZED;
+    if (
+      input.boundary === 'organization' &&
+      found.token.projectMode === 'selected' &&
+      request.route.path.split('/').includes(':project')
+    ) {
+      const slug = request.params['project'];
+      if (!isValidProjectSlug(slug)) return NOT_FOUND;
+      // Resolve cap membership without replacing the organization permission decision.
+      const projectAccess = await access.lookupToken(request.org, {
+        ...input,
+        boundary: 'project',
+        projectSlug: slug,
+        allowArchived: true,
+        selector: token.selector,
+      });
+      if (projectAccess?.project == null) return NOT_FOUND;
+    }
     const effective = tokenEffective(found, input.boundary);
     const decision = decideFrom(
       {
         principal,
         project: found.project,
         effective,
-        projectVisible: found.projectVisible === true,
+        projectVisible:
+          found.projectVisible === true &&
+          (found.token.projectMode !== 'selected' || found.project !== null),
       },
       permission,
       input.boundary,

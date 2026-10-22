@@ -338,6 +338,7 @@ export function App(props: { client?: AuthClient }) {
   const services = useMemo<ShellServices>(
     () => ({
       client,
+      subscribeReplay: flow.subscribeReplay,
       requireReauth: (request, options) =>
         flow.requireReauth(request, options, window.location.hash),
     }),

@@ -1,3 +1,4 @@
+import { entries as projectGrantReadEntries } from './mutation-table/project-grant-read.js';
 import { entries as selectedKeysEntries } from './mutation-table/selected-keys.js';
 import { entries as sourceSelectionRevisionEntries } from './mutation-table/source-selection-revision.js';
 import { entries as sourceSelectionEntries } from './mutation-table/source-selection.js';
@@ -194,6 +195,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sourceEntries,
   ...attachedProxyEntries,
   ...projectSourceReadEntries,
+  ...projectGrantReadEntries,
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,

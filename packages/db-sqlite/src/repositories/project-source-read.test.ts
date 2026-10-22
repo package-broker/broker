@@ -72,8 +72,8 @@ describe('project source attachment reader', () => {
   it('returns exactly the attachment set in precedence order', async () => {
     const reader = createProjectSourceReader(database.executor);
     expect(await reader.list(own, { projectId: 'P1' })).toEqual([
-      { sourceId: 'S-OWNED' },
-      { sourceId: 'S-ORG' },
+      { sourceId: 'S-OWNED', precedence: 0 },
+      { sourceId: 'S-ORG', precedence: 1 },
     ]);
   });
 
@@ -95,4 +95,21 @@ describe('project source attachment reader', () => {
     const reader = createProjectSourceReader(database.executor);
     await expect(reader.list(own, { projectId: '' })).rejects.toThrow(RangeError);
   });
+});
+
+it('exposes the stored attachment precedence, including gaps', async () => {
+  await database.executor.batch([
+    stmt(
+      'UPDATE project_source SET precedence = 7 WHERE org_id = ? AND project_id = ? AND source_id = ?',
+      own.orgId,
+      'P1',
+      'S-ORG',
+    ),
+  ]);
+  expect(await createProjectSourceReader(database.executor).list(own, { projectId: 'P1' })).toEqual(
+    [
+      { sourceId: 'S-OWNED', precedence: 0 },
+      { sourceId: 'S-ORG', precedence: 7 },
+    ],
+  );
 });

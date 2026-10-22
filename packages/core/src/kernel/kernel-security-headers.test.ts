@@ -93,9 +93,7 @@ describe('kernel security headers', () => {
     expect(response.status).toBe(status);
     expect(response.headers.get('strict-transport-security')).toBe(HSTS);
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
-    expect(response.headers.get('referrer-policy')).toBe(
-      path === '/_pb/ui' ? 'same-origin' : 'no-referrer',
-    );
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
   });
 
   it.each(['/_pb/auth/providers', '/_pb/session', '/_pb/profile', '/_pb/auth/missing'])(

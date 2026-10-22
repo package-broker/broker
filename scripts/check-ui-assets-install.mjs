@@ -196,13 +196,20 @@ async function seed(execute, orgId) {
 async function delivery(dispatch, cookie, manifest, expected) {
   for (const [name, bytes] of expected) {
     const path = `/_pb/ui/${name === manifest.entry ? '' : name}`;
-    assert.equal((await dispatch(path)).status, 401, 'anonymous UI request must be refused');
+    const anonymous = await dispatch(path);
+    assert.equal(anonymous.status, 200, `anonymous delivery: ${name}`);
+    assert.equal(anonymous.headers.get('set-cookie'), null);
+    expectServedAsset(name, Buffer.from(await anonymous.arrayBuffer()), bytes);
     const response = await dispatch(path, cookie);
     assert.equal(response.status, 200, `authenticated delivery: ${name}`);
+    assert.equal(response.headers.get('set-cookie'), null);
     expectServedAsset(name, Buffer.from(await response.arrayBuffer()), bytes);
     assert.equal((await dispatch(`/${name}`, cookie)).status, 404, 'raw asset bypass');
   }
-  assert.equal((await dispatch('/_pb/ui/', '__Host-pb_session=invalid')).status, 401);
+  const invalidSession = await dispatch('/_pb/ui/', '__Host-pb_session=invalid');
+  assert.equal(invalidSession.status, 200);
+  assert.equal(invalidSession.headers.get('set-cookie'), null);
+  assert.equal((await dispatch('/_pb/ui/manifest.json')).status, 404);
 }
 
 async function nodeDelivery(out, expected, manifest) {

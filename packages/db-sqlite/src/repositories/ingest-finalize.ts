@@ -258,7 +258,16 @@ export function createIngestFinalizer(
       }
 
       const statements: Statement[] = [...ingestSessionGuard(ctx, session)];
-      if (acceptanceApplied && scope.kind === 'source') {
+      let acceptanceAuditIndex: number | undefined;
+      if (armed && scope.kind === 'source' && expectedCount >= 1) {
+        const needsAcceptance = acceptanceApplied
+          ? sql<boolean>`1`
+          : sql<boolean>`NOT ${withinAbsenceShare(
+              unseenSourcePackages(ctx, scope.sourceId),
+              expectedCount,
+              options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
+              minPackages,
+            )}`;
         const applied = auditEvent({
           id: ulid(),
           now: new Date().toISOString(),
@@ -269,14 +278,32 @@ export function createIngestFinalizer(
           projectId: armedRow?.project_id ?? null,
           changes: {
             source_id: { new: scope.sourceId },
-            absent: { new: input.definitiveAbsent },
+            absent: { new: 0 },
             listed: { new: expectedCount },
           },
         });
         if (!applied.ok) throw new TypeError('Invalid source audit event');
         statements.push(
-          ...assertCheck(acceptedBound(scope.sourceId)),
-          auditPendingStatement(ctx, applied.event),
+          ...assertCheck(
+            sql<boolean>`(NOT (${needsAcceptance}) OR ${acceptedBound(scope.sourceId)})`,
+          ),
+        );
+        acceptanceAuditIndex = statements.length;
+        statements.push(
+          auditPendingStatement(
+            ctx,
+            applied.event,
+            compile({ compile: () => needsAcceptance.compile(db) }),
+          ),
+          compile(
+            db
+              .updateTable('audit_pending')
+              .set({
+                payload_json: sql<string>`json_set(payload_json, '$.changes.absent.new', ${unseenSourcePackages(ctx, scope.sourceId)})`,
+              })
+              .where('org_id', '=', ctx.orgId)
+              .where('id', '=', applied.event.id),
+          ),
         );
       }
       let leaseHeldBackIndex: number | undefined;
@@ -288,6 +315,7 @@ export function createIngestFinalizer(
             : completeVersionListing({ packageId: scope.packageId, stamp, count: expectedCount });
         const finalized = finalizeListingStatements(ctx, guard, listing, input, {
           ...finalizeOptions,
+          ...(armed && scope.kind === 'source' ? { maxAbsenceShare: 1 } : {}),
           countUnseen: true,
         });
         if (finalized.leaseHeldBackIndex !== undefined) {
@@ -326,6 +354,8 @@ export function createIngestFinalizer(
       let leaseHeldBack: number;
       try {
         const results = await executor.batch(statements);
+        acceptanceApplied =
+          acceptanceAuditIndex !== undefined && (results[acceptanceAuditIndex]?.changes ?? 0) === 1;
         leaseHeldBack =
           leaseHeldBackIndex === undefined
             ? 0
@@ -358,7 +388,7 @@ export function createIngestFinalizer(
                       WHERE id = ${scopeId} AND org_id = ${ctx.orgId}
                         AND listing_open_stamp = ${stamp}))`.as('held'),
                   unseen.as('unseen'),
-                  (acceptanceApplied && scope.kind === 'source'
+                  (armed && scope.kind === 'source'
                     ? acceptedBound(scope.sourceId)
                     : sql<boolean>`1`
                   ).as('bounded'),

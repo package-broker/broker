@@ -17,6 +17,7 @@ import { runCloudflareSetup } from './commands/cloudflare/setup.js';
 import { runCloudflareSmoke } from './commands/cloudflare/smoke.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
+import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
 import { runBootstrapSqlite, runMigrateSqlite } from './commands/sqlite.js';
 
@@ -36,6 +37,7 @@ const USAGE =
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
+  '       pb source accept-removal --url <https-origin> --source <id> (PB_SESSION and PB_CSRF_TOKEN)\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
@@ -49,6 +51,8 @@ function parseCliArgs(argv: string[]) {
       args: argv,
       allowPositionals: true,
       options: {
+        url: { type: 'string' },
+        source: { type: 'string' },
         config: { type: 'string' },
         target: { type: 'string' },
         out: { type: 'string' },
@@ -229,6 +233,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'baseline',
     'mode',
   ],
+  'source accept-removal': ['url', 'source'],
   openapi: ['out'],
   version: [],
 };
@@ -283,6 +288,15 @@ export async function run(argv: readonly string[]): Promise<number> {
     return usageError();
   }
   const [command, subcommand] = positionals;
+
+  if (command === 'source' && subcommand === 'accept-removal') {
+    if (!values.url || !values.source) return usageError();
+    return runSourceAcceptRemoval({
+      url: values.url,
+      source: values.source,
+      env: process.env,
+    });
+  }
 
   if (command === 'openapi') return runOpenApi(values.out);
 

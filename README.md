@@ -82,6 +82,32 @@ Cloudflare caches a configuration failure for 30 seconds per environment fingerp
 Changing the configuration gets a new verification attempt immediately. Node shares each
 deferred attempt between requests and starts at most one attempt per second.
 
+## Operating sources
+
+### Accepting a refused source removal
+
+A source sync refuses to remove packages when the removal would exceed the share guard (25% of the
+source, exempting sources below 10 packages). A refusal changes nothing in the catalogue and does
+not pin the source: the next sync lists again and applies the guard again. The last refusal (time,
+absent, listed and successfully fetched counts) is shown on the source (`lastRemovalRefusal`).
+
+An organization admin can arm a one-shot acceptance with `POST /_pb/sources/:source/accept-removal`
+(no body). It returns 204, 404 for an invisible source, and 409 when the source has no recorded
+refusal, an acceptance is already armed, or the last refusal had no successfully listed packages.
+The CLI uses the same endpoint:
+
+```sh
+pb source accept-removal --url https://broker.example.com --source <source-id>
+```
+
+Set `PB_SESSION` and `PB_CSRF_TOKEN` from the admin session in the environment. The acceptance is
+audited as `source.removal_accepted` with the source id and the refusal facts it accepts
+(`removalAcceptanceArmed` on the source shows it). The next finalize that the guard would refuse
+applies once, only if it removes no more than the accepted absent count, and consumes the
+acceptance with a `source.removal_applied` audit row. A larger removal is refused again and disarms
+the acceptance. Any other completed sync clears an unused acceptance and
+the recorded refusal. Incomplete listings and invalid candidate evidence still refuse finalization.
+
 ## Versioning
 
 Releases are cut by Release Please with the prerelease strategy: the product packages (`core`, `cli`, `runtime-cloudflare`, `runtime-node`, `ui`) share one version through a `linked-versions` group and ship as `2.0.0-rc.X`, while each `plugin-*` package versions independently as `0.1.0-rc.X` until GA, with tags in the form `<component>-v<version>`. A Docker image published to GHCR with all first-party plugins is planned (T835).

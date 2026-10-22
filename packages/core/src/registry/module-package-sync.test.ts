@@ -74,6 +74,8 @@ function harness(ecosystem: 'npm' | 'composer' = 'npm') {
     listingHash: null,
     pollEtag: null,
     pollLastModified: null,
+    removalRefusal: null,
+    removalAccepted: false,
   };
   const stored: Partial<Record<UpstreamForm, UpstreamState>> = {};
   const replies: Record<string, Reply | Reply[]> = {};

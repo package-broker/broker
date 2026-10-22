@@ -189,6 +189,40 @@ export function describeExecutorContract(name: string, open: () => Promise<Opene
       });
     });
 
+    it('rejects a batch above 200 statements before reading SQL or parameters', async () => {
+      await withExecutor(open, async (executor) => {
+        const unreadable = {
+          get sql(): string {
+            throw new Error('SQL was read');
+          },
+          get params(): readonly [] {
+            throw new Error('parameters were read');
+          },
+        };
+        await expectDbError(
+          executor.batch(Array.from({ length: 201 }, () => unreadable)),
+          'too_big',
+        );
+      });
+    });
+
+    it('accepts a batch of exactly 200 statements and applies it atomically', async () => {
+      await withExecutor(open, async (executor) => {
+        await createTables(executor, 'CREATE TABLE item (id INTEGER PRIMARY KEY)');
+        const insert = (id: number) => ({
+          sql: 'INSERT INTO item (id) VALUES (?)',
+          params: [id],
+        });
+        await executor.batch(Array.from({ length: 200 }, (_, index) => insert(index)));
+        await expectDbError(
+          executor.batch(Array.from({ length: 201 }, (_, index) => insert(1000 + index))),
+          'too_big',
+        );
+        const rows = await executor.all({ sql: 'SELECT COUNT(*) AS n FROM item', params: [] });
+        expect(rows).toEqual([{ n: 200 }]);
+      });
+    });
+
     it('9. an unsafe integer parameter rejects with TypeError', async () => {
       await withExecutor(open, async (executor) => {
         const unsafe = 2 ** 53;

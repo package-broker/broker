@@ -159,7 +159,7 @@ export const entries: readonly MutationEntry[] = [
       {
         locate: /(?<![\w.])org_id = \?/,
         reason:
-          'The empty-listing open-stamp assertion uses the same source id as the guarded session; source ids are PRIMARY KEY. Completion uses that same guarded session id.',
+          'The empty-listing open-stamp assertion uses the same source id as the guarded session; source ids are PRIMARY KEY. Completion uses that same guarded session id. The armed-acceptance read, the refusal record and the refusal clearing address the source by that same primary key.',
       },
     ],
   },

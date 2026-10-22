@@ -3,15 +3,20 @@ import { noopObservability, type Observability } from '../platform/observability
 import { assertNoMassAbsence, MassAbsenceError } from './absence-guard.js';
 
 export const DEFAULT_MAX_ABSENCE_SHARE = 0.25;
+export const DEFAULT_MIN_PACKAGES = 10;
 
 export const INGEST_EVENTS: ReadonlySet<string> = new Set([
   'ingest.mass_absence',
+  'ingest.removal_applied',
+  'ingest.removal_acceptance_cleared',
   'ingest.version_skipped',
   'ingest.snapshot_corrupt',
   'ingest.budget_exhausted',
 ]);
 export const INGEST_REASON_CODES: ReadonlySet<string> = new Set([
   'mass_absence',
+  'removal_applied',
+  'removal_acceptance_cleared',
   'member_too_large',
   'snapshot_corrupt',
   'budget_exhausted',
@@ -19,6 +24,7 @@ export const INGEST_REASON_CODES: ReadonlySet<string> = new Set([
 
 export interface FinalizeGuardOptions {
   readonly maxAbsenceShare?: number;
+  readonly minPackages?: number;
   readonly observability?: Pick<Observability, 'counter' | 'log'>;
 }
 
@@ -29,6 +35,25 @@ export function recordMassAbsence(options: FinalizeGuardOptions = {}): void {
     level: 'warn',
     event: 'ingest.mass_absence',
     reason_code: 'mass_absence',
+  });
+}
+
+export function recordRemovalApplied(options: FinalizeGuardOptions = {}): void {
+  const observability = options.observability ?? noopObservability;
+  observability.counter('pb.ingest.removal_applied', undefined, 1);
+  observability.log({
+    level: 'warn',
+    event: 'ingest.removal_applied',
+    reason_code: 'removal_applied',
+  });
+}
+
+export function recordRemovalAcceptanceCleared(options: FinalizeGuardOptions = {}): void {
+  const observability = options.observability ?? noopObservability;
+  observability.log({
+    level: 'info',
+    event: 'ingest.removal_acceptance_cleared',
+    reason_code: 'removal_acceptance_cleared',
   });
 }
 
@@ -58,7 +83,7 @@ export function assertFinalizeAllowed(
       { total: attemptedCandidates, definitiveAbsent },
       {
         maxShare: options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
-        minPackages: 0,
+        minPackages: options.minPackages ?? 0,
       },
     );
   } catch (error) {

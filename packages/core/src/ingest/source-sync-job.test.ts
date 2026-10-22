@@ -54,6 +54,8 @@ function record(over: Partial<SourceRecord> = {}): SourceRecord {
     listingHash: null,
     pollEtag: null,
     pollLastModified: null,
+    removalRefusal: null,
+    removalAccepted: false,
     ...over,
   };
 }

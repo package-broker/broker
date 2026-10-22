@@ -4,6 +4,7 @@ import type { OrgContext, ScalarStatement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCatalogueLookup } from './catalogue-lookup.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 let database: MigratedDatabase;
 let ctx: OrgContext;
@@ -144,7 +145,7 @@ describe('lookupVersion', () => {
         ],
       });
     }
-    await database.executor.batch(statements);
+    await batchInChunks(database.executor, statements);
     const found = await lookup().lookupVersion(ctx, {
       ...ref('left-pad'),
       versionNormalized: '1.0.249',

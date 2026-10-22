@@ -26,6 +26,7 @@ import {
   type GrantRepositoryOptions,
   type ProtectedHolderInput,
 } from './grant.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 const apiCall = {
   audit: {
@@ -417,7 +418,7 @@ function rolesFor(org: OrgContext, admin: string, extra: boolean): Statement[] {
 }
 
 async function seed(statements: readonly Statement[]): Promise<void> {
-  await executor.batch(statements);
+  await batchInChunks(executor, statements);
 }
 
 beforeEach(async () => {
@@ -2655,7 +2656,7 @@ describe('spike scale', () => {
 
   it('8: holder ids and the guarded answers match a JavaScript model, before and after ANALYZE', async () => {
     const world = build();
-    await executor.batch(world.statements);
+    await batchInChunks(executor, world.statements);
     expect(world.memberships).toBeGreaterThanOrEqual(1000);
     expect(world.grants.length).toBeGreaterThanOrEqual(600);
     await expectHolders(world);

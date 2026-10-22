@@ -221,8 +221,10 @@ export function withinAbsenceShare(
   unseen: RawBuilder<number>,
   seen: number,
   maxShare: number,
+  minPackages = 0,
 ): RawBuilder<boolean> {
-  return sql<boolean>`(SELECT CAST(counted.n AS REAL) / (${seen} + counted.n) <= ${maxShare}
+  return sql<boolean>`(SELECT (${seen} + counted.n) < ${minPackages}
+    OR CAST(counted.n AS REAL) / (${seen} + counted.n) <= ${maxShare}
     FROM (SELECT ${unseen} AS n) AS counted)`;
 }
 
@@ -322,11 +324,12 @@ export function finalizeListingStatements(
     throw new TypeError('finalize needs a complete listing minted by the ingest session');
   }
   const { stamp, count } = listing;
-  assertFinalizeAllowed(count, evidence, options);
   const scope: ListingScope =
     'sourceId' in listing
       ? { kind: 'source', sourceId: listing.sourceId }
       : { kind: 'package', packageId: listing.packageId };
+  const minPackages = scope.kind === 'source' ? (options.minPackages ?? 0) : 0;
+  assertFinalizeAllowed(count, evidence, { ...options, minPackages });
   const id = scopeId(scope);
   const opId = newOpId();
   const boundary = sweepBoundary(ctx, scope);
@@ -355,6 +358,7 @@ export function finalizeListingStatements(
               unseenSourcePackages(ctx, id),
               count,
               options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
+              minPackages,
             ),
           )
         : []),
@@ -435,6 +439,7 @@ export function finalizeListingStatements(
             unseenPackageVersions(ctx, id),
             count,
             options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,
+            minPackages,
           ),
         )
       : []),

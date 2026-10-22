@@ -72,6 +72,15 @@ const source = z.strictObject({
   pollIntervalSeconds: z.number().int(),
   lastSuccessAt: z.string().nullable(),
   hasCredential: z.boolean(),
+  lastRemovalRefusal: z
+    .strictObject({
+      at: z.string(),
+      absent: z.number().int(),
+      listed: z.number().int(),
+      successful: z.number().int(),
+    })
+    .nullable(),
+  removalAcceptanceArmed: z.boolean(),
 });
 const page = z.strictObject({ items: z.array(source), next: ulid.nullable() });
 const created = z.strictObject({ id: ulid });
@@ -178,3 +187,18 @@ function scopeSpecs(boundary: 'organization' | 'project') {
 }
 
 export const SOURCE_API_SPECS = [...scopeSpecs('organization'), ...scopeSpecs('project')] as const;
+
+export const ACCEPT_REMOVAL_API_SPEC = {
+  method: 'POST',
+  path: '/_pb/sources/:source/accept-removal',
+  boundary: 'organization',
+  permission: 'org:sources:write',
+  service: 'SourceError',
+  api: {
+    operationId: 'acceptSourceRemoval',
+    summary: 'Arm a one-shot acceptance of the last refused source removal',
+    tags: ['sources'],
+    params: z.strictObject({ source: ulid }),
+    responses: { 204: null },
+  },
+} as const satisfies ApiRouteSpec;

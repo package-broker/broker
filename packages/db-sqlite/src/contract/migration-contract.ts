@@ -906,6 +906,86 @@ export function describeMigrationContract(
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
       });
     });
+
+    it.each([
+      { mismatch: 'user', operation: 'INSERT' },
+      { mismatch: 'org', operation: 'INSERT' },
+      { mismatch: 'user', operation: 'UPDATE' },
+      { mismatch: 'org', operation: 'UPDATE' },
+    ])(
+      'session $operation rejects an identity from another $mismatch',
+      async ({ mismatch, operation }) => {
+        await withPair(open, async ({ executor }) => {
+          await enableForeignKeys(executor);
+          await migrate(executor, [await core0001()], { holder: 'session-identity' });
+          await seedPopulated(executor);
+          await run(executor, 'DROP INDEX organization_singleton');
+          await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+            OTHER_ORG,
+            'other',
+            'Other',
+          ]);
+          await run(executor, 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)', [
+            'other-user',
+            ORG,
+            'other@example.test',
+          ]);
+          await run(
+            executor,
+            'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
+            [
+              'other-identity',
+              mismatch === 'org' ? OTHER_ORG : ORG,
+              mismatch === 'user' ? 'other-user' : USER,
+              'dex',
+              'other-subject',
+              'other@example.test',
+            ],
+          );
+          const insert = (identity: string | null) =>
+            run(
+              executor,
+              'INSERT INTO session (id, org_id, user_id, identity_id, secret_hash, csrf_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              ['session', ORG, USER, identity, HASH_64, HASH_64, EXPIRY],
+            );
+          if (operation === 'UPDATE') await insert(IDENTITY);
+
+          await expect(
+            operation === 'INSERT'
+              ? insert('other-identity')
+              : run(executor, 'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?', [
+                  'other-identity',
+                  ORG,
+                  'session',
+                ]),
+          ).rejects.toMatchObject({ kind: 'foreign_key' });
+          expect(
+            await rows(executor, 'SELECT identity_id FROM session WHERE org_id = ?', [ORG]),
+          ).toEqual(operation === 'INSERT' ? [] : [{ identity_id: IDENTITY }]);
+          expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        });
+      },
+    );
+
+    it.each([null, IDENTITY])(
+      'session accepts its own identity or local login: %s',
+      async (identity) => {
+        await withPair(open, async ({ executor }) => {
+          await enableForeignKeys(executor);
+          await migrate(executor, [await core0001()], { holder: 'session-identity' });
+          await seedPopulated(executor);
+          await run(
+            executor,
+            'INSERT INTO session (id, org_id, user_id, identity_id, secret_hash, csrf_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            ['session', ORG, USER, identity, HASH_64, HASH_64, EXPIRY],
+          );
+          expect(
+            await rows(executor, 'SELECT identity_id FROM session WHERE org_id = ?', [ORG]),
+          ).toEqual([{ identity_id: identity }]);
+          expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        });
+      },
+    );
   });
 
   describeOrgKeyContract(name, open);
@@ -1001,8 +1081,7 @@ export function describeSchemaEquivalenceContract(
   open: () => Promise<OpenedExecutor>,
 ): void {
   describe(`baseline schema equivalence: ${name}`, () => {
-    it('matches the recorded 0001–0024 normalized sqlite_schema and per-table index order', async () => {
-      // Captured from the original 24 migrations, including pragma_index_list sequence numbers.
+    it('matches the recorded 0001–0024 schema with the session identity binding and per-table index order', async () => {
       const oldChain = JSON.parse(
         readFileSync(new URL('../migrations/old-chain-schema.json', import.meta.url), 'utf8'),
       ) as SchemaDump;

@@ -6,6 +6,7 @@ import type { AuthenticatedActor, MutationFence } from '@package-broker/core/aut
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { assertGuard, compile, db, runOrgFenced, type ProtectedHolderProvider } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { createGrantRepository } from './grant.js';
 import { createRoleRepository } from './role.js';
 import { createUnlinkRepository } from './unlink.js';
@@ -315,9 +316,11 @@ describe('actorHolds through assertGuard', () => {
 
   it('rolls back when the session identity does not belong to the user', async () => {
     const foreignIdentity = '01J0IDENT00000000000000002';
-    await executor.batch([
-      stmt('UPDATE session SET identity_id = ? WHERE id = ?', foreignIdentity, SESSION),
-    ]);
+    await withForeignKeysOff(executor, () =>
+      executor.batch([
+        stmt('UPDATE session SET identity_id = ? WHERE id = ?', foreignIdentity, SESSION),
+      ]),
+    );
     expect(await commits({ permission: PERMISSION, projectId: PA })).toBe(false);
   });
 });
@@ -799,28 +802,32 @@ describe('shared actor session identity binding', () => {
   });
 
   it.each(CALLERS)('%s rolls back with a foreign-account identity', async (caller) => {
-    await executor.batch([
-      stmt(
-        'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
-        OTHER_IDENTITY,
-        a.orgId,
-        SESSION,
-      ),
-    ]);
+    await withForeignKeysOff(executor, () =>
+      executor.batch([
+        stmt(
+          'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
+          OTHER_IDENTITY,
+          a.orgId,
+          SESSION,
+        ),
+      ]),
+    );
     const before = await authorityTargets();
     expect(await callWriter(caller)).toBe(false);
     expect(await authorityTargets()).toEqual(before);
   });
 
   it.each(CALLERS)('%s rolls back with a foreign-org identity', async (caller) => {
-    await executor.batch([
-      stmt(
-        'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
-        FOREIGN_IDENTITY,
-        a.orgId,
-        SESSION,
-      ),
-    ]);
+    await withForeignKeysOff(executor, () =>
+      executor.batch([
+        stmt(
+          'UPDATE session SET identity_id = ? WHERE org_id = ? AND id = ?',
+          FOREIGN_IDENTITY,
+          a.orgId,
+          SESSION,
+        ),
+      ]),
+    );
     const before = await authorityTargets();
     expect(await callWriter(caller)).toBe(false);
     expect(await authorityTargets()).toEqual(before);

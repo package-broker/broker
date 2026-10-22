@@ -296,7 +296,8 @@ CREATE TABLE identity (
   email_verified INTEGER NOT NULL DEFAULT 0 CHECK (email_verified IN (0, 1)),
   created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  validated_at   TEXT
+  validated_at   TEXT,
+  UNIQUE (org_id, id, user_id)
 ) STRICT;
 
 CREATE TABLE identity_block (
@@ -414,7 +415,7 @@ CREATE TABLE session (
   id           TEXT NOT NULL PRIMARY KEY,
   org_id       TEXT NOT NULL REFERENCES organization (id),
   user_id      TEXT NOT NULL REFERENCES user_account (id),
-  identity_id  TEXT REFERENCES identity (id),
+  identity_id  TEXT,
   secret_hash  TEXT NOT NULL CHECK (length(secret_hash) = 64),
   csrf_hash    TEXT NOT NULL CHECK (length(csrf_hash) = 64),
   created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -423,7 +424,8 @@ CREATE TABLE session (
   reauth_at    TEXT,
   revoked_at   TEXT,
   ip           TEXT,
-  user_agent   TEXT
+  user_agent   TEXT,
+  FOREIGN KEY (org_id, identity_id, user_id) REFERENCES identity (org_id, id, user_id)
 ) STRICT;
 
 CREATE TABLE source (

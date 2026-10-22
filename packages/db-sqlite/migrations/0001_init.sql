@@ -494,7 +494,9 @@ CREATE TABLE token (
   validation_identity_id TEXT REFERENCES identity (id) ON DELETE SET NULL CHECK (validation_identity_id IS NULL OR (validation_kind IS NOT 'local' AND kind = 'pat')),
   last_op_id             TEXT,
   CHECK ( (kind = 'pat' AND user_id IS NOT NULL AND service_principal_id IS NULL AND customer_id IS NULL) OR (kind = 'svc' AND service_principal_id IS NOT NULL AND user_id IS NULL AND customer_id IS NULL) OR (kind = 'cst' AND customer_id IS NOT NULL AND user_id IS NULL AND service_principal_id IS NULL) ),
-  CHECK (kind = 'cst' OR expires_at IS NOT NULL)
+  CHECK (kind = 'cst' OR expires_at IS NOT NULL),
+  -- The single-column FK clears only the identity on deletion; this FK enforces ownership.
+  FOREIGN KEY (org_id, validation_identity_id, user_id) REFERENCES identity (org_id, id, user_id)
 ) STRICT;
 
 CREATE TABLE token_project (

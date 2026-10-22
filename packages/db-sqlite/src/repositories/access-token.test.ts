@@ -7,6 +7,7 @@ import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import {
   createAccessRepository,
   lookupTokenStatement,
@@ -616,7 +617,8 @@ describe('lookupToken project binding for listing', () => {
     await seed(
       pat('pat-exp', { expiresAt: at(-HOUR) }),
       pat('pat-rev', { revokedAt: at(-HOUR) }),
-      pat('pat-susp', { userId: U3 }),
+      identity(a, '01J0IDENT000000000000000U3', U3, 'u3@example.test', at(-HOUR)),
+      pat('pat-susp', { userId: U3, validationIdentityId: '01J0IDENT000000000000000U3' }),
     );
 
     for (const label of ['pat-exp', 'pat-rev', 'pat-susp']) {
@@ -1188,7 +1190,7 @@ describe('round 2: expiry, local validation, plans, bindings', () => {
   });
 
   it('denies a PAT whose user belongs to another organization', async () => {
-    await seed(pat('pat-alien', { userId: UB }));
+    await withForeignKeysOff(executor, () => seed(pat('pat-alien', { userId: UB })));
 
     const result = await lookup('pat-alien');
 

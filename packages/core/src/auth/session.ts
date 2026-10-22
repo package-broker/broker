@@ -85,10 +85,13 @@ function timestampMs(value: string): number {
   return ms;
 }
 
-export async function sessionMetaOf(request: Request): Promise<SessionMeta> {
+export async function sessionMetaOf(
+  request: Request,
+  resolveClientIp: (request: Request) => string | null = clientIp,
+): Promise<SessionMeta> {
   const secret = sessionSecretOf(request);
   return {
-    ip: clientIp(request),
+    ip: resolveClientIp(request),
     userAgent: nonEmpty(request.headers.get('user-agent')),
     previousSecretHash: secret === null ? null : await sha256Hex(secret),
   };

@@ -27,7 +27,7 @@ const mf = new Miniflare(
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
     compatibilityDate: '2026-10-01',
-    d1Databases: ['APDB0', 'APDB1'],
+    d1Databases: ['APDB0', 'APDB1', 'APDB2'],
   } as Parameters<typeof convertV4MiniflareOptions>[0]),
 );
 
@@ -223,5 +223,68 @@ describe('Workers management API personal access token lifecycle', () => {
       }),
     );
     expect(reordered.status).toBe(204);
+  });
+
+  it('attaches and detaches an organization source over the real store with audit rows', async () => {
+    const { call, executor, cookie, csrf } = await boot('APDB2');
+    const write = { cookie, 'x-csrf-token': csrf };
+    const slugs = ['alpha', 'beta'];
+    const ids: string[] = [];
+    for (const slug of slugs) {
+      const created = await call(
+        request('/_pb/projects', {
+          method: 'POST',
+          body: { slug, name: slug },
+          headers: write,
+        }),
+      );
+      expect(created.status).toBe(201);
+      ids.push(((await created.json()) as { id: string }).id);
+    }
+    const [org] = await executor.all<{ id: string }>({
+      sql: 'SELECT id FROM organization',
+      params: [],
+    });
+    const [source, foreign] = [ulid(), ulid()];
+    await executor.batch(
+      (
+        [
+          [source, null],
+          [foreign, ids[1] ?? ''],
+        ] as [string, string | null][]
+      ).map(([id, owner]) => ({
+        sql: "INSERT INTO source (id, org_id, name, ecosystem, type, project_id) VALUES (?, ?, ?, 'composer', 'composer_repository', ?)",
+        params: [id, org?.id ?? '', id, owner],
+      })),
+    );
+    const target = (id: string) => `/_pb/projects/alpha/sources/${id}/attachment`;
+    const listed = async () =>
+      (
+        (await (await call(request('/_pb/projects/alpha/sources', { headers: write }))).json()) as {
+          items: { id: string }[];
+        }
+      ).items.map((item) => item.id);
+    expect(await listed()).not.toContain(source);
+
+    const put = (id: string) =>
+      call(request(target(id), { method: 'PUT', body: {}, headers: write }));
+    expect((await put(source)).status).toBe(204);
+    expect(await listed()).toContain(source);
+    expect((await put(source)).status).toBe(204);
+    expect((await put(foreign)).status).toBe(404);
+
+    const del = () => call(request(target(source), { method: 'DELETE', headers: write }));
+    expect((await del()).status).toBe(204);
+    expect(await listed()).not.toContain(source);
+    expect((await del()).status).toBe(404);
+
+    const actions = (
+      await executor.all<{ action: string }>({
+        sql: 'SELECT action FROM audit_pending ORDER BY created_at',
+        params: [],
+      })
+    ).map((row) => row.action);
+    expect(actions.filter((action) => action === 'source.attach')).toHaveLength(1);
+    expect(actions.filter((action) => action === 'source.detach')).toHaveLength(1);
   });
 });

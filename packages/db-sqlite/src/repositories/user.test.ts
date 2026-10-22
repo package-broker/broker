@@ -853,8 +853,8 @@ describe('invitation predicate at spike scale', () => {
       sequence += 1;
     }
 
-    for (let start = 0; start < statements.length; start += 400) {
-      await executor.batch(statements.slice(start, start + 400));
+    for (let start = 0; start < statements.length; start += 200) {
+      await executor.batch(statements.slice(start, start + 200));
     }
     return { grants, random, memberships };
   }

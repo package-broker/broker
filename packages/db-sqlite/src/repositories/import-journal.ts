@@ -8,7 +8,13 @@ import {
 } from '@package-broker/core/authz/fence';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { auditEvent, type AuditEventInput } from '@package-broker/core/audit/actions';
-import type { OrgContext, SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
+import {
+  D1_STATEMENTS_PER_BATCH,
+  type OrgContext,
+  type SqlExecutor,
+  type SqlValue,
+  type Statement,
+} from '@package-broker/core/db/port';
 import type {
   ImportApplyItem,
   ImportApplyRun,
@@ -43,7 +49,6 @@ const ENTITY = {
 } as const;
 const SESSION_ONLY = PERMISSIONS.filter((p) => p.sessionOnly).map((p) => p.name);
 const VERSION_DOMAIN = ['blob_id', 'published_at', 'status', 'metadata_json'] as const;
-const MAX_BATCH_STATEMENTS = 900;
 const MAX_STATEMENT_PARAMETERS = 100;
 const MAX_STATEMENT_SQL_BYTES = 100_000;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
@@ -116,7 +121,7 @@ export async function hash(
   return Array.from(new Uint8Array(bytes), (v) => v.toString(16).padStart(2, '0')).join('');
 }
 export function withinBatchBudget(statements: readonly Statement[]): boolean {
-  if (statements.length > MAX_BATCH_STATEMENTS) return false;
+  if (statements.length > D1_STATEMENTS_PER_BATCH) return false;
   let bytes = 0;
   for (const statement of statements) {
     const sqlBytes = ENCODER.encode(statement.sql).byteLength;

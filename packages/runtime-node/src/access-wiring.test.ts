@@ -967,8 +967,8 @@ describe('node access wiring', () => {
           roleId,
         ],
       });
-      for (let i = 0; i < seed.length; i += 500)
-        await opened.executor.batch(seed.slice(i, i + 500));
+      for (let i = 0; i < seed.length; i += 200)
+        await opened.executor.batch(seed.slice(i, i + 200));
 
       const listed = await services?.projectList.list(
         ctx,

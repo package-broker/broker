@@ -1,3 +1,5 @@
+import { D1_STATEMENTS_PER_BATCH } from './port.js';
+
 export type DbErrorKind =
   'unique' | 'foreign_key' | 'not_null' | 'check' | 'busy' | 'too_big' | 'unknown';
 
@@ -82,4 +84,13 @@ export function classifySqliteError(error: unknown): DbError {
       : undefined;
 
   return new DbError(kind, `${kind}: ${originalMessage(error)}`, { cause: error, constraint });
+}
+
+export function assertBatchStatementCount(count: number): void {
+  if (count > D1_STATEMENTS_PER_BATCH) {
+    throw new DbError(
+      'too_big',
+      `too_big: batch holds ${count} statements, D1 allows at most ${D1_STATEMENTS_PER_BATCH}`,
+    );
+  }
 }

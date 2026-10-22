@@ -53,6 +53,7 @@ export const PROJECT_API_SPECS = [
     service: 'ProjectListError',
     api: {
       operationId: 'listProjects',
+      mcp: true,
       summary: 'List readable projects',
       tags: ['projects'],
       query: listQuery,
@@ -81,6 +82,7 @@ export const PROJECT_API_SPECS = [
     service: 'ProjectError',
     api: {
       operationId: 'getProject',
+      mcp: true,
       summary: 'Read a project',
       tags: ['projects'],
       params: projectParams,

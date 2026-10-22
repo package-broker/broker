@@ -1,4 +1,11 @@
-import { observability, platformPorts, plugins, registry, tokens } from '#pb-manifest';
+import {
+  observability,
+  platformPorts,
+  plugins,
+  registry,
+  tokens,
+  vulnerability,
+} from '#pb-manifest';
 import type { BrokerConfig } from '@package-broker/core/config';
 import { createWorker } from './index.js';
 
@@ -11,4 +18,5 @@ export default createWorker(plugins, {
   observability,
   ...(registry === undefined ? {} : { registry }),
   ...(tokens === undefined ? {} : { tokens }),
+  ...(vulnerability === undefined ? {} : { vulnerability }),
 });

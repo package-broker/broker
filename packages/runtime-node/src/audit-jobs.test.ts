@@ -37,6 +37,7 @@ describe('Node audit job registration', () => {
           definition.schedule,
         ]),
       ).toEqual([
+        ['core:vulnerability-sync:v1', { everySeconds: 300 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400 }],
       ]);

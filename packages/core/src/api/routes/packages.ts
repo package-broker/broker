@@ -4,6 +4,8 @@ import type {
   PackageListQuery,
   VersionListItem,
 } from '../../db/package-admin.js';
+import type { OrgContext } from '../../db/port.js';
+import type { VulnerabilityStatus } from '../../db/vulnerability.js';
 import { isUlid } from '../../ids.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import type { RouteDefinition } from '../../plugin.js';
@@ -29,14 +31,59 @@ function publicPackage(item: PackageListItem): PackageListItem {
   };
 }
 
-function publicVersion(item: VersionListItem): VersionListItem {
+const MASKED_VULNERABILITY: VulnerabilityStatus = Object.freeze({
+  status: 'unknown',
+  reason: 'not_checked',
+  source: null,
+  fetchedAt: null,
+  lastKnownStatus: null,
+  advisoryCount: 0,
+  advisories: [],
+  detailsComplete: false,
+  advisoriesTruncated: false,
+});
+
+function publicVersion(item: VersionListItem, vulnerability: VulnerabilityStatus) {
   const { id, version, stability, status, publishedAt, removedUpstreamAt, tombstonedAt, revision } =
     item;
-  return { id, version, stability, status, publishedAt, removedUpstreamAt, tombstonedAt, revision };
+  return {
+    id,
+    version,
+    stability,
+    status,
+    publishedAt,
+    removedUpstreamAt,
+    tombstonedAt,
+    revision,
+    vulnerability: {
+      status: vulnerability.status,
+      reason: vulnerability.reason,
+      source: vulnerability.source,
+      fetchedAt: vulnerability.fetchedAt,
+      lastKnownStatus: vulnerability.lastKnownStatus,
+      advisoryCount: vulnerability.advisoryCount,
+      advisories: vulnerability.advisories.map((advisory) => ({
+        id: advisory.id,
+        url: advisory.url,
+        severity: {
+          level: advisory.severity.level,
+          entries: advisory.severity.entries.map(({ type, score }) => ({ type, score })),
+        },
+        detailsFetchedAt: advisory.detailsFetchedAt,
+      })),
+      detailsComplete: vulnerability.detailsComplete,
+      advisoriesTruncated: vulnerability.advisoriesTruncated,
+    },
+  };
 }
 
 export function packageRoutes(
-  reader: Pick<PackageAdminReader, 'listProject' | 'listOrganization' | 'listVersions'>,
+  reader: Pick<PackageAdminReader, 'listProject' | 'listOrganization' | 'listVersions'> & {
+    readonly readStatuses?: (
+      ctx: OrgContext,
+      visibleVersionIds: readonly string[],
+    ) => Promise<ReadonlyMap<string, VulnerabilityStatus>>;
+  },
 ): readonly RouteDefinition[] {
   const [projectList, projectVersions, orgList, orgVersions] = PACKAGE_API_SPECS;
   const lists = [projectList, orgList].map((spec) =>
@@ -81,9 +128,26 @@ export function packageRoutes(
         limit: Number(query.limit ?? 50),
         ...(query.after === undefined ? {} : { after: query.after }),
       });
-      return page === null
-        ? { error: 'not_found' }
-        : { status: 200, body: { items: page.items.map(publicVersion), next: page.next } };
+      if (page === null) return { error: 'not_found' };
+      let statuses: ReadonlyMap<string, VulnerabilityStatus> = new Map();
+      try {
+        statuses =
+          (await reader.readStatuses?.(
+            ctx.org,
+            page.items.map((item) => item.id),
+          )) ?? statuses;
+      } catch {
+        // A failed provenance read cannot disclose cached findings.
+      }
+      return {
+        status: 200,
+        body: {
+          items: page.items.map((item) =>
+            publicVersion(item, statuses.get(item.id) ?? MASKED_VULNERABILITY),
+          ),
+          next: page.next,
+        },
+      };
     }),
   );
   return [lists[0]!, versions[0]!, lists[1]!, versions[1]!].map((route) => ({

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createObservability,
+  filterLogLevel,
   type Observability,
   type ObsRecord,
 } from '../platform/observability.js';
@@ -903,12 +904,16 @@ describe('createPolicyFetch round 2', () => {
     expect((await failure(f(request()))).reason).toBe('opaque_redirect');
   });
 
-  it('emits only registered metrics through the real sink, including body-stream errors', async () => {
+  it('emits only registered metrics at the default level, including body-stream errors', async () => {
     const records: ObsRecord[] = [];
     const obs = createObservability(
-      { emit: (r) => void records.push(r) },
+      filterLogLevel({ emit: (r) => void records.push(r) }),
       { deploymentId: 'dep-1', runtime: 'node', requestId: null },
-      { events: new Set(), reasonCodes: new Set(), routeTemplates: new Set() },
+      {
+        events: new Set(['upstream.refused']),
+        reasonCodes: new Set(['upstream.blocked_address']),
+        routeTemplates: new Set(),
+      },
     );
     const ok = make({ 'https://a.example.com/start?x=1': new Response('abc') }, obs);
     await new Response((await ok.run(request())).body).arrayBuffer();
@@ -1036,5 +1041,83 @@ describe('createPolicyFetch round 2', () => {
     }
     expect(delays).toContain(30000);
     expect(delays).not.toContain(600000);
+  });
+});
+
+describe.each(['node', 'cloudflare'] as const)('refusal reporting on %s', (runtime) => {
+  it.each(
+    (['destination', 'dns', 'redirect'] as const).flatMap((kind) =>
+      ([undefined, 'info', 'debug'] as const).map((level) => ({ kind, level })),
+    ),
+  )('reports a $kind refusal at level $level', async ({ kind, level }) => {
+    const records: ObsRecord[] = [];
+    const obs = createObservability(
+      filterLogLevel({ emit: (r) => void records.push(r) }, level),
+      { deploymentId: 'dep-1', runtime, requestId: null, projectId: 'project-1' },
+      {
+        events: new Set(['upstream.refused']),
+        reasonCodes: new Set([
+          'upstream.destination',
+          'upstream.blocked_address',
+          'upstream.redirect_refused',
+        ]),
+        routeTemplates: new Set(),
+      },
+    );
+    const hops: string[] = [];
+    const run = createPolicyFetch({
+      policy: createOutboundPolicy({ allowPrivateHosts: [], runtime, selfOrigins: [] }),
+      userAgent: 'test',
+      observability: obs,
+      sourceId: 'source-1',
+      fetchImpl: async (input) => {
+        hops.push(String(input));
+        if (kind === 'dns') {
+          const cause = Object.assign(new Error('private address'), {
+            name: 'DnsGuardError',
+            reason: 'blocked_address',
+          });
+          throw new TypeError('fetch failed', { cause });
+        }
+        return Response.redirect('https://127.0.0.1/sentinel?token=secret', 302);
+      },
+    });
+    await expect(
+      run(
+        request({
+          url: 'https://a.example.com/?token=secret',
+          ...(kind === 'destination' ? { destinations: ['https://allowed.example.com'] } : {}),
+          ...(kind === 'redirect' ? { redirects: 'error' as const } : {}),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'refused' });
+    const logs = records.filter((r) => r.kind === 'log');
+    expect(logs).toEqual(
+      level === 'debug'
+        ? [
+            {
+              kind: 'log',
+              record: expect.objectContaining({
+                level: 'debug',
+                event: 'upstream.refused',
+                source_id: 'source-1',
+                project_id: 'project-1',
+                reason_code: `upstream.${kind === 'dns' ? 'blocked_address' : kind === 'redirect' ? 'redirect_refused' : 'destination'}`,
+              }),
+            },
+          ]
+        : [],
+    );
+    expect(
+      records.filter(
+        (r) =>
+          r.kind === 'counter' &&
+          r.name === 'pb.upstream.requests' &&
+          r.labels['outcome'] === 'refused',
+      ),
+    ).toEqual([expect.objectContaining({ value: 1 })]);
+    expect(hops).toHaveLength(kind === 'destination' ? 0 : 1);
+    expect(hops.some((url) => url.includes('sentinel'))).toBe(false);
+    expect(JSON.stringify(records)).not.toMatch(/secret|127\.0\.0\.1|example\.com/);
   });
 });

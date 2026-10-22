@@ -84,6 +84,16 @@ describe('brokerObservabilityProblems', () => {
     expect(brokerObservabilityProblems(config({ trustInboundTraceparent: false }))).toEqual([]);
   });
 
+  it.each(['debug', 'info', 'warn', 'error'])('accepts log level %s', (level) => {
+    expect(brokerObservabilityProblems(config({ level }))).toEqual([]);
+  });
+
+  it.each(['secret-level', true, null, 1])('rejects invalid log levels safely', (level) => {
+    expect(brokerObservabilityProblems(config({ level }))).toEqual([
+      'observability.level: must be debug, info, warn or error',
+    ]);
+  });
+
   it('rejects a non-boolean flag without echoing the value', () => {
     const problems = brokerObservabilityProblems(config({ trustInboundTraceparent: 'yes-secret' }));
     expect(problems).toHaveLength(1);

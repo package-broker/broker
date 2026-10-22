@@ -47,7 +47,12 @@ import type { JobDefinition } from '../platform/jobs.js';
 import type { PlatformPorts, Platform, RequestContext, RouteDefinition } from '../plugin.js';
 import { parseSourceConfig } from '../sources/config.js';
 import type { CredentialEchoProbe } from '../sources/credentials.js';
-import type { PolicyFetch, UpstreamCredential } from '../sources/policy-fetch.js';
+import type { Observability } from '../platform/observability.js';
+import type {
+  PolicyFetchOptions,
+  PolicyFetch,
+  UpstreamCredential,
+} from '../sources/policy-fetch.js';
 import {
   type DocumentValidators,
   type ProviderContext,
@@ -96,7 +101,10 @@ export interface RegistryModuleDeps {
   readonly publicUrl: string;
   readonly registry: RegistryConfig;
   readonly outboundPolicy: OutboundPolicy;
-  readonly policyFetch: (userAgent: string) => PolicyFetch;
+  readonly policyFetch: (
+    userAgent: string,
+    options?: Pick<PolicyFetchOptions, 'observability' | 'sourceId'>,
+  ) => PolicyFetch;
   readonly deploymentId: string;
   readonly providers?: readonly SourceProvider[];
   readonly registryJobs?: RegistryJobsDeps;
@@ -216,7 +224,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       : registry.userAgent.default;
   }
 
-  async function bind(ctx: OrgContext, record: SourceRecord) {
+  async function bind(ctx: OrgContext, record: SourceRecord, requestObservability?: Observability) {
     if (record.status === 'paused') return null;
     const parsed = parseSourceConfig(record.type, record.ecosystem, record.url, record.configJson, {
       runtime: deps.runtime,
@@ -236,7 +244,10 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       draft.type === 'vcs' ? draft : ({ ...draft, providerId: provider.id } as ProviderSource);
     const credential = record.credentialId === null ? null : await ingest.credential(ctx, record);
     if (record.credentialId !== null && credential === null) return null;
-    const fetch = deps.policyFetch(userAgentOf(record));
+    const fetch = deps.policyFetch(userAgentOf(record), {
+      sourceId: record.id,
+      observability: requestObservability ?? observability,
+    });
     const boundedFetch: PolicyFetch = (request) =>
       fetch({
         ...request,
@@ -268,10 +279,11 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     ctx: OrgContext,
     sourceId: string,
     key: string,
+    requestObservability?: Observability,
   ): Promise<PackageFillPlan | null> {
     const record = await catalogue.sources.get(ctx, sourceId);
     if (record === null) return null;
-    const bound = await bind(ctx, record);
+    const bound = await bind(ctx, record, requestObservability);
     if (bound === null) return null;
     if (
       bound.source.type === 'composer_repository' &&
@@ -358,7 +370,11 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     } satisfies PackageFillPlan;
   }
 
-  async function planFetch(ctx: OrgContext, target: DistTarget): Promise<DistFetchPlan | null> {
+  async function planFetch(
+    ctx: OrgContext,
+    target: DistTarget,
+    requestObservability?: Observability,
+  ): Promise<DistFetchPlan | null> {
     const row = await catalogue.versionById(ctx, {
       packageId: target.packageId,
       versionId: target.versionId,
@@ -366,7 +382,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     if (row === null) return null;
     const record = await catalogue.sources.get(ctx, target.sourceId);
     if (record === null) return null;
-    const bound = await bind(ctx, record);
+    const bound = await bind(ctx, record, requestObservability);
     if (bound === null) return null;
     return {
       packageName: row.packageName,

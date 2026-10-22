@@ -236,7 +236,7 @@ describe('npmjs proxy provider', () => {
     );
     await expect(opening).rejects.toMatchObject({
       code: 'refused',
-      reason: 'foreign_tarball_host',
+      reason: 'destination',
     });
     expect(hops).toHaveLength(0);
   });
@@ -449,7 +449,7 @@ describe('npm registry provider (GitHub Packages)', () => {
     const { hops, fetch } = upstream({});
     await expect(
       provider.openDist(context(fetch, ghToken()), ghSource, dist(storage, '@acme/widget')),
-    ).rejects.toMatchObject({ code: 'refused', reason: 'foreign_tarball_host' });
+    ).rejects.toMatchObject({ code: 'refused', reason: 'destination' });
     expect(hops).toHaveLength(0);
   });
 
@@ -601,7 +601,7 @@ describe('npm registry provider (distHosts)', () => {
     const { hops, fetch } = upstream({ [cdnTgz]: tarball });
     await expect(
       provider.openDist(context(fetch, acmeToken()), acmeSource([]), dist(cdnTgz, '@acme/widget')),
-    ).rejects.toMatchObject({ code: 'refused', reason: 'foreign_tarball_host' });
+    ).rejects.toMatchObject({ code: 'refused', reason: 'destination' });
     expect(hops).toHaveLength(0);
   });
 

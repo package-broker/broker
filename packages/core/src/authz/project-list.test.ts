@@ -25,7 +25,7 @@ function idOf(n: number): string {
 }
 
 function entry(n: number, status: 'active' | 'archived' = 'active'): ProjectListEntry {
-  return { id: idOf(n), slug: `p${n}`, name: `Project ${n}`, status };
+  return { id: idOf(n), slug: `p${n}`, name: `Project ${n}`, status, revision: 1 };
 }
 
 interface World {
@@ -393,17 +393,34 @@ describe('paging', () => {
   });
 });
 
+describe('prefix validation', () => {
+  it.each(['', '%', '_', 'name%', 'name_', 'x'.repeat(201), '\u0000', 1, null])(
+    'rejects %j before querying',
+    async (q) => {
+      const w = world({ projects: range(1), organizationPermissions: ['project:read'] });
+      const f = setup(w);
+      expect(await f.lister.list(ctx, actorOf(w), { limit: 5, q: q as string })).toEqual({
+        ok: false,
+        error: 'invalid_query',
+      });
+      expect(f.list).not.toHaveBeenCalled();
+      expect(f.listReadableProjects).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('item shape and wiring', () => {
-  it('returns only id, slug, name and status', async () => {
+  it('returns only id, slug, name, status and revision', async () => {
     const w = world({ projects: range(1), organizationPermissions: ['project:read'] });
     const rows = [
       { ...entry(1), tokenMaxScope: 'full', requirePublishApproval: true, revision: 4 },
     ] as unknown as ProjectListEntry[];
     const result = await setup(w, rows).lister.list(ctx, actorOf(w), { limit: 5 });
-    expect(result.ok && result.value.items).toEqual([entry(1)]);
+    expect(result.ok && result.value.items).toEqual([{ ...entry(1), revision: 4 }]);
     expect(result.ok && Object.keys(result.value.items[0] ?? {}).sort()).toEqual([
       'id',
       'name',
+      'revision',
       'slug',
       'status',
     ]);
@@ -712,6 +729,7 @@ describe('restricted listing through the readable source', () => {
       slug: `p${i + 1}`,
       name: `Project ${i + 1}`,
       status: 'active' as const,
+      revision: 1,
     }));
     const w = world({
       projects,
@@ -749,6 +767,7 @@ describe('restricted listing through the readable source', () => {
       slug: `p${i + 1}`,
       name: `Project ${i + 1}`,
       status: 'active' as const,
+      revision: 1,
     }));
     const revoked = validId(1);
     const far = validId(total);

@@ -43,6 +43,7 @@ const REASON_CODES = [
   'error.misconfigured',
   'error.unavailable',
   'error.internal',
+  'error.upstream_refused',
   'db.unique',
   'db.foreign_key',
   'db.not_null',
@@ -85,6 +86,7 @@ const ENVELOPE_REASONS: ReadonlyMap<string, KernelReasonCode> = new Map([
   ['not_bootstrapped', 'error.not_bootstrapped'],
   ['misconfigured', 'error.misconfigured'],
   ['unavailable', 'error.unavailable'],
+  ['upstream_refused', 'error.upstream_refused'],
 ]);
 
 export function envelopeReason(code: string): KernelReasonCode {

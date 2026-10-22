@@ -176,7 +176,7 @@ describe('packagist proxy describe', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('refuses a dev metadata redirect and returns incomplete stable metadata', async () => {
+  it('rejects a refused dev metadata redirect', async () => {
     const target = `${REPO}/p2/evil/other.json`;
     const { calls, fetch } = setup({
       [`${REPO}/p2/${NAME}.json`]: { status: 200, body: p2('1.0.0') },
@@ -187,25 +187,23 @@ describe('packagist proxy describe', () => {
       [target]: { status: 200, body: p2('dev-main') },
     });
     const failures: unknown[] = [];
-    const result = await describePackagist(
-      async (request) => {
-        try {
-          return await fetch(request);
-        } catch (error) {
-          failures.push(error);
-          throw error;
-        }
-      },
-      NAME,
-      { path: 'request', clock: fixedClock(NOW) },
-    );
+    await expect(
+      describePackagist(
+        async (request) => {
+          try {
+            return await fetch(request);
+          } catch (error) {
+            failures.push(error);
+            throw error;
+          }
+        },
+        NAME,
+        { path: 'request', clock: fixedClock(NOW) },
+      ),
+    ).rejects.toMatchObject({ code: 'refused' });
     expect(failures).toEqual([
       expect.objectContaining({ code: 'refused', reason: 'redirect_refused' }),
     ]);
-    expect(result.kind).toBe('found');
-    if (result.kind !== 'found') return;
-    await drain(result.description);
-    expect(result.description.upstreamComplete).toBe(false);
     expect(calls.some((call) => call.url === target)).toBe(false);
     expect(calls).toHaveLength(2);
   });

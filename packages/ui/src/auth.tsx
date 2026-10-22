@@ -7,7 +7,7 @@ import {
   useSyncExternalStore,
   type FormEvent,
 } from 'react';
-import type { ApiClient, ApiRequestDescription } from './api.js';
+import type { ApiClient, ApiErrorCode, ApiRequestDescription, ApiResult } from './api.js';
 import type { paths } from './api-types.js';
 import {
   loadPending,
@@ -188,6 +188,7 @@ export interface ReplayResult {
   readonly path: string;
   readonly ok: boolean;
   readonly status: number;
+  readonly code?: ApiErrorCode;
 }
 
 export function createReauthFlow(deps: {
@@ -270,11 +271,16 @@ export function createReauthFlow(deps: {
         method: string,
         path: string,
         init: object,
-      ) => Promise<{ ok: boolean; status: number }>;
+      ) => Promise<ApiResult<unknown>>;
       let outcome: ReplayResult;
       try {
         const result = await replay(action.method.toLowerCase(), action.path, init);
-        outcome = { path: action.path, ok: result.ok, status: result.status };
+        outcome = {
+          path: action.path,
+          ok: result.ok,
+          status: result.status,
+          ...(!result.ok ? { code: result.code } : {}),
+        };
         store.set({ dialog: 'closed', busy: false, outcome: result.ok ? 'replayed' : 'failed' });
       } catch {
         outcome = { path: action.path, ok: false, status: 0 };

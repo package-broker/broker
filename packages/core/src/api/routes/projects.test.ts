@@ -333,7 +333,93 @@ describe('PROJECT_API_SPECS', () => {
 });
 
 describe('GET /_pb/projects', () => {
-  const entry = { id: PROJECT, slug: 'demo', name: 'Demo', status: 'active' as const };
+  const entry = { id: PROJECT, slug: 'demo', name: 'Demo', status: 'active' as const, revision: 7 };
+  const listedEntry = { id: PROJECT, slug: 'demo', name: 'Demo', status: 'active', etag: '"r7"' };
+
+  it('forwards a name prefix with pagination', async () => {
+    const f = await fixture();
+    const response = await f.request('GET', `/_pb/projects?q=Demo&limit=2&after=${OTHER}`);
+    expect(response.status).toBe(200);
+    expect(vi.mocked(f.lister.list).mock.calls[0]![2]).toEqual({
+      q: 'Demo',
+      limit: 2,
+      afterId: OTHER,
+      status: 'active',
+    });
+  });
+
+  it.each([
+    '%',
+    '_',
+    'demo%',
+    'demo_',
+    '',
+    'a'.repeat(201),
+    'secret\u0000prefix',
+    'secret\n',
+    'secret\r',
+  ])('rejects invalid prefix %j without echoing it', async (q) => {
+    const f = await fixture();
+    const response = await f.request('GET', `/_pb/projects?q=${encodeURIComponent(q)}`);
+    expect(response.status).toBe(400);
+    const text = await response.text();
+    if (q.length > 1) expect(text).not.toContain(q.split('\u0000')[0]!);
+    expect(JSON.parse(text)).toMatchObject({
+      error: {
+        code: 'invalid_request',
+        details: expect.arrayContaining([expect.objectContaining({ path: '/query/q' })]),
+      },
+    });
+    expect(f.lister.list).not.toHaveBeenCalled();
+    expect(f.logged).toEqual([]);
+  });
+
+  it('uses the same per-item ETag as an active GET', async () => {
+    const f = await fixture({
+      listed: { ok: true, value: { items: [PROJECT_ROW], nextAfterId: null } },
+    });
+    const list = (await (await f.request('GET', '/_pb/projects')).json()) as {
+      items: { etag: string }[];
+    };
+    const get = await f.request('GET', '/_pb/projects/demo');
+    expect(list.items[0]!.etag).toBe(get.headers.get('etag'));
+    expect(list.items[0]!.etag).toBe('"r7"');
+  });
+
+  it('lists an archived ETag for restore while concealing its GET', async () => {
+    const archived = { ...PROJECT_ROW, status: 'archived' as const };
+    const f = await fixture({
+      row: archived,
+      listed: { ok: true, value: { items: [archived], nextAfterId: null } },
+    });
+    const list = (await (await f.request('GET', '/_pb/projects?status=archived')).json()) as {
+      items: { etag: string }[];
+    };
+    expect((await f.request('GET', '/_pb/projects/demo')).status).toBe(404);
+    expect(list.items[0]!.etag).toBe('"r7"');
+    expect(
+      (await f.request('POST', '/_pb/projects/demo/restore', { ifMatch: list.items[0]!.etag }))
+        .status,
+    ).toBe(204);
+    expect(f.restoreProject.mock.calls[0]![2].expected).toEqual({ project: 7 });
+  });
+
+  it('answers 412 when an archived list ETag has become stale', async () => {
+    const archived = { ...PROJECT_ROW, status: 'archived' as const };
+    const f = await fixture({
+      row: archived,
+      storeAnswer: { restore: 'conflict' },
+      listed: { ok: true, value: { items: [archived], nextAfterId: null } },
+    });
+    const list = (await (await f.request('GET', '/_pb/projects?status=archived')).json()) as {
+      items: { etag: string }[];
+    };
+    expect(list.items[0]!.etag).toBe('"r7"');
+    expect(
+      (await f.request('POST', '/_pb/projects/demo/restore', { ifMatch: list.items[0]!.etag }))
+        .status,
+    ).toBe(412);
+  });
 
   it('answers 401 to an anonymous caller', async () => {
     const f = await fixture();
@@ -348,7 +434,7 @@ describe('GET /_pb/projects', () => {
     });
     const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ items: [entry], next: null });
+    expect(await response.json()).toEqual({ items: [listedEntry], next: null });
     const [, actor, request] = vi.mocked(f.lister.list).mock.calls[0]!;
     expect(actor).toMatchObject({ kind: 'organization', userId: 'user-1' });
     expect(actor.isOrganizationAdmin).toBe(false);
@@ -396,7 +482,7 @@ describe('GET /_pb/projects', () => {
       listed: { ok: true, value: { items: [entry], nextAfterId: null } },
     });
     const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
-    expect(await response.json()).toEqual({ items: [entry], next: null });
+    expect(await response.json()).toEqual({ items: [listedEntry], next: null });
     expect(vi.mocked(f.lister.list).mock.calls[0]![2]).toMatchObject({
       restrictTo: [PROJECT, OTHER],
     });
@@ -410,7 +496,7 @@ describe('GET /_pb/projects', () => {
       listed: { ok: true, value: { items: [entry, stray], nextAfterId: null } },
     });
     const response = await f.request('GET', '/_pb/projects', { auth: 'token' });
-    expect(await response.json()).toEqual({ items: [entry], next: null });
+    expect(await response.json()).toEqual({ items: [listedEntry], next: null });
   });
 
   it('answers an empty list to a selected PAT with no bound project without asking the lister', async () => {
@@ -465,7 +551,7 @@ describe('GET /_pb/projects', () => {
       listed: { ok: true, value: { items: [entry], nextAfterId: PROJECT } },
     });
     const response = await f.request('GET', `/_pb/projects?limit=2&after=${after}&status=archived`);
-    expect(await response.json()).toEqual({ items: [entry], next: PROJECT });
+    expect(await response.json()).toEqual({ items: [listedEntry], next: PROJECT });
     expect(vi.mocked(f.lister.list).mock.calls[0]![2]).toEqual({
       limit: 2,
       afterId: after,

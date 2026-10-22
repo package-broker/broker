@@ -127,9 +127,14 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
             key,
             outcome: resolved,
             signal: ctx.request.signal,
+            ...(ctx.ports.platform === undefined
+              ? {}
+              : { observability: ctx.ports.platform.observability }),
           });
           if (filled.kind === 'not_found') return notFound(ctx.requestId);
           if (filled.kind === 'busy') return unavailable(ctx.requestId, filled.retryAfterSeconds);
+          if (filled.kind === 'upstream_refused')
+            return apiError('upstream_refused', ctx.requestId);
           if (filled.kind === 'upstream_error') return apiError('bad_gateway', ctx.requestId);
           if (filled.kind === 'serve' && filled.background !== undefined) {
             deferOf(ctx)(filled.background);
@@ -192,7 +197,12 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
               versionId: ref.versionId,
               revision: ref.revision,
             },
-            { signal: ctx.request.signal },
+            {
+              signal: ctx.request.signal,
+              ...(ctx.ports.platform === undefined
+                ? {}
+                : { observability: ctx.ports.platform.observability }),
+            },
           );
           if (result.kind === 'busy') return unavailable(ctx.requestId, result.retryAfterSeconds);
           if (result.kind === 'refused') return apiError('bad_gateway', ctx.requestId);

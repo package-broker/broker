@@ -205,7 +205,7 @@ describe.each(['node', 'cloudflare'])('%s access services contract', () => {
       expect(await list()).toEqual({
         ok: true,
         value: {
-          items: [{ id: 'P', slug: 'alpha', name: 'Alpha', status: 'active' }],
+          items: [{ id: 'P', slug: 'alpha', name: 'Alpha', status: 'active', revision: 1 }],
           nextAfterId: null,
         },
       });

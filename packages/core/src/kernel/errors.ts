@@ -1,3 +1,5 @@
+import { API_ERROR_CODES } from '../api/response.js';
+import { UpstreamError } from '../sources/policy-fetch.js';
 import { DbError } from '../db/errors.js';
 import { errorEnvelope } from '../envelope.js';
 import { BlobBusyError } from '../platform/blob.js';
@@ -54,6 +56,9 @@ interface Mapping {
 }
 
 function mappingOf(error: unknown): Mapping {
+  if (error instanceof UpstreamError && error.code === 'refused') {
+    return { ...API_ERROR_CODES.upstream_refused, code: 'upstream_refused' };
+  }
   if (error instanceof NotBootstrappedError) {
     return { status: 503, code: 'not_bootstrapped', message: 'Organization is not bootstrapped' };
   }

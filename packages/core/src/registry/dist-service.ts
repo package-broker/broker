@@ -17,6 +17,7 @@ import {
 } from '../ingest/dist-fetch.js';
 import type { Clock } from '../ids.js';
 import type { BlobRead, BlobStore, Sha256 } from '../platform/blob.js';
+import type { Observability } from '../platform/observability.js';
 import type { AccessRecorder } from './access-recorder.js';
 
 export const DIST_BUSY_RETRY_AFTER_SECONDS = 5;
@@ -57,12 +58,17 @@ export interface DistServiceDeps {
   readonly clock: Clock;
   readonly leaseKey: (parts: readonly string[]) => Promise<string>;
   readonly writeGuard: (ctx: OrgContext, handle: FetchLeaseHandle) => CatalogueWriteGuard;
-  readonly planFetch: (ctx: OrgContext, target: DistTarget) => Promise<DistFetchPlan | null>;
+  readonly planFetch: (
+    ctx: OrgContext,
+    target: DistTarget,
+    observability?: Observability,
+  ) => Promise<DistFetchPlan | null>;
   readonly recorder: Pick<AccessRecorder, 'record'>;
   readonly coalesce?: Pick<CoalesceOptions, 'waitBudgetMs' | 'pollMs'>;
 }
 
 export interface DistServeOptions {
+  readonly observability?: Observability;
   /** Aborting cancels the coalesced wait and, for the lease holder, the upstream fetch. */
   readonly signal?: AbortSignal;
 }
@@ -163,10 +169,11 @@ export function createDistService(deps: DistServiceDeps): DistService {
     signal: AbortSignal,
     isDone: () => Promise<DoneState>,
     onRefused: () => void,
+    observability?: Observability,
   ): Promise<DoneState> {
     const handle = handles.get(scoped(ctx, key));
     if (handle === undefined) return 'pending';
-    const plan = await deps.planFetch(ctx, target);
+    const plan = await deps.planFetch(ctx, target, observability);
     if (plan === null) return 'negative';
     const outcome: DistFetchOutcome = await fetchAndVerifyDist(
       {
@@ -235,9 +242,17 @@ export function createDistService(deps: DistServiceDeps): DistService {
         (signal) =>
           latest === null
             ? Promise.resolve('negative')
-            : fill(ctx, latest, key, signal, isDone, () => {
-                refused = true;
-              }),
+            : fill(
+                ctx,
+                latest,
+                key,
+                signal,
+                isDone,
+                () => {
+                  refused = true;
+                },
+                options?.observability,
+              ),
         { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
       );
 

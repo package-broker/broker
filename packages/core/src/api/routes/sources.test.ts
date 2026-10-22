@@ -15,6 +15,7 @@ import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
 import { createSourceService } from '../../sources/source-service.js';
 import { defineApi } from '../route.js';
+import { generateOpenApi } from '../openapi.js';
 import { ACCEPT_REMOVAL_API_SPEC, SOURCE_API_SPECS } from './sources-schemas.js';
 import { sourceRoutes } from './sources.js';
 
@@ -770,6 +771,21 @@ it('guards project source listing if the project is archived after authorization
 describe('POST /_pb/sources/:source/accept-removal', () => {
   const path = `/_pb/sources/${SOURCE}/accept-removal`;
   const refusal = { at: '2026-10-22T10:00:00.000Z', absent: 9, listed: 1, successful: 1 };
+  it('documents conflicts with the shared error envelope', () => {
+    const document = generateOpenApi([ACCEPT_REMOVAL_API_SPEC], {
+      title: 'Package Broker',
+      version: '2.0.0',
+    });
+    expect(document.paths['/_pb/sources/{source}/accept-removal']?.post?.responses).toMatchObject({
+      204: { description: 'No content' },
+      409: {
+        content: {
+          'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+        },
+      },
+    });
+  });
+
   it('returns 404 without the optional method while source reads remain available', async () => {
     const f = await fixture({ admin: true, acceptRemoval: false });
     expect((await f.request('POST', path)).status).toBe(404);

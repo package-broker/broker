@@ -105,12 +105,11 @@ export async function openNpmTarball(
   } catch {
     throw refused('tarball_url');
   }
-  if (!tarballOrigins.includes(origin)) throw refused('foreign_tarball_host');
   const response = await ctx.fetch({
     url: target.url,
     method: 'GET',
     headers: { accept: 'application/octet-stream' },
-    destinations,
+    destinations: tarballOrigins.includes(origin) ? destinations : [],
     ...(credential === undefined ? {} : { credential }),
     purpose: 'archive',
     maxBytes: UPSTREAM_DEFAULTS.archiveMaxBytes,

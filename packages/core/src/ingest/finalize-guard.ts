@@ -1,3 +1,4 @@
+import { UPSTREAM_REFUSAL_REASON_CODES } from '../sources/policy-fetch.js';
 import type { FinalizeEvidence } from '../db/catalogue.js';
 import { noopObservability, type Observability } from '../platform/observability.js';
 import { assertNoMassAbsence, MassAbsenceError } from './absence-guard.js';
@@ -6,6 +7,7 @@ export const DEFAULT_MAX_ABSENCE_SHARE = 0.25;
 export const DEFAULT_MIN_PACKAGES = 10;
 
 export const INGEST_EVENTS: ReadonlySet<string> = new Set([
+  'upstream.refused',
   'ingest.mass_absence',
   'ingest.removal_applied',
   'ingest.removal_acceptance_cleared',
@@ -14,6 +16,7 @@ export const INGEST_EVENTS: ReadonlySet<string> = new Set([
   'ingest.budget_exhausted',
 ]);
 export const INGEST_REASON_CODES: ReadonlySet<string> = new Set([
+  ...UPSTREAM_REFUSAL_REASON_CODES,
   'mass_absence',
   'removal_applied',
   'removal_acceptance_cleared',

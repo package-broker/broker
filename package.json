@@ -15,7 +15,7 @@
     "typecheck": "tsc -b",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "pb": "node packages/cli/dist/bin.js",
-    "openapi:sync": "pnpm pb openapi --out packages/ui/openapi.json && pnpm --filter @package-broker/ui run gen:api && prettier --write packages/ui/src/api-types.ts",
+    "openapi:sync": "pnpm pb openapi --out packages/ui/openapi.json && node scripts/sync-openapi-document.mjs && pnpm --filter @package-broker/ui run gen:api && prettier --write packages/ui/src/api-types.ts",
     "bundle": "pnpm pb build --config broker.config.ts --target cloudflare && pnpm pb build --config broker.config.ts --target node",
     "check:pack": "node scripts/check-pack.mjs",
     "check:ui-assets-install": "node scripts/check-ui-assets-install.mjs",

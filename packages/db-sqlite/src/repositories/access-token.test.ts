@@ -1404,7 +1404,7 @@ describe('lookupToken projectVisible', () => {
   });
 
   it.each(['pat', 'svc'] as const)(
-    'answers 403 for an invalid %s binding on a visible project and 404 on an invisible one',
+    'refuses an invalid %s binding within principal visibility and the token project cap',
     async (kind) => {
       const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
       const label = `${kind}-invalid`;
@@ -1444,7 +1444,7 @@ describe('lookupToken projectVisible', () => {
         providerAnchors: () => Promise.resolve([OIDC]),
       });
       for (const [slug, status] of [
-        ['alpha', 403],
+        ['alpha', kind === 'svc' ? 404 : 403],
         ['beta', 404],
         ['nope', 404],
       ] as const) {

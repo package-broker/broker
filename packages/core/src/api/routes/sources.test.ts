@@ -15,7 +15,7 @@ import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
 import { createSourceService } from '../../sources/source-service.js';
 import { defineApi } from '../route.js';
-import { SOURCE_API_SPECS } from './sources-schemas.js';
+import { ACCEPT_REMOVAL_API_SPEC, SOURCE_API_SPECS } from './sources-schemas.js';
 import { sourceRoutes } from './sources.js';
 
 const ORIGIN = 'https://broker.test';
@@ -53,6 +53,9 @@ const fields = [
 async function fixture(
   options: {
     organizationPermissions?: readonly string[];
+    admin?: boolean;
+    refusal?: SourceRecord['removalRefusal'];
+    armed?: boolean;
     projectPermissions?: readonly string[];
     projectState?: 'absent' | 'archived' | 'foreign' | 'invisible';
     archivedAfterAuthorization?: boolean;
@@ -99,8 +102,11 @@ async function fixture(
     removalPolicy: 'flag',
     pollIntervalSeconds: 300,
     lastSuccessAt: null,
+    removalRefusal: options.refusal === undefined ? null : options.refusal,
+    removalAccepted: options.armed ?? false,
   } as SourceRecord;
   const sources = {
+    acceptRemoval: vi.fn().mockResolvedValue('accepted'),
     get: vi.fn(async () => (options.sourceAbsent ? null : row)),
     getVisible: vi.fn(async () =>
       !options.sourceAbsent &&
@@ -181,7 +187,7 @@ async function fixture(
           session: { id: 'session-1', csrfHash: await sha256Hex(CSRF) },
           user: { id: 'user-1' },
           identity: null,
-          protectedHolder: false,
+          protectedHolder: options.admin ?? false,
           project: input.boundary === 'project' ? authorizedProject : null,
           organizationPermissions: orgPermissions,
           projectPermissions: options.projectState === 'invisible' ? [] : projectPermissions,
@@ -687,4 +693,51 @@ it('guards project source listing if the project is archived after authorization
   expect(await f.projects.get.mock.results[0]?.value).toMatchObject({ status: 'archived' });
   expect(f.list).not.toHaveBeenCalled();
   expect(f.sources.list).not.toHaveBeenCalled();
+});
+
+describe('POST /_pb/sources/:source/accept-removal', () => {
+  const path = `/_pb/sources/${SOURCE}/accept-removal`;
+  const refusal = { at: '2026-10-22T10:00:00.000Z', absent: 9, listed: 1, successful: 1 };
+  it('exports a schema and accepts an audited admin request without a body', async () => {
+    expect(() => defineApi(ACCEPT_REMOVAL_API_SPEC)).not.toThrow();
+    const f = await fixture({ admin: true, refusal });
+    expect((await f.request('POST', path)).status).toBe(204);
+    expect(f.sources.acceptRemoval).toHaveBeenCalledWith(
+      expect.anything(),
+      { userId: 'user-1', sessionId: 'session-1', expected: {} },
+      expect.objectContaining({
+        id: SOURCE,
+        refusal,
+        audit: expect.objectContaining({ action: 'source.removal_accepted' }),
+      }),
+    );
+  });
+  it('returns conflict when the repository finds the refusal changed', async () => {
+    const f = await fixture({ admin: true, refusal });
+    f.sources.acceptRemoval.mockResolvedValue('conflict');
+    expect((await f.request('POST', path)).status).toBe(409);
+  });
+  it.each([
+    ['no recorded refusal', {}],
+    ['a total wipe', { refusal: { ...refusal, successful: 0 } }],
+    ['an armed acceptance', { refusal, armed: true }],
+  ])('returns 409 for %s', async (_name, options) => {
+    const f = await fixture({ admin: true, ...options });
+    expect((await f.request('POST', path)).status).toBe(409);
+    expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
+  });
+  it('requires an admin even with delegated source-write permission', async () => {
+    const f = await fixture({ refusal });
+    expect((await f.request('POST', path)).status).toBe(403);
+    expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
+  });
+  it('returns the same 404 for missing and invisible sources', async () => {
+    const missing = await fixture({ admin: true, sourceAbsent: true });
+    const hidden = await fixture({ admin: true, sourceProject: PROJECT, projectState: 'archived' });
+    expect(await normalized(await missing.request('POST', path))).toEqual(
+      await normalized(await hidden.request('POST', path)),
+    );
+    expect((await hidden.request('POST', path)).status).toBe(404);
+    expect(hidden.sources.acceptRemoval).not.toHaveBeenCalled();
+  });
 });

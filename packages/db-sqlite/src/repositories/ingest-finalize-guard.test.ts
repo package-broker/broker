@@ -105,7 +105,7 @@ async function fixture(ecosystem: 'npm' | 'composer', kind: 'source' | 'package'
 
 describe.each(['npm', 'composer'] as const)('%s ingest mass-removal guard', (ecosystem) => {
   it.each(['source', 'package'] as const)(
-    'stops above-share %s finalize before any batch',
+    'stops above-share %s finalize before any removal',
     async (kind) => {
       const session = await fixture(ecosystem, kind, 2);
       const before = await snapshot();
@@ -113,13 +113,79 @@ describe.each(['npm', 'composer'] as const)('%s ingest mass-removal guard', (eco
       const executor: SqlExecutor = { ...database.executor, batch };
       const observability = { counter: vi.fn(), log: vi.fn() };
       expect(
-        await createIngestFinalizer(executor, { observability }).finalize(ctx, session, {
+        await createIngestFinalizer(executor, { observability, minPackages: 0 }).finalize(
+          ctx,
+          session,
+          {
+            expectedCount: 2,
+            upstreamComplete: true,
+            validatorTtlSeconds: 60,
+            ...evidence(2, 3),
+          },
+        ),
+      ).toEqual({ status: 'refused', reason: 'mass_absence' });
+      const after = await snapshot();
+      if (kind === 'source') {
+        expect(batch).toHaveBeenCalledTimes(1);
+        expect(after.slice(1)).toEqual(before.slice(1));
+        expect(after[0]).toEqual(
+          before[0]!.map((row) => ({
+            ...row,
+            last_refusal_at: expect.any(String),
+            last_refusal_absent: 3,
+            last_refusal_listed: 2,
+            last_refusal_successful: 2,
+            updated_at: expect.any(String),
+          })),
+        );
+      } else {
+        expect(batch).not.toHaveBeenCalled();
+        expect(after).toEqual(before);
+      }
+      expect(observability.counter).toHaveBeenCalledTimes(1);
+      expect(observability.log).toHaveBeenCalledWith({
+        level: 'warn',
+        event: 'ingest.mass_absence',
+        reason_code: 'mass_absence',
+      });
+    },
+  );
+
+  it.each(['source', 'package'] as const)(
+    'guards above-share %s finalize unless the source is below the minimum',
+    async (kind) => {
+      const session = await fixture(ecosystem, kind, 2);
+      const before = await snapshot();
+      const batch = vi.fn(database.executor.batch.bind(database.executor));
+      const executor: SqlExecutor = { ...database.executor, batch };
+      const observability = { counter: vi.fn(), log: vi.fn() };
+      const result = await createIngestFinalizer(executor, { observability }).finalize(
+        ctx,
+        session,
+        {
           expectedCount: 2,
           upstreamComplete: true,
           validatorTtlSeconds: 60,
           ...evidence(2, 3),
-        }),
-      ).toEqual({ status: 'refused', reason: 'mass_absence' });
+        },
+      );
+      if (kind === 'source') {
+        expect(result).toMatchObject({ status: 'complete' });
+        expect(batch).toHaveBeenCalledTimes(1);
+        expect(await database.executor.all(stmt('SELECT status FROM version ORDER BY id'))).toEqual(
+          [
+            { status: 'active' },
+            { status: 'active' },
+            { status: 'removed_upstream' },
+            { status: 'removed_upstream' },
+            { status: 'removed_upstream' },
+          ],
+        );
+        expect(observability.counter).not.toHaveBeenCalled();
+        expect(observability.log).not.toHaveBeenCalled();
+        return;
+      }
+      expect(result).toEqual({ status: 'refused', reason: 'mass_absence' });
       expect(batch).not.toHaveBeenCalled();
       expect(await snapshot()).toEqual(before);
       expect(observability.counter).toHaveBeenCalledTimes(1);

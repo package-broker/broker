@@ -2,6 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { assertFinalizeAllowed, DEFAULT_MAX_ABSENCE_SHARE } from './finalize-guard.js';
 
 describe('finalize candidate evidence', () => {
+  it('exempts runs below an explicit minimum package count', () => {
+    const evidence = { attemptedCandidates: 9, successfulCandidates: 1, definitiveAbsent: 8 };
+    expect(() => assertFinalizeAllowed(1, evidence, { minPackages: 10 })).not.toThrow();
+    expect(() => assertFinalizeAllowed(1, evidence)).toThrow('sync stopped');
+  });
+
   it('defaults to a quarter with no small-run exemption', () => {
     expect(DEFAULT_MAX_ABSENCE_SHARE).toBe(0.25);
     expect(() =>

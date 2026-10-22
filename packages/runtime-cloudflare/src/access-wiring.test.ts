@@ -54,6 +54,20 @@ const faults = vi.hoisted(() => ({
 }));
 const kernels = vi.hoisted(() => ({ coreRoutes: [] as unknown[][] }));
 
+const apiModule = vi.hoisted(() => ({ routes: [] as Array<{ method: string; path: string }>[] }));
+
+vi.mock('@package-broker/core/api/module', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@package-broker/core/api/module')>();
+  return {
+    ...actual,
+    createApiModule: (...args: Parameters<typeof actual.createApiModule>) => {
+      const module = actual.createApiModule(...args);
+      apiModule.routes.push([...module.routes]);
+      return module;
+    },
+  };
+});
+
 vi.mock('@package-broker/db-sqlite/repositories/access', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@package-broker/db-sqlite/repositories/access')>();
@@ -837,14 +851,20 @@ describe('cloudflare access wiring on Miniflare D1', () => {
     });
   });
 
-  it('registers no step 5 HTTP resource', async () => {
+  it('registers only the session route and the management API routes outside auth', async () => {
+    apiModule.routes.length = 0;
     await boot();
     const [routes] = kernels.coreRoutes as RouteDefinition[][];
-    expect(
-      (routes ?? [])
-        .map((route) => `${route.method} ${route.path}`)
-        .filter((route) => !route.includes('/_pb/auth/')),
-    ).toEqual(['GET /_pb/session']);
+    const outside = (routes ?? [])
+      .filter((route) => !route.path.includes('/_pb/auth/'))
+      .map((route) => `${route.method} ${route.path}`)
+      .sort();
+    expect(apiModule.routes).toHaveLength(1);
+    const expected = [
+      'GET /_pb/session',
+      ...apiModule.routes[0]!.map((route) => `${route.method} ${route.path}`),
+    ].sort();
+    expect(outside).toEqual(expected);
   });
 
   it('keeps the token telemetry write off the response and inside waitUntil', async () => {

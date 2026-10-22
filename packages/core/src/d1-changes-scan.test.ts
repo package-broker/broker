@@ -317,6 +317,8 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/registered-name.ts',
   'db-sqlite/src/repositories/session-liveness.ts',
   'db-sqlite/src/repositories/session.ts',
+  'db-sqlite/src/repositories/source-removal.ts',
+  'db-sqlite/src/repositories/source-selection.ts',
   'db-sqlite/src/repositories/upstream-state.ts',
   'db-sqlite/src/repositories/visibility-attach.ts',
   'db-sqlite/src/repositories/visibility-audit.ts',
@@ -385,7 +387,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     "deleteFrom('fetch_lease') x2; insertInto('fetch_lease') [onConflict:doUpdateSet]; updateTable('fetch_lease')",
   'db-sqlite/src/repositories/idempotency.ts':
     'DELETE FROM api_idempotency; INSERT INTO api_idempotency',
-  'db-sqlite/src/repositories/ingest-finalize.ts': 'UPDATE ingest_session',
+  'db-sqlite/src/repositories/ingest-finalize.ts': 'UPDATE ingest_session; UPDATE source x2',
   'db-sqlite/src/repositories/ingest-session.ts':
     "deleteFrom('ingest_session') x3; insertInto('ingest_session') [onConflict:doUpdateSet]; updateTable('ingest_session') x6",
   'db-sqlite/src/repositories/job-lease-guard.ts': '',
@@ -408,6 +410,8 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/session-liveness.ts': '',
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
+  'db-sqlite/src/repositories/source-removal.ts': 'UPDATE source',
+  'db-sqlite/src/repositories/source-selection.ts': '',
   'db-sqlite/src/repositories/source.ts':
     "deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x6",
   'db-sqlite/src/repositories/upstream-state.ts':
@@ -664,6 +668,120 @@ function reads(source: string): ReadSite[] {
 // Keys preserve exact expression text, including SQL whitespace and interpolation expressions.
 const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
+    {
+      reason:
+        'Fixture-side access in source-selection-races-contract.ts; indexes or assigns test data, never an executor result count.',
+      sites: [
+        'db-sqlite/src/contract/source-selection-races-contract.ts:opaque object access: Object.assign(session, { stamp, snapshotId: SNAPSHOT, cursor, seenCount: 1 }) #1',
+      ],
+    },
+    {
+      reason:
+        'SQL in catalogue-reconcile.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+      sites: [
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n        WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${id}\n          ${keyFilter(sql`package.name`)}\n          AND package.listing_seen_stamp = ${stamp}\n          ${keys === undefined ? sql`AND ${selectedPackage(ctx)}` : sql``})` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n    WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}\n      AND package.name IN (SELECT value FROM json_each(${keys}))\n      ${stamp === undefined ? sql`` : sql`AND package.listing_seen_stamp = ${stamp}`}\n      ${selectedOnly ? sql`AND ${selectedPackage(ctx)}` : sql``})` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<string>`package.source_id` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<string>`package.ecosystem` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<string>`package.name` #1',
+        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`package.updated_at < ${boundary}\n      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing')\n      AND ${selectedPackage(ctx)}` #1",
+        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n    WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}\n      AND package.updated_at < ${boundary} AND package.status = 'active'\n      AND ${selectedPackage(ctx)})` #1",
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`(SELECT (${seen} + counted.n) < ${minPackages}\n    OR CAST(counted.n AS REAL) / (${seen} + counted.n) <= ${maxShare}\n    FROM (SELECT ${unseen} AS n) AS counted)` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`version.package_id IN (SELECT package.id FROM package\n          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId}\n            AND ${selectedPackage(ctx)})` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM package WHERE package.org_id = ${ctx.orgId} AND package.id = ${id} AND ${selectedPackage(ctx)})` #1',
+        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'\n      AND ${selectedPackage(ctx)}` #1",
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}\n              WHERE org_id = ${ctx.orgId} AND source_id = ${id} AND listing_seen_stamp IS NOT ${stamp}\n                AND name IN (SELECT value FROM json_each(${json}))\n                AND ${selectedPackage(ctx)}` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`${sourceKeyRows(ctx, id, json)} = ${keys.length}` #1',
+        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`${sourceKeyRows(ctx, id, json, stamp)} = ${sourceKeyRows(ctx, id, json, undefined, true)}` #1',
+        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET last_op_id = ${decisionId},\n          listing_open_stamp = strftime('%Y-%m-%dT%H:%M:%fZ', listing_open_stamp, '+0.001 seconds')\n          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId} AND ${selectedPackage(ctx)} AND ${absent}` #1",
+      ],
+    },
+    {
+      reason:
+        'Import in ingest-finalize.ts; dependency is opaque to the scan and exposes no executor count.',
+      sites: [
+        "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import { auditEvent } from '@package-broker/core/audit/actions'; #1",
+        "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import { ulid } from '@package-broker/core/ids'; #1",
+        "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import {\n  assertFinalizeAllowed,\n  DEFAULT_MAX_ABSENCE_SHARE,\n  DEFAULT_MIN_PACKAGES,\n  FinalizeEvidenceError,\n  recordMassAbsence,\n  recordRemovalAcceptanceCleared,\n  recordRemovalApplied,\n  type FinalizeGuardOptions,\n} from '@package-broker/core/ingest/finalize-guard'; #1",
+      ],
+    },
+    {
+      reason:
+        'SQL in ingest-finalize.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+      sites: [
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n        WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId}\n          AND package.listing_seen_stamp = ${stamp}\n          AND ${sourceSelectionCondition(ctx, scope.sourceId, sql<string>`package.ecosystem`, sql<string>`package.name`, true)})` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql`UPDATE source SET last_refusal_at = NULL, last_refusal_absent = NULL,\n                last_refusal_listed = NULL, last_refusal_successful = NULL,\n                removal_accepted = 0, updated_at = ${NOW}\n              WHERE org_id = ${ctx.orgId} AND id = ${scope.sourceId}\n                AND (last_refusal_at IS NOT NULL OR removal_accepted = 1)` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<string>`package.ecosystem` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<string>`package.name` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql`SELECT removal_accepted AS armed, last_refusal_absent AS accepted_absent,\n                      project_id FROM source\n                    WHERE org_id = ${ctx.orgId} AND id = ${scope.sourceId}` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM source\n          WHERE org_id = ${ctx.orgId} AND id = ${sourceId} AND removal_accepted = 1\n            AND ${unseenSourcePackages(ctx, sourceId)} <= last_refusal_absent)` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM source\n              WHERE org_id = ${ctx.orgId} AND id = ${scope.sourceId} AND listing_open_stamp = ${stamp})` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql`UPDATE source SET last_refusal_at = ${NOW}, last_refusal_absent = ${absent},\n                  last_refusal_listed = ${expectedCount},\n                  last_refusal_successful = ${input.successfulCandidates},\n                  removal_accepted = 0, updated_at = ${NOW}\n                WHERE org_id = ${ctx.orgId} AND id = ${scope.sourceId}\n                  AND listing_open_stamp = ${stamp}` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`1` #1',
+      ],
+    },
+    {
+      reason:
+        'SQL in ingest-session.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+      sites: [
+        "db-sqlite/src/repositories/ingest-session.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}\n            AND ingest_session.scope = 'source' AND ingest_session.source_id = ${pin.sourceId})\n            AND ${unseenSourcePackages(ctx, pin.sourceId)} = ${pin.unseen}` #1",
+        "db-sqlite/src/repositories/ingest-session.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}\n      AND (ingest_session.scope = 'source' OR EXISTS (SELECT 1 FROM source\n        WHERE source.id = ingest_session.source_id AND source.org_id = ${ctx.orgId}\n          AND ${sourceSelectionCondition(ctx, sql<string>`source.id`, sql<string>`source.ecosystem`, sql<string>`ingest_session.package_key`, true)})))` #1",
+      ],
+    },
+    {
+      reason:
+        'Import in source-removal.ts; dependency is opaque to the scan and exposes no executor count.',
+      sites: [
+        "db-sqlite/src/repositories/source-removal.ts:opaque dependency: import { sql } from 'kysely'; #1",
+      ],
+    },
+    {
+      reason:
+        'SQL in source-removal.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+      sites: [
+        'db-sqlite/src/repositories/source-removal.ts:SQL template: sql`UPDATE source SET removal_accepted = 1, updated_at = ${NOW}\n      WHERE org_id = ${ctx.orgId} AND id = ${input.sourceId} AND removal_accepted = 0\n        AND last_refusal_at = ${refusal.at} AND last_refusal_absent = ${refusal.absent}\n        AND last_refusal_listed = ${refusal.listed}\n        AND last_refusal_successful = ${refusal.successful} AND last_refusal_successful > 0` #1',
+      ],
+    },
+    {
+      reason:
+        'Import in source-selection.ts; dependency is opaque to the scan and exposes no executor count.',
+      sites: [
+        "db-sqlite/src/repositories/source-selection.ts:opaque dependency: import { sql, type Expression, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/repositories/source-selection.ts:opaque dependency: import { MAX_PATTERN_BYTES, MAX_PATTERN_WILDCARDS } from '@package-broker/core/catalogue/patterns'; #1",
+      ],
+    },
+    {
+      reason:
+        'SQL in source-selection.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+      sites: [
+        "db-sqlite/src/repositories/source-selection.ts:SQL template: sql`CASE WHEN json_valid(selection_source.config_json)\n    THEN selection_source.config_json ELSE '{}' END` #1",
+        "db-sqlite/src/repositories/source-selection.ts:SQL template: sql`OR (selection_source.config_json = '{}' AND selection_source.status = 'active'\n        AND NOT EXISTS (SELECT 1 FROM registered_name AS selection_registration\n          WHERE selection_registration.org_id = ${ctx.orgId}\n            AND selection_registration.source_id = selection_source.id))` #1",
+        'db-sqlite/src/repositories/source-selection.ts:SQL template: sql`` #1',
+        "db-sqlite/src/repositories/source-selection.ts:SQL template: sql<SqlBool>`EXISTS (SELECT 1 FROM source AS selection_source\n    WHERE selection_source.org_id = ${ctx.orgId} AND selection_source.id = ${sourceId}\n      AND selection_source.ecosystem = ${ecosystem}\n      AND (selection_source.type IN ('packagist_proxy', 'npmjs_proxy')\n        ${unconfigured}\n        OR (${registered} AND (\n          (selection_source.type = 'vcs')\n          OR (selection_source.type = 'npm_registry' AND EXISTS (\n            SELECT 1 FROM json_each(${config}, '$.scopes') AS selected_scope\n            WHERE selected_scope.type = 'text'\n              AND substr(${key}, 1, instr(${key}, '/') - 1) = selected_scope.value))\n          OR (selection_source.type = 'composer_repository' AND (\n            EXISTS (SELECT 1 FROM json_each(${config}, '$.selection.packages') AS selected_name\n              WHERE selected_name.type = 'text' AND selected_name.value = ${key})\n            OR EXISTS (SELECT 1 FROM json_each(${config}, '$.selection.patterns') AS selected_pattern\n              WHERE CASE WHEN selected_pattern.type = 'text'\n                AND selected_pattern.value NOT GLOB '*[^a-z0-9._~@!/*-]*'\n                AND length(selected_pattern.value) BETWEEN 1 AND ${sql.lit(MAX_PATTERN_BYTES)}\n                AND length(selected_pattern.value) - length(replace(selected_pattern.value, '*', '')) <= ${sql.lit(MAX_PATTERN_WILDCARDS)}\n                THEN ${key} GLOB selected_pattern.value ELSE 0 END)))))))` #1",
+      ],
+    },
+    {
+      reason:
+        'SQL in source.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+      sites: [
+        'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`EXISTS (SELECT 1 FROM session\n        WHERE org_id = ${ctx.orgId} AND id = ${fence.sessionId} AND identity_id IS NULL)` #1',
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`EXISTS (SELECT 1 FROM (${permissions}) AS removal_admin\n        WHERE removal_admin.scope = 'organization' AND removal_admin.protects = 1)` #1",
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`EXISTS (SELECT 1 FROM source\n        WHERE org_id = ${ctx.orgId} AND id = ${input.id}\n          AND (project_id IS NULL OR EXISTS (SELECT 1 FROM project\n            WHERE project.org_id = ${ctx.orgId} AND project.id = source.project_id AND project.status = 'active')))` #1",
+      ],
+    },
+    {
+      reason:
+        'SQL changes() guard after a single direct source UPDATE; SQLite changes() excludes FK-action rows.',
+      sites: ['db-sqlite/src/repositories/source.ts:SQL template: sql<boolean>`changes() = 1` #1'],
+    },
+    {
+      reason:
+        'Fixture-side access in project-source-read.ts; indexes or assigns test data, never an executor result count.',
+      sites: [
+        'db-sqlite/src/testing/mutation-table/project-source-read.ts:unresolved computed access: orgs[sourceOrg] #1',
+        'db-sqlite/src/testing/mutation-table/project-source-read.ts:unresolved computed access: orgs[attachmentOrg] #1',
+      ],
+    },
     {
       reason:
         'Add batch prepends an org-scoped visibility check; remaining writes are inserts, and no result count is read.',
@@ -1443,16 +1561,11 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<string>`(SELECT listing_opened_at FROM ${table}\n    WHERE id = ${scopeId(scope)} AND org_id = ${ctx.orgId})` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql` AND ${column} IN (SELECT value FROM json_each(${keys}))` #1',
-        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n        WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${id}\n          ${keyFilter(sql`package.name`)}\n          AND package.listing_seen_stamp = ${stamp})` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM version\n        WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${id}\n          ${keyFilter(sql`version.version_normalized`)}\n          AND version.listing_seen_stamp = ${stamp})` #1',
-        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`package.updated_at < ${boundary}\n      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing')` #1",
-        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n    WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}\n      AND package.updated_at < ${boundary} AND package.status = 'active')` #1",
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<number>`(SELECT count(*) FROM version\n    WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${packageId}\n      AND version.status = 'active' AND version.updated_at < ${boundary})` #1",
-        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`(SELECT CAST(counted.n AS REAL) / (${seen} + counted.n) <= ${maxShare}\n    FROM (SELECT ${unseen} AS n) AS counted)` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE cache_epoch SET version = hex(randomblob(16))\n        WHERE org_id = ${ctx.orgId} AND ${condition}` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`NOT (changes() <> 1 AND ${condition})` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`version.last_op_id = ${scope.opId}` #1',
-        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`version.package_id IN (SELECT package.id FROM package\n          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId})` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`version.package_id = ${scope.packageId}` #1',
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE blob SET refetchable = 0\n        WHERE blob.org_id = ${ctx.orgId} AND blob.refetchable = 1\n          AND blob.deleted_at IS NULL AND blob.purge_after IS NULL\n          AND NOT ${leaseLive('blob.purge_lease_until')}\n          AND blob.id IN (SELECT version.blob_id FROM version\n            WHERE version.org_id = ${ctx.orgId} AND version.status = 'removed_upstream'\n              AND version.blob_id IS NOT NULL AND ${inScope})` #1",
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`1 = 1` #1',
@@ -1463,7 +1576,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE version SET status = 'active', removed_upstream_at = NULL,\n            revision = revision + 1, last_op_id = ${opId} WHERE ${rows}` #1",
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE version SET status = 'removed_upstream', removed_upstream_at = ${NOW},\n            revision = revision + 1, last_op_id = ${opId} WHERE ${rows}` #1",
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`${seenRows(ctx, scope, stamp)} = ${count}` #1',
-        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'` #1",
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}` #1',
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET status = 'removed_upstream', removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),\n          removal_cause = 'source_listing',\n          last_op_id = CASE WHEN status = 'active' THEN ${opId} ELSE last_op_id END,\n          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(unseen)}\n          RETURNING package.last_op_id = ${opId} AS newly_removed` #1",
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET status = 'active', removed_upstream_at = NULL,\n          removal_cause = NULL, last_op_id = ${opId},\n          rev = rev + 1, modified_at = ${CLOCK} WHERE ${rows(returned)}` #1",
@@ -1481,12 +1593,10 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`source` #3',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`package` #3',
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE ${table} SET listing_opened_at = ${NOW}, listing_open_stamp =\n          strftime('%Y-%m-%dT%H:%M:%fZ', max(unixepoch('now', 'subsec'),\n            coalesce(unixepoch(listing_open_stamp, 'subsec') + 0.001, 0)), 'unixepoch')\n          WHERE id = ${scopeId(scope)} AND org_id = ${ctx.orgId}\n          RETURNING listing_open_stamp AS stamp` #1",
-        'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}\n              WHERE org_id = ${ctx.orgId} AND source_id = ${id} AND listing_seen_stamp IS NOT ${stamp}\n                AND name IN (SELECT value FROM json_each(${json}))` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE version SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}\n              WHERE org_id = ${ctx.orgId} AND package_id = ${id} AND listing_seen_stamp IS NOT ${stamp}\n                AND version_normalized IN (SELECT value FROM json_each(${json}))` #1',
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`${seenRows(ctx, scope, stamp, json)} = ${keys.length}` #1',
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`(EXISTS (SELECT 1 FROM upstream_state\n          WHERE upstream_state.package_id = ${packageId} AND upstream_state.org_id = ${ctx.orgId})\n        AND NOT EXISTS (SELECT 1 FROM upstream_state\n          WHERE upstream_state.package_id = ${packageId} AND upstream_state.org_id = ${ctx.orgId}\n            AND (upstream_state.not_found_count < ${ABSENCE_MIN_NOT_FOUND}\n              OR upstream_state.first_not_found_at IS NULL\n              OR upstream_state.first_not_found_at >\n                strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${String(sinceSeconds)} seconds`}))))` #1",
         'db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM package WHERE package.id = ${packageId}\n          AND package.org_id = ${ctx.orgId} AND package.last_op_id = ${opId})` #1',
-        "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET last_op_id = ${decisionId},\n          listing_open_stamp = strftime('%Y-%m-%dT%H:%M:%fZ', listing_open_stamp, '+0.001 seconds')\n          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId} AND ${absent}` #1",
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql`UPDATE package SET status = 'removed_upstream',\n            removed_upstream_at = coalesce(removed_upstream_at, ${NOW}),\n            removal_cause = CASE WHEN status = 'active' THEN 'document_absent' ELSE removal_cause END,\n            last_op_id = ${opId},\n            rev = rev + 1, modified_at = ${CLOCK}\n            WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}\n              AND package.last_op_id = ${decisionId}\n              AND (package.status = 'active' OR EXISTS (SELECT 1 FROM version\n                WHERE version.package_id = package.id AND version.org_id = ${ctx.orgId}\n                  AND version.status = 'active'))` #1",
         "db-sqlite/src/repositories/catalogue-reconcile.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM package\n          JOIN source ON source.id = package.source_id AND source.org_id = package.org_id\n          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}\n            AND package.last_op_id = ${opId} AND source.removal_policy = 'exclude')` #1",
       ],
@@ -1827,7 +1937,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'SQL in ingest-finalize; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
-        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<number>`(SELECT count(*) FROM package\n        WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId}\n          AND package.listing_seen_stamp = ${stamp})` #1',
         'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<number>`(SELECT count(*) FROM version\n        WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${scope.packageId}\n          AND version.listing_seen_stamp = ${stamp})` #1',
         "db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql`UPDATE ingest_session SET state = 'complete', updated_at = ${NOW}\n        WHERE id = ${session.id} AND org_id = ${ctx.orgId} AND owner = ${session.owner}\n          AND fence = ${session.fence} AND state = 'running'` #1",
         "db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM ingest_session\n        WHERE id = ${session.id} AND org_id = ${ctx.orgId} AND state = 'complete')` #1",
@@ -3057,7 +3166,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import {\n  completeSourceListing,\n  completeVersionListing,\n} from '@package-broker/core/catalogue/version-rules'; #1",
         "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import { MassAbsenceError } from '@package-broker/core/ingest/absence-guard'; #1",
-        "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import {\n  assertFinalizeAllowed,\n  DEFAULT_MAX_ABSENCE_SHARE,\n  FinalizeEvidenceError,\n  recordMassAbsence,\n  type FinalizeGuardOptions,\n} from '@package-broker/core/ingest/finalize-guard'; #1",
         "db-sqlite/src/repositories/ingest-finalize.ts:opaque dependency: import { parsePendingValidators, type UpstreamForm } from '@package-broker/core/ingest/validators'; #1",
         "db-sqlite/src/repositories/ingest-session.ts:opaque dependency: import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/repositories/ingest-session.ts:opaque dependency: import { parsePendingValidators } from '@package-broker/core/ingest/validators'; #1",

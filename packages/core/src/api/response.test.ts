@@ -292,6 +292,7 @@ describe('ProjectListError', () => {
     'invalid_limit',
     'invalid_cursor',
     'invalid_status',
+    'invalid_query',
     'source_invalid',
   ] as const satisfies readonly ProjectListError[];
   it('covers every member with the specified code and status', () => {

@@ -328,6 +328,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/visibility-attach.ts',
   'db-sqlite/src/repositories/visibility-audit.ts',
   'db-sqlite/src/repositories/visibility-derive.ts',
+  'db-sqlite/src/sql/project-prefix.ts',
   'db-sqlite/src/sql/scan.ts',
   'db-sqlite/src/testing/foreign-keys-off.ts',
   'db-sqlite/src/testing/migrated-database.ts',
@@ -434,6 +435,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     'DELETE FROM vulnerability_advisory; DELETE FROM vulnerability_match x2; DELETE FROM vulnerability_refresh x3; DELETE FROM vulnerability_result; INSERT INTO vulnerability_advisory x3; INSERT INTO vulnerability_match; INSERT INTO vulnerability_refresh; INSERT INTO vulnerability_result x2; INSERT INTO vulnerability_sync_state; UPDATE vulnerability_refresh; UPDATE vulnerability_result; UPDATE vulnerability_sync_state x12',
   'db-sqlite/src/repositories/webhook-delivery.ts':
     'INSERT INTO webhook_delivery; UPDATE webhook_delivery',
+  'db-sqlite/src/sql/project-prefix.ts': '',
   'db-sqlite/src/sql/scan.ts': '',
   'db-sqlite/src/testing/catalogue-fixture.ts':
     'INSERT INTO cache_epoch; INSERT INTO organization; INSERT INTO package; INSERT INTO project; INSERT INTO project_package x2; INSERT INTO project_package_pattern; INSERT INTO project_source; INSERT INTO registered_name; INSERT INTO source; INSERT INTO version',
@@ -676,6 +678,17 @@ function reads(source: string): ReadSite[] {
 // Keys preserve exact expression text, including SQL whitespace and interpolation expressions.
 const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
+    {
+      reason:
+        'The prefix helper only validates input and builds comparison predicates with Kysely; it neither mutates rows nor reads executor change counts.',
+      sites: [
+        "db-sqlite/src/sql/project-prefix.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/sql/project-prefix.ts:opaque dependency: import { isValidProjectListPrefix } from '@package-broker/core/authz/project-list'; #1",
+        'db-sqlite/src/sql/project-prefix.ts:SQL template: sql<SqlBool>`${sql.ref(column)} >= ${q}` #1',
+        'db-sqlite/src/sql/project-prefix.ts:SQL template: sql<SqlBool>`(${sql.ref(column)} >= ${q} AND ${sql.ref(column)} < ${upper})` #1',
+        'db-sqlite/src/sql/project-prefix.ts:SQL template: sql<SqlBool>`(${range(slug)} OR ${range(name)})` #1',
+      ],
+    },
     {
       reason:
         'Project revision increments change no referenced key; attachment change predicates and their parenthesized true fallback preserve scope filters in the existing fenced batch without consuming executor change counts.',

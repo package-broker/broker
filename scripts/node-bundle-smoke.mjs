@@ -681,7 +681,7 @@ async function run() {
   await expectStatus(signedIn, 200, 'GET /_pb/session with the minted session');
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
 
-  step = 'checking the authenticated UI mount';
+  step = 'checking the public UI mount';
   const assetsDir = join(copy, 'assets');
   const uiManifest = JSON.parse(await readFile(join(assetsDir, 'manifest.json'), 'utf8'));
   const uiDocument = await readFile(join(assetsDir, uiManifest.entry), 'utf8');
@@ -695,7 +695,6 @@ async function run() {
   }
   const uiPaths = [
     '/_pb/ui/',
-    '/_pb/ui/manifest.json',
     ...Object.keys(uiManifest.files)
       .filter((name) => name !== uiManifest.entry)
       .map((name) => `/_pb/ui/${name}`),
@@ -705,23 +704,34 @@ async function run() {
       redirect: 'manual',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    await expectStatus(anonymousUi, 401, `GET ${path} without credentials`);
+    await expectStatus(anonymousUi, 200, `GET ${path} without credentials`);
+    assert.equal(anonymousUi.headers.get('set-cookie'), null);
     const authenticatedUi = await fetch(`${base}${path}`, {
       headers: { cookie },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     await expectStatus(authenticatedUi, 200, `GET ${path} with a session`);
     const name = path === '/_pb/ui/' ? uiManifest.entry : path.slice('/_pb/ui/'.length);
-    if (name === 'manifest.json') {
-      assert.deepEqual(await authenticatedUi.json(), uiManifest);
-    } else {
-      assert.deepEqual(
-        Buffer.from(await authenticatedUi.arrayBuffer()),
-        await readFile(join(assetsDir, name)),
-        `${path} differs from the staged file`,
-      );
-    }
+    assert.equal(authenticatedUi.headers.get('set-cookie'), null);
+    const anonymousBytes = Buffer.from(await anonymousUi.arrayBuffer());
+    assert.deepEqual(Buffer.from(await authenticatedUi.arrayBuffer()), anonymousBytes);
+    assert.deepEqual(
+      anonymousBytes,
+      await readFile(join(assetsDir, name)),
+      `${path} differs from the staged file`,
+    );
   }
+  for (const headers of [{}, { cookie }]) {
+    await expectStatus(
+      await fetch(`${base}/_pb/ui/manifest.json`, {
+        headers,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      }),
+      404,
+      'GET /_pb/ui/manifest.json',
+    );
+  }
+
   for (const name of ['index.html', 'manifest.json', ...referenced]) {
     for (const headers of [{}, { cookie }]) {
       const raw = await fetch(`${base}/${name}`, {
@@ -733,7 +743,7 @@ async function run() {
     }
   }
   console.log(
-    `smoke:node UI document, manifest and ${uiPaths.length - 2} assets require a session and match the staged output`,
+    `smoke:node public UI document and ${uiPaths.length - 1} assets match the staged output with and without a session`,
   );
 
   await checkPlatformPorts(base, cookie, env);

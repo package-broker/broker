@@ -157,20 +157,20 @@ describe('Worker setup mount', () => {
     }
   });
 
-  it('keeps the ordinary UI behind the session after the setup routes mount', async () => {
+  it('keeps the ordinary UI public after the setup routes mount', async () => {
     const { fetchAs } = harness();
     try {
       for (const path of [
         '/_pb/ui/',
-        '/_pb/ui',
-        '/_pb/ui/manifest.json',
         '/_pb/ui/app.0123456789ab.js',
         '/_pb/ui/app.0123456789ab.css',
         '/_pb/ui/setup.html',
         '/_pb/ui/setup.0123456789ab.js',
       ]) {
-        expect((await fetchAs(path)).status, `anonymous ${path}`).toBe(401);
+        expect((await fetchAs(path)).status, `anonymous ${path}`).toBe(200);
       }
+      expect((await fetchAs('/_pb/ui')).status).toBe(303);
+      expect((await fetchAs('/_pb/ui/manifest.json')).status).toBe(404);
       for (const path of ['/_pb/ui/', '/_pb/ui/app.0123456789ab.js']) {
         expect((await fetchAs(path, { headers: session })).status, path).toBe(200);
       }
@@ -179,7 +179,7 @@ describe('Worker setup mount', () => {
     }
   });
 
-  it('adds the public document and asset routes ahead of the authenticated UI routes', async () => {
+  it('mounts the setup routes ahead of the public UI routes', async () => {
     const { worker, env } = harness();
     try {
       await worker.services(env);
@@ -211,15 +211,15 @@ describe('Worker setup mount', () => {
           method: 'GET',
           path: '/_pb/ui',
           permission: null,
-          boundary: 'authenticated',
-          needsOrg: true,
+          boundary: undefined,
+          needsOrg: false,
         },
         {
           method: 'GET',
           path: '/_pb/ui/:file',
           permission: null,
-          boundary: 'authenticated',
-          needsOrg: true,
+          boundary: undefined,
+          needsOrg: false,
         },
       ]);
     } finally {

@@ -1449,14 +1449,6 @@ export function createNodeServer(
     const uiRoutes = ui.map((route) => ({
       ...route,
       path: route.path.replace('/assets/:file', '/:file'),
-      handler: async (context: Parameters<typeof route.handler>[0]) =>
-        context.params['file'] === 'manifest.json'
-          ? Response.json(await assets?.manifest(), {
-              headers: { 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
-            })
-          : route.handler(context),
-      boundary: 'authenticated' as const,
-      needsOrg: true,
     }));
     const kernel = await createKernel({
       platform: 'node',

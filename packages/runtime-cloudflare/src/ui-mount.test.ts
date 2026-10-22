@@ -79,7 +79,7 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
 }
 
 describe('Worker UI mount', () => {
-  it('adds only UI routes and requires the engine authenticated boundary', async () => {
+  it('adds only public UI routes without an organization or session requirement', async () => {
     const worker = createWorker([], { authorization: engine, log: () => undefined });
     const authEnv: Env = {
       DB: keyringOnlyD1(),
@@ -100,22 +100,24 @@ describe('Worker UI mount', () => {
     await worker.services(env);
     const fetchUi = (request: Request) => worker.fetch(request, env);
     try {
-      for (const path of ['/_pb/ui/', '/_pb/ui', '/_pb/ui/manifest.json', '/_pb/ui/index.html']) {
+      const authorizationCalls = vi.mocked(engine.authorize).mock.calls.length;
+      for (const [path, expected] of [['/_pb/ui/', document]]) {
         const anonymous = await fetchUi(new Request(`https://broker.test${path}`));
-        expect(anonymous.status, `anonymous ${path}`).toBe(401);
-      }
-      for (const [path, expected] of [
-        ['/_pb/ui/', document],
-        ['/_pb/ui/manifest.json', JSON.stringify(manifest)],
-      ]) {
-        const response = await fetchUi(
+        const signedIn = await fetchUi(
           new Request(`https://broker.test${path}`, {
             headers: { cookie: 'test-session=valid' },
           }),
         );
-        expect(response.status, path).toBe(200);
-        expect(await response.text()).toBe(expected);
+        for (const response of [anonymous, signedIn]) {
+          expect(response.status, path).toBe(200);
+          expect(response.headers.get('set-cookie')).toBeNull();
+          expect(await response.text()).toBe(expected);
+        }
+        const headers = (response: Response) =>
+          [...response.headers].filter(([name]) => name !== 'x-request-id');
+        expect(headers(anonymous)).toEqual(headers(signedIn));
       }
+      expect(vi.mocked(engine.authorize).mock.calls).toHaveLength(authorizationCalls);
       const redirect = await fetchUi(
         new Request('https://broker.test/_pb/ui?view=packages', {
           headers: { cookie: 'test-session=valid' },
@@ -152,8 +154,8 @@ describe('Worker UI mount', () => {
       ).toEqual([
         { method: 'GET', path: '/_pb/ui/setup/document', boundary: undefined, needsOrg: false },
         { method: 'GET', path: '/_pb/ui/setup/assets/:file', boundary: undefined, needsOrg: false },
-        { method: 'GET', path: '/_pb/ui', boundary: 'authenticated', needsOrg: true },
-        { method: 'GET', path: '/_pb/ui/:file', boundary: 'authenticated', needsOrg: true },
+        { method: 'GET', path: '/_pb/ui', boundary: undefined, needsOrg: false },
+        { method: 'GET', path: '/_pb/ui/:file', boundary: undefined, needsOrg: false },
       ]);
       expect(baseline.some((route) => route.path === '/_pb/session')).toBe(true);
       const otherDocument = document.replace('Broker', 'Server');
@@ -240,9 +242,18 @@ describe('Worker UI mount from the ASSETS binding', () => {
       for (const url of urls) {
         const name = url.pathname.split('/').at(-1)!;
         const declared = stagedManifest.files[name as keyof typeof stagedManifest.files]!;
-        expect((await fetchUi(new Request(url))).status, `anonymous ${name}`).toBe(401);
+        const authorizationCalls = vi.mocked(engine.authorize).mock.calls.length;
+        const anonymous = await fetchUi(new Request(url));
         const response = await fetchUi(new Request(url, { headers: session }));
         expect(response.status, name).toBe(200);
+        expect(anonymous.status, `anonymous ${name}`).toBe(200);
+        expect(response.headers.get('set-cookie')).toBeNull();
+        expect(anonymous.headers.get('set-cookie')).toBeNull();
+        const headers = (response: Response) =>
+          [...response.headers].filter(([name]) => name !== 'x-request-id');
+        expect(headers(anonymous)).toEqual(headers(response));
+        expect(await anonymous.arrayBuffer()).toEqual(await response.clone().arrayBuffer());
+        expect(vi.mocked(engine.authorize).mock.calls).toHaveLength(authorizationCalls);
         expect(response.headers.get('content-type')).toBe(declared.contentType);
         expect(response.headers.get('content-length')).toBe(String(declared.bytes));
         expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
@@ -252,6 +263,10 @@ describe('Worker UI mount from the ASSETS binding', () => {
       }
       for (const path of [
         '/_pb/ui/index.html',
+        '/_pb/ui/manifest.json',
+        '/index.html',
+        '/manifest.json',
+        '/app.0123456789ab.js',
         '/_pb/ui/unknown.js',
         '/_pb/ui/..%2Fx',
         '/_pb/ui/%252e%252e%252fsecret.txt',
@@ -259,19 +274,12 @@ describe('Worker UI mount from the ASSETS binding', () => {
         '/_pb/ui/%2Fetc%2Fpasswd',
         '/_pb/ui/secret.txt%00.js',
       ]) {
-        const missing = await fetchUi(
-          new Request(`https://broker.test${path}`, { headers: session }),
-        );
+        const missing = await fetchUi(new Request(`https://broker.test${path}`));
         expect(missing.status, path).toBe(404);
         expect(await missing.json()).toEqual({
           error: { code: 'not_found', message: 'Route not found', requestId: expect.any(String) },
         });
       }
-      const manifest = await fetchUi(
-        new Request('https://broker.test/_pb/ui/manifest.json', { headers: session }),
-      );
-      expect(manifest.headers.get('cache-control')).toBe('no-cache');
-      expect(manifest.headers.get('x-content-type-options')).toBe('nosniff');
     } finally {
       vi.clearAllMocks();
     }
@@ -282,10 +290,7 @@ describe('Worker UI mount from the ASSETS binding', () => {
     const env = { ...authEnv, ASSETS: bindingFor('{"version":1,"entry":"../x","files":{}}') };
     try {
       for (const path of ['/_pb/ui/', '/_pb/ui', '/_pb/ui/manifest.json', '/_pb/ui/index.html']) {
-        const response = await worker.fetch(
-          new Request(`https://broker.test${path}`, { headers: session }),
-          env,
-        );
+        const response = await worker.fetch(new Request(`https://broker.test${path}`), env);
         expect(response.status, path).toBe(404);
         expect(await response.json()).toMatchObject({ error: { code: 'not_found' } });
       }

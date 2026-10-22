@@ -102,6 +102,66 @@ async function errorOf(response: Response) {
   return { status: response.status, code: body.error.code, message: body.error.message };
 }
 
+describe('public UI boundary', () => {
+  it('serves identical documents and assets without resolving an organization or authenticating', async () => {
+    const resolveOrg = vi.fn(() => {
+      throw new Error('public UI must not resolve an organization');
+    });
+    const authorize = vi.fn(() => {
+      throw new Error('public UI must not authenticate or refresh a session');
+    });
+    const kernel = await createKernel({
+      platform: 'node',
+      publicOrigin: HTTPS,
+      plugins: [],
+      ports: {
+        organizations: { get: () => Promise.resolve(null) },
+        clock: { now: () => new Date('2026-10-22T12:00:00Z') },
+        ids: { ulid: () => '01J0A0000000000000000000000' },
+      },
+      resolveOrg,
+      authorization: { authorize },
+      health: () => Promise.resolve(true),
+      coreRoutes: createUiRoutes(fakeAssets(), { publicOrigin: HTTPS }),
+      log: () => undefined,
+    });
+    for (const path of ['/_pb/ui', '/_pb/ui/assets/app.012345abcdef.js']) {
+      for (const method of ['GET', 'HEAD']) {
+        const anonymous = await kernel.fetch(new Request(`${HTTPS}${path}`, { method }));
+        const signedIn = await kernel.fetch(
+          new Request(`${HTTPS}${path}`, {
+            method,
+            headers: { cookie: '__Host-pb_session=valid' },
+          }),
+        );
+        expect(anonymous.status).toBe(200);
+        expect(signedIn.status).toBe(200);
+        expect(anonymous.headers.get('set-cookie')).toBeNull();
+        expect(signedIn.headers.get('set-cookie')).toBeNull();
+        expect(await anonymous.arrayBuffer()).toEqual(await signedIn.arrayBuffer());
+        const headers = (response: Response) =>
+          [...response.headers].filter(([name]) => name !== 'x-request-id');
+        expect(headers(anonymous)).toEqual(headers(signedIn));
+        const etag = anonymous.headers.get('etag');
+        expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
+        const revalidated = await kernel.fetch(
+          new Request(`${HTTPS}${path}`, {
+            method,
+            headers: { cookie: '__Host-pb_session=valid', 'if-none-match': etag! },
+          }),
+        );
+        expect(revalidated.status).toBe(304);
+        expect(revalidated.headers.get('set-cookie')).toBeNull();
+        expect(revalidated.headers.get('cache-control')).toBe(
+          anonymous.headers.get('cache-control'),
+        );
+      }
+    }
+    expect(resolveOrg).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+  });
+});
+
 describe('UI response headers', () => {
   it('sends the exact content security policy', async () => {
     const response = await (await app()).fetch(get('/_pb/ui'));
@@ -112,7 +172,7 @@ describe('UI response headers', () => {
   it.each([
     ['cross-origin-opener-policy', 'same-origin'],
     ['x-content-type-options', 'nosniff'],
-    ['referrer-policy', 'same-origin'],
+    ['referrer-policy', 'no-referrer'],
   ])('sends %s', async (name, value) => {
     const response = await (await app()).fetch(get('/_pb/ui'));
     expect(response.headers.get(name)).toBe(value);
@@ -124,7 +184,7 @@ describe('UI response headers', () => {
       const response = await (await app()).fetch(get(path));
       expect(response.headers.get('content-security-policy')).toBe(CSP);
       expect(response.headers.get('x-content-type-options')).toBe('nosniff');
-      expect(response.headers.get('referrer-policy')).toBe('same-origin');
+      expect(response.headers.get('referrer-policy')).toBe('no-referrer');
       expect(response.headers.get('cross-origin-opener-policy')).toBe('same-origin');
     },
   );

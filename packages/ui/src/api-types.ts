@@ -1177,6 +1177,23 @@ export interface paths {
     patch: operations['updateOrganizationSource'];
     trace?: never;
   };
+  '/_pb/sources/{source}/accept-removal': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Arm a one-shot acceptance of the last refused source removal */
+    post: operations['acceptSourceRemoval'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/sources/{source}/credential': {
     parameters: {
       query?: never;
@@ -6410,6 +6427,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
     };
   };
   detachSource: {
@@ -6460,6 +6486,15 @@ export interface operations {
       };
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -8472,6 +8507,80 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  acceptSourceRemoval: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        source: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      409: {
         headers: {
           [name: string]: unknown;
         };

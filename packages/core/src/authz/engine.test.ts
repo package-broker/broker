@@ -1103,25 +1103,30 @@ describe('token scope shortfall on a visible project', () => {
     };
   }
 
-  it('answers 403 when the principal sees the project but the token scope yields nothing', async () => {
-    const state = freshState();
-    state.token.projectPermissions = [];
-    const engine = createAuthorizationEngine(withVisibility(state, true));
-    expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
-      allow: false,
-      status: 403,
-    });
-    expect(state.dispatched).toBe(0);
-  });
+  it.each(['all', 'selected'] as const)(
+    'answers 403 within a %s cap when token scope yields nothing',
+    async (mode) => {
+      const state = freshState();
+      state.token.projectMode = mode;
+      state.token.projectPermissions = [];
+      const engine = createAuthorizationEngine(withVisibility(state, true));
+      expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
+        allow: false,
+        status: 403,
+      });
+      expect(state.dispatched).toBe(0);
+    },
+  );
 
-  it('answers 403 when the principal sees the project but the token binding excludes it', async () => {
+  it('answers 404 when the principal sees the project but the token cap excludes it', async () => {
     const state = freshState();
+    state.token.projectMode = 'selected';
     state.token.project = null;
     state.token.projectPermissions = [];
     const engine = createAuthorizationEngine(withVisibility(state, true));
     expect(await engine.authorize(req({ headers: bearer(PAT) }))).toEqual({
       allow: false,
-      status: 403,
+      status: 404,
     });
   });
 

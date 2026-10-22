@@ -32,6 +32,7 @@ import {
 import { holdsPermission, permissionRows } from './access.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
+import { projectPrefixCondition } from '../sql/project-prefix.js';
 import { attachSourceStatements } from './visibility-attach.js';
 import {
   DEFAULT_IDLE_SECONDS,
@@ -75,6 +76,7 @@ export interface ProjectRepository extends ProjectStore {
   list(
     ctx: OrgContext,
     page: {
+      readonly q?: string;
       readonly afterId?: string;
       readonly limit: number;
       readonly status?: ProjectStatus;
@@ -499,6 +501,7 @@ export function createProjectRepository(
         throw new TypeError(`limit must be an integer from 1 to ${PROJECT_LIST_MAX_LIMIT}`);
       }
       let query = selectProjects(ctx).orderBy('id').limit(page.limit);
+      if (page.q !== undefined) query = query.where(projectPrefixCondition('slug', 'name', page.q));
       if (page.afterId !== undefined) query = query.where('id', '>', page.afterId);
       if (page.status !== undefined) query = query.where('status', '=', page.status);
       if (page.ids !== undefined) {

@@ -1,4 +1,8 @@
 import * as z from 'zod';
+import {
+  PROJECT_LIST_PREFIX_MAX_LENGTH,
+  PROJECT_LIST_PREFIX_PATTERN,
+} from '../../authz/project-list.js';
 import { PROJECT_SLUG_PATTERN } from '../../authz/project-path.js';
 import { TOKEN_MAX_SCOPES } from '../../authz/project-service.js';
 import type { ApiRouteSpec } from '../route.js';
@@ -10,6 +14,13 @@ const tokenMaxScope = z.enum(TOKEN_MAX_SCOPES);
 const status = z.enum(['active', 'archived']);
 
 const listQuery = z.strictObject({
+  q: z
+    .string()
+    .min(1)
+    .max(PROJECT_LIST_PREFIX_MAX_LENGTH)
+    .regex(PROJECT_LIST_PREFIX_PATTERN)
+    .describe('Case-sensitive slug or name prefix; LIKE wildcards % and _ are refused.')
+    .optional(),
   limit: z
     .string()
     .regex(/^([1-9][0-9]?|100)$/)
@@ -18,7 +29,15 @@ const listQuery = z.strictObject({
   status: status.optional(),
 });
 const listResponse = z.strictObject({
-  items: z.array(z.strictObject({ id: z.string(), slug: z.string(), name: z.string(), status })),
+  items: z.array(
+    z.strictObject({
+      id: z.string(),
+      slug: z.string(),
+      name: z.string(),
+      status,
+      etag: z.string(),
+    }),
+  ),
   next: z.string().nullable(),
 });
 const createBody = z.strictObject({

@@ -101,7 +101,7 @@ beforeAll(async () => {
       const query = trap
         ? statement.sql.replace(
             /"project" as "(pe|pg)"/g,
-            '(select id, org_id, slug, name, counted_status(status) as status from project) as "$1"',
+            '(select id, org_id, slug, name, revision, counted_status(status) as status from project) as "$1"',
           )
         : statement.sql;
       return raw.prepare(query).all(...statement.params) as R[];

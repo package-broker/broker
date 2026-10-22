@@ -1,9 +1,12 @@
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { describe, expect, it, vi } from 'vitest';
+import { promisify } from 'node:util';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   assertBuiltModules,
   assertWorkerBundle,
   fixtureDestination,
+  repository,
   removeWebhookRegistration,
   upstreamOrigins,
 } from './local.js';
@@ -39,6 +42,21 @@ describe('local production assembly', () => {
       expect(() => fixtureDestination('https://api.github.com/', origin)).toThrow();
     },
   );
+
+  it.each([
+    ['https://127.0.0.1:1234', 'NonLoopbackFixture'],
+    ['http://localhost:1234', 'NonLoopbackFixture'],
+    ['http://10.0.0.1:1234', 'NonLoopbackFixture'],
+    ['http://127.0.0.1.evil.test:1234', 'NonLoopbackFixture'],
+    ['http://user:secret@127.0.0.1:1234', 'InvalidFixtureOrigin'],
+    ['http://127.0.0.1:1234/path', 'InvalidFixtureOrigin'],
+    ['http://127.0.0.1:1234?query=1', 'InvalidFixtureOrigin'],
+    ['http://127.0.0.1:1234#fragment', 'InvalidFixtureOrigin'],
+    ['http://127.0.0.1', 'InvalidFixturePort'],
+    ['http://127.0.0.1:0', 'InvalidFixturePort'],
+  ] as const)('rejects Node fixture %s before starting infrastructure', async (origin, error) => {
+    await expect(local.startLocal('node', origin)).rejects.toThrow(error);
+  });
 
   it('fails empty module evidence and workspace source imports', () => {
     expect(() => assertBuiltModules([])).toThrow('EmptyModuleEvidence');
@@ -178,9 +196,16 @@ describe('T448 fixture transport', () => {
   });
 });
 
+const run = promisify(execFile);
+
 describe('production bundle HTTP scenario', () => {
+  beforeAll(async () => {
+    for (const script of ['build', 'bundle'])
+      await run('pnpm', [script], { cwd: repository, maxBuffer: 64 * 1024 * 1024 });
+  }, 600_000);
+
   it('passes both production assemblies and fails the patched Node webhook leg', async () => {
     const result = await runRegistryAssembly();
     expect(result.status, result.reason).toBe('PASS');
-  }, 180_000);
+  }, 300_000);
 });

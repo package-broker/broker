@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { deflateSync } from 'node:zlib';
 import { startLocal, until, LocalUnavailable, fixtureDestination } from './local.js';
 import type { LocalBroker, Runtime } from './local.js';
@@ -380,12 +381,23 @@ async function session(broker: LocalBroker) {
     'setup-start',
   );
   const { secret } = (await started.json()) as { secret: string };
-  const step = Math.floor(Date.now() / 30_000);
+  let lastStep = -1;
+  const nextCode = async (): Promise<string> => {
+    for (;;) {
+      const clock = Math.floor(Date.now() / 30_000);
+      const step = Math.max(lastStep + 1, clock);
+      if (step <= clock + 1) {
+        lastStep = step;
+        return totp(secret, step);
+      }
+      await delay(Math.max(lastStep * 30_000 - Date.now(), 0) + 100);
+    }
+  };
   await status(
     await request('/_pb/auth/local/setup/finish', {
       token: broker.setupToken,
       password: PASSWORD,
-      code: totp(secret, step - 1),
+      code: await nextCode(),
     }),
     204,
     'setup-finish',
@@ -394,13 +406,13 @@ async function session(broker: LocalBroker) {
     await request('/_pb/auth/local/login', {
       email: 'admin@example.test',
       password: PASSWORD,
-      code: totp(secret, step),
+      code: await nextCode(),
     }),
     204,
     'login',
   );
   await status(
-    await request('/_pb/auth/local/reauth', { password: PASSWORD, code: totp(secret, step + 1) }),
+    await request('/_pb/auth/local/reauth', { password: PASSWORD, code: await nextCode() }),
     204,
     'reauth',
   );
@@ -437,7 +449,8 @@ export async function registryScenario(
       status(await admin.request(path, body, method), expected, path);
     const project = await api('/_pb/projects', { slug: 'alpha', name: 'Alpha' }, 201);
     const { id: projectId } = (await project.json()) as { id: string };
-    await api('/_pb/projects', { slug: 'beta', name: 'Beta' }, 201);
+    const betaProject = await api('/_pb/projects', { slug: 'beta', name: 'Beta' }, 201);
+    const { id: betaId } = (await betaProject.json()) as { id: string };
     const sources = [
       {
         name: 'mirror',
@@ -468,35 +481,6 @@ export async function registryScenario(
     ];
     for (const { source_type, ...source } of sources)
       await api('/_pb/sources', { ...source, type: source_type }, 201);
-    const planned = await api(
-      '/_pb/import-runs',
-      {
-        version: 1,
-        source_system: 'local-release',
-        widening: [],
-        items: sources.map((source, i) => ({
-          type: 'attachment',
-          external_ref: `attach-${source.name}`,
-          project: { existing: 'alpha' },
-          source: { existing: { project: null, name: source.name } },
-          precedence: i * 100,
-        })),
-      },
-      201,
-    );
-    const { id: runId, planHash } = (await planned.json()) as { id: string; planHash: string };
-    await api(`/_pb/import-runs/${runId}/approve`, { planHash });
-    await api(`/_pb/import-runs/${runId}/apply`, undefined);
-    await until(async () => {
-      const response = await status(
-        await admin.request(`/_pb/import-runs/${runId}`, undefined, 'GET'),
-        200,
-        'import-state',
-      );
-      const { state } = (await response.json()) as { state: string };
-      assert(state !== 'failed', 'ImportApplyFailed');
-      return state === 'applied';
-    }, 'import-apply');
     const listed = await status(
       await admin.request('/_pb/sources', undefined, 'GET'),
       200,
@@ -504,6 +488,17 @@ export async function registryScenario(
     );
     const { items } = (await listed.json()) as { items: { id: string; name: string }[] };
     const source = items.find((item) => item.name === 'mirror')!.id;
+    const attach = (slug: string, name: string, precedence: number) =>
+      api(
+        `/_pb/projects/${slug}/sources/${items.find((item) => item.name === name)!.id}/attachment`,
+        { precedence },
+        204,
+        'PUT',
+      );
+    await attach('alpha', 'mirror', 0);
+    await attach('alpha', 'packagist', 100);
+    await attach('alpha', 'npmjs', 200);
+    await attach('beta', 'packagist', 0);
     await api(
       `/_pb/sources/${source}/credential`,
       {
@@ -533,6 +528,18 @@ export async function registryScenario(
       201,
     );
     const { token } = (await issued.json()) as { token: string };
+    const betaIssued = await api(
+      '/_pb/me/tokens',
+      {
+        name: 'beta-reader',
+        scope: 'read',
+        readOnly: true,
+        projectMode: 'selected',
+        projectIds: [betaId],
+      },
+      201,
+    );
+    const { token: betaToken } = (await betaIssued.json()) as { token: string };
     const organization = await status(
       await admin.request('/_pb/organization', undefined, 'GET'),
       200,
@@ -551,17 +558,23 @@ export async function registryScenario(
     assert.equal(credentials.length, 1);
     const credential = credentials[0]!.credential_id;
     const captured: string[] = [];
-    const get = async (path: string, authenticated = true) => {
+    const get = async (path: string, authenticated = true, bearer = token) => {
       const response = await fetch(local.origin + path, {
-        headers: authenticated ? { authorization: `Bearer ${token}` } : {},
+        headers: authenticated ? { authorization: `Bearer ${bearer}` } : {},
         redirect: 'manual',
         signal: AbortSignal.timeout(10_000),
       });
       captured.push(JSON.stringify([...response.headers]), await response.clone().text());
       return response;
     };
-    const envelope = async (path: string, code: number, expected: string, authenticated = true) => {
-      const response = await status(await get(path, authenticated), code, 'authorization');
+    const envelope = async (
+      path: string,
+      code: number,
+      expected: string,
+      authenticated = true,
+      bearer = token,
+    ) => {
+      const response = await status(await get(path, authenticated, bearer), code, 'authorization');
       const value = (await response.json()) as {
         error: { code: string; message: string; requestId: string };
       };
@@ -617,13 +630,16 @@ export async function registryScenario(
       'WebhookJobMissing',
     );
     const composer = async (name: string, wanted = '1.0.0') => {
-      const response = await status(await get(`/alpha/p2/${name}.json`), 200, 'composer-metadata');
-      const body = (await response.json()) as {
-        packages: Record<string, { version: string; dist: { url: string } }[]>;
-      };
-      const versions = body.packages[name]!;
-      const version = versions.find((version) => version.version === wanted);
-      assert(version, 'ComposerVersionMissing');
+      type Metadata = { packages: Record<string, { version: string; dist: { url: string } }[]> };
+      let body: Metadata | undefined;
+      await until(async () => {
+        const response = await get(`/alpha/p2/${name}.json`);
+        if (response.status !== 200) return false;
+        body = (await response.json()) as Metadata;
+        return body.packages[name]?.some((version) => version.version === wanted) === true;
+      }, 'composer-metadata');
+      const versions = body!.packages[name]!;
+      const version = versions.find((version) => version.version === wanted)!;
       const dist = new URL(version.dist.url);
       assert.equal(dist.origin, local.origin);
       const archive = await status(await get(dist.pathname), 200, 'composer-archive');
@@ -650,14 +666,25 @@ export async function registryScenario(
     assert.equal(dist.integrity, `sha512-${createHash('sha512').update(TGZ).digest('base64')}`);
     const tarball = await status(await get(new URL(dist.tarball).pathname), 200, 'npm-tarball');
     assert.deepEqual(new Uint8Array(await tarball.arrayBuffer()), TGZ);
+    const betaPath = proxy.path.replace('/alpha/', '/beta/');
+    const betaMetadata = await status(
+      await get('/beta/p2/acme/proxy.json', true, betaToken),
+      200,
+      'beta-metadata',
+    );
+    assert(JSON.stringify(await betaMetadata.json()).includes('acme/proxy'), 'BetaPackageMissing');
+    const betaArchive = await status(await get(betaPath, true, betaToken), 200, 'beta-archive');
+    assert.deepEqual(new Uint8Array(await betaArchive.arrayBuffer()), ZIP);
     const deniedCalls = remote.calls.length;
-    const beta = await envelope(proxy.path.replace('/alpha/', '/beta/'), 404, 'not_found');
+    const beta = await envelope(betaPath, 403, 'forbidden');
+    await envelope('/beta/p2/acme/proxy.json', 403, 'forbidden');
+    await envelope('/gamma/p2/acme/proxy.json', 404, 'not_found');
     const missing = await envelope(
       proxy.path.replace('acme/proxy', 'acme/other'),
       404,
       'not_found',
     );
-    assert.deepEqual(beta, missing);
+    assert.notEqual(beta.code, missing.code);
     assert.equal(remote.calls.length, deniedCalls);
     stage = 're-mirror';
     await local.loseBlob(orgId, hash(ZIP));
@@ -697,6 +724,7 @@ export async function registryScenario(
       PASSWORD,
       'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
       token,
+      betaToken,
       local.setupToken,
       'admin@example.test',
       ...admin.secrets(),

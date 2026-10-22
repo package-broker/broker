@@ -127,6 +127,9 @@ export async function startLocal(
   fixtureOrigin: string,
   options: { removeWebhook?: boolean } = {},
 ): Promise<LocalBroker> {
+  fixtureDestination(upstreamOrigins[0], fixtureOrigin);
+  const fixture = new URL(fixtureOrigin);
+  assert(Number(fixture.port) > 0, 'InvalidFixturePort');
   const port = await reserveLoopbackPort();
   const origin = `http://127.0.0.1:${port}`;
   const output = join(repository, '.pb', runtime);
@@ -266,8 +269,8 @@ export async function startLocal(
       await (await worker!.getD1Database('DB')).prepare('SELECT 1').bind().all();
       await worker!.dispose();
       worker = undefined;
-      const sqliteFiles = (await files(join(persist, 'd1'))).filter((path) =>
-        path.endsWith('.sqlite'),
+      const sqliteFiles = (await files(join(persist, 'd1'))).filter(
+        (path) => path.endsWith('.sqlite') && !path.endsWith('/metadata.sqlite'),
       );
       assert.equal(sqliteFiles.length, 1, 'D1DatabaseFileMissing');
       database = sqliteFiles[0]!;
@@ -324,8 +327,7 @@ registerHooks({ resolve(specifier, context, next) {
 https.request = (options) => {
   const url = new URL('https://' + options.host + options.path);
   if (!origins.includes(url.origin)) throw new Error('UnexpectedUpstream');
-  const fixture = new URL(${JSON.stringify(fixtureOrigin)});
-  return http.request({ hostname: fixture.hostname, port: fixture.port,
+  return http.request({ hostname: '127.0.0.1', port: ${JSON.stringify(fixture.port)},
     path: '/__upstream/' + url.hostname + url.pathname + url.search,
     method: options.method, headers: options.headers, agent: false });
 };

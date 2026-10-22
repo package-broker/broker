@@ -152,6 +152,7 @@ import {
 } from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
+import { nodeClientIp } from './client-ip.js';
 import { nodeCodecs } from './codec/node-codec.js';
 import { createDnsGuard } from './sources/dns-guard.js';
 import { createGuardedFetch } from './sources/guarded-fetch.js';
@@ -295,6 +296,8 @@ export interface NodeAuthOptions {
 }
 
 export interface NodeServerOptions {
+  /** Trust client IP headers only when a proxy overwrites them. Default false. */
+  readonly trustedProxy?: boolean;
   readonly executor?: SqlExecutor;
   readonly auth?: NodeAuthOptions;
   readonly closeDatabase?: () => Promise<void>;
@@ -394,6 +397,7 @@ async function assembleAccess(
   executor: SqlExecutor,
   log: KernelLog,
   tokens: TokenWiring,
+  clientIp: (request: Request) => string | null,
 ): Promise<AccessAssembly> {
   await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
   const providers = buildIdentityProviders(registration, plugins, {
@@ -410,6 +414,7 @@ async function assembleAccess(
     ids: { ulid },
     log,
     dispatch: deferredDispatch,
+    clientIp,
     registration,
     tokens,
   });
@@ -923,14 +928,6 @@ function buildCatalogue(
   });
 }
 
-function clientIp(request: Request): string | null {
-  const candidate =
-    request.headers.get('cf-connecting-ip')?.trim() ||
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    null;
-  return candidate !== null && /^[0-9a-fA-F:.]{2,45}$/.test(candidate) ? candidate : null;
-}
-
 function auditReader(executor: SqlExecutor): AuditReader {
   const audit = createAuditQueryRepository(executor);
   const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
@@ -959,6 +956,7 @@ function auditReader(executor: SqlExecutor): AuditReader {
 }
 
 function buildApiRoutes(input: {
+  readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
   readonly auth: NodeAuthOptions;
   readonly access: AccessAssembly;
@@ -971,7 +969,7 @@ function buildApiRoutes(input: {
   const { executor, access, packages, lifetime, log } = input;
   const { services } = access;
   const anchors = access.anchors;
-  const common = { ids: { ulid }, clock: systemClock, clientIp };
+  const common = { ids: { ulid }, clock: systemClock, clientIp: input.clientIp };
   const organizations = createOrganizationRepository(executor);
   const projects = createProjectRepository(executor, {
     reservedSlugs: reservedFirstSegments([
@@ -1103,6 +1101,9 @@ export function createNodeServer(
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
   const lifetime = resolveTokenLifetime(options.tokens);
+  const remoteAddress = new AsyncLocalStorage<string | null>();
+  const clientIp = (request: Request): string | null =>
+    nodeClientIp(request, remoteAddress.getStore() ?? null, options.trustedProxy === true);
 
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);
@@ -1290,6 +1291,7 @@ export function createNodeServer(
             executor,
             log,
             tokenWiring(lifetime, patJobs, options.platformServices !== undefined),
+            clientIp,
           );
     if (access !== undefined && options.platformServices !== undefined) {
       importJobs.set({
@@ -1310,6 +1312,7 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : buildApiRoutes({
+            clientIp,
             executor,
             auth,
             access,
@@ -1409,34 +1412,35 @@ export function createNodeServer(
   const serving = async (request: Request): Promise<boolean> =>
     gate === undefined || new URL(request.url).pathname === '/health/live' || (await gate());
 
-  const server = createServer(
-    getRequestListener(async (request) =>
-      !(await serving(request))
-        ? refuse(request)
-        : kernel
-            .then(async (ready) => {
-              if (new URL(request.url).pathname !== '/health/live') await verifyOnce();
-              const setup = rewriteSetupRequest(request);
-              if (setup !== null) return ready.fetch(setup);
-              const url = new URL(request.url);
-              if (url.pathname === '/_pb/ui') {
-                const response = await ready.fetch(request);
-                if (response.status !== 200) return response;
-                url.pathname = '/_pb/ui/';
-                return new Response(null, {
-                  status: 303,
-                  headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-                });
-              }
-              if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
-              url.pathname = '/_pb/ui';
-              return ready.fetch(new Request(url, request));
-            })
-            .catch((error: unknown) => {
-              const response = errorResponse(error, crypto.randomUUID(), log);
-              return request.method === 'HEAD' ? new Response(null, response) : response;
-            }),
-    ),
+  const listener = getRequestListener(async (request) =>
+    !(await serving(request))
+      ? refuse(request)
+      : kernel
+          .then(async (ready) => {
+            if (new URL(request.url).pathname !== '/health/live') await verifyOnce();
+            const setup = rewriteSetupRequest(request);
+            if (setup !== null) return ready.fetch(setup);
+            const url = new URL(request.url);
+            if (url.pathname === '/_pb/ui') {
+              const response = await ready.fetch(request);
+              if (response.status !== 200) return response;
+              url.pathname = '/_pb/ui/';
+              return new Response(null, {
+                status: 303,
+                headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
+              });
+            }
+            if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
+            url.pathname = '/_pb/ui';
+            return ready.fetch(new Request(url, request));
+          })
+          .catch((error: unknown) => {
+            const response = errorResponse(error, crypto.randomUUID(), log);
+            return request.method === 'HEAD' ? new Response(null, response) : response;
+          }),
+  );
+  const server = createServer((incoming, outgoing) =>
+    remoteAddress.run(incoming.socket.remoteAddress ?? null, () => listener(incoming, outgoing)),
   );
 
   let closed = false;

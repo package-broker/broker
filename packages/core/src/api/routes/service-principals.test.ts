@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { AuthenticatedSession } from '../../auth/session.js';
+import type { IdempotencyRecord } from '../idempotency.js';
 import { SESSION_COOKIE } from '../../auth/cookies.js';
 import { sha256Hex } from '../../auth/primitives.js';
 import {
@@ -21,7 +23,10 @@ import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
 import { defineApi } from '../route.js';
 import { SERVICE_ERROR_TABLE } from '../response.js';
-import { SERVICE_PRINCIPAL_API_SPECS } from './service-principals-schemas.js';
+import {
+  createServicePrincipalSpec,
+  SERVICE_PRINCIPAL_API_SPECS,
+} from './service-principals-schemas.js';
 import { servicePrincipalRoutes } from './service-principals.js';
 
 const ORIGIN = 'https://broker.test';
@@ -53,6 +58,8 @@ async function fixture(
     projectArchived?: boolean;
     principalPermissions?: readonly string[];
     principalStatus?: 'active' | 'suspended';
+    staleSession?: boolean;
+    duplicate?: boolean;
   } = {},
 ) {
   let current: ServicePrincipalRecord = {
@@ -65,9 +72,28 @@ async function fixture(
     permissions: options.principalPermissions ?? ['project:read'],
   };
   const audits: string[] = [];
+  const log = vi.fn();
+  const replays = new Map<string, IdempotencyRecord>();
+  const records = new Map<string, ServicePrincipalRecord>();
   const store = {
     get: vi.fn<ServicePrincipalStore['get']>(async () => (options.absent ? null : current)),
-    create: vi.fn<ServicePrincipalStore['create']>(),
+    create: vi.fn<ServicePrincipalStore['create']>(async (_org, _fence, _guard, input) => {
+      if (options.duplicate || [...records.values()].some((p) => p.name === input.name))
+        return 'duplicate';
+      current = {
+        id: input.id,
+        name: input.name,
+        projectId: input.projectId,
+        createdByUserId: input.createdByUserId,
+        permissions: input.permissions,
+        status: 'active',
+        revision: 1,
+      };
+      records.set(current.id, current);
+      audits.push(input.audit.action);
+      if (input.idempotency !== undefined) replays.set(input.idempotency.key, input.idempotency);
+      return 'created';
+    }),
     setPermissions: vi.fn<ServicePrincipalStore['setPermissions']>(
       async (_org, _fence, _guard, input) => {
         current = { ...current, permissions: input.permissions, revision: current.revision + 1 };
@@ -103,12 +129,49 @@ async function fixture(
     directory: { createdBy: async () => [] },
     clock,
     ids,
-    log: () => undefined,
+    log,
   });
   const setPermissions = vi.spyOn(servicePrincipals, 'setPermissions');
   const suspend = vi.spyOn(servicePrincipals, 'suspend');
   const restore = vi.spyOn(servicePrincipals, 'restore');
-  const get = vi.fn<ServicePrincipalStore['get']>(async () => (options.absent ? null : current));
+  const get = vi.fn<ServicePrincipalStore['get']>(async (_org, id) =>
+    options.absent ? null : (records.get(id) ?? current),
+  );
+  const list = vi.fn(
+    async (
+      _org: unknown,
+      input: { limit: number; after?: string; projectId?: string; includeProjects: boolean },
+    ) => {
+      const items = [...records.values()]
+        .filter(
+          (p) =>
+            (input.after === undefined || p.id > input.after) &&
+            (input.projectId === undefined || p.projectId === input.projectId) &&
+            (input.includeProjects || p.projectId === null),
+        )
+        .sort((a, b) => a.id.localeCompare(b.id));
+      return {
+        items: items.slice(0, input.limit),
+        next: items.length > input.limit ? items[input.limit - 1]!.id : null,
+      };
+    },
+  );
+  const projects = {
+    get: vi.fn(async () => (options.projectArchived ? null : { status: 'active' as const })),
+  };
+  const sessions = {
+    authenticate: vi.fn(async () =>
+      options.staleSession
+        ? null
+        : ({
+            session: { id: 'session-1', userId: 'user-1' },
+            principal: { kind: 'user', id: 'user-1' },
+          } as AuthenticatedSession),
+    ),
+  };
+  const idempotency = {
+    find: vi.fn(async (_org: unknown, _principal: string, key: string) => replays.get(key) ?? null),
+  };
   const clientIp = vi.fn(() => '203.0.113.7');
   const permissions = options.permissions ?? PERMISSIONS.map((p) => p.name);
   const app = await createKernel({
@@ -116,7 +179,10 @@ async function fixture(
     plugins: [],
     coreRoutes: servicePrincipalRoutes({
       servicePrincipals,
-      principals: { get },
+      principals: { get, list },
+      sessions,
+      projects,
+      idempotency,
       clock,
       ids,
       clientIp,
@@ -124,7 +190,7 @@ async function fixture(
     ports: { organizations: { get: async () => null }, clock, ids },
     resolveOrg: async () => orgContext('org-1'),
     health: async () => true,
-    log: () => undefined,
+    log,
     authorization: createAuthorizationEngine({
       access: {
         lookupSession: async (_org, input) => ({
@@ -177,7 +243,7 @@ async function fixture(
         dispatch: (run) => {
           void run();
         },
-        log: () => undefined,
+        log,
       },
       patValidation: patValidationGate,
       publicOrigin: ORIGIN,
@@ -185,12 +251,13 @@ async function fixture(
     }),
   });
   const request = (
-    route: RouteCase,
+    route: Pick<RouteCase, 'method' | 'path' | 'action'>,
     options: {
       auth?: 'anonymous' | 'token';
       ifMatch?: string | null;
       body?: unknown;
       path?: string;
+      key?: string | null;
     } = {},
   ) => {
     const headers = new Headers({ origin: ORIGIN, 'content-type': 'application/json' });
@@ -199,6 +266,7 @@ async function fixture(
       headers.set('cookie', `${SESSION_COOKIE}=${SECRET}`);
       headers.set('x-csrf-token', CSRF);
     }
+    if (options.key !== null) headers.set('idempotency-key', options.key ?? 'create-key');
     if (options.ifMatch !== null) headers.set('if-match', options.ifMatch ?? '"r3"');
     return app.fetch(
       new Request(ORIGIN + (options.path ?? route.path), {
@@ -210,7 +278,22 @@ async function fixture(
       }),
     );
   };
-  return { request, get, store, authority, audits, setPermissions, suspend, restore, clientIp };
+  return {
+    request,
+    get,
+    list,
+    projects,
+    sessions,
+    idempotency,
+    store,
+    authority,
+    audits,
+    setPermissions,
+    suspend,
+    restore,
+    clientIp,
+    log,
+  };
 }
 
 async function normalized(response: Response) {
@@ -526,9 +609,9 @@ for (const project of [false, true]) {
   });
 }
 
-it('exports six representable route specs without constructing services', () => {
-  expect(SERVICE_PRINCIPAL_API_SPECS).toHaveLength(6);
-  expect(new Set(SERVICE_PRINCIPAL_API_SPECS.map((spec) => spec.api.operationId)).size).toBe(6);
+it('exports nine representable route specs without constructing services', () => {
+  expect(SERVICE_PRINCIPAL_API_SPECS).toHaveLength(9);
+  expect(new Set(SERVICE_PRINCIPAL_API_SPECS.map((spec) => spec.api.operationId)).size).toBe(9);
   for (const spec of SERVICE_PRINCIPAL_API_SPECS) expect(defineApi(spec)).toBe(spec);
 });
 
@@ -544,3 +627,268 @@ it.each(Object.keys(SERVICE_ERROR_TABLE.ServicePrincipalError))(
     expect(await response.json()).toMatchObject({ error: { code: mapping.code } });
   },
 );
+
+const createRoute = { method: 'POST', path: '/_pb/service-principals', action: 'create' };
+const listRoute = { method: 'GET', path: '/_pb/service-principals', action: 'list' };
+const readRoute = { method: 'GET', path: `/_pb/service-principals/${ID}`, action: 'read' };
+const createBody = { name: 'build-bot', permissions: ['project:read'] };
+
+describe('service principal create, list and read', () => {
+  it('creates with an ETag and exactly one audit row, then replays the original response', async () => {
+    const f = await fixture();
+    const response = await f.request(createRoute, { body: createBody });
+    expect(response.status).toBe(201);
+    expect(response.headers.get('etag')).toBe('"r1"');
+    const principal = await response.json();
+    expect(principal).toMatchObject({
+      ...createBody,
+      projectId: null,
+      status: 'active',
+      revision: 1,
+    });
+    expect(f.audits).toEqual(['service_principal.create']);
+    const replay = await f.request(createRoute, { body: createBody });
+    expect(replay.status).toBe(201);
+    expect(replay.headers.get('etag')).toBe('"r1"');
+    expect(replay.headers.get('idempotent-replayed')).toBe('true');
+    expect(await replay.json()).toEqual(principal);
+    expect(f.store.create).toHaveBeenCalledOnce();
+    expect(f.audits).toEqual(['service_principal.create']);
+  });
+
+  it('returns the defined duplicate conflict', async () => {
+    const f = await fixture({ duplicate: true });
+    const response = await f.request(createRoute, { body: createBody });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'duplicate' } });
+    expect(f.audits).toEqual([]);
+  });
+
+  it.each([createRoute, listRoute, readRoute])(
+    'denies $action before lookups without permission',
+    async (route) => {
+      const f = await fixture({ permissions: [] });
+      const response = await f.request(route, {
+        ...(route === createRoute ? { body: createBody } : {}),
+      });
+      expect(response.status).toBe(403);
+      expect(f.get).not.toHaveBeenCalled();
+      expect(f.list).not.toHaveBeenCalled();
+      expect(f.projects.get).not.toHaveBeenCalled();
+      expect(f.sessions.authenticate).not.toHaveBeenCalled();
+      noStoreWrites(f);
+    },
+  );
+
+  it('refuses a project-scoped caller creating in another project before lookup', async () => {
+    const f = await fixture({
+      protectedHolder: false,
+      permissions: ['project:service-principals:write'],
+    });
+    expect(
+      (await f.request(createRoute, { body: { ...createBody, project: PROJECT } })).status,
+    ).toBe(403);
+    expect(f.projects.get).not.toHaveBeenCalled();
+    noStoreWrites(f);
+  });
+
+  it('creates in an active project and hides an unavailable project', async () => {
+    const f = await fixture();
+    const response = await f.request(createRoute, { body: { ...createBody, project: PROJECT } });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ projectId: PROJECT });
+    const hidden = await fixture({ projectArchived: true });
+    expect(
+      (await hidden.request(createRoute, { body: { ...createBody, project: PROJECT } })).status,
+    ).toBe(404);
+    noStoreWrites(hidden);
+  });
+
+  it.each([null, '', 'bad key'])('requires a valid Idempotency-Key (%s)', async (key) => {
+    const f = await fixture();
+    expect((await f.request(createRoute, { body: createBody, key })).status).toBe(400);
+    noStoreWrites(f);
+  });
+
+  it('rejects a changed request under the same idempotency key', async () => {
+    const f = await fixture();
+    expect((await f.request(createRoute, { body: createBody })).status).toBe(201);
+    const response = await f.request(createRoute, { body: { ...createBody, name: 'other' } });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'idempotency_mismatch' } });
+    expect(f.store.create).toHaveBeenCalledOnce();
+  });
+
+  it.each([['org:service-principals:write'], ['unknown'], ['project:read', 'project:read']])(
+    'rejects invalid permissions %j',
+    async (...permissions) => {
+      const f = await fixture();
+      expect((await f.request(createRoute, { body: { ...createBody, permissions } })).status).toBe(
+        400,
+      );
+      noStoreWrites(f);
+    },
+  );
+
+  it('refuses permissions beyond the live ceiling', async () => {
+    const f = await fixture({ livePermissions: ['org:service-principals:write'] });
+    expect((await f.request(createRoute, { body: createBody })).status).toBe(403);
+    noStoreWrites(f);
+  });
+
+  it('paginates and filters by project', async () => {
+    const f = await fixture();
+    for (const [index, project] of [undefined, PROJECT, PROJECT].entries()) {
+      expect(
+        (
+          await f.request(createRoute, {
+            key: `key-${index}`,
+            body: { ...createBody, name: `bot-${index}`, ...(project ? { project } : {}) },
+          })
+        ).status,
+      ).toBe(201);
+    }
+    const first = await f.request(listRoute, {
+      path: `/_pb/service-principals?limit=1&project=${PROJECT}`,
+    });
+    expect(first.status).toBe(200);
+    const page = (await first.json()) as {
+      items: { id: string; projectId: string }[];
+      next: string;
+    };
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]!.projectId).toBe(PROJECT);
+    expect(page.next).toBe(page.items[0]!.id);
+    const second = await f.request(listRoute, {
+      path: `/_pb/service-principals?limit=1&project=${PROJECT}&after=${page.next}`,
+    });
+    const last = (await second.json()) as typeof page;
+    expect(last.items).toHaveLength(1);
+    expect(last.items[0]!.id).not.toBe(page.items[0]!.id);
+    expect(last.next).toBeNull();
+  });
+
+  it('reads a principal with its ETag', async () => {
+    const f = await fixture();
+    const response = await f.request(readRoute);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('etag')).toBe('"r3"');
+    expect(await response.json()).toMatchObject({ id: ID, name: 'ci' });
+  });
+
+  it('answers 404 for an unknown principal', async () => {
+    const f = await fixture({ absent: true });
+    expect((await f.request(readRoute)).status).toBe(404);
+  });
+
+  it('hides project principals from a non-admin and archived project principals from an admin', async () => {
+    for (const options of [{ protectedHolder: false }, { projectArchived: true }]) {
+      const f = await fixture({ projectId: PROJECT, ...options });
+      expect((await f.request(readRoute)).status).toBe(404);
+    }
+  });
+
+  it('refuses a session that disappeared after authorization', async () => {
+    const f = await fixture({ staleSession: true });
+    expect((await f.request(createRoute, { body: createBody })).status).toBe(403);
+    noStoreWrites(f);
+  });
+});
+
+describe('creation replay races and validation', () => {
+  it.each([
+    ['empty', ''],
+    ['overlong', 'build bot '.repeat(10) + 'x'],
+    ['overlong Unicode', '😀'.repeat(101)],
+    ['control character', 'build\u0000bot'],
+    ['trailing newline', 'build\nbot\n'],
+    ['format character', 'build\u200dbot'],
+    ['astral format character', 'build\u{e0001}bot'],
+    ['line separator', 'build\u2028bot'],
+    ['paragraph separator', 'build\u2029bot'],
+    ['lone surrogate', 'build\ud800bot'],
+  ])('rejects a name at the schema (%s) without saving a replay', async (_kind, name) => {
+    const body = { ...createBody, name };
+    expect(createServicePrincipalSpec.api.body.safeParse(body).success).toBe(false);
+    const f = await fixture();
+    const response = await f.request(createRoute, { body });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'invalid_request' } });
+    expect(f.sessions.authenticate).not.toHaveBeenCalled();
+    expect(f.authority.livePermissions).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain(JSON.stringify(body));
+    noStoreWrites(f);
+    const valid = await f.request(createRoute, { body: createBody });
+    expect(valid.status).toBe(201);
+    const replay = await f.request(createRoute, { body: createBody });
+    expect(replay.headers.get('idempotent-replayed')).toBe('true');
+    expect(await replay.json()).toEqual(await valid.json());
+    expect(f.store.create).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['broker token', `pb_pat_abcdefghijkl_${'Q'.repeat(43)}`],
+    ['URL with userinfo', 'https://deploy:password@broker.example.test/repo'],
+    ['high-entropy string', 'a8K2mQ7xR4vN9zB3pL6wT1yH5cD0sF8j'],
+  ])('refuses a credential-bearing name (%s) without saving a replay', async (_kind, name) => {
+    const f = await fixture();
+    const response = await f.request(createRoute, { body: { ...createBody, name } });
+    expect(response.status).toBe(400);
+    const text = await response.text();
+    expect(JSON.parse(text)).toMatchObject({ error: { code: 'invalid_request' } });
+    expect(text).not.toContain(name);
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain(name);
+    noStoreWrites(f);
+    expect(f.authority.livePermissions).not.toHaveBeenCalled();
+    const valid = await f.request(createRoute, { body: createBody });
+    expect(valid.status).toBe(201);
+    const replay = await f.request(createRoute, { body: createBody });
+    expect(replay.headers.get('idempotent-replayed')).toBe('true');
+    expect(await replay.json()).toEqual(await valid.json());
+    expect(f.store.create).toHaveBeenCalledOnce();
+  });
+
+  it.each(['b', 'build bot '.repeat(10), '😀'.repeat(100)])(
+    'accepts a safe name of %s at the schema and service',
+    async (name) => {
+      const body = { ...createBody, name };
+      expect(createServicePrincipalSpec.api.body.safeParse(body).success).toBe(true);
+      const f = await fixture();
+      const response = await f.request(createRoute, { body });
+      expect(response.status).toBe(201);
+      expect(await response.json()).toMatchObject({ name });
+    },
+  );
+
+  it('settles a concurrent loser using the stored winning response', async () => {
+    const f = await fixture();
+    const winner = await f.request(createRoute, { body: createBody });
+    const body = await winner.json();
+    f.idempotency.find.mockResolvedValueOnce(null);
+    const loser = await f.request(createRoute, { body: createBody });
+    expect(loser.status).toBe(201);
+    expect(loser.headers.get('idempotent-replayed')).toBe('true');
+    expect(await loser.json()).toEqual(body);
+    expect(f.store.create).toHaveBeenCalledTimes(2);
+    expect(f.audits).toEqual(['service_principal.create']);
+  });
+
+  it.each(['?limit=0', '?limit=101', '?after=bad', '?project=bad', '?limit=1&limit=2'])(
+    'rejects malformed list query %s before reading rows',
+    async (query) => {
+      const f = await fixture();
+      expect((await f.request(listRoute, { path: listRoute.path + query })).status).toBe(400);
+      expect(f.list).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps invalid name data out of errors and logs', async () => {
+    const f = await fixture();
+    const name = 'request-private-value\u0000';
+    const response = await f.request(createRoute, { body: { ...createBody, name } });
+    expect(response.status).toBe(400);
+    expect(await response.text()).not.toContain('request-private-value');
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain('request-private-value');
+    noStoreWrites(f);
+  });
+});

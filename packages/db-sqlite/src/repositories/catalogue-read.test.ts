@@ -26,6 +26,7 @@ import {
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import * as versionReaderModule from './catalogue-read.js';
 import { createVersionReader } from './catalogue-read.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 type Result = PackageResolution | PageChanged | null;
 
@@ -615,7 +616,7 @@ describe('page bounds and proxy safety', () => {
         params: [id, ctx.orgId, id, id, T0],
       });
     }
-    await database.executor.batch(statements);
+    await batchInChunks(database.executor, statements);
     const first = page(await reader().resolveVersions(ctx, query('acme/a')));
     expect(first.versions).toHaveLength(200);
     expect(first.next).toEqual({ publishedAt: T0, id: 'V-199' });

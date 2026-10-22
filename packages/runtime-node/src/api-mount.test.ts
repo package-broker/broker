@@ -9,6 +9,8 @@ import {
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { ulid } from '@package-broker/core/ids';
 import { resolveRegistryConfig } from '@package-broker/core/registry/registry-config';
+import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
+import type { KernelLog } from '@package-broker/core/kernel/errors';
 import { createNodeServer, type NodeBroker } from './index.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
@@ -78,7 +80,12 @@ describe('Node management API mount', () => {
     await db.close();
   });
 
-  const create = (): NodeBroker =>
+  const create = (
+    extra: {
+      platformServices?: NonNullable<Parameters<typeof createNodeServer>[1]>['platformServices'];
+      log?: KernelLog;
+    } = {},
+  ): NodeBroker =>
     (broker = createNodeServer([], {
       executor: db.executor,
       auth: {
@@ -86,8 +93,22 @@ describe('Node management API mount', () => {
         publicOrigin: 'https://broker.test',
         env: {},
       },
-      log: () => undefined,
+      log: extra.log ?? (() => undefined),
+      ...(extra.platformServices === undefined ? {} : { platformServices: extra.platformServices }),
     }));
+  const platformServices = () => ({
+    jobStore: createJobRepository(db.executor),
+    blob: {
+      head: async () => null,
+      get: async () => null,
+      put: async () => {
+        throw new Error('unused');
+      },
+    },
+    cache: { get: async () => null, set: async () => undefined, delete: async () => undefined },
+  });
+  const mountedKeys = (kernel: Awaited<ReturnType<NodeBroker['ready']>>) =>
+    kernel.coreRoutes.map((route) => `${route.method} ${route.path}`);
 
   it('answers an anonymous GET /_pb/me with the standard 401 envelope', async () => {
     const kernel = await create().ready();
@@ -110,6 +131,44 @@ describe('Node management API mount', () => {
         key,
       ).toHaveLength(1);
     }
+  });
+
+  it('mounts the package manage routes without a rebuild route', async () => {
+    const mounted = mountedKeys(await create().ready());
+    for (const action of ['quarantine', 'tombstone', 'release']) {
+      expect(mounted).toContain(`POST /_pb/packages/:package/versions/:version/${action}`);
+      expect(mounted).toContain(
+        `POST /_pb/projects/:project/packages/:package/versions/:version/${action}`,
+      );
+    }
+    expect(mounted).not.toContain('POST /_pb/packages/:package/versions/:version/rebuild');
+  });
+
+  it('omits the import routes and logs the reason without a blob store', async () => {
+    const records: unknown[] = [];
+    const mounted = mountedKeys(await create({ log: (record) => records.push(record) }).ready());
+    expect(mounted.filter((key) => key.includes('/_pb/import-runs'))).toEqual([]);
+    expect(records).toContainEqual({
+      level: 'info',
+      event: 'api.import_routes_omitted',
+      reason: 'blob_store_not_configured',
+    });
+  });
+
+  it('mounts the import routes when a blob store is configured', async () => {
+    const records: unknown[] = [];
+    const mounted = mountedKeys(
+      await create({
+        platformServices: platformServices(),
+        log: (record) => records.push(record),
+      }).ready(),
+    );
+    expect(mounted).toContain('POST /_pb/import-runs');
+    expect(mounted).toContain('PUT /_pb/import-runs/:id/credentials/:externalRef');
+    expect(mounted.filter((key) => key.includes('/_pb/import-runs'))).toHaveLength(10);
+    expect(records).not.toContainEqual(
+      expect.objectContaining({ event: 'api.import_routes_omitted' }),
+    );
   });
 
   it('fails before serving with a named error when a required dependency is missing', async () => {

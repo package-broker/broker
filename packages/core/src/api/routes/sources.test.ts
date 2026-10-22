@@ -54,6 +54,7 @@ async function fixture(
   options: {
     organizationPermissions?: readonly string[];
     admin?: boolean;
+    acceptRemoval?: boolean;
     refusal?: SourceRecord['removalRefusal'];
     armed?: boolean;
     projectPermissions?: readonly string[];
@@ -173,10 +174,19 @@ async function fixture(
     'project:sources:read',
     'project:sources:write',
   ];
+  const { acceptRemoval, ...baseService } = service;
   const app = await createKernel({
     platform: 'node',
     plugins: [],
-    coreRoutes: sourceRoutes({ service, sources, projects, sessions, ids, clock, clientIp }),
+    coreRoutes: sourceRoutes({
+      service: { ...baseService, ...(options.acceptRemoval === false ? {} : { acceptRemoval }) },
+      sources,
+      projects,
+      sessions,
+      ids,
+      clock,
+      clientIp,
+    }),
     ports: { organizations: { get: async () => null }, ids, clock },
     resolveOrg: async () => orgContext('org-1'),
     health: async () => true,
@@ -698,6 +708,12 @@ it('guards project source listing if the project is archived after authorization
 describe('POST /_pb/sources/:source/accept-removal', () => {
   const path = `/_pb/sources/${SOURCE}/accept-removal`;
   const refusal = { at: '2026-10-22T10:00:00.000Z', absent: 9, listed: 1, successful: 1 };
+  it('returns 404 without the optional method while source reads remain available', async () => {
+    const f = await fixture({ admin: true, acceptRemoval: false });
+    expect((await f.request('POST', path)).status).toBe(404);
+    expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
+    expect((await f.request('GET', '/_pb/sources')).status).toBe(200);
+  });
   it('exports a schema and accepts an audited admin request without a body', async () => {
     expect(() => defineApi(ACCEPT_REMOVAL_API_SPEC)).not.toThrow();
     const f = await fixture({ admin: true, refusal });

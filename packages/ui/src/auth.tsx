@@ -84,15 +84,6 @@ export function isNavigableLocation(location: string): boolean {
 }
 
 export function safePageHash(hash: string): string {
-  if (hash === '#/packages' || hash.startsWith('#/packages?')) {
-    const query = new URLSearchParams(hash.slice('#/packages?'.length));
-    const allowed = new Set(['project', 'projectId', 'status', 'source', 'q', 'after']);
-    for (const key of [...query.keys()]) if (!allowed.has(key)) query.delete(key);
-    const project = query.get('project');
-    if (project !== null && !/^[A-Za-z0-9._-]{1,64}$/.test(project)) query.delete('project');
-    const search = query.toString();
-    return `#/packages${search === '' ? '' : `?${search}`}`;
-  }
   const match =
     /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?([\s\S]*))?$/.exec(hash);
   if (match === null || match[0] !== hash) return '#/projects';
@@ -100,6 +91,8 @@ export function safePageHash(hash: string): string {
   return buildListFilterHash((match[1] === 'login' ? 'projects' : match[1]) as HashRoute, {
     project: query.get('project'),
     status: query.get('status'),
+    source: query.get('source'),
+    projectId: query.get('projectId'),
     q: query.get('q'),
     after: query.get('after'),
   });

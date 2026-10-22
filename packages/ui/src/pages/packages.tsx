@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { operations } from '../api-types.js';
-import { useServices, type ShellServices, type ReplayResult } from '../auth.js';
+import { safePageHash, useServices, type ShellServices, type ReplayResult } from '../auth.js';
+import { buildListFilterHash } from '../page-hash.js';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
 import {
@@ -37,7 +38,6 @@ const STATUSES: readonly PackageStatus[] = [
   'removed_upstream',
 ];
 const ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
-const SLUG = /^[A-Za-z0-9._-]{1,64}$/;
 const ACTION_LABELS: Record<Action, string> = {
   quarantine: 'Quarantine',
   tombstone: 'Tombstone',
@@ -56,16 +56,14 @@ export interface PackageQuery {
 }
 
 export function parsePackagesHash(hash: string): PackageQuery {
-  const params = new URLSearchParams(hash.split('?').slice(1).join('?'));
-  const project = params.get('project');
-  const state: PackageQuery = { project: project !== null && SLUG.test(project) ? project : null };
+  const params = new URLSearchParams(safePageHash(hash).split('?')[1]);
+  const state: PackageQuery = { project: params.get('project') };
   const status = params.get('status');
   if (STATUSES.includes(status as PackageStatus)) state.status = status as PackageStatus;
   const source = params.get('source');
-  if (source !== null && ID.test(source)) state.source = source;
+  if (source !== null) state.source = source;
   const projectId = params.get('projectId');
-  if (state.project === null && projectId !== null && ID.test(projectId))
-    state.projectId = projectId;
+  if (state.project === null && projectId !== null) state.projectId = projectId;
   const q = params.get('q')?.trim().toLowerCase();
   if (q && q.length <= 100 && !q.includes('\0')) state.q = q;
   const after = params.get('after');
@@ -74,11 +72,7 @@ export function parsePackagesHash(hash: string): PackageQuery {
 }
 
 export function buildPackagesHash(state: PackageQuery): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(state))
-    if (value !== null && value !== undefined) params.set(key, value);
-  const query = params.toString();
-  return `#/packages${query ? `?${query}` : ''}`;
+  return buildListFilterHash('packages', state);
 }
 
 export interface PackageAccess {

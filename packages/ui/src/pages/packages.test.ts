@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createApiClient } from '../api.js';
 import type { paths } from '../api-types.js';
 import { ServicesContext } from '../auth.js';
+import { buildListFilterHash } from '../page-hash.js';
 import {
   PackageVersions,
   PackagesView,
@@ -163,6 +164,19 @@ describe('D8 action visibility', () => {
 });
 
 describe('hash filters', () => {
+  it('uses the shared hash encoding for package navigation', () => {
+    const state = { ...query, q: '@scope/pkg & tool', after: 'opaque/+=' };
+    expect(buildPackagesHash(state)).toBe(buildListFilterHash('packages', state));
+  });
+  it('drops oversized cursors when reading a package hash', () => {
+    expect(parsePackagesHash(`#/packages?after=${'x'.repeat(4097)}`).after).toBeUndefined();
+  });
+  it('keeps a boundary-length cursor when reading a package hash', () => {
+    expect(parsePackagesHash(`#/packages?after=${'x'.repeat(4096)}`).after).toBe('x'.repeat(4096));
+  });
+  it('drops unencodable values when building a package hash', () => {
+    expect(buildPackagesHash({ project: null, q: '\ud800' })).toBe('#/packages');
+  });
   it('round-trips filters and project scope', () => {
     const state = parsePackagesHash(
       `#/packages?project=web&status=quarantined&source=${sourceId}&q=%40example`,

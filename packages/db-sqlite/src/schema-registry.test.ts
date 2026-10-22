@@ -131,43 +131,6 @@ describe('registry table types match the migrated database', () => {
     expect(columns.map((column) => column.name)).toEqual(['org_id', 'snapshot_blob_sha256']);
   });
 
-  it('backfills publication time from created_at when upgrading existing blobs', async () => {
-    const upgrade = openNodeSqliteExecutor();
-    try {
-      const names = readdirSync(migrationsUrl)
-        .filter((name) => name.endsWith('.sql'))
-        .sort();
-      const sources = await Promise.all(
-        names.map((name) =>
-          loadMigrationSource('core', name, readFileSync(new URL(name, migrationsUrl), 'utf8')),
-        ),
-      );
-      await migrate(
-        upgrade.executor,
-        sources.filter((source) => source.id < 'core:0009_'),
-        { holder: 'backfill-test' },
-      );
-      await upgrade.executor.batch([
-        {
-          sql: "INSERT INTO organization (id, slug, name) VALUES ('ORG', 'org', 'Org')",
-          params: [],
-        },
-        {
-          sql: "INSERT INTO blob (id, org_id, sha256, size_bytes, storage_key, created_at) VALUES ('B', 'ORG', ?, 1, 'k', '2000-01-01T00:00:00.000Z')",
-          params: ['a'.repeat(64)],
-        },
-      ]);
-      await migrate(upgrade.executor, sources, { holder: 'backfill-test' });
-      const rows = await upgrade.executor.all<{ published_at: string }>({
-        sql: 'SELECT published_at FROM blob',
-        params: [],
-      });
-      expect(rows).toEqual([{ published_at: '2000-01-01T00:00:00.000Z' }]);
-    } finally {
-      await upgrade.close();
-    }
-  });
-
   it('adds nullable publication time for blob inserts outside publish', async () => {
     const columns = await opened.executor.all<{ type: string; notnull: number }>({
       sql: `SELECT type, "notnull" FROM pragma_table_info('blob') WHERE name = 'published_at'`,

@@ -4,7 +4,6 @@ const MAX_STATEMENT_BYTES = 100_000;
 const SEMICOLON = 59;
 const utf8 = new TextEncoder();
 const LEADING_WORD = /^[A-Za-z_]+/;
-const DEFER_FOREIGN_KEYS = /^PRAGMA\s+defer_foreign_keys\s*=\s*ON$/i;
 const CREATE_TRIGGER = /^CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i;
 
 const FORBIDDEN_KEYWORDS = new Set([
@@ -32,7 +31,6 @@ export class MigrationSyntaxError extends Error {
 
 function reject(statement: string, index: number): void {
   const word = LEADING_WORD.exec(statement)?.[0]?.toUpperCase();
-  if (DEFER_FOREIGN_KEYS.test(statement)) return;
   if ((word !== undefined && FORBIDDEN_KEYWORDS.has(word)) || CREATE_TRIGGER.test(statement)) {
     throw new MigrationSyntaxError(`statement ${index} is not allowed in a migration`, index);
   }

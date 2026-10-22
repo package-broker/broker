@@ -8,9 +8,9 @@ import { loadMigrationSource, type MigrationSource } from './source.js';
 
 const migrationsUrl = new URL('../../migrations/', import.meta.url);
 
-async function loadCore(only?: (name: string) => boolean): Promise<MigrationSource[]> {
+async function loadCore(): Promise<MigrationSource[]> {
   const names = readdirSync(migrationsUrl)
-    .filter((name) => name.endsWith('.sql') && (only?.(name) ?? true))
+    .filter((name) => name.endsWith('.sql'))
     .sort();
   return Promise.all(
     names.map((name) =>
@@ -39,8 +39,6 @@ function expectContiguousSequences(
 const ORG = '01J0ACME000000000000000000';
 const USER = '01J0USER000000000000000000';
 const OTHER_USER = '01J0USER000000000000000001';
-const IDENTITY = '01J0IDEN000000000000000000';
-const SESSION = '01J0SESS000000000000000000';
 const CREDENTIAL = '01J0CRED000000000000000000';
 const HASH_64 = 'a'.repeat(64);
 const SETUP_EXPIRY = '2026-10-16T09:00:00.000Z';
@@ -114,17 +112,6 @@ async function tableNames(): Promise<string[]> {
   return found.map((row) => row.name);
 }
 
-async function snapshot(): Promise<Record<string, Record<string, unknown>[]>> {
-  const tables = ['organization', 'user_account', 'identity', 'session', 'credential'];
-  const result: Record<string, Record<string, unknown>[]> = {};
-  for (const table of tables) {
-    const columns = await rows<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`);
-    const names = columns.map((column) => column.name).filter((name) => name !== 'validated_at');
-    result[table] = await rows(`SELECT ${names.join(', ')} FROM ${table} ORDER BY id`);
-  }
-  return result;
-}
-
 async function migrateAll(): Promise<void> {
   await migrate(opened.executor, await loadCore(), { holder: 'core-migrations-test' });
 }
@@ -174,68 +161,26 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 55 tables, expand phase for 0002', async () => {
+  it('1: a fresh database gets every core migration: 55 tables, one expand baseline', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
-    expect(ids.slice(0, 2)).toEqual(['core:0001_init', 'core:0002_local_login']);
+    expect(ids).toEqual(['core:0001_init']);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))
       .sort();
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    // 37 from 0001, +2 from 0002, +3 from 0003, +1 from 0004: cache_epoch; 0005 and 0006 add none, 0007: 4; 0008, 0009 and 0010 add none; 0011 adds 2; 0012, 0013 and 0014 add none; 0015 adds 1; 0022 adds 5
     expect(await countTables()).toBe(55);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
-    expect(sources.find((source) => source.id === 'core:0002_local_login')?.phase).toBe('expand');
+    expect(sources[0]?.phase).toBe('expand');
     const applied = await rows<{ id: string }>('SELECT id FROM schema_migration ORDER BY id');
     expect(applied.map((row) => row.id)).toEqual(ids);
-  });
-
-  it('2: upgrades a populated 0001 database and keeps its rows', async () => {
-    const [init] = await loadCore((name) => name.startsWith('0001_'));
-    if (init === undefined) throw new Error('0001_init.sql is missing');
-    await migrate(opened.executor, [init], { holder: 'core-migrations-test' });
-    await seedOrganization();
-    await seedUser(USER, 'admin@example.test');
-    await run(
-      'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
-      [IDENTITY, ORG, USER, 'dex', 'subject-1', 'admin@example.test'],
-    );
-    await run(
-      'INSERT INTO session (id, org_id, user_id, identity_id, secret_hash, csrf_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [SESSION, ORG, USER, IDENTITY, HASH_64, HASH_64, SETUP_EXPIRY],
-    );
-    await seedCredential();
-    expect(await countTables()).toBe(37);
-    const before = await snapshot();
-    const sources = await loadCore();
-
-    const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
-
-    expect(result.applied).toEqual(sources.slice(1).map((source) => source.id));
-    expect(result.skipped).toEqual(['core:0001_init']);
-    // 0002, 0003, 0004, 0007, 0015_keyring_verifier and 0011 add 13 tables to the 37 of 0001; 0022 adds 5 more
-    expect(await countTables()).toBe(55);
-    expect(await tableNames()).toEqual(
-      expect.arrayContaining(['local_login', 'identity_provider_binding']),
-    );
-    const after = await snapshot();
-    expect(after).toEqual({
-      ...before,
-      user_account: (before.user_account ?? []).map((row) => ({
-        ...row,
-        pat_invalid_before: null,
-      })),
-    });
-    expect(await rows('SELECT id, validated_at FROM identity')).toEqual([
-      { id: IDENTITY, validated_at: null },
-    ]);
   });
 
   describe('local_login', () => {
@@ -374,22 +319,6 @@ describe('core migrations', () => {
   describe('cache_epoch', () => {
     const OTHER_ORG = '01J0ACME000000000000000001';
 
-    it('17: seeds one random 32-character hex version for each existing organization', async () => {
-      const [init] = await loadCore((name) => name.startsWith('0001_'));
-      if (init === undefined) throw new Error('0001_init.sql is missing');
-      await migrate(opened.executor, [init], { holder: 'core-migrations-test' });
-      await seedOrganization();
-
-      await migrateAll();
-
-      const found = await rows<{ org_id: string; version: string }>(
-        'SELECT org_id, version FROM cache_epoch',
-      );
-      expect(found).toHaveLength(1);
-      expect(found[0]?.org_id).toBe(ORG);
-      expect(found[0]?.version).toMatch(/^[0-9A-F]{32}$/);
-    });
-
     it('18: seeds no row on an empty database and creates no trigger', async () => {
       await migrateAll();
 
@@ -444,27 +373,6 @@ describe('core migrations', () => {
       expect(await rows('SELECT org_id FROM cache_epoch')).toEqual([{ org_id: ORG }]);
     });
 
-    it('23: a failure after CREATE TABLE cache_epoch leaves no table and no bookkeeping row', async () => {
-      const before = await loadCore((name) => name < '0004_');
-      const [real] = await loadCore((name) => name.startsWith('0004_'));
-      if (real === undefined) throw new Error('0004_cache_epoch.sql is missing');
-      const broken = await loadMigrationSource(
-        'core',
-        '0004_cache_epoch.sql',
-        `${real.sql}\nCREATE TABL broken (id INTEGER);\n`,
-      );
-
-      await expect(
-        migrate(opened.executor, [...before, broken], { holder: 'core-migrations-test' }),
-      ).rejects.toThrow();
-
-      expect(await tableNames()).not.toContain('cache_epoch');
-      expect(
-        await rows<{ id: string }>("SELECT id FROM schema_migration WHERE id LIKE '%0004%'"),
-      ).toEqual([]);
-      expect(await countTables()).toBe(42);
-    });
-
     it('22: the table is STRICT without a rowid shortcut and has exactly org_id and version', async () => {
       await migrateAll();
 
@@ -480,7 +388,7 @@ describe('core migrations', () => {
   });
 });
 
-describe('import rollback persistence (0019)', () => {
+describe('import rollback persistence', () => {
   const COUNT_COLUMNS = [
     'rollback_restored_count',
     'rollback_conflict_count',
@@ -500,7 +408,7 @@ describe('import rollback persistence (0019)', () => {
 
   it('adds the three count columns and expired_at, additive and in the expand phase', async () => {
     const sources = await loadCore();
-    const source = sources.find((candidate) => candidate.id.startsWith('core:0019_'));
+    const source = sources[0];
     expect(source?.phase).toBe('expand');
     await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
@@ -521,29 +429,6 @@ describe('import rollback persistence (0019)', () => {
         "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('import_ref') WHERE name = 'expired_at'",
       ),
     ).toEqual([{ name: 'expired_at', type: 'TEXT', notnull: 0, dflt_value: null }]);
-  });
-
-  it('keeps existing journal rows and backfills zero counts and a null expiry', async () => {
-    await migrate(opened.executor, await loadCore((name) => name < '0019_'), {
-      holder: 'core-migrations-test',
-    });
-    await seedJournal();
-    const runBefore = await rows<Record<string, SqlValue>>('SELECT * FROM import_run');
-    const refBefore = await rows<Record<string, SqlValue>>('SELECT * FROM import_ref');
-
-    await migrate(opened.executor, await loadCore(), { holder: 'core-migrations-test' });
-
-    expect(await rows('SELECT * FROM import_run WHERE 1 = 1')).toEqual([
-      {
-        ...runBefore[0],
-        rollback_restored_count: 0,
-        rollback_conflict_count: 0,
-        rollback_expired_count: 0,
-      },
-    ]);
-    expect(await rows('SELECT * FROM import_ref WHERE 1 = 1')).toEqual([
-      { ...refBefore[0], expired_at: null },
-    ]);
   });
 
   it.each(COUNT_COLUMNS)('rejects a negative %s', async (column) => {

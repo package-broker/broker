@@ -36,22 +36,6 @@ const migrationsDirectory = join(
 );
 let init: MigrationSource | undefined;
 
-async function epochSources(): Promise<MigrationSource[]> {
-  return Promise.all(
-    [
-      '0002_local_login.sql',
-      '0003_access_model.sql',
-      '0004_cache_epoch.sql',
-      '0005_admin_permission_topup.sql',
-      '0006_ports.sql',
-      '0015_keyring_verifier.sql',
-      '0016_keyring_version_indexes.sql',
-    ].map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
-}
-
 async function initSource(): Promise<MigrationSource> {
   init ??= await loadMigrationSource(
     'core',
@@ -66,7 +50,7 @@ async function migratedDatabase(): Promise<D1DatabaseLike> {
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
   const db = (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
-  await migrate(createD1Executor(db), [await initSource(), ...(await epochSources())], {
+  await migrate(createD1Executor(db), [await initSource()], {
     holder: 'worker-test',
   });
   return db;

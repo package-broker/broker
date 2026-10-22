@@ -37,7 +37,7 @@ function readableCase(branch: Branch, layer: Layer): ContractCase {
           ? foreign.orgId
           : own.orgId;
       const now = new Date().toISOString();
-      await seedProject(seed, 'P', org('project'));
+      await seedProject(seed, '00000000000000000000000000', org('project'));
       await seed(
         "INSERT INTO user_account (id, org_id, email) VALUES ('U', ?, 'reader@example.test')",
         org('user'),
@@ -51,7 +51,7 @@ function readableCase(branch: Branch, layer: Layer): ContractCase {
         org('permission'),
       );
       await seed(
-        "INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id) VALUES ('G', ?, ?, ?, ?, 'project', 'P', 'R')",
+        "INSERT INTO access_grant (id, org_id, subject_type, subject_value, subject_provider, scope, project_id, role_id) VALUES ('G', ?, ?, ?, ?, 'project', '00000000000000000000000000', 'R')",
         org('grant'),
         branch,
         branch === 'email' ? 'reader@example.test' : 'readers',
@@ -72,13 +72,15 @@ function readableCase(branch: Branch, layer: Layer): ContractCase {
           org('member'),
           now,
         );
-      const statement = listReadableProjectsStatement(
-        own,
-        { userId: 'U' },
-        { status: 'active', limit: 10 },
-        providers,
-      );
-      expect(await context.executor.all(context.mutate(statement))).toEqual([]);
+      for (const ids of [undefined, ['00000000000000000000000000']]) {
+        const statement = listReadableProjectsStatement(
+          own,
+          { userId: 'U' },
+          { status: 'active', limit: 10, ...(ids === undefined ? {} : { ids }) },
+          providers,
+        );
+        expect(await context.executor.all(context.mutate(statement))).toEqual([]);
+      }
     },
   };
 }
@@ -111,7 +113,7 @@ export const entries: readonly MutationEntry[] = [
             joined ? `"${alias[layer === 'role' ? 'grant' : 'role']}"\\."org_id"` : '\\?',
           ),
           neutral: joined ? ALWAYS : NOT_NULL,
-          copies: 1,
+          copies: 2,
           caseName: readableCase(branch, layer).name,
         };
       }),

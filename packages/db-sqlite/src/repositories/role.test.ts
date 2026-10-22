@@ -455,7 +455,7 @@ async function coreSources(): Promise<MigrationSource[]> {
 }
 
 describe('admin completeness', () => {
-  it('2: an organization seeded as of migration 0001 has every catalogue permission on organization_admin after all migrations, before any bootstrap', async () => {
+  it('2: bootstrap fills an incomplete organization_admin permission set idempotently', async () => {
     const opened = openNodeSqliteExecutor();
     try {
       const [init, ...later] = await coreSources();
@@ -468,6 +468,10 @@ describe('admin completeness', () => {
         {
           sql: 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)',
           params: [orgId, 'upgrade', 'Upgrade'],
+        },
+        {
+          sql: 'INSERT INTO cache_epoch (org_id, version) VALUES (?, ?)',
+          params: [orgId, 'initial'],
         },
         {
           sql: `INSERT INTO role (id, org_id, key, name, scope, is_system, protects_last_holder)
@@ -495,7 +499,6 @@ describe('admin completeness', () => {
         const roles = await createRoleRepository(opened.executor).list(ctx);
         return roles.find((role) => role.key === 'organization_admin')?.permissions ?? [];
       };
-      expect(missingCatalogue(await adminPermissions())).toEqual([]);
 
       const bootstrap = (prefix: string, tag: string) =>
         bootstrapAdmin(opened.executor, ctx, {

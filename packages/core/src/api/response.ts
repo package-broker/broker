@@ -150,7 +150,6 @@ export const SERVICE_ERROR_TABLE = {
     invalid_limit: { status: 400, code: 'invalid_request' },
     invalid_cursor: { status: 400, code: 'invalid_request' },
     invalid_status: { status: 400, code: 'invalid_request' },
-    scan_incomplete: { status: 503, code: 'unavailable' },
     source_invalid: { status: 503, code: 'unavailable' },
   } satisfies Record<ProjectListError, ServiceErrorMapping>,
 } as const;

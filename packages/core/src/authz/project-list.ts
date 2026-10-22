@@ -1,12 +1,11 @@
 import type { OrgContext } from '../db/port.js';
-import { idBefore, isUlid } from '../ids.js';
+import { isUlid } from '../ids.js';
 import { isPermissionView } from './actor.js';
 import type { ActorContext } from './administration.js';
 import type { ProjectStatus } from './project-service.js';
 
 export const PROJECT_LIST_MAX_LIMIT = 200;
 
-const MAX_SOURCE_READS = 10;
 const RESTRICTED_CHUNK = 50;
 
 export interface ProjectListEntry {
@@ -33,11 +32,13 @@ export interface ReadableProjectPage {
   readonly afterId?: string;
   readonly limit: number;
   readonly status: ProjectStatus;
+  /** Restricts the query to these bound ids before applying grants. */
+  readonly ids?: readonly string[];
 }
 
 /**
  * Returns, in id order and at most `limit` rows, only projects of `status` after `afterId` on which
- * the actor holds `project:read` through its organization or project grants. One read per page.
+ * the actor holds `project:read` through project grants. One read per page.
  */
 export interface ReadableProjectSource {
   listReadableProjects(
@@ -73,12 +74,7 @@ export interface ProjectListPage {
 }
 
 export type ProjectListError =
-  | 'forbidden'
-  | 'invalid_limit'
-  | 'invalid_cursor'
-  | 'invalid_status'
-  | 'scan_incomplete'
-  | 'source_invalid';
+  'forbidden' | 'invalid_limit' | 'invalid_cursor' | 'invalid_status' | 'source_invalid';
 
 export type ProjectListResult =
   | { readonly ok: true; readonly value: ProjectListPage }
@@ -94,15 +90,10 @@ export interface ProjectLister {
 
 export interface ProjectListerDeps {
   readonly source: ProjectListSource;
-  /**
-   * Required when `readable` is absent and ignored when it is wired. Without `readable`, an
-   * unrestricted caller lacking organization `project:read` gets at most ten source reads per page
-   * and may see `scan_incomplete`. A restricted listing never does: at its read cap it returns the
-   * greatest bound id reached as the cursor.
-   */
+  /** Optional per-project permission lookup for restricted listings. */
   readonly access?: ProjectReadAccess;
   /** Lists project-grant readable projects for a caller lacking organization `project:read`. */
-  readonly readable?: ReadableProjectSource;
+  readonly readable: ReadableProjectSource;
 }
 
 function fail(error: ProjectListError): ProjectListResult {
@@ -114,16 +105,15 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
   if (
     source === undefined ||
     typeof source.list !== 'function' ||
-    (readable !== undefined
-      ? typeof readable.listReadableProjects !== 'function'
-      : access === undefined || typeof access.permissionsFor !== 'function')
+    readable === undefined ||
+    typeof readable.listReadableProjects !== 'function' ||
+    (access !== undefined && typeof access.permissionsFor !== 'function')
   ) {
-    throw new TypeError(
-      'project lister requires a source and a readable source or read-access port',
-    );
+    throw new TypeError('project lister requires a source and a readable source');
   }
 
   const pages: ProjectListSource = source;
+  const grants: ReadableProjectSource = readable;
 
   async function listRestricted(
     ctx: OrgContext,
@@ -139,58 +129,16 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       return fail('source_invalid');
     }
     const bound = [...new Set(restrictTo as string[])].sort();
-    const wanted = new Set(bound);
-    const lastBound = bound[bound.length - 1] as string;
+    const lastBound = bound[bound.length - 1];
     const { limit, status } = page;
     const items: ProjectListEntry[] = [];
-    const finish = (resume: string, exhausted: boolean): ProjectListResult => {
-      const last = items[items.length - 1];
-      const done = exhausted || (last !== undefined && last.id >= lastBound);
-      return { ok: true, value: { items, nextAfterId: done ? null : resume } };
-    };
-
-    if (!inheritsAll && readable !== undefined) {
-      let cursor = page.afterId;
-      let resume = page.afterId;
-      for (let reads = 0; reads < MAX_SOURCE_READS; reads += 1) {
-        const at = cursor;
-        const next = bound.find((id) => at === undefined || id > at);
-        if (next === undefined) return finish(resume as string, true);
-        const floor = idBefore(next);
-        if (floor !== null && (at === undefined || floor > at)) cursor = floor;
-        const from = cursor;
-        const rows = await readable.listReadableProjects(
-          ctx,
-          { userId },
-          {
-            ...(from === undefined ? {} : { afterId: from }),
-            limit: PROJECT_LIST_MAX_LIMIT,
-            status,
-          },
-        );
-        let passed = false;
-        let scanned = from;
-        for (const row of rows) {
-          if (from !== undefined && row.id <= from) continue;
-          if (row.id > lastBound) {
-            passed = true;
-            break;
-          }
-          scanned = row.id;
-          if (row.status !== status || !wanted.has(row.id)) continue;
-          items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
-          resume = row.id;
-          if (items.length === limit) return finish(resume, false);
-        }
-        if (passed || rows.length < PROJECT_LIST_MAX_LIMIT) return finish(resume as string, true);
-        if (scanned === from) return fail('source_invalid');
-        cursor = scanned;
-        const reached = [...bound].reverse().find((id) => id <= (scanned as string));
-        if (reached !== undefined && (resume === undefined || reached > resume)) resume = reached;
-      }
-      if (resume === undefined || resume === page.afterId) return fail('source_invalid');
-      return finish(resume, false);
-    }
+    const finish = (resume: string | undefined, exhausted: boolean): ProjectListResult => ({
+      ok: true,
+      value: {
+        items,
+        nextAfterId: exhausted || resume === lastBound ? null : (resume ?? null),
+      },
+    });
 
     let cursor = page.afterId;
     while (items.length < limit) {
@@ -199,18 +147,23 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         .filter((id) => start === undefined || id > start)
         .slice(0, RESTRICTED_CHUNK);
       const last = chunk[chunk.length - 1];
-      if (last === undefined) return finish(cursor as string, true);
-      const rows = await pages.list(ctx, { limit: chunk.length, status, ids: chunk });
-      const granted = inheritsAll
-        ? null
-        : await (access as ProjectReadAccess).permissionsFor(
-            ctx,
-            userId,
-            rows.map((row) => row.id),
-          );
+      if (last === undefined) return finish(cursor, true);
+      const query = { limit: chunk.length, status, ids: chunk };
+      const rows =
+        !inheritsAll && access === undefined
+          ? await grants.listReadableProjects(ctx, { userId }, query)
+          : await pages.list(ctx, query);
+      const granted =
+        inheritsAll || access === undefined
+          ? null
+          : await access.permissionsFor(
+              ctx,
+              userId,
+              rows.map((row) => row.id),
+            );
       cursor = last;
       for (const row of rows) {
-        if (row.status !== status || !wanted.has(row.id)) continue;
+        if (row.status !== status || !chunk.includes(row.id)) continue;
         if (granted !== null && granted.get(row.id)?.has('project:read') !== true) continue;
         items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
         if (items.length === limit) {
@@ -219,7 +172,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         }
       }
     }
-    return finish(cursor as string, false);
+    return finish(cursor, false);
   }
 
   return {
@@ -257,7 +210,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         );
       }
 
-      if (!inheritsAll && readable !== undefined) {
+      if (!inheritsAll) {
         const rows = await readable.listReadableProjects(
           ctx,
           { userId },
@@ -276,47 +229,19 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         return { ok: true, value: { items, nextAfterId: last.id } };
       }
 
-      const batch = inheritsAll ? limit : PROJECT_LIST_MAX_LIMIT;
-
-      const items: ProjectListEntry[] = [];
-      let cursor = afterId;
-      let exhausted = false;
-      for (
-        let reads = 0;
-        items.length < limit && !exhausted && reads < MAX_SOURCE_READS;
-        reads += 1
-      ) {
-        const rows = await source.list(ctx, {
-          ...(cursor === undefined ? {} : { afterId: cursor }),
-          limit: batch,
-          status,
-        });
-        const granted =
-          inheritsAll || rows.length === 0
-            ? null
-            : await (access as ProjectReadAccess).permissionsFor(
-                ctx,
-                userId,
-                rows.map((row) => row.id),
-              );
-        for (const row of rows) {
-          if (items.length === limit) break;
-          if (row.status !== status) continue;
-          if (!inheritsAll && granted?.get(row.id)?.has('project:read') !== true) continue;
-          items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
-        }
-        exhausted = rows.length < batch;
-        cursor = rows[rows.length - 1]?.id;
-      }
-
-      const lastItem = items[items.length - 1];
-      if (lastItem === undefined) {
-        return exhausted
-          ? { ok: true, value: { items, nextAfterId: null } }
-          : fail('scan_incomplete');
-      }
-      const drained = exhausted && items.length < limit;
-      return { ok: true, value: { items, nextAfterId: drained ? null : lastItem.id } };
+      const rows = await source.list(ctx, {
+        ...(afterId === undefined ? {} : { afterId }),
+        limit,
+        status,
+      });
+      const items = rows
+        .filter((row) => row.status === status)
+        .slice(0, limit)
+        .map(({ id, slug, name, status }) => ({ id, slug, name, status }));
+      return {
+        ok: true,
+        value: { items, nextAfterId: rows.length < limit ? null : (items.at(-1)?.id ?? null) },
+      };
     },
   };
 }

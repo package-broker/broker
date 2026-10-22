@@ -107,6 +107,12 @@ describe('generateOpenApi', () => {
     });
   });
 
+  it('does not advertise scan_incomplete for project listing', () => {
+    const operation = generateOpenApi(PROJECT_API_SPECS, info).paths['/_pb/projects']!.get;
+    expect(JSON.stringify(operation)).not.toContain('scan_incomplete');
+    expect(SERVICE_ERROR_TABLE.ProjectListError).not.toHaveProperty('scan_incomplete');
+  });
+
   it('derives only errors present in the linked service', () => {
     const responses = generateOpenApi([{ ...specs[0]!, service: 'ProjectListError' }], info).paths[
       '/_pb/status'

@@ -402,7 +402,7 @@ describe('version-state fenced batch', () => {
           target: { type: 'version' as const, id: nextId },
         },
       };
-      expect(await act(method, replay)).toMatchObject({ ok: false });
+      expect(await act(method, replay)).toEqual({ ok: false, reason: 'conflict' });
       expect(await snapshot()).toEqual(before);
       expect(
         await scalar(

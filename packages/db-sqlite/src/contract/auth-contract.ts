@@ -453,8 +453,8 @@ const UPGRADE_SVC = '01J00000000000000000000SVC';
 
 const upgrade: Case = async (open) => {
   await withDatabase(open, async ({ executor }) => {
-    const [init, ...rest] = await loadSources();
-    if (init === undefined || rest.length === 0) throw new Error('two core migrations expected');
+    const [init] = await loadSources();
+    if (init === undefined) throw new Error('core baseline expected');
     await migrate(executor, [init], { holder: 'auth-contract' });
     const org = '01J00000000000000000000A0A';
     await executor.batch([
@@ -537,9 +537,9 @@ const upgrade: Case = async (open) => {
     const before = await read();
     expect(before.every((rows) => rows.length > 0)).toBe(true);
 
-    const result = await migrate(executor, [init, ...rest], { holder: 'auth-contract' });
+    const result = await migrate(executor, [init], { holder: 'auth-contract' });
 
-    expect(result.applied).toEqual(rest.map((source) => source.id));
+    expect(result.applied).toEqual([]);
     expect(await read()).toEqual(before);
     expect(
       await countOf(
@@ -1523,7 +1523,7 @@ export const authContractCases = {
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
     it(
-      '1. upgrade: 0001 with populated rows then every later migration keep the rows, add no authority and give 55 tables',
+      '1. baseline rerun keeps populated rows, adds no authority and gives 55 tables',
       () => authContractCases.upgrade(open),
       30_000,
     );

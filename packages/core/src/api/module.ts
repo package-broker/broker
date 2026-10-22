@@ -8,6 +8,7 @@ import { myPermissionsRoute, myProjectPermissionsRoute } from './routes/permissi
 import { projectAccessRoutes } from './routes/project-access.js';
 import { projectRoutes } from './routes/projects.js';
 import { servicePrincipalRoutes } from './routes/service-principals.js';
+import { sourceAttachmentRoutes } from './routes/source-attachment.js';
 import { sourceNameRoutes } from './routes/source-names.js';
 import { sourceRoutes } from './routes/sources.js';
 import { tokenRoutes } from './routes/tokens.js';
@@ -24,6 +25,7 @@ export interface ApiModuleDeps {
   readonly servicePrincipals: Parameters<typeof servicePrincipalRoutes>[0];
   readonly sources: Parameters<typeof sourceRoutes>[0];
   readonly sourceNames: Parameters<typeof sourceNameRoutes>[0];
+  readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
   readonly packages: Parameters<typeof packageRoutes>[0];
   readonly audit: Parameters<typeof auditRoutes>[0];
   readonly extensions?: readonly ApiRouteFactory[];
@@ -137,6 +139,13 @@ const REQUIRED_DEPENDENCIES = {
     projectSources: { list: true },
     projects: { get: true },
   },
+  sourceAttachments: {
+    ...CONTEXT_METHODS,
+    sources: { get: true },
+    visibility: { attachSource: true, detachSource: true },
+    projectSources: { list: true },
+    projects: { get: true },
+  },
   packages: { listProject: true, listOrganization: true, listVersions: true },
   audit: { list: true, head: true },
 } as const satisfies {
@@ -179,6 +188,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...servicePrincipalRoutes(deps.servicePrincipals),
     ...sourceRoutes(deps.sources),
     ...sourceNameRoutes(deps.sourceNames),
+    ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
     ...auditRoutes(deps.audit),
     myPermissionsRoute(),

@@ -1,3 +1,9 @@
+import {
+  createVulnerabilityRuntime,
+  VULNERABILITY_EVENT,
+  VULNERABILITY_REASON_CODES,
+} from '@package-broker/core/runtime/vulnerability';
+import { createVulnerabilityRepository } from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
 import { createApiModule } from '@package-broker/core/api/module';
 import type { AuditReader } from '@package-broker/core/api/routes/audit';
@@ -328,6 +334,7 @@ export interface WorkerOptions {
   /** Registry settings; an invalid value fails startup. Dist URLs use the origin of PB_PUBLIC_URL only, so a path-prefixed public URL is unsupported. */
   readonly registry?: RegistryConfigInput;
   readonly tokens?: BrokerConfig['tokens'];
+  readonly vulnerability?: BrokerConfig['vulnerability'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -602,6 +609,7 @@ function buildApiRoutes(input: {
   readonly keyring: Keyring;
   readonly services: WorkerAccessServices;
   readonly packages: WorkerCatalogueServices;
+  readonly vulnerability: ReturnType<typeof createVulnerabilityRuntime>;
   readonly policy: OutboundPolicy;
   readonly registration: Registration;
   readonly coreRoutes: readonly RouteDefinition[];
@@ -716,7 +724,10 @@ function buildApiRoutes(input: {
         projectSources: createProjectSourceReader(executor),
         projects,
       },
-      packages: createPackageAdminReader(executor),
+      packages: {
+        ...createPackageAdminReader(executor),
+        readStatuses: input.vulnerability.readStatuses,
+      },
       audit: auditReader(executor),
       packageManage: {
         ...common,
@@ -1829,6 +1840,26 @@ export function createWorker(
         },
       });
     }
+    let vulnerabilityRuntime: ReturnType<typeof createVulnerabilityRuntime> | undefined;
+    const vulnerability = (): ReturnType<typeof createVulnerabilityRuntime> =>
+      (vulnerabilityRuntime ??= createVulnerabilityRuntime({
+        config: {
+          platform: 'cloudflare',
+          plugins,
+          ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
+        },
+        repository: createVulnerabilityRepository(executor as SqlExecutor, systemClock),
+        policyFetch: createPolicyFetch({
+          fetchImpl: (...args) => globalThis.fetch(...args),
+          policy: createOutboundPolicy({
+            allowPrivateHosts: [],
+            runtime: 'cloudflare',
+            selfOrigins: publicUrl === undefined ? [] : [publicUrl],
+          }),
+          userAgent: 'PackageBroker/2.0',
+        }),
+        clock: systemClock,
+      }));
     const importJobs = createImportJobHolder();
     const reads = db === undefined ? undefined : buildPackageReads(executor as SqlExecutor);
     const collectRegistration = (): Registration =>
@@ -1849,6 +1880,15 @@ export function createWorker(
           config === null
             ? []
             : [
+                ...(db === undefined
+                  ? []
+                  : vulnerability().jobs.map((job) =>
+                      registerObservedJob(job.definition, {
+                        events: new Set([VULNERABILITY_EVENT]),
+                        reasonCodes: new Set(VULNERABILITY_REASON_CODES),
+                        routeTemplates: new Set(),
+                      }),
+                    )),
                 ...(db === undefined
                   ? []
                   : retentionRegistrations(executor as SqlExecutor, () => {
@@ -1998,6 +2038,7 @@ export function createWorker(
             keyring: built.keyring,
             services: built.access,
             packages,
+            vulnerability: vulnerability(),
             policy:
               registryModule?.policy ??
               createOutboundPolicy({

@@ -7,6 +7,7 @@ import type {
   PackageListItem,
   VersionListItem,
 } from '../../db/package-admin.js';
+import type { VulnerabilityStatus } from '../../db/vulnerability.js';
 import { orgContext } from '../../db/port.js';
 import { fixedClock } from '../../ids.js';
 import { createKernel } from '../../kernel/kernel.js';
@@ -53,6 +54,10 @@ afterEach(() => vi.restoreAllMocks());
 async function fixture(
   options: {
     permissions?: string[];
+    readStatuses?: (
+      ctx: typeof org,
+      ids: readonly string[],
+    ) => Promise<ReadonlyMap<string, VulnerabilityStatus>>;
     listProject?: PackageAdminReader['listProject'];
     listOrganization?: PackageAdminReader['listOrganization'];
     listVersions?: PackageAdminReader['listVersions'];
@@ -86,7 +91,8 @@ async function fixture(
   });
   const resolve = vi.fn(async () => ({ kind: 'absent' as const }));
   const log = vi.fn();
-  const routes = packageRoutes({ listProject, listOrganization, listVersions });
+  const readStatuses = vi.fn(options.readStatuses ?? (async () => new Map()));
+  const routes = packageRoutes({ listProject, listOrganization, listVersions, readStatuses });
   const kernel = await createKernel({
     platform: 'node',
     plugins: [],
@@ -124,7 +130,16 @@ async function fixture(
         headers: authenticated ? { cookie: `__Host-pb_session=${SECRET}` } : {},
       }),
     );
-  return { request, listProject, listOrganization, listVersions, resolve, routes, log };
+  return {
+    request,
+    listProject,
+    listOrganization,
+    listVersions,
+    readStatuses,
+    resolve,
+    routes,
+    log,
+  };
 }
 
 async function dump(response: Response) {
@@ -178,6 +193,7 @@ for (const path of paths) {
     expect(f.listProject).not.toHaveBeenCalled();
     expect(f.listOrganization).not.toHaveBeenCalled();
     expect(f.listVersions).not.toHaveBeenCalled();
+    expect(f.readStatuses).not.toHaveBeenCalled();
   });
   it(`denies missing permission on visible resource ${path}`, async () => {
     const f = await fixture({ permissions: [] });
@@ -187,6 +203,7 @@ for (const path of paths) {
     expect(f.listProject).not.toHaveBeenCalled();
     expect(f.listOrganization).not.toHaveBeenCalled();
     expect(f.listVersions).not.toHaveBeenCalled();
+    expect(f.readStatuses).not.toHaveBeenCalled();
   });
 }
 for (const slug of ['absent', 'archived', 'foreign', 'invisible']) {
@@ -225,6 +242,7 @@ for (const base of [PROJECT, '/_pb/packages']) {
       await dump(await f.request('/_pb/projects/absent/packages')),
     );
     expect(f.listVersions).not.toHaveBeenCalled();
+    expect(f.readStatuses).not.toHaveBeenCalled();
   });
 }
 it('passes organization filters and scope without changing literal prefixes', async () => {
@@ -348,7 +366,10 @@ for (const path of [paths[1]!, paths[3]!]) {
     });
     const response = await f.request(`${path}?limit=1&after=${ID}`);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ items: versions, next: OTHER });
+    expect(await response.json()).toEqual({
+      items: versions.map((v) => ({ ...v, vulnerability: masked })),
+      next: OTHER,
+    });
     expect(f.listVersions).toHaveBeenCalledWith(org, {
       packageId: ID,
       projectId: path.startsWith(PROJECT) ? ID : null,
@@ -361,6 +382,7 @@ for (const path of [paths[1]!, paths[3]!]) {
     const f = await fixture();
     expect((await f.request(`${path}?after=bad`)).status).toBe(400);
     expect(f.listVersions).not.toHaveBeenCalled();
+    expect(f.readStatuses).not.toHaveBeenCalled();
   });
 }
 it('returns only declared package fields', async () => {
@@ -388,5 +410,79 @@ for (const base of [PROJECT, '/_pb/packages']) {
     const f = await fixture();
     expect((await f.request(`${base}?q=${encodeURIComponent('😀'.repeat(100))}`)).status).toBe(200);
     expect((await f.request(`${base}?q=${encodeURIComponent('😀'.repeat(101))}`)).status).toBe(400);
+  });
+}
+
+const masked: VulnerabilityStatus = {
+  status: 'unknown',
+  reason: 'not_checked',
+  source: null,
+  fetchedAt: null,
+  lastKnownStatus: null,
+  advisoryCount: 0,
+  advisories: [],
+  detailsComplete: false,
+  advisoriesTruncated: false,
+};
+for (const path of [paths[1]!, paths[3]!]) {
+  it(`projects only the visible page on ${path} without outbound requests`, async () => {
+    const outbound = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected egress'));
+    const assessment: VulnerabilityStatus = {
+      ...masked,
+      status: 'affected',
+      reason: null,
+      source: 'osv',
+      fetchedAt: '2026-10-20T00:00:00.000Z',
+      lastKnownStatus: 'affected',
+      advisoryCount: 1,
+      advisories: [
+        {
+          id: 'GHSA-aaaa-bbbb-cccc',
+          url: null,
+          severity: { level: 'high', entries: [] },
+          detailsFetchedAt: null,
+        },
+      ],
+    };
+    const f = await fixture({
+      readStatuses: async () =>
+        new Map([
+          [
+            ID,
+            {
+              ...assessment,
+              provenance: 'private',
+              advisories: assessment.advisories.map((advisory) => ({
+                ...advisory,
+                summary: 'private',
+              })),
+            },
+          ],
+        ]),
+    });
+    expect(await (await f.request(`${path}?limit=100`)).json()).toEqual({
+      items: [{ ...version, vulnerability: assessment }],
+      next: null,
+    });
+    expect(f.readStatuses).toHaveBeenCalledExactlyOnceWith(org, [ID]);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+  it(`does not project an invisible package on ${path}`, async () => {
+    const f = await fixture({ listVersions: async () => null });
+    expect((await f.request(path)).status).toBe(404);
+    expect(f.readStatuses).not.toHaveBeenCalled();
+  });
+  it(`masks a failed projection on ${path}`, async () => {
+    const f = await fixture({
+      readStatuses: async () => {
+        throw new Error('private evidence');
+      },
+    });
+    expect(await (await f.request(path)).json()).toEqual({
+      items: [{ ...version, vulnerability: masked }],
+      next: null,
+    });
   });
 }

@@ -521,3 +521,40 @@ describe('runApiContract', () => {
     expect(JSON.stringify(findings)).not.toContain(sentinel);
   });
 });
+
+it('accepts the complete vulnerability mask and rejects undeclared provenance evidence', async () => {
+  const { PACKAGE_API_SPECS } = await import('./routes/packages-schemas.js');
+  const response = PACKAGE_API_SPECS[1].api.responses[200];
+  const vulnerability = {
+    status: 'unknown',
+    reason: 'not_checked',
+    source: null,
+    fetchedAt: null,
+    lastKnownStatus: null,
+    advisoryCount: 0,
+    advisories: [],
+    detailsComplete: false,
+    advisoriesTruncated: false,
+  };
+  const version = {
+    id: '01JA0000000000000000000000',
+    version: '1.2.3',
+    stability: 'stable',
+    status: 'quarantined',
+    publishedAt: '2026-10-20T00:00:00.000Z',
+    removedUpstreamAt: null,
+    tombstonedAt: null,
+    revision: 1,
+    vulnerability,
+  };
+  expect(response.safeParse({ items: [version], next: null }).success).toBe(true);
+  expect(
+    response.safeParse({
+      items: [{ ...version, vulnerability: { ...vulnerability, holders: ['private'] } }],
+      next: null,
+    }).success,
+  ).toBe(false);
+  expect(
+    response.safeParse({ items: [{ ...version, vulnerability: undefined }], next: null }).success,
+  ).toBe(false);
+});

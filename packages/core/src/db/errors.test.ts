@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError, classifySqliteError } from './errors.js';
+import {
+  ACCESS_MUTATION_GUARD_CONSTRAINT,
+  DbError,
+  assertBatchStatementCount,
+  classifySqliteError,
+} from './errors.js';
+import { D1_STATEMENTS_PER_BATCH, D1_STATEMENTS_PER_INVOCATION } from './port.js';
 import type { DbErrorKind } from './errors.js';
 
 const cases: readonly (readonly [string, DbErrorKind, string | undefined])[] = [
@@ -117,5 +123,31 @@ describe('ACCESS_MUTATION_GUARD_CONSTRAINT', () => {
 
     expect(error.kind).toBe('unique');
     expect(error.constraint).toBe(ACCESS_MUTATION_GUARD_CONSTRAINT);
+  });
+});
+
+describe('assertBatchStatementCount', () => {
+  it('pins the D1 budgets', () => {
+    expect(D1_STATEMENTS_PER_BATCH).toBe(200);
+    expect(D1_STATEMENTS_PER_INVOCATION).toBe(500);
+  });
+
+  it('accepts counts up to the per-batch budget', () => {
+    expect(() => assertBatchStatementCount(0)).not.toThrow();
+    expect(() => assertBatchStatementCount(D1_STATEMENTS_PER_BATCH)).not.toThrow();
+  });
+
+  it('rejects a count above the per-batch budget as too_big without request data', () => {
+    let thrown: unknown;
+    try {
+      assertBatchStatementCount(D1_STATEMENTS_PER_BATCH + 1);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DbError);
+    expect(thrown).toMatchObject({ kind: 'too_big' });
+    expect((thrown as DbError).message).toBe(
+      'too_big: batch holds 201 statements, D1 allows at most 200',
+    );
   });
 });

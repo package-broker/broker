@@ -710,21 +710,21 @@ describe('import journal', () => {
   it('fits a maximum role chunk within statement and parameter budgets', async () => {
     const permissions = PERMISSIONS.map((p) => p.name);
     expect(permissions.length).toBeGreaterThanOrEqual(33);
-    expect(
-      await apply(
-        Array.from({ length: 50 }, (_, i) => ({
-          type: 'role',
-          external_ref: `role-${String(i)}`,
-          key: `role-${String(i)}`,
-          name: 'Role',
-          scope: 'organization',
-          permissions,
-        })),
-      ),
-    ).toEqual({ ok: true });
-    expect(batches).toHaveLength(1);
-    expect(batches[0]!.length).toBeLessThanOrEqual(900);
-    expect(batches[0]!.every((s) => s.params.length <= 100)).toBe(true);
+    const roles = Array.from({ length: 50 }, (_, i) => ({
+      type: 'role' as const,
+      external_ref: `role-${String(i)}`,
+      key: `role-${String(i)}`,
+      name: 'Role',
+      scope: 'organization' as const,
+      permissions,
+    }));
+    const rolesPerChunk = 32;
+    for (let offset = 0; offset < roles.length; offset += rolesPerChunk) {
+      expect(await apply(roles.slice(offset, offset + rolesPerChunk))).toEqual({ ok: true });
+    }
+    expect(batches).toHaveLength(2);
+    expect(batches.every((batch) => batch.length <= 200)).toBe(true);
+    expect(batches.every((batch) => batch.every((s) => s.params.length <= 100))).toBe(true);
     expect(
       await executor.all(
         stmt(

@@ -21,6 +21,7 @@ import {
   type MigrationSource,
 } from '@package-broker/db-sqlite/migrations/source';
 import { createObservability, type ObsRecord } from '@package-broker/core/platform/observability';
+import { encodeMetrics } from '@package-broker/core/platform/otlp';
 import {
   AUTH_EVENTS,
   AlreadyBootstrappedError,
@@ -140,6 +141,106 @@ function counters(records: readonly ObsRecord[]): ObsRecord[] {
 }
 
 describe('auth sink log', () => {
+  const finishDetails = [
+    'invalid_grant',
+    'invalid_client',
+    'invalid_request',
+    'unauthorized_client',
+    'unsupported_grant_type',
+    'invalid_scope',
+    'token_endpoint_error',
+  ];
+
+  it.each(finishDetails)('keeps finish detail %s as reason_code', (detail) => {
+    const { records, log } = authSink();
+    log({
+      level: 'warn',
+      event: 'auth.login.refused',
+      requestId: REQUEST_ID,
+      provider: 'oidc',
+      reason: 'provider_error',
+      detail,
+    });
+    expect(logs(records)[0]).toMatchObject({
+      event: 'auth.login.refused',
+      request_id: REQUEST_ID,
+      reason_code: detail,
+    });
+  });
+
+  it('counts finish failures in distinct series for each detail', () => {
+    const { records, log } = authSink();
+    for (const detail of finishDetails) {
+      log({
+        level: 'warn',
+        event: 'auth.login.refused',
+        provider: 'oidc',
+        reason: 'provider_error',
+        detail,
+      });
+    }
+    expect(counters(records)).toEqual(
+      finishDetails.map((detail) => ({
+        kind: 'counter',
+        name: 'pb.auth.login',
+        labels: { provider: 'oidc', outcome: 'refused', detail },
+        value: 1,
+      })),
+    );
+    expect(
+      encodeMetrics(counters(records), {
+        service: 'package-broker',
+        deploymentId: 'test-deployment',
+        runtime: 'node',
+      }),
+    ).toMatchObject({
+      resourceMetrics: [
+        {
+          scopeMetrics: [
+            {
+              metrics: finishDetails.map((detail) => ({
+                name: 'pb.auth.login',
+                sum: {
+                  dataPoints: [
+                    {
+                      attributes: expect.arrayContaining([
+                        { key: 'detail', value: { stringValue: detail } },
+                      ]),
+                    },
+                  ],
+                },
+              })),
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it.each([
+    ['provider_error', 'unregistered_detail'],
+    ['provider_error', { secret: 'private_detail' }],
+    ['provider_error', 'discovery_failed'],
+    ['invalid_token', 'invalid_grant'],
+  ])('omits inapplicable metric details for reason %s and detail %j', (reason, detail) => {
+    const { records, log } = authSink();
+    log({
+      level: 'warn',
+      event: 'auth.login.refused',
+      provider: 'oidc',
+      reason,
+      detail,
+    });
+    expect(counters(records)).toEqual([
+      {
+        kind: 'counter',
+        name: 'pb.auth.login',
+        labels: { provider: 'oidc', outcome: 'refused' },
+        value: 1,
+      },
+    ]);
+  });
+
   it('only forwards reasons from the core auth reason set', () => {
     expectTypeOf(registeredAuthReason).returns.toEqualTypeOf<AuthReasonCode | undefined>();
     expectTypeOf<string>().not.toExtend<AuthReasonCode>();
@@ -279,22 +380,6 @@ describe('startNode', () => {
     return loadMigrationSource('core', '0001_init.sql', text);
   }
 
-  async function epochSources(): Promise<MigrationSource[]> {
-    return Promise.all(
-      [
-        '0002_local_login.sql',
-        '0003_access_model.sql',
-        '0004_cache_epoch.sql',
-        '0005_admin_permission_topup.sql',
-        '0006_ports.sql',
-        '0015_keyring_verifier.sql',
-        '0016_keyring_version_indexes.sql',
-      ].map(async (name) =>
-        loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-      ),
-    );
-  }
-
   async function listen(broker: NodeBroker): Promise<string> {
     running.push(broker);
     await new Promise<void>((resolve) => broker.server.listen(0, '127.0.0.1', resolve));
@@ -313,7 +398,7 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [healthyPlugin()],
-      migrations: [await initSource(), ...(await epochSources())],
+      migrations: [await initSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -365,7 +450,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource(), ...(await epochSources())],
+      migrations: [await initSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -399,7 +484,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource(), ...(await epochSources())],
+      migrations: [await initSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -414,7 +499,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'other',
@@ -447,7 +532,7 @@ describe('startNode', () => {
       const failure = await rejection(
         startNode({
           plugins: [broken],
-          migrations: [await initSource(), ...(await epochSources())],
+          migrations: [await initSource()],
           env: {
             PB_SQLITE_PATH: path,
             PB_ORG_SLUG: 'acme',
@@ -473,7 +558,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'acme',
@@ -587,7 +672,7 @@ describe('startNode', () => {
     ): Promise<NodeBroker> {
       return startNode({
         plugins: [probePlugin()],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: env(databasePath(), extraEnv),
         ...(platformPorts === undefined ? {} : { platformPorts }),
         stdout: capture().stream,
@@ -642,7 +727,7 @@ describe('startNode', () => {
               },
             },
           ],
-          migrations: [await initSource(), ...(await epochSources())],
+          migrations: [await initSource()],
           env: { ...env(databasePath(`n-${String(platformPorts)}.sqlite`)), DEPLOYMENT_ID: '' },
           ...(platformPorts === undefined ? {} : { platformPorts }),
         });
@@ -701,7 +786,7 @@ describe('startNode', () => {
         const failure = await rejection(
           startNode({
             plugins: [probePlugin()],
-            migrations: [await initSource(), ...(await epochSources())],
+            migrations: [await initSource()],
             env: env(path, extra),
             platformPorts: stanza,
             stdout: capture().stream,
@@ -989,7 +1074,7 @@ describe('startNode', () => {
       };
       const broker = await startNode({
         plugins: [stuck],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: env(databasePath()),
         platformPorts: ports,
         stdout: out.stream,

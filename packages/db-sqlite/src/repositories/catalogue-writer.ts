@@ -1,3 +1,7 @@
+import {
+  D1_STATEMENTS_PER_BATCH,
+  D1_STATEMENTS_PER_INVOCATION,
+} from '@package-broker/core/db/port';
 import { sql } from 'kysely';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
@@ -28,7 +32,7 @@ import { versionStatusStatements } from '../internal/catalogue-status-statements
 import { packageUpsertStatements } from './catalogue-write-package.js';
 import { versionInsertStatements } from './catalogue-write-version-insert.js';
 import { versionUpdateStatements } from './catalogue-write-version-update.js';
-import { distTagStatements, MAX_TAGS_PER_CALL } from './catalogue-write-tags.js';
+import { distTagStatementGroups, MAX_TAGS_PER_CALL } from './catalogue-write-tags.js';
 import { distAttachStatements } from './catalogue-write-dist.js';
 import { quarantineStatements } from './catalogue-status.js';
 import type { FinalizeGuardOptions } from '@package-broker/core/ingest/finalize-guard';
@@ -43,11 +47,11 @@ import {
 } from './visibility-subset.js';
 import { actorHolds } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
 
-const MAX_STATEMENTS = 500;
-const MAX_BATCH_STATEMENTS = 200;
+const MAX_STATEMENTS = D1_STATEMENTS_PER_INVOCATION;
+const MAX_BATCH_STATEMENTS = D1_STATEMENTS_PER_BATCH;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 const encoder = new TextEncoder();
 function parameterBytes(statements: readonly Statement[]): number {
@@ -132,7 +136,7 @@ export function createCatalogueWriter(
   return {
     ...reconcile,
     statementBudget: {
-      syncPackage: 500,
+      syncPackage: D1_STATEMENTS_PER_INVOCATION,
       attachDist: 4,
       openListing: 3,
       markListing: 5,
@@ -253,7 +257,7 @@ export function createCatalogueWriter(
       const tags =
         input.tags === undefined
           ? null
-          : distTagStatements(ctx, guard, {
+          : distTagStatementGroups(ctx, guard, {
               packageId: placeholder,
               ecosystem: input.ecosystem,
               tags: input.tags,
@@ -277,22 +281,14 @@ export function createCatalogueWriter(
         placeholder,
         lookup,
       );
-      const tagAdvance = tags?.statements.at(-1);
+      const tagAdvance = tags?.groups.at(-1)?.at(-1);
       const advance = tagAdvance && bindPackage(tagAdvance, placeholder, lookup);
-      const tagGroups: Statement[][] = [];
-      const tagStatements = tags?.statements ?? [];
-      for (let offset = 0; offset < tagStatements.length;) {
-        // A tag's before-image and its following write must commit together.
-        const size = /^insert into "dist_tag_history" /i.test(tagStatements[offset]!.sql) ? 2 : 1;
-        tagGroups.push(tagStatements.slice(offset, offset + size));
-        offset += size;
-      }
       const groups = [
         upsert.statements,
         [probe],
         update?.statements ?? [],
         insert?.statements ?? [],
-        ...tagGroups,
+        ...(tags?.groups ?? []),
         [lookup],
       ].map((group) =>
         group.map((statement) => {
@@ -356,7 +352,8 @@ export function createCatalogueWriter(
       offset += update?.statements.length ?? 0;
       const inserted = insert?.result(results.slice(offset, offset + insert.statements.length));
       offset += insert?.statements.length ?? 0;
-      const tagResult = tags?.result(results.slice(offset, offset + tags.statements.length));
+      const tagStatementCount = tags?.groups.reduce((sum, group) => sum + group.length, 0) ?? 0;
+      const tagResult = tags?.result(results.slice(offset, offset + tagStatementCount));
       const packageId = results.at(-1)?.rows[0]?.['id'];
       if (typeof packageId !== 'string') throw new TypeError('catalogue package was not returned');
       const refused = input.versions.flatMap((v, index) => {
@@ -500,6 +497,11 @@ export function createVisibilityStore(
       if (!(await holds(statusMatches))) return { ok: false, reason: 'conflict' };
       if (!(await holds(authority))) return { ok: false, reason: 'authority' };
       if (!(await holds(blobReady))) return { ok: false, reason: 'conflict' };
+      if (
+        input.idempotency !== undefined &&
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
+      )
+        return { ok: false, reason: 'conflict' };
     } catch {
       return { ok: false, reason: 'unclassified' };
     }

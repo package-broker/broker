@@ -15,10 +15,6 @@ import { createOrganizationBootstrap, createOrganizationRepository } from './org
 
 const initUrl = new URL('../../migrations/0001_init.sql', import.meta.url);
 const initText = readFileSync(initUrl, 'utf8');
-const epochText = readFileSync(
-  new URL('../../migrations/0004_cache_epoch.sql', import.meta.url),
-  'utf8',
-);
 
 const FIRST = {
   id: '01J0ACME000000000000000000',
@@ -69,13 +65,11 @@ function recordingExecutor(executor: ScalarSqlExecutor): Recording {
 
 let opened: OpenedExecutor;
 let init: MigrationSource;
-let epoch: MigrationSource;
 
 beforeEach(async () => {
   opened = openNodeSqliteExecutor();
   init = await loadMigrationSource('core', '0001_init.sql', initText);
-  epoch = await loadMigrationSource('core', '0004_cache_epoch.sql', epochText);
-  await migrate(opened.executor, [init, epoch], { holder: 't99' });
+  await migrate(opened.executor, [init], { holder: 't99' });
 });
 
 afterEach(async () => {

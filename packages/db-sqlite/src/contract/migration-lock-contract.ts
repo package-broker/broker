@@ -230,7 +230,7 @@ export function describeMigrationLockContract(
               sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
               params: [],
             }),
-          ).toHaveLength(37);
+          ).toHaveLength(55);
         });
       }
     }, 60_000);

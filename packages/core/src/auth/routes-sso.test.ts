@@ -773,6 +773,111 @@ describe('start refusals', () => {
   });
 });
 
+describe('finish failure details', () => {
+  it.each(['provider_error', 'invalid_token', 'forged_reason'])(
+    'handles a throwing detail getter with reason %s',
+    async (reason) => {
+      const detail = vi.fn(() => {
+        throw new Error(PROVIDER_ERROR_TEXT);
+      });
+      const result = Object.defineProperty({ ok: false, reason }, 'detail', { get: detail });
+      const app = await build({
+        providers: [makeProvider('dex', { finish: () => Promise.resolve(result as never) })],
+      });
+      const response = await app.kernel.fetch(callback('dex', await loginCookieOf(app)));
+
+      expect(response.status).toBe(401);
+      expect(await bodyOf(response)).toMatchObject({ error: { code: 'login_failed' } });
+      expect(refusals(app)[0]).toMatchObject({
+        reason: reason === 'invalid_token' ? reason : 'provider_error',
+      });
+      expect(refusals(app)[0]).not.toHaveProperty('detail');
+      expect(detail).toHaveBeenCalledTimes(reason === 'provider_error' ? 1 : 0);
+      expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
+      expect(app.login).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'invalid_grant',
+    'invalid_client',
+    'invalid_request',
+    'unauthorized_client',
+    'unsupported_grant_type',
+    'invalid_scope',
+    'token_endpoint_error',
+  ])('logs %s without changing the browser response', async (detail) => {
+    let result: unknown = { ok: false, reason: 'provider_error' };
+    const app = await build({
+      providers: [makeProvider('dex', { finish: () => Promise.resolve(result as never) })],
+    });
+    const cookie = await loginCookieOf(app);
+    const requestId = vi
+      .spyOn(crypto, 'randomUUID')
+      .mockReturnValue('00000000-0000-4000-8000-000000000620');
+    const plain = await app.kernel.fetch(callback('dex', cookie));
+    result = {
+      ok: false,
+      reason: 'provider_error',
+      detail,
+      error_description: PROVIDER_ERROR_TEXT,
+    };
+    const detailed = await app.kernel.fetch(callback('dex', cookie));
+    requestId.mockRestore();
+
+    expect(refusals(app)[1]).toMatchObject({ reason: 'provider_error', detail });
+    expect(refusals(app)[0]).not.toHaveProperty('detail');
+    expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
+    expect(detailed.status).toBe(401);
+    expect(detailed.status).toBe(plain.status);
+    expect([...detailed.headers]).toEqual([...plain.headers]);
+    expect(await detailed.text()).toBe(await plain.text());
+    expect(app.login).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an unknown string', 'provider_error', PROVIDER_ERROR_TEXT],
+    ['a non-string', 'provider_error', { secret: PROVIDER_ERROR_TEXT }],
+    ['another reason', 'invalid_token', 'invalid_grant'],
+    ['an unknown reason', 'forged_reason', 'invalid_grant'],
+  ])('drops a finish detail with %s', async (_name, reason, detail) => {
+    const app = await build({
+      providers: [
+        makeProvider('dex', {
+          finish: () => Promise.resolve({ ok: false, reason, detail } as never),
+        }),
+      ],
+    });
+    const response = await app.kernel.fetch(callback('dex', await loginCookieOf(app)));
+
+    expect(response.status).toBe(401);
+    expect(refusals(app)).toEqual([
+      expect.objectContaining({ reason: reason === 'invalid_token' ? reason : 'provider_error' }),
+    ]);
+    expect(refusals(app)[0]).not.toHaveProperty('detail');
+    expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
+    expect(await bodyOf(response)).toMatchObject({ error: { code: 'login_failed' } });
+  });
+
+  it('logs a finish detail for a direct provider', async () => {
+    const app = await build({
+      providers: [
+        makeProvider('access', {
+          start: () => Promise.resolve({ kind: 'direct' }),
+          finish: () =>
+            Promise.resolve({ ok: false, reason: 'provider_error', detail: 'invalid_client' }),
+        }),
+      ],
+    });
+    const response = await app.kernel.fetch(startRequest('access'));
+
+    expect(response.status).toBe(401);
+    expect(refusals(app)).toEqual([
+      expect.objectContaining({ reason: 'provider_error', detail: 'invalid_client' }),
+    ]);
+  });
+});
+
 describe('callback refusals', () => {
   it('refuses a callback without the login cookie', async () => {
     const app = await build();

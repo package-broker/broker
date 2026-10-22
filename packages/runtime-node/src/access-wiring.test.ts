@@ -103,6 +103,20 @@ vi.mock('@package-broker/db-sqlite/repositories/project', async (importOriginal)
   };
 });
 
+const apiModule = vi.hoisted(() => ({ routes: [] as Array<{ method: string; path: string }>[] }));
+
+vi.mock('@package-broker/core/api/module', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@package-broker/core/api/module')>();
+  return {
+    ...actual,
+    createApiModule: (...args: Parameters<typeof actual.createApiModule>) => {
+      const module = actual.createApiModule(...args);
+      apiModule.routes.push([...module.routes]);
+      return module;
+    },
+  };
+});
+
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const PASSWORD = 'correct horse battery staple 42';
 const EMAIL = 'admin@example.test';
@@ -807,16 +821,21 @@ describe('node access wiring', () => {
     });
   });
 
-  it('registers no step 5 HTTP resource', async () => {
+  it('registers only the session route and the management API routes outside auth', async () => {
+    apiModule.routes.length = 0;
     const { broker } = await start(await freePort());
     const kernel = await broker.ready();
 
-    const routes = [...kernel.coreRoutes, ...kernel.registration.routes].map(
-      (route) => `${route.method} ${route.path}`,
-    );
-    expect(
-      routes.filter((route) => !route.includes('/_pb/auth/') && !route.includes('/probe/')),
-    ).toEqual(['GET /_pb/session']);
+    const outside = [...kernel.coreRoutes, ...kernel.registration.routes]
+      .filter((route) => !route.path.includes('/_pb/auth/') && !route.path.includes('/probe/'))
+      .map((route) => `${route.method} ${route.path}`)
+      .sort();
+    expect(apiModule.routes).toHaveLength(1);
+    const expected = [
+      'GET /_pb/session',
+      ...apiModule.routes[0]!.map((route) => `${route.method} ${route.path}`),
+    ].sort();
+    expect(outside).toEqual(expected);
   });
 
   it('does not block the response on the token telemetry write', async () => {
@@ -948,8 +967,8 @@ describe('node access wiring', () => {
           roleId,
         ],
       });
-      for (let i = 0; i < seed.length; i += 500)
-        await opened.executor.batch(seed.slice(i, i + 500));
+      for (let i = 0; i < seed.length; i += 200)
+        await opened.executor.batch(seed.slice(i, i + 200));
 
       const listed = await services?.projectList.list(
         ctx,

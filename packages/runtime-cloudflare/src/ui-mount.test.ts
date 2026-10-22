@@ -132,7 +132,7 @@ describe('Worker UI mount', () => {
             }),
           )
         ).status,
-      ).toBe(404);
+      ).toBe(200);
       const routes = captured.options.at(-1)?.coreRoutes ?? [];
 
       expect(

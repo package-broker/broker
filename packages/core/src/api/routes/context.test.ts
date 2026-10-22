@@ -4,7 +4,7 @@ import type { AccessContextSnapshot } from '../../authz/access-context.js';
 import { fenceKind } from '../../authz/fence.js';
 import { orgContext } from '../../db/port.js';
 import type { RequestContext } from '../../plugin.js';
-import { auditCall, callContext } from './context.js';
+import { auditCall, callContext, hasOrganizationAdminAuthority } from './context.js';
 import type { ApiRouteDeps } from './context.js';
 
 function dependencies() {
@@ -204,6 +204,49 @@ function projectContext() {
     },
   );
 }
+
+describe('hasOrganizationAdminAuthority', () => {
+  it('fails closed without an organization or access snapshot and on a project boundary', () => {
+    expect(hasOrganizationAdminAuthority(context({}, null))).toBe(false);
+    expect(hasOrganizationAdminAuthority(context({ org: null }))).toBe(false);
+    expect(hasOrganizationAdminAuthority(projectContext())).toBe(false);
+    expect(
+      hasOrganizationAdminAuthority(
+        context(
+          {},
+          {
+            ...tokenSnapshot,
+            token: { kind: 'pat', scope: 'full', readOnly: false, projectMode: 'all' },
+          },
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    { scope: 'read' },
+    { scope: 'write' },
+    { readOnly: true },
+    { projectMode: 'selected', projectIds: ['project-1'] },
+    { organizationAdmin: false },
+  ] as const)('withholds authority from a restricted token: %j', (restriction) => {
+    const ctx = context(
+      {},
+      {
+        ...tokenSnapshot,
+        token: {
+          kind: 'pat',
+          scope: 'full',
+          readOnly: false,
+          projectMode: 'all',
+          organizationAdmin: true,
+          ...restriction,
+        },
+      },
+    );
+    expect(hasOrganizationAdminAuthority(ctx)).toBe(false);
+  });
+});
 
 describe('projectSessionCallContext', () => {
   it('returns project identity, revision fence and audit context without copying authority', () => {

@@ -1,3 +1,8 @@
+/** D1 statements per `batch()` call; every executor refuses a larger batch. */
+export const D1_STATEMENTS_PER_BATCH = 200;
+/** D1 statements per Worker invocation; no executor counts them. */
+export const D1_STATEMENTS_PER_INVOCATION = 500;
+
 export type ScalarSqlValue = string | number | null; // number: finite; integers must be safe integers
 export type SqlValue = ScalarSqlValue | Uint8Array;
 

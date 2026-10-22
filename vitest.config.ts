@@ -35,14 +35,34 @@ const loadTolerantProjects = new Set([
   'plugin-github',
 ]);
 
+const budgetGuardedProjects = new Set(['db-sqlite', 'runtime-cloudflare', 'runtime-node', 'cli']);
+
 export default defineConfig({
   test: {
+    reporters: [
+      'default',
+      fileURLToPath(
+        new URL('./packages/db-sqlite/src/testing/statement-budget-trip-sites.ts', import.meta.url),
+      ),
+    ],
     projects: packages.map((name) => ({
       resolve: { alias },
       test: {
         name,
         root: fileURLToPath(new URL(`./packages/${name}`, import.meta.url)),
         include: ['src/**/*.test.ts'],
+        ...(budgetGuardedProjects.has(name)
+          ? {
+              setupFiles: [
+                fileURLToPath(
+                  new URL(
+                    './packages/db-sqlite/src/testing/statement-budget-setup.ts',
+                    import.meta.url,
+                  ),
+                ),
+              ],
+            }
+          : {}),
         ...(loadTolerantProjects.has(name) ? { testTimeout: 20_000, hookTimeout: 30_000 } : {}),
       },
     })),

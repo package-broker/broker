@@ -1,3 +1,4 @@
+import { entries as catalogueWriteTagGroupsEntries } from './mutation-table/catalogue-write-tag-groups.js';
 import { entries as accessServicesEntries } from './mutation-table/access-services.js';
 import { entries as sourceVisibleEntries } from './mutation-table/source-visible.js';
 import { entries as packageAdminReadEntries } from './mutation-table/package-admin-read.js';
@@ -51,6 +52,7 @@ import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.j
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
 import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
 import { entries as attachedProxyEntries } from './mutation-table/source-attached-proxy.js';
+import { entries as projectSourceReadEntries } from './mutation-table/project-source-read.js';
 import { entries as importRunEntries } from './mutation-table/import-run.js';
 import { entries as projectReadableEntries } from './mutation-table/project-readable.js';
 import { entries as catalogueStatusEntries } from './mutation-table/catalogue-status-statements.js';
@@ -95,6 +97,7 @@ import { entries as catalogueReblobEntries } from './mutation-table/catalogue-re
 import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
 import { entries as sourceSyncReadsEntries } from './mutation-table/source-sync-reads.js';
 import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
+import { entries as sourceRemovalEntries } from './mutation-table/source-removal.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -172,6 +175,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...cataloguePredicatesEntries,
   ...registeredNameEntries,
   ...catalogueWriteTagsEntries,
+  ...catalogueWriteTagGroupsEntries,
   ...accessEntries,
   ...accessBuilderEntries,
   ...accessServicesEntries,
@@ -185,6 +189,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueEpochEntries,
   ...sourceEntries,
   ...attachedProxyEntries,
+  ...projectSourceReadEntries,
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,
@@ -201,6 +206,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...importRollbackEntries,
   ...importVerificationEntries,
   ...sourceSyncCountsEntries,
+  ...sourceRemovalEntries,
   ...sourceSyncReadsEntries,
 ];
 

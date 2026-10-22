@@ -199,6 +199,6 @@ export const ACCEPT_REMOVAL_API_SPEC = {
     summary: 'Arm a one-shot acceptance of the last refused source removal',
     tags: ['sources'],
     params: z.strictObject({ source: ulid }),
-    responses: { 204: null },
+    responses: { 204: null, 409: null },
   },
 } as const satisfies ApiRouteSpec;

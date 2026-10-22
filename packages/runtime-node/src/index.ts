@@ -1,3 +1,5 @@
+import { openApiRoute } from '@package-broker/core/api/openapi-route';
+import { openApiDocument } from '@package-broker/core/api/openapi-document';
 import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
@@ -1474,6 +1476,7 @@ export function createNodeServer(
       coreRoutes: [
         ...(access?.module.coreRoutes ?? []),
         ...apiRoutes,
+        openApiRoute(openApiDocument),
         ...(registry?.module.coreRoutes ?? []).map((route) => ({
           ...route,
           async handler(context: Parameters<typeof route.handler>[0]) {

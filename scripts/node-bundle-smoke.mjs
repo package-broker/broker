@@ -653,6 +653,13 @@ async function checkPlatformPorts(base, cookie, env) {
 async function run() {
   const { base, env } = await startBundle(SOURCE);
 
+  step = 'checking the public OpenAPI document';
+  assert.equal(
+    await request(`${base}/_pb/openapi.json`, 200),
+    await readFile(join(REPO_ROOT, 'packages/ui/openapi.json'), 'utf8'),
+  );
+  console.log('smoke:node GET /_pb/openapi.json 200 committed document');
+
   step = 'checking the not-found envelope';
   const envelope = JSON.parse(await request(`${base}/nope`, 404));
   if (envelope?.error?.code !== 'not_found') {

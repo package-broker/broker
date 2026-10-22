@@ -8,6 +8,7 @@ import * as packages from '@package-broker/core/api/routes/packages-schemas';
 import * as projectAccess from '@package-broker/core/api/routes/project-access-schemas';
 import * as projects from '@package-broker/core/api/routes/projects-schemas';
 import * as servicePrincipals from '@package-broker/core/api/routes/service-principals-schemas';
+import * as sourceAttachments from '@package-broker/core/api/routes/source-attachment-schemas';
 import * as sourceNames from '@package-broker/core/api/routes/source-names-schemas';
 import * as sources from '@package-broker/core/api/routes/sources-schemas';
 import * as tokens from '@package-broker/core/api/routes/tokens-schemas';
@@ -18,7 +19,10 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 
 /** Route construction never calls a dependency, so each required one is satisfied by a stub. */
 function stubDependencies(): ApiModuleDeps {
-  const deps: Record<string, unknown> = { imports: {} };
+  const deps: Record<string, unknown> = {
+    imports: {},
+    sources: { service: { acceptRemoval: () => undefined } },
+  };
   for (let round = 0; round < MAX_STUB_ROUNDS; round += 1) {
     try {
       createApiModule(deps as unknown as ApiModuleDeps);
@@ -54,6 +58,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
     projectAccess,
     projects,
     servicePrincipals,
+    sourceAttachments,
     sourceNames,
     sources,
     tokens,

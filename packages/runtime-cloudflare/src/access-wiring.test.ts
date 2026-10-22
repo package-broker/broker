@@ -855,16 +855,26 @@ describe('cloudflare access wiring on Miniflare D1', () => {
     apiModule.routes.length = 0;
     await boot();
     const [routes] = kernels.coreRoutes as RouteDefinition[][];
-    const outside = (routes ?? [])
-      .filter((route) => !route.path.includes('/_pb/auth/'))
-      .map((route) => `${route.method} ${route.path}`)
-      .sort();
+    const outsideRoutes = (routes ?? []).filter((route) => !route.path.includes('/_pb/auth/'));
+    const outside = outsideRoutes.map((route) => `${route.method} ${route.path}`).sort();
     expect(apiModule.routes).toHaveLength(1);
     const expected = [
+      'GET /_pb/openapi.json',
       'GET /_pb/session',
       ...apiModule.routes[0]!.map((route) => `${route.method} ${route.path}`),
     ].sort();
     expect(outside).toEqual(expected);
+    expect(
+      outsideRoutes
+        .filter(
+          (route) =>
+            route.permission === null &&
+            route.boundary !== 'authenticated' &&
+            route.boundary !== 'self',
+        )
+        .map((route) => `${route.method} ${route.path}`)
+        .sort(),
+    ).toEqual(['GET /_pb/openapi.json', 'GET /_pb/session']);
   });
 
   it('keeps the token telemetry write off the response and inside waitUntil', async () => {

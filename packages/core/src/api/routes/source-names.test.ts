@@ -271,7 +271,7 @@ const writes = [
 
 async function sqliteNameWrite(
   method: 'POST' | 'DELETE',
-  state: 'active' | 'archived' | 'foreign' | 'missing',
+  state: 'active' | 'archived' | 'foreign' | 'missing' | 'archive-at-write' | 'delete-at-write',
 ) {
   const [{ openMigratedDatabase }, { createSourceRepository }, { createRegisteredNameRepository }] =
     await Promise.all([
@@ -388,7 +388,27 @@ async function sqliteNameWrite(
       }
     }
     const sources = createSourceRepository(executor);
-    const registeredNames = createRegisteredNameRepository(executor);
+    let raced = false;
+    const writer: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      async batch(statements) {
+        if (!raced && (state === 'archive-at-write' || state === 'delete-at-write')) {
+          raced = true;
+          await batch(
+            state === 'archive-at-write'
+              ? query(
+                  "UPDATE project SET status = 'archived' WHERE org_id = ? AND id = ?",
+                  ctx.orgId,
+                  projectId,
+                )
+              : query('DELETE FROM source WHERE org_id = ? AND id = ?', ctx.orgId, sourceId),
+          );
+        }
+        return executor.batch(statements);
+      },
+    };
+    const registeredNames = createRegisteredNameRepository(writer);
     const write =
       method === 'POST' ? vi.spyOn(registeredNames, 'add') : vi.spyOn(registeredNames, 'remove');
     const ids = { ulid };
@@ -522,6 +542,23 @@ for (const method of ['POST', 'DELETE'] as const) {
       expect(result.writeCalls).toBe(0);
       expect(result.logs.join('\n')).not.toContain(SOURCE);
       expect(result.logs.join('\n')).not.toContain(PROJECT);
+    },
+  );
+
+  it.each(['archive-at-write', 'delete-at-write'] as const)(
+    `refuses a SQLite-backed ${method} name write when visibility changes at the batch: %s`,
+    async (state) => {
+      const result = await sqliteNameWrite(method, state);
+      expect(result.response.status).toBe(404);
+      expect(result.response).toEqual(result.absent);
+      expect(result.writeCalls).toBe(1);
+      expect(result.after.audit).toEqual(result.before.audit);
+      expect(result.after.epoch).toEqual(result.before.epoch);
+      if (state === 'archive-at-write') expect(result.after).toEqual(result.before);
+      else {
+        expect(result.after.names).toEqual([]);
+        expect(result.after.sources).toEqual([]);
+      }
     },
   );
 
@@ -800,6 +837,20 @@ it.each([
   );
   expect(f.projectSources.list).toHaveBeenCalledWith(orgContext('org-1'), { projectId: PROJECT });
   expect(f.visibility.setOrder).not.toHaveBeenCalled();
+});
+
+it('returns precondition_failed when a complete order has a stale If-Match revision', async () => {
+  const f = await fixture({ attachedSourceIds: [SOURCE, OTHER] });
+  f.visibility.setOrder.mockResolvedValue({ ok: false, error: 'conflict' });
+  const response = await f.request('PUT', orderPath, { sourceIds: [OTHER, SOURCE] }, false, '"r6"');
+  expect(response.status).toBe(412);
+  expect(await response.json()).toMatchObject({ error: { code: 'precondition_failed' } });
+  expect(f.visibility.setOrder).toHaveBeenCalledExactlyOnceWith(
+    orgContext('org-1'),
+    expect.objectContaining({ expected: { project: 6 } }),
+    { projectId: PROJECT, sourceIds: [OTHER, SOURCE] },
+    expect.anything(),
+  );
 });
 
 it('conflicts on an incomplete source order before calling the writer', async () => {

@@ -890,8 +890,13 @@ describe('round 2', () => {
       ),
       grant('01J0GRANT000000000000000A3', 'm1@example.test', PROJECT_ROLE, P_ARCHIVED),
       seedSource(SRC_ARCHIVED, 'old-src', { project_id: P_ARCHIVED }),
+      stmt(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'old/*')",
+        NAME_1,
+        a.orgId,
+        SRC_ARCHIVED,
+      ),
     ]);
-    expect(await add(orgFence(), NAME_1, SRC_ARCHIVED, 'old/*')).toBe('added');
     expect(
       await names.enable(a, p1Fence(), {
         id: SRC_ARCHIVED,
@@ -1599,142 +1604,169 @@ describe('registered-name route regressions with SQLite', () => {
     );
   }
 
-  it('returns conflict when an attachment is detached between ordering preflight and write', async () => {
-    const origin = 'https://broker.test';
-    const projectId = ulid();
-    const sourceId = ulid();
-    const otherId = ulid();
-    const csrf = 'B'.repeat(43);
-    const clock = fixedClock(NOW);
-    const ids = { ulid };
-    const store = createVisibilityStore(executor, { providerAnchors: ANCHORS });
-    const visibility = createVisibilityService({ store, log: () => {} });
-    await executor.batch([
-      stmt(
-        "INSERT INTO project (id, org_id, slug, name, status) VALUES (?, ?, 'order-race', 'Order race', 'active')",
-        projectId,
-        a.orgId,
-      ),
-      seedSource(sourceId, 'race-one'),
-      seedSource(otherId, 'race-two'),
-      stmt(
-        'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 1)',
-        a.orgId,
-        projectId,
-        sourceId,
-      ),
-      stmt(
-        'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 2)',
-        a.orgId,
-        projectId,
-        otherId,
-      ),
-    ]);
-    const setOrder = vi.spyOn(visibility, 'setOrder');
-    const projectSources = {
-      async list(ctx: OrgContext, input: { projectId: string }) {
-        const snapshot = await executor.all<{ sourceId: string }>(
-          stmt(
-            'SELECT source_id AS sourceId FROM project_source WHERE org_id = ? AND project_id = ?',
-            ctx.orgId,
-            input.projectId,
-          ),
+  it.each(['detach', 'stale_revision'] as const)(
+    'handles an ordering race between preflight and write: %s',
+    async (race) => {
+      const origin = 'https://broker.test';
+      const projectId = ulid();
+      const sourceId = ulid();
+      const otherId = ulid();
+      const csrf = 'B'.repeat(43);
+      const clock = fixedClock(NOW);
+      const ids = { ulid };
+      const store = createVisibilityStore(executor, { providerAnchors: ANCHORS });
+      const visibility = createVisibilityService({ store, log: () => {} });
+      await executor.batch([
+        stmt(
+          "INSERT INTO project (id, org_id, slug, name, status) VALUES (?, ?, 'order-race', 'Order race', 'active')",
+          projectId,
+          a.orgId,
+        ),
+        seedSource(sourceId, 'race-one'),
+        seedSource(otherId, 'race-two'),
+        stmt(
+          'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 1)',
+          a.orgId,
+          projectId,
+          sourceId,
+        ),
+        stmt(
+          'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 2)',
+          a.orgId,
+          projectId,
+          otherId,
+        ),
+      ]);
+      await executor.batch([grant(ulid(), 'm1@example.test', PROJECT_ROLE, projectId)]);
+      const setOrder = vi.spyOn(visibility, 'setOrder');
+      const projectSources = {
+        async list(ctx: OrgContext, input: { projectId: string }) {
+          const snapshot = await executor.all<{ sourceId: string }>(
+            stmt(
+              'SELECT source_id AS sourceId FROM project_source WHERE org_id = ? AND project_id = ?',
+              ctx.orgId,
+              input.projectId,
+            ),
+          );
+          await executor.batch([
+            race === 'detach'
+              ? stmt(
+                  'DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?',
+                  ctx.orgId,
+                  input.projectId,
+                  sourceId,
+                )
+              : stmt(
+                  'UPDATE project SET revision = revision + 1 WHERE org_id = ? AND id = ?',
+                  ctx.orgId,
+                  input.projectId,
+                ),
+          ]);
+          return snapshot;
+        },
+      };
+      const app = await createKernel({
+        platform: 'node',
+        plugins: [],
+        coreRoutes: sourceNameRoutes({
+          service: sourceService(),
+          sources: createSourceRepository(executor),
+          registeredNames: names,
+          visibility,
+          projectSources,
+          projects: {
+            async get(ctx, id) {
+              const [project] = await executor.all<{
+                status: 'active' | 'archived';
+                revision: number;
+              }>(
+                stmt(
+                  'SELECT status, revision FROM project WHERE org_id = ? AND id = ?',
+                  ctx.orgId,
+                  id,
+                ),
+              );
+              return project ?? null;
+            },
+          },
+          ids,
+          clock,
+          clientIp: () => '192.0.2.1',
+        }),
+        ports: { organizations: { get: async () => null }, ids, clock },
+        resolveOrg: async () => a,
+        health: async () => true,
+        log: () => {},
+        authorization: createAuthorizationEngine({
+          access: {
+            lookupSession: async () => ({
+              session: { id: S_P1, csrfHash: await sha256Hex(csrf) },
+              user: { id: P1_MAINTAINER },
+              identity: null,
+              protectedHolder: false,
+              project: { id: projectId },
+              organizationPermissions: [],
+              projectPermissions: ['project:sources:write'],
+            }),
+            lookupToken: async () => null,
+            touchSession: async () => true,
+            touchToken: async () => true,
+          },
+          tokenUse: {
+            keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
+            nowMs: () => clock.now().getTime(),
+            dispatch: (run) => {
+              void run();
+            },
+            log: () => {},
+          },
+          patValidation: patValidationGate,
+          publicOrigin: origin,
+          providerAnchors: async () => ANCHORS,
+        }),
+      });
+      const response = await app.fetch(
+        new Request(origin + '/_pb/projects/order-race/sources/order', {
+          method: 'PUT',
+          headers: {
+            origin,
+            'content-type': 'application/json',
+            cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}`,
+            'x-csrf-token': csrf,
+            'if-match': '"r1"',
+          },
+          body: JSON.stringify({ sourceIds: [otherId, sourceId] }),
+        }),
+      );
+      expect(response.status).toBe(race === 'detach' ? 409 : 412);
+      expect(await response.json()).toMatchObject({
+        error: { code: race === 'detach' ? 'conflict' : 'precondition_failed' },
+      });
+      expect(setOrder).toHaveBeenCalledTimes(1);
+      if (race === 'detach')
+        await expect(setOrder.mock.results[0]!.value).rejects.toThrow(
+          'invalid visibility order size',
         );
-        await executor.batch([
-          stmt(
-            'DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?',
-            ctx.orgId,
-            input.projectId,
-            sourceId,
-          ),
-        ]);
-        return snapshot;
-      },
-    };
-    const app = await createKernel({
-      platform: 'node',
-      plugins: [],
-      coreRoutes: sourceNameRoutes({
-        service: sourceService(),
-        sources: createSourceRepository(executor),
-        registeredNames: names,
-        visibility,
-        projectSources,
-        projects: {
-          async get(ctx, id) {
-            const [project] = await executor.all<{
-              status: 'active' | 'archived';
-              revision: number;
-            }>(
-              stmt(
-                'SELECT status, revision FROM project WHERE org_id = ? AND id = ?',
-                ctx.orgId,
-                id,
-              ),
-            );
-            return project ?? null;
-          },
-        },
-        ids,
-        clock,
-        clientIp: () => '192.0.2.1',
-      }),
-      ports: { organizations: { get: async () => null }, ids, clock },
-      resolveOrg: async () => a,
-      health: async () => true,
-      log: () => {},
-      authorization: createAuthorizationEngine({
-        access: {
-          lookupSession: async () => ({
-            session: { id: S_P1, csrfHash: await sha256Hex(csrf) },
-            user: { id: P1_MAINTAINER },
-            identity: null,
-            protectedHolder: false,
-            project: { id: projectId },
-            organizationPermissions: [],
-            projectPermissions: ['project:sources:write'],
-          }),
-          lookupToken: async () => null,
-          touchSession: async () => true,
-          touchToken: async () => true,
-        },
-        tokenUse: {
-          keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
-          nowMs: () => clock.now().getTime(),
-          dispatch: (run) => {
-            void run();
-          },
-          log: () => {},
-        },
-        patValidation: patValidationGate,
-        publicOrigin: origin,
-        providerAnchors: async () => ANCHORS,
-      }),
-    });
-    const response = await app.fetch(
-      new Request(origin + '/_pb/projects/order-race/sources/order', {
-        method: 'PUT',
-        headers: {
-          origin,
-          'content-type': 'application/json',
-          cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}`,
-          'x-csrf-token': csrf,
-          'if-match': '"r1"',
-        },
-        body: JSON.stringify({ sourceIds: [otherId, sourceId] }),
-      }),
-    );
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: 'conflict' } });
-    expect(setOrder).toHaveBeenCalledTimes(1);
-    await expect(setOrder.mock.results[0]!.value).rejects.toThrow('invalid visibility order size');
-    expect(
-      await rows(
-        'SELECT source_id, precedence FROM project_source WHERE org_id = ? AND project_id = ?',
-        a.orgId,
-        projectId,
-      ),
-    ).toEqual([{ source_id: otherId, precedence: 2 }]);
-    expect(await rows('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([]);
-  });
+      else
+        await expect(setOrder.mock.results[0]!.value).resolves.toMatchObject({
+          ok: false,
+          error: 'conflict',
+        });
+      expect(
+        await rows(
+          'SELECT source_id, precedence FROM project_source WHERE org_id = ? AND project_id = ? ORDER BY precedence',
+          a.orgId,
+          projectId,
+        ),
+      ).toEqual(
+        race === 'detach'
+          ? [{ source_id: otherId, precedence: 2 }]
+          : [
+              { source_id: sourceId, precedence: 1 },
+              { source_id: otherId, precedence: 2 },
+            ],
+      );
+      expect(await rows('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([]);
+    },
+  );
 });

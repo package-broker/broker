@@ -120,6 +120,16 @@ export interface SourceListQuery {
   readonly limit: number;
 }
 
+export interface SourceAttachmentCountQuery {
+  readonly sourceIds: readonly string[];
+  readonly userId: string;
+  /** Service-token reads use this principal's stored read permission and project binding. */
+  readonly servicePrincipalId?: string;
+  readonly allProjects: boolean;
+  readonly includeArchived: boolean;
+  readonly providerAnchors: NewSource['providerAnchors'];
+}
+
 export interface SourceUpdate extends SourceTarget {
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
@@ -161,6 +171,13 @@ export interface SourceRepository {
    * Returns up to limit + 1 rows in id order; limit is an integer from 1 to 100.
    */
   list(ctx: OrgContext, input: SourceListQuery): Promise<SourceRecord[]>;
+  /** One grouped read for the supplied page of organization sources; absent entries mean zero.
+   * allProjects requires organization project:read or admin authority; only admins include archives.
+   */
+  countAttachedProjects(
+    ctx: OrgContext,
+    input: SourceAttachmentCountQuery,
+  ): Promise<ReadonlyMap<string, number>>;
   pause(
     ctx: OrgContext,
     fence: MutationFence,

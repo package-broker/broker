@@ -54,6 +54,9 @@ async function fixture(
   options: {
     organizationPermissions?: readonly string[];
     admin?: boolean;
+    tokenInherited?: boolean;
+    tokenAdmin?: boolean;
+    tokenKind?: 'pat' | 'svc';
     acceptRemoval?: boolean;
     refusal?: SourceRecord['removalRefusal'];
     armed?: boolean;
@@ -68,6 +71,10 @@ async function fixture(
     rows?: readonly SourceRecord[];
   } = {},
 ) {
+  const tokenBearer =
+    options.tokenKind === 'svc'
+      ? formatToken('svc', 'abcdefghijkl', new Uint8Array(32).fill(9))
+      : bearer;
   const logs: string[] = [];
   const log = (entry: unknown) => {
     logs.push(JSON.stringify(entry));
@@ -108,6 +115,7 @@ async function fixture(
   } as SourceRecord;
   const sources = {
     acceptRemoval: vi.fn().mockResolvedValue('accepted'),
+    countAttachedProjects: vi.fn().mockResolvedValue(new Map([[SOURCE, 2]])),
     get: vi.fn(async () => (options.sourceAbsent ? null : row)),
     getVisible: vi.fn(async () =>
       !options.sourceAbsent &&
@@ -208,17 +216,19 @@ async function fixture(
             {
               token: {
                 id: 'token-1',
-                kind: 'pat',
+                kind: options.tokenKind ?? 'pat',
                 expired: false,
                 revoked: false,
                 lastUsedAt: null,
-                userId: 'user-1',
-                servicePrincipalId: null,
+                userId: options.tokenKind === 'svc' ? null : 'user-1',
+                servicePrincipalId: options.tokenKind === 'svc' ? 'service-1' : null,
                 bindingOk: true,
-                projectMode: 'all',
+                projectMode: options.tokenKind === 'svc' ? 'selected' : 'all',
                 scope: { level: 'read', readOnly: true },
               },
               principalStatus: 'active',
+              projectReadInherited: options.tokenInherited ?? false,
+              protectedHolder: options.tokenAdmin ?? false,
               projectVisible: authorizedProject !== null && options.projectState !== 'invisible',
               validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
               project: input.boundary === 'project' ? authorizedProject : null,
@@ -227,7 +237,7 @@ async function fixture(
                 options.projectState === 'invisible' ? [] : ['project:sources:read'],
             },
             'verifier',
-            { value: { secretHash: await hashToken(keyring, 1, bearer), pepperVersion: 1 } },
+            { value: { secretHash: await hashToken(keyring, 1, tokenBearer), pepperVersion: 1 } },
           ) as unknown as EngineTokenAccess,
         touchSession: async () => true,
         touchToken: async () => true,
@@ -247,7 +257,7 @@ async function fixture(
   });
   const request = (method: string, path: string, body?: unknown, token = false) => {
     const headers = new Headers({ origin: ORIGIN, 'content-type': 'application/json' });
-    if (token) headers.set('authorization', `Bearer ${bearer}`);
+    if (token) headers.set('authorization', `Bearer ${tokenBearer}`);
     else {
       headers.set('cookie', `${SESSION_COOKIE}=${SESSION}`);
       headers.set('x-csrf-token', CSRF);
@@ -472,8 +482,9 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
       expect(text).not.toContain(SENTINEL);
       const body = JSON.parse(text) as { items: Record<string, unknown>[]; next: string | null };
       expect(Object.keys(body.items[0]!).sort()).toEqual(
-        project ? [...fields, 'attached'].sort() : fields,
+        project ? [...fields, 'attached'].sort() : [...fields, 'attachedProjectCount'].sort(),
       );
+      if (!project) expect(body.items[0]?.attachedProjectCount).toBe(2);
       expect(body.items[0]?.hasCredential).toBe(true);
       expect(body.items[0]?.url).toBe('https://packages.example.com/');
       expect(body.next).toBe(null);
@@ -525,6 +536,51 @@ it.each(['absent', 'archived', 'foreign', 'invisible'] as const)(
   },
 );
 
+it.each([
+  [false, false, false],
+  [false, true, false],
+  [false, false, true],
+  [true, false, false],
+  [true, true, false],
+  [true, false, true],
+])(
+  'passes count visibility for token %s, inherited read %s, admin %s',
+  async (token, inherited, admin) => {
+    const f = await fixture({
+      admin,
+      organizationPermissions: ['org:sources:read', ...(inherited ? ['project:read'] : [])],
+      tokenInherited: inherited,
+      tokenAdmin: admin,
+    });
+    const response = await f.request('GET', '/_pb/sources', undefined, token);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ items: [{ attachedProjectCount: 2 }] });
+    expect(f.sources.countAttachedProjects).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), {
+      sourceIds: [SOURCE],
+      userId: 'user-1',
+      allProjects: admin || inherited,
+      includeArchived: admin,
+      providerAnchors: [],
+    });
+  },
+);
+
+it('uses service token authority to count only projects within its scope', async () => {
+  const f = await fixture({ tokenKind: 'svc' });
+  f.sources.countAttachedProjects.mockResolvedValue(new Map([[SOURCE, 1]]));
+  const response = await f.request('GET', '/_pb/sources', undefined, true);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ items: [{ attachedProjectCount: 1 }] });
+  expect(f.sources.countAttachedProjects).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), {
+    sourceIds: [SOURCE],
+    userId: 'service-1',
+    servicePrincipalId: 'service-1',
+    allProjects: false,
+    includeArchived: false,
+    providerAnchors: [],
+  });
+});
+
 it('pages in id order using after and next IDs', async () => {
   const rows = [SECOND, SOURCE].map(
     (id) =>
@@ -543,11 +599,14 @@ it('pages in id order using after and next IDs', async () => {
   const f = await fixture({ rows });
   const first = await f.request('GET', '/_pb/sources?limit=1');
   expect(await first.json()).toMatchObject({
-    items: [{ id: SOURCE, hasCredential: false }],
+    items: [{ id: SOURCE, hasCredential: false, attachedProjectCount: 2 }],
     next: SOURCE,
   });
   const second = await f.request('GET', `/_pb/sources?limit=1&after=${SOURCE}`);
-  expect(await second.json()).toMatchObject({ items: [{ id: SECOND }], next: null });
+  expect(await second.json()).toMatchObject({
+    items: [{ id: SECOND, attachedProjectCount: 0 }],
+    next: null,
+  });
   expect(f.sources.list.mock.calls[1]?.[1]).toEqual({ projectId: null, after: SOURCE, limit: 1 });
 });
 

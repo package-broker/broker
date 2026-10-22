@@ -82,7 +82,10 @@ const source = z.strictObject({
     .nullable(),
   removalAcceptanceArmed: z.boolean(),
 });
-const page = z.strictObject({ items: z.array(source), next: ulid.nullable() });
+const page = z.strictObject({
+  items: z.array(source.extend({ attachedProjectCount: z.number().int().nonnegative() })),
+  next: ulid.nullable(),
+});
 const created = z.strictObject({ id: ulid });
 
 function scopeSpecs(boundary: 'organization' | 'project') {

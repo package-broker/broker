@@ -115,15 +115,22 @@ function reader(ctx: RequestContext): SourceActor {
   if (ctx.org === null || ctx.principal === null || access?.token == null) {
     throw new TypeError('route requires an authenticated access context');
   }
-  // The kernel has authorized only this read permission for the token.
+  // Source reads are authorized by the kernel; project visibility comes from its token snapshot.
   if (ctx.projectId === null)
     return {
       kind: 'org',
+      ...(access.token.kind === 'svc' && ctx.principal.kind === 'service'
+        ? { servicePrincipalId: ctx.principal.id }
+        : {}),
       actor: {
         kind: 'organization',
         userId: ctx.principal.id,
-        isOrganizationAdmin: false,
-        permissions: new Set<Permission>(['org:sources:read']),
+        isOrganizationAdmin:
+          access.token.projectMode === 'all' && access.token.organizationAdmin === true,
+        permissions: new Set<Permission>([
+          'org:sources:read',
+          ...(access.token.projectReadInherited === true ? (['project:read'] as const) : []),
+        ]),
       },
     };
   return {

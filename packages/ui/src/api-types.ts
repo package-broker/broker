@@ -8167,6 +8167,7 @@ export interface operations {
         content: {
           'application/json': {
             items: {
+              attachedProjectCount: number;
               /** @enum {string} */
               ecosystem: 'composer' | 'npm';
               hasCredential: boolean;

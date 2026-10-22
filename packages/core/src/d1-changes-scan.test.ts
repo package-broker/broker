@@ -335,7 +335,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     'DELETE FROM package; DELETE FROM project_package x2; DELETE FROM project_package_pattern; DELETE FROM project_source; DELETE FROM registered_name x2; DELETE FROM version; INSERT INTO blob; INSERT INTO dist_tag; INSERT INTO package; INSERT INTO project x3; INSERT INTO project_package; INSERT INTO project_package_pattern; INSERT INTO project_source; INSERT INTO registered_name x2; INSERT INTO source x2; INSERT INTO version; INSERT INTO version_revision x2; UPDATE package; UPDATE project x3; UPDATE project_package; UPDATE project_source x3; UPDATE source x6; UPDATE version x5; UPDATE version_revision',
   'db-sqlite/src/contract/count-calls.ts': '',
   'db-sqlite/src/contract/executor-contract.ts':
-    'INSERT INTO child x3; INSERT INTO item x8; INSERT INTO value_row; UPDATE item x2',
+    'INSERT INTO child x3; INSERT INTO item x9; INSERT INTO value_row; UPDATE item x2',
   'db-sqlite/src/contract/two-organizations.ts':
     'INSERT INTO cache_epoch; INSERT INTO organization',
   'db-sqlite/src/internal/catalogue-status-statements.ts':
@@ -899,6 +899,8 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/contract/executor-contract.ts:SQL input: sql: 'SELECT label FROM item WHERE id = ?' #2",
         "db-sqlite/src/contract/executor-contract.ts:SQL input: sql: 'SELECT ? AS n' #1",
         "db-sqlite/src/contract/executor-contract.ts:SQL input: sql: 'SELECT ? AS n' #2",
+        "db-sqlite/src/contract/executor-contract.ts:SQL input: sql: 'INSERT INTO item (id) VALUES (?)' #1",
+        "db-sqlite/src/contract/executor-contract.ts:SQL input: sql: 'SELECT COUNT(*) AS n FROM item' #1",
       ],
     },
     {
@@ -2869,6 +2871,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Test-runner metadata assignment in statement-budget-setup; it carries trip records and reads no statement result.',
+      sites: [
+        'db-sqlite/src/testing/statement-budget-setup.ts:opaque object access: Object.assign(task.meta, { statementBudgetTrips: [...trips] }) #1',
+      ],
+    },
+    {
+      reason:
         'Indexes fixture data in node-sqlite-executor; retained because the key cannot be proven to exclude changes.',
       sites: [
         'db-sqlite/src/testing/node-sqlite-executor.ts:unresolved computed access: params[index] #1',
@@ -3084,8 +3093,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { mutationFence } from '@package-broker/core/authz/fence'; #1",
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata'; #1",
-        "db-sqlite/src/testing/node-sqlite-executor.ts:opaque dependency: import { DbError, classifySqliteError } from '@package-broker/core/db/errors'; #1",
-        "runtime-cloudflare/src/db/d1-executor.ts:opaque dependency: import { DbError, classifySqliteError } from '@package-broker/core/db/errors'; #1",
+        "db-sqlite/src/testing/node-sqlite-executor.ts:opaque dependency: import {\n  DbError,\n  assertBatchStatementCount,\n  classifySqliteError,\n} from '@package-broker/core/db/errors'; #1",
+        "runtime-cloudflare/src/db/d1-executor.ts:opaque dependency: import {\n  DbError,\n  assertBatchStatementCount,\n  classifySqliteError,\n} from '@package-broker/core/db/errors'; #1",
+        "db-sqlite/src/testing/catalogue-fixture.ts:opaque dependency: import {\n  D1_STATEMENTS_PER_BATCH,\n  D1_STATEMENTS_PER_INVOCATION,\n  type ScalarSqlExecutor,\n  type ScalarStatement,\n} from '@package-broker/core/db/port'; #1",
       ],
     },
     {

@@ -2027,17 +2027,6 @@ export function createWorker(
     const uiRoutes = ui.map((route) => ({
       ...route,
       path: route.path.replace('/assets/:file', '/:file'),
-      handler: async (context: Parameters<typeof route.handler>[0]) => {
-        const manifest =
-          context.params['file'] === 'manifest.json' ? await (await uiAssets())?.manifest() : null;
-        return manifest
-          ? Response.json(manifest, {
-              headers: { 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' },
-            })
-          : route.handler(context);
-      },
-      boundary: 'authenticated' as const,
-      needsOrg: true,
     }));
     try {
       const kernel = await createKernel({

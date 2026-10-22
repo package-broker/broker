@@ -111,14 +111,25 @@ describe('Workers management API mount', () => {
     built.drop = undefined;
   });
 
-  it('answers an anonymous GET /_pb/me with the standard 401 envelope', async () => {
+  it('refuses anonymous requests to every route in the API module table', async () => {
     const env = await environment();
     const worker = createWorker([], { log: () => undefined });
-    const response = await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
-    expect(response.status).toBe(401);
-    expect(response.headers.get('content-type')).toContain('application/json');
-    const body = (await response.json()) as { error?: { code?: unknown } };
-    expect(typeof body.error?.code).toBe('string');
+    await worker.services(env);
+    expect(built.modules).toHaveLength(1);
+    const routes = built.modules[0]!;
+    expect(routes.length).toBeGreaterThan(0);
+    for (const route of routes) {
+      const path = route.path.replace(/:[A-Za-z][A-Za-z0-9]*/g, '01J0A0000000000000000000000');
+      const request = new Request(`https://broker.test${path}`, {
+        method: route.method,
+        headers: { origin: 'https://broker.test', 'content-type': 'application/json' },
+        ...(route.method === 'GET' ? {} : { body: '{}' }),
+      });
+      const response = await worker.fetch(request, env);
+      expect(response.status, `${route.method} ${route.path}`).toBe(401);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(await response.json()).toMatchObject({ error: { code: expect.any(String) } });
+    }
   });
 
   it('mounts every management route exactly once', async () => {

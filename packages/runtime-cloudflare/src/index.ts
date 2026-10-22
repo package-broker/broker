@@ -349,7 +349,7 @@ const IDENTITY_FETCH_TIMEOUT_MS = 5000;
 
 export function publicOriginOf(raw: string | undefined): string {
   try {
-    return parsePublicOrigin(raw);
+    return parsePublicOrigin(raw, { http: 'loopback' });
   } catch (error) {
     if (!(error instanceof PublicOriginError)) throw error;
     throw new SecretsConfigError(

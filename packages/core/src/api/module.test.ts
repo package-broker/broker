@@ -36,6 +36,7 @@ const EXPECTED_ROUTES = [
   'POST /_pb/grants',
   'PATCH /_pb/grants/:grant',
   'DELETE /_pb/grants/:grant',
+  'GET /_pb/projects/:project/grants',
   'POST /_pb/projects/:project/grants',
   'PATCH /_pb/projects/:project/grants/:grant',
   'DELETE /_pb/projects/:project/grants/:grant',
@@ -163,6 +164,7 @@ function dependencies(): ApiModuleDeps {
     projectAccess: {
       ...common(),
       projectAdministration: unused('grant', 'changeRole', 'revoke'),
+      reader: unused('list'),
       roles: unused('get'),
     },
     tokens: {
@@ -194,6 +196,7 @@ function dependencies(): ApiModuleDeps {
       ...common(),
       service: unused('getVisible', 'list', 'create', 'update', 'pause', 'resume'),
       sources: unused('get'),
+      projectSources: unused('list'),
       projects: unused('get'),
       sessions: unused('authenticate', 'isReauthFresh'),
     },

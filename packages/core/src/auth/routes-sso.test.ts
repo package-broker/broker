@@ -88,6 +88,7 @@ function activeSession(id: string, csrfHash: string, expiresAt: string): ActiveS
 }
 
 interface Options {
+  readonly clientIp?: (request: Request) => string | null;
   readonly providers?: readonly IdentityProvider[];
   readonly localLoginAvailable?: boolean;
   readonly loginRefusal?: string;
@@ -194,6 +195,7 @@ async function build(options: Options = {}) {
   );
   const findActiveById = vi.fn(repository.findActiveById);
   const deps: SsoRouteDeps = {
+    ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
     reauthSessions: { findActiveById },
     providers,
     sessions,
@@ -402,6 +404,24 @@ describe('SSO login through start and callback', () => {
     expect(meta.previousSecretHash).toBeNull();
     expect(app.logs).toContainEqual(
       expect.objectContaining({ event: 'auth.login.succeeded', provider: 'dex' }),
+    );
+  });
+
+  it.each(['127.0.0.1', null])('uses the runtime IP resolver for SSO sessions (%s)', async (ip) => {
+    const clientIp = vi.fn(() => ip);
+    const app = await build({ clientIp });
+    const login = await loginCookieOf(app);
+    const request = callback('dex', login);
+    request.headers.set('cf-connecting-ip', '203.0.113.7');
+    request.headers.set('x-forwarded-for', '198.51.100.1');
+
+    expect((await app.kernel.fetch(request)).status).toBe(303);
+    expect(clientIp).toHaveBeenCalledExactlyOnceWith(request);
+    expect(app.login).toHaveBeenCalledWith(
+      ORG,
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ ip }),
     );
   });
 

@@ -56,6 +56,7 @@ export interface SsoRouteDeps {
   readonly stateCipher: SecretCipher;
   readonly clock: Clock;
   readonly publicOrigin: string;
+  readonly clientIp?: (request: Request) => string | null;
   readonly localLoginAvailable: boolean;
   readonly log: KernelLog;
 }
@@ -315,7 +316,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       orgOf(rc),
       provider,
       identity,
-      await sessionMetaOf(rc.request),
+      await sessionMetaOf(rc.request, deps.clientIp),
     );
     if (!outcome.ok) {
       const reason: unknown = outcome.reason;

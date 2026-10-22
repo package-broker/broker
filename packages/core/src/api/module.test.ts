@@ -10,6 +10,7 @@ import * as tokens from './routes/tokens.js';
 import * as servicePrincipals from './routes/service-principals.js';
 import * as sources from './routes/sources.js';
 import * as sourceNames from './routes/source-names.js';
+import * as sourceAttachment from './routes/source-attachment.js';
 import * as packages from './routes/packages.js';
 import * as audit from './routes/audit.js';
 import * as permissions from './routes/permissions.js';
@@ -75,6 +76,8 @@ const EXPECTED_ROUTES = [
   'DELETE /_pb/sources/:source/names/:name',
   'POST /_pb/sources/:source/enable',
   'PUT /_pb/projects/:project/sources/order',
+  'PUT /_pb/projects/:project/sources/:source/attachment',
+  'DELETE /_pb/projects/:project/sources/:source/attachment',
   'GET /_pb/projects/:project/resolve',
   'GET /_pb/packages',
   'GET /_pb/packages/:package/versions',
@@ -207,6 +210,13 @@ function dependencies(): ApiModuleDeps {
       projectSources: unused('list'),
       projects: unused('get'),
     },
+    sourceAttachments: {
+      ...common(),
+      sources: unused('get'),
+      visibility: unused('attachSource', 'detachSource'),
+      projectSources: unused('list'),
+      projects: unused('get'),
+    },
     packages: unused('listProject', 'listOrganization', 'listVersions'),
     audit: unused('list', 'head'),
     packageManage: {
@@ -287,6 +297,7 @@ describe('createApiModule', () => {
       vi.spyOn(servicePrincipals, 'servicePrincipalRoutes'),
       vi.spyOn(sources, 'sourceRoutes'),
       vi.spyOn(sourceNames, 'sourceNameRoutes'),
+      vi.spyOn(sourceAttachment, 'sourceAttachmentRoutes'),
       vi.spyOn(packages, 'packageRoutes'),
       vi.spyOn(audit, 'auditRoutes'),
       vi.spyOn(permissions, 'myPermissionsRoute'),

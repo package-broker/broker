@@ -1789,6 +1789,17 @@ describe('runtime MCP mount', () => {
       const selector = 'abcdefghijkl';
       const token = formatToken('svc', selector, new Uint8Array(32).fill(7));
       const hash = await hashToken(createKeyring([parseMasterKey(key, 'PB_MASTER_KEY')]), 1, token);
+      const limit = vi
+        .fn<(input: { key: string }) => Promise<{ success: boolean }>>()
+        .mockResolvedValue({ success: true });
+      const env: Env = {
+        DB: db,
+        PB_PUBLIC_URL: 'https://broker.test',
+        PB_MASTER_KEY: key,
+        MCP_RATE_LIMIT: { limit },
+      };
+      const worker = createWorker([], { mcp: { enabled: true }, log: () => undefined });
+      await worker.services(env);
       await executor.batch([
         {
           sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
@@ -1812,16 +1823,6 @@ describe('runtime MCP mount', () => {
           ],
         },
       ]);
-      const limit = vi
-        .fn<(input: { key: string }) => Promise<{ success: boolean }>>()
-        .mockResolvedValue({ success: true });
-      const env: Env = {
-        DB: db,
-        PB_PUBLIC_URL: 'https://broker.test',
-        PB_MASTER_KEY: key,
-        MCP_RATE_LIMIT: { limit },
-      };
-      const worker = createWorker([], { mcp: { enabled: true }, log: () => undefined });
       const request = () =>
         new Request('https://broker.test/_pb/mcp', {
           method: 'POST',

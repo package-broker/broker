@@ -31,6 +31,7 @@ import {
 import { Label } from './components/ui/label.js';
 import { Select } from './components/ui/select.js';
 import { cn } from './lib/utils.js';
+import { buildListFilterHash } from './page-hash.js';
 import { AccessPage } from './pages/access.js';
 import { AuditPage } from './pages/audit.js';
 import { ImportPage } from './pages/import.js';
@@ -84,7 +85,7 @@ export function parseHash(hash: string): ParsedHash {
 }
 
 export function buildHash(route: Route, project: string | null): string {
-  return project === null ? `#/${route}` : `#/${route}?project=${encodeURIComponent(project)}`;
+  return buildListFilterHash(route, { project });
 }
 
 export function resolveRoute(

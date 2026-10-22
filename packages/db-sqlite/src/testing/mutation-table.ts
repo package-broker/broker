@@ -1,4 +1,5 @@
 import { entries as selectedKeysEntries } from './mutation-table/selected-keys.js';
+import { entries as sourceSelectionRevisionEntries } from './mutation-table/source-selection-revision.js';
 import { entries as sourceSelectionEntries } from './mutation-table/source-selection.js';
 import { entries as catalogueWriteTagGroupsEntries } from './mutation-table/catalogue-write-tag-groups.js';
 import { entries as accessServicesEntries } from './mutation-table/access-services.js';
@@ -110,6 +111,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...sourceSelectionRevisionEntries,
   ...sourceVisibleEntries,
   ...packageAdminReadEntries,
   ...sourceListEntries,

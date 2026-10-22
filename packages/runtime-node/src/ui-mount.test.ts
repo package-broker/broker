@@ -59,7 +59,7 @@ vi.mock('./assets.js', async (original) => {
 });
 
 describe('Node UI mount', () => {
-  it('adds only UI routes and requires the engine authenticated boundary', async () => {
+  it('adds only public UI routes without an organization or session requirement', async () => {
     const auth = {
       keyring: createKeyring([
         parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
@@ -105,22 +105,27 @@ describe('Node UI mount', () => {
     await broker.ready();
     const fetchUi = (request: Request) => listener.fetch!(request);
     try {
-      for (const path of ['/_pb/ui/', '/_pb/ui', '/_pb/ui/manifest.json', assetUrl.pathname]) {
-        const anonymous = await fetchUi(new Request(`https://broker.test${path}`));
-        expect(anonymous.status, `anonymous ${path}`).toBe(401);
-      }
+      const authorizationCalls = vi.mocked(engine.authorize).mock.calls.length;
       for (const [path, expected] of [
         ['/_pb/ui/', document],
-        ['/_pb/ui/manifest.json', JSON.stringify(manifest)],
+        [assetUrl.pathname, fixtureAsset],
       ]) {
-        const response = await fetchUi(
+        const anonymous = await fetchUi(new Request(`https://broker.test${path}`));
+        const signedIn = await fetchUi(
           new Request(`https://broker.test${path}`, {
             headers: { cookie: 'test-session=valid' },
           }),
         );
-        expect(response.status, path).toBe(200);
-        expect(await response.text()).toBe(expected);
+        for (const response of [anonymous, signedIn]) {
+          expect(response.status, path).toBe(200);
+          expect(response.headers.get('set-cookie')).toBeNull();
+          expect(await response.text()).toBe(expected);
+        }
+        const headers = (response: Response) =>
+          [...response.headers].filter(([name]) => name !== 'x-request-id');
+        expect(headers(anonymous)).toEqual(headers(signedIn));
       }
+      expect(vi.mocked(engine.authorize).mock.calls).toHaveLength(authorizationCalls);
       const headers = { cookie: 'test-session=valid' };
       const canonical = await fetchUi(
         new Request('https://broker.test/_pb/ui?view=packages', { headers }),
@@ -133,8 +138,15 @@ describe('Node UI mount', () => {
       expect(new Uint8Array(await asset.arrayBuffer())).toEqual(
         new Uint8Array(await readFile(join(fixture.root, referencedAsset!))),
       );
-      for (const path of ['/_pb/ui/unknown.js', '/_pb/ui/index.html']) {
-        const missing = await fetchUi(new Request(`https://broker.test${path}`, { headers }));
+      for (const path of [
+        '/_pb/ui/unknown.js',
+        '/_pb/ui/index.html',
+        '/_pb/ui/manifest.json',
+        '/index.html',
+        '/manifest.json',
+        '/app.fixture.js',
+      ]) {
+        const missing = await fetchUi(new Request(`https://broker.test${path}`));
         expect(missing.status).toBe(404);
         expect(missing.headers.get('content-type')).toContain('application/json');
         expect(await missing.json()).toEqual({
@@ -173,8 +185,8 @@ describe('Node UI mount', () => {
       ).toEqual([
         { method: 'GET', path: '/_pb/ui/setup/document', boundary: undefined, needsOrg: false },
         { method: 'GET', path: '/_pb/ui/setup/assets/:file', boundary: undefined, needsOrg: false },
-        { method: 'GET', path: '/_pb/ui', boundary: 'authenticated', needsOrg: true },
-        { method: 'GET', path: '/_pb/ui/:file', boundary: 'authenticated', needsOrg: true },
+        { method: 'GET', path: '/_pb/ui', boundary: undefined, needsOrg: false },
+        { method: 'GET', path: '/_pb/ui/:file', boundary: undefined, needsOrg: false },
       ]);
       expect(baseline.some((route) => route.path === '/_pb/session')).toBe(true);
     } finally {
@@ -256,9 +268,18 @@ describe('Node UI mount from staged assets', () => {
         const declared = (
           manifest['files'] as Record<string, { contentType: string; bytes: number }>
         )[name]!;
-        expect((await fetchUi(new Request(url))).status, `anonymous ${name}`).toBe(401);
+        const authorizationCalls = vi.mocked(engine.authorize).mock.calls.length;
+        const anonymous = await fetchUi(new Request(url));
         const response = await fetchUi(new Request(url, { headers: session }));
         expect(response.status, name).toBe(200);
+        expect(anonymous.status, `anonymous ${name}`).toBe(200);
+        expect(response.headers.get('set-cookie')).toBeNull();
+        expect(anonymous.headers.get('set-cookie')).toBeNull();
+        const headers = (response: Response) =>
+          [...response.headers].filter(([name]) => name !== 'x-request-id');
+        expect(headers(anonymous)).toEqual(headers(response));
+        expect(await anonymous.arrayBuffer()).toEqual(await response.clone().arrayBuffer());
+        expect(vi.mocked(engine.authorize).mock.calls).toHaveLength(authorizationCalls);
         expect(response.headers.get('content-type')).toBe(declared.contentType);
         expect(response.headers.get('content-length')).toBe(String(declared.bytes));
         expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
@@ -290,10 +311,9 @@ describe('Node UI mount from staged assets', () => {
         '/_pb/ui/secret.txt%00.js',
         '/_pb/ui/assets/app.0123456789ab.js',
         '/_pb/ui/index.html',
+        '/_pb/ui/manifest.json',
       ]) {
-        const response = await fetchUi(
-          new Request(`https://broker.test${path}`, { headers: session }),
-        );
+        const response = await fetchUi(new Request(`https://broker.test${path}`));
         expect(response.status, path).toBe(404);
         expect(await response.text()).not.toContain('outside');
       }

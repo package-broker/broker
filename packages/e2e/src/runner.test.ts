@@ -5,6 +5,7 @@ import { capabilities, requiredScenarioIds } from './capabilities.js';
 import {
   layers,
   releaseCatalogue,
+  releaseScenarios,
   releaseRequirements,
   runRelease,
   runScenarios,
@@ -187,13 +188,19 @@ describe('release runner', () => {
         fileURLToPath(new URL('./runner.ts', import.meta.url)),
         '--',
         '--layer',
-        'L',
+        'R',
       ],
       { encoding: 'utf8' },
     );
     expect(child.status).toBe(1);
     expect(child.stderr).toBe('');
-    expect(child.stdout).toContain('NOT RUN [L]: No scenarios registered');
+    expect(child.stdout).toContain('NOT RUN [R]: No scenarios registered');
+  });
+
+  it('registers the assembly scenario for layer L and no other layer', () => {
+    expect(releaseScenarios.map(({ id, layer }) => [id, layer])).toEqual([
+      ['mirror-proxy-assembly', 'L'],
+    ]);
   });
 
   it('recognizes a relative entry path without relying on import.meta.main', () => {
@@ -203,13 +210,13 @@ describe('release runner', () => {
         '--disable-warning=ExperimentalWarning',
         '--input-type=module',
         '--eval',
-        "process.argv = [process.execPath, './runner.ts', '--layer', 'L']; await import('./runner.ts');",
+        "process.argv = [process.execPath, './runner.ts', '--layer', 'R']; await import('./runner.ts');",
       ],
       { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8' },
     );
     expect(child.status).toBe(1);
     expect(child.stderr).toBe('');
-    expect(child.stdout).toContain('NOT RUN [L]: No scenarios registered');
+    expect(child.stdout).toContain('NOT RUN [R]: No scenarios registered');
   });
 
   it('does not run the CLI when imported without an entry path', () => {

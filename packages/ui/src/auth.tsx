@@ -11,6 +11,7 @@ import type { ApiClient, ApiRequestDescription } from './api.js';
 import type { paths } from './api-types.js';
 import { loadPending, savePending, type PendingAction, type PendingStorage } from './pending.js';
 import { encodeQr, type QrMatrix } from './qr.js';
+import { buildListFilterHash, type HashRoute } from './page-hash.js';
 import { Alert, AlertDescription } from './components/ui/alert.js';
 import { Button } from './components/ui/button.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card.js';
@@ -93,11 +94,15 @@ export function safePageHash(hash: string): string {
     return `#/packages${search === '' ? '' : `?${search}`}`;
   }
   const match =
-    /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?project=([A-Za-z0-9._-]{1,64}))?$/.exec(
-      hash,
-    );
+    /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?([\s\S]*))?$/.exec(hash);
   if (match === null || match[0] !== hash) return '#/projects';
-  return match[1] === 'login' ? hash.replace('#/login', '#/projects') : hash;
+  const query = new URLSearchParams(match[2]);
+  return buildListFilterHash((match[1] === 'login' ? 'projects' : match[1]) as HashRoute, {
+    project: query.get('project'),
+    status: query.get('status'),
+    q: query.get('q'),
+    after: query.get('after'),
+  });
 }
 
 export function reauthReturnHash(hash: string): string {
@@ -220,7 +225,7 @@ export function createReauthFlow(deps: {
         return;
       }
       store.set({ dialog: 'closed', action: null, outcome: null });
-      deps.navigate(`#/reauth?return=${encodeURIComponent(returnHash.replace(/^#/, ''))}`);
+      deps.navigate(`#/reauth?return=${encodeURIComponent(safePageHash(returnHash).slice(1))}`);
     },
 
     restore(): void {

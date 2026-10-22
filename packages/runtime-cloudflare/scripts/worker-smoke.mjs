@@ -414,7 +414,7 @@ async function run() {
     await expectStatus('/_pb/session after setup', afterSetup, 200);
     console.log('smoke:cloudflare workerd: session after setup ok');
 
-    step = 'checking the authenticated UI mount';
+    step = 'checking the public UI mount';
     const stagedAssets = await readAssetsDescriptor(workerScript);
     assert.ok(stagedAssets !== null, 'the build output has no assets.json');
     assert.equal(stagedAssets.binding, 'ASSETS');
@@ -435,24 +435,37 @@ async function run() {
     }
     const uiPaths = [
       '/_pb/ui/',
-      '/_pb/ui/manifest.json',
       ...Object.keys(uiManifest.files)
         .filter((name) => name !== uiManifest.entry)
         .map((name) => `/_pb/ui/${name}`),
     ];
     for (const path of uiPaths) {
-      await expectStatus(`${path} without credentials`, await dispatch(path, limitMs), 401);
+      const anonymous = await dispatch(path, limitMs);
+      await expectStatus(`${path} without credentials`, anonymous, 200);
+      assert.equal(anonymous.headers.get('set-cookie'), null);
       const response = await send(path, limitMs, { cookie: cookiesOf(finished) });
       await expectStatus(`${path} with a session`, response, 200);
       const name = path === '/_pb/ui/' ? uiManifest.entry : path.slice('/_pb/ui/'.length);
-      if (name === 'manifest.json') assert.deepEqual(await response.json(), uiManifest);
-      else
-        assert.deepEqual(
-          Buffer.from(await response.arrayBuffer()),
-          await readFile(join(stagedAssets.directory, name)),
-          `${path} differs from the staged file`,
-        );
+      assert.equal(response.headers.get('set-cookie'), null);
+      const anonymousBytes = Buffer.from(await anonymous.arrayBuffer());
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), anonymousBytes);
+      assert.deepEqual(
+        anonymousBytes,
+        await readFile(join(stagedAssets.directory, name)),
+        `${path} differs from the staged file`,
+      );
     }
+    await expectStatus(
+      'UI manifest without credentials',
+      await dispatch('/_pb/ui/manifest.json', limitMs),
+      404,
+    );
+    await expectStatus(
+      'UI manifest with a session',
+      await send('/_pb/ui/manifest.json', limitMs, { cookie: cookiesOf(finished) }),
+      404,
+    );
+
     for (const name of ['index.html', 'manifest.json', ...referenced]) {
       await expectStatus(
         `raw /${name} without credentials`,
@@ -466,7 +479,7 @@ async function run() {
       );
     }
     console.log(
-      `smoke:cloudflare UI document, manifest and ${uiPaths.length - 2} assets require a session and match the staged output`,
+      `smoke:cloudflare public UI document and ${uiPaths.length - 1} assets match the staged output with and without a session`,
     );
 
     step = 'storing the section 2.6 password vector';

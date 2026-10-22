@@ -90,6 +90,8 @@ function setup(options: {
   signal?: AbortSignal;
   listPackages?: SourceProvider['listPackages'];
   noListing?: boolean;
+  selectionRevision?: () => Promise<string>;
+  onMark?: () => void;
 }) {
   const source = options.source === undefined ? record() : options.source;
   const pages: Pages = options.pages ?? { '': page([], null) };
@@ -214,6 +216,7 @@ function setup(options: {
       },
       async markListing(_ctx, _guard, input) {
         marks.push({ stamp: input.stamp, present: input.present });
+        options.onMark?.();
         return { changed: true, marked: input.present.length, statements: 4 };
       },
     },
@@ -242,6 +245,9 @@ function setup(options: {
     },
     existingKeys: async (_ctx, _sourceId, names) =>
       new Set(options.existing === undefined ? [] : options.existing(names)),
+    ...(options.selectionRevision === undefined
+      ? {}
+      : { selectionRevision: options.selectionRevision }),
     staleHeldKeys: async (_ctx, _sourceId, query) => {
       calls.held += 1;
       if (options.heldError === true) throw new Error(`database said ${SECRET}`);
@@ -353,6 +359,29 @@ describe('source sync job: payload', () => {
 });
 
 describe('source sync job: listing and fan-out', () => {
+  it.each(['between pages', 'during marks'])(
+    'restarts when selection changes %s even without filtered names',
+    async (phase) => {
+      let revision = 'initial';
+      const t = setup({
+        existing: (names) => [...names],
+        selectionRevision: async () => revision,
+        listPackages: async (_ctx, _source, cursor) => {
+          if (cursor === null) return page(['a/one'], 'p2');
+          if (phase === 'between pages') revision = 'changed';
+          return page(['a/two'], null);
+        },
+        onMark: () => {
+          if (phase === 'during marks') revision = 'changed';
+        },
+      });
+      await expect(t.run(payload())).rejects.toMatchObject({ code: 'handler_error' });
+      expect(t.finalizes).toEqual([]);
+      expect(t.calls.abandon).toBe(1);
+      expect(t.polls).toEqual([]);
+    },
+  );
+
   const twoPages: Pages = {
     '': page(['a/one', 'a/two'], 'p2'),
     p2: page(['a/three'], null),

@@ -161,7 +161,7 @@ describe('runImportApply', () => {
       throw new Error('simulated crash after commit');
     });
     await expect(s.execute()).rejects.toThrow('simulated crash after commit');
-    expect(s.rows).toHaveLength(50);
+    expect(s.rows).toHaveLength(48);
     expect(s.store.finish).not.toHaveBeenCalled();
     s.fences.mockClear();
     expect(await s.execute()).toEqual({ status: 'applied' });
@@ -186,8 +186,8 @@ describe('runImportApply', () => {
       .mockImplementationOnce(apply)
       .mockResolvedValueOnce({ ok: false, reason: 'guard' });
     expect(await s.execute()).toEqual({ status: 'failed', reason: 'guard_failed' });
-    expect(s.rows).toHaveLength(50);
-    expect(s.rows).not.toContain('project:p50');
+    expect(s.rows).toHaveLength(48);
+    expect(s.rows).not.toContain('project:p48');
     failed(s, 'guard_failed');
     expect(s.store.finish.mock.calls[0]![1]).toBe(s.store.applyChunk.mock.calls[1]![1]);
   });
@@ -257,7 +257,7 @@ describe('runImportApply', () => {
   it('issues one fence per chunk with the stored approver and run', async () => {
     const s = await setup(Array.from({ length: 51 }, (_, i) => project(i)));
     await s.execute();
-    expect(s.store.applyChunk.mock.calls.map((call) => call[2].items.length)).toEqual([50, 1]);
+    expect(s.store.applyChunk.mock.calls.map((call) => call[2].items.length)).toEqual([48, 3]);
     expect(s.fences.mock.calls).toEqual([
       [approver, runId, {}],
       [approver, runId, {}],

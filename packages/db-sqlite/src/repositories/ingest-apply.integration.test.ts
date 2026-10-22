@@ -52,6 +52,7 @@ function counting(executor: SqlExecutor): { executor: SqlExecutor; take(): numbe
         return executor.all<R>(statement);
       },
       batch(statements) {
+        expect(statements.length).toBeLessThanOrEqual(200);
         count += statements.length;
         return executor.batch(statements);
       },

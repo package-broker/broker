@@ -666,6 +666,34 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Add batch prepends an org-scoped visibility check; remaining writes are inserts, and no result count is read.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, sourceUnchanged]), ctx),\n        [\n          ...assertCheck(visible),\n          insert,\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,\n            false,\n          ),\n          collision: probe(sameSource, false),\n        },\n      ); #1',
+      ],
+    },
+    {
+      reason:
+        'Remove batch prepends a visibility check; the tail-relative count still selects the source status update, whose referenced keys are unchanged.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(visible),\n          compile(\n            db\n              .deleteFrom('registered_name')\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId),\n          ),\n          pause,\n          auditPendingStatement(ctx, input.pauseAudit, { sql: 'changes() = 1', params: [] }),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(liveIdempotencyCollision(ctx, input.idempotency), false),\n        },\n      ); #1",
+      ],
+    },
+    {
+      reason:
+        'Indexes SELECT id rows to choose a version for the idempotency fixture; not an executor count.',
+      sites: [
+        'db-sqlite/src/contract/catalogue-write-contract.ts:unresolved computed access: versions[index] #1',
+      ],
+    },
+    {
+      reason:
+        'Org-scoped source/project visibility SELECT used by the batch guard; it performs no mutation or count read.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as visible_source\n    where visible_source.id = ${sourceId} and visible_source.org_id = ${ctx.orgId}\n      and (visible_source.project_id is null or exists (\n        select 1 from project as visible_project\n        where visible_project.id = visible_source.project_id\n          and visible_project.org_id = ${ctx.orgId} and visible_project.status = 'active')))` #1",
+      ],
+    },
+    {
+      reason:
         'Indexes domain data in backup-scope; retained because the key cannot be proven to exclude changes.',
       sites: ['db-sqlite/src/backup-scope.ts:unresolved computed access: BACKUP_SCOPE[table] #1'],
     },
@@ -875,8 +903,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'Indexes fixture data in migration-contract; retained because the key cannot be proven to exclude changes.',
       sites: [
-        'db-sqlite/src/contract/migration-contract.ts:unresolved computed access: result[table] #1',
-        'db-sqlite/src/contract/migration-contract.ts:unresolved computed access: result[table] #2',
         'db-sqlite/src/contract/migration-contract.ts:unresolved computed access: ROLE_IDS[defaults.key] #1',
       ],
     },
@@ -885,14 +911,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Indexes fixture data in migration-lock-contract; retained because the key cannot be proven to exclude changes.',
       sites: [
         'db-sqlite/src/contract/migration-lock-contract.ts:unresolved computed access: runners[loserIndex] #1',
-      ],
-    },
-    {
-      reason:
-        'Indexes fixture data in org-key-contract; retained because the key cannot be proven to exclude changes.',
-      sites: [
-        'db-sqlite/src/contract/org-key-contract.ts:unresolved computed access: dump[table] #1',
-        'db-sqlite/src/contract/org-key-contract.ts:unresolved computed access: rowids[index] #1',
       ],
     },
     {
@@ -2132,7 +2150,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Local builder in registered-name; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:builder variable: const insert = compile(\n        db.insertInto('registered_name').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          source_id: input.sourceId,\n          ecosystem: source.ecosystem,\n          pattern: input.pattern,\n        }),\n      ); #1",
-        'db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, sourceUnchanged]), ctx),\n        [\n          insert,\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,\n            false,\n          ),\n          collision: probe(sameSource, false),\n        },\n      ); #1',
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) return 'added'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (\n        outcome.reason === 'conflict' &&\n        input.idempotency !== undefined &&\n        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))\n      )\n        return 'conflict'; #1",
@@ -2140,7 +2157,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'collision') return 'duplicate'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'indeterminate') return 'indeterminate'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: const pause = compile(\n        db\n          .updateTable('source')\n          .set({ status: 'paused', updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')` })\n          .where('id', '=', sourceId)\n          .where('org_id', '=', ctx.orgId)\n          .where('status', '<>', 'paused')\n          .where(sql<SqlBool>`not ${sourceActivatable(ctx, sourceId)}`),\n      ); #1",
-        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          compile(\n            db\n              .deleteFrom('registered_name')\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId),\n          ),\n          pause,\n          auditPendingStatement(ctx, input.pauseAudit, { sql: 'changes() = 1', params: [] }),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(liveIdempotencyCollision(ctx, input.idempotency), false),\n        },\n      ); #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) {\n        return outcome.results[outcome.results.length - (input.idempotency === undefined ? 3 : 4)]\n          ?.changes === 1\n          ? 'removed_and_paused'\n          : 'removed';\n      } #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #2",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'conflict') return 'conflict'; #1",

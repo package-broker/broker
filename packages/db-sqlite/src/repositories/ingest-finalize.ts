@@ -28,6 +28,7 @@ import {
   withinAbsenceShare,
 } from './catalogue-reconcile.js';
 import { createIngestSessionWriteGuard, ingestSessionGuard } from './ingest-session.js';
+import { sourceSelectionCondition } from './source-selection.js';
 import { createUpstreamStateRepository, type PublishedValidators } from './upstream-state.js';
 
 export type {
@@ -53,7 +54,8 @@ export function markedRows(
   return scope.kind === 'source'
     ? sql<number>`(SELECT count(*) FROM package
         WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId}
-          AND package.listing_seen_stamp = ${stamp})`
+          AND package.listing_seen_stamp = ${stamp}
+          AND ${sourceSelectionCondition(ctx, scope.sourceId, sql<string>`package.ecosystem`, sql<string>`package.name`, true)})`
     : sql<number>`(SELECT count(*) FROM version
         WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${scope.packageId}
           AND version.listing_seen_stamp = ${stamp})`;
@@ -130,7 +132,16 @@ export function createIngestFinalizer(
               .select('id')
               .where('org_id', '=', ctx.orgId)
               .where('source_id', '=', row.source_id)
-              .where('name', '=', row.package_key ?? ''),
+              .where('name', '=', row.package_key ?? '')
+              .where(
+                sourceSelectionCondition(
+                  ctx,
+                  row.source_id,
+                  sql<string>`package.ecosystem`,
+                  sql<string>`package.name`,
+                  true,
+                ),
+              ),
           ),
         );
         if (found === undefined) return { status: 'refused', reason: 'no_package' };

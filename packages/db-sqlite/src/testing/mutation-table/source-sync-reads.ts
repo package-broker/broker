@@ -5,6 +5,7 @@ import {
 } from '../../repositories/source-sync-reads.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { ALWAYS, FUTURE, NOT_NULL, ref, seedPackage, seedSource } from './fixtures.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 function foreignSource(read: 'existing' | 'stale'): ContractCase {
   return {
@@ -65,7 +66,7 @@ const foreignStateReference: ContractCase = {
 
 export const allowlist: Readonly<Record<string, string>> = {
   'repositories/source-sync-reads.ts#createSourceSyncReads':
-    'NOT_A_MUTATION: read-only factory adds no SQL; chunks names and maps rows from existingKeysStatement and staleHeldKeysStatement, registered separately in source-sync-reads.ts.',
+    'NOT_A_MUTATION: read-only factory adds no SQL; chunks names and maps rows from existingKeysStatement, selectedKeysStatement and staleHeldKeysStatement, registered separately in source-sync-reads.ts.',
 };
 
 export const entries: readonly MutationEntry[] = [
@@ -86,6 +87,7 @@ export const entries: readonly MutationEntry[] = [
   {
     file: 'repositories/source-sync-reads.ts',
     builder: 'staleHeldKeysStatement',
+    waivers: selectionOrgWaivers,
     cases: [stale, foreignSourceReference, foreignStateReference],
     predicates: [
       {
@@ -94,6 +96,9 @@ export const entries: readonly MutationEntry[] = [
         neutral: NOT_NULL,
         copies: 1,
         caseName: stale.name,
+        waivedCopies: {
+          0: 'The composed selection source organization check independently excludes this foreign source; its isolated mutation case tests that check.',
+        },
       },
       {
         name: 'stale held keys require the source organization to match',
@@ -101,6 +106,9 @@ export const entries: readonly MutationEntry[] = [
         neutral: ALWAYS,
         copies: 1,
         caseName: foreignSourceReference.name,
+        waivedCopies: {
+          0: 'The composed selection source organization check independently rejects the foreign source; its isolated mutation case tests that check.',
+        },
       },
       {
         name: 'stale held keys require the upstream state organization to match',

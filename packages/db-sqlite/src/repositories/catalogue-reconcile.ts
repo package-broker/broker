@@ -23,6 +23,7 @@ import {
   type FinalizeGuardOptions,
 } from '@package-broker/core/ingest/finalize-guard';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
+import { sourceSelectionCondition } from './source-selection.js';
 import { blobLeaseNotLive, leaseLive } from './blob-lease-guard.js';
 import { assertCatalogueWriteGuard } from '../internal/catalogue-write-guard.js';
 
@@ -160,16 +161,42 @@ function seenRows(
     ? sql<number>`(SELECT count(*) FROM package
         WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${id}
           ${keyFilter(sql`package.name`)}
-          AND package.listing_seen_stamp = ${stamp})`
+          AND package.listing_seen_stamp = ${stamp}
+          ${keys === undefined ? sql`AND ${selectedPackage(ctx)}` : sql``})`
     : sql<number>`(SELECT count(*) FROM version
         WHERE version.org_id = ${ctx.orgId} AND version.package_id = ${id}
           ${keyFilter(sql`version.version_normalized`)}
           AND version.listing_seen_stamp = ${stamp})`;
 }
 
-function sourceUnseenPredicate(boundary: RawBuilder<string>): RawBuilder<boolean> {
+function sourceKeyRows(
+  ctx: OrgContext,
+  sourceId: string,
+  keys: string,
+  stamp?: string,
+  selectedOnly = stamp !== undefined,
+): RawBuilder<number> {
+  return sql<number>`(SELECT count(*) FROM package
+    WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}
+      AND package.name IN (SELECT value FROM json_each(${keys}))
+      ${stamp === undefined ? sql`` : sql`AND package.listing_seen_stamp = ${stamp}`}
+      ${selectedOnly ? sql`AND ${selectedPackage(ctx)}` : sql``})`;
+}
+
+function selectedPackage(ctx: OrgContext) {
+  return sourceSelectionCondition(
+    ctx,
+    sql<string>`package.source_id`,
+    sql<string>`package.ecosystem`,
+    sql<string>`package.name`,
+    true,
+  );
+}
+
+function sourceUnseenPredicate(ctx: OrgContext, boundary: RawBuilder<string>): RawBuilder<boolean> {
   return sql<boolean>`package.updated_at < ${boundary}
-      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing')`;
+      AND (package.status = 'active' OR package.removal_cause IS NOT 'source_listing')
+      AND ${selectedPackage(ctx)}`;
 }
 
 export function unseenSourcePackages(ctx: OrgContext, sourceId: string): RawBuilder<number> {
@@ -177,7 +204,8 @@ export function unseenSourcePackages(ctx: OrgContext, sourceId: string): RawBuil
   const boundary = sweepBoundary(ctx, { kind: 'source', sourceId });
   return sql<number>`(SELECT count(*) FROM package
     WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${sourceId}
-      AND package.updated_at < ${boundary} AND package.status = 'active')`;
+      AND package.updated_at < ${boundary} AND package.status = 'active'
+      AND ${selectedPackage(ctx)})`;
 }
 
 export function unseenPackageVersions(ctx: OrgContext, packageId: string): RawBuilder<number> {
@@ -217,7 +245,8 @@ export function removedBlobs(
       ? sql`version.last_op_id = ${scope.opId}`
       : scope.kind === 'source'
         ? sql`version.package_id IN (SELECT package.id FROM package
-          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId})`
+          WHERE package.org_id = ${ctx.orgId} AND package.source_id = ${scope.sourceId}
+            AND ${selectedPackage(ctx)})`
         : sql`version.package_id = ${scope.packageId}`;
   return compile({
     compile: () =>
@@ -303,14 +332,19 @@ export function finalizeListingStatements(
   const boundary = sweepBoundary(ctx, scope);
   const preconditions = [
     ...guard,
-    ...checkOf(scopeExists(ctx, scope)),
+    ...checkOf(
+      scope.kind === 'package'
+        ? sql<boolean>`EXISTS (SELECT 1 FROM package WHERE package.org_id = ${ctx.orgId} AND package.id = ${id} AND ${selectedPackage(ctx)})`
+        : scopeExists(ctx, scope),
+    ),
     ...checkOf(openMatches(ctx, scope, stamp)),
     ...checkOf(sql<boolean>`${seenRows(ctx, scope, stamp)} = ${count}`),
   ];
 
   if (scope.kind === 'source') {
-    const unseen = sourceUnseenPredicate(boundary);
-    const returned = sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'`;
+    const unseen = sourceUnseenPredicate(ctx, boundary);
+    const returned = sql<boolean>`package.updated_at >= ${boundary} AND package.status = 'removed_upstream'
+      AND ${selectedPackage(ctx)}`;
     const rows = (predicate: RawBuilder<boolean>) =>
       sql`package.org_id = ${ctx.orgId} AND package.source_id = ${id} AND ${predicate}`;
     const statements = [
@@ -486,7 +520,8 @@ export function createCatalogueReconciler(
         scope.kind === 'source'
           ? sql`UPDATE package SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}
               WHERE org_id = ${ctx.orgId} AND source_id = ${id} AND listing_seen_stamp IS NOT ${stamp}
-                AND name IN (SELECT value FROM json_each(${json}))`
+                AND name IN (SELECT value FROM json_each(${json}))
+                AND ${selectedPackage(ctx)}`
           : sql`UPDATE version SET updated_at = max(updated_at, ${boundary}), listing_seen_stamp = ${stamp}
               WHERE org_id = ${ctx.orgId} AND package_id = ${id} AND listing_seen_stamp IS NOT ${stamp}
                 AND version_normalized IN (SELECT value FROM json_each(${json}))`;
@@ -498,7 +533,14 @@ export function createCatalogueReconciler(
       const updateIndex = statements.length;
       statements.push(
         statementOf(update),
-        ...checkOf(sql<boolean>`${seenRows(ctx, scope, stamp, json)} = ${keys.length}`),
+        ...(scope.kind === 'source'
+          ? [
+              ...checkOf(sql<boolean>`${sourceKeyRows(ctx, id, json)} = ${keys.length}`),
+              ...checkOf(
+                sql<boolean>`${sourceKeyRows(ctx, id, json, stamp)} = ${sourceKeyRows(ctx, id, json, undefined, true)}`,
+              ),
+            ]
+          : checkOf(sql<boolean>`${seenRows(ctx, scope, stamp, json)} = ${keys.length}`)),
       );
       const results = await executor.batch(statements);
       const changed = results[updateIndex]?.changes ?? 0;
@@ -549,7 +591,7 @@ export function createCatalogueReconciler(
       statements.push(
         statementOf(sql`UPDATE package SET last_op_id = ${decisionId},
           listing_open_stamp = strftime('%Y-%m-%dT%H:%M:%fZ', listing_open_stamp, '+0.001 seconds')
-          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId} AND ${absent}`),
+          WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId} AND ${selectedPackage(ctx)} AND ${absent}`),
       );
       const flip = statements.length;
       statements.push(

@@ -28,7 +28,7 @@ const listingCases = [
     label: 'nonempty plugin listing',
     type: 'composer_repository',
     url: 'https://repo.example.test/packages.json',
-    config: {},
+    config: { selection: { packages: ['acme/one', 'acme/two'] } },
     agent: null,
     target: 'https://repo.example.test/packages.json',
     names: ['acme/one', 'acme/two'],

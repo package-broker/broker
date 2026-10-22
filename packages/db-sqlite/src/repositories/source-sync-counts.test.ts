@@ -98,7 +98,7 @@ describe('source sync counts', () => {
     const stamp = await markedSession(3);
     expect(await counts().markedCount(own, 'S', stamp)).toBe(3);
     expect(await counts().markedCount(own, 'S', OLD)).toBe(0);
-    expect(await counts().markedCount(foreign, 'S', stamp)).toBe(5);
+    expect(await counts().markedCount(foreign, 'S', stamp)).toBe(0);
   });
 
   it('unseenExistingCount equals the number at which finalizeListing refuses or accepts', async () => {

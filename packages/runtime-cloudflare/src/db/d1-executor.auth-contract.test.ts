@@ -207,10 +207,10 @@ describe('d1 concurrent role seeding', () => {
   }, 60_000);
 });
 
-const UPGRADE_ORG = '01J00000000000000000000A0A';
-const UPGRADE_USER_1 = '01J00000000000000000000A0B';
-const UPGRADE_USER_2 = '01J00000000000000000000A0C';
-const UPGRADE_CREDENTIAL = '01J00000000000000000000A0D';
+const FRESH_ORG = '01J00000000000000000000A0A';
+const FRESH_USER_1 = '01J00000000000000000000A0B';
+const FRESH_USER_2 = '01J00000000000000000000A0C';
+const FRESH_CREDENTIAL = '01J00000000000000000000A0D';
 const VALID_PASSWORD_HASH = 'pbkdf2-sha256$i=100000$v=1$c2FsdA$aGFzaA';
 const VALID_SETUP_HASH = 'ab'.repeat(32);
 const SETUP_EXPIRES = '2026-10-16T12:00:00.000Z';
@@ -227,47 +227,45 @@ async function rejected(executor: SqlExecutor, statement: ScalarStatement): Prom
     expect(classified).toBeInstanceOf(DbError);
     return classified;
   }
-  throw new Error(`expected the 0002 write to be rejected: ${statement.sql}`);
+  throw new Error(`expected the local login write to be rejected: ${statement.sql}`);
 }
 
-describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
-  it('rejects every 0002 constraint violation on rows populated under 0001', async () => {
+describe('d1 local login constraints on the fresh 0001 baseline', () => {
+  it('rejects malformed hashes, unpaired setup, negative failures and duplicate setup or TOTP credentials', async () => {
     const db = await database();
     const executor = createD1Executor(db);
-    const [init, ...rest] = await loadSources();
-    if (init === undefined || rest.length === 0) throw new Error('two core migrations expected');
+    const sources = await loadSources();
+    expect(sources.map(({ id }) => id)).toEqual(['core:0001_init']);
 
-    await migrate(executor, [init], { holder: 'auth-contract' });
+    const result = await migrate(executor, sources, { holder: 'auth-contract' });
+    expect(result.applied).toEqual(['core:0001_init']);
     await executor.batch([
-      st('INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', UPGRADE_ORG, 'acme', 'Acme'),
+      st('INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', FRESH_ORG, 'acme', 'Acme'),
       st(
         'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         'u1@example.test',
       ),
       st(
         'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
-        UPGRADE_USER_2,
-        UPGRADE_ORG,
+        FRESH_USER_2,
+        FRESH_ORG,
         'u2@example.test',
       ),
       st(
         "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', x'00', x'000000000000000000000000', 1, 'aad')",
-        UPGRADE_CREDENTIAL,
-        UPGRADE_ORG,
+        FRESH_CREDENTIAL,
+        FRESH_ORG,
       ),
     ]);
-
-    const result = await migrate(executor, [init, ...rest], { holder: 'auth-contract' });
-    expect(result.applied).toEqual(rest.map((source) => source.id));
 
     const malformedPassword = await rejected(
       executor,
       st(
         'INSERT INTO local_login (user_id, org_id, password_hash) VALUES (?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         'not-a-pbkdf2-hash',
       ),
     );
@@ -277,8 +275,8 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
       executor,
       st(
         'INSERT INTO local_login (user_id, org_id, setup_hash, setup_expires_at) VALUES (?, ?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         'AB'.repeat(32),
         SETUP_EXPIRES,
       ),
@@ -289,8 +287,8 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
       executor,
       st(
         'INSERT INTO local_login (user_id, org_id, setup_hash) VALUES (?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         VALID_SETUP_HASH,
       ),
     );
@@ -300,8 +298,8 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
       executor,
       st(
         'INSERT INTO local_login (user_id, org_id, failed_count) VALUES (?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         -1,
       ),
     );
@@ -310,8 +308,8 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
     await executor.batch([
       st(
         'INSERT INTO local_login (user_id, org_id, setup_hash, setup_expires_at) VALUES (?, ?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         VALID_SETUP_HASH,
         SETUP_EXPIRES,
       ),
@@ -320,8 +318,8 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
       executor,
       st(
         'INSERT INTO local_login (user_id, org_id, setup_hash, setup_expires_at) VALUES (?, ?, ?, ?)',
-        UPGRADE_USER_2,
-        UPGRADE_ORG,
+        FRESH_USER_2,
+        FRESH_ORG,
         VALID_SETUP_HASH,
         SETUP_EXPIRES,
       ),
@@ -332,9 +330,9 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
     await executor.batch([
       st(
         'INSERT INTO local_login (user_id, org_id, totp_credential_id, totp_enabled_at) VALUES (?, ?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
-        UPGRADE_CREDENTIAL,
+        FRESH_USER_1,
+        FRESH_ORG,
+        FRESH_CREDENTIAL,
         SETUP_EXPIRES,
       ),
     ]);
@@ -342,9 +340,9 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
       executor,
       st(
         'INSERT INTO local_login (user_id, org_id, totp_credential_id, totp_enabled_at) VALUES (?, ?, ?, ?)',
-        UPGRADE_USER_2,
-        UPGRADE_ORG,
-        UPGRADE_CREDENTIAL,
+        FRESH_USER_2,
+        FRESH_ORG,
+        FRESH_CREDENTIAL,
         SETUP_EXPIRES,
       ),
     );
@@ -354,8 +352,8 @@ describe('d1 local login constraints after the 0001 to 0002 upgrade', () => {
     await executor.batch([
       st(
         'INSERT INTO local_login (user_id, org_id, password_hash, credential_rev) VALUES (?, ?, ?, ?)',
-        UPGRADE_USER_1,
-        UPGRADE_ORG,
+        FRESH_USER_1,
+        FRESH_ORG,
         VALID_PASSWORD_HASH,
         1,
       ),

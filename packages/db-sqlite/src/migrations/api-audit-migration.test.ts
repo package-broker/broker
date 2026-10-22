@@ -11,9 +11,9 @@ const ORG = 'org-a';
 const NOW = '2026-10-17T09:00:00.000Z';
 let opened: OpenedExecutor;
 
-async function migrateTo(limit = '0012_'): Promise<void> {
+async function migrateAll(): Promise<void> {
   const names = readdirSync(migrationsUrl)
-    .filter((name) => name.endsWith('.sql') && name < limit)
+    .filter((name) => name.endsWith('.sql'))
     .sort();
   const sources = await Promise.all(
     names.map((name) =>
@@ -70,9 +70,9 @@ afterEach(async () => {
   await opened.close();
 });
 
-describe('migration 0011', () => {
+describe('baseline schema', () => {
   beforeEach(async () => {
-    await migrateTo();
+    await migrateAll();
     await insert('organization', { id: ORG, slug: 'acme', name: 'Acme' });
   });
 
@@ -100,8 +100,8 @@ describe('migration 0011', () => {
     ]);
     const source = await loadMigrationSource(
       'core',
-      '0011_api_audit.sql',
-      readFileSync(new URL('0011_api_audit.sql', migrationsUrl), 'utf8'),
+      '0001_init.sql',
+      readFileSync(new URL('0001_init.sql', migrationsUrl), 'utf8'),
     );
     expect(source.phase).toBe('expand');
     expect(await rows("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([]);
@@ -233,21 +233,4 @@ describe('migration 0011', () => {
     expect(BACKUP_SCOPE.audit_pending).toBe('include');
     expect(BACKUP_SCOPE.api_idempotency).toBe('exclude');
   });
-});
-
-it('upgrades a populated 0010 database without changing its audit row', async () => {
-  await migrateTo('0011_');
-  await insert('organization', { id: ORG, slug: 'acme', name: 'Acme' });
-  await insert('audit_event', {
-    ...pending({ id: 'event-a' }),
-    seq: 1,
-    prev_hash: '0'.repeat(64),
-    hash: 'a'.repeat(64),
-  });
-  const before = await rows('SELECT * FROM audit_event WHERE org_id = ?', [ORG]);
-  await migrateTo();
-  expect(await rows('SELECT * FROM audit_event WHERE org_id = ?', [ORG])).toEqual(before);
-  expect(await rows("SELECT id FROM schema_migration WHERE id = 'core:0011_api_audit'")).toEqual([
-    { id: 'core:0011_api_audit' },
-  ]);
 });

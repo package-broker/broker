@@ -162,39 +162,8 @@ describe('large registry package on node:sqlite', () => {
 describe('release migration contract', () => {
   it('ships contiguous core migrations starting at 0001', async () => {
     const core = (await discoveredMigrations()).filter((source) => source.owner === 'core');
-    expect(core.length).toBeGreaterThanOrEqual(7);
+    expect(core.length).toBe(1);
     expect(core.map((source) => source.sequence)).toEqual(core.map((_, index) => index + 1));
-  });
-
-  it('produces identical schema for fresh 0001..0007 and 0001..0006 then 0007', async () => {
-    const sources = (await discoveredMigrations()).filter((source) => source.sequence <= 7);
-    const fresh = openNodeSqliteExecutor();
-    const upgraded = openNodeSqliteExecutor();
-    try {
-      await migrate(fresh.executor, sources, { holder: 'fresh' });
-      await migrate(
-        upgraded.executor,
-        sources.filter((source) => source.sequence <= 6),
-        { holder: 'upgrade' },
-      );
-      await migrate(upgraded.executor, sources, { holder: 'upgrade' });
-      const dump = {
-        sql: 'SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name',
-        params: [],
-      };
-      const schema = await fresh.executor.all(dump);
-      expect(schema.length).toBeGreaterThan(0);
-      expect(await upgraded.executor.all(dump)).toEqual(schema);
-      expect(
-        await fresh.executor.all({
-          sql: 'SELECT id FROM schema_migration ORDER BY id',
-          params: [],
-        }),
-      ).toEqual(sources.map(({ id }) => ({ id })));
-    } finally {
-      await fresh.close();
-      await upgraded.close();
-    }
   });
 
   it('refuses a pending core migration below the highest already applied sequence', async () => {

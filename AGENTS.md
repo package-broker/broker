@@ -42,6 +42,7 @@ If you are changing something in the first column, read its role in the second f
 - Load code at run time. Plugins are composed at build time.
 - Log or return secrets, tokens, cookies or credential-bearing URLs.
 - Log or return e-mail addresses of accounts and identities the broker holds.
+  Exception: the organization users and grants admin list routes may return account e-mails only to callers holding organization admin authority.
 - Edit generated build manifests or `dist/`.
 - Edit tests to make them pass.
 - Commit without the `Signed-off-by:` trailer (`git commit -s`).

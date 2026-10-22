@@ -850,6 +850,83 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     }
   });
 
+  it.each([undefined, 'info', 'debug'] as const)(
+    'maps every fill path to upstream_refused at log level %s without contacting the sentinel',
+    async (level) => {
+      const { fetch, cookie, orgId, events, seed } = await boot({
+        worker: { observability: level === undefined ? {} : { level } },
+        sources: [
+          {
+            id: 'CP',
+            ecosystem: 'composer',
+            type: 'packagist_proxy',
+            url: 'https://repo.packagist.org',
+          },
+        ],
+      });
+      await seed(
+        "UPDATE source SET type = 'packagist_proxy', url = 'https://repo.packagist.org' WHERE org_id = ? AND id = 'S1'",
+        [orgId],
+      );
+      const sentinel = vi.fn();
+      let refusing = false;
+      const normal = globalThis.fetch;
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('sentinel.invalid') || url.includes('127.0.0.1')) {
+          sentinel();
+          throw new Error('sentinel reached');
+        }
+        if (refusing) {
+          if (url.includes('~dev.json')) return Response.json({ packages: {} });
+          return Response.redirect('https://sentinel.invalid/private?token=private-secret', 302);
+        }
+        return normal(input, init);
+      });
+      const metadata = await fetch(request('/p1/npm/left-pad', { headers: { cookie } }));
+      expect(metadata.status).toBe(200);
+      const npm = (await metadata.json()) as {
+        versions: Record<string, { dist: { tarball: string } }>;
+      };
+      await seed(
+        "UPDATE version SET metadata_json = json_set(metadata_json, '$.dist.url', ?), dist_type = 'zip' WHERE org_id = ? AND id = ?",
+        ['https://127.0.0.1/sentinel?token=private-secret', orgId, `${VERSION_PREFIX}2`],
+      );
+      refusing = true;
+      for (const [path, sourceId, projectId, reason] of [
+        [`/p1/dist/acme/lib/${VERSION_PREFIX}2.1.zip`, 'S1', 'P1', 'blocked_address'],
+        ['/p4/p2/acme/fresh.json', 'CP', 'P4', 'redirect_refused'],
+        [new URL(npm.versions['1.0.0']!.dist.tarball).pathname, 'NX1', 'P1', 'destination'],
+        ['/p1/npm/fresh', 'NX1', 'P1', 'destination'],
+      ]) {
+        const before = events.length;
+        const response = await fetch(request(path!, { headers: { cookie } }));
+        expect(response.status, path).toBe(502);
+        const body = await response.text();
+        expect(body).toContain('upstream_refused');
+        expect(body).not.toMatch(/https?:|sentinel|127\.0\.0\.1|private-secret/);
+        const emitted = events
+          .slice(before)
+          .map((entry) =>
+            typeof entry === 'string'
+              ? (JSON.parse(entry) as Record<string, unknown>)
+              : (entry as Record<string, unknown>),
+          );
+        const refused = emitted.filter((entry) => entry['event'] === 'upstream.refused');
+        expect(refused, path).toHaveLength(level === 'debug' ? 1 : 0);
+        if (level === 'debug')
+          expect(refused[0]).toMatchObject({
+            level: 'debug',
+            source_id: sourceId,
+            project_id: projectId,
+            reason_code: `upstream.${reason}`,
+          });
+        expect(JSON.stringify(emitted)).not.toMatch(/sentinel|127\.0\.0\.1|private-secret/);
+      }
+      expect(sentinel).not.toHaveBeenCalled();
+    },
+  );
+
   it('refuses sources that point at loopback, link-local and the broker itself without fetching', async () => {
     const { stub } = stubUpstream();
     const hosts = ['https://127.0.0.1', 'https://169.254.169.254', PUBLIC_URL];

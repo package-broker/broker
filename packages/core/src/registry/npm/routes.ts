@@ -140,10 +140,15 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       key: parsed.key,
       outcome: resolved,
       signal: ctx.request.signal,
+      ...(ctx.ports.platform === undefined
+        ? {}
+        : { observability: ctx.ports.platform.observability }),
     });
     if (ctx.request.signal.aborted) return new Response(null, { status: 499 });
     if (filled.kind === 'not_found') return notFound(ctx);
     if (filled.kind === 'busy') return unavailable(ctx, filled.retryAfterSeconds);
+    if (filled.kind === 'upstream_refused')
+      return fail(ctx, 502, 'upstream_refused', API_ERROR_CODES.upstream_refused.message);
     if (filled.kind === 'upstream_error') {
       return fail(ctx, 502, 'bad_gateway', API_ERROR_CODES.bad_gateway.message);
     }
@@ -231,7 +236,12 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
           versionId: found.version.versionId,
           revision: found.version.revision,
         },
-        { signal: ctx.request.signal },
+        {
+          signal: ctx.request.signal,
+          ...(ctx.ports.platform === undefined
+            ? {}
+            : { observability: ctx.ports.platform.observability }),
+        },
       );
     } catch (error) {
       if (ctx.request.signal.aborted) return new Response(null, { status: 499 });

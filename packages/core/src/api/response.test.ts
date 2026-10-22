@@ -34,6 +34,7 @@ const statuses = {
   unsupported_media_type: 415,
   not_acceptable: 406,
   bad_gateway: 502,
+  upstream_refused: 502,
   unavailable: 503,
 } as const;
 

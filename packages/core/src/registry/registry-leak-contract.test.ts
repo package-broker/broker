@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { apiRoute } from '../api/route.js';
+import { PROJECT_ACCESS_API_SPECS } from '../api/routes/project-access-schemas.js';
+import { PROJECT_API_SPECS } from '../api/routes/projects-schemas.js';
 import { SESSION_COOKIE } from '../auth/cookies.js';
+import { sha256Hex } from '../auth/primitives.js';
 import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
 import type { EngineSessionAccess, EngineTokenAccess } from '../authz/engine.js';
 import { displayName } from '../catalogue/names.js';
@@ -32,6 +36,7 @@ const VERSION_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const REVALIDATE = 'private, no-cache';
 const ABBREVIATED = 'application/vnd.npm.install-v1+json';
 const cookie = { cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` };
+const CSRF = 'B'.repeat(43);
 const PERMISSIONS = ['project:read', 'project:packages:read'];
 const PROJECTS: Record<string, { id: string; permissions: readonly string[] }> = {
   alpha: { id: 'proj-a', permissions: PERMISSIONS },
@@ -263,10 +268,13 @@ const store = () => {
   return { raw, writes };
 };
 
-type Auth = 'cookie' | 'bearer';
+type Auth = 'cookie' | 'bearer' | 'basic';
 const AUTHS: Auth[] = ['cookie', 'bearer'];
 
-async function harness(auth: Auth = 'cookie') {
+async function harness(
+  auth: Auth = 'cookie',
+  options: { capped?: boolean; tokenKind?: 'pat' | 'svc'; permissions?: readonly string[] } = {},
+) {
   const { reader, projectsQueried, admissible } = fixture();
   const access = createPackageAccess(reader);
   const ensure = vi.fn<OnDemandFill['ensure']>(async (_actor, request) =>
@@ -307,17 +315,33 @@ async function harness(auth: Auth = 'cookie') {
     }),
   ];
   const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
-  const token = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
+  const tokenKind = options.tokenKind ?? 'pat';
+  const token = formatToken(tokenKind, 'abcdefghijkl', new Uint8Array(32).fill(9));
+  const apiHandler = vi.fn();
+  const csrfHash = await sha256Hex(CSRF);
+  const lookupProject = (slug: string | null, capped = false) => {
+    const found = projectAccess(slug);
+    const excluded = capped && found.project?.id !== 'proj-a';
+    return {
+      project: excluded ? null : found.project,
+      projectPermissions: excluded ? [] : (options.permissions ?? found.projectPermissions),
+      projectVisible: found.projectPermissions.length > 0,
+    };
+  };
   const tokenAccess = Object.defineProperty(
     {
       token: {
         id: 'token-1',
-        kind: 'pat',
+        kind: tokenKind,
+        bindingOk: true,
+        projectMode: options.capped === true ? 'selected' : 'all',
+        boundProjectIds: options.capped === true ? ['proj-a'] : [],
+        scope: { level: 'read', readOnly: true },
         expired: false,
         revoked: false,
         lastUsedAt: null,
-        userId: 'user-1',
-        servicePrincipalId: null,
+        userId: tokenKind === 'pat' ? 'user-1' : null,
+        servicePrincipalId: tokenKind === 'svc' ? 'service-1' : null,
       },
       principalStatus: 'active',
       validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
@@ -335,21 +359,52 @@ async function harness(auth: Auth = 'cookie') {
       ids: { ulid: () => VERSION_ID },
     },
     ecosystemRoutes: routes,
+    coreRoutes: [
+      apiRoute(PROJECT_API_SPECS[2], async () => {
+        apiHandler();
+        return {
+          status: 200,
+          body: {
+            id: 'proj-a',
+            slug: 'alpha',
+            name: 'Alpha',
+            status: 'active',
+            tokenMaxScope: 'full',
+            requirePublishApproval: false,
+            revision: 1,
+          },
+        };
+      }),
+      apiRoute(PROJECT_API_SPECS[3], async () => {
+        apiHandler();
+        return { status: 204 };
+      }),
+      apiRoute(PROJECT_ACCESS_API_SPECS[0], async () => {
+        apiHandler();
+        return { status: 201, body: { id: VERSION_ID } };
+      }),
+      ...PROJECT_API_SPECS.slice(4).map((spec) =>
+        apiRoute(spec, async () => {
+          apiHandler();
+          return { status: 204 };
+        }),
+      ),
+    ],
     packageResolver: access,
     authorization: createAuthorizationEngine({
       access: {
         lookupSession: async (_ctx, input) =>
           ({
-            session: { id: 'session-1', csrfHash: '' },
+            session: { id: 'session-1', csrfHash },
             user: { id: 'user-1' },
             identity: null,
             protectedHolder: false,
             organizationPermissions: [],
-            ...projectAccess(input.projectSlug),
+            ...lookupProject(input.projectSlug),
           }) satisfies EngineSessionAccess,
         lookupToken: async (_ctx, input) =>
           Object.defineProperty(
-            { ...tokenAccess, ...projectAccess(input.projectSlug) },
+            { ...tokenAccess, ...lookupProject(input.projectSlug, options.capped) },
             'verifier',
             Object.getOwnPropertyDescriptor(tokenAccess, 'verifier')!,
           ),
@@ -365,7 +420,10 @@ async function harness(auth: Auth = 'cookie') {
     health: async () => true,
     log: () => undefined,
   });
-  const credential = auth === 'cookie' ? cookie : { authorization: `Bearer ${token}` };
+  const credential =
+    auth === 'cookie'
+      ? cookie
+      : { authorization: auth === 'basic' ? `Basic ${btoa(`token:${token}`)}` : `Bearer ${token}` };
   const call = (path: string, init: RequestInit = {}) =>
     kernel.fetch(
       new Request(`https://broker.test${path}`, {
@@ -375,6 +433,7 @@ async function harness(auth: Auth = 'cookie') {
     );
   return {
     call,
+    apiHandler,
     ensure,
     serve,
     projectsQueried,
@@ -538,6 +597,8 @@ describe('registry cross-project leak contract', () => {
         const beta = await observe(h, surface.path('beta', subject), surface.init);
         expect(beta.leaks).not.toEqual([]);
 
+        expect((await h.call('/_pb/projects/alpha')).status).toBe(200);
+        h.apiHandler.mockClear();
         h.projectsQueried.clear();
         h.serve.mockClear();
         h.ensure.mockClear();
@@ -672,6 +733,139 @@ describe('registry cross-project leak contract', () => {
     expect(response.status).toBe(404);
     expect(h.ensure).toHaveBeenCalledTimes(1);
     expect(h.ensure.mock.calls[0]?.[0].projectId).toBe('proj-a');
+  });
+
+  describe.each(['pat', 'svc'] as const)('%s project cap', (tokenKind) => {
+    describe.each(['bearer', 'basic'] as const)('with %s credentials', (auth) => {
+      it.each([
+        ...SURFACES.map((surface) => ({
+          name: surface.name,
+          path: (project: string) => surface.path(project, subjectFor(surface, 'secret')),
+          init: surface.init,
+        })),
+        {
+          name: 'composer packages.json',
+          path: (p: string) => `/${p}/packages.json`,
+          init: undefined,
+        },
+        {
+          name: 'npm search',
+          path: (p: string) => `/${p}/npm/-/v1/search?text=secret`,
+          init: undefined,
+        },
+        { name: 'project API read', path: (p: string) => `/_pb/projects/${p}`, init: undefined },
+        {
+          name: 'project API settings',
+          path: (p: string) => `/_pb/projects/${p}`,
+          init: { method: 'PATCH', headers: { origin: 'https://broker.test' } },
+        },
+        {
+          name: 'project API grants',
+          path: (p: string) => `/_pb/projects/${p}/grants`,
+          init: { method: 'POST', headers: { origin: 'https://broker.test' } },
+        },
+        ...['archive', 'restore'].map((action) => ({
+          name: `project API ${action}`,
+          path: (p: string) => `/_pb/projects/${p}/${action}`,
+          init: { method: 'POST', headers: { origin: 'https://broker.test' } },
+        })),
+      ])('conceals $name before serving or evaluating validators', async (surface) => {
+        const h = await harness(auth, { capped: true, tokenKind });
+        expect((await h.call('/alpha/packages.json')).status).toBe(200);
+        h.projectsQueried.clear();
+        h.ensure.mockClear();
+        for (const validators of [
+          {},
+          { 'if-none-match': '*' },
+          { 'if-modified-since': 'Wed, 01 Jan 2031 00:00:00 GMT' },
+          {
+            'if-none-match': '"cached-beta"',
+            'if-modified-since': 'Wed, 01 Jan 2031 00:00:00 GMT',
+          },
+        ]) {
+          const init = {
+            ...surface.init,
+            headers: { ...surface.init?.headers, ...validators },
+          };
+          for (const method of [
+            surface.init?.method ?? 'GET',
+            ...(surface.init?.method ? [] : ['HEAD']),
+          ]) {
+            const absent = await snapshot(
+              await h.call(surface.path('nowhere'), { ...init, method }),
+            );
+            const excluded = await snapshot(
+              await h.call(surface.path('beta'), { ...init, method }),
+            );
+            expect(absent.status).toBe(404);
+            expect(excluded).toEqual(absent);
+          }
+        }
+        expect(h.apiHandler).not.toHaveBeenCalled();
+        expect(h.ensure).not.toHaveBeenCalled();
+        expect(h.serve).not.toHaveBeenCalled();
+        expect(h.projectsQueried.size).toBe(0);
+      });
+    });
+  });
+
+  it.each(['cookie', 'bearer', 'basic'] as const)(
+    'keeps a visible project permission shortfall at 403 with %s credentials',
+    async (auth) => {
+      const h = await harness(auth, { permissions: ['project:read'] });
+      for (const path of [
+        '/beta/packages.json',
+        '/beta/p2/acme/secret.json',
+        `/beta/dist/acme/secret/${distRef('beta')}`,
+        '/beta/npm/secret-pkg',
+        '/beta/npm/-/v1/search?text=secret',
+        '/beta/npm/secret-pkg/-/secret-pkg-1.0.0.tgz',
+      ]) {
+        for (const headers of [{}, { 'if-none-match': '*' }]) {
+          expect((await h.call(path, { headers })).status).toBe(403);
+        }
+      }
+      expect(
+        (
+          await h.call('/_pb/projects/beta', {
+            method: 'PATCH',
+            headers: { origin: 'https://broker.test', 'x-csrf-token': CSRF },
+          })
+        ).status,
+      ).toBe(403);
+      for (const action of ['archive', 'restore']) {
+        expect(
+          (
+            await h.call(`/_pb/projects/beta/${action}`, {
+              method: 'POST',
+              headers: { origin: 'https://broker.test', 'x-csrf-token': CSRF },
+            })
+          ).status,
+        ).toBe(403);
+      }
+      expect(h.apiHandler).not.toHaveBeenCalled();
+      expect(h.ensure).not.toHaveBeenCalled();
+      expect(h.serve).not.toHaveBeenCalled();
+      expect(h.projectsQueried.size).toBe(0);
+    },
+  );
+
+  it('allows session settings writes with valid CSRF credentials and permission', async () => {
+    const h = await harness('cookie', {
+      permissions: ['project:read', 'project:settings:write'],
+    });
+    const response = await h.call('/_pb/projects/beta', {
+      method: 'PATCH',
+      headers: {
+        origin: 'https://broker.test',
+        'x-csrf-token': CSRF,
+        'content-type': 'application/json',
+        'if-match': '"r1"',
+      },
+      body: JSON.stringify({ name: 'Beta' }),
+    });
+    expect(response.status).toBe(204);
+    expect(h.apiHandler).toHaveBeenCalledOnce();
   });
 
   describe('listing surfaces', () => {

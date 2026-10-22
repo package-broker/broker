@@ -95,6 +95,7 @@ export function createLocalRoutes(deps: {
   readonly setup: LocalSetupService;
   readonly sessions: SessionService;
   readonly publicOrigin: string;
+  readonly clientIp?: (request: Request) => string | null;
   readonly log: KernelLog;
 }): readonly RouteDefinition[] {
   const { local, setup, sessions, publicOrigin } = deps;
@@ -165,7 +166,11 @@ export function createLocalRoutes(deps: {
       permission: null,
       handler: guarded(async (ctx, org) => {
         const body = await readFields(ctx.request, localSetupFinishBody);
-        const result = await setup.finish(org, body, await sessionMetaOf(ctx.request));
+        const result = await setup.finish(
+          org,
+          body,
+          await sessionMetaOf(ctx.request, deps.clientIp),
+        );
         if (result.ok) {
           log({
             level: 'info',
@@ -199,7 +204,11 @@ export function createLocalRoutes(deps: {
       permission: null,
       handler: guarded(async (ctx, org) => {
         const body = await readFields(ctx.request, localLoginBody);
-        const result = await local.login(org, body, await sessionMetaOf(ctx.request));
+        const result = await local.login(
+          org,
+          body,
+          await sessionMetaOf(ctx.request, deps.clientIp),
+        );
         if (result.ok) {
           log({
             level: 'info',

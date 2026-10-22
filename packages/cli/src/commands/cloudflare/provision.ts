@@ -23,6 +23,9 @@ import {
   digest,
   emptyInventory,
   installIdentity,
+  abortOnlyRule,
+  lifecycleRule,
+  type LifecycleRule,
   validResourceId,
   type InstallIdentity,
   type Inventory,
@@ -401,7 +404,7 @@ async function allResources(
       if (detail.id !== listed.id) throw new CloudflareError('ownership_conflict', 8);
       verify(spec, detail);
       if (spec.kind === 'queue') {
-        const consumers = await api.list(`/queues/${detail.id}/consumers`);
+        const consumers = await api.snapshot(`/queues/${detail.id}/consumers`);
         queueConsumers.set(detail.id, consumers);
         const script = spec.name.slice(0, spec.key === 'dlq' ? -9 : -5);
         if (
@@ -1016,6 +1019,37 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
         operation.id,
       );
       await save();
+    }
+    const bucket = journal.resources.r2;
+    if (
+      !o.dryRun &&
+      bucket?.id &&
+      bucket.state === 'complete' &&
+      bucket.lifecycle_baseline === undefined &&
+      bucket.evidence &&
+      ['created', 'pending_create'].includes(bucket.evidence.source)
+    ) {
+      let baseline: LifecycleRule[] | undefined;
+      try {
+        const live = object(
+          (
+            await api.request(
+              `/r2/buckets/${encodeURIComponent(bucket.id)}/lifecycle`,
+              'GET',
+              undefined,
+              { 'cf-r2-jurisdiction': identity.jurisdiction },
+            )
+          ).result,
+        ).rules;
+        if (Array.isArray(live) && live.length <= 16 && live.every(lifecycleRule))
+          baseline = live.map(abortOnlyRule);
+      } catch {
+        baseline = undefined;
+      }
+      if (baseline) {
+        bucket.lifecycle_baseline = baseline;
+        await save();
+      } else output.checks.push({ name: 'lifecycle_baseline', status: 'unrecorded' });
     }
     if (!o.dryRun && build.required.analytics && journal.resources.analytics === undefined) {
       journal.resources.analytics = {

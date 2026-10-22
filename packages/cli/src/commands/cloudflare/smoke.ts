@@ -193,9 +193,9 @@ async function verifyRestoredSettings(api: CloudflareApi, base: string, j: Inven
   )
     return failed();
   const consumers = j.resources.jobs?.id
-    ? await api.list(`/queues/${j.resources.jobs.id}/consumers`)
+    ? await api.snapshot(`/queues/${j.resources.jobs.id}/consumers`)
     : [];
-  if (j.resources.dlq?.id && (await api.list(`/queues/${j.resources.dlq.id}/consumers`)).length)
+  if (j.resources.dlq?.id && (await api.snapshot(`/queues/${j.resources.dlq.id}/consumers`)).length)
     return failed();
   if (consumers.length !== (expected.consumer ? 1 : 0)) return failed();
   if (expected.consumer) {

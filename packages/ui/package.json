@@ -26,6 +26,9 @@
   },
   "devDependencies": {
     "@package-broker/core": "workspace:^",
+    "@radix-ui/react-label": "catalog:",
+    "@radix-ui/react-slot": "catalog:",
+    "@radix-ui/react-tabs": "catalog:",
     "@tailwindcss/cli": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",

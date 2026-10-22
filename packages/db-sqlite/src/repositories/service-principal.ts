@@ -27,6 +27,15 @@ export interface ServicePrincipal {
 }
 
 export interface ServicePrincipalRepository {
+  list(
+    ctx: OrgContext,
+    input: {
+      readonly limit: number;
+      readonly after?: string;
+      readonly projectId?: string;
+      readonly includeProjects: boolean;
+    },
+  ): Promise<{ readonly items: readonly ServicePrincipal[]; readonly next: string | null }>;
   get(ctx: OrgContext, id: string): Promise<ServicePrincipal | null>;
   /** The principals of this organization whose creator is `userId`, ordered by id. */
   createdBy(
@@ -226,7 +235,7 @@ function toPrincipals(rows: readonly PrincipalRow[]): ServicePrincipal[] {
   return [...found.values()];
 }
 
-function selectPrincipals(ctx: OrgContext, id: string) {
+function selectPrincipals(ctx: OrgContext, id?: string) {
   return db
     .selectFrom('service_principal as sp')
     .leftJoin('service_principal_permission as p', (join) =>
@@ -242,7 +251,8 @@ function selectPrincipals(ctx: OrgContext, id: string) {
       'p.permission',
     ])
     .where('sp.org_id', '=', ctx.orgId)
-    .where('sp.id', '=', id)
+    .$if(id !== undefined, (q) => q.where('sp.id', '=', id!))
+    .orderBy('sp.id')
     .orderBy('p.permission');
 }
 
@@ -331,6 +341,43 @@ export function createServicePrincipalRepository(
 
   return {
     get: load,
+
+    async list(ctx, input) {
+      if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+        throw new TypeError('invalid service principal page limit');
+      }
+      const pageIds = db
+        .selectFrom('service_principal as page')
+        .select('page.id')
+        .where('page.org_id', '=', ctx.orgId)
+        .$if(input.after !== undefined, (q) => q.where('page.id', '>', input.after!))
+        .$if(input.projectId !== undefined, (q) =>
+          q.where('page.project_id', '=', input.projectId!),
+        )
+        .where((eb) =>
+          input.includeProjects
+            ? eb.or([
+                eb('page.project_id', 'is', null),
+                eb.exists(
+                  eb
+                    .selectFrom('project as visible_project')
+                    .select('visible_project.id')
+                    .whereRef('visible_project.id', '=', 'page.project_id')
+                    .where('visible_project.org_id', '=', ctx.orgId)
+                    .where('visible_project.status', '=', 'active'),
+                ),
+              ])
+            : eb('page.project_id', 'is', null),
+        )
+        .orderBy('page.id')
+        .limit(input.limit + 1);
+      const rows = await executor.all<PrincipalRow>(
+        scalar(selectPrincipals(ctx).where('sp.id', 'in', pageIds)),
+      );
+      const found = toPrincipals(rows);
+      const items = found.slice(0, input.limit);
+      return { items, next: found.length > input.limit ? items.at(-1)!.id : null };
+    },
 
     async createdBy(ctx, userId) {
       requireNonEmpty(userId, 'userId');

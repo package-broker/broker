@@ -29,6 +29,36 @@ describe('response headers', () => {
     expect(fetch.mock.calls[1]?.[1].headers['If-Match']).toBe('"revision-7"');
   });
 
+  it('passes a server prefix and restores an archived project with its list ETag', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          items: [
+            { id: 'project-id', slug: 'acme', name: 'Acme', status: 'archived', etag: '"r7"' },
+          ],
+          next: null,
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = createApiClient<paths>({ fetch, readCookie: () => undefined });
+    const result = await client.request('get', '/_pb/projects', {
+      query: { q: 'Ac', status: 'archived', limit: '10' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('list failed');
+    const item = result.data.items[0]!;
+    expect(item.etag).toBe('"r7"');
+    const query = new URL(fetch.mock.calls[0]![0], 'https://broker.test').searchParams;
+    expect(Object.fromEntries(query)).toEqual({ q: 'Ac', status: 'archived', limit: '10' });
+    const restored = await client.request('post', '/_pb/projects/{project}/restore', {
+      params: { project: item.slug },
+      headers: { 'If-Match': item.etag },
+    });
+    expect(restored.ok).toBe(true);
+    expect(fetch.mock.calls[1]?.[1].headers['If-Match']).toBe('"r7"');
+  });
+
   it.each([201, 204])('exposes ETag and Location on a %s success', async (status) => {
     const client = createApiClient<paths>({
       fetch: async () =>

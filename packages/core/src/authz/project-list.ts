@@ -6,6 +6,18 @@ import type { ProjectStatus } from './project-service.js';
 
 export const PROJECT_LIST_MAX_LIMIT = 200;
 
+export const PROJECT_LIST_PREFIX_MAX_LENGTH = 200;
+// eslint-disable-next-line no-control-regex
+export const PROJECT_LIST_PREFIX_PATTERN = /^[^%_\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/;
+
+export function isValidProjectListPrefix(q: unknown): q is string {
+  return (
+    typeof q === 'string' &&
+    q.length <= PROJECT_LIST_PREFIX_MAX_LENGTH &&
+    PROJECT_LIST_PREFIX_PATTERN.test(q)
+  );
+}
+
 const RESTRICTED_CHUNK = 50;
 
 export interface ProjectListEntry {
@@ -13,6 +25,7 @@ export interface ProjectListEntry {
   readonly slug: string;
   readonly name: string;
   readonly status: ProjectStatus;
+  readonly revision: number;
 }
 
 /** The project repository's `list` satisfies this; rows come back ordered by id. */
@@ -20,6 +33,7 @@ export interface ProjectListSource {
   list(
     ctx: OrgContext,
     page: {
+      readonly q?: string;
       readonly afterId?: string;
       readonly limit: number;
       readonly status: ProjectStatus;
@@ -29,6 +43,7 @@ export interface ProjectListSource {
 }
 
 export interface ReadableProjectPage {
+  readonly q?: string;
   readonly afterId?: string;
   readonly limit: number;
   readonly status: ProjectStatus;
@@ -61,6 +76,7 @@ export interface ProjectReadAccess {
 }
 
 export interface ProjectListRequest {
+  readonly q?: string;
   readonly limit: number;
   readonly afterId?: string;
   readonly status?: ProjectStatus;
@@ -74,7 +90,12 @@ export interface ProjectListPage {
 }
 
 export type ProjectListError =
-  'forbidden' | 'invalid_limit' | 'invalid_cursor' | 'invalid_status' | 'source_invalid';
+  | 'forbidden'
+  | 'invalid_limit'
+  | 'invalid_cursor'
+  | 'invalid_status'
+  | 'invalid_query'
+  | 'source_invalid';
 
 export type ProjectListResult =
   | { readonly ok: true; readonly value: ProjectListPage }
@@ -119,7 +140,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
     ctx: OrgContext,
     userId: string,
     inheritsAll: boolean,
-    page: { readonly limit: number; readonly afterId?: string; readonly status: ProjectStatus },
+    page: ReadableProjectPage,
     restrictTo: unknown,
   ): Promise<ProjectListResult> {
     if (
@@ -148,7 +169,12 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         .slice(0, RESTRICTED_CHUNK);
       const last = chunk[chunk.length - 1];
       if (last === undefined) return finish(cursor, true);
-      const query = { limit: chunk.length, status, ids: chunk };
+      const query = {
+        limit: chunk.length,
+        status,
+        ids: chunk,
+        ...(page.q === undefined ? {} : { q: page.q }),
+      };
       const rows =
         !inheritsAll && access === undefined
           ? await grants.listReadableProjects(ctx, { userId }, query)
@@ -165,7 +191,13 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       for (const row of rows) {
         if (row.status !== status || !chunk.includes(row.id)) continue;
         if (granted !== null && granted.get(row.id)?.has('project:read') !== true) continue;
-        items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
+        items.push({
+          id: row.id,
+          slug: row.slug,
+          name: row.name,
+          status: row.status,
+          revision: row.revision,
+        });
         if (items.length === limit) {
           cursor = row.id;
           break;
@@ -184,7 +216,9 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       if (!isPermissionView(orgPermissions)) return fail('forbidden');
       const admin = isOrganizationAdmin === true;
 
-      const { limit, afterId } = request;
+      const { limit, afterId, q } = request;
+      if (q !== undefined && !isValidProjectListPrefix(q)) return fail('invalid_query');
+      const prefix = q === undefined ? {} : { q };
       if (!Number.isInteger(limit) || limit < 1 || limit > PROJECT_LIST_MAX_LIMIT) {
         return fail('invalid_limit');
       }
@@ -205,7 +239,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
           ctx,
           userId,
           inheritsAll,
-          { limit, status, ...(afterId === undefined ? {} : { afterId }) },
+          { ...prefix, limit, status, ...(afterId === undefined ? {} : { afterId }) },
           request.restrictTo,
         );
       }
@@ -214,13 +248,19 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
         const rows = await readable.listReadableProjects(
           ctx,
           { userId },
-          { ...(afterId === undefined ? {} : { afterId }), limit, status },
+          { ...prefix, ...(afterId === undefined ? {} : { afterId }), limit, status },
         );
         const items: ProjectListEntry[] = [];
         let previous = afterId;
         for (const row of rows.slice(0, limit)) {
           if (row.status !== status || (previous !== undefined && row.id <= previous)) continue;
-          items.push({ id: row.id, slug: row.slug, name: row.name, status: row.status });
+          items.push({
+            id: row.id,
+            slug: row.slug,
+            name: row.name,
+            status: row.status,
+            revision: row.revision,
+          });
           previous = row.id;
         }
         if (rows.length < limit) return { ok: true, value: { items, nextAfterId: null } };
@@ -230,6 +270,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       }
 
       const rows = await source.list(ctx, {
+        ...prefix,
         ...(afterId === undefined ? {} : { afterId }),
         limit,
         status,
@@ -237,7 +278,7 @@ export function createProjectLister(deps: ProjectListerDeps): ProjectLister {
       const items = rows
         .filter((row) => row.status === status)
         .slice(0, limit)
-        .map(({ id, slug, name, status }) => ({ id, slug, name, status }));
+        .map(({ id, slug, name, status, revision }) => ({ id, slug, name, status, revision }));
       return {
         ok: true,
         value: { items, nextAfterId: rows.length < limit ? null : (items.at(-1)?.id ?? null) },

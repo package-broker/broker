@@ -340,7 +340,139 @@ describe('listReadableProjects', () => {
     );
   });
 
-  it('returns projects granted by e-mail and by a fresh group, projected to four fields', async () => {
+  it.each([
+    'organization',
+    'grants',
+    'restricted-organization',
+    'restricted-grants',
+    'restricted-access',
+  ])('filters slug or name before paginating, preserving visibility (%s)', async (mode) => {
+    await seed(
+      member(a, U1, 'team'),
+      grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(2) }),
+      grant(a, 'group', 'team', PROJECT_READER, { projectId: projectId(4) }),
+      stmt("UPDATE project SET slug = 'needle-slug', revision = 7 WHERE id = ?", projectId(2)),
+      stmt("UPDATE project SET name = 'needle name', revision = 9 WHERE id = ?", projectId(4)),
+      stmt("UPDATE project SET name = 'needle hidden' WHERE id = ?", projectId(5)),
+      stmt("UPDATE project SET name = 'needle archived' WHERE id = ?", projectId(6)),
+      stmt("UPDATE project SET name = 'needle foreign' WHERE id = ?", projectId(7)),
+    );
+    const all = mode.includes('organization');
+    const lister = createProjectLister({
+      source: createProjectRepository(executor),
+      readable: repository(),
+      ...(mode === 'restricted-access'
+        ? {
+            access: {
+              permissionsFor: async () =>
+                new Map([
+                  [projectId(2), new Set(['project:read'])],
+                  [projectId(4), new Set(['project:read'])],
+                ]),
+            },
+          }
+        : {}),
+    });
+    const actor: ActorContext = {
+      kind: 'organization',
+      userId: U1,
+      permissions: new Set<Permission>(all ? ['project:read'] : []),
+      isOrganizationAdmin: false,
+    };
+    const request = {
+      q: 'needle',
+      limit: 1,
+      ...(mode.startsWith('restricted')
+        ? { restrictTo: [1, 2, 3, 4, 5, 6, 7].map(projectId) }
+        : {}),
+    };
+    const seen: { id: string; revision: number }[] = [];
+    let exhausted = false;
+    let afterId: string | undefined;
+    for (let i = 0; i < 5; i += 1) {
+      const result = await lister.list(a, actor, {
+        ...request,
+        ...(afterId === undefined ? {} : { afterId }),
+      });
+      if (!result.ok) throw new Error(result.error);
+      seen.push(...result.value.items);
+      if (result.value.nextAfterId === null) {
+        exhausted = true;
+        break;
+      }
+      afterId = result.value.nextAfterId;
+    }
+    expect(exhausted).toBe(true);
+    expect(seen.map(({ id }) => id)).toEqual((all ? [2, 4, 5] : [2, 4]).map(projectId));
+    expect(seen.slice(0, 2).map(({ revision }) => revision)).toEqual([7, 9]);
+  });
+
+  it('accepts long Unicode prefixes beyond the D1 LIKE limit and matches glob characters literally', async () => {
+    const q = '界'.repeat(40) + '[*?]';
+    await seed(
+      grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(2) }),
+      stmt('UPDATE project SET name = ? WHERE id = ?', q + ' suffix', projectId(2)),
+    );
+    expect(
+      (
+        await repository().listReadableProjects(
+          a,
+          { userId: U1 },
+          { limit: 10, status: 'active', q },
+        )
+      ).map(({ id }) => id),
+    ).toEqual([projectId(2)]);
+    expect(
+      (await createProjectRepository(executor).list(a, { limit: 10, q })).map(({ id }) => id),
+    ).toEqual([projectId(2)]);
+    expect(
+      await repository().listReadableProjects(
+        a,
+        { userId: U1 },
+        { limit: 10, status: 'active', q: 'absent' },
+      ),
+    ).toEqual([]);
+  });
+
+  it.each(['', '%', '_', 'x'.repeat(201), '\u0000'])(
+    'refuses invalid prefixes in both database repositories (%j)',
+    async (q) => {
+      await expect(
+        repository().listReadableProjects(a, { userId: U1 }, { limit: 10, status: 'active', q }),
+      ).rejects.toThrow('invalid project prefix');
+      await expect(createProjectRepository(executor).list(a, { limit: 10, q })).rejects.toThrow(
+        'invalid project prefix',
+      );
+    },
+  );
+
+  it.each(['x'.repeat(200), '\u{10ffff}', 'edge\u{10ffff}', '\ud7ff'])(
+    'matches exact and extended prefixes at Unicode range boundaries (%j)',
+    async (q) => {
+      await seed(
+        grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(2) }),
+        grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(4) }),
+        stmt('UPDATE project SET name = ? WHERE id = ?', q, projectId(2)),
+        stmt('UPDATE project SET name = ? WHERE id = ?', q + '\u{10ffff}tail', projectId(4)),
+        stmt('UPDATE project SET name = ? WHERE id = ?', '\ue000 unrelated', projectId(5)),
+      );
+      const ids = [2, 4].map(projectId);
+      expect(
+        (
+          await repository().listReadableProjects(
+            a,
+            { userId: U1 },
+            { limit: 10, status: 'active', q },
+          )
+        ).map(({ id }) => id),
+      ).toEqual(ids);
+      expect(
+        (await createProjectRepository(executor).list(a, { limit: 10, q })).map(({ id }) => id),
+      ).toEqual(ids);
+    },
+  );
+
+  it('returns projects granted by e-mail and by a fresh group, projected to list fields including revision', async () => {
     await seed(
       member(a, U1, 'team'),
       grant(a, 'email', 'u1@example.test', PROJECT_READER, { projectId: projectId(2) }),
@@ -354,8 +486,8 @@ describe('listReadableProjects', () => {
       { limit: 10, status: 'active' },
     );
     expect(rows).toEqual([
-      { id: projectId(2), slug: 'p2', name: 'Project 2', status: 'active' },
-      { id: projectId(4), slug: 'p4', name: 'Project 4', status: 'active' },
+      { id: projectId(2), slug: 'p2', name: 'Project 2', status: 'active', revision: 1 },
+      { id: projectId(4), slug: 'p4', name: 'Project 4', status: 'active', revision: 1 },
     ]);
   });
 
@@ -551,6 +683,7 @@ describe('scale', () => {
             slug: `p${target}`,
             name: `Project ${target}`,
             status: 'active',
+            revision: 1,
           },
         ],
         nextAfterId: projectId(target),
@@ -599,8 +732,8 @@ describe('restricted listing', () => {
       ok: true,
       value: {
         items: [
-          { id: projectId(2), slug: 'p2', name: 'Project 2', status: 'active' },
-          { id: projectId(3), slug: 'p3', name: 'Project 3', status: 'active' },
+          { id: projectId(2), slug: 'p2', name: 'Project 2', status: 'active', revision: 1 },
+          { id: projectId(3), slug: 'p3', name: 'Project 3', status: 'active', revision: 1 },
         ],
         nextAfterId: null,
       },

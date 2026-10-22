@@ -687,6 +687,25 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Fisher-Yates swap of generated import fixture items in the batch contract; indexes fixture data, not an executor count.',
+      sites: [
+        'db-sqlite/src/contract/writer-batch-contract.ts:unresolved computed access: items[i] #1',
+        'db-sqlite/src/contract/writer-batch-contract.ts:unresolved computed access: items[i] #2',
+        'db-sqlite/src/contract/writer-batch-contract.ts:unresolved computed access: items[j] #1',
+        'db-sqlite/src/contract/writer-batch-contract.ts:unresolved computed access: items[j] #2',
+      ],
+    },
+    {
+      reason:
+        'Result-length guard comparing results.length with statements.length; reads no changes value and the existing changes reads in the same function stay reviewed.',
+      sites: [
+        "db-sqlite/src/internal/catalogue-status-statements.ts:builder variable: if (results.length !== statements.length) {\n        throw new TypeError('incomplete status transition results');\n      } #1",
+        "db-sqlite/src/repositories/catalogue-reblob.ts:builder variable: if (results.length !== statements.length) {\n        throw new TypeError('incomplete blob replace results');\n      } #1",
+        "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: if (results.length !== statements.length) {\n        throw new TypeError('incomplete dist attach results');\n      } #1",
+      ],
+    },
+    {
+      reason:
         'Org-scoped source/project visibility SELECT used by the batch guard; it performs no mutation or count read.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as visible_source\n    where visible_source.id = ${sourceId} and visible_source.org_id = ${ctx.orgId}\n      and (visible_source.project_id is null or exists (\n        select 1 from project as visible_project\n        where visible_project.id = visible_source.project_id\n          and visible_project.org_id = ${ctx.orgId} and visible_project.status = 'active')))` #1",
@@ -989,7 +1008,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/internal/catalogue-status-statements.ts:builder variable: const updateVersion = db\n    .updateTable('version')\n    .set({\n      status: to,\n      revision: sql<number>`version.revision + 1`,\n      last_op_id: opId,\n      ...(to === 'active' ? { removed_upstream_at: null } : {}),\n      ...(tombstone ? { tombstoned_at: NOW, tombstone_reason: reason } : {}),\n    })\n    .where('version.id', '=', versionId)\n    .where('version.org_id', '=', ctx.orgId)\n    .where('version.status', 'in', from)\n    .where(\n      sql<boolean>`EXISTS (SELECT 1 FROM version_revision\n        WHERE version_revision.version_id = version.id AND version_revision.op_id = ${opId})`,\n    ); #1",
         "db-sqlite/src/internal/catalogue-status-statements.ts:builder variable: const advancePackage = db\n    .updateTable('package')\n    .set({\n      rev: sql<number>`package.rev + 1`,\n      modified_at: monotonicNow,\n    })\n    .where('package.org_id', '=', ctx.orgId)\n    .where(\n      sql<boolean>`EXISTS (SELECT 1 FROM version\n        WHERE version.package_id = package.id AND version.last_op_id = ${opId})`,\n    ); #1",
         'db-sqlite/src/internal/catalogue-status-statements.ts:builder variable: const statements = [compile(insertRevision), compile(updateVersion), compile(advancePackage)]; #1',
-        "db-sqlite/src/internal/catalogue-status-statements.ts:builder variable: if (results.length !== statements.length) {\n        throw new TypeError('incomplete status transition results');\n      } #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
         'db-sqlite/src/internal/catalogue-status-statements.ts:builder variable: return { changed: (results[1]?.changes ?? 0) > 0, statements: statements.length }; #1',
       ],
     },
@@ -1401,7 +1420,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-reblob.ts:builder variable: const replace = db\n    .updateTable('version')\n    .set({\n      blob_id: liveBlob,\n      revision: sql<number>`version.revision + 1`,\n      last_op_id: opId,\n    })\n    .where('version.id', '=', versionId)\n    .where('version.org_id', '=', ctx.orgId)\n    .where('version.revision', '=', expectedRevision)\n    .where(\n      sql<SqlBool>`EXISTS (SELECT 1 FROM version_revision AS before\n        WHERE before.version_id = version.id AND before.org_id = ${ctx.orgId}\n          AND before.revision = version.revision AND before.op_id = ${opId})`,\n    ); #1",
         "db-sqlite/src/repositories/catalogue-reblob.ts:builder variable: const advance = db\n    .updateTable('package')\n    .set({\n      rev: sql<number>`package.rev + 1`,\n      modified_at: monotonicNow,\n    })\n    .where('package.org_id', '=', ctx.orgId)\n    .where(\n      sql<SqlBool>`EXISTS (SELECT 1 FROM version\n        WHERE version.package_id = package.id AND version.id = ${versionId}\n          AND version.org_id = ${ctx.orgId} AND version.last_op_id = ${opId})`,\n    ); #1",
         'db-sqlite/src/repositories/catalogue-reblob.ts:builder variable: const statements = [\n    ...guard,\n    ...precheck,\n    compile(beforeImage),\n    compile(replace),\n    ...replaced,\n    compile(advance),\n  ]; #1',
-        "db-sqlite/src/repositories/catalogue-reblob.ts:builder variable: if (results.length !== statements.length) {\n        throw new TypeError('incomplete blob replace results');\n      } #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
         'db-sqlite/src/repositories/catalogue-reblob.ts:builder variable: return { changed: true, statements: statements.length }; #1',
       ],
     },
@@ -1504,7 +1523,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const attach = db\n    .updateTable('version')\n    .set({ blob_id: liveBlob, last_op_id: opId })\n    .where('version.id', '=', versionId)\n    .where('version.org_id', '=', ctx.orgId)\n    .where('version.revision', '=', revision)\n    .where('version.status', '<>', 'tombstoned')\n    .where(sql<SqlBool>`${liveBlob} IS NOT NULL`)\n    .where('version.blob_id', 'is', null); #1",
         "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const advance = db\n    .updateTable('package')\n    .set({\n      rev: sql<number>`package.rev + 1`,\n      modified_at: monotonicNow,\n    })\n    .where('package.org_id', '=', ctx.orgId)\n    .where(\n      sql<SqlBool>`EXISTS (SELECT 1 FROM version\n        WHERE version.package_id = package.id AND version.id = ${versionId}\n          AND version.last_op_id = ${opId})`,\n    ); #1",
         'db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const statements = [...guard, compile(attach), ...attached, compile(advance)]; #1',
-        "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: if (results.length !== statements.length) {\n        throw new TypeError('incomplete dist attach results');\n      } #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
         'db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: return {\n        changed: (results[attachIndex]?.changes ?? 0) > 0,\n        statements: statements.length,\n      }; #1',
       ],
     },
@@ -1567,9 +1586,10 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const removeHistory = compile(\n    db\n      .insertInto('dist_tag_history')\n      .columns([\n        'id',\n        'org_id',\n        'package_id',\n        'tag',\n        'version_id',\n        'previous_version_id',\n        'action',\n        'actor_type',\n        'actor_id',\n        'op_id',\n      ])\n      .expression(\n        db\n          .selectFrom('dist_tag')\n          .select([\n            // One statement removes many rows: share the ULID time prefix, generate 64 random bits per row.\n            sql<string>`${newOpId().slice(0, 10)} || upper(hex(randomblob(8)))`.as('id'),\n            'dist_tag.org_id',\n            'dist_tag.package_id',\n            'dist_tag.tag',\n            sql<string | null>`NULL`.as('version_id'),\n            'dist_tag.version_id',\n            sql<string>`'remove'`.as('action'),\n            sql<string>`${actorType}`.as('actor_type'),\n            sql<string | null>`${actorId}`.as('actor_id'),\n            sql<string>`${opId}`.as('op_id'),\n          ])\n          .where(absent),\n      ),\n  ); #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const remove = compile(db.deleteFrom('dist_tag').where(absent)); #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const advance = compile(\n    db\n      .updateTable('package')\n      .set({\n        rev: sql<number>`package.rev + 1`,\n        modified_at: monotonicNow,\n      })\n      .where('package.id', '=', packageId)\n      .where('package.org_id', '=', ctx.orgId)\n      .where(\n        sql<boolean>`EXISTS (SELECT 1 FROM dist_tag_history\n          WHERE dist_tag_history.package_id = package.id AND dist_tag_history.op_id = ${opId})`,\n      ),\n  ); #1",
-        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const statements = [...head, ...probes, ...sets, removeHistory, remove, advance]; #1',
-        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statements.length) throw new TypeError('incomplete dist tag results'); #1",
-        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: return {\n        packageId,\n        inserted: 0,\n        updated: setChanges + removed,\n        unchanged: valid.length - (skipped.length - badGrammar.length) - setChanges,\n        conflicts: [],\n        refused: [],\n        skippedTags: skipped,\n        statements: statements.length,\n      }; #1',
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const groups = [\n    head,\n    ...probes.map((probe) => [probe]),\n    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),\n    [removeHistory, remove],\n    [advance],\n  ]; #1',
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const statementCount = groups.reduce((sum, group) => sum + group.length, 0); #1',
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: return {\n        packageId,\n        inserted: 0,\n        updated: setChanges + removed,\n        unchanged: valid.length - (skipped.length - badGrammar.length) - setChanges,\n        conflicts: [],\n        refused: [],\n        skippedTags: skipped,\n        statements: statementCount,\n      }; #1',
       ],
     },
     {
@@ -1648,7 +1668,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Indexes domain data in catalogue-writer; retained because the key cannot be proven to exclude changes.',
       sites: [
         'db-sqlite/src/repositories/catalogue-writer.ts:unresolved computed access: statement.params[index++] #1',
-        'db-sqlite/src/repositories/catalogue-writer.ts:unresolved computed access: tagStatements[offset] #1',
         'db-sqlite/src/repositories/catalogue-writer.ts:unresolved computed access: planned[i] #1',
         'db-sqlite/src/repositories/catalogue-writer.ts:unresolved computed access: lease.params[index] #1',
       ],

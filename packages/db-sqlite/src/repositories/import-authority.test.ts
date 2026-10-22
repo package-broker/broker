@@ -12,6 +12,7 @@ import {
 } from '@package-broker/core/authz/fence';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { openMigratedDatabase } from '../testing/migrated-database.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 
 import { compile, db } from '../kysely.js';
 import { importWriteAuthority } from './import-authority.js';
@@ -307,7 +308,9 @@ describe.each(['sqlite', 'd1'])('import write authority (%s)', (driver) => {
   });
   it('refuses a foreign token even when the principal matches', async () => {
     const token = await seedPatToken();
-    await executor.all(stmt('UPDATE token SET org_id = ?', foreign.orgId));
+    await withForeignKeysOff(executor, () =>
+      executor.all(stmt('UPDATE token SET org_id = ?', foreign.orgId)),
+    );
     expect(await allowed(token)).toBe(false);
     expect(await allowed(token, foreign)).toBe(false);
   });

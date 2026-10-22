@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { emptyInventory, installIdentity } from './inventory.js';
@@ -32,8 +32,18 @@ async function fixture(name: string, runIdentity: string | null, updated = epoch
     id: '11111111-1111-4111-8111-111111111111',
     state: 'complete',
     jurisdiction: 'eu',
-    evidence: { source: 'adopted', operation_id: null, verified_at: journal.updated_at },
+    evidence: { source: 'created', operation_id: 'create-db', verified_at: journal.updated_at },
   };
+  journal.operations.push({
+    id: 'create-db',
+    kind: 'd1',
+    name: journal.resources.d1.name,
+    spec_sha256: 'e'.repeat(64),
+    absence_observed_at: journal.updated_at,
+    started_at: journal.updated_at,
+    state: 'confirmed',
+    resolved_id: journal.resources.d1.id,
+  });
   const inventory = join(directory, `inventory.${randomUUID()}.json`);
   await writeFile(inventory, JSON.stringify(journal));
   return inventory;
@@ -152,4 +162,142 @@ it('matches a compact Worker name to the exact repository and epoch in the run i
     (await janitor({ project, inventory, repositoryId: '123456788', now, env, fetch })).exitCode,
   ).toBe(0);
   expect(fetch).not.toHaveBeenCalled();
+});
+
+it('skips foreign-account inventories and unrelated JSON files during discovery', async () => {
+  const name = `pb-e2e-456-${epoch}`;
+  const inventory = await fixture(name, name);
+  const foreign = JSON.parse(await readFile(inventory, 'utf8'));
+  foreign.identity.account_id = 'f'.repeat(32);
+  await writeFile(inventory, JSON.stringify(foreign));
+  await writeFile(join(directory, 'outputs.json'), '{');
+  await writeFile(join(directory, 'lock.worker.json'), '{}');
+  const fetch = vi.fn();
+  const result = await janitor({
+    project,
+    inventoryDirectory: directory,
+    repositoryId: '456',
+    now,
+    env,
+    fetch,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.output.checks).toEqual([{ name: 'inventory', status: 'skipped' }]);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('retains adopted data without any provider calls', async () => {
+  const name = `pb-e2e-456-${epoch}`;
+  const inventory = await fixture(name, name);
+  const journal = JSON.parse(await readFile(inventory, 'utf8'));
+  journal.resources.d1.evidence = {
+    source: 'adopted',
+    operation_id: null,
+    verified_at: journal.updated_at,
+  };
+  await writeFile(inventory, JSON.stringify(journal));
+  const fetch = vi.fn();
+  const result = await janitor({ project, inventory, repositoryId: '456', now, env, fetch });
+  expect(result.exitCode).toBe(2);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('scans account Worker references once and reuses only foreign reference reads for selected inventories', async () => {
+  const name = `pb-e2e-456-${epoch}`;
+  await fixture(`${name}-a`, `${name}-a`);
+  await fixture(`${name}-b`, `${name}-b`);
+  const paths: string[] = [];
+  const fetch: typeof globalThis.fetch = vi.fn(async (input) => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    const result = url.pathname.endsWith('/workers/scripts')
+      ? [{ id: 'foreign-worker' }]
+      : url.pathname.endsWith('/settings')
+        ? { bindings: [] }
+        : url.pathname.endsWith('/versions')
+          ? { items: [{ id: 'foreign-version' }] }
+          : url.pathname.endsWith('/versions/foreign-version')
+            ? { resources: { bindings: [] } }
+            : null;
+    return Response.json({ success: true, result, result_info: { total_pages: 1 } });
+  });
+  const result = await janitor({
+    project,
+    inventoryDirectory: directory,
+    repositoryId: '456',
+    now,
+    env,
+    fetch,
+  });
+  expect(result.exitCode).toBe(0);
+  for (const suffix of [
+    '/workers/scripts',
+    '/foreign-worker/settings',
+    '/foreign-worker/versions',
+    '/versions/foreign-version',
+  ])
+    expect(paths.filter((path) => path.endsWith(suffix))).toHaveLength(1);
+  expect(result.output.checks.filter((check) => check.status === 'deleted')).toHaveLength(2);
+});
+
+it('removes successfully deleted Workers from the shared scan before the next inventory', async () => {
+  const name = `pb-e2e-456-${epoch}`;
+  const workers = new Set<string>();
+  for (const suffix of ['a', 'b']) {
+    const inventory = await fixture(`${name}-${suffix}`, `${name}-${suffix}`);
+    const journal = JSON.parse(await readFile(inventory, 'utf8'));
+    const script = journal.identity.script_name;
+    workers.add(script);
+    journal.resources = {
+      worker: {
+        name: script,
+        id: script,
+        state: 'complete',
+        evidence: { source: 'adopted', operation_id: null, verified_at: journal.updated_at },
+      },
+    };
+    journal.operations = [];
+    await writeFile(inventory, JSON.stringify(journal));
+  }
+  let scans = 0;
+  const readWorkers = new Set<string>();
+  const fetch: typeof globalThis.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    if (path.endsWith('/workers/scripts')) {
+      scans++;
+      return Response.json({ success: true, result: [...workers].map((id) => ({ id })) });
+    }
+    const worker = path.match(/\/workers\/scripts\/([^/]+)/)?.[1];
+    if (worker) {
+      expect(workers.has(worker)).toBe(true);
+      if (init?.method === 'DELETE') {
+        workers.delete(worker);
+        return Response.json({ success: true, result: null });
+      }
+      readWorkers.add(worker);
+    }
+    const result = path.endsWith('/settings')
+      ? { bindings: [], tags: [] }
+      : path.endsWith('/schedules')
+        ? { schedules: [] }
+        : path.endsWith('/versions')
+          ? { items: [] }
+          : path.endsWith('/subdomain')
+            ? { enabled: false, previews_enabled: false }
+            : [];
+    return Response.json({ success: true, result, result_info: { total_pages: 1 } });
+  });
+  const result = await janitor({
+    project,
+    inventoryDirectory: directory,
+    repositoryId: '456',
+    now,
+    env,
+    fetch,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(workers.size).toBe(0);
+  expect(scans).toBe(1);
+  expect(readWorkers.size).toBe(2);
 });

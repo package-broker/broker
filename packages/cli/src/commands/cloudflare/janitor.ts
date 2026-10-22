@@ -8,6 +8,8 @@ import {
   type CommandResult,
 } from './api.js';
 import {
+  ForeignAccountInventoryError,
+  WorkerReferenceScan,
   cleanupFailure,
   cleanupInventory,
   cleanupPath,
@@ -51,14 +53,15 @@ export async function janitor(o: JanitorOptions): Promise<CommandResult> {
         for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
           if (entry.isSymbolicLink()) throw new CloudflareError('unsafe_path', 2);
           if (entry.isDirectory()) await scan(join(path, entry.name), depth + 1);
-          else if (entry.name.endsWith('.json') && !entry.name.startsWith('lock.'))
+          else if (/^inventory(?:[.-].*)?\.json$/.test(entry.name))
             paths.push(join(path, entry.name));
         }
       };
       await scan(directory, 0);
     }
+    const references = new WorkerReferenceScan();
     for (const inventory of paths) {
-      const options = { ...o, project, inventory };
+      const options = { ...o, project, inventory, iUnderstandThisDeletes: false };
       let result: CommandResult;
       try {
         const { journal } = await cleanupInventory(options);
@@ -66,8 +69,12 @@ export async function janitor(o: JanitorOptions): Promise<CommandResult> {
           output.checks.push({ name: 'inventory', status: 'skipped' });
           continue;
         }
-        result = await teardown(options);
+        result = await teardown(options, references);
       } catch (error) {
+        if (error instanceof ForeignAccountInventoryError) {
+          output.checks.push({ name: 'inventory', status: 'skipped' });
+          continue;
+        }
         result = failCommand(
           commandEnvelope('teardown', o.dryRun),
           cleanupFailure(error, 'janitor'),

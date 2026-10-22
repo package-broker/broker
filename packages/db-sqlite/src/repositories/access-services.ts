@@ -102,6 +102,7 @@ export interface AccessServicesOptions {
   readonly log: KernelLog;
   readonly dispatch: (run: () => Promise<void>) => void;
   readonly publicOrigin: string;
+  readonly clientIp?: (request: Request) => string | null;
   readonly registration: Pick<Registration, 'hooks' | 'routes'>;
 }
 
@@ -129,6 +130,7 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
   const providerAnchors = anchorReader(anchorList);
 
   const module = createAuthModule({
+    ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
     repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
     keyring,
     clock,

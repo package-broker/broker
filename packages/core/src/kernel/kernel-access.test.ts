@@ -3,6 +3,7 @@ import * as engineModule from '../authz/engine.js';
 import {
   accessContextOf,
   authenticatedActorOf,
+  authenticatedTokenActor,
   organizationActorOf,
 } from '../authz/access-context.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -56,6 +57,17 @@ function echo(ctx: RequestContext): Response {
 }
 
 const routes: readonly RouteDefinition[] = [
+  {
+    method: 'GET',
+    path: '/token-actor',
+    permission: 'org:read',
+    boundary: 'organization',
+    handler: (ctx) =>
+      Response.json({
+        token: authenticatedTokenActor(ctx) ?? null,
+        session: authenticatedActorOf(ctx),
+      }),
+  },
   { method: 'GET', path: '/pub', permission: null, handler: echo },
   {
     method: 'GET',
@@ -279,6 +291,28 @@ describe('kernel with the live authorization engine', () => {
       call('/p/demo', { headers: { authorization: `Bearer ${PAT}` } }),
     );
     expect(response.status).toBe(200);
+  });
+
+  it('hands a token request its token actor and no session actor', async () => {
+    const k = await kernel(liveEngine(state()));
+    const response = await k.fetch(
+      call('/token-actor', { headers: { authorization: `Bearer ${PAT}` } }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      token: { tokenId: 'tok-1', tokenKind: 'pat', principalId: 'user-1' },
+      session: null,
+    });
+  });
+
+  it('hands a session request no token actor', async () => {
+    const k = await kernel(liveEngine(state()));
+    const response = await k.fetch(call('/token-actor', { headers: cookie }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      token: null,
+      session: { userId: 'user-1', sessionId: 'sess-1' },
+    });
   });
 
   it('authorizes HEAD as GET, strips the body, and returns 503 without an engine', async () => {

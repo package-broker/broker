@@ -657,3 +657,26 @@ describe('shutdown deadline', () => {
     );
   });
 });
+
+it.each([undefined, true, false])(
+  'forwards the vulnerability deployment switch %s',
+  async (enabled) => {
+    const { broker } = fakeBroker();
+    const h = harness(async () => broker);
+    const vulnerability = enabled === undefined ? undefined : { enabled };
+    await runEntry(
+      Promise.resolve({
+        plugins: [],
+        migrations: [],
+        ...(vulnerability === undefined ? {} : { vulnerability }),
+      }),
+      {},
+      h.runtime,
+    );
+    expect(h.runtime.start).toHaveBeenCalledWith(
+      expect.objectContaining(vulnerability === undefined ? {} : { vulnerability }),
+    );
+    if (vulnerability === undefined)
+      expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('vulnerability');
+  },
+);

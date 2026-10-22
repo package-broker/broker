@@ -73,7 +73,7 @@ it('does not change existing bytes or modes on read, and validates identity and 
   await store.read();
   expect(await readFile(store.path)).toEqual(before);
   expect((await stat(store.path)).mtimeMs).toBe(info.mtimeMs);
-  expect(() => validateInventory({ ...inventory, schema_version: 2 }, identity)).toThrow();
+  expect(() => validateInventory({ ...inventory, schema_version: 1 }, identity)).toThrow();
   for (const key of [
     'account_id',
     'deployment_id',

@@ -374,10 +374,12 @@ async function probeNewConstraints(executor: ScalarSqlExecutor): Promise<void> {
   );
   await run(executor, 'DELETE FROM identity WHERE id = ?', [IDENTITY]);
   expect(
-    await rows(executor, 'SELECT validation_kind, validation_identity_id FROM token WHERE id = ?', [
-      PAT_BOUND,
-    ]),
-  ).toEqual([{ validation_kind: 'sso', validation_identity_id: null }]);
+    await rows(
+      executor,
+      'SELECT org_id, user_id, validation_kind, validation_identity_id FROM token WHERE id = ?',
+      [PAT_BOUND],
+    ),
+  ).toEqual([{ org_id: ORG, user_id: USER, validation_kind: 'sso', validation_identity_id: null }]);
   await run(executor, 'UPDATE token SET revoked_at = ? WHERE kind = ?', [NOW, 'svc']);
   await run(executor, 'DELETE FROM token WHERE kind = ?', ['svc']);
   await run(executor, 'DELETE FROM service_principal WHERE id = ?', [PRINCIPAL]);
@@ -986,6 +988,92 @@ export function describeMigrationContract(
         });
       },
     );
+
+    it.each([
+      { mismatch: 'user', operation: 'INSERT' },
+      { mismatch: 'org', operation: 'INSERT' },
+      { mismatch: 'user', operation: 'UPDATE' },
+      { mismatch: 'org', operation: 'UPDATE' },
+    ])(
+      'token $operation rejects an identity from another $mismatch',
+      async ({ mismatch, operation }) => {
+        await withPair(open, async ({ executor }) => {
+          await enableForeignKeys(executor);
+          await migrate(executor, [await core0001()], { holder: 'token-identity' });
+          await seedPopulated(executor);
+          await run(executor, 'DROP INDEX organization_singleton');
+          await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+            OTHER_ORG,
+            'other',
+            'Other',
+          ]);
+          await run(executor, 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)', [
+            'other-user',
+            ORG,
+            'other@example.test',
+          ]);
+          await run(
+            executor,
+            'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
+            [
+              'other-identity',
+              mismatch === 'org' ? OTHER_ORG : ORG,
+              mismatch === 'user' ? 'other-user' : USER,
+              'dex',
+              'other-subject',
+              'other@example.test',
+            ],
+          );
+          const insert = (identity: string | null) =>
+            insertToken(executor, 'identity-token', {
+              validation_kind: 'sso',
+              validation_identity_id: identity,
+            });
+          if (operation === 'UPDATE') await insert(IDENTITY);
+
+          await expect(
+            operation === 'INSERT'
+              ? insert('other-identity')
+              : run(
+                  executor,
+                  'UPDATE token SET validation_identity_id = ? WHERE org_id = ? AND id = ?',
+                  ['other-identity', ORG, 'identity-token'],
+                ),
+          ).rejects.toMatchObject({ kind: 'foreign_key' });
+          expect(
+            await rows(
+              executor,
+              'SELECT validation_identity_id FROM token WHERE org_id = ? AND id = ?',
+              [ORG, 'identity-token'],
+            ),
+          ).toEqual(operation === 'INSERT' ? [] : [{ validation_identity_id: IDENTITY }]);
+          expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        });
+      },
+    );
+
+    it.each([null, IDENTITY])(
+      'token accepts its own identity or a null validation identity: %s',
+      async (identity) => {
+        await withPair(open, async ({ executor }) => {
+          await enableForeignKeys(executor);
+          await migrate(executor, [await core0001()], { holder: 'token-identity' });
+          await seedPopulated(executor);
+          await insertToken(executor, 'identity-token', {
+            validation_kind: 'sso',
+            validation_identity_id: identity,
+          });
+          expect(
+            await rows(
+              executor,
+              'SELECT validation_identity_id FROM token WHERE org_id = ? AND id = ?',
+              [ORG, 'identity-token'],
+            ),
+          ).toEqual([{ validation_identity_id: identity }]);
+          expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+        });
+      },
+    );
   });
 
   describeOrgKeyContract(name, open);
@@ -1081,7 +1169,7 @@ export function describeSchemaEquivalenceContract(
   open: () => Promise<OpenedExecutor>,
 ): void {
   describe(`baseline schema equivalence: ${name}`, () => {
-    it('matches the recorded 0001–0024 schema with the session identity binding and per-table index order', async () => {
+    it('matches the recorded 0001–0024 schema with session and token identity bindings and per-table index order', async () => {
       const oldChain = JSON.parse(
         readFileSync(new URL('../migrations/old-chain-schema.json', import.meta.url), 'utf8'),
       ) as SchemaDump;

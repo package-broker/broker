@@ -94,3 +94,32 @@ describe('build-time package resolver', () => {
     ).rejects.toThrow('declarations only');
   });
 });
+
+describe('build vulnerability configuration', () => {
+  it.each([undefined, {}, { enabled: true }, { enabled: false }])(
+    'accepts %j and exports it from the configured manifest',
+    async (vulnerability) => {
+      const options = await fixture(routeSource(''));
+      await writeFile(
+        options.configPath,
+        `export default { platform: 'node', plugins: [], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} }, vulnerability: ${JSON.stringify(vulnerability)} };`,
+      );
+      await writeFile(options.runtimeEntry, "export { vulnerability } from '#pb-manifest';");
+      const result = await build(options);
+      expect(await readFile(result.manifestTs, 'utf8')).toContain(
+        'export const vulnerability = config.vulnerability;',
+      );
+    },
+  );
+  it.each([false, null, { enabled: 'false' }, { extra: true }])(
+    'rejects invalid %j before emitting a build',
+    async (vulnerability) => {
+      const options = await fixture(routeSource(''));
+      await writeFile(
+        options.configPath,
+        `export default { platform: 'node', plugins: [], vulnerability: ${JSON.stringify(vulnerability)} };`,
+      );
+      await expect(build(options)).rejects.toBeInstanceOf(BuildDiagnosticsError);
+    },
+  );
+});

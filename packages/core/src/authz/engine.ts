@@ -26,6 +26,7 @@ export interface EngineGrant {
   readonly sessionId: string | null;
   readonly tokenSelector: string | null;
   readonly token: {
+    readonly id: string;
     readonly kind: 'pat' | 'svc';
     readonly scope: ScopeLevel | null;
     readonly readOnly: boolean;
@@ -382,6 +383,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         sessionId: null,
         tokenSelector: token.selector,
         token: Object.freeze({
+          id: found.token.id,
           kind: found.token.kind,
           scope: found.token.scope?.level ?? null,
           readOnly: found.token.scope?.readOnly ?? false,

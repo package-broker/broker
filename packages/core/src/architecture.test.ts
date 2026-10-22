@@ -786,6 +786,7 @@ const ACCESS_CONTEXT_RULE: ImportRule = {
       'accessContextOf',
       'organizationActorOf',
       'authenticatedActorOf',
+      'authenticatedTokenActor',
     ],
     'packages/core/src/authz/engine': ['engineGrantOf'],
     'packages/core/src/internal/package-actor': [

@@ -82,6 +82,7 @@ export interface StartOptions {
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
   readonly tokens?: BrokerConfig['tokens'];
+  readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -651,6 +652,11 @@ async function keyringGate(
 }
 
 export async function startNode(options: StartOptions): Promise<NodeBroker> {
+  const rawTrustedProxy = options.env['PB_TRUSTED_PROXY'];
+  if (rawTrustedProxy !== undefined && rawTrustedProxy !== '0' && rawTrustedProxy !== '1') {
+    throw new StartupConfigError('PB_TRUSTED_PROXY', 'must be 0 or 1');
+  }
+  const trustedProxy = rawTrustedProxy === '1';
   const log = options.log;
   const path = options.env['PB_SQLITE_PATH'] ?? DEFAULT_DATABASE_PATH;
   const ports = options.platformPorts ?? null;
@@ -738,9 +744,11 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     }
 
     broker = createNodeServer(options.plugins, {
+      trustedProxy,
       executor: opened.executor,
       closeDatabase,
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
+      ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
       auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
       ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined

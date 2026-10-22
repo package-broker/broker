@@ -72,6 +72,12 @@ interface Harness {
   creates: () => number;
   fetch: typeof fetch;
 }
+const DEFAULT_ABORT_RULE = {
+  id: 'Default Multipart Abort Rule',
+  enabled: true,
+  conditions: { prefix: '' },
+  abortMultipartUploadsTransition: { condition: { type: 'Age', maxAge: 604800 } },
+};
 function harness(): Harness {
   let time = Date.parse('2026-10-19T12:00:00Z');
   const resources: Record<string, Remote[]> = { d1: [], r2: [], queue: [] };
@@ -117,6 +123,10 @@ function harness(): Harness {
       if (path === '/workers/subdomain') return ok({ subdomain: h.subdomain });
       if (path.includes('/workers/scripts/'))
         return h.worker === null ? new Response('', { status: 404 }) : ok(h.worker);
+      if (path.endsWith('/lifecycle')) {
+        expect(new Headers(init?.headers).get('cf-r2-jurisdiction')).toMatch(/^(?:eu|default)$/);
+        return ok({ rules: [DEFAULT_ABORT_RULE] });
+      }
       const kind: ResourceKind = path.startsWith('/d1')
         ? 'd1'
         : path.startsWith('/r2')
@@ -154,7 +164,7 @@ function harness(): Harness {
         }
         return ok(remote);
       }
-      if (path.endsWith('/consumers')) return ok([], { total_pages: 1 });
+      if (path.endsWith('/consumers')) return ok([]);
       if (detail) {
         const id = segments.at(-1);
         const remote = resources[kind]!.find((r) => (r.uuid ?? r.queue_id ?? r.name) === id);
@@ -694,7 +704,7 @@ it('rejects foreign queue consumers even with exact-ID adoption', async () => {
   h.resources.queue!.push({ queue_id: 'c'.repeat(32), queue_name: 'broker-production-jobs' });
   h.hook = (path) =>
     path.endsWith('/consumers')
-      ? ok([{ type: 'worker', script_name: 'foreign-worker' }], { total_pages: 1 })
+      ? ok([{ type: 'worker', script_name: 'foreign-worker' }])
       : undefined;
   const result = await provision(options(h, { adoptResource: [`queue:${'c'.repeat(32)}`] }));
   expect(result).toMatchObject({
@@ -793,7 +803,7 @@ it.each(['valid', 'missing', 'foreign-dlq', 'foreign-worker', 'ambiguous'])(
     };
     h.hook = (path) =>
       path === `/queues/${IDS[3]}/consumers`
-        ? ok(evidence === 'ambiguous' ? [consumer, consumer] : [consumer], { total_pages: 1 })
+        ? ok(evidence === 'ambiguous' ? [consumer, consumer] : [consumer])
         : undefined;
     expect((await provision(options(h))).exitCode).toBe(evidence === 'valid' ? 0 : 8);
     expect(h.creates()).toBe(4);
@@ -951,7 +961,7 @@ it('refuses a DLQ that has a consumer of its own', async () => {
   expect((await provision(options(h))).exitCode).toBe(0);
   h.hook = (path) =>
     path === `/queues/${IDS[2]}/consumers`
-      ? ok([{ type: 'worker', script_name: identity.script_name }], { total_pages: 1 })
+      ? ok([{ type: 'worker', script_name: identity.script_name }])
       : undefined;
   const before = await readFile(statePath(), 'utf8');
   const result = await provision(options(h));
@@ -1179,4 +1189,76 @@ it('keeps the generic unsafe path message when git itself is unavailable', async
   } finally {
     vi.unstubAllEnvs();
   }
+});
+
+it('records the documented abort-only rule shape with an empty storage class list', async () => {
+  const h = harness();
+  h.hook = (path) =>
+    path.endsWith('/lifecycle')
+      ? ok({ rules: [{ ...DEFAULT_ABORT_RULE, storageClassTransitions: [] }] })
+      : undefined;
+  const result = await provision(options(h));
+  expect(result.exitCode).toBe(0);
+  expect((await journal()).resources.r2?.lifecycle_baseline).toEqual([DEFAULT_ABORT_RULE]);
+  expect(result.output.checks).not.toContainEqual({
+    name: 'lifecycle_baseline',
+    status: 'unrecorded',
+  });
+});
+
+it.each([
+  'provider_failure',
+  'unrecognised_rule',
+  'non_empty_transitions',
+  'delete_transition',
+] as const)('still succeeds and reports an unrecorded lifecycle baseline on %s', async (kind) => {
+  const h = harness();
+  h.hook = (path) => {
+    if (!path.endsWith('/lifecycle')) return undefined;
+    if (kind === 'provider_failure') return new Response('', { status: 500 });
+    const rule =
+      kind === 'unrecognised_rule'
+        ? { id: 'expire', enabled: true, conditions: { prefix: '' } }
+        : kind === 'non_empty_transitions'
+          ? {
+              ...DEFAULT_ABORT_RULE,
+              storageClassTransitions: [
+                {
+                  condition: { type: 'Age', maxAge: 60 },
+                  storageClass: 'InfrequentAccess',
+                },
+              ],
+            }
+          : {
+              ...DEFAULT_ABORT_RULE,
+              deleteObjectsTransition: { condition: { type: 'Age', maxAge: 60 } },
+            };
+    return ok({ rules: [rule] });
+  };
+  const result = await provision(options(h));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.error).toBeNull();
+  expect(result.output.checks).toContainEqual({
+    name: 'lifecycle_baseline',
+    status: 'unrecorded',
+  });
+  expect((await journal()).resources.r2?.lifecycle_baseline).toBeUndefined();
+});
+
+it('records the provider-created R2 lifecycle baseline once and ignores non-abort rules', async () => {
+  const h = harness();
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect((await journal()).resources.r2?.lifecycle_baseline).toEqual([DEFAULT_ABORT_RULE]);
+  const lifecycleReads = () => h.trace.filter((t) => t.path.endsWith('/lifecycle')).length;
+  const reads = lifecycleReads();
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect(lifecycleReads()).toBe(reads);
+  const foreign = harness();
+  foreign.hook = (path) =>
+    path.endsWith('/lifecycle')
+      ? ok({ rules: [{ id: 'expire', enabled: true, conditions: { prefix: '' } }] })
+      : undefined;
+  await rm(statePath(), { force: true });
+  expect((await provision(options(foreign))).exitCode).toBe(0);
+  expect((await journal()).resources.r2?.lifecycle_baseline).toBeUndefined();
 });

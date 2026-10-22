@@ -21,6 +21,8 @@ import {
 import { leaseKey } from './fetch-lease.js';
 import { FORMAT, NOW, seconds, until } from '../internal/lease-time.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
+import { unseenSourcePackages } from './catalogue-reconcile.js';
+import { sourceSelectionCondition } from './source-selection.js';
 
 export type {
   IngestScopeRef,
@@ -96,13 +98,38 @@ export function ingestSessionGuard(
   );
 }
 
+function pinnedUnseen(handle: IngestSessionHandle): { sourceId: string; unseen: number } | null {
+  if (handle.cursor === null) return null;
+  try {
+    const value = JSON.parse(handle.cursor) as { u?: unknown; s?: unknown } | null;
+    return Number.isSafeInteger(value?.u) &&
+      (value?.u as number) >= 0 &&
+      typeof value?.s === 'string'
+      ? { sourceId: value.s, unseen: value.u as number }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createIngestSessionWriteGuard(
   ctx: OrgContext,
   handle: IngestSessionHandle,
   job?: JobGuard,
 ): CatalogueWriteGuard {
+  const pin = pinnedUnseen(handle);
   return registerCatalogueWriteGuard(ctx, [
-    ...ingestSessionGuard(ctx, handle),
+    ...(pin === null
+      ? []
+      : assertCheck(
+          sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}
+            AND ingest_session.scope = 'source' AND ingest_session.source_id = ${pin.sourceId})
+            AND ${unseenSourcePackages(ctx, pin.sourceId)} = ${pin.unseen}`,
+        )),
+    ...assertCheck(sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}
+      AND (ingest_session.scope = 'source' OR EXISTS (SELECT 1 FROM source
+        WHERE source.id = ingest_session.source_id AND source.org_id = ${ctx.orgId}
+          AND ${sourceSelectionCondition(ctx, sql<string>`source.id`, sql<string>`source.ecosystem`, sql<string>`ingest_session.package_key`, true)})))`),
     ...(job === undefined ? [] : jobLeaseGuard(ctx, job)),
   ]);
 }

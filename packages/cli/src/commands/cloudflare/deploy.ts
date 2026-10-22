@@ -24,6 +24,7 @@ import {
   InventoryTransaction,
   digest,
   installIdentity,
+  recordDeploymentHistory,
   safeBuildInfo,
   type DeploymentAttempt,
   type Distribution,
@@ -428,9 +429,12 @@ async function readSettings(
   }
   let consumer: ManagedSettings['consumer'] = null;
   if (j.resources.jobs?.id) {
-    const consumers = await api.list(`/queues/${j.resources.jobs.id}/consumers`);
+    const consumers = await api.snapshot(`/queues/${j.resources.jobs.id}/consumers`);
     if (consumers.length > 1) return conflict();
-    if (j.resources.dlq?.id && (await api.list(`/queues/${j.resources.dlq.id}/consumers`)).length)
+    if (
+      j.resources.dlq?.id &&
+      (await api.snapshot(`/queues/${j.resources.dlq.id}/consumers`)).length
+    )
       return conflict();
     if (consumers[0]) {
       const c = consumers[0],
@@ -1083,7 +1087,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       ...(o.sleep ? { sleep: o.sleep } : {}),
     });
     const base = `/workers/scripts/${identity.script_name}`;
-    const workers = await api.list('/workers/scripts');
+    const workers = await api.snapshot('/workers/scripts');
     const matches = workers.filter((w) => w.id === identity.script_name);
     if (matches.length > 1) return conflict();
     const exists = matches.length === 1;
@@ -1408,10 +1412,22 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         intended_settings: structuredClone(intended),
         changes: [],
       };
-      journal.deployment = { attempt: a, last_verified: verified };
+      journal.deployment = {
+        attempt: a,
+        last_verified: verified,
+        ...(priorJournal?.history ? { history: structuredClone(priorJournal.history) } : {}),
+      };
+      recordDeploymentHistory(journal.deployment, {
+        ...(priorAttempt?.version_id ? { versionId: priorAttempt.version_id } : {}),
+        ...(endpointEnv ? { plainBinding: { name: endpointEnv, text: telemetryEndpoint! } } : {}),
+      });
       await save(store, journal, now);
     }
     attemptStarted = true;
+    if (endpointEnv && journal.deployment)
+      recordDeploymentHistory(journal.deployment, {
+        plainBinding: { name: endpointEnv, text: telemetryEndpoint! },
+      });
     outputAttempt(output, a);
     if (a.phase === 'preparing_upload' || a.phase === 'upload_pending') {
       if (a.phase === 'upload_pending') {
@@ -1426,6 +1442,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         });
         if (matches.length !== 1 || !uuid(matches[0]!.id)) return unknown();
         a.version_id = matches[0]!.id;
+        recordDeploymentHistory(journal.deployment!, { versionId: a.version_id });
         await version(api, base, a.version_id, a, allNames, plainBindings);
       } else {
         if (
@@ -1477,6 +1494,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         const uploaded = object(response.result);
         if (!uuid(uploaded.id)) return unknown();
         a.version_id = uploaded.id;
+        recordDeploymentHistory(journal.deployment!, { versionId: a.version_id });
         await save(store, journal, now);
         await version(api, base, a.version_id, a, allNames, plainBindings);
       }
@@ -1721,7 +1739,7 @@ async function activeOrAbsent(
 ): Promise<ActiveDeployment> {
   if (exists) return active(api, base);
   const script = base.split('/').at(-1);
-  if ((await api.list('/workers/scripts')).some((w) => w.id === script)) return conflict();
+  if ((await api.snapshot('/workers/scripts')).some((w) => w.id === script)) return conflict();
   return { id: null, versions: [] };
 }
 export async function runCloudflareDeploy(o: DeployOptions): Promise<number> {

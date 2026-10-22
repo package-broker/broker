@@ -5,7 +5,7 @@ export interface ProjectSourceReader {
   list(
     ctx: OrgContext,
     input: { readonly projectId: string },
-  ): Promise<readonly { readonly sourceId: string }[]>;
+  ): Promise<readonly { readonly sourceId: string; readonly precedence: number }[]>;
 }
 
 export function projectSourceIdsStatement(ctx: OrgContext, projectId: string): Statement {
@@ -13,7 +13,7 @@ export function projectSourceIdsStatement(ctx: OrgContext, projectId: string): S
     db
       .selectFrom('project_source as ps')
       .innerJoin('source as s', 's.id', 'ps.source_id')
-      .select('ps.source_id')
+      .select(['ps.source_id', 'ps.precedence'])
       .where('ps.org_id', '=', ctx.orgId)
       .where('s.org_id', '=', ctx.orgId)
       .where('ps.project_id', '=', projectId)
@@ -28,10 +28,10 @@ export function createProjectSourceReader(executor: SqlExecutor): ProjectSourceR
       if (typeof projectId !== 'string' || projectId === '') {
         throw new RangeError('project id must be a non-empty string');
       }
-      const rows = await executor.all<{ source_id: string }>(
+      const rows = await executor.all<{ source_id: string; precedence: number }>(
         projectSourceIdsStatement(ctx, projectId),
       );
-      return rows.map((row) => ({ sourceId: row.source_id }));
+      return rows.map((row) => ({ sourceId: row.source_id, precedence: row.precedence }));
     },
   };
 }

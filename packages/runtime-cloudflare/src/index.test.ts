@@ -1707,6 +1707,25 @@ it.each([undefined, true, false])(
 );
 
 describe('runtime MCP mount', () => {
+  it.each([true, false])(
+    'checks binding availability after a cached startup with binding present: %s',
+    async (initiallyBound) => {
+      const worker = createWorker([], { mcp: { enabled: true }, log: () => undefined });
+      const bound = {
+        PB_PUBLIC_URL: 'https://broker.test',
+        MCP_RATE_LIMIT: { limit: async () => ({ success: true }) },
+      };
+      const unbound = { PB_PUBLIC_URL: 'https://broker.test' };
+      const start = async (hasBinding: boolean) => {
+        const startup = worker.services(hasBinding ? bound : unbound);
+        if (hasBinding) expect((await startup).access).toBeNull();
+        else await expect(startup).rejects.toMatchObject({ name: 'KernelConfigError' });
+      };
+      await start(initiallyBound);
+      await start(!initiallyBound);
+    },
+  );
+
   it.each([undefined, false])(
     'MCP disabled (%s) matches the unknown core route',
     async (enabled) => {

@@ -613,7 +613,8 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /** List project grants and their principals */
+    get: operations['listProjectGrants'];
     put?: never;
     /** Grant project access */
     post: operations['createProjectGrant'];
@@ -1174,6 +1175,23 @@ export interface paths {
     head?: never;
     /** Change source settings */
     patch: operations['updateOrganizationSource'];
+    trace?: never;
+  };
+  '/_pb/sources/{source}/accept-removal': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Arm a one-shot acceptance of the last refused source removal */
+    post: operations['acceptSourceRemoval'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   '/_pb/sources/{source}/credential': {
@@ -4456,6 +4474,87 @@ export interface operations {
       };
     };
   };
+  listProjectGrants: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              createdAt: string;
+              id: string;
+              principal: {
+                displayName: string;
+                email?: string;
+                id: string;
+                /** @enum {string} */
+                kind: 'user' | 'email' | 'group';
+                provider?: string;
+              };
+              revision: number;
+              role: {
+                id: string;
+                name: string;
+                permissions: string[];
+              };
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   createProjectGrant: {
     parameters: {
       query?: never;
@@ -5758,36 +5857,73 @@ export interface operations {
         };
         content: {
           'application/json': {
-            items: {
-              /** @enum {string} */
-              ecosystem: 'composer' | 'npm';
-              hasCredential: boolean;
-              id: string;
-              lastRemovalRefusal: {
-                absent: number;
-                at: string;
-                listed: number;
-                successful: number;
-              } | null;
-              lastSuccessAt: string | null;
-              name: string;
-              pollIntervalSeconds: number;
-              projectId: string | null;
-              removalAcceptanceArmed: boolean;
-              /** @enum {string} */
-              removalPolicy: 'flag' | 'exclude';
-              /** @enum {string} */
-              status: 'active' | 'degraded' | 'failing' | 'paused';
-              /** @enum {string} */
-              type:
-                | 'vcs'
-                | 'composer_repository'
-                | 'npm_registry'
-                | 'packagist_proxy'
-                | 'npmjs_proxy'
-                | 'hosted';
-              url: string | null;
-            }[];
+            items: (
+              | {
+                  /** @constant */
+                  attached: true;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm';
+                  hasCredential: boolean;
+                  id: string;
+                  lastRemovalRefusal: {
+                    absent: number;
+                    at: string;
+                    listed: number;
+                    successful: number;
+                  } | null;
+                  lastSuccessAt: string | null;
+                  name: string;
+                  pollIntervalSeconds: number;
+                  precedence: number;
+                  projectId: string | null;
+                  removalAcceptanceArmed: boolean;
+                  /** @enum {string} */
+                  removalPolicy: 'flag' | 'exclude';
+                  /** @enum {string} */
+                  status: 'active' | 'degraded' | 'failing' | 'paused';
+                  /** @enum {string} */
+                  type:
+                    | 'vcs'
+                    | 'composer_repository'
+                    | 'npm_registry'
+                    | 'packagist_proxy'
+                    | 'npmjs_proxy'
+                    | 'hosted';
+                  url: string | null;
+                }
+              | {
+                  /** @constant */
+                  attached: false;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm';
+                  hasCredential: boolean;
+                  id: string;
+                  lastRemovalRefusal: {
+                    absent: number;
+                    at: string;
+                    listed: number;
+                    successful: number;
+                  } | null;
+                  lastSuccessAt: string | null;
+                  name: string;
+                  pollIntervalSeconds: number;
+                  projectId: string | null;
+                  removalAcceptanceArmed: boolean;
+                  /** @enum {string} */
+                  removalPolicy: 'flag' | 'exclude';
+                  /** @enum {string} */
+                  status: 'active' | 'degraded' | 'failing' | 'paused';
+                  /** @enum {string} */
+                  type:
+                    | 'vcs'
+                    | 'composer_repository'
+                    | 'npm_registry'
+                    | 'packagist_proxy'
+                    | 'npmjs_proxy'
+                    | 'hosted';
+                  url: string | null;
+                }
+            )[];
             next: string | null;
           };
         };
@@ -6291,6 +6427,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
     };
   };
   detachSource: {
@@ -6341,6 +6486,15 @@ export interface operations {
       };
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -8353,6 +8507,80 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  acceptSourceRemoval: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        source: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      409: {
         headers: {
           [name: string]: unknown;
         };

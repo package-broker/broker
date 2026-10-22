@@ -1,3 +1,6 @@
+import { openApiRoute } from '@package-broker/core/api/openapi-route';
+import { openApiDocument } from '@package-broker/core/api/openapi-document';
+import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
 import {
   assertMcpRateLimit,
   createMcpLimiter,
@@ -692,6 +695,7 @@ function buildApiRoutes(input: {
       projectAccess: {
         ...common,
         projectAdministration: services.projectGrants,
+        reader: createProjectGrantReader(executor),
         roles: {
           get: async (ctx, id) =>
             (await services.administration.listRoles(ctx)).find((role) => role.id === id) ?? null,
@@ -719,6 +723,7 @@ function buildApiRoutes(input: {
         ...common,
         service: sourceService,
         sources,
+        projectSources: createProjectSourceReader(executor),
         projects,
         sessions: services.sessions,
       },
@@ -1161,7 +1166,14 @@ const STARTUP_EVENTS = [
   'deferred.untracked',
 ] as const;
 const MAX_CACHED_APPLICATIONS = 8;
-const FINGERPRINT_BINDINGS = ['ASSETS', 'DB', 'STORAGE', 'JOBS', 'ANALYTICS'] as const;
+const FINGERPRINT_BINDINGS = [
+  'ASSETS',
+  'DB',
+  'STORAGE',
+  'JOBS',
+  'ANALYTICS',
+  'MCP_RATE_LIMIT',
+] as const;
 const HISTOGRAM_BOUNDS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 
 type Handler = (input: unknown) => Promise<void>;
@@ -2115,6 +2127,7 @@ export function createWorker(
       const coreRoutes = [
         ...(auth?.coreRoutes ?? []),
         ...apiRoutes,
+        openApiRoute(openApiDocument),
         ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
           ...route,
           async handler(context: Parameters<typeof route.handler>[0]) {

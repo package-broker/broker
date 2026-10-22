@@ -107,7 +107,19 @@ function scopeSpecs(boundary: 'organization' | 'project') {
         tags: ['sources'],
         params: collectionParams,
         query: listQuery,
-        responses: { 200: page },
+        responses: {
+          200: scoped
+            ? z.strictObject({
+                items: z.array(
+                  z.union([
+                    source.extend({ attached: z.literal(true), precedence: z.number().int() }),
+                    source.extend({ attached: z.literal(false) }),
+                  ]),
+                ),
+                next: ulid.nullable(),
+              })
+            : page,
+        },
       },
     },
     {
@@ -199,6 +211,6 @@ export const ACCEPT_REMOVAL_API_SPEC = {
     summary: 'Arm a one-shot acceptance of the last refused source removal',
     tags: ['sources'],
     params: z.strictObject({ source: ulid }),
-    responses: { 204: null },
+    responses: { 204: null, 409: null },
   },
 } as const satisfies ApiRouteSpec;

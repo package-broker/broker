@@ -149,7 +149,22 @@ export async function runScenarios(
   return { results, hostnameExceptions, exitCode: failed ? 1 : 0 };
 }
 
-export const releaseScenarios: readonly Scenario[] = [];
+export const releaseScenarios: readonly Scenario[] = [
+  {
+    id: 'mirror-proxy-assembly',
+    layer: 'L',
+    async run() {
+      const url = new URL(
+        import.meta.url.endsWith('.ts') ? '../dist/registry.spec.js' : './registry.spec.js',
+        import.meta.url,
+      );
+      const { runRegistryAssembly } = (await import(
+        url.href
+      )) as typeof import('./registry.spec.js');
+      return runRegistryAssembly();
+    },
+  },
+];
 export const releaseRequirements: Requirements = Object.fromEntries(
   layers.map((layer) => [layer, requiredScenarioIds(layer)]),
 );

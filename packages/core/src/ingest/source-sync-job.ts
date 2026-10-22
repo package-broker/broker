@@ -82,6 +82,14 @@ export interface SourceSyncDeps {
     sourceId: string,
     stamp: string,
   ) => Promise<number>;
+  /** Recheck the current refresh selection before marking or dispatching listed names. */
+  readonly selectedKeys?: (
+    ctx: OrgContext,
+    sourceId: string,
+    names: readonly string[],
+  ) => Promise<readonly string[]>;
+  /** Changes whenever the inputs of the refresh selection change. */
+  readonly selectionRevision?: (ctx: OrgContext, sourceId: string) => Promise<string>;
   /** The subset of `names` that already has a package row in the source. */
   readonly existingKeys: (
     ctx: OrgContext,
@@ -102,6 +110,8 @@ interface ListingCursor {
   readonly x?: 1;
   readonly d?: 1;
   readonly h?: string;
+  readonly r?: string;
+  readonly e?: 1;
 }
 
 class SyncFailure extends Error {
@@ -192,6 +202,8 @@ function parseCursor(session: IngestSessionHandle): ListingCursor {
       (value.o as number) >= 0 &&
       (value.x === undefined || value.x === 1) &&
       (value.d === undefined || value.d === 1) &&
+      (value.e === undefined || value.e === 1) &&
+      (value.r === undefined || (typeof value.r === 'string' && HEX_64.test(value.r))) &&
       (value.h === undefined || (typeof value.h === 'string' && HEX_64.test(value.h)))
     ) {
       return value as ListingCursor;
@@ -306,6 +318,11 @@ async function syncListing(
   const providerContext = deps.providerContext(job, credential);
 
   let cursor = parseCursor(session);
+  const revisionOf = async (): Promise<string | undefined> =>
+    deps.selectionRevision === undefined
+      ? undefined
+      : digest([await deps.selectionRevision(ctx, record.id)]);
+  const restartListing = () => new SyncFailure('internal', false, true, true);
   let budget = FANOUT_PER_INVOCATION;
   const adopt = (next: IngestSessionHandle) => {
     session = next;
@@ -371,18 +388,31 @@ async function syncListing(
     if (cursor.o > 0 && cursor.h !== pageDigest) throw invalidListing();
     const unreadable = cursor.x === 1 || names.length !== new Set(page.names).size;
     const slice = names.slice(cursor.o, cursor.o + budget);
+    const revision = await revisionOf();
+    if (cursor.e === 1 && cursor.r !== undefined && revision !== cursor.r) throw restartListing();
+    const selected =
+      deps.selectedKeys === undefined ? slice : await deps.selectedKeys(ctx, record.id, slice);
     const existing =
-      slice.length === 0 ? new Set<string>() : await deps.existingKeys(ctx, record.id, slice);
-    for (const key of slice) {
+      selected.length === 0 ? new Set<string>() : await deps.existingKeys(ctx, record.id, selected);
+    let filteredExisting = cursor.e === 1;
+    if (!filteredExisting && selected.length < slice.length) {
+      const kept = new Set(selected);
+      const dropped = slice.filter((key) => !kept.has(key));
+      filteredExisting = (await deps.existingKeys(ctx, record.id, dropped)).size > 0;
+    }
+    for (const key of selected) {
       await fanOut(job, {
         sourceId: record.id,
         key,
         generation: [session.id, session.generation],
       });
     }
+    if (filteredExisting && revision !== undefined && (await revisionOf()) !== revision) {
+      throw restartListing();
+    }
     budget -= slice.length;
 
-    const present = slice.filter((key) => existing.has(key));
+    const present = selected.filter((key) => existing.has(key));
     for (let offset = 0; offset < present.length; offset += CATALOGUE_KEY_LIST_MAX) {
       await deps.writer.markListing(ctx, guard, {
         scope: { kind: 'source', sourceId: record.id },
@@ -392,7 +422,11 @@ async function syncListing(
     }
 
     const consumed = cursor.o + slice.length >= names.length;
-    const flags = unreadable ? ({ x: 1 } as const) : {};
+    const flags = {
+      ...(unreadable ? ({ x: 1 } as const) : {}),
+      ...(filteredExisting ? ({ e: 1 } as const) : {}),
+      ...(revision === undefined ? {} : { r: revision }),
+    };
     const next: ListingCursor = !consumed
       ? { c: cursor.c, o: cursor.o + slice.length, ...flags, h: pageDigest }
       : outcome.complete
@@ -428,6 +462,10 @@ async function syncListing(
   if (!Number.isSafeInteger(unseen) || unseen < 0 || !Number.isSafeInteger(marked) || marked < 0) {
     throw new SyncFailure('internal', true, true, false);
   }
+  // `u` pins the unseen count into the guard so a selection widened after this read refuses the batch.
+  if (cursor.e === 1 && cursor.r !== undefined && unseen > 0 && (await revisionOf()) !== cursor.r) {
+    throw restartListing();
+  }
   const result = await deps.finalizer.finalize(
     ctx,
     session,
@@ -439,7 +477,13 @@ async function syncListing(
       upstreamComplete: true,
       validatorTtlSeconds: 0,
     },
-    deps.writeGuard(ctx, session, job),
+    deps.writeGuard(
+      ctx,
+      cursor.e === 1
+        ? { ...session, cursor: JSON.stringify({ ...cursor, u: unseen, s: record.id }) }
+        : session,
+      job,
+    ),
   );
   if (result.status !== 'complete') {
     if (result.reason === 'superseded' || result.reason === 'session_unavailable') {

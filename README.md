@@ -21,6 +21,10 @@ A package registry broker for Composer and npm that runs on Cloudflare Workers o
 | `@package-broker/ui-assets`          | Build-time bridge that hands the UI to `pb build`   |
 | `@package-broker/plugin-*`           | First-party plugins (`sso-oidc`, `github`)          |
 
+## Source selection
+
+Narrowing a source's package list, patterns, registered names or npm scopes stops refreshing packages outside the current selection. Those packages keep their status, metadata and visibility; narrowing does not mark them absent or include them in the mass-removal share. Widening the selection resumes refreshing them. Only upstream absence within the current selection can use the existing guarded removal path. There is no separate `outside_selection` status or flag.
+
 ## Develop
 
 ```sh

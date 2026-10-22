@@ -199,14 +199,14 @@ describe('runEntry', () => {
         return JSON.parse(line as string) as Record<string, unknown>;
       });
       const applied = records.filter((record) => record['id'] !== undefined);
-      expect(applied.map((record) => record['id'])).toEqual(migrations.map(({ id }) => id));
+      expect(applied.map((record) => record['id'])).toEqual(['core:0001_init']);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
-      for (const { id } of migrations) {
-        expect(applied).toContainEqual({ level: 'info', message: `applied ${id}`, id, holder });
-      }
-      expect(records).toContainEqual({ level: 'info', message: 'migration lock acquired', holder });
-      expect(records).toContainEqual({ level: 'info', message: 'migration lock released', holder });
+      expect(applied).toEqual([
+        { level: 'info', message: 'applied core:0001_init', id: 'core:0001_init', holder },
+      ]);
+      expect(records.some((record) => record['message'] === 'migration lock acquired')).toBe(false);
+      expect(records.some((record) => record['message'] === 'migration lock released')).toBe(false);
       const output = JSON.stringify(stdout.mock.calls);
       for (const value of [masterKey, 'password', 'account@example.test', privateData]) {
         expect(output).not.toContain(value);

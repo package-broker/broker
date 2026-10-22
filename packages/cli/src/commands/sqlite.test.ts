@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadMigrationSource, sha256Hex } from '@package-broker/db-sqlite/migrations/source';
+import { sha256Hex } from '@package-broker/db-sqlite/migrations/source';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { run } from '../cli.js';
@@ -21,20 +21,6 @@ async function writeBuiltOutput(root: string): Promise<void> {
   await mkdir(join(root, 'generated'), { recursive: true });
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
-  const later: { name: string; sql: string }[] = [];
-  for (const name of [
-    '0003_access_model',
-    '0004_cache_epoch',
-    '0005_admin_permission_topup',
-    '0006_ports',
-  ]) {
-    const text = await readFile(
-      new URL(`../../../db-sqlite/migrations/${name}.sql`, import.meta.url),
-      'utf8',
-    );
-    await writeFile(join(root, 'migrations', 'core', `${name}.sql`), text);
-    later.push({ name, sql: text });
-  }
   await writeFile(
     join(root, 'generated', 'manifest.json'),
     JSON.stringify({
@@ -46,14 +32,6 @@ async function writeBuiltOutput(root: string): Promise<void> {
           checksum: await sha256Hex(sql),
           phase: 'expand',
         },
-        ...(await Promise.all(
-          later.map(async ({ name, sql: text }) => ({
-            id: `core:${name}`,
-            name: `${name}.sql`,
-            checksum: await sha256Hex(text),
-            phase: (await loadMigrationSource('core', `${name}.sql`, text)).phase,
-          })),
-        )),
       ],
     }),
   );
@@ -78,13 +56,7 @@ it('applies a migration once and skips it on the second run', async () => {
   expect(await runMigrateSqlite({ file, outDir, dryRun: false })).toBe(0);
   expect(console.log).toHaveBeenLastCalledWith(
     JSON.stringify({
-      applied: [
-        'core:0001_init',
-        'core:0003_access_model',
-        'core:0004_cache_epoch',
-        'core:0005_admin_permission_topup',
-        'core:0006_ports',
-      ],
+      applied: ['core:0001_init'],
       skipped: [],
       unknown: [],
       pending: [],
@@ -94,13 +66,7 @@ it('applies a migration once and skips it on the second run', async () => {
   expect(console.log).toHaveBeenLastCalledWith(
     JSON.stringify({
       applied: [],
-      skipped: [
-        'core:0001_init',
-        'core:0003_access_model',
-        'core:0004_cache_epoch',
-        'core:0005_admin_permission_topup',
-        'core:0006_ports',
-      ],
+      skipped: ['core:0001_init'],
       unknown: [],
       pending: [],
     }),
@@ -124,13 +90,7 @@ it('lists pending migrations without creating tables for a dry run', async () =>
       applied: [],
       skipped: [],
       unknown: [],
-      pending: [
-        'core:0001_init',
-        'core:0003_access_model',
-        'core:0004_cache_epoch',
-        'core:0005_admin_permission_topup',
-        'core:0006_ports',
-      ],
+      pending: ['core:0001_init'],
     }),
   );
   const opened = openBetterSqliteExecutor(file);
@@ -229,13 +189,7 @@ it('falls back to .pb/node when --out is empty', async () => {
       applied: [],
       skipped: [],
       unknown: [],
-      pending: [
-        'core:0001_init',
-        'core:0003_access_model',
-        'core:0004_cache_epoch',
-        'core:0005_admin_permission_topup',
-        'core:0006_ports',
-      ],
+      pending: ['core:0001_init'],
     }),
   );
 });

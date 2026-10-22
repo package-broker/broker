@@ -11,10 +11,6 @@ import { createOrganizationRepository } from './organization.js';
 
 const initUrl = new URL('../../migrations/0001_init.sql', import.meta.url);
 const initText = readFileSync(initUrl, 'utf8');
-const epochText = readFileSync(
-  new URL('../../migrations/0004_cache_epoch.sql', import.meta.url),
-  'utf8',
-);
 
 const UNKNOWN = '01J0UNKNOWN0000000000000000';
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -24,8 +20,7 @@ let opened: OpenedExecutor;
 beforeEach(async () => {
   opened = openNodeSqliteExecutor();
   const init: MigrationSource = await loadMigrationSource('core', '0001_init.sql', initText);
-  const epoch = await loadMigrationSource('core', '0004_cache_epoch.sql', epochText);
-  await migrate(opened.executor, [init, epoch], { holder: 't100' });
+  await migrate(opened.executor, [init], { holder: 't100' });
 });
 
 afterEach(async () => {

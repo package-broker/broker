@@ -1,0 +1,2464 @@
+{
+  "schema": [
+    {
+      "type": "index",
+      "name": "access_grant_org_scope",
+      "tbl_name": "access_grant",
+      "sql": "CREATE UNIQUE INDEX access_grant_org_scope ON access_grant (org_id, subject_type, subject_provider, subject_value) WHERE subject_type = 'group' AND scope = 'organization'"
+    },
+    {
+      "type": "index",
+      "name": "access_grant_org_scope_email",
+      "tbl_name": "access_grant",
+      "sql": "CREATE UNIQUE INDEX access_grant_org_scope_email ON access_grant (org_id, subject_type, subject_value) WHERE subject_type = 'email' AND scope = 'organization'"
+    },
+    {
+      "type": "index",
+      "name": "access_grant_project",
+      "tbl_name": "access_grant",
+      "sql": "CREATE INDEX access_grant_project ON access_grant (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "access_grant_project_scope",
+      "tbl_name": "access_grant",
+      "sql": "CREATE UNIQUE INDEX access_grant_project_scope ON access_grant (project_id, subject_type, subject_provider, subject_value) WHERE subject_type = 'group' AND scope = 'project'"
+    },
+    {
+      "type": "index",
+      "name": "access_grant_project_scope_email",
+      "tbl_name": "access_grant",
+      "sql": "CREATE UNIQUE INDEX access_grant_project_scope_email ON access_grant (project_id, subject_type, subject_value) WHERE subject_type = 'email' AND scope = 'project'"
+    },
+    {
+      "type": "index",
+      "name": "access_grant_role",
+      "tbl_name": "access_grant",
+      "sql": "CREATE INDEX access_grant_role ON access_grant (role_id)"
+    },
+    {
+      "type": "index",
+      "name": "access_grant_subject",
+      "tbl_name": "access_grant",
+      "sql": "CREATE INDEX access_grant_subject ON access_grant (org_id, subject_type, subject_provider, subject_value, project_id)"
+    },
+    {
+      "type": "index",
+      "name": "api_idempotency_expiry",
+      "tbl_name": "api_idempotency",
+      "sql": "CREATE INDEX api_idempotency_expiry ON api_idempotency (org_id, expires_at)"
+    },
+    {
+      "type": "index",
+      "name": "audit_event_action",
+      "tbl_name": "audit_event",
+      "sql": "CREATE INDEX audit_event_action ON audit_event (org_id, action, seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_event_actor",
+      "tbl_name": "audit_event",
+      "sql": "CREATE INDEX audit_event_actor ON audit_event (org_id, actor_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_event_prev_hash",
+      "tbl_name": "audit_event",
+      "sql": "CREATE UNIQUE INDEX audit_event_prev_hash ON audit_event (org_id, prev_hash)"
+    },
+    {
+      "type": "index",
+      "name": "audit_event_project",
+      "tbl_name": "audit_event",
+      "sql": "CREATE INDEX audit_event_project ON audit_event (org_id, project_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_event_seq",
+      "tbl_name": "audit_event",
+      "sql": "CREATE UNIQUE INDEX audit_event_seq ON audit_event (org_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_event_target",
+      "tbl_name": "audit_event",
+      "sql": "CREATE INDEX audit_event_target ON audit_event (org_id, target_type, target_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_pending_org_id",
+      "tbl_name": "audit_pending",
+      "sql": "CREATE INDEX audit_pending_org_id ON audit_pending (org_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "blob_digest",
+      "tbl_name": "blob",
+      "sql": "CREATE UNIQUE INDEX blob_digest ON blob (org_id, sha256)"
+    },
+    {
+      "type": "index",
+      "name": "blob_idle",
+      "tbl_name": "blob",
+      "sql": "CREATE INDEX blob_idle ON blob (last_accessed_at) WHERE refetchable = 1 AND deleted_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "blob_purge",
+      "tbl_name": "blob",
+      "sql": "CREATE INDEX blob_purge ON blob (purge_after) WHERE purge_after IS NOT NULL AND deleted_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "blob_storage_key",
+      "tbl_name": "blob",
+      "sql": "CREATE UNIQUE INDEX blob_storage_key ON blob (org_id, storage_key)"
+    },
+    {
+      "type": "index",
+      "name": "bundle_item_package",
+      "tbl_name": "bundle_item",
+      "sql": "CREATE INDEX bundle_item_package ON bundle_item (package_id)"
+    },
+    {
+      "type": "index",
+      "name": "bundle_name",
+      "tbl_name": "bundle",
+      "sql": "CREATE UNIQUE INDEX bundle_name ON bundle (org_id, name)"
+    },
+    {
+      "type": "index",
+      "name": "credential_key_version",
+      "tbl_name": "credential",
+      "sql": "CREATE INDEX credential_key_version ON credential (org_id, key_version)"
+    },
+    {
+      "type": "index",
+      "name": "credential_project",
+      "tbl_name": "credential",
+      "sql": "CREATE INDEX credential_project ON credential (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "credential_version_in_use",
+      "tbl_name": "credential",
+      "sql": "CREATE INDEX credential_version_in_use ON credential (key_version)"
+    },
+    {
+      "type": "index",
+      "name": "customer_external_ref",
+      "tbl_name": "customer",
+      "sql": "CREATE UNIQUE INDEX customer_external_ref ON customer (org_id, external_ref) WHERE external_ref IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "customer_grant_bundle",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE UNIQUE INDEX customer_grant_bundle ON customer_grant (customer_id, project_id, bundle_id) WHERE bundle_id IS NOT NULL AND revoked_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "customer_grant_bundle_fk",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE INDEX customer_grant_bundle_fk ON customer_grant (bundle_id)"
+    },
+    {
+      "type": "index",
+      "name": "customer_grant_customer",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE INDEX customer_grant_customer ON customer_grant (customer_id)"
+    },
+    {
+      "type": "index",
+      "name": "customer_grant_package",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE UNIQUE INDEX customer_grant_package ON customer_grant (customer_id, project_id, package_id) WHERE package_id IS NOT NULL AND revoked_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "customer_grant_package_fk",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE INDEX customer_grant_package_fk ON customer_grant (package_id)"
+    },
+    {
+      "type": "index",
+      "name": "customer_grant_project",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE INDEX customer_grant_project ON customer_grant (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "dist_tag_history_previous",
+      "tbl_name": "dist_tag_history",
+      "sql": "CREATE INDEX dist_tag_history_previous ON dist_tag_history (previous_version_id)"
+    },
+    {
+      "type": "index",
+      "name": "dist_tag_history_tag",
+      "tbl_name": "dist_tag_history",
+      "sql": "CREATE INDEX dist_tag_history_tag ON dist_tag_history (package_id, tag, created_at)"
+    },
+    {
+      "type": "index",
+      "name": "dist_tag_history_version",
+      "tbl_name": "dist_tag_history",
+      "sql": "CREATE INDEX dist_tag_history_version ON dist_tag_history (version_id)"
+    },
+    {
+      "type": "index",
+      "name": "dist_tag_version",
+      "tbl_name": "dist_tag",
+      "sql": "CREATE INDEX dist_tag_version ON dist_tag (version_id)"
+    },
+    {
+      "type": "index",
+      "name": "fetch_lease_expiry",
+      "tbl_name": "fetch_lease",
+      "sql": "CREATE INDEX fetch_lease_expiry ON fetch_lease (lease_until)"
+    },
+    {
+      "type": "index",
+      "name": "identity_block_user",
+      "tbl_name": "identity_block",
+      "sql": "CREATE INDEX identity_block_user ON identity_block (blocked_by_user_id) WHERE blocked_by_user_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "identity_subject",
+      "tbl_name": "identity",
+      "sql": "CREATE UNIQUE INDEX identity_subject ON identity (org_id, provider, subject)"
+    },
+    {
+      "type": "index",
+      "name": "identity_user",
+      "tbl_name": "identity",
+      "sql": "CREATE INDEX identity_user ON identity (user_id)"
+    },
+    {
+      "type": "index",
+      "name": "import_ref_entity",
+      "tbl_name": "import_ref",
+      "sql": "CREATE INDEX import_ref_entity ON import_ref (org_id, entity_type, entity_id)"
+    },
+    {
+      "type": "index",
+      "name": "import_ref_external",
+      "tbl_name": "import_ref",
+      "sql": "CREATE INDEX import_ref_external ON import_ref (org_id, entity_type, external_ref)"
+    },
+    {
+      "type": "index",
+      "name": "import_ref_run_external",
+      "tbl_name": "import_ref",
+      "sql": "CREATE UNIQUE INDEX import_ref_run_external ON import_ref (import_run_id, entity_type, external_ref)"
+    },
+    {
+      "type": "index",
+      "name": "import_run_approver",
+      "tbl_name": "import_run",
+      "sql": "CREATE INDEX import_run_approver ON import_run (approved_by_user_id)"
+    },
+    {
+      "type": "index",
+      "name": "import_run_sp_starter",
+      "tbl_name": "import_run",
+      "sql": "CREATE INDEX import_run_sp_starter ON import_run (started_by_service_principal_id)"
+    },
+    {
+      "type": "index",
+      "name": "import_run_starter",
+      "tbl_name": "import_run",
+      "sql": "CREATE INDEX import_run_starter ON import_run (started_by_user_id)"
+    },
+    {
+      "type": "index",
+      "name": "import_run_state",
+      "tbl_name": "import_run",
+      "sql": "CREATE INDEX import_run_state ON import_run (org_id, state)"
+    },
+    {
+      "type": "index",
+      "name": "ingest_session_running_scope",
+      "tbl_name": "ingest_session",
+      "sql": "CREATE UNIQUE INDEX ingest_session_running_scope ON ingest_session (org_id, scope_key) WHERE state = 'running'"
+    },
+    {
+      "type": "index",
+      "name": "ingest_session_scope_generation",
+      "tbl_name": "ingest_session",
+      "sql": "CREATE INDEX ingest_session_scope_generation ON ingest_session (org_id, scope_key, generation)"
+    },
+    {
+      "type": "index",
+      "name": "ingest_session_snapshot_blob",
+      "tbl_name": "ingest_session",
+      "sql": "CREATE INDEX ingest_session_snapshot_blob ON ingest_session (org_id, snapshot_blob_sha256)"
+    },
+    {
+      "type": "index",
+      "name": "ingest_session_state_lease",
+      "tbl_name": "ingest_session",
+      "sql": "CREATE INDEX ingest_session_state_lease ON ingest_session (state, lease_until)"
+    },
+    {
+      "type": "index",
+      "name": "job_attempt_fence",
+      "tbl_name": "job_attempt",
+      "sql": "CREATE UNIQUE INDEX job_attempt_fence ON job_attempt (job_id, fence)"
+    },
+    {
+      "type": "index",
+      "name": "job_claim_org",
+      "tbl_name": "job",
+      "sql": "CREATE INDEX job_claim_org ON job(org_id, run_at, id) WHERE state = 'queued'"
+    },
+    {
+      "type": "index",
+      "name": "job_dead",
+      "tbl_name": "job",
+      "sql": "CREATE INDEX job_dead ON job (org_id, finished_at) WHERE state = 'dead'"
+    },
+    {
+      "type": "index",
+      "name": "job_idempotency",
+      "tbl_name": "job",
+      "sql": "CREATE UNIQUE INDEX job_idempotency ON job (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "job_lease_org",
+      "tbl_name": "job",
+      "sql": "CREATE INDEX job_lease_org ON job(org_id, lease_until) WHERE state = 'running'"
+    },
+    {
+      "type": "index",
+      "name": "job_one_running_per_resource",
+      "tbl_name": "job",
+      "sql": "CREATE UNIQUE INDEX job_one_running_per_resource ON job (org_id, resource_key) WHERE state = 'running' AND resource_key IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "job_queued_resource",
+      "tbl_name": "job",
+      "sql": "CREATE INDEX job_queued_resource ON job (org_id, resource_key, type) WHERE state = 'queued' AND resource_key IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "job_schedule_due",
+      "tbl_name": "job_schedule",
+      "sql": "CREATE INDEX job_schedule_due ON job_schedule (next_run_at) WHERE enabled = 1"
+    },
+    {
+      "type": "index",
+      "name": "local_login_org",
+      "tbl_name": "local_login",
+      "sql": "CREATE INDEX local_login_org ON local_login (org_id)"
+    },
+    {
+      "type": "index",
+      "name": "local_login_setup",
+      "tbl_name": "local_login",
+      "sql": "CREATE UNIQUE INDEX local_login_setup ON local_login (setup_hash) WHERE setup_hash IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "local_login_totp",
+      "tbl_name": "local_login",
+      "sql": "CREATE UNIQUE INDEX local_login_totp ON local_login (totp_credential_id) WHERE totp_credential_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "organization_singleton",
+      "tbl_name": "organization",
+      "sql": "CREATE UNIQUE INDEX organization_singleton ON organization (singleton)"
+    },
+    {
+      "type": "index",
+      "name": "package_by_name",
+      "tbl_name": "package",
+      "sql": "CREATE INDEX package_by_name ON package (org_id, ecosystem, name)"
+    },
+    {
+      "type": "index",
+      "name": "package_identity",
+      "tbl_name": "package",
+      "sql": "CREATE UNIQUE INDEX package_identity ON package (org_id, ecosystem, source_id, name)"
+    },
+    {
+      "type": "index",
+      "name": "package_org_id",
+      "tbl_name": "package",
+      "sql": "CREATE UNIQUE INDEX package_org_id ON package (id, org_id)"
+    },
+    {
+      "type": "index",
+      "name": "package_source",
+      "tbl_name": "package",
+      "sql": "CREATE INDEX package_source ON package (source_id)"
+    },
+    {
+      "type": "index",
+      "name": "project_org_id",
+      "tbl_name": "project",
+      "sql": "CREATE UNIQUE INDEX project_org_id ON project (id, org_id)"
+    },
+    {
+      "type": "index",
+      "name": "project_package_name",
+      "tbl_name": "project_package",
+      "sql": "CREATE INDEX project_package_name ON project_package (org_id, project_id, ecosystem, name)"
+    },
+    {
+      "type": "index",
+      "name": "project_package_package",
+      "tbl_name": "project_package",
+      "sql": "CREATE INDEX project_package_package ON project_package (package_id)"
+    },
+    {
+      "type": "index",
+      "name": "project_package_pattern_identity",
+      "tbl_name": "project_package_pattern",
+      "sql": "CREATE UNIQUE INDEX project_package_pattern_identity ON project_package_pattern (project_id, source_id, pattern)"
+    },
+    {
+      "type": "index",
+      "name": "project_package_pattern_source",
+      "tbl_name": "project_package_pattern",
+      "sql": "CREATE INDEX project_package_pattern_source ON project_package_pattern (source_id)"
+    },
+    {
+      "type": "index",
+      "name": "project_slug",
+      "tbl_name": "project",
+      "sql": "CREATE UNIQUE INDEX project_slug ON project (org_id, slug)"
+    },
+    {
+      "type": "index",
+      "name": "project_source_source",
+      "tbl_name": "project_source",
+      "sql": "CREATE INDEX project_source_source ON project_source (source_id)"
+    },
+    {
+      "type": "index",
+      "name": "registered_name_pattern",
+      "tbl_name": "registered_name",
+      "sql": "CREATE UNIQUE INDEX registered_name_pattern ON registered_name (org_id, ecosystem, pattern)"
+    },
+    {
+      "type": "index",
+      "name": "registered_name_source",
+      "tbl_name": "registered_name",
+      "sql": "CREATE INDEX registered_name_source ON registered_name (source_id)"
+    },
+    {
+      "type": "index",
+      "name": "role_key",
+      "tbl_name": "role",
+      "sql": "CREATE UNIQUE INDEX role_key ON role (org_id, key)"
+    },
+    {
+      "type": "index",
+      "name": "service_principal_creator",
+      "tbl_name": "service_principal",
+      "sql": "CREATE INDEX service_principal_creator ON service_principal (created_by_user_id)"
+    },
+    {
+      "type": "index",
+      "name": "service_principal_name",
+      "tbl_name": "service_principal",
+      "sql": "CREATE UNIQUE INDEX service_principal_name ON service_principal (org_id, name)"
+    },
+    {
+      "type": "index",
+      "name": "service_principal_org_id",
+      "tbl_name": "service_principal",
+      "sql": "CREATE UNIQUE INDEX service_principal_org_id ON service_principal (org_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "service_principal_project",
+      "tbl_name": "service_principal",
+      "sql": "CREATE INDEX service_principal_project ON service_principal (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "session_expiry",
+      "tbl_name": "session",
+      "sql": "CREATE INDEX session_expiry ON session (expires_at)"
+    },
+    {
+      "type": "index",
+      "name": "session_identity",
+      "tbl_name": "session",
+      "sql": "CREATE INDEX session_identity ON session (identity_id)"
+    },
+    {
+      "type": "index",
+      "name": "session_secret",
+      "tbl_name": "session",
+      "sql": "CREATE UNIQUE INDEX session_secret ON session (secret_hash)"
+    },
+    {
+      "type": "index",
+      "name": "session_user",
+      "tbl_name": "session",
+      "sql": "CREATE INDEX session_user ON session (user_id, expires_at)"
+    },
+    {
+      "type": "index",
+      "name": "source_credential",
+      "tbl_name": "source",
+      "sql": "CREATE INDEX source_credential ON source (credential_id)"
+    },
+    {
+      "type": "index",
+      "name": "source_due",
+      "tbl_name": "source",
+      "sql": "CREATE INDEX source_due ON source (next_poll_at) WHERE status <> 'paused'"
+    },
+    {
+      "type": "index",
+      "name": "source_name_org",
+      "tbl_name": "source",
+      "sql": "CREATE UNIQUE INDEX source_name_org ON source (org_id, name) WHERE project_id IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "source_name_project",
+      "tbl_name": "source",
+      "sql": "CREATE UNIQUE INDEX source_name_project ON source (project_id, name) WHERE project_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "source_org_id",
+      "tbl_name": "source",
+      "sql": "CREATE UNIQUE INDEX source_org_id ON source (id, org_id)"
+    },
+    {
+      "type": "index",
+      "name": "source_project",
+      "tbl_name": "source",
+      "sql": "CREATE INDEX source_project ON source (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_binding_project",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_binding_project ON token (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_creator",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_creator ON token (created_by_user_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_customer",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_customer ON token (customer_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_pepper_version",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_pepper_version ON token (pepper_version)"
+    },
+    {
+      "type": "index",
+      "name": "token_project_project",
+      "tbl_name": "token_project",
+      "sql": "CREATE INDEX token_project_project ON token_project (project_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_selector",
+      "tbl_name": "token",
+      "sql": "CREATE UNIQUE INDEX token_selector ON token (selector)"
+    },
+    {
+      "type": "index",
+      "name": "token_service_principal",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_service_principal ON token (service_principal_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_user",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_user ON token (user_id)"
+    },
+    {
+      "type": "index",
+      "name": "token_validation_identity",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_validation_identity ON token (validation_identity_id) WHERE validation_identity_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "upstream_state_content",
+      "tbl_name": "upstream_state",
+      "sql": "CREATE INDEX upstream_state_content ON upstream_state (org_id, content_sha256)"
+    },
+    {
+      "type": "index",
+      "name": "user_account_email",
+      "tbl_name": "user_account",
+      "sql": "CREATE UNIQUE INDEX user_account_email ON user_account (org_id, email)"
+    },
+    {
+      "type": "index",
+      "name": "user_group_name",
+      "tbl_name": "user_group",
+      "sql": "CREATE INDEX user_group_name ON user_group (org_id, provider, group_name, user_id)"
+    },
+    {
+      "type": "index",
+      "name": "version_blob",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX version_blob ON version (blob_id)"
+    },
+    {
+      "type": "index",
+      "name": "version_by_published",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX version_by_published ON version (package_id, published_at)"
+    },
+    {
+      "type": "index",
+      "name": "version_identity",
+      "tbl_name": "version",
+      "sql": "CREATE UNIQUE INDEX version_identity ON version (package_id, version_normalized)"
+    },
+    {
+      "type": "index",
+      "name": "version_op",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX version_op ON version (last_op_id) WHERE last_op_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "version_org_id",
+      "tbl_name": "version",
+      "sql": "CREATE UNIQUE INDEX version_org_id ON version (id, org_id)"
+    },
+    {
+      "type": "index",
+      "name": "version_package_id",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX version_package_id ON version (package_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "version_package_status",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX version_package_status ON version (package_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "version_purge",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX version_purge ON version (purge_after) WHERE purge_after IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "version_revision_blob",
+      "tbl_name": "version_revision",
+      "sql": "CREATE INDEX version_revision_blob ON version_revision (blob_id)"
+    },
+    {
+      "type": "index",
+      "name": "version_revision_identity",
+      "tbl_name": "version_revision",
+      "sql": "CREATE UNIQUE INDEX version_revision_identity ON version_revision (version_id, revision)"
+    },
+    {
+      "type": "index",
+      "name": "vulnerability_advisory_due",
+      "tbl_name": "vulnerability_advisory",
+      "sql": "CREATE INDEX vulnerability_advisory_due ON vulnerability_advisory (org_id, source, next_attempt_at, advisory_id)"
+    },
+    {
+      "type": "index",
+      "name": "vulnerability_match_advisory",
+      "tbl_name": "vulnerability_match",
+      "sql": "CREATE INDEX vulnerability_match_advisory ON vulnerability_match (org_id, source, advisory_id)"
+    },
+    {
+      "type": "index",
+      "name": "vulnerability_refresh_due",
+      "tbl_name": "vulnerability_refresh",
+      "sql": "CREATE INDEX vulnerability_refresh_due ON vulnerability_refresh (org_id, next_attempt_at, refresh_id)"
+    },
+    {
+      "type": "index",
+      "name": "vulnerability_result_due",
+      "tbl_name": "vulnerability_result",
+      "sql": "CREATE INDEX vulnerability_result_due ON vulnerability_result (org_id, source, next_attempt_at, version_id)"
+    },
+    {
+      "type": "index",
+      "name": "vulnerability_source_evidence",
+      "tbl_name": "source",
+      "sql": "CREATE INDEX vulnerability_source_evidence ON source (org_id, ecosystem, id) WHERE ecosystem IN ('composer', 'npm')"
+    },
+    {
+      "type": "index",
+      "name": "vulnerability_version_due",
+      "tbl_name": "version",
+      "sql": "CREATE INDEX vulnerability_version_due ON version (org_id, id) WHERE length(CAST(version AS BLOB)) BETWEEN 1 AND 200"
+    },
+    {
+      "type": "index",
+      "name": "webhook_delivery_received",
+      "tbl_name": "webhook_delivery",
+      "sql": "CREATE INDEX webhook_delivery_received ON webhook_delivery (received_at)"
+    },
+    {
+      "type": "index",
+      "name": "webhook_delivery_source",
+      "tbl_name": "webhook_delivery",
+      "sql": "CREATE INDEX webhook_delivery_source ON webhook_delivery (source_id)"
+    },
+    {
+      "type": "table",
+      "name": "access_grant",
+      "tbl_name": "access_grant",
+      "sql": "CREATE TABLE access_grant (\n  id            TEXT NOT NULL PRIMARY KEY,\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  subject_type  TEXT NOT NULL CHECK (subject_type IN ('group', 'email')),\n  subject_value TEXT NOT NULL CHECK (subject_type = 'group' OR subject_value = lower(subject_value)),\n  subject_provider TEXT CHECK ((subject_type = 'group' AND subject_provider IS NOT NULL AND length(subject_provider) BETWEEN 1 AND 64 AND subject_provider = trim(subject_provider)) OR (subject_type = 'email' AND subject_provider IS NULL)),\n  scope         TEXT NOT NULL CHECK (scope IN ('organization', 'project')),\n  project_id    TEXT REFERENCES project (id),\n  role_id       TEXT NOT NULL REFERENCES role (id),\n  created_by    TEXT,\n  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT,\n  CHECK ((scope = 'organization' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "access_mutation_guard",
+      "tbl_name": "access_mutation_guard",
+      "sql": "CREATE TABLE access_mutation_guard (\n  key TEXT NOT NULL PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 64)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "api_idempotency",
+      "tbl_name": "api_idempotency",
+      "sql": "CREATE TABLE api_idempotency (\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  principal_key TEXT NOT NULL CHECK (length(principal_key) BETWEEN 1 AND 80),\n  key           TEXT NOT NULL CHECK (length(key) BETWEEN 1 AND 128),\n  route         TEXT NOT NULL,\n  request_hash  TEXT NOT NULL CHECK (length(request_hash) = 64),\n  status        INTEGER NOT NULL CHECK (status BETWEEN 100 AND 599),\n  response_json TEXT NOT NULL CHECK (json_valid(response_json)),\n  created_at    TEXT NOT NULL,\n  expires_at    TEXT NOT NULL,\n  PRIMARY KEY (org_id, principal_key, key)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "audit_event",
+      "tbl_name": "audit_event",
+      "sql": "CREATE TABLE audit_event (\n  id             TEXT NOT NULL PRIMARY KEY,\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  seq            INTEGER NOT NULL CHECK (seq >= 1),\n  prev_hash      TEXT NOT NULL CHECK (length(prev_hash) = 64),\n  hash           TEXT NOT NULL CHECK (length(hash) = 64),\n  created_at     TEXT NOT NULL,\n  actor_type     TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id       TEXT,\n  token_selector TEXT,\n  source_ip      TEXT,\n  action         TEXT NOT NULL,\n  target_type    TEXT NOT NULL,\n  target_id      TEXT,\n  project_id     TEXT,\n  payload_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "audit_pending",
+      "tbl_name": "audit_pending",
+      "sql": "CREATE TABLE audit_pending (\n  id             TEXT PRIMARY KEY,\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  created_at     TEXT NOT NULL,\n  actor_type     TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id       TEXT,\n  token_selector TEXT,\n  source_ip      TEXT,\n  action         TEXT NOT NULL CHECK (length(action) BETWEEN 3 AND 64),\n  target_type    TEXT NOT NULL,\n  target_id      TEXT,\n  project_id     TEXT,\n  payload_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json) AND length(CAST(payload_json AS BLOB)) <= 4096)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "blob",
+      "tbl_name": "blob",
+      "sql": "CREATE TABLE blob (\n  id               TEXT NOT NULL PRIMARY KEY,\n  org_id           TEXT NOT NULL REFERENCES organization (id),\n  sha256           TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 = lower(sha256)),\n  size_bytes       INTEGER NOT NULL CHECK (size_bytes >= 0),\n  storage_key      TEXT NOT NULL,\n  media_type       TEXT NOT NULL DEFAULT 'application/octet-stream',\n  refetchable      INTEGER NOT NULL DEFAULT 1 CHECK (refetchable IN (0, 1)),\n  upstream_url     TEXT,\n  last_fetched_at  TEXT,\n  last_accessed_at TEXT,\n  purge_after      TEXT,\n  deleted_at       TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, purge_generation TEXT, purge_lease_until TEXT, published_at TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "bundle",
+      "tbl_name": "bundle",
+      "sql": "CREATE TABLE bundle (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  name       TEXT NOT NULL,\n  revision   INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "bundle_item",
+      "tbl_name": "bundle_item",
+      "sql": "CREATE TABLE bundle_item (\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  bundle_id          TEXT NOT NULL REFERENCES bundle (id),\n  bundle_revision    INTEGER NOT NULL CHECK (bundle_revision >= 1),\n  package_id         TEXT NOT NULL REFERENCES package (id),\n  version_constraint TEXT,\n  PRIMARY KEY (bundle_id, bundle_revision, package_id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "cache_epoch",
+      "tbl_name": "cache_epoch",
+      "sql": "CREATE TABLE cache_epoch (\n  org_id  TEXT NOT NULL PRIMARY KEY REFERENCES organization (id) ON DELETE CASCADE,\n  version TEXT NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "credential",
+      "tbl_name": "credential",
+      "sql": "CREATE TABLE credential (\n  id          TEXT NOT NULL PRIMARY KEY,\n  org_id      TEXT NOT NULL REFERENCES organization (id),\n  project_id  TEXT REFERENCES project (id),\n  kind        TEXT NOT NULL,\n  ciphertext  BLOB NOT NULL,\n  nonce       BLOB NOT NULL CHECK (length(nonce) = 12),\n  key_version INTEGER NOT NULL CHECK (key_version >= 1),\n  aad         TEXT NOT NULL,\n  rotated_at  TEXT,\n  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "customer",
+      "tbl_name": "customer",
+      "sql": "CREATE TABLE customer (\n  id           TEXT NOT NULL PRIMARY KEY,\n  org_id       TEXT NOT NULL REFERENCES organization (id),\n  name         TEXT NOT NULL,\n  email        TEXT CHECK (email IS NULL OR email = lower(email)),\n  external_ref TEXT,\n  status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),\n  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "customer_grant",
+      "tbl_name": "customer_grant",
+      "sql": "CREATE TABLE customer_grant (\n  id                TEXT NOT NULL PRIMARY KEY,\n  org_id            TEXT NOT NULL REFERENCES organization (id),\n  customer_id       TEXT NOT NULL REFERENCES customer (id),\n  project_id        TEXT NOT NULL REFERENCES project (id),\n  package_id        TEXT REFERENCES package (id),\n  bundle_id         TEXT REFERENCES bundle (id),\n  version_constraint TEXT,\n  minimum_stability TEXT NOT NULL DEFAULT 'stable' CHECK (minimum_stability IN ('dev', 'alpha', 'beta', 'RC', 'stable')),\n  valid_until       TEXT,\n  revoked_at        TEXT,\n  row_version       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),\n  last_op_id        TEXT,\n  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  CHECK ((package_id IS NOT NULL AND bundle_id IS NULL) OR (package_id IS NULL AND bundle_id IS NOT NULL))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "dist_tag",
+      "tbl_name": "dist_tag",
+      "sql": "CREATE TABLE \"dist_tag\" (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  package_id TEXT NOT NULL,\n  tag        TEXT NOT NULL,\n  version_id TEXT NOT NULL,\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (package_id, tag),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "dist_tag_history",
+      "tbl_name": "dist_tag_history",
+      "sql": "CREATE TABLE \"dist_tag_history\" (\n  id                  TEXT NOT NULL PRIMARY KEY,\n  org_id              TEXT NOT NULL REFERENCES organization (id),\n  package_id          TEXT NOT NULL,\n  tag                 TEXT NOT NULL,\n  version_id          TEXT,\n  previous_version_id TEXT,\n  action              TEXT NOT NULL CHECK (action IN ('set', 'remove')),\n  actor_type          TEXT NOT NULL,\n  actor_id            TEXT,\n  op_id               TEXT,\n  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id),\n  FOREIGN KEY (org_id, previous_version_id) REFERENCES version (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "fetch_lease",
+      "tbl_name": "fetch_lease",
+      "sql": "CREATE TABLE fetch_lease (\n  org_id      TEXT NOT NULL REFERENCES organization (id),\n  lease_key   TEXT NOT NULL PRIMARY KEY CHECK (length(lease_key) = 64 AND lease_key = lower(lease_key) AND lease_key NOT GLOB '*[^0-9a-f]*'),\n  owner       TEXT NOT NULL,\n  fence       INTEGER NOT NULL CHECK (fence >= 1),\n  lease_until TEXT NOT NULL,\n  acquired_at TEXT NOT NULL\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "identity",
+      "tbl_name": "identity",
+      "sql": "CREATE TABLE identity (\n  id             TEXT NOT NULL PRIMARY KEY,\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  user_id        TEXT NOT NULL REFERENCES user_account (id),\n  provider       TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 64 AND provider = trim(provider)),\n  subject        TEXT NOT NULL,\n  email          TEXT NOT NULL CHECK (email = lower(email)),\n  email_verified INTEGER NOT NULL DEFAULT 0 CHECK (email_verified IN (0, 1)),\n  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, validated_at TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "identity_block",
+      "tbl_name": "identity_block",
+      "sql": "CREATE TABLE identity_block (\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  provider           TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 64 AND provider = trim(provider)),\n  issuer             TEXT NOT NULL CHECK (length(issuer) BETWEEN 1 AND 512),\n  subject            TEXT NOT NULL CHECK (length(subject) >= 1),\n  blocked_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  blocked_by_user_id TEXT REFERENCES user_account (id),\n  PRIMARY KEY (org_id, provider, issuer, subject)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "identity_provider_binding",
+      "tbl_name": "identity_provider_binding",
+      "sql": "CREATE TABLE identity_provider_binding (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  provider   TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 64 AND provider = trim(provider)),\n  anchor     TEXT NOT NULL CHECK (length(anchor) BETWEEN 1 AND 512),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (org_id, provider)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "import_ref",
+      "tbl_name": "import_ref",
+      "sql": "CREATE TABLE import_ref (\n  id                TEXT NOT NULL PRIMARY KEY,\n  org_id            TEXT NOT NULL REFERENCES organization (id),\n  import_run_id     TEXT NOT NULL REFERENCES import_run (id),\n  entity_type       TEXT NOT NULL,\n  entity_id         TEXT NOT NULL,\n  external_ref      TEXT NOT NULL,\n  action            TEXT NOT NULL CHECK (action IN ('create', 'update')),\n  before_image_json TEXT CHECK (before_image_json IS NULL OR json_valid(before_image_json)),\n  content_hash      TEXT,\n  conflict_state    TEXT NOT NULL DEFAULT 'none' CHECK (conflict_state IN ('none', 'changed_after_import', 'resolved')),\n  rolled_back_at    TEXT,\n  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, published_at_basis TEXT CHECK (published_at_basis IS NULL OR published_at_basis IN ('source_release', 'packagist_added', 'import_time')), expired_at TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "import_run",
+      "tbl_name": "import_run",
+      "sql": "CREATE TABLE import_run (\n  id                      TEXT NOT NULL PRIMARY KEY,\n  org_id                  TEXT NOT NULL REFERENCES organization (id),\n  source_system           TEXT NOT NULL,\n  state                   TEXT NOT NULL DEFAULT 'planned' CHECK (state IN ('planned', 'applying', 'failed', 'applied', 'verifying', 'verified', 'rolled_back', 'cancelled')),\n  plan_hash               TEXT,\n  planned_count           INTEGER NOT NULL DEFAULT 0 CHECK (planned_count >= 0),\n  applied_count           INTEGER NOT NULL DEFAULT 0 CHECK (applied_count >= 0),\n  started_by_user_id      TEXT REFERENCES user_account (id),\n  before_image_expires_at TEXT,\n  accepted_at             TEXT,\n  last_error              TEXT,\n  created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, approved_by_user_id TEXT REFERENCES user_account (id), approved_at TEXT, credential_window_until TEXT, started_by_service_principal_id TEXT REFERENCES service_principal (id), manifest_blob_sha256 TEXT CHECK (manifest_blob_sha256 IS NULL OR length(manifest_blob_sha256) = 64), rollback_restored_count INTEGER NOT NULL DEFAULT 0 CHECK (rollback_restored_count >= 0), rollback_conflict_count INTEGER NOT NULL DEFAULT 0 CHECK (rollback_conflict_count >= 0), rollback_expired_count INTEGER NOT NULL DEFAULT 0 CHECK (rollback_expired_count >= 0)) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "ingest_session",
+      "tbl_name": "ingest_session",
+      "sql": "CREATE TABLE ingest_session (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  scope                TEXT NOT NULL CHECK (scope IN ('source', 'package')),\n  scope_key            TEXT NOT NULL CHECK (length(scope_key) = 64 AND scope_key = lower(scope_key) AND scope_key NOT GLOB '*[^0-9a-f]*'),\n  source_id            TEXT NOT NULL REFERENCES source (id) ON DELETE CASCADE,\n  package_key          TEXT,\n  generation           INTEGER NOT NULL CHECK (generation >= 1),\n  owner                TEXT NOT NULL,\n  fence                INTEGER NOT NULL CHECK (fence >= 1),\n  lease_until          TEXT NOT NULL,\n  state                TEXT NOT NULL CHECK (state IN ('running', 'complete', 'abandoned')),\n  snapshot_id          TEXT,\n  snapshot_blob_sha256 TEXT CHECK (snapshot_blob_sha256 IS NULL OR (length(snapshot_blob_sha256) = 64 AND snapshot_blob_sha256 = lower(snapshot_blob_sha256) AND snapshot_blob_sha256 NOT GLOB '*[^0-9a-f]*')),\n  stamp                TEXT,\n  cursor               TEXT CHECK (cursor IS NULL OR length(cursor) <= 4096),\n  seen_count           INTEGER NOT NULL DEFAULT 0 CHECK (seen_count >= 0),\n  pending_validators   TEXT CHECK (pending_validators IS NULL OR CASE WHEN json_valid(pending_validators) THEN json_type(pending_validators) = 'object' ELSE 0 END),\n  pages_so_far         INTEGER NOT NULL DEFAULT 0 CHECK (pages_so_far >= 0),\n  started_at           TEXT NOT NULL,\n  updated_at           TEXT NOT NULL,\n  CHECK ((scope = 'package') = (package_key IS NOT NULL))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "job",
+      "tbl_name": "job",
+      "sql": "CREATE TABLE job (\n  id              TEXT NOT NULL PRIMARY KEY,\n  org_id          TEXT NOT NULL REFERENCES organization (id),\n  type            TEXT NOT NULL,\n  payload_json    TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json) AND length(payload_json) <= 131072),\n  resource_key    TEXT,\n  idempotency_key TEXT,\n  state           TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'succeeded', 'dead')),\n  attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\n  max_attempts    INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts >= 1),\n  lease_owner     TEXT,\n  lease_until     TEXT,\n  fence           INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),\n  run_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  last_error      TEXT,\n  finished_at     TEXT,\n  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), project_id TEXT REFERENCES project (id), initiator_token_id TEXT,\n  CHECK (state <> 'running' OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "job_attempt",
+      "tbl_name": "job_attempt",
+      "sql": "CREATE TABLE \"job_attempt\" (\n  id          TEXT NOT NULL PRIMARY KEY,\n  org_id      TEXT NOT NULL REFERENCES organization (id),\n  job_id      TEXT NOT NULL REFERENCES job (id) ON DELETE CASCADE,\n  attempt     INTEGER NOT NULL CHECK (attempt >= 1),\n  fence       INTEGER NOT NULL CHECK (fence >= 1),\n  worker      TEXT NOT NULL,\n  outcome     TEXT NOT NULL DEFAULT 'running' CHECK (outcome IN ('running', 'succeeded', 'failed', 'lease_expired', 'released')),\n  error       TEXT,\n  started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  finished_at TEXT,\n  next_run_at TEXT\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "job_schedule",
+      "tbl_name": "job_schedule",
+      "sql": "CREATE TABLE job_schedule (\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  name           TEXT NOT NULL,\n  every_seconds  INTEGER CHECK (every_seconds IS NULL OR every_seconds > 0),\n  cron           TEXT,\n  next_run_at    TEXT NOT NULL,\n  last_slot      TEXT,\n  enabled        INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n  PRIMARY KEY (org_id, name),\n  CHECK (every_seconds IS NOT NULL OR cron IS NOT NULL)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "keyring_verifier",
+      "tbl_name": "keyring_verifier",
+      "sql": "CREATE TABLE keyring_verifier (\n  key_version INTEGER NOT NULL PRIMARY KEY CHECK (key_version >= 1),\n  mac         BLOB NOT NULL CHECK (length(mac) = 32),\n  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "local_login",
+      "tbl_name": "local_login",
+      "sql": "CREATE TABLE local_login (\n  user_id            TEXT NOT NULL PRIMARY KEY REFERENCES user_account (id),\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  password_hash      TEXT CHECK (password_hash IS NULL OR password_hash GLOB 'pbkdf2-sha256$*'),\n  totp_credential_id TEXT REFERENCES credential (id) ON DELETE SET NULL,\n  totp_enabled_at    TEXT,\n  totp_last_step     INTEGER CHECK (totp_last_step IS NULL OR totp_last_step >= 0),\n  credential_rev     INTEGER NOT NULL DEFAULT 0 CHECK (credential_rev >= 0),\n  setup_hash         TEXT CHECK (setup_hash IS NULL OR (length(setup_hash) = 64 AND setup_hash NOT GLOB '*[^0-9a-f]*')),\n  setup_expires_at   TEXT,\n  failed_count       INTEGER NOT NULL DEFAULT 0 CHECK (failed_count >= 0),\n  locked_until       TEXT,\n  last_op_id         TEXT,\n  last_login_at      TEXT,\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  CHECK ((setup_hash IS NULL) = (setup_expires_at IS NULL))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "migration_lock",
+      "tbl_name": "migration_lock",
+      "sql": "CREATE TABLE migration_lock (\n  id          INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),\n  holder      TEXT,\n  acquired_at TEXT,\n  expires_at  TEXT\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "organization",
+      "tbl_name": "organization",
+      "sql": "CREATE TABLE organization (\n  id                                TEXT NOT NULL PRIMARY KEY,\n  singleton                         INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),\n  slug                              TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                              TEXT NOT NULL,\n  retention_removed_upstream_days   INTEGER NOT NULL DEFAULT 365 CHECK (retention_removed_upstream_days >= 0),\n  token_default_expiry_days         INTEGER NOT NULL DEFAULT 90 CHECK (token_default_expiry_days > 0),\n  token_ci_readonly_expiry_days     INTEGER NOT NULL DEFAULT 365 CHECK (token_ci_readonly_expiry_days > 0),\n  created_at                        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "package",
+      "tbl_name": "package",
+      "sql": "CREATE TABLE package (\n  id                         TEXT NOT NULL PRIMARY KEY,\n  org_id                     TEXT NOT NULL REFERENCES organization (id),\n  source_id                  TEXT NOT NULL,\n  ecosystem                  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  name                       TEXT NOT NULL CHECK (name = lower(name)),\n  description                TEXT,\n  visible_to_new_projects    INTEGER NOT NULL DEFAULT 1 CHECK (visible_to_new_projects IN (0, 1)),\n  status                     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'removed_upstream')),\n  removed_upstream_at        TEXT,\n  rev                        INTEGER NOT NULL DEFAULT 1 CHECK (rev >= 1),\n  modified_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  last_synced_at             TEXT,\n  created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  removal_cause              TEXT CHECK (removal_cause IS NULL OR removal_cause IN ('document_absent', 'source_listing')),\n  last_op_id                 TEXT,\n  listing_open_stamp         TEXT,\n  listing_seen_stamp         TEXT,\n  listing_opened_at          TEXT,\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "project",
+      "tbl_name": "project",
+      "sql": "CREATE TABLE project (\n  id                       TEXT NOT NULL PRIMARY KEY,\n  org_id                   TEXT NOT NULL REFERENCES organization (id),\n  slug                     TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                     TEXT NOT NULL,\n  status                   TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),\n  token_max_scope          TEXT NOT NULL DEFAULT 'full' CHECK (token_max_scope IN ('read', 'write', 'full')),\n  require_publish_approval INTEGER NOT NULL DEFAULT 0 CHECK (require_publish_approval IN (0, 1)),\n  created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "project_package",
+      "tbl_name": "project_package",
+      "sql": "CREATE TABLE \"project_package\" (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  package_id TEXT NOT NULL,\n  origin     TEXT NOT NULL CHECK (origin IN ('subscription', 'explicit', 'pattern')),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  ecosystem  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  name       TEXT NOT NULL CHECK (name = lower(name)),\n  PRIMARY KEY (project_id, package_id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "project_package_pattern",
+      "tbl_name": "project_package_pattern",
+      "sql": "CREATE TABLE \"project_package_pattern\" (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  source_id  TEXT NOT NULL,\n  pattern    TEXT NOT NULL CHECK (pattern = lower(pattern)),\n  effect     TEXT NOT NULL CHECK (effect IN ('include', 'exclude')),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "project_source",
+      "tbl_name": "project_source",
+      "sql": "CREATE TABLE \"project_source\" (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  source_id  TEXT NOT NULL,\n  precedence INTEGER NOT NULL DEFAULT 100 CHECK (precedence >= 0),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (project_id, source_id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "registered_name",
+      "tbl_name": "registered_name",
+      "sql": "CREATE TABLE \"registered_name\" (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  source_id  TEXT NOT NULL,\n  ecosystem  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  pattern    TEXT NOT NULL CHECK (pattern = lower(pattern)),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id) ON DELETE CASCADE\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "representation_clock",
+      "tbl_name": "representation_clock",
+      "sql": "CREATE TABLE representation_clock (\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  project_id    TEXT NOT NULL REFERENCES project (id) ON DELETE CASCADE,\n  key_hash      TEXT NOT NULL CHECK (length(key_hash) = 64 AND key_hash = lower(key_hash) AND key_hash NOT GLOB '*[^0-9a-f]*'),\n  form          TEXT NOT NULL CHECK (form IN ('composer-p2', 'composer-p2-dev')),\n  validator     TEXT NOT NULL CHECK (length(validator) = 64 AND validator = lower(validator) AND validator NOT GLOB '*[^0-9a-f]*'),\n  last_modified TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0 CHECK (rev >= 0), package_id TEXT NOT NULL DEFAULT '',\n  PRIMARY KEY (project_id, key_hash, form)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "role",
+      "tbl_name": "role",
+      "sql": "CREATE TABLE role (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  key                  TEXT NOT NULL CHECK (key = lower(key)),\n  name                 TEXT NOT NULL,\n  scope                TEXT NOT NULL CHECK (scope IN ('organization', 'project')),\n  is_system            INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),\n  protects_last_holder INTEGER NOT NULL DEFAULT 0 CHECK (protects_last_holder IN (0, 1)),\n  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "role_permission",
+      "tbl_name": "role_permission",
+      "sql": "CREATE TABLE role_permission (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  role_id    TEXT NOT NULL REFERENCES role (id) ON DELETE CASCADE,\n  permission TEXT NOT NULL,\n  PRIMARY KEY (role_id, permission)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "schema_migration",
+      "tbl_name": "schema_migration",
+      "sql": "CREATE TABLE schema_migration (\n  id         TEXT NOT NULL PRIMARY KEY,\n  name       TEXT NOT NULL,\n  checksum   TEXT NOT NULL CHECK (length(checksum) = 64),\n  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "service_principal",
+      "tbl_name": "service_principal",
+      "sql": "CREATE TABLE service_principal (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  name               TEXT NOT NULL,\n  project_id         TEXT REFERENCES project (id),\n  created_by_user_id TEXT NOT NULL REFERENCES user_account (id),\n  status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "service_principal_permission",
+      "tbl_name": "service_principal_permission",
+      "sql": "CREATE TABLE service_principal_permission (\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  service_principal_id TEXT NOT NULL,\n  permission           TEXT NOT NULL,\n  PRIMARY KEY (org_id, service_principal_id, permission),\n  FOREIGN KEY (org_id, service_principal_id) REFERENCES service_principal (org_id, id) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "session",
+      "tbl_name": "session",
+      "sql": "CREATE TABLE session (\n  id            TEXT NOT NULL PRIMARY KEY,\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  user_id       TEXT NOT NULL REFERENCES user_account (id),\n  identity_id   TEXT REFERENCES identity (id),\n  secret_hash   TEXT NOT NULL CHECK (length(secret_hash) = 64),\n  csrf_hash     TEXT NOT NULL CHECK (length(csrf_hash) = 64),\n  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  expires_at    TEXT NOT NULL,\n  last_seen_at  TEXT,\n  reauth_at     TEXT,\n  revoked_at    TEXT,\n  ip            TEXT,\n  user_agent    TEXT\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "source",
+      "tbl_name": "source",
+      "sql": "CREATE TABLE source (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  org_id                          TEXT NOT NULL REFERENCES organization (id),\n  project_id                      TEXT REFERENCES project (id),\n  name                            TEXT NOT NULL,\n  ecosystem                       TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  type                            TEXT NOT NULL CHECK (type IN ('vcs', 'composer_repository', 'npm_registry', 'packagist_proxy', 'npmjs_proxy', 'hosted')),\n  url                             TEXT,\n  credential_id                   TEXT REFERENCES credential (id),\n  config_json                     TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),\n  protocol_mode                   TEXT CHECK (protocol_mode IS NULL OR protocol_mode IN ('v2', 'v1-providers', 'v1-lazy', 'v1-includes', 'npm-packument')),\n  has_available_packages          INTEGER NOT NULL DEFAULT 0 CHECK (has_available_packages IN (0, 1)),\n  user_agent                      TEXT,\n  default_visible_to_new_projects INTEGER NOT NULL DEFAULT 1 CHECK (default_visible_to_new_projects IN (0, 1)),\n  removal_policy                  TEXT NOT NULL DEFAULT 'flag' CHECK (removal_policy IN ('flag', 'exclude')),\n  retention_days_override         INTEGER CHECK (retention_days_override IS NULL OR retention_days_override >= 0),\n  status                          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'degraded', 'failing', 'paused')),\n  poll_interval_seconds           INTEGER NOT NULL DEFAULT 86400 CHECK (poll_interval_seconds > 0),\n  next_poll_at                    TEXT,\n  last_polled_at                  TEXT,\n  last_success_at                 TEXT,\n  poll_etag                       TEXT,\n  poll_last_modified              TEXT,\n  root_hash                       TEXT,\n  listing_hash                    TEXT,\n  consecutive_failures            INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),\n  last_error                      TEXT,\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, listing_open_stamp TEXT, listing_opened_at TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "token",
+      "tbl_name": "token",
+      "sql": "CREATE TABLE token (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  kind                 TEXT NOT NULL CHECK (kind IN ('pat', 'svc', 'cst')),\n  selector             TEXT NOT NULL CHECK (length(selector) = 12),\n  hash                 TEXT NOT NULL CHECK (length(hash) = 64),\n  pepper_version       INTEGER NOT NULL CHECK (pepper_version >= 1),\n  name                 TEXT NOT NULL,\n  scopes_json          TEXT NOT NULL CHECK (json_valid(scopes_json)),\n  read_only            INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),\n  user_id              TEXT REFERENCES user_account (id),\n  service_principal_id TEXT REFERENCES service_principal (id),\n  customer_id          TEXT REFERENCES customer (id),\n  project_id           TEXT REFERENCES project (id),\n  created_by_user_id   TEXT REFERENCES user_account (id),\n  expires_at           TEXT,\n  revoked_at           TEXT,\n  last_used_at         TEXT,\n  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), project_mode TEXT NOT NULL DEFAULT 'selected' CHECK (project_mode IN ('all', 'selected')), validation_kind TEXT CHECK (validation_kind IS NULL OR (validation_kind IN ('sso', 'local') AND kind = 'pat')), validation_identity_id TEXT REFERENCES identity (id) ON DELETE SET NULL\n  CHECK (validation_identity_id IS NULL OR (validation_kind IS NOT 'local' AND kind = 'pat')), last_op_id TEXT,\n  CHECK (\n    (kind = 'pat' AND user_id IS NOT NULL AND service_principal_id IS NULL AND customer_id IS NULL) OR\n    (kind = 'svc' AND service_principal_id IS NOT NULL AND user_id IS NULL AND customer_id IS NULL) OR\n    (kind = 'cst' AND customer_id IS NOT NULL AND user_id IS NULL AND service_principal_id IS NULL)\n  ),\n  CHECK (kind = 'cst' OR expires_at IS NOT NULL)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "token_project",
+      "tbl_name": "token_project",
+      "sql": "CREATE TABLE token_project (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  token_id   TEXT NOT NULL REFERENCES token (id) ON DELETE CASCADE,\n  project_id TEXT NOT NULL REFERENCES project (id),\n  PRIMARY KEY (token_id, project_id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "upstream_state",
+      "tbl_name": "upstream_state",
+      "sql": "CREATE TABLE upstream_state (\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  package_id         TEXT NOT NULL REFERENCES package (id) ON DELETE CASCADE,\n  form               TEXT NOT NULL CHECK (form IN ('composer-p2', 'composer-p2-dev', 'composer-v1-provider', 'npm-packument')),\n  etag               TEXT,\n  last_modified      TEXT,\n  content_sha256     TEXT CHECK (content_sha256 IS NULL OR (length(content_sha256) = 64 AND content_sha256 = lower(content_sha256) AND content_sha256 NOT GLOB '*[^0-9a-f]*')),\n  checked_at         TEXT NOT NULL,\n  fresh_until        TEXT NOT NULL,\n  not_found_count    INTEGER NOT NULL DEFAULT 0 CHECK (not_found_count >= 0),\n  first_not_found_at TEXT,\n  PRIMARY KEY (package_id, form)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "user_account",
+      "tbl_name": "user_account",
+      "sql": "CREATE TABLE user_account (\n  id               TEXT NOT NULL PRIMARY KEY,\n  org_id           TEXT NOT NULL REFERENCES organization (id),\n  email            TEXT NOT NULL CHECK (email = lower(email)),\n  display_name     TEXT,\n  status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),\n  last_login_at    TEXT,\n  idp_validated_at TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, pat_invalid_before TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "user_group",
+      "tbl_name": "user_group",
+      "sql": "CREATE TABLE user_group (\n  org_id       TEXT NOT NULL REFERENCES organization (id),\n  user_id      TEXT NOT NULL REFERENCES user_account (id) ON DELETE CASCADE,\n  provider     TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 64 AND provider = trim(provider)),\n  group_name   TEXT NOT NULL,\n  refreshed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (user_id, provider, group_name)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "version",
+      "tbl_name": "version",
+      "sql": "CREATE TABLE version (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  package_id           TEXT NOT NULL,\n  version              TEXT NOT NULL,\n  version_normalized   TEXT NOT NULL,\n  stability            TEXT NOT NULL DEFAULT 'stable' CHECK (stability IN ('dev', 'alpha', 'beta', 'RC', 'stable')),\n  published_at         TEXT NOT NULL,\n  published_at_basis   TEXT NOT NULL,\n  upstream_released_at TEXT,\n  license              TEXT,\n  blob_id              TEXT REFERENCES blob (id),\n  dist_type            TEXT CHECK (dist_type IS NULL OR dist_type IN ('zip', 'tar', 'tgz')),\n  composer_shasum      TEXT,\n  npm_integrity        TEXT,\n  source_ref           TEXT,\n  metadata_json        TEXT NOT NULL CHECK (json_valid(metadata_json)),\n  deprecated_message   TEXT,\n  status               TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'removed_upstream', 'yanked', 'quarantined', 'tombstoned')),\n  removed_upstream_at  TEXT,\n  tombstoned_at        TEXT,\n  tombstone_reason     TEXT,\n  purge_after          TEXT,\n  revision             INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  last_op_id           TEXT,\n  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  listing_seen_stamp   TEXT,\n  CHECK (status <> 'tombstoned' OR tombstoned_at IS NOT NULL),\n  CHECK (status <> 'removed_upstream' OR removed_upstream_at IS NOT NULL),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "version_revision",
+      "tbl_name": "version_revision",
+      "sql": "CREATE TABLE version_revision (\n  id            TEXT NOT NULL PRIMARY KEY,\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  version_id    TEXT NOT NULL REFERENCES version (id),\n  revision      INTEGER NOT NULL CHECK (revision >= 1),\n  blob_id       TEXT REFERENCES blob (id),\n  source_ref    TEXT,\n  metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json)),\n  reason        TEXT NOT NULL,\n  op_id         TEXT,\n  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "vulnerability_advisory",
+      "tbl_name": "vulnerability_advisory",
+      "sql": "CREATE TABLE vulnerability_advisory (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  advisory_id TEXT NOT NULL CHECK (length(CAST(advisory_id AS BLOB)) BETWEEN 1 AND 200 AND instr(advisory_id, '/') = 0 AND instr(advisory_id, char(92)) = 0 AND advisory_id NOT IN ('.', '..')),\n  detail_json TEXT CHECK (detail_json IS NULL OR (length(CAST(detail_json AS BLOB)) <= 65536 AND json_valid(detail_json) AND json_type(detail_json) = 'object')),\n  summary TEXT CHECK (summary IS NULL OR length(CAST(summary AS BLOB)) <= 8192),\n  severity_json TEXT CHECK (severity_json IS NULL OR (length(CAST(severity_json AS BLOB)) <= 16384 AND json_valid(severity_json))),\n  modified_at TEXT CHECK (modified_at IS NULL OR (length(modified_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', modified_at) IS modified_at)),\n  fetched_at TEXT CHECK (fetched_at IS NULL OR (length(fetched_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at) IS fetched_at)),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 1000),\n  last_error_code TEXT CHECK (last_error_code IN ('unavailable', 'protocol', 'config', 'limit')),\n  PRIMARY KEY (org_id, source, advisory_id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "vulnerability_match",
+      "tbl_name": "vulnerability_match",
+      "sql": "CREATE TABLE vulnerability_match (\n  org_id TEXT NOT NULL,\n  version_id TEXT NOT NULL,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  advisory_id TEXT NOT NULL CHECK (length(CAST(advisory_id AS BLOB)) BETWEEN 1 AND 200 AND instr(advisory_id, '/') = 0 AND instr(advisory_id, char(92)) = 0 AND advisory_id NOT IN ('.', '..')),\n  advisory_modified_at TEXT CHECK (advisory_modified_at IS NULL OR (length(advisory_modified_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', advisory_modified_at) IS advisory_modified_at)),\n  PRIMARY KEY (org_id, version_id, source, advisory_id),\n  FOREIGN KEY (org_id, version_id, source) REFERENCES vulnerability_result(org_id, version_id, source) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "vulnerability_refresh",
+      "tbl_name": "vulnerability_refresh",
+      "sql": "CREATE TABLE vulnerability_refresh (\n  org_id TEXT NOT NULL,\n  refresh_id TEXT NOT NULL CHECK (length(refresh_id) BETWEEN 1 AND 200),\n  version_id TEXT NOT NULL,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  generation INTEGER NOT NULL CHECK (generation >= 0),\n  mapping_version INTEGER NOT NULL CHECK (mapping_version > 0),\n  query_version TEXT NOT NULL,\n  continuation_token TEXT NOT NULL CHECK (length(CAST(continuation_token AS BLOB)) BETWEEN 1 AND 4096),\n  page_count INTEGER NOT NULL CHECK (page_count BETWEEN 1 AND 4),\n  accumulated_ids_json TEXT NOT NULL CHECK (length(CAST(accumulated_ids_json AS BLOB)) <= 65536 AND json_valid(accumulated_ids_json) AND json_type(accumulated_ids_json) = 'array' AND json_array_length(accumulated_ids_json) <= 200),\n  started_at TEXT NOT NULL CHECK (length(started_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at) IS started_at),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  PRIMARY KEY (org_id, refresh_id),\n  UNIQUE (org_id, version_id, source),\n  FOREIGN KEY (org_id, version_id, source) REFERENCES vulnerability_result(org_id, version_id, source) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "vulnerability_result",
+      "tbl_name": "vulnerability_result",
+      "sql": "CREATE TABLE vulnerability_result (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  version_id TEXT NOT NULL,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  package_id TEXT NOT NULL,\n  ecosystem TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  package_key TEXT NOT NULL,\n  version TEXT NOT NULL,\n  query_version TEXT NOT NULL,\n  mapping_version INTEGER NOT NULL CHECK (mapping_version > 0),\n  assessment TEXT CHECK (assessment IN ('affected', 'not_affected')),\n  fetched_at TEXT CHECK (fetched_at IS NULL OR (length(fetched_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at) IS fetched_at)),\n  attempted_at TEXT NOT NULL CHECK (length(attempted_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', attempted_at) IS attempted_at),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 1000),\n  last_error_code TEXT CHECK (last_error_code IN ('unavailable', 'protocol', 'config', 'limit')),\n  generation INTEGER NOT NULL CHECK (generation >= 0),\n  refresh_id TEXT,\n  PRIMARY KEY (org_id, version_id, source),\n  UNIQUE (org_id, ecosystem, package_id, version_id, source),\n  FOREIGN KEY (org_id, version_id) REFERENCES version(org_id, id) ON DELETE CASCADE,\n  FOREIGN KEY (org_id, package_id) REFERENCES package(org_id, id) ON DELETE CASCADE,\n  CHECK ((assessment IS NULL) = (fetched_at IS NULL))\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "vulnerability_sync_state",
+      "tbl_name": "vulnerability_sync_state",
+      "sql": "CREATE TABLE vulnerability_sync_state (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  fence INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),\n  lease_owner TEXT,\n  lease_until TEXT CHECK (lease_until IS NULL OR (length(lease_until) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', lease_until) IS lease_until)),\n  next_request_at TEXT NOT NULL CHECK (length(next_request_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_request_at) IS next_request_at),\n  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 1000),\n  write_token TEXT,\n  prune_cursor TEXT NOT NULL DEFAULT '',\n  selection_cursor TEXT NOT NULL DEFAULT '{\"due\":\"\",\"id\":\"\"}' CHECK (length(selection_cursor) <= 1024 AND json_valid(selection_cursor) AND json_type(selection_cursor) = 'object'),\n  blocked_until TEXT CHECK (blocked_until IS NULL OR (length(blocked_until) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', blocked_until) IS blocked_until)),\n  CHECK ((lease_owner IS NULL) = (lease_until IS NULL)),\n  PRIMARY KEY (org_id, source)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "webhook_delivery",
+      "tbl_name": "webhook_delivery",
+      "sql": "CREATE TABLE webhook_delivery (\n  org_id       TEXT NOT NULL REFERENCES organization (id),\n  provider     TEXT NOT NULL,\n  delivery_id  TEXT NOT NULL,\n  source_id    TEXT REFERENCES source (id),\n  event        TEXT NOT NULL,\n  outcome      TEXT NOT NULL DEFAULT 'received' CHECK (outcome IN ('received', 'processed', 'ignored', 'failed')),\n  received_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  processed_at TEXT,\n  PRIMARY KEY (provider, delivery_id)\n) STRICT, WITHOUT ROWID"
+    }
+  ],
+  "indexes": [
+    {
+      "tbl_name": "access_grant",
+      "seq": 0,
+      "name": "access_grant_role",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 1,
+      "name": "access_grant_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 2,
+      "name": "access_grant_subject",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 3,
+      "name": "access_grant_project_scope_email",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 4,
+      "name": "access_grant_org_scope_email",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 5,
+      "name": "access_grant_project_scope",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 6,
+      "name": "access_grant_org_scope",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "access_grant",
+      "seq": 7,
+      "name": "sqlite_autoindex_access_grant_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "access_mutation_guard",
+      "seq": 0,
+      "name": "sqlite_autoindex_access_mutation_guard_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "api_idempotency",
+      "seq": 0,
+      "name": "api_idempotency_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "api_idempotency",
+      "seq": 1,
+      "name": "sqlite_autoindex_api_idempotency_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 0,
+      "name": "audit_event_action",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 1,
+      "name": "audit_event_actor",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 2,
+      "name": "audit_event_target",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 3,
+      "name": "audit_event_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 4,
+      "name": "audit_event_prev_hash",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 5,
+      "name": "audit_event_seq",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_event",
+      "seq": 6,
+      "name": "sqlite_autoindex_audit_event_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_pending",
+      "seq": 0,
+      "name": "audit_pending_org_id",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_pending",
+      "seq": 1,
+      "name": "sqlite_autoindex_audit_pending_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "blob",
+      "seq": 0,
+      "name": "blob_idle",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "blob",
+      "seq": 1,
+      "name": "blob_purge",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "blob",
+      "seq": 2,
+      "name": "blob_storage_key",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "blob",
+      "seq": 3,
+      "name": "blob_digest",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "blob",
+      "seq": 4,
+      "name": "sqlite_autoindex_blob_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "bundle",
+      "seq": 0,
+      "name": "bundle_name",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "bundle",
+      "seq": 1,
+      "name": "sqlite_autoindex_bundle_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "bundle_item",
+      "seq": 0,
+      "name": "bundle_item_package",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "bundle_item",
+      "seq": 1,
+      "name": "sqlite_autoindex_bundle_item_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "cache_epoch",
+      "seq": 0,
+      "name": "sqlite_autoindex_cache_epoch_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "credential",
+      "seq": 0,
+      "name": "credential_version_in_use",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "credential",
+      "seq": 1,
+      "name": "credential_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "credential",
+      "seq": 2,
+      "name": "credential_key_version",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "credential",
+      "seq": 3,
+      "name": "sqlite_autoindex_credential_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "customer",
+      "seq": 0,
+      "name": "customer_external_ref",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "customer",
+      "seq": 1,
+      "name": "sqlite_autoindex_customer_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 0,
+      "name": "customer_grant_bundle_fk",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 1,
+      "name": "customer_grant_package_fk",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 2,
+      "name": "customer_grant_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 3,
+      "name": "customer_grant_customer",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 4,
+      "name": "customer_grant_bundle",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 5,
+      "name": "customer_grant_package",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "customer_grant",
+      "seq": 6,
+      "name": "sqlite_autoindex_customer_grant_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "dist_tag",
+      "seq": 0,
+      "name": "dist_tag_version",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "dist_tag",
+      "seq": 1,
+      "name": "sqlite_autoindex_dist_tag_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "dist_tag_history",
+      "seq": 0,
+      "name": "dist_tag_history_version",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "dist_tag_history",
+      "seq": 1,
+      "name": "dist_tag_history_tag",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "dist_tag_history",
+      "seq": 2,
+      "name": "dist_tag_history_previous",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "dist_tag_history",
+      "seq": 3,
+      "name": "sqlite_autoindex_dist_tag_history_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "fetch_lease",
+      "seq": 0,
+      "name": "fetch_lease_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "fetch_lease",
+      "seq": 1,
+      "name": "sqlite_autoindex_fetch_lease_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "identity",
+      "seq": 0,
+      "name": "identity_user",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "identity",
+      "seq": 1,
+      "name": "identity_subject",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "identity",
+      "seq": 2,
+      "name": "sqlite_autoindex_identity_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "identity_block",
+      "seq": 0,
+      "name": "identity_block_user",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "identity_block",
+      "seq": 1,
+      "name": "sqlite_autoindex_identity_block_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "identity_provider_binding",
+      "seq": 0,
+      "name": "sqlite_autoindex_identity_provider_binding_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_ref",
+      "seq": 0,
+      "name": "import_ref_external",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_ref",
+      "seq": 1,
+      "name": "import_ref_entity",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_ref",
+      "seq": 2,
+      "name": "import_ref_run_external",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_ref",
+      "seq": 3,
+      "name": "sqlite_autoindex_import_ref_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_run",
+      "seq": 0,
+      "name": "import_run_sp_starter",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_run",
+      "seq": 1,
+      "name": "import_run_approver",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_run",
+      "seq": 2,
+      "name": "import_run_state",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_run",
+      "seq": 3,
+      "name": "import_run_starter",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "import_run",
+      "seq": 4,
+      "name": "sqlite_autoindex_import_run_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "ingest_session",
+      "seq": 0,
+      "name": "ingest_session_snapshot_blob",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "ingest_session",
+      "seq": 1,
+      "name": "ingest_session_scope_generation",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "ingest_session",
+      "seq": 2,
+      "name": "ingest_session_state_lease",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "ingest_session",
+      "seq": 3,
+      "name": "ingest_session_running_scope",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "ingest_session",
+      "seq": 4,
+      "name": "sqlite_autoindex_ingest_session_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "job",
+      "seq": 0,
+      "name": "job_lease_org",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job",
+      "seq": 1,
+      "name": "job_claim_org",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job",
+      "seq": 2,
+      "name": "job_dead",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job",
+      "seq": 3,
+      "name": "job_queued_resource",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job",
+      "seq": 4,
+      "name": "job_idempotency",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job",
+      "seq": 5,
+      "name": "job_one_running_per_resource",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job",
+      "seq": 6,
+      "name": "sqlite_autoindex_job_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "job_attempt",
+      "seq": 0,
+      "name": "job_attempt_fence",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "job_attempt",
+      "seq": 1,
+      "name": "sqlite_autoindex_job_attempt_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "job_schedule",
+      "seq": 0,
+      "name": "job_schedule_due",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "job_schedule",
+      "seq": 1,
+      "name": "sqlite_autoindex_job_schedule_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "keyring_verifier",
+      "seq": 0,
+      "name": "sqlite_autoindex_keyring_verifier_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "local_login",
+      "seq": 0,
+      "name": "local_login_totp",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "local_login",
+      "seq": 1,
+      "name": "local_login_org",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "local_login",
+      "seq": 2,
+      "name": "local_login_setup",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "local_login",
+      "seq": 3,
+      "name": "sqlite_autoindex_local_login_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "organization",
+      "seq": 0,
+      "name": "organization_singleton",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "organization",
+      "seq": 1,
+      "name": "sqlite_autoindex_organization_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "package",
+      "seq": 0,
+      "name": "package_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "package",
+      "seq": 1,
+      "name": "package_source",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "package",
+      "seq": 2,
+      "name": "package_identity",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "package",
+      "seq": 3,
+      "name": "package_by_name",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "package",
+      "seq": 4,
+      "name": "sqlite_autoindex_package_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project",
+      "seq": 0,
+      "name": "project_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project",
+      "seq": 1,
+      "name": "project_slug",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project",
+      "seq": 2,
+      "name": "sqlite_autoindex_project_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_package",
+      "seq": 0,
+      "name": "project_package_name",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_package",
+      "seq": 1,
+      "name": "project_package_package",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_package",
+      "seq": 2,
+      "name": "sqlite_autoindex_project_package_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_package_pattern",
+      "seq": 0,
+      "name": "project_package_pattern_source",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_package_pattern",
+      "seq": 1,
+      "name": "project_package_pattern_identity",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_package_pattern",
+      "seq": 2,
+      "name": "sqlite_autoindex_project_package_pattern_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_source",
+      "seq": 0,
+      "name": "project_source_source",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "project_source",
+      "seq": 1,
+      "name": "sqlite_autoindex_project_source_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "registered_name",
+      "seq": 0,
+      "name": "registered_name_source",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "registered_name",
+      "seq": 1,
+      "name": "registered_name_pattern",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "registered_name",
+      "seq": 2,
+      "name": "sqlite_autoindex_registered_name_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "representation_clock",
+      "seq": 0,
+      "name": "sqlite_autoindex_representation_clock_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "role",
+      "seq": 0,
+      "name": "role_key",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "role",
+      "seq": 1,
+      "name": "sqlite_autoindex_role_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "role_permission",
+      "seq": 0,
+      "name": "sqlite_autoindex_role_permission_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "schema_migration",
+      "seq": 0,
+      "name": "sqlite_autoindex_schema_migration_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "service_principal",
+      "seq": 0,
+      "name": "service_principal_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "service_principal",
+      "seq": 1,
+      "name": "service_principal_creator",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "service_principal",
+      "seq": 2,
+      "name": "service_principal_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "service_principal",
+      "seq": 3,
+      "name": "service_principal_name",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "service_principal",
+      "seq": 4,
+      "name": "sqlite_autoindex_service_principal_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "service_principal_permission",
+      "seq": 0,
+      "name": "sqlite_autoindex_service_principal_permission_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "session",
+      "seq": 0,
+      "name": "session_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "session",
+      "seq": 1,
+      "name": "session_identity",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "session",
+      "seq": 2,
+      "name": "session_user",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "session",
+      "seq": 3,
+      "name": "session_secret",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "session",
+      "seq": 4,
+      "name": "sqlite_autoindex_session_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "source",
+      "seq": 0,
+      "name": "vulnerability_source_evidence",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "source",
+      "seq": 1,
+      "name": "source_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "source",
+      "seq": 2,
+      "name": "source_due",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "source",
+      "seq": 3,
+      "name": "source_credential",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "source",
+      "seq": 4,
+      "name": "source_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "source",
+      "seq": 5,
+      "name": "source_name_project",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "source",
+      "seq": 6,
+      "name": "source_name_org",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "source",
+      "seq": 7,
+      "name": "sqlite_autoindex_source_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 0,
+      "name": "token_pepper_version",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 1,
+      "name": "token_validation_identity",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "token",
+      "seq": 2,
+      "name": "token_creator",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 3,
+      "name": "token_binding_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 4,
+      "name": "token_customer",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 5,
+      "name": "token_service_principal",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 6,
+      "name": "token_user",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 7,
+      "name": "token_selector",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 8,
+      "name": "sqlite_autoindex_token_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token_project",
+      "seq": 0,
+      "name": "token_project_project",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token_project",
+      "seq": 1,
+      "name": "sqlite_autoindex_token_project_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "upstream_state",
+      "seq": 0,
+      "name": "upstream_state_content",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "upstream_state",
+      "seq": 1,
+      "name": "sqlite_autoindex_upstream_state_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "user_account",
+      "seq": 0,
+      "name": "user_account_email",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "user_account",
+      "seq": 1,
+      "name": "sqlite_autoindex_user_account_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "user_group",
+      "seq": 0,
+      "name": "user_group_name",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "user_group",
+      "seq": 1,
+      "name": "sqlite_autoindex_user_group_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 0,
+      "name": "version_package_id",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 1,
+      "name": "version_package_status",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 2,
+      "name": "vulnerability_version_due",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "version",
+      "seq": 3,
+      "name": "version_purge",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "version",
+      "seq": 4,
+      "name": "version_op",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "version",
+      "seq": 5,
+      "name": "version_identity",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 6,
+      "name": "version_by_published",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 7,
+      "name": "version_blob",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 8,
+      "name": "version_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version",
+      "seq": 9,
+      "name": "sqlite_autoindex_version_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version_revision",
+      "seq": 0,
+      "name": "version_revision_blob",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version_revision",
+      "seq": 1,
+      "name": "version_revision_identity",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version_revision",
+      "seq": 2,
+      "name": "sqlite_autoindex_version_revision_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_advisory",
+      "seq": 0,
+      "name": "vulnerability_advisory_due",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_advisory",
+      "seq": 1,
+      "name": "sqlite_autoindex_vulnerability_advisory_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_match",
+      "seq": 0,
+      "name": "vulnerability_match_advisory",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_match",
+      "seq": 1,
+      "name": "sqlite_autoindex_vulnerability_match_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_refresh",
+      "seq": 0,
+      "name": "vulnerability_refresh_due",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_refresh",
+      "seq": 1,
+      "name": "sqlite_autoindex_vulnerability_refresh_2",
+      "unique": 1,
+      "origin": "u",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_refresh",
+      "seq": 2,
+      "name": "sqlite_autoindex_vulnerability_refresh_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_result",
+      "seq": 0,
+      "name": "vulnerability_result_due",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_result",
+      "seq": 1,
+      "name": "sqlite_autoindex_vulnerability_result_2",
+      "unique": 1,
+      "origin": "u",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_result",
+      "seq": 2,
+      "name": "sqlite_autoindex_vulnerability_result_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "vulnerability_sync_state",
+      "seq": 0,
+      "name": "sqlite_autoindex_vulnerability_sync_state_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "webhook_delivery",
+      "seq": 0,
+      "name": "webhook_delivery_received",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "webhook_delivery",
+      "seq": 1,
+      "name": "webhook_delivery_source",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "webhook_delivery",
+      "seq": 2,
+      "name": "sqlite_autoindex_webhook_delivery_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    }
+  ]
+}

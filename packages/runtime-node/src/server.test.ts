@@ -85,20 +85,7 @@ describe('createNodeServer', () => {
       '0001_init.sql',
       await readFile(join(migrationsDirectory, '0001_init.sql'), 'utf8'),
     );
-    const later = await Promise.all(
-      [
-        '0002_local_login.sql',
-        '0003_access_model.sql',
-        '0004_cache_epoch.sql',
-        '0005_admin_permission_topup.sql',
-        '0006_ports.sql',
-        '0015_keyring_verifier.sql',
-        '0016_keyring_version_indexes.sql',
-      ].map(async (name) =>
-        loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-      ),
-    );
-    await migrate(opened.executor, [init, ...later], { holder: 'runtime-node-server-test' });
+    await migrate(opened.executor, [init], { holder: 'runtime-node-server-test' });
   });
 
   afterEach(async () => {

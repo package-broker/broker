@@ -248,7 +248,7 @@ describe('identity table types', () => {
   });
 });
 
-describe('0003 access-model table types', () => {
+describe('fresh baseline access-model table types', () => {
   it('compiles a select of every service_principal_permission column', () => {
     const statement = compile(
       db
@@ -337,7 +337,7 @@ describe('0003 access-model table types', () => {
     );
   });
 
-  it('compiles the revision and last_op_id columns added by 0003', () => {
+  it('compiles the baseline revision and last_op_id columns', () => {
     expect(compile(db.selectFrom('role').select(['revision', 'last_op_id'])).sql).toBe(
       'select "revision", "last_op_id" from "role"',
     );

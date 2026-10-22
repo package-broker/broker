@@ -380,7 +380,19 @@ describe('node auth wiring', () => {
         name: 'trusted invalid header',
         setting: '1',
         headers: { 'cf-connecting-ip': '999.1.1.1', 'x-forwarded-for': '198.51.100.1' },
-        expected: null,
+        expected: '127.0.0.1',
+      },
+      {
+        name: 'trusted Forwarded IPv6 with port',
+        setting: '1',
+        headers: { forwarded: 'for="[2001:db8::1]:4711";proto=https' },
+        expected: '2001:db8::1',
+      },
+      {
+        name: 'trusted Forwarded hostname',
+        setting: '1',
+        headers: { forwarded: 'for=proxy.example.test' },
+        expected: '127.0.0.1',
       },
       { name: 'trusted missing headers', setting: '1', headers: {}, expected: '127.0.0.1' },
     ])(

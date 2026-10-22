@@ -7,6 +7,8 @@ import { toJsonSchema, type JsonValue } from './json-schema.js';
 import { API_ERROR_CODES, SERVICE_ERROR_TABLE } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 import { AUTH_API } from './auth-schemas.js';
+import { PROJECT_API_SPECS } from './routes/projects-schemas.js';
+import { SERVICE_PRINCIPAL_API_SPECS } from './routes/service-principals-schemas.js';
 
 const info = { title: 'Package Broker', version: '2.0.0' };
 const result = z.strictObject({ ok: z.boolean() });
@@ -103,6 +105,12 @@ describe('generateOpenApi', () => {
         content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
       },
     });
+  });
+
+  it('does not advertise scan_incomplete for project listing', () => {
+    const operation = generateOpenApi(PROJECT_API_SPECS, info).paths['/_pb/projects']!.get;
+    expect(JSON.stringify(operation)).not.toContain('scan_incomplete');
+    expect(SERVICE_ERROR_TABLE.ProjectListError).not.toHaveProperty('scan_incomplete');
   });
 
   it('derives only errors present in the linked service', () => {
@@ -255,32 +263,36 @@ describe('generateOpenApi', () => {
     });
   });
 
-  it('adds concurrency parameters and errors to PATCH', () => {
-    expect(document().paths['/_pb/settings']?.patch).toMatchObject({
-      parameters: [
-        {
-          in: 'header',
-          name: 'If-Match',
-          required: true,
-          schema: { type: 'string', pattern: IF_MATCH.source },
-        },
-      ],
-      responses: {
-        204: { description: expect.any(String) },
-        412: {
-          content: {
-            'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'] as const)(
+    'adds declared concurrency parameters and errors to %s',
+    (method) => {
+      const spec = defineApi({ ...specs[2]!, method });
+      const operation = generateOpenApi([spec], info).paths['/_pb/settings']![
+        method.toLowerCase()
+      ]!;
+      expect(operation).toMatchObject({
+        parameters: [
+          {
+            in: 'header',
+            name: 'If-Match',
+            required: true,
+            schema: { type: 'string', pattern: IF_MATCH.source },
           },
+        ],
+        responses: {
+          204: { description: expect.any(String) },
+          412: {
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+            },
+          },
+          428: {},
         },
-        428: {},
-      },
-    });
-    const responses = document().paths['/_pb/settings']!.patch!.responses as Record<
-      string,
-      unknown
-    >;
-    expect(responses['204']).not.toHaveProperty('content');
-  });
+      });
+      const responses = operation.responses as Record<string, unknown>;
+      expect(responses['204']).not.toHaveProperty('content');
+    },
+  );
 
   it('documents the weak-password problems on the auth setup error envelope', () => {
     const doc = generateOpenApi(
@@ -326,11 +338,44 @@ describe('generateOpenApi', () => {
     });
   });
 
-  it('omits concurrency parameters and errors from POST', () => {
+  it('omits concurrency parameters and errors from POST without a declaration', () => {
     const post = document().paths['/_pb/settings']!.post!;
     expect(post.parameters ?? []).toEqual([]);
     expect(post.responses).not.toHaveProperty('412');
     expect(post.responses).not.toHaveProperty('428');
+  });
+
+  it.each([
+    ['/_pb/projects/{project}/archive', PROJECT_API_SPECS],
+    ['/_pb/projects/{project}/restore', PROJECT_API_SPECS],
+    ['/_pb/service-principals/{principal}/restore', SERVICE_PRINCIPAL_API_SPECS],
+    ['/_pb/projects/{project}/service-principals/{principal}/restore', SERVICE_PRINCIPAL_API_SPECS],
+  ] as const)('documents If-Match for POST %s', (path, specs) => {
+    const operation = generateOpenApi(specs, info).paths[path]!.post!;
+    expect(operation.parameters).toContainEqual({
+      name: 'If-Match',
+      in: 'header',
+      required: true,
+      schema: { type: 'string', pattern: IF_MATCH.source },
+    });
+    for (const status of ['412', '428']) {
+      expect(operation.responses).toHaveProperty(
+        `${status}.content.application/json.schema.$ref`,
+        '#/components/schemas/ErrorEnvelope',
+      );
+    }
+  });
+
+  it('keeps suspend POSTs free of concurrency parameters and errors', () => {
+    const doc = generateOpenApi(SERVICE_PRINCIPAL_API_SPECS, info);
+    for (const methods of Object.values(doc.paths)) {
+      if (!String(methods.post?.operationId).startsWith('suspend')) continue;
+      expect(methods.post!.parameters).not.toContainEqual(
+        expect.objectContaining({ in: 'header', name: 'If-Match' }),
+      );
+      expect(methods.post!.responses).not.toHaveProperty('412');
+      expect(methods.post!.responses).not.toHaveProperty('428');
+    }
   });
 
   it('adds 404 for a path parameter other than project', () => {

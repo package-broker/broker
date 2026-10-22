@@ -124,7 +124,7 @@ async function due(org: OrgContext, sha: Sha256): Promise<void> {
   );
 }
 
-describe('schema assertions (0006 shape)', () => {
+describe('schema assertions (fresh baseline)', () => {
   it('has both purge columns as nullable TEXT and a unique digest index', async () => {
     const info = await rows<{ name: string; type: string; notnull: number; dflt_value: unknown }>(
       'SELECT name, type, "notnull", dflt_value FROM pragma_table_info(\'blob\')',

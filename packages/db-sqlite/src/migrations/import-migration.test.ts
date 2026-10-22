@@ -18,9 +18,9 @@ const NEW_COLUMNS = [
 ];
 let opened: OpenedExecutor;
 
-async function migrateTo(limit = '0013_'): Promise<void> {
+async function migrateAll(): Promise<void> {
   const names = readdirSync(migrationsUrl)
-    .filter((name) => name.endsWith('.sql') && name < limit)
+    .filter((name) => name.endsWith('.sql'))
     .sort();
   const sources = await Promise.all(
     names.map((name) =>
@@ -77,9 +77,9 @@ afterEach(async () => {
   await opened.close();
 });
 
-describe('migration 0012', () => {
+describe('baseline schema', () => {
   beforeEach(async () => {
-    await migrateTo();
+    await migrateAll();
     await seed();
   });
 
@@ -101,8 +101,8 @@ describe('migration 0012', () => {
     }
     const source = await loadMigrationSource(
       'core',
-      '0012_import.sql',
-      readFileSync(new URL('0012_import.sql', migrationsUrl), 'utf8'),
+      '0001_init.sql',
+      readFileSync(new URL('0001_init.sql', migrationsUrl), 'utf8'),
     );
     expect(source.phase).toBe('expand');
     expect(BACKUP_SCOPE.import_run).toBe('include');
@@ -168,26 +168,4 @@ describe('migration 0012', () => {
   it('refuses approved as a state', async () => {
     await expect(insertRun({ state: 'approved' })).rejects.toThrow(/CHECK constraint failed/);
   });
-});
-
-it('preserves a populated 0011 import run and its state CHECK', async () => {
-  await migrateTo('0012_');
-  await seed();
-  const [before] = await rows<Record<string, SqlValue>>(
-    'SELECT * FROM import_run WHERE org_id = ?',
-    [ORG],
-  );
-  const [ddlBefore] = await rows<{ sql: string }>(
-    "SELECT sql FROM sqlite_master WHERE name = 'import_run'",
-  );
-  const stateCheck = /CHECK \(state IN \([^)]+\)\)/;
-  await migrateTo();
-  const columns = [...Object.keys(before ?? {}), ...NEW_COLUMNS];
-  expect(
-    await rows(`SELECT ${columns.join(', ')} FROM import_run WHERE org_id = ?`, [ORG]),
-  ).toEqual([{ ...before, ...Object.fromEntries(NEW_COLUMNS.map((name) => [name, null])) }]);
-  const [ddlAfter] = await rows<{ sql: string }>(
-    "SELECT sql FROM sqlite_master WHERE name = 'import_run'",
-  );
-  expect(ddlAfter?.sql.match(stateCheck)?.[0]).toBe(ddlBefore?.sql.match(stateCheck)?.[0]);
 });

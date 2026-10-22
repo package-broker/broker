@@ -47,6 +47,12 @@ function requirePage(page: ReadableProjectPage): void {
   if (page.afterId !== undefined && (typeof page.afterId !== 'string' || !isUlid(page.afterId))) {
     throw new TypeError('afterId must be a ULID');
   }
+  if (
+    page.ids !== undefined &&
+    (!Array.isArray(page.ids) || page.ids.length > 50 || !page.ids.every(isUlid))
+  ) {
+    throw new TypeError('ids must contain at most 50 ULIDs');
+  }
   if (page.status !== 'active' && page.status !== 'archived') {
     throw new TypeError('status must be active or archived');
   }
@@ -133,6 +139,11 @@ function grantPath(
       : query
           .whereRef(`${g}.subject_provider`, '=', `${m}.provider`)
           .whereRef(`${g}.subject_value`, '=', `${m}.group_name`);
+  if (page.ids !== undefined) {
+    query = query.where(
+      sql<SqlBool>`${sql.ref(`${g}.project_id`)} in (select value from json_each(${JSON.stringify(page.ids)}))`,
+    );
+  }
   if (page.afterId !== undefined) query = query.where(`${g}.project_id`, '>', page.afterId);
 
   const alias = holderAlias(u, `${kind}_evidence`);

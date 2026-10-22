@@ -2,6 +2,7 @@ import { afterAll } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import {
   describeMigrationContract,
+  describeSchemaEquivalenceContract,
   describeVulnerabilityMigrationContract,
 } from '@package-broker/db-sqlite/contract/migration-contract';
 import { describeMigrationLockContract } from '@package-broker/db-sqlite/contract/migration-lock-contract';
@@ -42,7 +43,9 @@ async function firstCoreMigration() {
   return first;
 }
 
-describeMigrationContract('d1', openPair, firstCoreMigration, { d1: true });
+describeMigrationContract('d1', openPair, firstCoreMigration);
 describeMigrationLockContract('d1', openPair, firstCoreMigration);
 
 describeVulnerabilityMigrationContract('d1', openPair);
+
+describeSchemaEquivalenceContract('d1', openPair);

@@ -168,7 +168,8 @@ describe('kernel permission views across services', () => {
     const project = { id: PROJECT_ID, slug: 'shop', name: 'Shop', status: 'active' } as const;
     const list = vi.fn(async () => [project]);
     const permissionsFor = vi.fn(async () => new Map<string, ReadonlySet<string>>());
-    const lister = createProjectLister({ source: { list }, access: { permissionsFor } });
+    const listReadableProjects = vi.fn(async () => []);
+    const lister = createProjectLister({ source: { list }, readable: { listReadableProjects } });
     expect(await lister.list(ctx, kernelActor(['project:read']), { limit: 10 })).toEqual({
       ok: true,
       value: { items: [project], nextAfterId: null },
@@ -178,7 +179,11 @@ describe('kernel permission views across services', () => {
       ok: true,
       value: { items: [], nextAfterId: null },
     });
-    expect(permissionsFor).toHaveBeenCalledExactlyOnceWith(ctx, 'actor', [PROJECT_ID]);
+    expect(listReadableProjects).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      { userId: 'actor' },
+      { limit: 10, status: 'active' },
+    );
   });
 
   it('project-administration accepts a kernel permission view and enforces project:grants:write', async () => {
@@ -231,7 +236,7 @@ describe('kernel permission views across services', () => {
       const listReadableProjects = vi.fn(async () => []);
       const actor = { ...kernelActor([]), permissions } as unknown as ActorContext;
       for (const deps of [
-        { source: { list }, access: { permissionsFor } },
+        { source: { list }, access: { permissionsFor }, readable: { listReadableProjects } },
         { source: { list }, readable: { listReadableProjects } },
       ]) {
         expect(await createProjectLister(deps).list(ctx, actor, { limit: 10 })).toEqual({

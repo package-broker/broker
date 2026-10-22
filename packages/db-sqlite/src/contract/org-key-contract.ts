@@ -1,16 +1,10 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { discoveredMigrations } from '../testing/migrated-database.js';
+import { migrate } from '../migrations/runner.js';
+
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DbError } from '@package-broker/core/db/errors';
 import type { ScalarSqlExecutor, ScalarSqlValue } from '@package-broker/core/db/port';
-import { migrate, MigrationApplyError } from '../migrations/runner.js';
-import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
-import { forgedItFor, withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import type { OpenedPair } from './migration-contract.js';
-
-const migrationsUrl = new URL('../../migrations/', import.meta.url);
-const ORG_KEYS_MIGRATION = '0020_org_consistent_keys.sql';
-const ORG_KEYS_TIER2_MIGRATION = '0021_org_consistent_keys_tier2.sql';
-
 const ORG_A = '01J0ACME000000000000000000';
 const ORG_B = '01J0ACME000000000000000001';
 
@@ -95,7 +89,7 @@ const CROSS_ORG_REFERENCES: readonly CrossOrgReference[] = [
     column: 'project_id',
     parent: 'project',
     insert: step(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'explicit', 'npm', 'left-pad')",
       [ORG_B, key('prj', 'a'), key('pkg', 'b', 2)],
     ),
     undo: step('DELETE FROM project_package WHERE package_id = ?', [key('pkg', 'b', 2)]),
@@ -105,7 +99,7 @@ const CROSS_ORG_REFERENCES: readonly CrossOrgReference[] = [
     column: 'package_id',
     parent: 'package',
     insert: step(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'explicit', 'npm', 'left-pad')",
       [ORG_B, key('prj', 'b', 2), key('pkg', 'a')],
     ),
     undo: step('DELETE FROM project_package WHERE project_id = ?', [key('prj', 'b', 2)]),
@@ -184,21 +178,6 @@ const CROSS_ORG_REFERENCES: readonly CrossOrgReference[] = [
   },
 ];
 
-const REBUILT_TABLES = [
-  'dist_tag',
-  'dist_tag_history',
-  'package',
-  'project_package',
-  'project_package_pattern',
-  'project_source',
-  'registered_name',
-  'version',
-];
-
-const TIER_2_TABLES = ['dist_tag_history', 'version', 'registered_name'];
-
-const NEW_PARENT_INDEXES = ['package_org_id', 'project_org_id', 'source_org_id', 'version_org_id'];
-
 const EXPECTED_FOREIGN_KEYS: Readonly<Record<string, readonly string[]>> = {
   dist_tag: [
     'package|org_id,package_id|org_id,id|NO ACTION',
@@ -226,20 +205,6 @@ const EXPECTED_FOREIGN_KEYS: Readonly<Record<string, readonly string[]>> = {
   version: ['package|org_id,package_id|org_id,id|NO ACTION'],
 };
 
-async function loadSources(include: (name: string) => boolean): Promise<MigrationSource[]> {
-  const names = (await readdir(migrationsUrl)).filter((n) => n.endsWith('.sql') && include(n));
-  names.sort();
-  return Promise.all(
-    names.map(async (name) =>
-      loadMigrationSource('core', name, await readFile(new URL(name, migrationsUrl), 'utf8')),
-    ),
-  );
-}
-
-const beforeOrgKeys = (name: string): boolean => name < ORG_KEYS_MIGRATION;
-const throughTier1 = (name: string): boolean => name <= ORG_KEYS_MIGRATION;
-const throughOrgKeys = (name: string): boolean => name <= ORG_KEYS_TIER2_MIGRATION;
-
 async function run(executor: ScalarSqlExecutor, statement: Step): Promise<void> {
   await executor.all({ sql: statement.sql, params: statement.params });
 }
@@ -250,6 +215,43 @@ async function rows<R>(
   params: readonly ScalarSqlValue[] = [],
 ): Promise<R[]> {
   return executor.all<R>({ sql, params });
+}
+
+async function foreignKeys(executor: ScalarSqlExecutor, table: string): Promise<string[]> {
+  const found = await rows<{
+    id: number;
+    table: string;
+    from: string;
+    to: string;
+    on_delete: string;
+  }>(
+    executor,
+    `SELECT id, "table", "from", "to", on_delete FROM pragma_foreign_key_list('${table}') ORDER BY id, seq`,
+  );
+  const grouped = new Map<number, { table: string; from: string[]; to: string[]; del: string }>();
+  for (const row of found) {
+    const entry = grouped.get(row.id) ?? {
+      table: row.table,
+      from: [],
+      to: [],
+      del: row.on_delete,
+    };
+    entry.from.push(row.from);
+    entry.to.push(row.to);
+    grouped.set(row.id, entry);
+  }
+  return [...grouped.values()]
+    .map((entry) => `${entry.table}|${entry.from.join(',')}|${entry.to.join(',')}|${entry.del}`)
+    .sort();
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected the promise to reject');
 }
 
 function seedOrganization(org: Org): Step[] {
@@ -306,7 +308,7 @@ function seedOrganization(org: Org): Step[] {
       [key('his', org), o, key('pkg', org), key('ver', org, 2), key('ver', org)],
     ),
     step(
-      "INSERT INTO project_package (org_id, project_id, package_id, origin) VALUES (?, ?, ?, 'explicit')",
+      "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) VALUES (?, ?, ?, 'explicit', 'npm', 'left-pad')",
       [o, key('prj', org), key('pkg', org)],
     ),
     step(
@@ -340,10 +342,10 @@ async function seedFixture(executor: ScalarSqlExecutor): Promise<void> {
   }
 }
 
-async function openAtPreviousSchema(open: () => Promise<OpenedPair>): Promise<OpenedPair> {
+async function openBaseline(open: () => Promise<OpenedPair>): Promise<OpenedPair> {
   const pair = await open();
   try {
-    await migrate(pair.executor, await loadSources(beforeOrgKeys), { holder: 'org-keys-before' });
+    await migrate(pair.executor, await discoveredMigrations(), { holder: 'org-keys-baseline' });
     await seedFixture(pair.executor);
   } catch (error) {
     await pair.close();
@@ -352,350 +354,16 @@ async function openAtPreviousSchema(open: () => Promise<OpenedPair>): Promise<Op
   return pair;
 }
 
-const IGNORED_FOR_DUMP = ['schema_migration', 'migration_lock'];
-
-async function userTables(executor: ScalarSqlExecutor): Promise<string[]> {
-  const found = await rows<{ name: string }>(
-    executor,
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) <> 'sqlite_' AND substr(name, 1, 4) <> '_cf_' ORDER BY name",
-  );
-  return found.map((row) => row.name).filter((name) => !IGNORED_FOR_DUMP.includes(name));
-}
-
-async function dumpData(executor: ScalarSqlExecutor): Promise<Record<string, string[]>> {
-  const dump: Record<string, string[]> = {};
-  for (const table of await userTables(executor)) {
-    const all = await rows<Record<string, unknown>>(executor, `SELECT * FROM "${table}"`);
-    dump[table] = all.map((row) => JSON.stringify(row)).sort();
-  }
-  return dump;
-}
-
-async function dumpSchema(executor: ScalarSqlExecutor): Promise<string[]> {
-  const found = await rows<{ type: string; name: string; sql: string }>(
-    executor,
-    "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND substr(name, 1, 4) <> '_cf_' ORDER BY type, name",
-  );
-  return found.map((row) => `${row.type}|${row.name}|${row.sql}`);
-}
-
-interface IndexRow {
-  readonly name: string;
-  readonly tbl_name: string;
-  readonly sql: string;
-}
-
-async function indexes(executor: ScalarSqlExecutor): Promise<IndexRow[]> {
-  return rows<IndexRow>(
-    executor,
-    "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY name",
-  );
-}
-
-async function foreignKeys(executor: ScalarSqlExecutor, table: string): Promise<string[]> {
-  const found = await rows<{
-    id: number;
-    table: string;
-    from: string;
-    to: string;
-    on_delete: string;
-  }>(
-    executor,
-    `SELECT id, "table", "from", "to", on_delete FROM pragma_foreign_key_list('${table}') ORDER BY id, seq`,
-  );
-  const grouped = new Map<number, { table: string; from: string[]; to: string[]; del: string }>();
-  for (const row of found) {
-    const entry = grouped.get(row.id) ?? {
-      table: row.table,
-      from: [],
-      to: [],
-      del: row.on_delete,
-    };
-    entry.from.push(row.from);
-    entry.to.push(row.to);
-    grouped.set(row.id, entry);
-  }
-  return [...grouped.values()]
-    .map((entry) => `${entry.table}|${entry.from.join(',')}|${entry.to.join(',')}|${entry.del}`)
-    .sort();
-}
-
-async function tableShape(executor: ScalarSqlExecutor, table: string): Promise<unknown> {
-  return {
-    columns: await rows(
-      executor,
-      `SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info('${table}') ORDER BY cid`,
-    ),
-    flags: await rows(
-      executor,
-      `SELECT strict, wr FROM pragma_table_list WHERE name = '${table}' AND schema = 'main'`,
-    ),
-  };
-}
-
-async function checkClauseCount(executor: ScalarSqlExecutor, table: string): Promise<number> {
-  const [row] = await rows<{ sql: string }>(
-    executor,
-    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-    [table],
-  );
-  return (row?.sql.match(/\bCHECK\s*\(/g) ?? []).length;
-}
-
-async function rejection(promise: Promise<unknown>): Promise<unknown> {
-  try {
-    await promise;
-  } catch (error) {
-    return error;
-  }
-  throw new Error('expected the promise to reject');
-}
-
-export function describeOrgKeyContract(
-  name: string,
-  open: () => Promise<OpenedPair>,
-  options: { readonly d1?: boolean } = {},
-): void {
-  const forgedIt = forgedItFor(options.d1 === true);
-  describe(`org-consistent keys, migrations 0020 and 0021: ${name}`, () => {
-    describe('preflight', () => {
-      let pair: OpenedPair;
-      let migrations: MigrationSource[];
-
-      beforeAll(async () => {
-        pair = await openAtPreviousSchema(open);
-        migrations = await loadSources(throughOrgKeys);
-      });
-
-      afterAll(async () => {
-        await pair.close();
-      });
-
-      it.each(CROSS_ORG_REFERENCES.map((ref) => [`${ref.table}.${ref.column}`, ref] as const))(
-        'refuses to migrate and changes nothing when %s crosses organizations',
-        async (_label, ref) => {
-          const { executor } = pair;
-          await run(executor, ref.insert);
-          try {
-            const dataBefore = await dumpData(executor);
-            const schemaBefore = await dumpSchema(executor);
-
-            const error = await rejection(migrate(executor, migrations, { holder: 'org-keys' }));
-
-            expect(error).toBeInstanceOf(MigrationApplyError);
-            expect((error as Error).message).toContain(`${ref.table}.${ref.column}`);
-            expect((error as Error).message).toContain('cross-org rows: 1');
-            expect(await dumpData(executor)).toEqual(dataBefore);
-            expect(await dumpSchema(executor)).toEqual(schemaBefore);
-            expect(
-              await rows(executor, 'SELECT id FROM schema_migration WHERE id = ?', [
-                `core:${ORG_KEYS_MIGRATION.replace('.sql', '')}`,
-              ]),
-            ).toEqual([]);
-          } finally {
-            await run(executor, ref.undo);
-          }
-        },
-      );
-
-      it('reports the number of crossing rows', async () => {
-        const { executor } = pair;
-        const second = step(
-          'INSERT INTO dist_tag (org_id, package_id, tag, version_id) VALUES (?, ?, ?, ?)',
-          [ORG_B, key('pkg', 'a'), 'crossed-two', key('ver', 'b')],
-        );
-        const first = CROSS_ORG_REFERENCES[0];
-        if (first === undefined) throw new Error('no cross-org reference cases');
-        await run(executor, first.insert);
-        await run(executor, second);
-        try {
-          const error = await rejection(migrate(executor, migrations, { holder: 'org-keys' }));
-
-          expect((error as Error).message).toContain('dist_tag.package_id cross-org rows: 2');
-        } finally {
-          await run(executor, step("DELETE FROM dist_tag WHERE tag IN ('crossed', 'crossed-two')"));
-        }
-      });
-    });
-
-    describe('orphan preflight', () => {
-      let pair: OpenedPair;
-      let migrations: MigrationSource[];
-
-      beforeAll(async () => {
-        pair = await openAtPreviousSchema(open);
-        migrations = await loadSources(throughOrgKeys);
-      });
-
-      afterAll(async () => {
-        await pair.close();
-      });
-
-      forgedIt(
-        'refuses to migrate and changes nothing when a child row has no parent',
-        async () => {
-          const { executor } = pair;
-          await withForeignKeysOff(executor, () =>
-            run(
-              executor,
-              step(
-                "INSERT INTO dist_tag_history (id, org_id, package_id, tag, version_id, previous_version_id, action, actor_type) VALUES ('orphan', ?, 'missing-package', 'x', NULL, NULL, 'set', 'user')",
-                [ORG_A],
-              ),
-            ),
-          );
-          try {
-            const schemaBefore = await dumpSchema(executor);
-
-            const error = await rejection(migrate(executor, migrations, { holder: 'org-keys' }));
-
-            expect(error).toBeInstanceOf(MigrationApplyError);
-            expect((error as Error).message).toContain(
-              'dist_tag_history.package_id orphan rows: 1',
-            );
-            expect(await dumpSchema(executor)).toEqual(schemaBefore);
-          } finally {
-            await run(executor, step("DELETE FROM dist_tag_history WHERE id = 'orphan'"));
-          }
-        },
-      );
-    });
-
-    describe('tier 2 preflight (0021)', () => {
-      let pair: OpenedPair;
-      let migrations: MigrationSource[];
-
-      beforeAll(async () => {
-        pair = await openAtPreviousSchema(open);
-        await migrate(pair.executor, await loadSources(throughTier1), { holder: 'org-keys-tier1' });
-        migrations = await loadSources(throughOrgKeys);
-      });
-
-      afterAll(async () => {
-        await pair.close();
-      });
-
-      it.each(
-        CROSS_ORG_REFERENCES.filter((ref) => TIER_2_TABLES.includes(ref.table)).map(
-          (ref) => [`${ref.table}.${ref.column}`, ref] as const,
-        ),
-      )(
-        'refuses to run 0021 and changes nothing when %s crosses organizations',
-        async (_l, ref) => {
-          const { executor } = pair;
-          await run(executor, ref.insert);
-          try {
-            const dataBefore = await dumpData(executor);
-            const schemaBefore = await dumpSchema(executor);
-
-            const error = await rejection(migrate(executor, migrations, { holder: 'org-keys' }));
-
-            expect(error).toBeInstanceOf(MigrationApplyError);
-            expect((error as Error).message).toContain(
-              `${ref.table}.${ref.column} cross-org rows: 1`,
-            );
-            expect(await dumpData(executor)).toEqual(dataBefore);
-            expect(await dumpSchema(executor)).toEqual(schemaBefore);
-            expect(
-              await rows(executor, 'SELECT id FROM schema_migration WHERE id = ?', [
-                `core:${ORG_KEYS_TIER2_MIGRATION.replace('.sql', '')}`,
-              ]),
-            ).toEqual([]);
-          } finally {
-            await run(executor, ref.undo);
-          }
-        },
-      );
-    });
-
-    it('preserves version counts and contents with negative, zero and large rowids', async () => {
-      const pair = await openAtPreviousSchema(open);
-      try {
-        const { executor } = pair;
-        await migrate(executor, await loadSources(throughTier1), { holder: 'rowids-tier1' });
-        const rowids = [-1, -7, 0, Number.MAX_SAFE_INTEGER];
-        const ids = [key('ver', 'a'), key('ver', 'a', 2), key('ver', 'b'), key('ver', 'b', 2)];
-        for (const [index, id] of ids.entries()) {
-          await run(
-            executor,
-            step('UPDATE version SET rowid = ? WHERE id = ?', [rowids[index]!, id]),
-          );
-        }
-        expect(await rows(executor, 'SELECT rowid FROM version ORDER BY rowid')).toEqual(
-          [...rowids].sort((a, b) => a - b).map((rowid) => ({ rowid })),
-        );
-        const before = await dumpData(executor);
-        const countBefore = await rows(executor, 'SELECT count(*) AS n FROM version');
-
-        await migrate(executor, await loadSources(throughOrgKeys), { holder: 'rowids-tier2' });
-
-        expect(await rows(executor, 'SELECT count(*) AS n FROM version')).toEqual(countBefore);
-        expect(await dumpData(executor)).toEqual(before);
-      } finally {
-        await pair.close();
-      }
-    });
-
+export function describeOrgKeyContract(name: string, open: () => Promise<OpenedPair>): void {
+  describe(`org-consistent keys on the baseline: ${name}`, () => {
     describe('populated fixture', () => {
       let pair: OpenedPair;
-      let dataBefore: Record<string, string[]>;
-      let indexesBefore: IndexRow[];
-      let shapesBefore: unknown[];
-      let checksBefore: number[];
-
       beforeAll(async () => {
-        pair = await openAtPreviousSchema(open);
-        const { executor } = pair;
-        dataBefore = await dumpData(executor);
-        indexesBefore = await indexes(executor);
-        shapesBefore = await Promise.all(REBUILT_TABLES.map((t) => tableShape(executor, t)));
-        checksBefore = await Promise.all(REBUILT_TABLES.map((t) => checkClauseCount(executor, t)));
-        await migrate(executor, await loadSources(throughOrgKeys), { holder: 'org-keys' });
+        pair = await openBaseline(open);
       });
 
       afterAll(async () => {
         await pair.close();
-      });
-
-      it('ships as a contract-phase migration', async () => {
-        const found = await loadSources(
-          (n) => n === ORG_KEYS_MIGRATION || n === ORG_KEYS_TIER2_MIGRATION,
-        );
-
-        expect(found.map((source) => source.phase)).toEqual(['contract', 'contract']);
-      });
-
-      it('keeps every row of every table', async () => {
-        expect(await dumpData(pair.executor)).toEqual(dataBefore);
-      });
-
-      it('keeps every index and adds one unique (id, org_id) index per parent', async () => {
-        const after = await indexes(pair.executor);
-
-        const kept = after.filter((index) => !NEW_PARENT_INDEXES.includes(index.name));
-        const added = after.filter((index) => NEW_PARENT_INDEXES.includes(index.name));
-        expect(kept).toEqual(indexesBefore);
-        expect(added.map((index) => `${index.tbl_name}:${index.name}`).sort()).toEqual([
-          'package:package_org_id',
-          'project:project_org_id',
-          'source:source_org_id',
-          'version:version_org_id',
-        ]);
-        for (const index of added) expect(index.sql).toMatch(/^CREATE UNIQUE INDEX/);
-      });
-
-      it('keeps column definitions, STRICT and WITHOUT ROWID of rebuilt tables', async () => {
-        const after = await Promise.all(REBUILT_TABLES.map((t) => tableShape(pair.executor, t)));
-
-        expect(after).toEqual(shapesBefore);
-      });
-
-      it('keeps every CHECK clause of rebuilt tables', async () => {
-        const after = await Promise.all(
-          REBUILT_TABLES.map((t) => checkClauseCount(pair.executor, t)),
-        );
-
-        expect(after).toEqual(checksBefore);
       });
 
       it.each(Object.entries(EXPECTED_FOREIGN_KEYS))(

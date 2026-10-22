@@ -7,8 +7,7 @@ const D1_MAX_PATTERN_BYTES = 50;
 const packagesRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const EXPECTED_MATCHES: Record<string, number> = {
-  'db-sqlite/migrations/0002_local_login.sql': 2,
-  'db-sqlite/migrations/0007_registry.sql': 6,
+  'db-sqlite/migrations/0001_init.sql': 8,
   'db-sqlite/src/contract/auth-contract.ts': 2,
   'db-sqlite/src/contract/migration-contract.ts': 5,
   'db-sqlite/src/contract/migration-lock-contract.ts': 1,

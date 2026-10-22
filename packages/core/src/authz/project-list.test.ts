@@ -20,7 +20,8 @@ const SESSION_SECRET = 'A'.repeat(43);
 const ULID_PREFIX = '01J00000000000000000';
 
 function idOf(n: number): string {
-  return `${ULID_PREFIX}${n.toString(32).toUpperCase().padStart(6, '0')}`;
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  return `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;
 }
 
 function entry(n: number, status: 'active' | 'archived' = 'active'): ProjectListEntry {
@@ -55,6 +56,7 @@ function setup(w: World, sourceRows: readonly (ProjectListEntry & object)[] = w.
     sourceRows
       .filter((p) => (page.afterId === undefined ? true : p.id > page.afterId))
       .filter((p) => p.status === page.status)
+      .filter((p) => page.ids === undefined || page.ids.includes(p.id))
       .sort((a, b) => (a.id < b.id ? -1 : 1))
       .slice(0, page.limit),
   );
@@ -68,7 +70,25 @@ function setup(w: World, sourceRows: readonly (ProjectListEntry & object)[] = w.
     return map;
   });
   const access: ProjectReadAccess = { permissionsFor };
-  return { source, access, list, permissionsFor, lister: createProjectLister({ source, access }) };
+  const listReadableProjects = vi.fn<ReadableProjectSource['listReadableProjects']>(
+    async (_ctx, _actor, page) =>
+      sourceRows
+        .filter((p) => page.afterId === undefined || p.id > page.afterId)
+        .filter((p) => p.status === page.status)
+        .filter((p) => page.ids === undefined || page.ids.includes(p.id))
+        .filter((p) => (w.projectPermissions[p.id] ?? []).includes('project:read'))
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .slice(0, page.limit),
+  );
+  const readableSource = { listReadableProjects };
+  return {
+    source,
+    access,
+    list,
+    permissionsFor,
+    listReadableProjects,
+    lister: createProjectLister({ source, access, readable: readableSource }),
+  };
 }
 
 function engineFor(w: World) {
@@ -330,16 +350,16 @@ describe('paging', () => {
     expect(result.ok && result.value.nextAfterId).toBeNull();
   });
 
-  it('crosses the 200-row batch boundary with readable rows on both sides', async () => {
+  it('reads sparse grants in one query', async () => {
     const w = world({
       projects: range(450),
       projectPermissions: readable([199, 200, 201, 202, 450]),
     });
-    const { lister, permissionsFor } = setup(w);
+    const { lister, listReadableProjects } = setup(w);
     expect(await ids(lister, actorOf(w), { limit: 10 })).toEqual(
       [199, 200, 201, 202, 450].map(idOf),
     );
-    expect(permissionsFor).toHaveBeenCalledTimes(3);
+    expect(listReadableProjects).toHaveBeenCalledTimes(1);
   });
 
   it('keeps hidden rows at the batch boundary out of the page and the cursor', async () => {
@@ -353,20 +373,23 @@ describe('paging', () => {
   it('never exposes a hidden id after 10,050 hidden projects', async () => {
     const total = 10_050;
     const w = world({ projects: range(total), projectPermissions: readable([total]) });
-    const { lister, list } = setup(w);
+    const { lister, list, listReadableProjects } = setup(w);
     const result = await lister.list(ctx, actorOf(w), { limit: 1 });
-    expect(result).toEqual({ ok: false, error: 'scan_incomplete' });
-    expect(JSON.stringify(result)).not.toMatch(/01J0000000000000000/);
-    expect(list.mock.calls.length).toBe(10);
+    expect(result).toEqual({
+      ok: true,
+      value: { items: [entry(total)], nextAfterId: idOf(total) },
+    });
+    expect(list).not.toHaveBeenCalled();
+    expect(listReadableProjects).toHaveBeenCalledTimes(1);
   });
 
-  it('returns found items with the last returned id when the scan cap is reached', async () => {
+  it('returns a final short page for sparse grants', async () => {
     const w = world({ projects: range(3000), projectPermissions: readable([5]) });
     const result = await setup(w).lister.list(ctx, actorOf(w), { limit: 3 });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.items.map((p) => p.id)).toEqual([idOf(5)]);
-    expect(result.value.nextAfterId).toBe(idOf(5));
+    expect(result.value.nextAfterId).toBeNull();
   });
 });
 
@@ -391,7 +414,7 @@ describe('item shape and wiring', () => {
     const { source } = setup(w);
     const lister = createProjectLister({
       source,
-      access: { permissionsFor: async () => new Map() },
+      readable: { listReadableProjects: async () => [] },
     });
     expect(await ids(lister, actorOf(w), { limit: 10 })).toEqual([]);
   });
@@ -408,6 +431,7 @@ function readableSetup(w: World) {
       w.projects
         .filter((p) => (page.afterId === undefined ? true : p.id > page.afterId))
         .filter((p) => p.status === page.status)
+        .filter((p) => page.ids === undefined || page.ids.includes(p.id))
         .filter((p) => (w.projectPermissions[p.id] ?? []).includes('project:read'))
         .sort((a, b) => (a.id < b.id ? -1 : 1))
         .slice(0, page.limit),
@@ -530,7 +554,7 @@ describe('readable-projects source', () => {
   it('refuses a readable source without its method', () => {
     const { source } = setup(world({ projects: range(1) }));
     expect(() => createProjectLister({ source, readable: {} as never })).toThrow(TypeError);
-    expect(() => createProjectLister({ source })).toThrow(TypeError);
+    expect(() => createProjectLister({ source } as never)).toThrow(TypeError);
   });
 });
 
@@ -545,7 +569,7 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-describe('capped fallback and readable source agree', () => {
+describe('restricted access lookup and readable source agree', () => {
   it.each(Array.from({ length: 40 }, (_, i) => i + 1))(
     'returns equal pages and cursors for random world %i',
     async (seed) => {
@@ -572,7 +596,12 @@ describe('capped fallback and readable source agree', () => {
         const actor = actorOf(w, status === 'archived');
         let afterId: string | undefined;
         for (let page = 0; page < 40; page += 1) {
-          const request = { limit, status, ...(afterId === undefined ? {} : { afterId }) };
+          const request = {
+            limit,
+            status,
+            restrictTo: projects.map((p) => p.id),
+            ...(afterId === undefined ? {} : { afterId }),
+          };
           const left = await fallback.list(ctx, actor, request);
           const right = await viaReadable.list(ctx, actor, request);
           expect(right).toEqual(left);
@@ -638,6 +667,29 @@ describe('restricted listing through the read-access port', () => {
 });
 
 describe('restricted listing through the readable source', () => {
+  it('fills 25 grant-readable bindings as 10, 10, 5 and stops', async () => {
+    const boundNumbers = Array.from({ length: 25 }, (_, i) => (i + 1) * 200);
+    const w = world({ projects: range(5000), projectPermissions: readable(boundNumbers) });
+    const { lister } = readableSetup(w);
+    let afterId: string | undefined;
+    const sizes: number[] = [];
+    const seen: string[] = [];
+    for (let page = 0; page < 4; page += 1) {
+      const result = await lister.list(ctx, actorOf(w), {
+        limit: 10,
+        restrictTo: boundNumbers.map(idOf),
+        ...(afterId === undefined ? {} : { afterId }),
+      });
+      if (!result.ok) throw new Error(result.error);
+      sizes.push(result.value.items.length);
+      seen.push(...result.value.items.map((p) => p.id));
+      if (result.value.nextAfterId === null) break;
+      afterId = result.value.nextAfterId;
+    }
+    expect(sizes).toEqual([10, 10, 5]);
+    expect(seen).toEqual(boundNumbers.map(idOf));
+  });
+
   it('reaches a bound project behind thousands of readable ones in one page', async () => {
     const w = world({
       projects: range(2_500),
@@ -650,7 +702,7 @@ describe('restricted listing through the readable source', () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it('skips ahead within one page to a far bound project, staying under the read cap', async () => {
+  it('returns distant bound projects in one query', async () => {
     const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
     const validId = (n: number): string =>
       `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;
@@ -678,7 +730,7 @@ describe('restricted listing through the readable source', () => {
         ...(afterId === undefined ? {} : { afterId }),
       });
       if (!result.ok) throw new Error(`refused: ${result.error}`);
-      expect(listReadableProjects.mock.calls.length).toBeLessThanOrEqual(10);
+      expect(listReadableProjects).toHaveBeenCalledTimes(1);
       found.push(...result.value.items.map((p) => p.id));
       if (result.value.nextAfterId === null) break;
       afterId = result.value.nextAfterId;
@@ -719,7 +771,7 @@ describe('restricted listing through the readable source', () => {
         ...(afterId === undefined ? {} : { afterId }),
       });
       if (!result.ok) throw new Error(`refused: ${result.error}`);
-      expect(listReadableProjects.mock.calls.length).toBeLessThanOrEqual(10);
+      expect(listReadableProjects).toHaveBeenCalledTimes(1);
       found.push(...result.value.items.map((p) => p.id));
       const next = result.value.nextAfterId;
       if (next === null) break;
@@ -732,50 +784,19 @@ describe('restricted listing through the readable source', () => {
     expect(sawCursor || found.length > 0).toBe(true);
   });
 
-  it('hands out a bound id, never the last scanned unbound one, when the read cap is hit', async () => {
-    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-    const validId = (n: number): string =>
-      `${ULID_PREFIX}${[5, 4, 3, 2, 1, 0].map((p) => alphabet[Math.floor(n / 32 ** p) % 32]).join('')}`;
-    const rowsOf = (after: string | undefined): ProjectListEntry[] =>
-      Array.from({ length: 5_000 }, (_, i) => i + 1)
-        .map((n) => ({
-          id: validId(n),
-          slug: `p${n}`,
-          name: `Project ${n}`,
-          status: 'archived' as const,
-        }))
-        .filter((p) => after === undefined || p.id > after)
-        .slice(0, PROJECT_LIST_MAX_LIMIT);
-    const listReadableProjects = vi.fn<ReadableProjectSource['listReadableProjects']>(
-      async (_ctx, _actor, page) => rowsOf(page.afterId),
+  it('exhausts more than ten chunks of invisible bindings without an empty continuation page', async () => {
+    const w = world({ projects: range(1000), projectPermissions: readable([1000]) });
+    const { lister, listReadableProjects } = readableSetup(w);
+    expect(
+      await lister.list(ctx, actorOf(w), {
+        limit: 10,
+        restrictTo: w.projects.map((p) => p.id),
+      }),
+    ).toEqual({ ok: true, value: { items: [entry(1000)], nextAfterId: null } });
+    expect(listReadableProjects).toHaveBeenCalledTimes(20);
+    expect(listReadableProjects.mock.calls.every(([, , page]) => page.ids?.length === 50)).toBe(
+      true,
     );
-    const w = world({ projects: [] });
-    const lister = createProjectLister({
-      source: setup(w).source,
-      readable: { listReadableProjects },
-    });
-    const bound = Array.from({ length: 2_500 }, (_, i) => validId(2 * i + 1));
-    const result = await lister.list(ctx, actorOf(w), { limit: 5, restrictTo: bound });
-    expect(listReadableProjects).toHaveBeenCalledTimes(10);
-    expect(result).toEqual({ ok: true, value: { items: [], nextAfterId: validId(1_999) } });
-  });
-
-  it('refuses a readable source that does not advance past the cursor', async () => {
-    const w = world({ projects: range(300), projectPermissions: readable([300]) });
-    const stuck = Array.from({ length: PROJECT_LIST_MAX_LIMIT }, (_, i) => entry(i + 1));
-    const listReadableProjects = vi.fn<ReadableProjectSource['listReadableProjects']>(
-      async () => stuck,
-    );
-    const lister = createProjectLister({
-      source: setup(w).source,
-      readable: { listReadableProjects },
-    });
-    const result = await lister.list(ctx, actorOf(w), {
-      limit: 5,
-      restrictTo: [idOf(300)],
-      afterId: idOf(250),
-    });
-    expect(result).toEqual({ ok: false, error: 'source_invalid' });
   });
 
   it('never lists a readable project outside the binding', async () => {

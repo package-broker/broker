@@ -7,6 +7,14 @@ const PAGE_SQL =
 
 export function createAuditVerifyReader(executor: ScalarSqlExecutor): AuditVerifyReader {
   return {
+    async markVerified(ctx, completedAt) {
+      await executor.batch([
+        {
+          sql: 'UPDATE organization SET audit_last_verified_at = ? WHERE id = ? AND (audit_last_verified_at IS NULL OR audit_last_verified_at < ?)',
+          params: [completedAt, ctx.orgId, completedAt],
+        },
+      ]);
+    },
     async page(ctx, afterSeq, limit) {
       if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {
         throw new RangeError('afterSeq must be a non-negative safe integer');

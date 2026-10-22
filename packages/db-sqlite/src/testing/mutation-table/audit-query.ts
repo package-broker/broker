@@ -41,6 +41,12 @@ async function fixture(context: CaseContext) {
       orgId,
     );
   }
+  for (const [orgId, timestamp] of [
+    [own.orgId, '2026-10-22T11:00:00.000Z'],
+    [foreign.orgId, '2026-10-22T12:00:00.000Z'],
+  ] as const) {
+    await seed('UPDATE organization SET audit_last_verified_at = ? WHERE id = ?', timestamp, orgId);
+  }
   const foreignRows = async () => ({
     events: await context.executor.all({
       sql: 'SELECT * FROM audit_event WHERE org_id = ? ORDER BY seq',
@@ -59,6 +65,7 @@ async function fixture(context: CaseContext) {
   };
   return {
     own,
+    foreign,
     repository: createAuditQueryRepository(executor),
     async assertForeignUnchanged() {
       expect(await foreignRows()).toEqual(before);
@@ -105,8 +112,21 @@ const headSparesForeign: ContractCase = {
   name: 'the audit head and pending count use only organization rows',
   async run(context) {
     const { own, repository, assertForeignUnchanged } = await fixture(context);
-    expect(await repository.head(own)).toEqual({ seq: 2, hash: '2'.repeat(64), pending: 1 });
+    expect(await repository.head(own)).toEqual({
+      seq: 2,
+      hash: '2'.repeat(64),
+      pending: 1,
+      lastVerifiedAt: '2026-10-22T11:00:00.000Z',
+    });
     await assertForeignUnchanged();
+  },
+};
+
+const verificationSparesForeign: ContractCase = {
+  name: 'audit head reads the requested organization verification time',
+  async run(context) {
+    const { foreign, repository } = await fixture(context);
+    expect((await repository.head(foreign))?.lastVerifiedAt).toBe('2026-10-22T12:00:00.000Z');
   },
 };
 
@@ -114,7 +134,7 @@ export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditQueryRepository',
     file: 'repositories/audit-query.ts',
-    cases: [listSparesForeign, cursorSparesForeign, headSparesForeign],
+    cases: [listSparesForeign, cursorSparesForeign, headSparesForeign, verificationSparesForeign],
     predicates: [
       {
         name: 'listed audit events belong to the organization',
@@ -136,6 +156,13 @@ export const entries: readonly MutationEntry[] = [
         neutral: '(? is not null)',
         copies: 1,
         caseName: headSparesForeign.name,
+      },
+      {
+        name: 'the last verification time belongs to the organization',
+        locate: /(?<=FROM organization WHERE )id = \?/,
+        neutral: '(? is not null)',
+        copies: 1,
+        caseName: verificationSparesForeign.name,
       },
       {
         name: 'the pending audit count belongs to the organization',

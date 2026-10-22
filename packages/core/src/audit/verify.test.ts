@@ -55,10 +55,21 @@ function setup(rows: readonly AuditRow[] = chain) {
       routeTemplates: new Set(),
     },
   );
-  const context = { org, signal: abort.signal, observability } as JobContext;
-  const job = auditVerifyJob({ page });
+  const now = vi.fn(() => new Date('2026-10-22T12:00:00.000Z'));
+  const markVerified = vi.fn<(ctx: typeof org, completedAt: string) => Promise<void>>(
+    async () => undefined,
+  );
+  const context = {
+    org,
+    signal: abort.signal,
+    observability,
+    ports: { clock: { now } },
+  } as unknown as JobContext;
+  const job = auditVerifyJob({ page, markVerified });
   return {
     records,
+    now,
+    markVerified,
     abort,
     page,
     job,
@@ -68,6 +79,7 @@ function setup(rows: readonly AuditRow[] = chain) {
 }
 
 function expectBroken(s: ReturnType<typeof setup>, seq: number, reason: string) {
+  expect(s.markVerified).not.toHaveBeenCalled();
   expect(s.logs()).toHaveLength(1);
   expect(s.logs()[0]).toMatchObject({ level: 'error', event: 'audit.chain_broken', seq, reason });
   expect(s.records.filter((r) => r.kind === 'counter')).toEqual([
@@ -101,6 +113,38 @@ describe('auditVerifyJob', () => {
       rows: 1200,
     });
     expect(JSON.stringify(s.records)).not.toContain(SENTINEL);
+  });
+
+  it.each([0, 1200])('records completion time after verifying %s rows', async (count) => {
+    const s = setup(chain.slice(0, count));
+    const completedAt = '2026-10-22T12:34:56.789Z';
+    s.page.mockImplementation(async (_ctx, after, limit) => {
+      if (after === count) s.now.mockReturnValue(new Date(completedAt));
+      return chain
+        .slice(0, count)
+        .filter((row) => row.seq > after)
+        .slice(0, limit);
+    });
+    s.markVerified.mockImplementation(async () => {
+      expect(s.logs()).toEqual([]);
+    });
+    await s.run();
+    expect(s.markVerified.mock.calls).toEqual([[org, completedAt]]);
+  });
+
+  it('does not record completion when a page read fails', async () => {
+    const s = setup();
+    s.page.mockRejectedValueOnce(new Error('read failed'));
+    await expect(s.run()).rejects.toThrow('read failed');
+    expect(s.markVerified).not.toHaveBeenCalled();
+    expect(s.logs()).toEqual([]);
+  });
+
+  it('propagates a completion write failure without reporting success', async () => {
+    const s = setup([]);
+    s.markVerified.mockRejectedValueOnce(new Error('write failed'));
+    await expect(s.run()).rejects.toThrow('write failed');
+    expect(s.logs()).toEqual([]);
   });
 
   it('rejects a tampered payload at row 700', async () => {
@@ -197,6 +241,7 @@ describe('auditVerifyJob', () => {
     });
     await s.run();
     expect(s.page).toHaveBeenCalledTimes(1);
+    expect(s.markVerified).not.toHaveBeenCalled();
     expect(s.logs()).toHaveLength(1);
     expect(s.logs()[0]).toMatchObject({ level: 'warn', event: 'audit.verify_partial', rows: 500 });
     expect(JSON.stringify(s.records)).not.toContain(SENTINEL);
@@ -208,6 +253,7 @@ describe('auditVerifyJob', () => {
     await s.run();
     expect(s.page).not.toHaveBeenCalled();
     expect(s.logs()).toHaveLength(1);
+    expect(s.markVerified).not.toHaveBeenCalled();
     expect(s.logs()[0]).toMatchObject({ event: 'audit.verify_partial', rows: 0 });
   });
 
@@ -219,6 +265,7 @@ describe('auditVerifyJob', () => {
     });
     await s.run();
     expect(s.logs()).toHaveLength(1);
+    expect(s.markVerified).not.toHaveBeenCalled();
     expect(s.logs()[0]).toMatchObject({ event: 'audit.verify_partial', rows: 0 });
   });
 

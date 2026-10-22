@@ -2,10 +2,14 @@ import { sql } from 'kysely';
 import type { SourceSyncDeps } from '@package-broker/core/ingest/source-sync-job';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { sourceSelectionCondition } from './source-selection.js';
+import { sourceSelectionRevision } from './source-selection-revision.js';
 import { compile, db } from '../kysely.js';
 
 export type SourceSyncReads = Required<
-  Pick<SourceSyncDeps, 'existingKeys' | 'staleHeldKeys' | 'selectedKeys' | 'selectionRevision'>
+  Pick<
+    SourceSyncDeps,
+    'existingKeys' | 'staleHeldKeys' | 'selectedKeys' | 'selectionRevision' | 'selectionSnapshot'
+  >
 >;
 
 const NAMES_PER_STATEMENT = 98;
@@ -123,20 +127,21 @@ export function selectedKeysStatement(
 
 export function selectionRevisionStatement(ctx: OrgContext, sourceId: string): Statement {
   requireSourceId(sourceId);
-  return compile(
-    db.selectNoFrom(
-      sql<string>`(SELECT json_array(source.config_json, source.status = 'active',
-          (SELECT json_group_array(registration.pattern) FROM (
-            SELECT registered_name.pattern FROM registered_name
-            WHERE registered_name.org_id = ${ctx.orgId} AND registered_name.source_id = ${sourceId}
-            ORDER BY registered_name.pattern) AS registration))
-        FROM source WHERE source.org_id = ${ctx.orgId} AND source.id = ${sourceId})`.as('revision'),
-    ),
-  );
+  return compile(db.selectNoFrom(sourceSelectionRevision(ctx, sourceId).as('revision')));
 }
 
 export function createSourceSyncReads(executor: SqlExecutor): SourceSyncReads {
   return {
+    async selectionSnapshot(ctx, sourceId, names) {
+      const [selected, revision] = await executor.batch([
+        selectedKeysStatement(ctx, sourceId, names),
+        selectionRevisionStatement(ctx, sourceId),
+      ]);
+      return {
+        keys: (selected!.rows as { name: string }[]).map((row) => row.name),
+        revision: (revision!.rows[0] as { revision: string | null }).revision ?? '',
+      };
+    },
     async selectedKeys(ctx, sourceId, names) {
       const rows = await executor.all<{ name: string }>(
         selectedKeysStatement(ctx, sourceId, names),

@@ -23,6 +23,7 @@ import { FORMAT, NOW, seconds, until } from '../internal/lease-time.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { unseenSourcePackages } from './catalogue-reconcile.js';
 import { sourceSelectionCondition } from './source-selection.js';
+import { sourceSelectionRevision } from './source-selection-revision.js';
 
 export type {
   IngestScopeRef,
@@ -98,14 +99,19 @@ export function ingestSessionGuard(
   );
 }
 
-function pinnedUnseen(handle: IngestSessionHandle): { sourceId: string; unseen: number } | null {
+function pinnedSelection(
+  handle: IngestSessionHandle,
+): { sourceId: string; unseen?: number; revision?: string } | null {
   if (handle.cursor === null) return null;
   try {
-    const value = JSON.parse(handle.cursor) as { u?: unknown; s?: unknown } | null;
-    return Number.isSafeInteger(value?.u) &&
-      (value?.u as number) >= 0 &&
-      typeof value?.s === 'string'
-      ? { sourceId: value.s, unseen: value.u as number }
+    const value = JSON.parse(handle.cursor) as { u?: unknown; s?: unknown; v?: unknown } | null;
+    const unseen = Number.isSafeInteger(value?.u) && (value?.u as number) >= 0;
+    return typeof value?.s === 'string' && (unseen || typeof value.v === 'string')
+      ? {
+          sourceId: value.s,
+          ...(unseen ? { unseen: value.u as number } : {}),
+          ...(typeof value.v === 'string' ? { revision: value.v } : {}),
+        }
       : null;
   } catch {
     return null;
@@ -117,14 +123,15 @@ export function createIngestSessionWriteGuard(
   handle: IngestSessionHandle,
   job?: JobGuard,
 ): CatalogueWriteGuard {
-  const pin = pinnedUnseen(handle);
+  const pin = pinnedSelection(handle);
   return registerCatalogueWriteGuard(ctx, [
     ...(pin === null
       ? []
       : assertCheck(
-          sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}
+          sql<boolean>`(EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}
             AND ingest_session.scope = 'source' AND ingest_session.source_id = ${pin.sourceId})
-            AND ${unseenSourcePackages(ctx, pin.sourceId)} = ${pin.unseen}`,
+            ${pin.unseen === undefined ? sql`` : sql`AND ${unseenSourcePackages(ctx, pin.sourceId)} = ${pin.unseen}`}
+            AND ${sourceSelectionRevision(ctx, pin.sourceId)} = ${pin.revision ?? null})`,
         )),
     ...assertCheck(sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}
       AND (ingest_session.scope = 'source' OR EXISTS (SELECT 1 FROM source

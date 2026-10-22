@@ -43,7 +43,7 @@ import {
 } from './visibility-subset.js';
 import { actorHolds } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
-import { idempotencyInsertStatement } from './idempotency.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
 
 const MAX_STATEMENTS = 500;
@@ -500,6 +500,11 @@ export function createVisibilityStore(
       if (!(await holds(statusMatches))) return { ok: false, reason: 'conflict' };
       if (!(await holds(authority))) return { ok: false, reason: 'authority' };
       if (!(await holds(blobReady))) return { ok: false, reason: 'conflict' };
+      if (
+        input.idempotency !== undefined &&
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
+      )
+        return { ok: false, reason: 'conflict' };
     } catch {
       return { ok: false, reason: 'unclassified' };
     }

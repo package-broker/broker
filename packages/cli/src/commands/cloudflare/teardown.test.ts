@@ -30,6 +30,10 @@ const response = (result: unknown = null, status = 200) =>
 const listingResponse = (result: unknown) => pageResponse(result, { total_pages: 1 });
 const snapshotResponse = (result: unknown) => response(result);
 
+function ownedWorkerSettings(bindings: unknown[] = []) {
+  return { bindings, tags: ['pb-install-v1', `pb-owner-${journal.identity.owner_digest}`] };
+}
+
 function attachmentResponse(path: string) {
   const settings = journal.deployment?.attempt.prior_settings;
   if (path.endsWith('/workers/domains'))
@@ -50,7 +54,8 @@ function attachmentResponse(path: string) {
   if (/\/(?:cors|lifecycle|lock)$/.test(path)) return response({ rules: [] });
   if (/\/(?:domains\/managed|sippy)$/.test(path)) return response({ enabled: false });
   if (path.endsWith('/workers/scripts')) return snapshotResponse([]);
-  if (path.endsWith('/settings')) return response({ bindings: [], tags: [] });
+  if (path.endsWith('/settings'))
+    return response(journal.deployment ? ownedWorkerSettings() : { bindings: [], tags: [] });
   if (path.endsWith('/versions')) return listingResponse({ items: [] });
   if (path.endsWith('/secrets')) return response([]);
   if (path.endsWith('/subdomain'))
@@ -108,6 +113,7 @@ beforeEach(async () => {
     project,
     inventory,
     env,
+    iUnderstandThisDeletes: true,
     now: () => 1792400000000,
     sleep: async () => undefined,
     fetch: vi.fn(async (input, init) => {
@@ -143,6 +149,22 @@ afterEach(async () => {
 });
 async function save() {
   await writeFile(inventory, JSON.stringify(journal));
+}
+
+function createdDatabase() {
+  const database = journal.resources.d1!;
+  const id = 'create-db';
+  database.evidence = { source: 'created', operation_id: id, verified_at: journal.updated_at };
+  journal.operations.push({
+    id,
+    kind: 'd1',
+    name: database.name,
+    spec_sha256: 'e'.repeat(64),
+    absence_observed_at: journal.updated_at,
+    started_at: journal.updated_at,
+    state: 'confirmed',
+    resolved_id: database.id,
+  });
 }
 
 it('deletes only recorded IDs after partial creation and repeated teardown reports already gone', async () => {
@@ -195,7 +217,9 @@ it('requires both destructive acknowledgement and the exact ownership digest for
     { inventoryId: journal.identity.owner_digest },
     { iUnderstandThisDeletes: true, inventoryId: 'wrong' },
   ]) {
-    expect((await teardown({ ...options, ...flags })).exitCode).toBe(2);
+    expect((await teardown({ ...options, iUnderstandThisDeletes: false, ...flags })).exitCode).toBe(
+      2,
+    );
   }
   expect(trace).toEqual([]);
   expect(
@@ -835,6 +859,7 @@ it('respects the shared inventory lock and releases its own lock on provider fai
 });
 
 it('dispatches both commands through the CLI with one JSON envelope and safe errors', async () => {
+  createdDatabase();
   await save();
   vi.spyOn(Date, 'now').mockImplementation(options.now!);
   const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -873,8 +898,10 @@ it('refuses to replace a cron list containing an unrecorded schedule', async () 
   await saveAttachments();
   const fetcher = options.fetch!;
   options.fetch = vi.fn(async (input, init) => {
-    await fetcher(input, init);
-    return response({ schedules: [{ cron: '* * * * *' }, { cron: '0 * * * *' }] });
+    const fallback = await fetcher(input, init);
+    return new URL(String(input)).pathname.endsWith('/schedules')
+      ? response({ schedules: [{ cron: '* * * * *' }, { cron: '0 * * * *' }] })
+      : fallback;
   });
   const result = await teardown(options);
   expect(result.exitCode).toBe(8);
@@ -1138,6 +1165,83 @@ async function expectOwnershipConflict() {
   expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
 }
 
+it.each(['missing', 'empty', 'install_only', 'owner_only', 'foreign', 'changed'] as const)(
+  'refuses a broker-deployed replacement Worker with %s ownership tags before mutation',
+  async (kind) => {
+    await saveAttachments();
+    let reads = 0;
+    interceptRead(async (url, fallback) => {
+      if (!url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}/settings`))
+        return fallback;
+      reads++;
+      const owned = ['pb-install-v1', `pb-owner-${journal.identity.owner_digest}`];
+      const tags =
+        kind === 'foreign'
+          ? ['pb-install-v1', `pb-owner-${'f'.repeat(64)}`]
+          : kind === 'install_only'
+            ? owned.slice(0, 1)
+            : kind === 'owner_only'
+              ? owned.slice(1)
+              : kind === 'changed' && reads === 1
+                ? owned
+                : [];
+      return response({ bindings: [], ...(kind === 'missing' ? {} : { tags }) });
+    });
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(8);
+    expect(result.output.error?.code).toBe('ownership_conflict');
+    expect(result.output.error?.message).toContain('ownership');
+    expect(result.output.checks).toEqual([]);
+    expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+    expect(reads).toBe(kind === 'changed' ? 2 : 1);
+  },
+);
+
+it.each([false, true])(
+  'closes HTTP entry points before draining R2 with Worker deletion refused=%s',
+  async (refused) => {
+    await saveAttachments();
+    const name = await provisionedBucket();
+    const attached = new Set(['worker', 'route', 'domain']);
+    const fetcher = options.fetch!;
+    let drained = false;
+    options.fetch = vi.fn(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const fallback = await fetcher(input, init);
+      if (path.endsWith('/settings'))
+        return response({
+          bindings: [],
+          tags: ['pb-install-v1', `pb-owner-${journal.identity.owner_digest}`],
+        });
+      if (init?.method === 'DELETE') {
+        if (path.endsWith(`/workers/scripts/${journal.identity.script_name}`)) {
+          if (refused) return response(null, 403);
+          attached.delete('worker');
+        }
+        if (path.endsWith('/workers/routes/route-1')) attached.delete('route');
+        if (path.endsWith('/workers/domains/domain-1')) attached.delete('domain');
+        if (path.endsWith('/objects')) drained = true;
+      }
+      if (init?.method === 'GET' && path.endsWith(`/r2/buckets/${name}/objects`)) {
+        if (!trace.some((entry) => entry.method !== 'GET'))
+          return pageResponse([{ key: 'live-http-object' }], { is_truncated: false });
+        if (attached.size) return response(null, 409);
+        return pageResponse([{ key: 'live-http-object' }], { is_truncated: false });
+      }
+      return fallback;
+    });
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(refused ? 1 : 0);
+    expect(drained).toBe(!refused);
+    if (refused) {
+      expect(result.output.error?.code).toBe('permission_denied');
+      expect(trace.some((entry) => entry.method !== 'GET' && entry.path.includes('/r2/'))).toBe(
+        false,
+      );
+    } else expect(attached.size).toBe(0);
+  },
+);
+
 async function adoptedWorker() {
   const script = journal.identity.script_name;
   journal.resources.worker = {
@@ -1352,7 +1456,7 @@ it.each(['current', 'inactive'] as const)(
     const script = journal.identity.script_name;
     interceptRead(async (url, fallback) => {
       if (state === 'current' && url.pathname.endsWith(`/workers/scripts/${script}/settings`))
-        return response({ bindings: [{ type: 'd1', name: 'FOREIGN', id: 'foreign-db' }] });
+        return response(ownedWorkerSettings([{ type: 'd1', name: 'FOREIGN', id: 'foreign-db' }]));
       if (state === 'inactive' && url.pathname.endsWith(`/workers/scripts/${script}/versions`))
         return listingResponse({ items: [{ id: 'version-1' }] });
       if (url.pathname.endsWith(`/versions/version-1`))
@@ -1375,7 +1479,8 @@ it('permits inventoried resource bindings and versions after reading them live',
     { type: 'queue', name: 'JOBS', queue_name: journal.resources.jobs!.name },
   ];
   interceptRead(async (url, fallback) => {
-    if (url.pathname.endsWith(`/workers/scripts/${script}/settings`)) return response({ bindings });
+    if (url.pathname.endsWith(`/workers/scripts/${script}/settings`))
+      return response(ownedWorkerSettings(bindings));
     if (url.pathname.endsWith(`/workers/scripts/${script}/versions`))
       return listingResponse({ items: [{ id: 'version-1' }] });
     if (url.pathname.endsWith('/versions/version-1')) return response({ resources: { bindings } });
@@ -1552,6 +1657,7 @@ it('refuses a queue binding whose known name conceals an unrecorded queue ID', a
   interceptRead(async (url, fallback) =>
     url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}/settings`)
       ? response({
+          ...ownedWorkerSettings(),
           bindings: [
             {
               type: 'queue',
@@ -1575,6 +1681,7 @@ it('resolves queue binding names live and refuses a replacement queue with the s
       return listingResponse([{ queue_id: replacement, queue_name: journal.resources.jobs!.name }]);
     if (url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}/settings`))
       return response({
+        ...ownedWorkerSettings(),
         bindings: [{ type: 'queue', name: 'JOBS', queue_name: journal.resources.jobs!.name }],
       });
     return fallback;
@@ -1705,6 +1812,7 @@ it.each(['enable_pending', 'enabled', 'cleanup_pending'] as const)(
     attempt.requested_rollout = 10;
     attempt.candidate_probe_url = 'https://candidate.example.test';
     attempt.preview = preview;
+    createdDatabase();
     await save();
     interceptRead(async (url, fallback) =>
       url.pathname.endsWith('/subdomain')
@@ -1814,7 +1922,7 @@ it.each(['binding_pending', 'bound'] as const)(
     };
     await save();
     interceptRead(async (url, fallback) => {
-      if (url.pathname.endsWith('/settings')) return response({ bindings: [binding], tags: [] });
+      if (url.pathname.endsWith('/settings')) return response(ownedWorkerSettings([binding]));
       if (url.pathname.endsWith('/versions'))
         return listingResponse({ items: [{ id: 'version-1' }] });
       if (url.pathname.endsWith('/versions/version-1'))
@@ -1861,7 +1969,7 @@ it.each(['foreign_dataset', 'missing_upload', 'wrong_evidence'])(
                     : journal.resources.analytics!.name,
               },
             ],
-            tags: [],
+            tags: ownedWorkerSettings().tags,
           })
         : fallback,
     );
@@ -1996,10 +2104,11 @@ it('accepts only the recorded telemetry endpoint binding', async () => {
   const script = journal.identity.script_name;
   journal.deployment!.history = {
     version_ids: ['version-1'],
-    plain_bindings: [{ name: 'OTEL_ENDPOINT', text: 'https://otel.example.test/v1' }],
+    plain_bindings: [{ name: 'OTEL_ENDPOINT', texts: ['https://otel.example.test/v1'] }],
   };
   await save();
   const settings = (text: string, name = 'OTEL_ENDPOINT') => ({
+    ...ownedWorkerSettings(),
     bindings: [{ type: 'plain_text', name, text }],
   });
   for (const [binding, exit] of [
@@ -2015,7 +2124,7 @@ it('accepts only the recorded telemetry endpoint binding', async () => {
   }
 });
 
-it('refuses a bucket with an unrecorded multipart upload before touching other resources', async () => {
+it('reports possible unrecorded multipart uploads while retaining other resources', async () => {
   const name = await provisionedBucket();
   const fetcher = options.fetch!;
   options.fetch = vi.fn(async (input, init) => {
@@ -2029,31 +2138,41 @@ it('refuses a bucket with an unrecorded multipart upload before touching other r
   const result = await teardown(options);
   expect(result.exitCode).toBe(8);
   expect(result.output.error?.code).toBe('ownership_conflict');
+  expect(result.output.error?.message).toContain('multipart uploads');
   expect(
     trace.filter((e) => e.method === 'DELETE' && !e.path.includes(`/r2/buckets/${name}`)),
   ).toEqual([]);
 });
 
-it('deletes objects with the documented array body and refuses an incomplete confirmation', async () => {
-  const name = await adoptedBucket();
-  let listed = 0;
-  interceptRead(async (url, fallback) =>
-    url.pathname.endsWith(`/r2/buckets/${name}/objects`) && ++listed === 2
-      ? pageResponse([{ key: 'a' }, { key: 'b/c' }], { is_truncated: false })
-      : fallback,
-  );
-  const fetcher = options.fetch!;
-  options.fetch = vi.fn(async (input, init) => {
-    const path = new URL(String(input)).pathname;
-    if (init?.method === 'DELETE' && path.endsWith('/objects')) {
-      trace.push({ path, method: 'DELETE', body: JSON.parse(String(init.body)) });
-      return response([{ key: 'a' }]);
-    }
-    return fetcher(input, init);
-  });
-  expect((await teardown(options)).exitCode).toBe(1);
-  expect(trace.find((e) => e.method === 'DELETE')?.body).toEqual(['a', 'b/c']);
-});
+it.each([
+  { confirmation: [{ key: 'a' }] },
+  { confirmation: [{ key: 'a' }, null] },
+  { confirmation: null },
+])(
+  'deletes objects with the documented array body and classifies an incomplete or invalid confirmation as unresolved: $confirmation',
+  async ({ confirmation }) => {
+    const name = await adoptedBucket();
+    let listed = 0;
+    interceptRead(async (url, fallback) =>
+      url.pathname.endsWith(`/r2/buckets/${name}/objects`) && ++listed === 2
+        ? pageResponse([{ key: 'a' }, { key: 'b/c' }], { is_truncated: false })
+        : fallback,
+    );
+    const fetcher = options.fetch!;
+    options.fetch = vi.fn(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (init?.method === 'DELETE' && path.endsWith('/objects')) {
+        trace.push({ path, method: 'DELETE', body: JSON.parse(String(init.body)) });
+        return response(confirmation);
+      }
+      return fetcher(input, init);
+    });
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(6);
+    expect(result.output.error?.code).toBe('outcome_unknown');
+    expect(trace.find((e) => e.method === 'DELETE')?.body).toEqual(['a', 'b/c']);
+  },
+);
 
 it('reads complete non-paginated Worker routes and secrets arrays', async () => {
   await saveAttachments();
@@ -2083,3 +2202,123 @@ it.each(['routes', 'secrets'] as const)(
     await expectOwnershipConflict();
   },
 );
+
+it.each(['d1', 'r2'] as const)(
+  'requires explicit destructive acknowledgement for adopted %s even in a test run',
+  async (key) => {
+    if (key === 'r2') {
+      await adoptedBucket();
+      delete journal.resources.d1;
+    }
+    await save();
+    const denied = await teardown({ ...options, iUnderstandThisDeletes: false });
+    expect(denied.exitCode).toBe(2);
+    expect(denied.output.error?.message).toContain('Adopted D1 and R2');
+    expect(trace).toEqual([]);
+    expect((await teardown(options)).exitCode).toBe(0);
+  },
+);
+
+it('classifies an incorrect inventory id in a test run as invalid input before any API call', async () => {
+  await save();
+  const result = await teardown({ ...options, inventoryId: 'wrong' });
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error?.code).toBe('invalid_input');
+  expect(trace).toEqual([]);
+});
+
+it('detaches every recorded writer before draining a bucket', async () => {
+  await saveAttachments();
+  const name = await provisionedBucket();
+  const attached = new Set(['schedules', 'consumer', 'route', 'domain', 'worker']);
+  const fetcher = options.fetch!;
+  let objects = ['live-writer-object'];
+  options.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    if (init?.method !== 'GET') {
+      if (url.pathname.endsWith('/schedules')) attached.delete('schedules');
+      if (url.pathname.endsWith('/consumers/consumer-1')) attached.delete('consumer');
+      if (url.pathname.endsWith('/workers/routes/route-1')) attached.delete('route');
+      if (url.pathname.endsWith('/workers/domains/domain-1')) attached.delete('domain');
+      if (url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}`))
+        attached.delete('worker');
+      if (url.pathname.endsWith('/objects')) {
+        expect(attached.size).toBe(0);
+        objects = [];
+      }
+    }
+    const fallback = await fetcher(input, init);
+    if (url.pathname.endsWith('/objects') && init?.method === 'GET')
+      return pageResponse(
+        objects.map((key) => ({ key })),
+        { is_truncated: false },
+      );
+    return fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(0);
+  const mutations = trace.filter((entry) => entry.method !== 'GET');
+  const drain = mutations.findIndex((entry) => entry.path.endsWith(`/r2/buckets/${name}/objects`));
+  expect(drain).toBe(5);
+  expect(mutations.slice(0, drain).map((entry) => entry.method)).toEqual([
+    'DELETE',
+    'DELETE',
+    'DELETE',
+    'PUT',
+    'DELETE',
+  ]);
+});
+
+it('retains the bucket contents when detaching a trigger fails', async () => {
+  await saveAttachments();
+  await provisionedBucket();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    init?.method === 'DELETE' && new URL(String(input)).pathname.endsWith('/workers/routes/route-1')
+      ? response(null, 403)
+      : fetcher(input, init),
+  );
+  expect((await teardown(options)).exitCode).toBe(1);
+  expect(trace.some((entry) => entry.method === 'DELETE' && entry.path.includes('/r2/'))).toBe(
+    false,
+  );
+});
+
+it('does not misclassify an empty final page and empty retries after deleting objects as multipart-only', async () => {
+  const name = await provisionedBucket();
+  let lists = 0;
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    if (init?.method === 'DELETE' && url.pathname.endsWith(`/r2/buckets/${name}`))
+      return response(null, 409);
+    const fallback = await fetcher(input, init);
+    if (init?.method === 'GET' && url.pathname.endsWith('/objects')) {
+      lists++;
+      return lists === 2
+        ? pageResponse([{ key: 'deleted-object' }], { is_truncated: true, cursor: 'last' })
+        : pageResponse([], { is_truncated: false });
+    }
+    return fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(1);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(result.output.error?.message).not.toContain('multipart uploads');
+});
+
+it('refuses queue references from R2 notifications in the FedRAMP jurisdiction', async () => {
+  await saveAttachments();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    const fallback = await fetcher(input, init);
+    if (new Headers(init?.headers).get('cf-r2-jurisdiction') !== 'fedramp') return fallback;
+    if (url.pathname.endsWith('/r2/buckets'))
+      return listingResponse({ buckets: [{ name: 'foreign-fedramp-bucket' }] });
+    if (url.pathname.endsWith('/foreign-fedramp-bucket/configuration'))
+      return response({ queues: [{ queueId: QUEUE, rules: [{ id: 'foreign-rule' }] }] });
+    return fallback;
+  });
+  await expectOwnershipConflict();
+});

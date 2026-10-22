@@ -88,3 +88,34 @@ rm -rf "$setup_dir"
 ## After setup
 
 Later sign-ins use your e-mail address, password and a current code, sent to `POST /_pb/auth/local/login`. A setup token cannot be reused, and it never resets an account that has finished setup. To reset a local login on purpose, run `pb admin reset-local`.
+
+## Cleanup inventory
+
+Cloudflare inventory schema 2 records uploaded version history, plain binding
+values grouped by binding name, and the R2 lifecycle baseline observed during
+provisioning. Older inventory schemas are refused; preserve the original private
+inventory for explicit reconciliation rather than changing its version by hand.
+Deployment refuses another upload before exceeding 10,000 recorded versions or
+64 distinct plain binding values. Historical values remain necessary to verify
+inactive Worker versions during cleanup.
+
+Teardown validates ownership and attachments before mutations, removes recorded
+routes, domains, queue consumers and schedules, then drains R2 before deleting
+Workers, queues and databases. If an attachment cannot be removed, the drain does
+not start. A later failure can leave triggers removed; retain the inventory and
+rerun cleanup. Persistent bucket conflicts after an empty drain report possible
+unrecorded multipart uploads, which require inspection with S3 credentials.
+
+Adopted D1 databases and R2 buckets always require
+`--i-understand-this-deletes`, including test-run inventories. Production teardown
+also requires `--inventory-id` equal to `identity.owner_digest`. Janitor retains
+adopted data resources for explicit teardown. An incorrect inventory ID exits 2;
+uncertain or incompletely confirmed object deletion exits 6. Janitor skips
+foreign-account inventories and unrelated JSON files, and shares account Worker
+reference discovery across the selected expired inventories in one run. It checks
+selected Workers live and only reads foreign Workers to verify references.
+
+The provision API's R2 jurisdiction query parameter still requires live
+verification during T830 against `cf-r2-jurisdiction`. Fixture tests do not prove
+that the provider honors the query parameter. T830 must also verify notification
+discovery in the default, EU and FedRAMP jurisdictions with the target token.

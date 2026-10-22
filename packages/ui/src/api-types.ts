@@ -502,23 +502,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/_pb/packages/{package}/versions/{version}/rebuild': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** rebuild a package version */
-    post: operations['rebuildPackageVersion'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/_pb/packages/{package}/versions/{version}/release': {
     parameters: {
       query?: never;
@@ -2077,7 +2060,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Bad gateway */
+      /** @description Upstream request refused; Bad gateway */
       502: {
         headers: {
           [name: string]: unknown;
@@ -3761,91 +3744,6 @@ export interface operations {
             id: string;
             /** @enum {string} */
             status: 'active' | 'removed_upstream' | 'yanked' | 'quarantined' | 'tombstoned';
-          };
-        };
-      };
-      /** @description Invalid request */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorEnvelope'];
-        };
-      };
-      /** @description Authentication required */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorEnvelope'];
-        };
-      };
-      /** @description Access denied */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorEnvelope'];
-        };
-      };
-      /** @description Not found */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorEnvelope'];
-        };
-      };
-      /** @description Payload too large */
-      413: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorEnvelope'];
-        };
-      };
-      /** @description Unsupported media type */
-      415: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorEnvelope'];
-        };
-      };
-    };
-  };
-  rebuildPackageVersion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        package: string;
-        version: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            id: string;
-            /** @constant */
-            status: 'rebuild_requested';
           };
         };
       };
@@ -6529,6 +6427,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
     };
   };
   detachSource: {
@@ -6579,6 +6486,15 @@ export interface operations {
       };
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -8656,6 +8572,15 @@ export interface operations {
       };
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      409: {
         headers: {
           [name: string]: unknown;
         };

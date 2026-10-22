@@ -27,6 +27,7 @@ export const API_ERROR_CODES = {
   payload_too_large: { status: 413, message: 'Payload too large' },
   unsupported_media_type: { status: 415, message: 'Unsupported media type' },
   not_acceptable: { status: 406, message: 'Not acceptable' },
+  upstream_refused: { status: 502, message: 'Upstream request refused' },
   bad_gateway: { status: 502, message: 'Bad gateway' },
   unavailable: { status: 503, message: 'Service unavailable' },
 } as const;

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixedClock } from '../ids.js';
+import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
+import type { EngineAccessPort, EngineTokenAccess } from '../authz/engine.js';
+import { orgContext } from '../db/port.js';
+import { createKeyring } from '../secrets/keyring.js';
+import { formatToken } from '../secrets/token-format.js';
+import { hashToken } from '../secrets/token-hash.js';
 import type { RouteDefinition } from '../plugin.js';
 import { API_EXEMPT_ROUTES, createApiModule, type ApiModuleDeps } from './module.js';
 import * as organization from './routes/organization.js';
@@ -280,6 +286,87 @@ function extended(...routes: RouteDefinition[]) {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe.each(
+  createApiModule(dependencies()).routes.filter((route) =>
+    route.path.split('/').includes(':project'),
+  ),
+)('$method $path token cap', (route) => {
+  it.each(['pat', 'svc'] as const)(
+    'conceals excluded and absent projects from a %s',
+    async (kind) => {
+      const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
+      const token = formatToken(kind, 'abcdefghijkl', new Uint8Array(32).fill(9));
+      const verifier = { secretHash: await hashToken(keyring, 1, token), pepperVersion: 1 };
+      const touch = vi.fn(async () => true);
+      const lookupToken = vi.fn<EngineAccessPort['lookupToken']>(async (_ctx, input) => {
+        const project =
+          input.boundary === 'project' && input.projectSlug === 'alpha' ? { id: 'proj-a' } : null;
+        return Object.defineProperty(
+          {
+            token: {
+              id: 'token-1',
+              kind,
+              bindingOk: true,
+              projectMode: 'selected',
+              boundProjectIds: ['proj-a'],
+              scope: { level: 'read', readOnly: true },
+              expired: false,
+              revoked: false,
+              lastUsedAt: null,
+              userId: kind === 'pat' ? 'user-1' : null,
+              servicePrincipalId: kind === 'svc' ? 'service-1' : null,
+            },
+            principalStatus: 'active',
+            validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
+            organizationPermissions: [],
+            projectPermissions: project === null ? [] : ['project:read'],
+            project,
+            projectVisible: input.projectSlug === 'beta',
+          } satisfies Omit<EngineTokenAccess, 'verifier'>,
+          'verifier',
+          { value: verifier },
+        ) as unknown as EngineTokenAccess;
+      });
+      const engine = createAuthorizationEngine({
+        access: {
+          lookupToken,
+          lookupSession: async () => null,
+          touchSession: touch,
+          touchToken: touch,
+        },
+        tokenUse: { keyring, nowMs: () => 0, dispatch: vi.fn(), log: vi.fn() },
+        patValidation: patValidationGate,
+        publicOrigin: 'https://broker.test',
+        providerAnchors: async () => [],
+      });
+      const authorize = (project: string) =>
+        engine.authorize({
+          org: orgContext('org-1'),
+          route: { ...route, plugin: 'core', permission: route.permission! },
+          params: { project },
+          request: new Request('https://broker.test', {
+            method: route.method,
+            headers: { authorization: `Bearer ${token}` },
+          }),
+        });
+      expect(await authorize('nowhere')).toEqual({ allow: false, status: 404 });
+      expect(await authorize('beta')).toEqual({ allow: false, status: 404 });
+      if (route.boundary === 'organization') {
+        expect(await authorize('alpha')).toEqual({ allow: false, status: 403 });
+        expect(lookupToken).toHaveBeenCalledWith(
+          orgContext('org-1'),
+          expect.objectContaining({
+            boundary: 'project',
+            projectSlug: 'beta',
+            allowArchived: true,
+          }),
+        );
+      }
+      expect(touch).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe('createApiModule', () => {
   it('registers exactly the method/path table once', () => {

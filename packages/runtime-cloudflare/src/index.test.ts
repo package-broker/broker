@@ -525,6 +525,45 @@ describe('runtime-cloudflare platform assembly', () => {
     await expect(worker.scheduled({}, env)).resolves.toBeUndefined();
   });
 
+  it.each([undefined, 'debug', 'info', 'warn', 'error'] as const)(
+    'exports completion spans independently of log level %s',
+    async (level) => {
+      const calls: Array<{ url: string; body: string }> = [];
+      const worker = createWorker([], {
+        ...quiet,
+        platformPorts: STANZA,
+        cacheStorage: fakeCaches(),
+        observability: level === undefined ? {} : { level },
+        otlpFetch: async (input, init) => {
+          calls.push({ url: String(input), body: String(init?.body) });
+          return new Response('{}');
+        },
+      });
+      const ctx = context();
+      const env = boundEnv();
+      expect(
+        (await worker.fetch(new Request('https://broker.test/health/live'), env, ctx)).status,
+      ).toBe(200);
+      await Promise.all(ctx.promises);
+
+      const traces = calls.filter((call) => call.url.endsWith('/v1/traces'));
+      expect(traces).toHaveLength(1);
+      const body = JSON.parse(traces[0]!.body) as {
+        resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[];
+      };
+      expect(
+        body.resourceSpans.flatMap((resource) =>
+          resource.scopeSpans.flatMap((scope) => scope.spans.map((span) => span.name)),
+        ),
+      ).toEqual(['GET /health/live']);
+      const logs = calls
+        .filter((call) => call.url.endsWith('/v1/logs'))
+        .map((call) => call.body)
+        .join('');
+      expect(logs.includes('/health/live')).toBe(level === 'debug');
+    },
+  );
+
   it('defers the OTLP export to waitUntil and never flushes eagerly', async () => {
     const otlp = otlpFetch();
     const worker = createWorker([], {

@@ -4,6 +4,7 @@ import { UpstreamError } from '../sources/policy-fetch.js';
 import type { DescribeOptions, DocumentValidators } from '../sources/provider.js';
 import { continuationOptions } from './apply-description.js';
 import { ComposerV1PackageError } from './composer/v1-package.js';
+import { ComposerRootError } from './composer/root.js';
 import { ComposerV2Error } from './composer/v2-package.js';
 import { NpmPackumentError } from './npm/packument.js';
 import type { IngestSessionHandle } from './session.js';
@@ -23,6 +24,15 @@ export function safeValidator(value: string | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+export function isUpstreamRefusal(error: unknown): boolean {
+  return (
+    (error instanceof UpstreamError ||
+      error instanceof ComposerV2Error ||
+      error instanceof ComposerRootError) &&
+    error.code === 'refused'
+  );
 }
 
 export function isUpstreamFailure(error: unknown): boolean {

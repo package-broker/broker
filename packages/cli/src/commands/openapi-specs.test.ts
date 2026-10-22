@@ -20,14 +20,47 @@ it('lists the management API and the auth specs with unique operation ids', () =
   const ids = specs.map((spec) => spec.api.operationId);
   expect(new Set(ids).size).toBe(ids.length);
   expect(ids).toEqual(
-    expect.arrayContaining(['getMyPermissions', 'getSession', 'listAuthProviders']),
+    expect.arrayContaining([
+      'getMyPermissions',
+      'getSession',
+      'listAuthProviders',
+      'acceptSourceRemoval',
+    ]),
   );
+});
+
+it('includes the optional accept-removal route and its conflict response', () => {
+  const document = generateOpenApi(servedApiSpecs(), { title: 'Package Broker', version: '2.0.0' });
+  expect(document.paths['/_pb/sources/{source}/accept-removal']?.post?.responses).toMatchObject({
+    204: { description: 'No content' },
+    409: {
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+      },
+    },
+  });
 });
 
 it('keeps the If-Match concurrency and service error family of the declared specs', () => {
   const update = servedApiSpecs().find((spec) => spec.api.operationId === 'updateProject');
   expect(update?.concurrency).toBe('if-match');
   expect(update?.service).toBe('ProjectError');
+});
+
+it.each(['attachSource', 'detachSource'])('keeps %s service errors in the document', (id) => {
+  const specs = servedApiSpecs();
+  expect(specs.find((spec) => spec.api.operationId === id)?.service).toBe('VisibilityError');
+  const document = generateOpenApi(specs, { title: 'Package Broker', version: '2.0.0' });
+  const operations = document.paths['/_pb/projects/{project}/sources/{source}/attachment'];
+  const operation = Object.values(operations ?? {}).find((value) => value.operationId === id);
+  expect(operation?.responses).toMatchObject({
+    204: { description: 'No content' },
+    503: {
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+      },
+    },
+  });
 });
 
 it('excludes exempt routes from the specs', () => {
@@ -51,13 +84,15 @@ it('writes exactly the body the openapi route serves for the same specs', async 
   );
 });
 
-it('serves the committed UI openapi.json byte for byte', async () => {
+it('generates the committed UI document apart from its release version', async () => {
   const { version } = createRequire(import.meta.url)('../../package.json') as { version: string };
   const served = await openApiRoute(
     generateOpenApi(servedApiSpecs(), { title: 'Package Broker', version }),
   ).handler({} as RequestContext);
   const committed = await readFile(new URL('../../../ui/openapi.json', import.meta.url), 'utf8');
-  expect(committed).toBe(await served.text());
+  const document = JSON.parse(committed) as { info: { version: string } };
+  document.info.version = version;
+  expect(JSON.stringify(document)).toBe(await served.text());
 });
 
 it('includes optional accept-removal and rebuild routes when constructing the full API module', () => {

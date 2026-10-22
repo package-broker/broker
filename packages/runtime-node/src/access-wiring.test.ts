@@ -918,16 +918,28 @@ describe('node access wiring', () => {
     const { broker } = await start(await freePort());
     const kernel = await broker.ready();
 
-    const outside = [...kernel.coreRoutes, ...kernel.registration.routes]
-      .filter((route) => !route.path.includes('/_pb/auth/') && !route.path.includes('/probe/'))
-      .map((route) => `${route.method} ${route.path}`)
-      .sort();
+    const outsideRoutes = [...kernel.coreRoutes, ...kernel.registration.routes].filter(
+      (route) => !route.path.includes('/_pb/auth/') && !route.path.includes('/probe/'),
+    );
+    const outside = outsideRoutes.map((route) => `${route.method} ${route.path}`).sort();
     expect(apiModule.routes).toHaveLength(1);
     const expected = [
+      'GET /_pb/openapi.json',
       'GET /_pb/session',
       ...apiModule.routes[0]!.map((route) => `${route.method} ${route.path}`),
     ].sort();
     expect(outside).toEqual(expected);
+    expect(
+      outsideRoutes
+        .filter(
+          (route) =>
+            route.permission === null &&
+            route.boundary !== 'authenticated' &&
+            route.boundary !== 'self',
+        )
+        .map((route) => `${route.method} ${route.path}`)
+        .sort(),
+    ).toEqual(['GET /_pb/openapi.json', 'GET /_pb/session']);
   });
 
   it('does not block the response on the token telemetry write', async () => {

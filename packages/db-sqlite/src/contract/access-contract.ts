@@ -501,7 +501,7 @@ const projectBinding: Case = (open, wrap) =>
         projects: [ALPHA],
       });
       expect(await decide(world, { bearer: selected })).toMatchObject({ allow: true });
-      expect(await decide(world, { bearer: selected, slug: 'beta' })).toEqual(FORBIDDEN);
+      expect(await decide(world, { bearer: selected, slug: 'beta' })).toEqual(NOT_FOUND);
 
       const permissions = ['project:read', 'project:packages:read', 'project:packages:write'];
       await addPrincipal(world, permissions, ALPHA);
@@ -533,7 +533,7 @@ const projectBinding: Case = (open, wrap) =>
       expect(await decide(world, { bearer: bound, slug: 'beta' })).toEqual(NOT_FOUND);
       expect(await decide(world, { bearer: bound, slug: 'shared' })).toEqual(NOT_FOUND);
       expect(await decide(world, { bearer: open, slug: 'beta' })).toMatchObject({ allow: true });
-      expect(await decide(world, { bearer: drifted })).toEqual(FORBIDDEN);
+      expect(await decide(world, { bearer: drifted })).toEqual(NOT_FOUND);
       expect(await decide(world, { bearer: drifted, slug: 'beta' })).toEqual(NOT_FOUND);
       expect(
         await decide(world, { bearer: bound, permission: 'project:packages:write' }),
@@ -590,9 +590,7 @@ const emptySelected: Case = (open, wrap) =>
         expect(found?.validation?.fresh).toBe(true);
         expect(found?.project).toBeNull();
         expect(found?.projectPermissions).toEqual([]);
-        expect(await decide(world, { bearer: plaintext, slug })).toEqual(
-          slug === 'alpha' || slug === 'beta' ? FORBIDDEN : NOT_FOUND,
-        );
+        expect(await decide(world, { bearer: plaintext, slug })).toEqual(NOT_FOUND);
       }
       expect(
         await decide(world, {
@@ -1480,7 +1478,7 @@ const selectedIssuance: Case = (open, wrap) =>
           allow: true,
         });
       }
-      expect(await decide(world, { bearer: result.plaintext, slug: 'alpha' })).toEqual(FORBIDDEN);
+      expect(await decide(world, { bearer: result.plaintext, slug: 'alpha' })).toEqual(NOT_FOUND);
 
       await expect(
         tokens.issuePersonal(

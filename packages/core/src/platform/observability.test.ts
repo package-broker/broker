@@ -12,6 +12,7 @@ import {
   type ObservabilityScope,
   type ObsRegistry,
   createObservability,
+  filterLogLevel,
   forPlugin,
   noopObservability,
   safeErrorName,
@@ -811,5 +812,36 @@ describe('fixed vulnerability observability registration', () => {
     expect(records.some((row) => row.kind === 'counter' && row.name === 'pb.obs.dropped')).toBe(
       false,
     );
+  });
+});
+
+describe('log level filtering', () => {
+  it.each([
+    [undefined, ['info', 'warn', 'error']],
+    ['debug', ['debug', 'info', 'warn', 'error']],
+    ['info', ['info', 'warn', 'error']],
+    ['warn', ['warn', 'error']],
+    ['error', ['error']],
+  ] as const)('filters logs at %s while preserving metrics', (level, expected) => {
+    const { sink, records } = collector();
+    const filtered = filterLogLevel(sink, level);
+    for (const entry of ['debug', 'info', 'warn', 'error'] as const)
+      filtered.emit({ kind: 'log', record: { level: entry, event: 'upstream.refused' } });
+    const counter: ObsRecord = {
+      kind: 'counter',
+      name: 'pb.upstream.requests',
+      labels: { outcome: 'refused' },
+      value: 1,
+    };
+    const histogram: ObsRecord = {
+      kind: 'histogram',
+      name: 'pb.upstream.duration_ms',
+      labels: { outcome: 'refused' },
+      value: 2,
+    };
+    filtered.emit(counter);
+    filtered.emit(histogram);
+    expect(logs(records).map((record) => record['level'])).toEqual(expected);
+    expect(records.filter((record) => record.kind !== 'log')).toEqual([counter, histogram]);
   });
 });

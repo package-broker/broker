@@ -18,12 +18,18 @@ import { createRepositoryJobs } from '../platform/jobs-port.js';
 import type { JobsFactory } from '../platform/jobs-port.js';
 import type {
   LogRecord,
+  LogLevel,
   Observability,
   ObservabilityScope,
   ObsRecordSink,
   ObsRegistry,
 } from '../platform/observability.js';
-import { forPlugin, noopObservability, safeRecord } from '../platform/observability.js';
+import {
+  filterLogLevel,
+  forPlugin,
+  noopObservability,
+  safeRecord,
+} from '../platform/observability.js';
 import type { HookErrorHandler } from './access.js';
 import { authorizeRoute, denyAllEngine, ENGINE_PLUGIN, INPUT_PLUGIN } from './authorize.js';
 import type {
@@ -77,6 +83,8 @@ import { finaliseSecurityHeaders } from './security-headers.js';
 import { uiRootRedirect } from './ui-routes.js';
 
 export interface KernelObservability {
+  readonly level?: LogLevel;
+  /** Receives all sanitized records; filter log outputs after deriving traces. */
   readonly sink: ObsRecordSink;
   readonly deploymentId: string;
   /** Honour an inbound W3C traceparent. Only behind a trusted proxy. Default false. */
@@ -398,7 +406,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     routeTemplates,
   };
   const obsContext: KernelObsContext = {
-    sink: options.observability?.sink ?? logSink(options.log ?? defaultLog),
+    sink:
+      options.observability?.sink ??
+      filterLogLevel(logSink(options.log ?? defaultLog), options.observability?.level),
     registry,
     deploymentId,
     runtime: options.platform,

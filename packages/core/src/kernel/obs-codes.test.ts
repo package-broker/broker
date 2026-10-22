@@ -40,7 +40,7 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 23 reason codes', () => {
+  it('has exactly the 24 reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
         'authz.unauthenticated',
@@ -56,6 +56,7 @@ describe('vocabularies', () => {
         'error.misconfigured',
         'error.unavailable',
         'error.internal',
+        'error.upstream_refused',
         'db.unique',
         'db.foreign_key',
         'db.not_null',
@@ -68,7 +69,7 @@ describe('vocabularies', () => {
         'http.handler_status',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(23);
+    expect(KERNEL_REASON_CODES.size).toBe(24);
   });
 
   it('matches the port CODE pattern for every value', () => {

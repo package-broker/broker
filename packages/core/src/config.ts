@@ -1,3 +1,4 @@
+import type { LogLevel } from './platform/observability.js';
 import { assetDeclarationProblems, type AssetDeclaration } from './asset-provider.js';
 import type { TokenLifetimeInput } from './authz/token-lifetime.js';
 import type { PlatformPortConfig } from './platform/port-config.js';
@@ -47,11 +48,13 @@ export function brokerAssetsProblems(config: BrokerConfig): string[] {
 }
 
 export interface BrokerObservabilityConfig {
+  /** Minimum emitted log level. Default info. Metrics are unaffected. */
+  readonly level?: LogLevel;
   /** Honour an inbound W3C traceparent only behind a proxy that sets or strips it. */
   readonly trustInboundTraceparent?: boolean;
 }
 
-const OBSERVABILITY_KEYS: ReadonlySet<string> = new Set(['trustInboundTraceparent']);
+const OBSERVABILITY_KEYS: ReadonlySet<string> = new Set(['trustInboundTraceparent', 'level']);
 
 export function brokerObservabilityProblems(config: BrokerConfig): string[] {
   const value: unknown = config.observability;
@@ -63,6 +66,9 @@ export function brokerObservabilityProblems(config: BrokerConfig): string[] {
   for (const [key, entry] of Object.entries(value)) {
     if (!OBSERVABILITY_KEYS.has(key)) {
       problems.push('observability: contains an unknown key');
+    } else if (key === 'level') {
+      if (typeof entry !== 'string' || !['debug', 'info', 'warn', 'error'].includes(entry))
+        problems.push('observability.level: must be debug, info, warn or error');
     } else if (typeof entry !== 'boolean') {
       problems.push(`observability.${key}: must be a boolean`);
     }

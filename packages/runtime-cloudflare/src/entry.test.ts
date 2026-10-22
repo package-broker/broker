@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   manifest: {} as {
     plugins: [];
+    vulnerability?: { enabled: boolean };
     platformPorts: null;
     observability?: { trustInboundTraceparent: boolean };
     tokens?: { maxLifetimeDays: { personal: number; service: number } };
@@ -19,6 +20,9 @@ vi.mock('#pb-manifest', () => ({
   },
   get observability() {
     return state.manifest.observability;
+  },
+  get vulnerability() {
+    return state.manifest.vulnerability;
   },
   get tokens() {
     return state.manifest.tokens;
@@ -88,3 +92,19 @@ describe('Worker entry tokens', () => {
     expect(options).not.toHaveProperty('tokens');
   });
 });
+
+it.each([undefined, true, false])(
+  'forwards the vulnerability deployment switch %s',
+  async (enabled) => {
+    const vulnerability = enabled === undefined ? undefined : { enabled };
+    state.manifest = {
+      plugins: [],
+      platformPorts: null,
+      ...(vulnerability === undefined ? {} : { vulnerability }),
+    };
+    await import('./entry.js');
+    const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
+    if (vulnerability === undefined) expect(options).not.toHaveProperty('vulnerability');
+    else expect(options).toHaveProperty('vulnerability', vulnerability);
+  },
+);

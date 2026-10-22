@@ -1242,3 +1242,231 @@ describe('blob purge timing', () => {
     },
   );
 });
+
+it.each([undefined, true, false])(
+  'vulnerability startup switch %s controls scheduler, old work and API projection',
+  async (enabled) => {
+    const kernelModule = await import('@package-broker/core/kernel/kernel');
+    const guarded = await import('./sources/guarded-fetch.js');
+    const { discoveredMigrations } =
+      await import('@package-broker/db-sqlite/testing/migrated-database');
+    const { createOrganizationBootstrap } =
+      await import('@package-broker/db-sqlite/repositories/organization');
+    const { createJobRepository } = await import('@package-broker/db-sqlite/repositories/job');
+    const { orgContext } = await import('@package-broker/core/db/port');
+    const { ulid } = await import('@package-broker/core/ids');
+    const loopModule = await import('./jobs/loop.js');
+    let schedulerOffset = 0;
+    const actualLoop = loopModule.createJobLoop;
+    vi.spyOn(loopModule, 'createJobLoop').mockImplementation((input) =>
+      actualLoop({ ...input, clock: { now: () => new Date(Date.now() + schedulerOffset) } }),
+    );
+    const actualKernel = kernelModule.createKernel;
+    vi.spyOn(kernelModule, 'createKernel').mockImplementation((options) =>
+      actualKernel({
+        ...options,
+        authorization: {
+          authorize: async () => ({
+            allow: true,
+            principal: { kind: 'user', id: 'reader' },
+            projectId: null,
+          }),
+        },
+      }),
+    );
+    let unavailable = true;
+    const transport = vi.fn<typeof fetch>(async (input, init) => {
+      expect(String(input)).toBe('https://api.osv.dev/v1/querybatch');
+      expect(await new Request(input, init).json()).toEqual({
+        queries: [{ package: { ecosystem: 'npm', name: 'public-control' }, version: '1.2.3' }],
+      });
+      return unavailable
+        ? new Response(null, { status: 503 })
+        : Response.json({ results: [{ vulns: [{ id: 'GHSA-test' }] }] });
+    });
+    vi.spyOn(guarded, 'createGuardedFetch').mockReturnValue(transport);
+    const directory = await realpath(await mkdtemp(join(process.cwd(), '.pb-vulnerability-')));
+    let broker: Awaited<ReturnType<typeof startNode>> | undefined;
+    let database: ReturnType<typeof openBetterSqliteExecutor> | undefined;
+    try {
+      const path = join(directory, 'broker.sqlite');
+      broker = await startNode({
+        plugins: [],
+        migrations: await discoveredMigrations(),
+        ...(enabled === undefined ? {} : { vulnerability: { enabled } }),
+        env: {
+          PB_SQLITE_PATH: path,
+          PB_BLOB_ROOT: join(directory, 'blobs'),
+          PB_ORG_SLUG: 'vulnerability',
+          PB_ORG_NAME: 'Vulnerability',
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'https://broker.test',
+          DEPLOYMENT_ID: 'vulnerability-test',
+        },
+        platformPorts: {
+          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1024 },
+          cache: { adapter: 'lru', maxBytes: 1024 },
+          jobs: { adapter: 'database', maxRunning: 1 },
+          observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
+        },
+        stdout: { write: () => true, on: () => undefined },
+        stderr: { write: () => true, on: () => undefined },
+      });
+      database = openBetterSqliteExecutor(path);
+      const { executor } = database;
+      const identity = await createOrganizationBootstrap(executor).findSingleton();
+      const org = orgContext(identity!.id);
+      const source = ulid(),
+        pkg = ulid(),
+        version = ulid();
+      await executor.batch([
+        {
+          sql: "INSERT INTO source (id,org_id,name,ecosystem,type,url,config_json) VALUES (?,?,'public','npm','npmjs_proxy','https://registry.npmjs.org','{}')",
+          params: [source, org.orgId],
+        },
+        {
+          sql: "INSERT INTO package (id,org_id,source_id,ecosystem,name) VALUES (?,?,?,'npm','public-control')",
+          params: [pkg, org.orgId, source],
+        },
+        {
+          sql: "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json) VALUES (?,?,?,'1.2.3','1.2.3',?,'upstream','{}')",
+          params: [version, org.orgId, pkg, new Date().toISOString()],
+        },
+      ]);
+      const kernel = await broker.ready();
+      const definition = kernel.registration.jobs.find(
+        (job) => job.qualifiedName === 'core:vulnerability-sync:v1',
+      );
+      expect(definition?.definition.schedule).toEqual(
+        enabled === false ? undefined : { everySeconds: 300 },
+      );
+      const read = async () => {
+        const response = await kernel.fetch(
+          new Request(`https://broker.test/_pb/packages/${pkg}/versions`),
+        );
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          items: {
+            vulnerability: { status: string; reason: string | null; advisoryCount: number };
+          }[];
+        };
+        return body.items[0]!.vulnerability;
+      };
+      expect(await read()).toMatchObject({
+        status: 'unknown',
+        reason: enabled === false ? 'disabled' : 'pending',
+      });
+      expect(transport).not.toHaveBeenCalled();
+      const jobs = createJobRepository(executor);
+      const enqueue = () =>
+        jobs.enqueue(org, {
+          id: ulid(),
+          type: 'core:vulnerability-sync:v1',
+          payloadJson: '{}',
+          idempotencyKey: ulid(),
+          maxAttempts: 3,
+          projectId: null,
+          initiatorTokenId: null,
+          resourceKey: null,
+          runAt: null,
+        });
+      if (enabled === false) {
+        await executor.batch([
+          {
+            sql: "INSERT INTO vulnerability_result (org_id,version_id,package_id,ecosystem,package_key,version,query_version,mapping_version,assessment,fetched_at,attempted_at,next_attempt_at,generation) VALUES (?,?,?,'npm','public-control','1.2.3','1.2.3',1,'affected',?,?,?,0)",
+            params: [
+              org.orgId,
+              version,
+              pkg,
+              new Date().toISOString(),
+              new Date().toISOString(),
+              new Date().toISOString(),
+            ],
+          },
+        ]);
+        expect(await read()).toEqual({
+          status: 'unknown',
+          reason: 'disabled',
+          source: null,
+          fetchedAt: null,
+          lastKnownStatus: null,
+          advisoryCount: 0,
+          advisories: [],
+          detailsComplete: false,
+          advisoriesTruncated: false,
+        });
+        const old = await enqueue();
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        expect((await jobs.status(org, old.id))?.state).not.toBe('succeeded');
+        expect(transport).not.toHaveBeenCalled();
+        expect(
+          await executor.all({
+            sql: "SELECT name FROM job_schedule WHERE org_id = ? AND name = 'core:vulnerability-sync:v1'",
+            params: [org.orgId],
+          }),
+        ).toEqual([]);
+      } else {
+        await vi.waitFor(async () =>
+          expect(
+            await executor.all({
+              sql: "SELECT name FROM job_schedule WHERE org_id=? AND name='core:vulnerability-sync:v1'",
+              params: [org.orgId],
+            }),
+          ).toHaveLength(1),
+        );
+        await executor.batch([
+          {
+            sql: "UPDATE job_schedule SET next_run_at='2000-01-01T00:00:00.000Z' WHERE org_id=? AND name='core:vulnerability-sync:v1'",
+            params: [org.orgId],
+          },
+        ]);
+        schedulerOffset = 60_000;
+        let scheduledId: string | undefined;
+        await vi.waitFor(
+          async () => {
+            const scheduled = await executor.all<{ id: string }>({
+              sql: "SELECT id FROM job WHERE org_id=? AND type='core:vulnerability-sync:v1'",
+              params: [org.orgId],
+            });
+            expect(scheduled).toHaveLength(1);
+            scheduledId = scheduled[0]!.id;
+          },
+          { timeout: 10000, interval: 25 },
+        );
+        await vi.waitFor(
+          async () =>
+            expect(await jobs.status(org, scheduledId!)).toMatchObject({ state: 'succeeded' }),
+          { timeout: 10000, interval: 25 },
+        );
+        expect(await read()).toMatchObject({ status: 'unknown', reason: 'upstream_unavailable' });
+        unavailable = false;
+        await executor.batch([
+          {
+            sql: "UPDATE vulnerability_result SET next_attempt_at='2000-01-01T00:00:00.000Z' WHERE org_id=?",
+            params: [org.orgId],
+          },
+          {
+            sql: "UPDATE vulnerability_sync_state SET blocked_until=NULL,next_request_at='2000-01-01T00:00:00.000Z' WHERE org_id=?",
+            params: [org.orgId],
+          },
+        ]);
+        const retry = await enqueue();
+        await vi.waitFor(
+          async () =>
+            expect(await jobs.status(org, retry.id)).toMatchObject({ state: 'succeeded' }),
+          { timeout: 10000, interval: 25 },
+        );
+        expect(await read()).toMatchObject({ status: 'affected', advisoryCount: 1 });
+        expect(transport).toHaveBeenCalledTimes(2);
+        const count = transport.mock.calls.length;
+        await read();
+        expect(transport).toHaveBeenCalledTimes(count);
+      }
+    } finally {
+      await broker?.close();
+      await database?.close();
+      await rm(directory, { recursive: true, force: true });
+      vi.restoreAllMocks();
+    }
+  },
+);

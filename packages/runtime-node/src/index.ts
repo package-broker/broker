@@ -1,3 +1,9 @@
+import {
+  createVulnerabilityRuntime,
+  VULNERABILITY_EVENT,
+  VULNERABILITY_REASON_CODES,
+} from '@package-broker/core/runtime/vulnerability';
+import { createVulnerabilityRepository } from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
 import {
@@ -304,6 +310,7 @@ export interface NodeServerOptions {
   readonly authorization?: AuthorizationEngine;
   /** Token lifetime maxima; an invalid value fails server creation. */
   readonly tokens?: BrokerConfig['tokens'];
+  readonly vulnerability?: BrokerConfig['vulnerability'];
   /** Resolves true once the broker may serve; a falsy answer refuses everything except liveness. */
   readonly servingGate?: () => Promise<boolean>;
   /** Registry routes need the database, auth, platform services and this input together. */
@@ -963,6 +970,7 @@ function buildApiRoutes(input: {
   readonly auth: NodeAuthOptions;
   readonly access: AccessAssembly;
   readonly packages: NodeCatalogueServices;
+  readonly vulnerability: ReturnType<typeof createVulnerabilityRuntime>;
   readonly policy: OutboundPolicy;
   readonly registration: Registration;
   readonly lifetime: TokenLifetimePolicy;
@@ -1074,7 +1082,10 @@ function buildApiRoutes(input: {
         projectSources: createProjectSourceReader(executor),
         projects,
       },
-      packages: createPackageAdminReader(executor),
+      packages: {
+        ...createPackageAdminReader(executor),
+        readStatuses: input.vulnerability.readStatuses,
+      },
       audit: auditReader(executor),
     }).routes;
   } catch (error) {
@@ -1172,7 +1183,14 @@ export function createNodeServer(
           }),
       });
     }
-    function registerIngestJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+    function registerIngestJob<P>(
+      definition: JobDefinition<P>,
+      registry = {
+        events: new Set([...INGEST_EVENTS]),
+        reasonCodes: INGEST_REASON_CODES,
+        routeTemplates: new Set<string>(),
+      },
+    ): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
         handler: (payload, context) => {
@@ -1190,11 +1208,7 @@ export function createNodeServer(
               jobId: context.jobId,
               attempt: context.attempt,
             },
-            {
-              events: new Set([...INGEST_EVENTS]),
-              reasonCodes: INGEST_REASON_CODES,
-              routeTemplates: new Set(),
-            },
+            registry,
           );
           return ingestScope.run(observability, () =>
             definition.handler(definition.validate(payload), { ...context, observability }),
@@ -1235,6 +1249,25 @@ export function createNodeServer(
             findOrganization: bootstrap.findSingleton,
             ingestScope,
           });
+    const vulnerabilityPolicy = createOutboundPolicy({
+      allowPrivateHosts: [],
+      runtime: 'node',
+      selfOrigins: auth === undefined ? [] : [auth.publicOrigin],
+    });
+    const vulnerability = createVulnerabilityRuntime({
+      config: {
+        platform: 'node',
+        plugins,
+        ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
+      },
+      repository: createVulnerabilityRepository(executor, systemClock),
+      policyFetch: createPolicyFetch({
+        fetchImpl: seams.transport ?? createGuardedFetch(vulnerabilityPolicy),
+        policy: vulnerabilityPolicy,
+        userAgent: 'PackageBroker/2.0',
+      }),
+      clock: systemClock,
+    });
     drainRegistry = registry?.drain;
     const packageResolver = registry?.module.visibilityPort ?? reads?.resolver;
     const retention = (
@@ -1248,6 +1281,13 @@ export function createNodeServer(
         options.platformServices === undefined
           ? []
           : [
+              ...vulnerability.jobs.map((job) =>
+                registerIngestJob(job.definition, {
+                  events: new Set([VULNERABILITY_EVENT]),
+                  reasonCodes: new Set(VULNERABILITY_REASON_CODES),
+                  routeTemplates: new Set<string>(),
+                }),
+              ),
               ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
@@ -1314,6 +1354,7 @@ export function createNodeServer(
             auth,
             access,
             packages,
+            vulnerability,
             policy: createOutboundPolicy({
               allowPrivateHosts: options.registry?.config.outbound.allowPrivateHosts ?? [],
               runtime: 'node',

@@ -3,6 +3,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import { isUlid } from '@package-broker/core/ids';
 import {
   PROJECT_LIST_MAX_LIMIT,
+  isValidProjectListPrefix,
   type ProjectListEntry,
   type ReadableProjectPage,
   type ReadableProjectSource,
@@ -18,6 +19,7 @@ import {
   type HolderAlias,
   type ProtectedHolderProvider,
 } from '../kysely.js';
+import { projectPrefixCondition } from '../sql/project-prefix.js';
 
 export interface ReadableProjectActor {
   readonly userId: string;
@@ -38,9 +40,12 @@ interface ReadableRow {
   readonly slug: string;
   readonly name: string;
   readonly status: ProjectListEntry['status'];
+  readonly revision: number;
 }
 
 function requirePage(page: ReadableProjectPage): void {
+  if (page.q !== undefined && !isValidProjectListPrefix(page.q))
+    throw new TypeError('invalid project prefix');
   if (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > PROJECT_LIST_MAX_LIMIT) {
     throw new TypeError(`limit must be an integer from 1 to ${PROJECT_LIST_MAX_LIMIT}`);
   }
@@ -83,7 +88,7 @@ function holderAlias(user: string, prefix: string): HolderAlias {
   };
 }
 
-const PROJECT_COLUMNS = ['id', 'slug', 'name', 'status'] as const;
+const PROJECT_COLUMNS = ['id', 'slug', 'name', 'status', 'revision'] as const;
 
 /**
  * One grant path: the user's project-scope grant rows, each joined by primary key to its role, the
@@ -139,6 +144,8 @@ function grantPath(
       : query
           .whereRef(`${g}.subject_provider`, '=', `${m}.provider`)
           .whereRef(`${g}.subject_value`, '=', `${m}.group_name`);
+  if (page.q !== undefined)
+    query = query.where(projectPrefixCondition(`${p}.slug`, `${p}.name`, page.q));
   if (page.ids !== undefined) {
     query = query.where(
       sql<SqlBool>`${sql.ref(`${g}.project_id`)} in (select value from json_each(${JSON.stringify(page.ids)}))`,
@@ -205,7 +212,7 @@ export function listReadableProjectsStatement(
   return compile(
     loose
       .selectFrom((union as SelectQueryBuilder<LooseDatabase, string, ReadableRow>).as('readable'))
-      .select(['readable.id', 'readable.slug', 'readable.name', 'readable.status'])
+      .select(PROJECT_COLUMNS.map((column) => `readable.${column}`))
       .orderBy('readable.id')
       .limit(page.limit),
   );
@@ -235,6 +242,7 @@ export function createReadableProjectRepository(
         slug: row.slug,
         name: row.name,
         status: row.status,
+        revision: row.revision,
       }));
     },
   };

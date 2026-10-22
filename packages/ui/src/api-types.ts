@@ -3978,6 +3978,7 @@ export interface operations {
       query?: {
         after?: string;
         limit?: string;
+        q?: string;
         status?: 'active' | 'archived';
       };
       header?: never;
@@ -3994,6 +3995,7 @@ export interface operations {
         content: {
           'application/json': {
             items: {
+              etag: string;
               id: string;
               name: string;
               slug: string;

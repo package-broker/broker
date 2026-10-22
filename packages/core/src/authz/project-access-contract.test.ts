@@ -165,7 +165,13 @@ describe('kernel permission views across services', () => {
   });
 
   it('project-list accepts a kernel actor and enforces project:read', async () => {
-    const project = { id: PROJECT_ID, slug: 'shop', name: 'Shop', status: 'active' } as const;
+    const project = {
+      id: PROJECT_ID,
+      slug: 'shop',
+      name: 'Shop',
+      status: 'active',
+      revision: 1,
+    } as const;
     const list = vi.fn(async () => [project]);
     const permissionsFor = vi.fn(async () => new Map<string, ReadonlySet<string>>());
     const listReadableProjects = vi.fn(async () => []);

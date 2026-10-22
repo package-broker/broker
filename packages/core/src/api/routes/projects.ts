@@ -16,6 +16,7 @@ import {
   settleIdempotent,
   type IdempotencyRecord,
 } from '../idempotency.js';
+import { revisionEtag } from '../response.js';
 import { apiRoute, type ApiOutcome, type RouteOutcome } from '../route.js';
 import { callContext, projectSessionCallContext, type ApiRouteDeps } from './context.js';
 import { PROJECT_API_SPECS } from './projects-schemas.js';
@@ -127,6 +128,7 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
     if (caller === null) return { status: 200, body: { items: [], next: null } };
     const result = await deps.lister.list(org, caller.actor, {
       limit: query.limit === undefined ? 50 : Number(query.limit),
+      ...(query.q === undefined ? {} : { q: query.q }),
       status: query.status ?? 'active',
       ...(query.after === undefined ? {} : { afterId: query.after }),
       ...(caller.restrictTo === undefined ? {} : { restrictTo: caller.restrictTo }),
@@ -135,7 +137,19 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
     const bound = caller.restrictTo === undefined ? null : new Set(caller.restrictTo);
     const items =
       bound === null ? result.value.items : result.value.items.filter(({ id }) => bound.has(id));
-    return { status: 200, body: { items, next: result.value.nextAfterId } };
+    return {
+      status: 200,
+      body: {
+        items: items.map(({ id, slug, name, status, revision }) => ({
+          id,
+          slug,
+          name,
+          status,
+          etag: revisionEtag(revision),
+        })),
+        next: result.value.nextAfterId,
+      },
+    };
   });
 
   const created = (

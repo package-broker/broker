@@ -151,16 +151,21 @@ export const SERVICE_ERROR_TABLE = {
     invalid_limit: { status: 400, code: 'invalid_request' },
     invalid_cursor: { status: 400, code: 'invalid_request' },
     invalid_status: { status: 400, code: 'invalid_request' },
+    invalid_query: { status: 400, code: 'invalid_request' },
     source_invalid: { status: 503, code: 'unavailable' },
   } satisfies Record<ProjectListError, ServiceErrorMapping>,
 } as const;
+
+export function revisionEtag(revision: number): string {
+  return `"r${revision}"`;
+}
 
 export function jsonResponse(status: number, body: unknown, options?: { etag?: number }): Response {
   const headers = new Headers({
     'Content-Type': 'application/json',
     'Cache-Control': 'no-store',
   });
-  if (options?.etag !== undefined) headers.set('ETag', `"r${options.etag}"`);
+  if (options?.etag !== undefined) headers.set('ETag', revisionEtag(options.etag));
   return new Response(status === 204 ? null : JSON.stringify(body), { status, headers });
 }
 

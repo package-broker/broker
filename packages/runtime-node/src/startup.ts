@@ -29,6 +29,7 @@ import {
   type Observability,
   type ObsRecord,
   type ObsRecordSink,
+  filterLogLevel,
   type ObsRegistry,
   type ObservabilityScope,
 } from '@package-broker/core/platform/observability';
@@ -440,16 +441,28 @@ function createTelemetry(ports: PlatformPortConfig, options: StartOptions): Tele
   const bridge = (record: ObsRecord): void => {
     if (otlp === undefined || exporter === undefined) return;
     otlp.emit(record);
-    if (record.kind !== 'log') return;
-    const span = completionSpan(record.record, routes);
-    if (span !== null) exporter.export('traces', span);
   };
 
+  const outputs = filterLogLevel(
+    {
+      emit(record) {
+        stdio.emit(record);
+        try {
+          bridge(record);
+        } catch {
+          return;
+        }
+      },
+    },
+    options.observability?.level,
+  );
   const sink: ObsRecordSink = {
     emit(record) {
-      stdio.emit(record);
+      outputs.emit(record);
+      if (record.kind !== 'log' || exporter === undefined) return;
       try {
-        bridge(record);
+        const span = completionSpan(record.record, routes);
+        if (span !== null) exporter.export('traces', span);
       } catch {
         return;
       }
@@ -761,6 +774,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
         : {
             observability: {
               sink: telemetry.sink,
+              level: options.observability?.level ?? 'info',
               deploymentId: telemetry.deploymentId,
               trustInboundTraceparent: options.observability?.trustInboundTraceparent === true,
             },

@@ -2060,7 +2060,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Bad gateway */
+      /** @description Upstream request refused; Bad gateway */
       502: {
         headers: {
           [name: string]: unknown;

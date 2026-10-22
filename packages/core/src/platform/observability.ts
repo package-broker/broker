@@ -118,6 +118,23 @@ export interface ObsRecordSink {
   emit(record: ObsRecord): void;
 }
 
+const LOG_LEVEL_ORDER: Readonly<Record<LogLevel, number>> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+export function filterLogLevel(sink: ObsRecordSink, level: LogLevel = 'info'): ObsRecordSink {
+  return {
+    emit(record): void {
+      if (record.kind === 'log' && LOG_LEVEL_ORDER[record.record.level] < LOG_LEVEL_ORDER[level])
+        return;
+      sink.emit(record);
+    },
+  };
+}
+
 export interface ObservabilityScope {
   readonly deploymentId: string;
   readonly runtime: ObsRuntime;

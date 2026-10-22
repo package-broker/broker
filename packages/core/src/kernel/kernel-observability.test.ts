@@ -9,6 +9,11 @@ import {
   type RouteDefinition,
 } from '../plugin.js';
 import type { ObsRecord, ObsRecordSink } from '../platform/observability.js';
+import { filterLogLevel } from '../platform/observability.js';
+import { completionSpan } from '../platform/completion-span.js';
+import type { OtlpSpanInput } from '../platform/otlp.js';
+import { createPolicyFetch } from '../sources/policy-fetch.js';
+import { createOutboundPolicy } from '../sources/url-policy.js';
 import type { AuthorizationDecision, AuthorizationEngine, authorizeRoute } from './authorize.js';
 import { envelopeResponse } from './errors.js';
 import { createKernel } from './kernel.js';
@@ -144,6 +149,15 @@ describe('kernel completion record', () => {
     const kernel = await createKernel({
       ...options([plugin('alpha', [publicItem])], logs),
       health: () => Promise.resolve(healthy),
+      observability: {
+        deploymentId: 'test',
+        level: 'debug',
+        sink: {
+          emit: (record) => {
+            if (record.kind === 'log') logs.push({ ...record.record });
+          },
+        },
+      },
     });
 
     const cases: Array<[string, number, string | undefined, string | undefined, boolean, string]> =
@@ -568,6 +582,118 @@ describe('kernel authorization records', () => {
 });
 
 describe('kernel observability option', () => {
+  it.each([undefined, 'debug', 'info', 'warn', 'error'] as const)(
+    'preserves trace inputs and completion spans at log level %s',
+    async (level) => {
+      const { sink: output, records: logs } = countingSink();
+      const filtered = filterLogLevel(output, level);
+      const inputs: ObsRecord[] = [];
+      const spans: OtlpSpanInput[] = [];
+      const transport = vi.fn();
+      const route: RouteDefinition = {
+        method: 'GET',
+        path: '/refused',
+        permission: null,
+        handler: async (ctx) => {
+          const fetch = createPolicyFetch({
+            policy: createOutboundPolicy({
+              runtime: 'node',
+              allowPrivateHosts: [],
+              selfOrigins: [],
+            }),
+            userAgent: 'pb-test/1',
+            fetchImpl: transport,
+            observability: ctx.ports.platform!.observability,
+            sourceId: 'src-1',
+          });
+          await fetch({
+            url: 'https://sentinel.invalid/private?token=secret',
+            method: 'GET',
+            destinations: [],
+            purpose: 'metadata',
+            maxBytes: 1024,
+            timeoutMs: 1000,
+          });
+          return new Response('unexpected');
+        },
+      };
+      const kernel = await createKernel({
+        ...options([plugin('alpha', [route])], []),
+        platformServices: {
+          blob: {} as never,
+          cache: {} as never,
+          jobStore: { enqueue: vi.fn(), status: vi.fn() },
+        },
+        observability: {
+          deploymentId: 'test',
+          ...(level === undefined ? {} : { level }),
+          sink: {
+            emit(record) {
+              inputs.push(record);
+              if (record.kind === 'log') {
+                const span = completionSpan(record.record, new Set(['/health/live', '/refused']));
+                if (span !== null) spans.push(span);
+              }
+              filtered.emit(record);
+            },
+          },
+        },
+      });
+
+      expect((await kernel.fetch(new Request(`${BASE}/health/live`))).status).toBe(200);
+      expect((await kernel.fetch(new Request(`${BASE}/refused`))).status).toBe(502);
+      expect(spans).toEqual([
+        expect.objectContaining({
+          name: 'GET /health/live',
+          attributes: expect.objectContaining({ status: 200 }),
+        }),
+        expect.objectContaining({
+          name: 'GET /refused',
+          status: 'error',
+          attributes: expect.objectContaining({
+            status: 502,
+            reason_code: 'error.upstream_refused',
+          }),
+        }),
+      ]);
+      expect(
+        inputs.filter(
+          (record) => record.kind === 'log' && record.record.event === 'upstream.refused',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          record: expect.objectContaining({
+            level: 'debug',
+            source_id: 'src-1',
+            reason_code: 'upstream.destination',
+            trace_id: spans[1]!.traceId,
+            span_id: spans[1]!.spanId,
+          }),
+        }),
+      ]);
+      expect(
+        logs.filter(
+          (record) => record.kind === 'log' && record.record.event === 'upstream.refused',
+        ),
+      ).toHaveLength(level === 'debug' ? 1 : 0);
+      expect(
+        logs.filter((record) => record.kind === 'log' && record.record.route === '/health/live'),
+      ).toHaveLength(level === 'debug' ? 1 : 0);
+      expect(
+        inputs.filter(
+          (record) => record.kind === 'counter' && record.name === 'pb.upstream.requests',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          value: 1,
+          labels: expect.objectContaining({ outcome: 'refused' }),
+        }),
+      ]);
+      expect(JSON.stringify(inputs)).not.toMatch(/sentinel\.invalid|secret/);
+      expect(transport).not.toHaveBeenCalled();
+    },
+  );
+
   it('emits one counter and one histogram per request with template route labels', async () => {
     const { sink, records } = countingSink();
     const kernel = await createKernel({

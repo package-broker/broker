@@ -34,7 +34,7 @@ import { JobError } from '@package-broker/core/platform/jobs';
 import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
 import { jobLeaseGuard } from '@package-broker/db-sqlite/repositories/job-lease-guard';
 import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
-import { createObservability } from '@package-broker/core/platform/observability';
+import { createObservability, filterLogLevel } from '@package-broker/core/platform/observability';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
 import { createImportJournalStore } from '@package-broker/db-sqlite/repositories/import-journal';
@@ -98,6 +98,7 @@ import type { ProjectActor } from '@package-broker/core/authz/project-actor';
 import {
   createRegistryModule,
   type RegistryModule,
+  type RegistryModuleDeps,
   type SourceCredential,
 } from '@package-broker/core/registry/module';
 import { createAccessRecorder } from '@package-broker/core/registry/access-recorder';
@@ -779,8 +780,8 @@ function assembleRegistry(input: {
     onError: () => undefined,
   });
 
-  const policyFetch = (userAgent: string) =>
-    createPolicyFetch({ fetchImpl: outboundFetch, policy, userAgent, observability });
+  const policyFetch: RegistryModuleDeps['policyFetch'] = (userAgent, context) =>
+    createPolicyFetch({ fetchImpl: outboundFetch, policy, userAgent, observability, ...context });
 
   const module = createRegistryModule({
     runtime: 'node',
@@ -1214,6 +1215,16 @@ export function createNodeServer(
   const application = (async () => {
     // A closed migration gate defers verification until the broker may serve.
     if (options.servingGate === undefined || (await options.servingGate())) await verifyOnce();
+    const obsSink =
+      options.observability?.sink ??
+      filterLogLevel(
+        {
+          emit: (record: ObsRecord) => {
+            if (record.kind === 'log') log({ ...record.record });
+          },
+        },
+        options.observability?.level,
+      );
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
@@ -1221,11 +1232,7 @@ export function createNodeServer(
           definition.handler(definition.validate(payload), {
             ...context,
             observability: createObservability(
-              options.observability?.sink ?? {
-                emit: (record) => {
-                  if (record.kind === 'log') log({ ...record.record });
-                },
-              },
+              obsSink,
               {
                 deploymentId: options.observability?.deploymentId ?? 'unconfigured',
                 runtime: 'node',
@@ -1255,11 +1262,7 @@ export function createNodeServer(
         ...definition,
         handler: (payload, context) => {
           const observability = createObservability(
-            options.observability?.sink ?? {
-              emit: (record) => {
-                if (record.kind === 'log') log({ ...record.record });
-              },
-            },
+            obsSink,
             {
               deploymentId: options.observability?.deploymentId ?? 'unconfigured',
               runtime: 'node',
@@ -1277,11 +1280,6 @@ export function createNodeServer(
       });
     }
     const reads = options.executor === undefined ? undefined : buildPackageReads(executor);
-    const obsSink = options.observability?.sink ?? {
-      emit: (record: ObsRecord) => {
-        if (record.kind === 'log') log({ ...record.record });
-      },
-    };
     const deploymentId = options.observability?.deploymentId ?? 'unconfigured';
     const registry =
       options.registry === undefined ||

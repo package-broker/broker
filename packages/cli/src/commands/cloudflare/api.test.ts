@@ -326,3 +326,43 @@ it('keeps preview cleanup within the caller-owned absolute recovery deadline', a
   });
   expect(transport).toHaveBeenCalledTimes(1);
 });
+
+it('reads a documented collection as one snapshot without pagination parameters', async () => {
+  const h = harness(() => json([{ id: 'a' }, { id: 'b' }]));
+  expect(await h.api.snapshot('/workers/scripts')).toEqual([{ id: 'a' }, { id: 'b' }]);
+  expect(vi.mocked(h.fetch)).toHaveBeenCalledTimes(1);
+  expect(String(vi.mocked(h.fetch).mock.calls[0]?.[0])).toMatch(/\/workers\/scripts$/);
+  expect(
+    await harness(() => json([], { total_pages: 0 })).api.snapshot('/queues/q/consumers'),
+  ).toEqual([]);
+  expect(await harness(() => json([{ id: 1 }], { total_pages: 1 })).api.snapshot('/x')).toEqual([
+    { id: 1 },
+  ]);
+});
+
+it.each([
+  ['more pages', [{ id: 1 }], { total_pages: 2 }],
+  ['a continuing cursor', [{ id: 1 }], { cursor: 'next' }],
+  ['a larger total', [{ id: 1 }], { total_count: 2 }],
+])('refuses a snapshot that advertises %s', async (_name, result, info) => {
+  await expect(harness(() => json(result, info)).api.snapshot('/x')).rejects.toMatchObject({
+    code: 'capability_unknown',
+  });
+});
+
+it('refuses a snapshot whose result is not an array', async () => {
+  await expect(harness(() => json({ id: 1 })).api.snapshot('/x')).rejects.toMatchObject({
+    code: 'provider_failure',
+  });
+});
+
+it('never lets caller headers replace the authorization header', async () => {
+  const h = harness(() => json({}));
+  await h.api.request('/r2/buckets/b/lifecycle', 'GET', undefined, {
+    authorization: 'Bearer attacker',
+    'cf-r2-jurisdiction': 'eu',
+  });
+  const headers = new Headers(vi.mocked(h.fetch).mock.calls[0]?.[1]?.headers);
+  expect(headers.get('authorization')).toBe(`Bearer ${apiToken}`);
+  expect(headers.get('cf-r2-jurisdiction')).toBe('eu');
+});

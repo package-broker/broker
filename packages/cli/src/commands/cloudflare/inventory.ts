@@ -33,6 +33,61 @@ export interface Resource {
   jurisdiction?: Jurisdiction | null;
   state: 'planned' | 'creating' | 'complete' | 'binding_pending' | 'bound';
   evidence: Evidence | null;
+  lifecycle_baseline?: LifecycleRule[];
+}
+export interface LifecycleRule {
+  id: string;
+  enabled: boolean;
+  conditions: { prefix: string };
+  abortMultipartUploadsTransition: { condition: { type: 'Age'; maxAge: number } };
+}
+export function abortOnlyRule(rule: LifecycleRule): LifecycleRule {
+  return {
+    id: rule.id,
+    enabled: rule.enabled,
+    conditions: rule.conditions,
+    abortMultipartUploadsTransition: rule.abortMultipartUploadsTransition,
+  };
+}
+export function lifecycleRule(raw: unknown): raw is LifecycleRule {
+  const record = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === 'object' && !Array.isArray(v);
+  const only = (v: Record<string, unknown>, keys: string[]) =>
+    Object.keys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
+  if (!record(raw)) return false;
+  const emptyTransitions =
+    Array.isArray(raw.storageClassTransitions) && raw.storageClassTransitions.length === 0;
+  if (
+    !only(
+      raw,
+      emptyTransitions
+        ? [
+            'id',
+            'enabled',
+            'conditions',
+            'abortMultipartUploadsTransition',
+            'storageClassTransitions',
+          ]
+        : ['id', 'enabled', 'conditions', 'abortMultipartUploadsTransition'],
+    )
+  )
+    return false;
+  const { conditions, abortMultipartUploadsTransition: abort } = raw;
+  if (!record(conditions) || !only(conditions, ['prefix']) || typeof conditions.prefix !== 'string')
+    return false;
+  if (!record(abort) || !only(abort, ['condition']) || !record(abort.condition)) return false;
+  const c = abort.condition;
+  return (
+    only(c, ['type', 'maxAge']) &&
+    c.type === 'Age' &&
+    typeof c.maxAge === 'number' &&
+    Number.isSafeInteger(c.maxAge) &&
+    c.maxAge > 0 &&
+    typeof raw.id === 'string' &&
+    raw.id.length > 0 &&
+    raw.id.length <= 255 &&
+    typeof raw.enabled === 'boolean'
+  );
 }
 export interface Operation {
   id: string;
@@ -166,6 +221,29 @@ export interface SmokeCheck {
 export interface DeploymentJournal {
   attempt: DeploymentAttempt;
   last_verified: DeploymentAttempt | null;
+  history?: DeploymentHistory;
+}
+export interface DeploymentHistory {
+  version_ids: string[];
+  plain_bindings: { name: string; text: string }[];
+}
+export function recordDeploymentHistory(
+  deployment: DeploymentJournal,
+  receipt: { versionId?: string; plainBinding?: { name: string; text: string } },
+): void {
+  const history = (deployment.history ??= { version_ids: [], plain_bindings: [] });
+  for (const id of [
+    receipt.versionId,
+    deployment.attempt.version_id,
+    deployment.last_verified?.version_id,
+  ])
+    if (id && !history.version_ids.includes(id)) history.version_ids.push(id);
+  const binding = receipt.plainBinding;
+  if (
+    binding &&
+    !history.plain_bindings.some((b) => b.name === binding.name && b.text === binding.text)
+  )
+    history.plain_bindings.push({ name: binding.name, text: binding.text });
 }
 export function safeBuildInfo(raw: unknown): BuildInfo {
   const bad = () => {
@@ -403,8 +481,27 @@ function deploymentValid(raw: unknown): boolean {
       )
     );
   };
+  const history = (v: unknown): boolean =>
+    exact(v, ['version_ids', 'plain_bindings']) &&
+    Array.isArray(v.version_ids) &&
+    v.version_ids.length <= 10_000 &&
+    v.version_ids.every(id) &&
+    new Set(v.version_ids).size === v.version_ids.length &&
+    Array.isArray(v.plain_bindings) &&
+    v.plain_bindings.length <= 64 &&
+    v.plain_bindings.every(
+      (b) =>
+        exact(b, ['name', 'text']) &&
+        typeof b.name === 'string' &&
+        /^[A-Z][A-Z0-9_]{0,127}$/.test(b.name) &&
+        typeof b.text === 'string' &&
+        b.text.length <= 4096,
+    );
   return (
-    exact(raw, ['attempt', 'last_verified']) &&
+    record(raw) &&
+    (Object.hasOwn(raw, 'history')
+      ? exact(raw, ['attempt', 'last_verified', 'history']) && history(raw.history)
+      : exact(raw, ['attempt', 'last_verified'])) &&
     attempt(raw.attempt) &&
     (raw.last_verified === null ||
       (record(raw.last_verified) &&
@@ -678,8 +775,19 @@ export function validateInventory(raw: unknown, expected: InstallIdentity): Inve
   for (const [key, r] of Object.entries(data.resources)) {
     if (
       Object.keys(r).some(
-        (key) => !['name', 'id', 'jurisdiction', 'state', 'evidence'].includes(key),
+        (key) =>
+          !['name', 'id', 'jurisdiction', 'state', 'evidence', 'lifecycle_baseline'].includes(key),
       )
+    )
+      return bad();
+    if (
+      r.lifecycle_baseline !== undefined &&
+      (key !== 'r2' ||
+        !Array.isArray(r.lifecycle_baseline) ||
+        r.lifecycle_baseline.length > 16 ||
+        !r.lifecycle_baseline.every(lifecycleRule) ||
+        r.evidence === null ||
+        !['created', 'pending_create'].includes(r.evidence.source))
     )
       return bad();
     if (

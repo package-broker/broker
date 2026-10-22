@@ -30,6 +30,12 @@ export interface DistTagPlan {
   result(results: readonly StatementResult[]): SyncResult;
 }
 
+export interface DistTagGroupPlan {
+  /** Indivisible groups; repeat the lease guard and publish a revision in each writing batch. */
+  readonly groups: readonly (readonly Statement[])[];
+  result(results: readonly StatementResult[]): SyncResult;
+}
+
 export class DistTagRefusedError extends Error {
   constructor(readonly tags: readonly string[]) {
     super('DIST_TAGS_REFUSED');
@@ -60,6 +66,16 @@ export function distTagStatements(
   guard: CatalogueWriteGuard,
   request: DistTagRequest,
 ): DistTagPlan {
+  const plan = distTagStatementGroups(ctx, guard, request);
+  return { statements: plan.groups.flat(), result: plan.result };
+}
+
+/** Keeps each before-image beside its write, without treating a large snapshot as one batch. */
+export function distTagStatementGroups(
+  ctx: OrgContext,
+  guard: CatalogueWriteGuard,
+  request: DistTagRequest,
+): DistTagGroupPlan {
   assertCatalogueWriteGuard(ctx, guard);
   const { packageId, ecosystem, actorType, actorId, opId } = request;
   if (ecosystem !== 'npm') throw new TypeError('composer packages have no dist tags');
@@ -223,12 +239,19 @@ export function distTagStatements(
   );
 
   const head = [...guard, ...packageMatches, ...checks];
-  const statements = [...head, ...probes, ...sets, removeHistory, remove, advance];
+  const groups = [
+    head,
+    ...probes.map((probe) => [probe]),
+    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),
+    [removeHistory, remove],
+    [advance],
+  ];
+  const statementCount = groups.reduce((sum, group) => sum + group.length, 0);
   const setOffset = head.length + probes.length;
   return {
-    statements,
+    groups,
     result(results) {
-      if (results.length !== statements.length) throw new TypeError('incomplete dist tag results');
+      if (results.length !== statementCount) throw new TypeError('incomplete dist tag results');
       const skipped = [
         ...badGrammar,
         ...results
@@ -247,7 +270,7 @@ export function distTagStatements(
         conflicts: [],
         refused: [],
         skippedTags: skipped,
-        statements: statements.length,
+        statements: statementCount,
       };
     },
   };

@@ -54,6 +54,7 @@ import { entries as removedBlobsEntries } from './mutation-table/removed-blobs.j
 import { entries as catalogueReconcileEntries } from './mutation-table/catalogue-reconcile.js';
 import { entries as catalogueWriterEntries } from './mutation-table/catalogue-writer.js';
 import { entries as attachedProxyEntries } from './mutation-table/source-attached-proxy.js';
+import { entries as projectSourceReadEntries } from './mutation-table/project-source-read.js';
 import { entries as importRunEntries } from './mutation-table/import-run.js';
 import { entries as projectReadableEntries } from './mutation-table/project-readable.js';
 import { entries as catalogueStatusEntries } from './mutation-table/catalogue-status-statements.js';
@@ -190,6 +191,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueEpochEntries,
   ...sourceEntries,
   ...attachedProxyEntries,
+  ...projectSourceReadEntries,
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,

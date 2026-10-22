@@ -53,6 +53,9 @@ const EXPECTED_ROUTES = [
   'GET /_pb/tokens/:token',
   'DELETE /_pb/tokens/:token',
   'POST /_pb/tokens/:token/rotate',
+  'POST /_pb/service-principals',
+  'GET /_pb/service-principals',
+  'GET /_pb/service-principals/:principal',
   'PUT /_pb/service-principals/:principal/permissions',
   'POST /_pb/service-principals/:principal/suspend',
   'POST /_pb/service-principals/:principal/restore',
@@ -184,8 +187,8 @@ function dependencies(): ApiModuleDeps {
     },
     servicePrincipals: {
       ...common(),
-      servicePrincipals: unused('setPermissions', 'suspend', 'restore'),
-      principals: unused('get'),
+      servicePrincipals: unused('create', 'setPermissions', 'suspend', 'restore'),
+      principals: unused('get', 'list'),
     },
     sources: {
       ...common(),

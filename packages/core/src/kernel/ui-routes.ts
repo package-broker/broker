@@ -93,7 +93,7 @@ function createRoutes(
     response.headers.set('content-security-policy', UI_CSP);
     response.headers.set('cross-origin-opener-policy', 'same-origin');
     response.headers.set('x-content-type-options', 'nosniff');
-    response.headers.set('referrer-policy', 'same-origin');
+    response.headers.set('referrer-policy', 'no-referrer');
     if (hsts) response.headers.set('strict-transport-security', HSTS);
     return response;
   }
@@ -256,6 +256,7 @@ function createRoutes(
   return { ui, setup };
 }
 
+/** Public, visitor-independent document and manifest-listed assets; bypasses session authorization. */
 export function createUiRoutes(
   assets: StaticAssets,
   options: UiRouteOptions,

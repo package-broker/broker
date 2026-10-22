@@ -140,3 +140,14 @@ test('no statement keeps a trailing semicolon', () => {
   expect(statements).toEqual(['SELECT 1', 'SELECT 2']);
   expect(statements.every((statement) => !statement.endsWith(';'))).toBe(true);
 });
+
+// Migration batches may not change PRAGMAs.
+test.each([
+  'PRAGMA foreign_keys = OFF',
+  'PRAGMA foreign_keys = ON',
+  'PRAGMA defer_foreign_keys = OFF',
+  'PRAGMA defer_foreign_keys = ON',
+  'PRAGMA writable_schema = ON',
+])('rejects migration PRAGMA %s', (statement) => {
+  expect(() => splitStatements(statement)).toThrow(MigrationSyntaxError);
+});

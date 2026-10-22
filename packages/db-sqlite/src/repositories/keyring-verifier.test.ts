@@ -30,22 +30,7 @@ async function run(sql: string, params: (string | number)[]): Promise<void> {
 
 async function migrated(): Promise<void> {
   const init = await loadMigrationSource('core', '0001_init.sql', read('0001_init.sql'));
-  const login = await loadMigrationSource(
-    'core',
-    '0002_local_login.sql',
-    read('0002_local_login.sql'),
-  );
-  const verifier = await loadMigrationSource(
-    'core',
-    '0015_keyring_verifier.sql',
-    read('0015_keyring_verifier.sql'),
-  );
-  const indexes = await loadMigrationSource(
-    'core',
-    '0016_keyring_version_indexes.sql',
-    read('0016_keyring_version_indexes.sql'),
-  );
-  await migrate(opened.executor, [init, login, verifier, indexes], { holder: 't707' });
+  await migrate(opened.executor, [init], { holder: 't707' });
 }
 
 const mac = (fill: number): Uint8Array => new Uint8Array(32).fill(fill);

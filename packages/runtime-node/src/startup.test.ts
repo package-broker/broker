@@ -279,22 +279,6 @@ describe('startNode', () => {
     return loadMigrationSource('core', '0001_init.sql', text);
   }
 
-  async function epochSources(): Promise<MigrationSource[]> {
-    return Promise.all(
-      [
-        '0002_local_login.sql',
-        '0003_access_model.sql',
-        '0004_cache_epoch.sql',
-        '0005_admin_permission_topup.sql',
-        '0006_ports.sql',
-        '0015_keyring_verifier.sql',
-        '0016_keyring_version_indexes.sql',
-      ].map(async (name) =>
-        loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-      ),
-    );
-  }
-
   async function listen(broker: NodeBroker): Promise<string> {
     running.push(broker);
     await new Promise<void>((resolve) => broker.server.listen(0, '127.0.0.1', resolve));
@@ -313,7 +297,7 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [healthyPlugin()],
-      migrations: [await initSource(), ...(await epochSources())],
+      migrations: [await initSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -365,7 +349,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource(), ...(await epochSources())],
+      migrations: [await initSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -399,7 +383,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource(), ...(await epochSources())],
+      migrations: [await initSource()],
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -414,7 +398,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'other',
@@ -447,7 +431,7 @@ describe('startNode', () => {
       const failure = await rejection(
         startNode({
           plugins: [broken],
-          migrations: [await initSource(), ...(await epochSources())],
+          migrations: [await initSource()],
           env: {
             PB_SQLITE_PATH: path,
             PB_ORG_SLUG: 'acme',
@@ -473,7 +457,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'acme',
@@ -587,7 +571,7 @@ describe('startNode', () => {
     ): Promise<NodeBroker> {
       return startNode({
         plugins: [probePlugin()],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: env(databasePath(), extraEnv),
         ...(platformPorts === undefined ? {} : { platformPorts }),
         stdout: capture().stream,
@@ -642,7 +626,7 @@ describe('startNode', () => {
               },
             },
           ],
-          migrations: [await initSource(), ...(await epochSources())],
+          migrations: [await initSource()],
           env: { ...env(databasePath(`n-${String(platformPorts)}.sqlite`)), DEPLOYMENT_ID: '' },
           ...(platformPorts === undefined ? {} : { platformPorts }),
         });
@@ -701,7 +685,7 @@ describe('startNode', () => {
         const failure = await rejection(
           startNode({
             plugins: [probePlugin()],
-            migrations: [await initSource(), ...(await epochSources())],
+            migrations: [await initSource()],
             env: env(path, extra),
             platformPorts: stanza,
             stdout: capture().stream,
@@ -989,7 +973,7 @@ describe('startNode', () => {
       };
       const broker = await startNode({
         plugins: [stuck],
-        migrations: [await initSource(), ...(await epochSources())],
+        migrations: [await initSource()],
         env: env(databasePath()),
         platformPorts: ports,
         stdout: out.stream,

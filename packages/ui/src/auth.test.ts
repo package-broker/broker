@@ -622,7 +622,7 @@ describe('package reauth integration', () => {
     expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(hash.slice(1))}`)).toBe(hash);
   });
   it.each([200, 404, 409])(
-    'publishes only path and outcome after a replay returns %s',
+    'publishes only path, outcome and a closed error code after a replay returns %s',
     async (status) => {
       const { storage } = memoryStorage();
       const { client } = fakeClient(status === 200 ? ok(200) : fail(status), ok(200));
@@ -641,6 +641,7 @@ describe('package reauth integration', () => {
         path: '/_pb/packages/p/versions/v/tombstone',
         ok: status === 200,
         status,
+        ...(status === 200 ? {} : { code: 'unauthorized' }),
       });
       unsubscribe();
       listener.mockClear();

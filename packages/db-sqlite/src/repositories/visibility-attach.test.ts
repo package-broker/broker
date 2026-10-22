@@ -342,6 +342,44 @@ afterEach(async () => {
 });
 
 describe('attachSource', () => {
+  it.each([
+    { projectId: PA, precedence: undefined },
+    { projectId: PA, precedence: 7 },
+    { projectId: PB, precedence: 7 },
+  ])(
+    'increments only the target project revision when attaching to $projectId with precedence $precedence',
+    async ({ projectId, precedence }) => {
+      const revisions = () =>
+        executor.all<{ org_id: string; id: string; revision: number }>(
+          stmt('SELECT org_id, id, revision FROM project ORDER BY org_id, id'),
+        );
+      const before = await revisions();
+      expect(before).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ org_id: ORG_A, id: projectId === PA ? PB : PA }),
+          expect.objectContaining({ org_id: ORG_B, id: P_FOREIGN }),
+        ]),
+      );
+
+      const outcome = await repository().attachSource(a, admin(), {
+        audit: visibilityAudit(),
+        projectId,
+        sourceId: SO,
+        ...(precedence === undefined ? {} : { precedence }),
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(await attachment(projectId, SO)).toBe(precedence ?? 100);
+      expect(await revisions()).toEqual(
+        before.map((row) =>
+          row.org_id === ORG_A && row.id === projectId
+            ? { ...row, revision: row.revision + 1 }
+            : row,
+        ),
+      );
+    },
+  );
+
   it('1: a project owner without org:sources:write cannot attach an organization source', async () => {
     const before = await epoch();
     const outcome = await repository().attachSource(a, owner(), {

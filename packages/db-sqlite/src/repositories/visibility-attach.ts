@@ -190,7 +190,7 @@ export function createVisibilityAttachRepository(
         .set({ revision: sql<number>`revision + 1` })
         .where('org_id', '=', ctx.orgId)
         .where('id', '=', projectId)
-        .where(changed ?? sql<SqlBool>`1`),
+        .where(sql<SqlBool>`(${changed ?? sql<SqlBool>`1`})`),
     );
   }
 

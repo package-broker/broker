@@ -678,12 +678,12 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
-        'Project revision increments change no referenced key; attachment change predicates and their true fallback run in the existing fenced batch without consuming executor change counts.',
+        'Project revision increments change no referenced key; attachment change predicates and their parenthesized true fallback preserve scope filters in the existing fenced batch without consuming executor change counts.',
       sites: [
         'db-sqlite/src/repositories/visibility-attach.ts:SQL template: sql<number>`revision + 1` #1',
         'db-sqlite/src/repositories/visibility-attach.ts:SQL template: sql<SqlBool>`not ${isAttached(ctx, input.projectId, input.sourceId)} or exists (\n          select 1 from project_source where org_id = ${ctx.orgId}\n          and project_id = ${input.projectId} and source_id = ${input.sourceId}\n          and ${precedence === undefined ? sql<SqlBool>`0` : sql<SqlBool>`precedence is not ${precedence}`})` #1',
         'db-sqlite/src/repositories/visibility-attach.ts:SQL template: sql<SqlBool>`exists (select 1 from project_source where org_id = ${ctx.orgId}\n          and project_id = ${input.projectId} and source_id = ${input.sourceId}\n          and precedence is not ${precedence})` #1',
-        'db-sqlite/src/repositories/visibility-attach.ts:SQL template: sql<SqlBool>`1` #2',
+        'db-sqlite/src/repositories/visibility-attach.ts:SQL template: sql<SqlBool>`(${changed ?? sql<SqlBool>`1`})` #1',
       ],
     },
     {

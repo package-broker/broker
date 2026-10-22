@@ -11,6 +11,7 @@ import {
   createSetupController,
   isNavigableLocation,
   startSso,
+  reauthReturnHash,
   type AuthClient,
 } from './auth.js';
 import type { PendingStorage } from './pending.js';
@@ -583,4 +584,50 @@ it('retains project scope when starting SSO on the login route', async () => {
       body: { purpose: 'login', returnTo: '/_pb/ui#/projects?project=acme' },
     }),
   );
+});
+
+describe('package reauth integration', () => {
+  it('preserves package filters and opaque cursor through the reauth return URL', () => {
+    const hash =
+      '#/packages?project=web&status=active&source=01ARZ3NDEKTSV4RRFFQ69G5FAV&q=%40example&after=npm%3A%2B%2F%25%3F%3D';
+    expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(hash.slice(1))}`)).toBe(hash);
+  });
+  it.each([200, 404, 409])(
+    'publishes only path and outcome after a replay returns %s',
+    async (status) => {
+      const { storage } = memoryStorage();
+      const { client } = fakeClient(status === 200 ? ok(200) : fail(status), ok(200));
+      const flow = createReauthFlow({ client, storage, now: Date.now, navigate: vi.fn() });
+      const listener = vi.fn();
+      const unsubscribe = flow.subscribeReplay(listener);
+      flow.requireReauth(
+        { method: 'POST', path: '/_pb/packages/p/versions/v/tombstone', body: {} },
+        { credential: false, secretFields: [] },
+        '#/packages',
+      );
+      flow.restore();
+      expect(listener).not.toHaveBeenCalled();
+      await flow.confirm();
+      expect(listener).toHaveBeenCalledExactlyOnceWith({
+        path: '/_pb/packages/p/versions/v/tombstone',
+        ok: status === 200,
+        status,
+      });
+      unsubscribe();
+      listener.mockClear();
+      flow.requireReauth(
+        { method: 'POST', path: '/_pb/packages/p/versions/v/tombstone', body: {} },
+        { credential: false, secretFields: [] },
+        '#/packages',
+      );
+      flow.restore();
+      await flow.confirm();
+      expect(listener).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it('drops unknown package return filters and invalid project scopes', () => {
+  const target = '/packages?project=%2F%2Foutside.invalid&redirect=https%3A%2F%2Foutside.invalid';
+  expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(target)}`)).toBe('#/packages');
 });

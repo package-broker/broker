@@ -83,6 +83,15 @@ export function isNavigableLocation(location: string): boolean {
 }
 
 export function safePageHash(hash: string): string {
+  if (hash === '#/packages' || hash.startsWith('#/packages?')) {
+    const query = new URLSearchParams(hash.slice('#/packages?'.length));
+    const allowed = new Set(['project', 'projectId', 'status', 'source', 'q', 'after']);
+    for (const key of [...query.keys()]) if (!allowed.has(key)) query.delete(key);
+    const project = query.get('project');
+    if (project !== null && !/^[A-Za-z0-9._-]{1,64}$/.test(project)) query.delete('project');
+    const search = query.toString();
+    return `#/packages${search === '' ? '' : `?${search}`}`;
+  }
   const match =
     /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?project=([A-Za-z0-9._-]{1,64}))?$/.exec(
       hash,
@@ -162,12 +171,19 @@ export interface ReauthState {
   readonly outcome: 'replayed' | 'failed' | 'save-failed' | 'credential-required' | null;
 }
 
+export interface ReplayResult {
+  readonly path: string;
+  readonly ok: boolean;
+  readonly status: number;
+}
+
 export function createReauthFlow(deps: {
   client: AuthClient;
   storage: PendingStorage;
   now: () => number;
   navigate: (hash: string) => void;
 }) {
+  const replayListeners = new Set<(result: ReplayResult) => void>();
   const store = createStore<ReauthState>({
     dialog: 'closed',
     action: null,
@@ -177,6 +193,13 @@ export function createReauthFlow(deps: {
   return {
     snapshot: store.get,
     subscribe: store.subscribe,
+
+    subscribeReplay(listener: (result: ReplayResult) => void) {
+      replayListeners.add(listener);
+      return () => {
+        replayListeners.delete(listener);
+      };
+    },
 
     requireReauth(
       request: ApiRequestDescription,
@@ -233,13 +256,17 @@ export function createReauthFlow(deps: {
         method: string,
         path: string,
         init: object,
-      ) => Promise<{ ok: boolean }>;
+      ) => Promise<{ ok: boolean; status: number }>;
+      let outcome: ReplayResult;
       try {
         const result = await replay(action.method.toLowerCase(), action.path, init);
+        outcome = { path: action.path, ok: result.ok, status: result.status };
         store.set({ dialog: 'closed', busy: false, outcome: result.ok ? 'replayed' : 'failed' });
       } catch {
+        outcome = { path: action.path, ok: false, status: 0 };
         store.set({ dialog: 'closed', busy: false, outcome: 'failed' });
       }
+      for (const listener of replayListeners) listener(outcome);
     },
 
     async submitLocal(input: { password: string; code: string }): Promise<'done' | 'refused'> {
@@ -389,6 +416,7 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
 }
 
 export interface ShellServices {
+  readonly subscribeReplay?: (listener: (result: ReplayResult) => void) => () => void;
   readonly client: AuthClient;
   readonly requireReauth: (
     request: ApiRequestDescription,

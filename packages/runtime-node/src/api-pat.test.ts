@@ -262,4 +262,77 @@ describe('Node management API personal access token lifecycle', () => {
     });
     expect(reordered.status).toBe(204);
   });
+  it('attaches and detaches an organization source over the real store with audit rows', async () => {
+    const base = await start();
+    const { cookie, csrf } = await login(base);
+    const write = {
+      cookie,
+      'x-csrf-token': csrf,
+      'content-type': 'application/json',
+      origin: base,
+    };
+    const created = await fetch(`${base}/_pb/projects`, {
+      method: 'POST',
+      headers: write,
+      body: JSON.stringify({ slug: 'alpha', name: 'Alpha' }),
+    });
+    expect(created.status).toBe(201);
+    const [source, foreign] = [ulid(), ulid()];
+    const beta = await fetch(`${base}/_pb/projects`, {
+      method: 'POST',
+      headers: write,
+      body: JSON.stringify({ slug: 'beta', name: 'Beta' }),
+    });
+    expect(beta.status).toBe(201);
+    const { id: betaId } = (await beta.json()) as { id: string };
+    const opened = openBetterSqliteExecutor(path);
+    try {
+      const org = await createOrganizationBootstrap(opened.executor).findSingleton();
+      const orgId = org?.id ?? '';
+      await opened.executor.batch(
+        (
+          [
+            [source, null],
+            [foreign, betaId],
+          ] as [string, string | null][]
+        ).map(([id, owner]) => ({
+          sql: "INSERT INTO source (id, org_id, name, ecosystem, type, project_id) VALUES (?, ?, ?, 'composer', 'composer_repository', ?)",
+          params: [id, orgId, id, owner],
+        })),
+      );
+    } catch (error) {
+      await opened.close();
+      throw error;
+    }
+    await opened.close();
+
+    const url = (id: string) => `${base}/_pb/projects/alpha/sources/${id}/attachment`;
+    const listed = async () =>
+      (
+        (await (
+          await fetch(`${base}/_pb/projects/alpha/sources`, { headers: { cookie } })
+        ).json()) as {
+          items: { id: string }[];
+        }
+      ).items.map((item) => item.id);
+    expect(await listed()).not.toContain(source);
+
+    const attached = await fetch(url(source), { method: 'PUT', headers: write, body: '{}' });
+    expect(attached.status).toBe(204);
+    expect(await listed()).toContain(source);
+    const again = await fetch(url(source), { method: 'PUT', headers: write, body: '{}' });
+    expect(again.status).toBe(204);
+    expect((await fetch(url(foreign), { method: 'PUT', headers: write, body: '{}' })).status).toBe(
+      404,
+    );
+
+    const detached = await fetch(url(source), { method: 'DELETE', headers: write });
+    expect(detached.status).toBe(204);
+    expect(await listed()).not.toContain(source);
+    expect((await fetch(url(source), { method: 'DELETE', headers: write })).status).toBe(404);
+
+    const actions = await pendingActions();
+    expect(actions.filter((action) => action === 'source.attach')).toHaveLength(1);
+    expect(actions.filter((action) => action === 'source.detach')).toHaveLength(1);
+  });
 });

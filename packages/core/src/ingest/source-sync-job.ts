@@ -90,6 +90,12 @@ export interface SourceSyncDeps {
   ) => Promise<readonly string[]>;
   /** Changes whenever the inputs of the refresh selection change. */
   readonly selectionRevision?: (ctx: OrgContext, sourceId: string) => Promise<string>;
+  /** Read the selected names and their revision from one database snapshot. */
+  readonly selectionSnapshot?: (
+    ctx: OrgContext,
+    sourceId: string,
+    names: readonly string[],
+  ) => Promise<{ readonly keys: readonly string[]; readonly revision: string }>;
   /** The subset of `names` that already has a package row in the source. */
   readonly existingKeys: (
     ctx: OrgContext,
@@ -319,9 +325,11 @@ async function syncListing(
 
   let cursor = parseCursor(session);
   const revisionOf = async (): Promise<string | undefined> =>
-    deps.selectionRevision === undefined
-      ? undefined
-      : digest([await deps.selectionRevision(ctx, record.id)]);
+    deps.selectionRevision === undefined ? undefined : deps.selectionRevision(ctx, record.id);
+  const revisionHash = async () => {
+    const revision = await revisionOf();
+    return revision === undefined ? undefined : digest([revision]);
+  };
   const restartListing = () => new SyncFailure('internal', false, true, true);
   let budget = FANOUT_PER_INVOCATION;
   const adopt = (next: IngestSessionHandle) => {
@@ -388,10 +396,21 @@ async function syncListing(
     if (cursor.o > 0 && cursor.h !== pageDigest) throw invalidListing();
     const unreadable = cursor.x === 1 || names.length !== new Set(page.names).size;
     const slice = names.slice(cursor.o, cursor.o + budget);
-    const revision = await revisionOf();
-    if (cursor.e === 1 && cursor.r !== undefined && revision !== cursor.r) throw restartListing();
+    const selection = await deps.selectionSnapshot?.(ctx, record.id, slice);
+    const rawRevision = selection === undefined ? await revisionOf() : selection.revision;
+    const revision = rawRevision === undefined ? undefined : await digest([rawRevision]);
+    if (cursor.r !== undefined && revision !== cursor.r) throw restartListing();
+    const listingGuard =
+      rawRevision === undefined
+        ? guard
+        : deps.writeGuard(
+            ctx,
+            { ...session, cursor: JSON.stringify({ ...cursor, s: record.id, v: rawRevision }) },
+            job,
+          );
     const selected =
-      deps.selectedKeys === undefined ? slice : await deps.selectedKeys(ctx, record.id, slice);
+      selection?.keys ??
+      (deps.selectedKeys === undefined ? slice : await deps.selectedKeys(ctx, record.id, slice));
     const existing =
       selected.length === 0 ? new Set<string>() : await deps.existingKeys(ctx, record.id, selected);
     let filteredExisting = cursor.e === 1;
@@ -407,19 +426,17 @@ async function syncListing(
         generation: [session.id, session.generation],
       });
     }
-    if (filteredExisting && revision !== undefined && (await revisionOf()) !== revision) {
-      throw restartListing();
-    }
     budget -= slice.length;
 
     const present = selected.filter((key) => existing.has(key));
     for (let offset = 0; offset < present.length; offset += CATALOGUE_KEY_LIST_MAX) {
-      await deps.writer.markListing(ctx, guard, {
+      await deps.writer.markListing(ctx, listingGuard, {
         scope: { kind: 'source', sourceId: record.id },
         stamp: session.stamp as string,
         present: present.slice(offset, offset + CATALOGUE_KEY_LIST_MAX),
       });
     }
+    if (revision !== undefined && (await revisionHash()) !== revision) throw restartListing();
 
     const consumed = cursor.o + slice.length >= names.length;
     const flags = {
@@ -438,7 +455,7 @@ async function syncListing(
       ctx,
       session,
       { cursor: text, addSeen: present.length },
-      guard,
+      listingGuard,
     );
     if (progress === null) throw lostSession();
     adopt({
@@ -462,8 +479,11 @@ async function syncListing(
   if (!Number.isSafeInteger(unseen) || unseen < 0 || !Number.isSafeInteger(marked) || marked < 0) {
     throw new SyncFailure('internal', true, true, false);
   }
-  // `u` pins the unseen count into the guard so a selection widened after this read refuses the batch.
-  if (cursor.e === 1 && cursor.r !== undefined && unseen > 0 && (await revisionOf()) !== cursor.r) {
+  const revision = await revisionOf();
+  if (
+    cursor.r !== undefined &&
+    (revision === undefined || (await digest([revision])) !== cursor.r)
+  ) {
     throw restartListing();
   }
   const result = await deps.finalizer.finalize(
@@ -479,8 +499,11 @@ async function syncListing(
     },
     deps.writeGuard(
       ctx,
-      cursor.e === 1
-        ? { ...session, cursor: JSON.stringify({ ...cursor, u: unseen, s: record.id }) }
+      revision !== undefined
+        ? {
+            ...session,
+            cursor: JSON.stringify({ ...cursor, s: record.id, v: revision }),
+          }
         : session,
       job,
     ),

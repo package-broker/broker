@@ -109,6 +109,10 @@ const REVIEWED: Readonly<Record<string, Review>> = {
       'Counts only upstream_state validator upsert slots; upstream_state has no inbound foreign keys.',
     parents: ['upstream_state'],
   },
+  'db-sqlite/src/repositories/ingest-finalize.ts:results[acceptanceAuditIndex]?.changes #1': {
+    reason: 'Counts the conditional audit_pending insert; inserts cannot fire FK actions.',
+    parents: ['audit_pending'],
+  },
   'db-sqlite/src/repositories/ingest-session.ts:result?.changes #1': {
     reason: 'Ingest session update/delete; ingest_session has no inbound foreign keys.',
     parents: ['ingest_session'],
@@ -318,6 +322,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/session-liveness.ts',
   'db-sqlite/src/repositories/session.ts',
   'db-sqlite/src/repositories/source-removal.ts',
+  'db-sqlite/src/repositories/source-selection-revision.ts',
   'db-sqlite/src/repositories/source-selection.ts',
   'db-sqlite/src/repositories/upstream-state.ts',
   'db-sqlite/src/repositories/visibility-attach.ts',
@@ -387,7 +392,8 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     "deleteFrom('fetch_lease') x2; insertInto('fetch_lease') [onConflict:doUpdateSet]; updateTable('fetch_lease')",
   'db-sqlite/src/repositories/idempotency.ts':
     'DELETE FROM api_idempotency; INSERT INTO api_idempotency',
-  'db-sqlite/src/repositories/ingest-finalize.ts': 'UPDATE ingest_session; UPDATE source x2',
+  'db-sqlite/src/repositories/ingest-finalize.ts':
+    "UPDATE ingest_session; UPDATE source x2; updateTable('audit_pending')",
   'db-sqlite/src/repositories/ingest-session.ts':
     "deleteFrom('ingest_session') x3; insertInto('ingest_session') [onConflict:doUpdateSet]; updateTable('ingest_session') x6",
   'db-sqlite/src/repositories/job-lease-guard.ts': '',
@@ -411,6 +417,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
   'db-sqlite/src/repositories/source-removal.ts': 'UPDATE source',
+  'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
   'db-sqlite/src/repositories/source.ts':
     "deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x6",
@@ -448,6 +455,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
 // Inbound edges after applying migrations in order, including ALTER TABLE/rebuilt tables.
 // Empty entries pin the absence of inbound FKs just as explicitly as existing actions.
 const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
+  audit_pending: [],
   api_idempotency: [],
   blob: [
     'version(blob_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
@@ -670,6 +678,47 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'The live share and accepted-count bound are organization-scoped scalar predicates; neither reads executor changes.',
+      sites: [
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`NOT ${withinAbsenceShare(\n              unseenSourcePackages(ctx, scope.sourceId),\n              expectedCount,\n              options.maxAbsenceShare ?? DEFAULT_MAX_ABSENCE_SHARE,\n              minPackages,\n            )}` #1',
+        'db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`(NOT (${needsAcceptance}) OR ${acceptedBound(scope.sourceId)})` #1',
+      ],
+    },
+    {
+      reason:
+        'The audit payload receives the organization-scoped live unseen count before removal; the update leaves all referenced audit keys unchanged.',
+      sites: [
+        "db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<string>`json_set(payload_json, '$.changes.absent.new', ${unseenSourcePackages(ctx, scope.sourceId)})` #1",
+      ],
+    },
+    {
+      reason:
+        'The fixed result index identifies the conditional audit insert; its changes semantics are reviewed separately.',
+      sites: [
+        'db-sqlite/src/repositories/ingest-finalize.ts:unresolved computed access: results[acceptanceAuditIndex] #1',
+      ],
+    },
+    {
+      reason:
+        'Literal true disables the accepted bound probe when the source was not armed; this contains no count access.',
+      sites: ['db-sqlite/src/repositories/ingest-finalize.ts:SQL template: sql<boolean>`1` #2'],
+    },
+    {
+      reason:
+        'The shared selection revision reads only organization-scoped source configuration and sorted registrations; it has no mutations or executor count reads.',
+      sites: [
+        "db-sqlite/src/repositories/source-selection-revision.ts:SQL template: sql<string>`(SELECT json_array(source.config_json, source.status = 'active',\n      (SELECT json_group_array(registration.pattern) FROM (\n        SELECT registered_name.pattern FROM registered_name\n        WHERE registered_name.org_id = ${ctx.orgId} AND registered_name.source_id = ${sourceId}\n        ORDER BY registered_name.pattern) AS registration))\n    FROM source WHERE source.org_id = ${ctx.orgId} AND source.id = ${sourceId})` #1",
+      ],
+    },
+    {
+      reason:
+        'Kysely supplies the shared revision SQL tag and exposes no executor count in this module.',
+      sites: [
+        "db-sqlite/src/repositories/source-selection-revision.ts:opaque dependency: import { sql } from 'kysely'; #1",
+      ],
+    },
+    {
+      reason:
         'Fixture-side access in source-selection-races-contract.ts; indexes or assigns test data, never an executor result count.',
       sites: [
         'db-sqlite/src/contract/source-selection-races-contract.ts:opaque object access: Object.assign(session, { stamp, snapshotId: SNAPSHOT, cursor, seenCount: 1 }) #1',
@@ -724,7 +773,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'SQL in ingest-session.ts; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
-        "db-sqlite/src/repositories/ingest-session.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}\n            AND ingest_session.scope = 'source' AND ingest_session.source_id = ${pin.sourceId})\n            AND ${unseenSourcePackages(ctx, pin.sourceId)} = ${pin.unseen}` #1",
+        "db-sqlite/src/repositories/ingest-session.ts:SQL template: sql<boolean>`(EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}\n            AND ingest_session.scope = 'source' AND ingest_session.source_id = ${pin.sourceId})\n            ${pin.unseen === undefined ? sql`` : sql`AND ${unseenSourcePackages(ctx, pin.sourceId)} = ${pin.unseen}`}\n            AND ${sourceSelectionRevision(ctx, pin.sourceId)} = ${pin.revision ?? null})` #1",
         "db-sqlite/src/repositories/ingest-session.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM ingest_session WHERE ${holds(ctx, handle)}\n      AND (ingest_session.scope = 'source' OR EXISTS (SELECT 1 FROM source\n        WHERE source.id = ingest_session.source_id AND source.org_id = ${ctx.orgId}\n          AND ${sourceSelectionCondition(ctx, sql<string>`source.id`, sql<string>`source.ecosystem`, sql<string>`ingest_session.package_key`, true)})))` #1",
       ],
     },

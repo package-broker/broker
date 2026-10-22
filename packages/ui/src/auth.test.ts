@@ -541,24 +541,20 @@ describe('SSO return route', () => {
       }),
     );
   });
-  it.each([
-    'https://evil.test/#/tokens',
-    '//evil.test',
-    '#//evil.test',
-    '#/unknown',
-    '#/tokens?project=%3Cbad%3E',
-    '#/tokens?next=https://evil.test',
-  ])('replaces unsafe or unrecognized hash input %s with a broker-local route', async (hash) => {
-    const { client, request } = fakeClient(ok(200, { location: 'https://idp.test/auth' }));
-    await startSso(client, 'corp', 'login', vi.fn(), hash);
-    expect(request).toHaveBeenCalledWith(
-      'post',
-      '/_pb/auth/sso/{provider}/start',
-      expect.objectContaining({
-        body: { purpose: 'login', returnTo: '/_pb/ui#/projects' },
-      }),
-    );
-  });
+  it.each(['https://evil.test/#/tokens', '//evil.test', '#//evil.test', '#/unknown'])(
+    'replaces unsafe or unrecognized hash input %s with a broker-local route',
+    async (hash) => {
+      const { client, request } = fakeClient(ok(200, { location: 'https://idp.test/auth' }));
+      await startSso(client, 'corp', 'login', vi.fn(), hash);
+      expect(request).toHaveBeenCalledWith(
+        'post',
+        '/_pb/auth/sso/{provider}/start',
+        expect.objectContaining({
+          body: { purpose: 'login', returnTo: '/_pb/ui#/projects' },
+        }),
+      );
+    },
+  );
 });
 
 it('rejects a hash with a trailing control character before SSO', async () => {

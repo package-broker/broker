@@ -1,3 +1,10 @@
+import { createSourceSyncJob } from '@package-broker/core/ingest/source-sync-job';
+import type { JobContext } from '@package-broker/core/platform/jobs';
+import { noopObservability } from '@package-broker/core/platform/observability';
+import { snapshotRef, type ProviderContext } from '@package-broker/core/sources/provider';
+import { createCatalogueWriter } from './catalogue-writer.js';
+import { createSourceSyncCounts } from './source-sync-counts.js';
+import { createSourceSyncReads } from './source-sync-reads.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { auditEvent } from '@package-broker/core/audit/actions';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
@@ -171,6 +178,161 @@ async function refuse() {
   );
   return session;
 }
+
+it.each([false, true])(
+  'applies an armed acceptance once with unchanged selection (live count changes: %s)',
+  async (countChanges) => {
+    const executor = database.executor;
+    const ctx = database.orgs!.a;
+    const sessions = createIngestSessions(executor);
+    const writer = createCatalogueWriter(executor);
+    const names = Array.from({ length: 10 }, (_, i) => `acme/p${i + 1}`);
+    const SNAPSHOT = '"snapshot"';
+    const OLD = '2020-01-01T00:00:00.000Z';
+    await executor.batch([
+      stmt(
+        "UPDATE source SET config_json = ? WHERE org_id = ? AND id = 'S'",
+        JSON.stringify({ selection: { packages: names, patterns: [] } }),
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('R', ?, 'S', 'composer', 'acme/*')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO job (id, org_id, type, idempotency_key, state, lease_owner, lease_until, fence) VALUES ('J', ?, 'sync:v1', 'poll', 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",
+        ctx.orgId,
+      ),
+    ]);
+    const reads = createSourceSyncReads(executor);
+    const revision = await reads.selectionRevision(ctx, 'S');
+    let accepted = false;
+    const finalizer = createIngestFinalizer(executor);
+    const job = createSourceSyncJob({
+      sources: createSourceRepository(executor),
+      sessions,
+      writer,
+      ...createSourceSyncCounts(executor),
+      ...reads,
+      finalizer: {
+        async finalize(...args) {
+          if (accepted && countChanges) {
+            await executor.batch([
+              stmt(
+                "UPDATE package SET updated_at = '2999-01-01T00:00:00.000Z' WHERE org_id = ? AND id = 'P10'",
+                ctx.orgId,
+              ),
+            ]);
+          }
+          return finalizer.finalize(...args);
+        },
+      },
+      providers: {
+        forSource: () => ({
+          id: 'listing',
+          sourceTypes: ['composer_repository'],
+          ecosystems: ['composer'],
+          async listPackages() {
+            return {
+              names: names.slice(0, 1),
+              next: null,
+              last: true,
+              snapshot: snapshotRef(SNAPSHOT),
+            };
+          },
+          async describe() {
+            throw new Error('unused');
+          },
+          async openDist() {
+            throw new Error('unused');
+          },
+        }),
+      },
+      toProviderSource: () => ({
+        id: 'S',
+        type: 'composer_repository',
+        ecosystem: 'composer',
+        url: 'https://example.test',
+        config: {
+          selection: { packages: [], patterns: [], expandPatterns: false },
+          distHosts: [],
+          mirrorsFallback: false,
+        },
+        providerId: 'listing',
+      }),
+      loadCredential: async () => null,
+      providerContext: () => ({}) as ProviderContext,
+      writeGuard: (org, held) => createIngestSessionWriteGuard(org, held),
+      jobGuard: () => ({ id: 'J', owner: 'worker', fence: 1 }),
+    });
+    const run = () =>
+      job.handler({ sourceId: 'S', reason: 'admin' }, {
+        org: ctx,
+        jobId: 'J',
+        attempt: 1,
+        signal: new AbortController().signal,
+        observability: noopObservability,
+        ports: {
+          platform: { jobs: { enqueue: async () => ({ id: 'unused', created: true }) } },
+        },
+      } as unknown as JobContext);
+    const state = () =>
+      executor.all(
+        stmt(
+          "SELECT removal_accepted, last_refusal_absent FROM source WHERE org_id = ? AND id = 'S'",
+          ctx.orgId,
+        ),
+      );
+    const removed = () =>
+      executor.all(
+        stmt(
+          "SELECT count(*) AS n FROM package WHERE org_id = ? AND source_id = 'S' AND status = 'removed_upstream'",
+          ctx.orgId,
+        ),
+      );
+    await run();
+    expect(await state()).toEqual([{ removal_accepted: 0, last_refusal_absent: 9 }]);
+    expect(await removed()).toEqual([{ n: 0 }]);
+    expect(await accept()).toBe('accepted');
+    accepted = true;
+    expect(await reads.selectionRevision(ctx, 'S')).toBe(revision);
+    await run();
+    expect(await sessions.latest(ctx, { scope: 'source', sourceId: 'S' })).toMatchObject({
+      state: 'complete',
+    });
+    const appliedCount = countChanges ? 8 : 9;
+    expect(await removed()).toEqual([{ n: appliedCount }]);
+    expect(await state()).toEqual([{ removal_accepted: 0, last_refusal_absent: null }]);
+    const audits = await executor.all<{ payload_json: string }>(
+      stmt(
+        "SELECT payload_json FROM audit_pending WHERE org_id = ? AND action = 'source.removal_applied'",
+        ctx.orgId,
+      ),
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0]!.payload_json).changes.absent).toEqual({ new: appliedCount });
+    accepted = false;
+    await executor.batch([
+      stmt(
+        "UPDATE package SET status = 'active', updated_at = ? WHERE org_id = ? AND source_id = 'S'",
+        OLD,
+        ctx.orgId,
+      ),
+    ]);
+    await run();
+    expect(await removed()).toEqual([{ n: 0 }]);
+    expect(await state()).toEqual([{ removal_accepted: 0, last_refusal_absent: 9 }]);
+    expect(
+      await executor.all(
+        stmt(
+          "SELECT count(*) AS n FROM audit_pending WHERE org_id = ? AND action = 'source.removal_applied'",
+          ctx.orgId,
+        ),
+      ),
+    ).toEqual([{ n: 1 }]);
+    expect(await reads.selectionRevision(ctx, 'S')).toBe(revision);
+  },
+);
 
 describe('recording a refusal', () => {
   it('stores the facts on the source, bumps updated_at and leaves the catalogue untouched', async () => {
@@ -351,6 +513,125 @@ describe('accepting a refusal', () => {
     expect(await database.executor.all(stmt('SELECT count(*) AS n FROM audit_pending'))).toEqual([
       { n: 1 },
     ]);
+  });
+
+  it.each([0, 2, 9])(
+    'applies accepted live removal when caller reports %i absent',
+    async (absent) => {
+      await refuse();
+      expect(await accept()).toBe('accepted');
+      const next = await open();
+      expect(
+        await finalize(next, {
+          ...honest,
+          attemptedCandidates: 1 + absent,
+          definitiveAbsent: absent,
+        }),
+      ).toMatchObject({ status: 'complete' });
+      expect(await removed()).toBe(9);
+      expect(await refusalRow()).toMatchObject([{ removal_accepted: 0, last_refusal_at: null }]);
+      const [audit] = await database.executor.all<{ payload_json: string }>(
+        stmt("SELECT payload_json FROM audit_pending WHERE action = 'source.removal_applied'"),
+      );
+      expect(JSON.parse(audit!.payload_json).changes.absent).toEqual({ new: 9 });
+    },
+  );
+
+  it('audits the live count when it changes after the acceptance preflight', async () => {
+    await refuse();
+    expect(await accept()).toBe('accepted');
+    const next = await open();
+    const finalizer = createIngestFinalizer({
+      ...database.executor,
+      async batch(statements) {
+        await database.executor.batch([
+          stmt(
+            "UPDATE package SET updated_at = '2999-01-01T00:00:00.000Z' WHERE org_id = ? AND id = 'P10'",
+            database.orgs!.a.orgId,
+          ),
+        ]);
+        return database.executor.batch(statements);
+      },
+    });
+    expect(await finalizer.finalize(database.orgs!.a, next, honest)).toMatchObject({
+      status: 'complete',
+    });
+    expect(await removed()).toBe(8);
+    const [audit] = await database.executor.all<{ payload_json: string }>(
+      stmt("SELECT payload_json FROM audit_pending WHERE action = 'source.removal_applied'"),
+    );
+    expect(JSON.parse(audit!.payload_json).changes.absent).toEqual({ new: 8 });
+  });
+
+  it('keeps the accepted bound when only the live share refuses', async () => {
+    await refuse();
+    expect(await accept()).toBe('accepted');
+    const next = await open();
+    let raced = false;
+    const finalizer = createIngestFinalizer({
+      ...database.executor,
+      async batch(statements) {
+        if (!raced) {
+          raced = true;
+          await database.executor.batch([
+            stmt(
+              "INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at) VALUES ('late', ?, 'S', 'composer', 'acme/late', '2020-01-01T00:00:00.000Z')",
+              database.orgs!.a.orgId,
+            ),
+          ]);
+        }
+        return database.executor.batch(statements);
+      },
+    });
+    expect(
+      await finalizer.finalize(database.orgs!.a, next, {
+        ...honest,
+        attemptedCandidates: 1,
+        definitiveAbsent: 0,
+      }),
+    ).toEqual({ status: 'refused', reason: 'mass_absence' });
+    expect(await removed()).toBe(0);
+    expect(await refusalRow()).toMatchObject([{ removal_accepted: 0, last_refusal_absent: 10 }]);
+    expect(
+      await database.executor.all(
+        stmt("SELECT id FROM audit_pending WHERE action = 'source.removal_applied'"),
+      ),
+    ).toEqual([]);
+  });
+
+  it('applies acceptance when the live share becomes too high inside the batch', async () => {
+    await refuse();
+    expect(await accept()).toBe('accepted');
+    const next = await open(8);
+    const finalizer = createIngestFinalizer({
+      ...database.executor,
+      async batch(statements) {
+        await database.executor.batch([
+          stmt(
+            `WITH RECURSIVE n(i) AS (SELECT 11 UNION ALL SELECT i + 1 FROM n WHERE i < 14)
+             INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at)
+             SELECT 'P' || i, ?, 'S', 'composer', 'acme/p' || i, '2020-01-01T00:00:00.000Z' FROM n`,
+            database.orgs!.a.orgId,
+          ),
+        ]);
+        return database.executor.batch(statements);
+      },
+    });
+    expect(
+      await finalizer.finalize(database.orgs!.a, next, {
+        ...honest,
+        expectedCount: 8,
+        attemptedCandidates: 10,
+        successfulCandidates: 8,
+        definitiveAbsent: 2,
+      }),
+    ).toMatchObject({ status: 'complete' });
+    expect(await removed()).toBe(6);
+    const [audit] = await database.executor.all<{ payload_json: string }>(
+      stmt("SELECT payload_json FROM audit_pending WHERE action = 'source.removal_applied'"),
+    );
+    expect(JSON.parse(audit!.payload_json).changes.absent).toEqual({ new: 6 });
+    expect(await refusalRow()).toMatchObject([{ removal_accepted: 0 }]);
   });
 
   it('bounds the acceptance in the batch when the evidence understates the removal', async () => {

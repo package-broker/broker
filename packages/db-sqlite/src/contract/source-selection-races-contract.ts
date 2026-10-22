@@ -125,6 +125,178 @@ export function describeSourceSelectionRacesContract(
   open: () => Promise<OpenedCatalogueWriteDatabase>,
 ): void {
   describe(`source selection races: ${name}`, () => {
+    it('dispatches keys from the same snapshot as the pinned selection revision', async () => {
+      const w = await fixture(open);
+      const { executor, ctx, sessions, writer } = w;
+      try {
+        await w.narrow('packages', 4);
+        let changed = false;
+        const changeAfterRead = async (statements: readonly Statement[]) => {
+          if (
+            !changed &&
+            statements.some((statement) => statement.sql.includes('json_array(source.config_json'))
+          ) {
+            changed = true;
+            await executor.batch([
+              st(
+                "UPDATE source SET config_json = ? WHERE org_id = ? AND id = 'S'",
+                JSON.stringify({ selection: { packages: names.slice(1, 5), patterns: [] } }),
+                ctx.orgId,
+              ),
+            ]);
+          }
+        };
+        const reads = createSourceSyncReads({
+          ...executor,
+          async all<R>(statement: Statement): Promise<R[]> {
+            const rows = await executor.all<R>(statement);
+            await changeAfterRead([statement]);
+            return rows;
+          },
+          async batch(statements) {
+            const results = await executor.batch(statements);
+            await changeAfterRead(statements);
+            return results;
+          },
+        });
+        const dispatched: string[] = [];
+        const job = createSourceSyncJob({
+          sources: createSourceRepository(executor),
+          sessions,
+          writer,
+          ...createSourceSyncCounts(executor),
+          ...reads,
+          async existingKeys(...args) {
+            // Restore the original selection before the write guard checks it.
+            await w.narrow('packages', 4);
+            return reads.existingKeys(...args);
+          },
+          finalizer: createIngestFinalizer(executor),
+          providers: {
+            forSource: () => ({
+              id: 'listing',
+              sourceTypes: ['composer_repository'],
+              ecosystems: ['composer'],
+              async listPackages() {
+                return {
+                  names: names.slice(0, 5),
+                  next: null,
+                  last: true,
+                  snapshot: snapshotRef(SNAPSHOT),
+                };
+              },
+              async describe() {
+                throw new Error('unused');
+              },
+              async openDist() {
+                throw new Error('unused');
+              },
+            }),
+          },
+          toProviderSource: () => ({
+            id: 'S',
+            type: 'composer_repository',
+            ecosystem: 'composer',
+            url: 'https://example.test',
+            config: {
+              selection: { packages: [], patterns: [], expandPatterns: false },
+              distHosts: [],
+              mirrorsFallback: false,
+            },
+            providerId: 'listing',
+          }),
+          loadCredential: async () => null,
+          providerContext: () => ({}) as ProviderContext,
+          writeGuard: (org, held) => createIngestSessionWriteGuard(org, held),
+          jobGuard: () => ({ id: 'J', owner: 'worker', fence: 1 }),
+        });
+        const outcome = await job
+          .handler({ sourceId: 'S', reason: 'admin' }, {
+            org: ctx,
+            jobId: 'J',
+            attempt: 1,
+            signal: new AbortController().signal,
+            observability: noopObservability,
+            ports: {
+              platform: {
+                jobs: {
+                  enqueue: async (_org: unknown, _type: string, payload: { key?: string }) => {
+                    if (payload.key !== undefined) dispatched.push(payload.key);
+                    return { id: 'unused', created: true };
+                  },
+                },
+              },
+            },
+          } as unknown as JobContext)
+          .then(
+            () => 'complete',
+            () => 'deferred',
+          );
+        expect(changed).toBe(true);
+        expect(dispatched).toEqual(names.slice(0, 4));
+        expect(outcome).toBe('complete');
+      } finally {
+        await w.database.close();
+      }
+    });
+
+    it('rejects a count-only finalize pin after an equal-size selection replacement', async () => {
+      const w = await fixture(open);
+      const { executor, ctx, sessions, writer } = w;
+      try {
+        await w.narrow('packages', 4);
+        const session = await sessions.acquire(
+          ctx,
+          { scope: 'source', sourceId: 'S' },
+          'worker',
+          60,
+        );
+        if (session === 'held') throw new Error('held');
+        const guard = createIngestSessionWriteGuard(ctx, session);
+        const scope = { kind: 'source', sourceId: 'S' } as const;
+        const { stamp } = await writer.openListing(ctx, guard, scope);
+        await sessions.start(ctx, session, { snapshot: { id: SNAPSHOT }, stamp });
+        await writer.markListing(ctx, guard, { scope, stamp, present: names.slice(1, 3) });
+        const unseen = await createSourceSyncCounts(executor).unseenExistingCount(ctx, 'S', stamp);
+        const pin = createIngestSessionWriteGuard(ctx, {
+          ...session,
+          cursor: JSON.stringify({ s: 'S', u: unseen }),
+        });
+        await executor.batch([
+          st(
+            "UPDATE source SET config_json = ? WHERE org_id = ? AND id = 'S'",
+            JSON.stringify({ selection: { packages: names.slice(1, 5), patterns: [] } }),
+            ctx.orgId,
+          ),
+        ]);
+        expect(await createSourceSyncCounts(executor).unseenExistingCount(ctx, 'S', stamp)).toBe(
+          unseen,
+        );
+        const before = await w.snapshot();
+        await expect(
+          createIngestFinalizer(executor, { maxAbsenceShare: 1 }).finalize(
+            ctx,
+            session,
+            {
+              expectedCount: 2,
+              attemptedCandidates: 4,
+              successfulCandidates: 2,
+              definitiveAbsent: unseen,
+              upstreamComplete: true,
+              validatorTtlSeconds: 0,
+            },
+            pin,
+          ),
+        ).resolves.toMatchObject({ status: 'refused', reason: 'superseded' });
+        expect(await w.snapshot()).toEqual(before);
+        expect(await sessions.latest(ctx, { scope: 'source', sourceId: 'S' })).toMatchObject({
+          state: 'running',
+        });
+      } finally {
+        await w.database.close();
+      }
+    });
+
     for (const selection of ['packages', 'patterns', 'registered', 'empty'] as const) {
       it(`finishes a completed cursor after 50 stamped packages narrow to ${selection}`, async () => {
         const w = await fixture(open);
@@ -341,6 +513,164 @@ export function describeSourceSelectionRacesContract(
           await w.database.close();
         }
       });
+    }
+
+    for (const direction of ['narrows', 'widens'] as const) {
+      for (const phase of [
+        'between-pages',
+        'during-mark',
+        'mark-batch',
+        'before-finalize',
+        'batch',
+        'batch-same-count',
+      ] as const) {
+        it(`defers without removal when selection ${direction} ${phase} with no locally filtered names`, async () => {
+          const w = await fixture(open);
+          const { executor, ctx, sessions, writer } = w;
+          try {
+            const initialCount = direction === 'narrows' ? 5 : 4;
+            const config = (count: number, extraPattern: boolean) =>
+              JSON.stringify({
+                selection: {
+                  packages: names.slice(0, count),
+                  patterns: extraPattern ? ['other/*'] : [],
+                },
+              });
+            await executor.batch([
+              st(
+                "UPDATE source SET config_json = ? WHERE org_id = ? AND id = 'S'",
+                config(initialCount, phase === 'batch-same-count' && direction === 'narrows'),
+                ctx.orgId,
+              ),
+            ]);
+            const change = () =>
+              executor.batch([
+                st(
+                  "UPDATE source SET config_json = ? WHERE org_id = ? AND id = 'S'",
+                  phase === 'batch-same-count'
+                    ? config(initialCount, direction === 'widens')
+                    : config(direction === 'narrows' ? 4 : 5, false),
+                  ctx.orgId,
+                ),
+              ]);
+            let markBatches = 0;
+            const markingWriter = createCatalogueWriter({
+              ...executor,
+              async batch(statements) {
+                markBatches += 1;
+                if (phase === 'mark-batch' && markBatches === 2) await change();
+                return executor.batch(statements);
+              },
+            });
+            const counts = createSourceSyncCounts(executor);
+            const job = createSourceSyncJob({
+              sources: createSourceRepository(executor),
+              sessions,
+              writer: {
+                ...writer,
+                async markListing(...args) {
+                  const result = await markingWriter.markListing(...args);
+                  if (phase === 'during-mark') await change();
+                  return result;
+                },
+              },
+              ...counts,
+              unseenExistingCount: async (...args) => {
+                const unseen = await counts.unseenExistingCount(...args);
+                if (phase === 'before-finalize') await change();
+                return unseen;
+              },
+              ...createSourceSyncReads(executor),
+              finalizer: createIngestFinalizer({
+                ...executor,
+                async batch(statements) {
+                  if (phase === 'batch' || phase === 'batch-same-count') await change();
+                  return executor.batch(statements);
+                },
+              }),
+              providers: {
+                forSource: () => ({
+                  id: 'listing',
+                  sourceTypes: ['composer_repository'],
+                  ecosystems: ['composer'],
+                  async listPackages(_context, _source, cursor) {
+                    if (cursor !== null && phase === 'between-pages') await change();
+                    return {
+                      names: cursor === null ? names.slice(0, 2) : names.slice(2, 3),
+                      next: cursor === null ? 'p2' : null,
+                      last: cursor !== null,
+                      snapshot: snapshotRef(SNAPSHOT),
+                    };
+                  },
+                  async describe() {
+                    throw new Error('unused');
+                  },
+                  async openDist() {
+                    throw new Error('unused');
+                  },
+                }),
+              },
+              toProviderSource: () => ({
+                id: 'S',
+                type: 'composer_repository',
+                ecosystem: 'composer',
+                url: 'https://example.test',
+                config: {
+                  selection: { packages: [], patterns: [], expandPatterns: false },
+                  distHosts: [],
+                  mirrorsFallback: false,
+                },
+                providerId: 'listing',
+              }),
+              loadCredential: async () => null,
+              providerContext: () => ({}) as ProviderContext,
+              writeGuard: (org, held) => createIngestSessionWriteGuard(org, held),
+              jobGuard: () => ({ id: 'J', owner: 'worker', fence: 1 }),
+            });
+            await expect(
+              job.handler({ sourceId: 'S', reason: 'admin' }, {
+                org: ctx,
+                jobId: 'J',
+                attempt: 1,
+                signal: new AbortController().signal,
+                observability: noopObservability,
+                ports: {
+                  platform: { jobs: { enqueue: async () => ({ id: 'unused', created: true }) } },
+                },
+              } as unknown as JobContext),
+            ).rejects.toMatchObject({ name: 'JobError' });
+            expect(
+              await executor.all(
+                st(
+                  "SELECT count(*) AS n FROM package WHERE org_id = ? AND status <> 'active'",
+                  ctx.orgId,
+                ),
+              ),
+            ).toEqual([{ n: 0 }]);
+            if (phase === 'mark-batch') {
+              expect(markBatches).toBe(2);
+              expect(
+                await executor.all(
+                  st(
+                    'SELECT name FROM package WHERE org_id = ? AND listing_seen_stamp IS NOT NULL ORDER BY name',
+                    ctx.orgId,
+                  ),
+                ),
+              ).toEqual(names.slice(0, 2).map((name) => ({ name })));
+              expect(
+                await executor.all(
+                  st('SELECT name, status FROM package WHERE org_id = ? ORDER BY name', ctx.orgId),
+                ),
+              ).toEqual(names.map((name) => ({ name, status: 'active' })));
+            }
+            expect(await sessions.latest(ctx, { scope: 'source', sourceId: 'S' })).toMatchObject({
+              state: phase.startsWith('batch') || phase === 'mark-batch' ? 'running' : 'abandoned',
+            });
+          } finally {
+            await w.database.close();
+          }
+        });
+      }
     }
 
     for (const selection of ['packages', 'patterns', 'registered'] as const) {

@@ -117,3 +117,34 @@ export interface GrantRepository {
   isProtectedHolder(ctx: OrgContext, userId: string): Promise<boolean>;
   countProtectedHolders(ctx: OrgContext): Promise<number>;
 }
+
+export interface ProjectGrantListItem {
+  readonly id: string;
+  readonly revision: number;
+  readonly createdAt: string;
+  readonly principal: {
+    readonly kind: 'user' | 'email' | 'group';
+    /** Account id for a user; grant id for an unresolved e-mail or provider group. */
+    readonly id: string;
+    readonly displayName: string;
+    readonly provider?: string;
+    readonly email?: string;
+  };
+  readonly role: {
+    readonly id: string;
+    readonly name: string;
+    readonly permissions: readonly string[];
+  };
+}
+
+export interface ProjectGrantReader {
+  list(
+    ctx: OrgContext,
+    input: {
+      readonly projectId: string;
+      readonly limit: number;
+      readonly after?: string;
+      readonly includeEmail?: boolean;
+    },
+  ): Promise<{ readonly items: readonly ProjectGrantListItem[]; readonly next: string | null }>;
+}

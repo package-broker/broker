@@ -107,7 +107,19 @@ function scopeSpecs(boundary: 'organization' | 'project') {
         tags: ['sources'],
         params: collectionParams,
         query: listQuery,
-        responses: { 200: page },
+        responses: {
+          200: scoped
+            ? z.strictObject({
+                items: z.array(
+                  z.union([
+                    source.extend({ attached: z.literal(true), precedence: z.number().int() }),
+                    source.extend({ attached: z.literal(false) }),
+                  ]),
+                ),
+                next: ulid.nullable(),
+              })
+            : page,
+        },
       },
     },
     {

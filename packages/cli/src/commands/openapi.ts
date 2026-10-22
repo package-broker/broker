@@ -2,6 +2,7 @@ import { stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { generateOpenApi } from '@package-broker/core/api/openapi';
 import type { ApiRouteSpec } from '@package-broker/core/api/route';
+import { servedApiSpecs } from './openapi-specs.js';
 
 export function openapiCommand(deps: {
   specs: () => readonly ApiRouteSpec[];
@@ -40,9 +41,7 @@ export function openapiCommand(deps: {
 
 const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
 export const runOpenApi = openapiCommand({
-  specs: () => {
-    throw new Error('no_api_specs');
-  },
+  specs: servedApiSpecs,
   info: { title: 'Package Broker', version: pkg.version },
   write: (path, bytes) => writeFile(path, bytes, 'utf8'),
 });

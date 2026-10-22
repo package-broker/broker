@@ -6,9 +6,9 @@ import { publicOriginOf } from './index.js';
 
 describe('Worker public origin policy', () => {
   it.each([
-    'http://localhost',
-    'http://127.0.0.1',
-    'http://[::1]',
+    'http://example.com',
+    'http://example.com:8787',
+    'http://127.0.0.1:8787/path',
     'https://broker.test/?',
     'https://broker.test/#',
   ])('rejects %s with the existing safe config error', (raw) => {
@@ -20,6 +20,15 @@ describe('Worker public origin policy', () => {
       }),
     );
   });
+});
+
+it.each([
+  ['http://127.0.0.1:8787', 'http://127.0.0.1:8787'],
+  ['http://localhost:8787', 'http://localhost:8787'],
+  ['http://[::1]:8787', 'http://[::1]:8787'],
+  ['http://localhost', 'http://localhost'],
+])('accepts loopback http origin %s', (raw, expected) => {
+  expect(publicOriginOf(raw)).toBe(expected);
 });
 
 it('propagates unexpected parser failures in Workers', () => {

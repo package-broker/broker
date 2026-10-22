@@ -91,6 +91,7 @@ const REQUIRED_DEPENDENCIES = {
   projectAccess: {
     ...CONTEXT_METHODS,
     projectAdministration: { grant: true, changeRole: true, revoke: true },
+    reader: { list: true },
     roles: { get: true },
   },
   tokens: {
@@ -129,6 +130,7 @@ const REQUIRED_DEPENDENCIES = {
       resume: true,
     },
     sources: { get: true },
+    projectSources: { list: true },
     projects: { get: true },
     sessions: { authenticate: true, isReauthFresh: true },
   },

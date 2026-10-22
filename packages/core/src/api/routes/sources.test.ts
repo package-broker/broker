@@ -183,6 +183,7 @@ async function fixture(
       sources,
       projects,
       sessions,
+      projectSources: { list: vi.fn(async () => [{ sourceId: SECOND, precedence: 2 }]) },
       ids,
       clock,
       clientIp,
@@ -470,7 +471,9 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
       const text = await response.text();
       expect(text).not.toContain(SENTINEL);
       const body = JSON.parse(text) as { items: Record<string, unknown>[]; next: string | null };
-      expect(Object.keys(body.items[0]!).sort()).toEqual(fields);
+      expect(Object.keys(body.items[0]!).sort()).toEqual(
+        project ? [...fields, 'attached'].sort() : fields,
+      );
       expect(body.items[0]?.hasCredential).toBe(true);
       expect(body.items[0]?.url).toBe('https://packages.example.com/');
       expect(body.next).toBe(null);
@@ -757,3 +760,44 @@ describe('POST /_pb/sources/:source/accept-removal', () => {
     expect(hidden.sources.acceptRemoval).not.toHaveBeenCalled();
   });
 });
+
+it('marks attachments using the complete attachment reader, preserving unattached owned sources', async () => {
+  const row = {
+    ...create,
+    id: SOURCE,
+    projectId: PROJECT,
+    configJson: '{}',
+    credentialId: null,
+    lastError: null,
+    status: 'active',
+    removalPolicy: 'flag',
+    pollIntervalSeconds: 300,
+    lastSuccessAt: null,
+  } as SourceRecord;
+  const f = await fixture({ rows: [row, { ...row, id: SECOND, projectId: null }] });
+  const response = await f.request('GET', '/_pb/projects/demo/sources?limit=1');
+  expect(response.status).toBe(200);
+  const first = (await response.json()) as { items: Record<string, unknown>[] };
+  expect(first).toMatchObject({ items: [{ id: SOURCE, attached: false }], next: SOURCE });
+  expect(first.items[0]).not.toHaveProperty('precedence');
+  const next = await f.request('GET', '/_pb/projects/demo/sources?after=' + SOURCE);
+  const page = (await next.json()) as { items: Record<string, unknown>[] };
+  expect(page.items[0]).toMatchObject({ id: SECOND, attached: true, precedence: 2 });
+  expect(response.headers.get('etag')).toBe('"r7"');
+});
+
+it('denies source listing before handler lookups without source read permission', async () => {
+  const f = await fixture({ projectPermissions: ['project:read'] });
+  expect((await f.request('GET', '/_pb/projects/demo/sources')).status).toBe(403);
+  expect(f.projects.get).not.toHaveBeenCalled();
+  expect(f.sources.list).not.toHaveBeenCalled();
+});
+
+it.each(['absent', 'foreign', 'archived', 'invisible'] as const)(
+  'hides the %s project on source reads',
+  async (projectState) => {
+    const f = await fixture({ projectState });
+    expect((await f.request('GET', '/_pb/projects/demo/sources')).status).toBe(404);
+    expect(f.sources.list).not.toHaveBeenCalled();
+  },
+);

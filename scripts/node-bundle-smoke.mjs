@@ -233,6 +233,7 @@ async function checkAuditJobs(database) {
         ['core:pat-offboarding-sweep:v1', 86400],
         ['core:retention-scan:v1', 86400],
         ['core:source-poll:v1', 60],
+        ['core:vulnerability-sync:v1', 300],
       ],
     );
     db.prepare(

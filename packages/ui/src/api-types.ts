@@ -2686,6 +2686,40 @@ export interface operations {
               status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream' | 'yanked';
               tombstonedAt: string | null;
               version: string;
+              vulnerability: {
+                advisories: {
+                  detailsFetchedAt: string | null;
+                  id: string;
+                  severity: {
+                    entries: {
+                      score: string;
+                      type: string;
+                    }[];
+                    /** @enum {string} */
+                    level: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+                  };
+                  url: null;
+                }[];
+                advisoriesTruncated: boolean;
+                advisoryCount: number;
+                detailsComplete: boolean;
+                fetchedAt: string | null;
+                lastKnownStatus: ('affected' | 'not_affected') | null;
+                reason:
+                  | (
+                      | 'not_checked'
+                      | 'disabled'
+                      | 'unsupported_version'
+                      | 'pending'
+                      | 'upstream_unavailable'
+                      | 'incomplete'
+                      | 'expired'
+                    )
+                  | null;
+                source: 'osv' | null;
+                /** @enum {string} */
+                status: 'affected' | 'not_affected' | 'unknown' | 'stale';
+              };
             }[];
             next: string | null;
           };
@@ -3655,6 +3689,40 @@ export interface operations {
               status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream' | 'yanked';
               tombstonedAt: string | null;
               version: string;
+              vulnerability: {
+                advisories: {
+                  detailsFetchedAt: string | null;
+                  id: string;
+                  severity: {
+                    entries: {
+                      score: string;
+                      type: string;
+                    }[];
+                    /** @enum {string} */
+                    level: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+                  };
+                  url: null;
+                }[];
+                advisoriesTruncated: boolean;
+                advisoryCount: number;
+                detailsComplete: boolean;
+                fetchedAt: string | null;
+                lastKnownStatus: ('affected' | 'not_affected') | null;
+                reason:
+                  | (
+                      | 'not_checked'
+                      | 'disabled'
+                      | 'unsupported_version'
+                      | 'pending'
+                      | 'upstream_unavailable'
+                      | 'incomplete'
+                      | 'expired'
+                    )
+                  | null;
+                source: 'osv' | null;
+                /** @enum {string} */
+                status: 'affected' | 'not_affected' | 'unknown' | 'stale';
+              };
             }[];
             next: string | null;
           };

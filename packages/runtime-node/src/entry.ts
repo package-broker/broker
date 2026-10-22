@@ -17,6 +17,7 @@ export interface EntryManifest {
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
   readonly tokens?: BrokerConfig['tokens'];
+  readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly plugins: readonly PluginDefinition[];
   readonly migrations: readonly MigrationSource[];
   readonly platformPorts?: PlatformPortConfig | null;
@@ -104,7 +105,8 @@ export async function runEntry(
   let port: number;
   let timeoutMs: number;
   try {
-    const { plugins, migrations, platformPorts, observability, registry, tokens } = await manifest;
+    const { plugins, migrations, platformPorts, observability, registry, tokens, vulnerability } =
+      await manifest;
     try {
       port = parsePort(env['PORT']);
       timeoutMs = parseShutdownTimeout(env['PB_SHUTDOWN_TIMEOUT_MS']);
@@ -122,6 +124,7 @@ export async function runEntry(
       ...(observability === undefined ? {} : { observability }),
       ...(registry === undefined ? {} : { registry }),
       ...(tokens === undefined ? {} : { tokens }),
+      ...(vulnerability === undefined ? {} : { vulnerability }),
     });
   } catch (error) {
     runtime.error(failureRecord('startup.failed', error));

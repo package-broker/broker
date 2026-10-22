@@ -167,5 +167,6 @@ export function renderBuildManifest(
   lines.push('export const observability = config.observability;');
   lines.push('export const registry = config.registry;');
   lines.push('export const tokens = config.tokens;');
+  lines.push('export const vulnerability = config.vulnerability;');
   return `${lines.join('\n')}\n`;
 }

@@ -56,6 +56,131 @@ describe('pending action storage', () => {
     expect(raw()).not.toContain('redaction-sentinel');
   });
 
+  it('persists only concurrency headers, normalizing their names', () => {
+    const { storage, raw } = setup();
+    expect(
+      savePending(storage, {
+        ...action,
+        headers: {
+          'if-match': '"revision-7"',
+          'IF-NONE-MATCH': '*',
+          Authorization: 'header-secret-sentinel',
+          Cookie: 'header-secret-sentinel',
+          'X-CSRF-Token': 'header-secret-sentinel',
+          'X-PB-CSRF': 'header-secret-sentinel',
+          Accept: 'application/json',
+        },
+      }),
+    ).toEqual({ ok: true });
+    expect(raw()).not.toContain('header-secret-sentinel');
+    expect(loadPending(storage, NOW)).toEqual({
+      ok: true,
+      action: { ...stored, headers: { 'If-Match': '"revision-7"', 'If-None-Match': '*' } },
+    });
+  });
+
+  it('round-trips a concurrency header at the length limit', () => {
+    const { storage } = setup();
+    const headers = { 'If-Match': 'x'.repeat(4096) };
+    expect(savePending(storage, { ...action, headers })).toEqual({
+      ok: true,
+    });
+    expect(loadPending(storage, NOW)).toEqual({ ok: true, action: { ...stored, headers } });
+  });
+
+  it.each([
+    ['non-string value', 7],
+    ['oversized value', 'x'.repeat(4097)],
+    ['newline', 'one\ntwo'],
+    ['carriage return', 'one\rtwo'],
+    ['tab', 'one\ttwo'],
+    ['null character', 'one\0two'],
+    ['DEL control', 'one\u007ftwo'],
+    ['C1 control', 'one\u0085two'],
+  ])('refuses to save a concurrency header with %s', (_name, value) => {
+    const { storage, entries } = setup();
+    expect(savePending(storage, { ...action, headers: { 'If-Match': value } } as never)).toEqual({
+      ok: false,
+    });
+    expect(entries.size).toBe(0);
+  });
+
+  it.each([
+    ['non-record headers', []],
+    ['null headers', null],
+    ['authorization', { Authorization: 'header-secret-sentinel' }],
+    ['cookie', { Cookie: 'header-secret-sentinel' }],
+    ['CSRF', { 'X-CSRF-Token': 'header-secret-sentinel' }],
+    ['unknown header', { Accept: 'application/json' }],
+    ['non-string value', { 'If-Match': 7 }],
+    ['oversized value', { 'If-Match': 'x'.repeat(4097) }],
+    ['newline', { 'If-Match': 'one\ntwo' }],
+    ['carriage return', { 'If-None-Match': 'one\rtwo' }],
+    ['tab', { 'If-Match': 'one\ttwo' }],
+    ['null character', { 'If-Match': 'one\0two' }],
+    ['DEL control', { 'If-Match': 'one\u007ftwo' }],
+    ['C1 control', { 'If-None-Match': 'one\u0085two' }],
+  ])('rejects and removes stored headers with %s', (_name, headers) => {
+    const { storage, seed, entries } = setup();
+    seed({ ...stored, headers });
+    expect(loadPending(storage, NOW)).toEqual({ ok: true, action: null });
+    expect(entries.size).toBe(0);
+  });
+
+  it('refuses ambiguous duplicate concurrency headers without storing', () => {
+    const { storage, entries } = setup();
+    expect(
+      savePending(storage, {
+        ...action,
+        headers: { 'If-Match': '"one"', 'if-match': '"two"' },
+      }),
+    ).toEqual({ ok: false });
+    expect(entries.size).toBe(0);
+  });
+
+  it('round-trips a credential re-entry marker without the body', () => {
+    const { storage, raw } = setup();
+    savePending(storage, { ...action, credential: true });
+    expect(raw()).not.toContain('redaction-sentinel');
+    expect(loadPending(storage, NOW)).toEqual({
+      ok: true,
+      action: {
+        method: action.method,
+        path: action.path,
+        idempotencyKey: action.idempotencyKey,
+        requiresCredential: true,
+        savedAt: NOW,
+      },
+    });
+  });
+
+  it('discards legacy entries that cannot identify stripped credential bodies', () => {
+    const { storage, entries } = setup();
+    storage.setItem(
+      'pb.pending-action',
+      JSON.stringify({ method: action.method, path: action.path, savedAt: NOW }),
+    );
+    expect(loadPending(storage, NOW)).toEqual({ ok: true, action: null });
+    expect(entries.size).toBe(0);
+  });
+
+  it.each([false, 'true', 1, null, {}, []].map((value) => [value]))(
+    'rejects an invalid credential re-entry marker %j',
+    (requiresCredential) => {
+      const { storage, seed, entries } = setup();
+      seed({ method: action.method, path: action.path, savedAt: NOW, requiresCredential });
+      expect(loadPending(storage, NOW)).toEqual({ ok: true, action: null });
+      expect(entries.size).toBe(0);
+    },
+  );
+
+  it('rejects a stored credential marker combined with a body', () => {
+    const { storage, seed, entries } = setup();
+    seed({ ...stored, requiresCredential: true });
+    expect(loadPending(storage, NOW)).toEqual({ ok: true, action: null });
+    expect(entries.size).toBe(0);
+  });
+
   it('removes top-level and array-index dot paths, ignoring absent paths', () => {
     const { storage, raw } = setup();
     savePending(storage, {

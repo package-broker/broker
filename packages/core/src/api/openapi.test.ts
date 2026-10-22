@@ -607,3 +607,49 @@ describe('OpenAPI follow-ups', () => {
     },
   );
 });
+
+it('publishes the same required nested vulnerability contract on both version reads', async () => {
+  const { PACKAGE_API_SPECS } = await import('./routes/packages-schemas.js');
+  const doc = generateOpenApi(PACKAGE_API_SPECS, info);
+  for (const path of [
+    '/_pb/packages/{package}/versions',
+    '/_pb/projects/{project}/packages/{package}/versions',
+  ]) {
+    const operation = doc.paths[path]!.get!;
+    expect(operation).toMatchObject({
+      responses: {
+        200: {
+          content: {
+            'application/json': {
+              schema: {
+                properties: {
+                  items: {
+                    items: {
+                      required: expect.arrayContaining(['status', 'vulnerability']),
+                      properties: {
+                        vulnerability: {
+                          additionalProperties: false,
+                          required: expect.arrayContaining([
+                            'status',
+                            'reason',
+                            'source',
+                            'fetchedAt',
+                            'lastKnownStatus',
+                            'advisoryCount',
+                            'advisories',
+                            'detailsComplete',
+                            'advisoriesTruncated',
+                          ]),
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+});

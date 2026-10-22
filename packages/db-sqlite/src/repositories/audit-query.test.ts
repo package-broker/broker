@@ -178,6 +178,7 @@ describe('createAuditQueryRepository', () => {
       seq: 3,
       hash: '3'.padStart(64, '0'),
       pending: 2,
+      lastVerifiedAt: null,
     });
     expect(statements).toHaveLength(1);
   });
@@ -196,6 +197,7 @@ describe('createAuditQueryRepository', () => {
       seq: 0,
       hash: AUDIT_GENESIS_HASH,
       pending: 2,
+      lastVerifiedAt: null,
     });
   });
 });

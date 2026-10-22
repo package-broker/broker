@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { envelopeResponse } from '@package-broker/core/kernel/errors';
+import { smoke } from './smoke.js';
+import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
 import { CloudflareApi } from './api.js';
 import {
@@ -28,7 +31,8 @@ const ACCOUNT = 'a'.repeat(32),
   TOKEN = 'API_SENTINEL';
 const OLD = '11111111-1111-4111-8111-111111111111',
   CANDIDATE = '22222222-2222-4222-8222-222222222222',
-  NEWEST = '33333333-3333-4333-8333-333333333333';
+  NEWEST = '33333333-3333-4333-8333-333333333333',
+  THIRD = '55555555-5555-4555-8555-555555555555';
 const DB = '44444444-4444-4444-8444-444444444444',
   JOBS = 'b'.repeat(32),
   DLQ = 'c'.repeat(32),
@@ -331,7 +335,7 @@ function harness() {
     }
     if (path === '/workers/assets/upload') return ok({ jwt: 'COMPLETION_SENTINEL' });
     if (path === base + '/versions' && method === 'POST') {
-      const candidate = ++uploads === 1 ? CANDIDATE : NEWEST;
+      const candidate = [CANDIDATE, NEWEST, THIRD][uploads++]!;
       expect(body).toBeInstanceOf(FormData);
       h.metadata = JSON.parse(String(body.get('metadata')));
       h.exists = true;
@@ -697,7 +701,9 @@ it('journals every uploaded version across successive deployments', async () => 
   expect((await deploy(options(h, { secret: ['PB_IDP_TEST_CLIENT_SECRET'] }))).exitCode).toBe(0);
   const history = (await store.read())!.deployment!.history!;
   expect(history.version_ids).toEqual([CANDIDATE, NEWEST]);
-  expect(history.plain_bindings).toEqual([]);
+  expect(history.plain_bindings).toEqual([
+    { name: 'PB_PUBLIC_URL', texts: ['https://broker.example.test'] },
+  ]);
 });
 it('journals the telemetry endpoint binding it uploads', async () => {
   const file = join(out, 'generated/manifest.json'),
@@ -710,7 +716,10 @@ it('journals the telemetry endpoint binding it uploads', async () => {
   expect((await deploy(o)).exitCode).toBe(0);
   expect((await store.read())!.deployment!.history).toEqual({
     version_ids: [CANDIDATE],
-    plain_bindings: [{ name: 'OTEL_ENDPOINT', text: 'https://telemetry.example.test' }],
+    plain_bindings: [
+      { name: 'OTEL_ENDPOINT', texts: ['https://telemetry.example.test'] },
+      { name: 'PB_PUBLIC_URL', texts: ['https://broker.example.test'] },
+    ],
   });
 });
 it.each(['success', 'failure', 'timeout', 'interruption'])(
@@ -2250,3 +2259,255 @@ it('R4 rollback verifies managed settings the candidate left unchanged', async (
   expect(second.deployment!.attempt.rollback).toBe('failed');
   expect(h.endpoints).toEqual(CLOSED);
 });
+
+function lifecycleHarness() {
+  const h = harness();
+  h.installed = ['PB_MASTER_KEY'];
+  h.endpoints = { enabled: false, previews_enabled: false };
+  h.exists = false;
+  h.active = { id: null, versions: [] };
+  h.versions.clear();
+  const provider = h.fetch;
+  const transport: typeof fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    if (url.origin !== 'https://api.cloudflare.com') {
+      if (url.pathname === '/health/ready') return Response.json({ status: 'ready' });
+      return envelopeResponse(
+        401,
+        'unauthorized',
+        'fixed message',
+        'request-1',
+        undefined,
+        url.pathname.endsWith('/npm/-/ping') ? 'npm' : 'nested',
+      );
+    }
+    const path = url.pathname
+      .replace(`/client/v4/accounts/${ACCOUNT}`, '')
+      .replace('/client/v4', '');
+    if (init?.method === 'DELETE') {
+      h.calls.push({ path, method: 'DELETE', body: undefined, auth: null });
+      if (path === base) {
+        h.exists = false;
+        h.versions.clear();
+      }
+      if (path.endsWith('/consumers/managed-consumer')) h.consumer = null;
+      if (path.endsWith('/domains/managed-domain')) h.domain = null;
+      return ok(null);
+    }
+    if (path === '/workers/domains/managed-domain') return ok(h.domain);
+    if (path === '/zones') return ok([]);
+    if (path === '/queues')
+      return ok([
+        { queue_id: JOBS, queue_name: `${script}-jobs` },
+        { queue_id: DLQ, queue_name: `${script}-jobs-dlq` },
+      ]);
+    if (path === '/r2/buckets') return ok({ buckets: [] });
+    if (path.endsWith('/configuration')) return ok({ queues: [] });
+    if (path.endsWith('/objects')) return ok([], { is_truncated: false });
+    if (path.endsWith('/domains/custom')) return ok({ domains: [] });
+    if (/\/(?:cors|lifecycle|lock)$/.test(path)) return ok({ rules: [] });
+    if (/\/(?:domains\/managed|sippy)$/.test(path)) return ok({ enabled: false });
+    return provider(input, init);
+  });
+  h.fetch = transport;
+  return h;
+}
+
+it.each([false, true])(
+  'chains three real deploy/smoke cycles into teardown with foreign version=%s',
+  async (foreign) => {
+    const h = lifecycleHarness();
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await writeFile(
+        join(out, 'worker.js'),
+        `export default { fetch() { return new Response("cycle ${cycle}") } };`,
+      );
+      const deployed = await deploy(options(h, { secret: ['PB_MASTER_KEY'] }));
+      expect(deployed.output.error).toBeNull();
+      expect(deployed.exitCode).toBe(0);
+      const checked = await smoke({
+        workerName: 'broker',
+        projectRoot: project,
+        env: options(h).env,
+        fetch: h.fetch,
+        now: h.now,
+        sleep: h.sleep,
+      });
+      expect(checked.output.error).toBeNull();
+      expect(checked.exitCode).toBe(0);
+    }
+    const j = (await store.read())!;
+    expect(j.deployment!.history!.version_ids).toEqual([CANDIDATE, NEWEST, THIRD]);
+    expect(j.deployment!.last_verified!.version_id).toBe(THIRD);
+    if (foreign)
+      h.versions.set('foreign-version', { id: 'foreign-version', resources: { bindings: [] } });
+    const before = h.calls.length;
+    const result = await teardown({
+      project,
+      inventory: store.path,
+      env: options(h).env,
+      fetch: h.fetch,
+      now: h.now,
+      sleep: h.sleep,
+      inventoryId: identity.owner_digest,
+      iUnderstandThisDeletes: true,
+    });
+    expect(result.exitCode).toBe(foreign ? 8 : 0);
+    if (foreign) expect(h.calls.slice(before).every((call) => call.method === 'GET')).toBe(true);
+    else {
+      expect(h.exists).toBe(false);
+      expect(h.versions.size).toBe(0);
+      expect(result.output.checks).toContainEqual({ name: 'r2', status: 'deleted' });
+    }
+  },
+);
+
+it.each([false, true])(
+  'chains telemetry deploys with a changed endpoint into teardown with drift=%s',
+  async (drift) => {
+    const file = join(out, 'generated/manifest.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.platformPorts.observability.endpointEnv = 'OTEL_ENDPOINT';
+    await writeFile(file, JSON.stringify(manifest));
+    const h = lifecycleHarness();
+    for (const endpoint of [
+      'https://telemetry.example.test/v1',
+      'https://telemetry.example.test/v2',
+    ]) {
+      const o = options(h, { secret: ['PB_MASTER_KEY'] });
+      o.env = { ...o.env, OTEL_ENDPOINT: endpoint };
+      expect((await deploy(o)).exitCode).toBe(0);
+      expect(
+        (
+          await smoke({
+            workerName: 'broker',
+            projectRoot: project,
+            env: o.env,
+            fetch: h.fetch,
+            now: h.now,
+            sleep: h.sleep,
+          })
+        ).exitCode,
+      ).toBe(0);
+    }
+    expect((await store.read())!.deployment!.history!.plain_bindings).toEqual([
+      {
+        name: 'OTEL_ENDPOINT',
+        texts: ['https://telemetry.example.test/v1', 'https://telemetry.example.test/v2'],
+      },
+      { name: 'PB_PUBLIC_URL', texts: ['https://broker.example.test'] },
+    ]);
+    if (drift) {
+      const version = h.versions.get(CANDIDATE)!;
+      (version.resources as { bindings: unknown[] }).bindings.push({
+        type: 'plain_text',
+        name: 'OTEL_ENDPOINT',
+        text: 'https://foreign.example.test',
+      });
+    }
+    const before = h.calls.length;
+    const result = await teardown({
+      project,
+      inventory: store.path,
+      env: options(h).env,
+      fetch: h.fetch,
+      now: h.now,
+      sleep: h.sleep,
+      inventoryId: identity.owner_digest,
+      iUnderstandThisDeletes: true,
+    });
+    expect(result.exitCode).toBe(drift ? 8 : 0);
+    if (drift) expect(h.calls.slice(before).every((call) => call.method === 'GET')).toBe(true);
+  },
+);
+
+it.each([false, true])(
+  'chains three public origins into teardown with historical URL drift=%s',
+  async (drift) => {
+    const h = lifecycleHarness();
+    const origins = [
+      'https://first.example.test',
+      'https://second.example.test',
+      'https://third.example.test',
+    ];
+    for (const origin of origins) {
+      const o = options(h, { publicUrl: origin, secret: ['PB_MASTER_KEY'] });
+      delete o.domain;
+      const deployed = await deploy(o);
+      expect(deployed.output.error).toBeNull();
+      expect(deployed.exitCode).toBe(0);
+      const checked = await smoke({
+        workerName: 'broker',
+        projectRoot: project,
+        env: o.env,
+        fetch: h.fetch,
+        now: h.now,
+        sleep: h.sleep,
+      });
+      expect(checked.output.error).toBeNull();
+      expect(checked.exitCode).toBe(0);
+    }
+    if (drift) {
+      const bindings = h.versions.get(CANDIDATE)!.resources as {
+        bindings: { name: string; text?: string }[];
+      };
+      bindings.bindings.find((binding) => binding.name === 'PB_PUBLIC_URL')!.text =
+        'https://foreign.example.test';
+    }
+    const before = h.calls.length;
+    const result = await teardown({
+      project,
+      inventory: store.path,
+      env: options(h).env,
+      fetch: h.fetch,
+      now: h.now,
+      sleep: h.sleep,
+      inventoryId: identity.owner_digest,
+      iUnderstandThisDeletes: true,
+    });
+    expect(result.exitCode).toBe(drift ? 8 : 0);
+    if (drift) expect(h.calls.slice(before).every((call) => call.method === 'GET')).toBe(true);
+    expect((await store.read())!.deployment!.history!.plain_bindings).toContainEqual({
+      name: 'PB_PUBLIC_URL',
+      texts: origins,
+    });
+  },
+);
+
+it.each(['versions', 'plainValues'] as const)(
+  'refuses history %s exhaustion before any deployment mutation',
+  async (limit) => {
+    const h = harness();
+    expect((await deploy(options(h, { secret: ['PB_MASTER_KEY'] }))).exitCode).toBe(0);
+    const j = (await store.read())!;
+    j.deployment!.attempt.phase = 'verified';
+    j.deployment!.attempt.smoke = 'passed';
+    if (limit === 'versions') {
+      j.deployment!.history!.version_ids = [
+        CANDIDATE,
+        ...Array.from({ length: 9999 }, (_, i) => `version-${i}`),
+      ];
+    } else {
+      j.deployment!.history!.plain_bindings = [
+        {
+          name: 'OTEL_ENDPOINT',
+          texts: Array.from({ length: 64 }, (_, i) => `https://telemetry.example.test/${i}`),
+        },
+      ];
+      const file = join(out, 'generated/manifest.json');
+      const manifest = JSON.parse(await readFile(file, 'utf8'));
+      manifest.platformPorts.observability.endpointEnv = 'OTEL_ENDPOINT';
+      await writeFile(file, JSON.stringify(manifest));
+    }
+    await store.write(j);
+    const count = mutations(h).length;
+    const o = options(h, { secret: ['PB_IDP_TEST_CLIENT_SECRET'] });
+    o.env = { ...o.env, OTEL_ENDPOINT: 'https://telemetry.example.test/new' };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(2);
+    expect(result.output.error?.code).toBe('capacity_exceeded');
+    expect(result.output.error?.message).toContain('Deployment history capacity reached');
+    expect(mutations(h)).toHaveLength(count);
+    expect((await store.read())!.deployment!.history).toEqual(j.deployment!.history);
+  },
+);

@@ -180,6 +180,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const vulnerability = config.vulnerability;',
         '',
       ].join('\n'),
     );
@@ -203,6 +204,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const vulnerability = config.vulnerability;',
         '',
       ].join('\n'),
     );
@@ -228,6 +230,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const vulnerability = config.vulnerability;',
         '',
       ].join('\n'),
     );
@@ -696,6 +699,28 @@ describe('built plugin order round trip', () => {
       });
       const loaded = (await import(pathToFileURL(result.bundle).href)) as { tokens: unknown };
       expect(loaded.tokens).toEqual(tokens);
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
+    'carries the disabled vulnerability setting into the %s bundle',
+    async (target) => {
+      const configPath = path.join(project, 'vulnerability.config.ts');
+      await writeFile(
+        configPath,
+        `export default ${JSON.stringify({ platform: target, plugins: [], vulnerability: { enabled: false } })};`,
+      );
+      await writeFile(runtimeEntry, "export { vulnerability } from '#pb-manifest';\n");
+      const result = await build({
+        configPath,
+        target,
+        outDir: path.join(project, target),
+        runtimeEntry,
+      });
+      const loaded = (await import(pathToFileURL(result.bundle).href)) as {
+        vulnerability: unknown;
+      };
+      expect(loaded.vulnerability).toEqual({ enabled: false });
     },
   );
 

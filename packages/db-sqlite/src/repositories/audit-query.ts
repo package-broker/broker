@@ -13,6 +13,7 @@ export interface AuditHead {
   readonly seq: number;
   readonly hash: string;
   readonly pending: number;
+  readonly lastVerifiedAt: string | null;
 }
 
 export interface AuditQueryRepository {
@@ -23,7 +24,7 @@ export interface AuditQueryRepository {
 const COLUMNS =
   'id, org_id, seq, prev_hash, hash, created_at, actor_type, actor_id, token_selector, source_ip, action, target_type, target_id, project_id, payload_json';
 const HEAD_SQL =
-  'SELECT head.seq, head.hash, pending.pending FROM (SELECT count(*) AS pending FROM audit_pending WHERE org_id = ?) AS pending LEFT JOIN (SELECT seq, hash FROM audit_event WHERE org_id = ? ORDER BY seq DESC LIMIT 1) AS head ON 1 = 1';
+  'SELECT head.seq, head.hash, pending.pending, (SELECT audit_last_verified_at FROM organization WHERE id = ?) AS last_verified_at FROM (SELECT count(*) AS pending FROM audit_pending WHERE org_id = ?) AS pending LEFT JOIN (SELECT seq, hash FROM audit_event WHERE org_id = ? ORDER BY seq DESC LIMIT 1) AS head ON 1 = 1';
 
 export function createAuditQueryRepository(executor: ScalarSqlExecutor): AuditQueryRepository {
   return {
@@ -64,12 +65,18 @@ export function createAuditQueryRepository(executor: ScalarSqlExecutor): AuditQu
         seq: number | null;
         hash: string | null;
         pending: number;
-      }>({ sql: HEAD_SQL, params: [ctx.orgId, ctx.orgId] });
-      if (row === undefined || (row.seq === null && row.pending === 0)) return null;
+        last_verified_at: string | null;
+      }>({ sql: HEAD_SQL, params: [ctx.orgId, ctx.orgId, ctx.orgId] });
+      if (
+        row === undefined ||
+        (row.seq === null && row.pending === 0 && row.last_verified_at === null)
+      )
+        return null;
       return {
         seq: row.seq ?? 0,
         hash: row.hash ?? AUDIT_GENESIS_HASH,
         pending: row.pending,
+        lastVerifiedAt: row.last_verified_at,
       };
     },
   };

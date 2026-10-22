@@ -345,6 +345,155 @@ describe('node auth wiring', () => {
     expect(anonymous.status).toBe(401);
   });
 
+  for (const transport of ['HTTP', 'kernel'] as const) {
+    it.each<{
+      name: string;
+      setting: string | undefined;
+      headers: Record<string, string>;
+      expected: string | null;
+    }>([
+      {
+        name: 'default',
+        setting: undefined,
+        headers: { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' },
+        expected: '127.0.0.1',
+      },
+      {
+        name: 'disabled',
+        setting: '0',
+        headers: { 'x-forwarded-for': '198.51.100.1' },
+        expected: '127.0.0.1',
+      },
+      {
+        name: 'trusted Cloudflare header',
+        setting: '1',
+        headers: { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' },
+        expected: '203.0.113.7',
+      },
+      {
+        name: 'trusted forwarded IPv6',
+        setting: '1',
+        headers: { 'x-forwarded-for': '2001:db8::1, 192.0.2.9' },
+        expected: '2001:db8::1',
+      },
+      {
+        name: 'trusted invalid header',
+        setting: '1',
+        headers: { 'cf-connecting-ip': '999.1.1.1', 'x-forwarded-for': '198.51.100.1' },
+        expected: '127.0.0.1',
+      },
+      {
+        name: 'trusted Forwarded IPv6 with port',
+        setting: '1',
+        headers: { forwarded: 'for="[2001:db8::1]:4711";proto=https' },
+        expected: '2001:db8::1',
+      },
+      {
+        name: 'trusted Forwarded hostname',
+        setting: '1',
+        headers: { forwarded: 'for=proxy.example.test' },
+        expected: '127.0.0.1',
+      },
+      { name: 'trusted missing headers', setting: '1', headers: {}, expected: '127.0.0.1' },
+    ])(
+      `uses $name IP policy for setup, login and audit over ${transport}`,
+      async ({ setting, headers, expected }) => {
+        const port = transport === 'HTTP' ? await freePort() : null;
+        const publicUrl = port === null ? 'http://127.0.0.1' : `http://127.0.0.1:${port}`;
+        const broker = await start({ PB_TRUSTED_PROXY: setting, PB_PUBLIC_URL: publicUrl });
+        const base = port === null ? publicUrl : await listen(broker, port);
+        const kernel = await broker.ready();
+        const expectedIp = transport === 'kernel' && expected === '127.0.0.1' ? null : expected;
+        const send = (route: string, body: unknown, headers: Record<string, string> = {}) =>
+          transport === 'HTTP'
+            ? post(base, route, body, headers)
+            : kernel.fetch(
+                new Request(`${base}${route}`, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', origin: base, ...headers },
+                  body: JSON.stringify(body),
+                }),
+              );
+        const token = await seedAdmin();
+        const proxyHeaders: Record<string, string> = headers;
+        const started = await send('/_pb/auth/local/setup/start', { token });
+        expect(started.status).toBe(200);
+        const { secret } = (await started.json()) as { secret: string };
+        const totpSecret = base32Decode(secret);
+        const step = Math.floor(Date.now() / 30_000);
+        const finished = await send(
+          '/_pb/auth/local/setup/finish',
+          {
+            token,
+            password: PASSWORD,
+            code: await totpCode(totpSecret, step),
+          },
+          proxyHeaders,
+        );
+        expect(finished.status).toBe(204);
+        const login = await send(
+          '/_pb/auth/local/login',
+          {
+            email: EMAIL,
+            password: PASSWORD,
+            code: await totpCode(totpSecret, step + 1),
+          },
+          proxyHeaders,
+        );
+        expect(login.status).toBe(204);
+        const cookie = cookieHeader([login]);
+        const csrf = cookie
+          .split('; ')
+          .find((entry) => entry.startsWith('__Host-pb_csrf='))
+          ?.split('=')[1];
+        expect(csrf).toBeDefined();
+        const created = await send(
+          '/_pb/roles',
+          {
+            key: 'ip_probe',
+            name: 'IP probe',
+            scope: 'organization',
+            permissions: ['org:read'],
+          },
+          { ...proxyHeaders, cookie, 'x-csrf-token': csrf! },
+        );
+        expect(created.status).toBe(201);
+
+        const opened = openBetterSqliteExecutor(path);
+        try {
+          const org = await createOrganizationBootstrap(opened.executor).findSingleton();
+          expect(org).not.toBeNull();
+          expect(
+            await opened.executor.all({
+              sql: 'SELECT ip FROM session WHERE org_id = ?',
+              params: [org!.id],
+            }),
+          ).toEqual([{ ip: expectedIp }, { ip: expectedIp }]);
+          expect(
+            await opened.executor.all({
+              sql: "SELECT source_ip FROM audit_pending WHERE org_id = ? AND action = 'role.create'",
+              params: [org!.id],
+            }),
+          ).toEqual([{ source_ip: expectedIp }]);
+        } finally {
+          await opened.close();
+        }
+      },
+    );
+  }
+
+  it.each(['', 'true', 'false', 'yes', '2', ' 1 ', 'invalid-setting-sentinel'])(
+    'rejects invalid PB_TRUSTED_PROXY value %j without echoing it',
+    async (setting) => {
+      const failure = await rejection(start({ PB_TRUSTED_PROXY: setting }));
+      expect(failure).toMatchObject({
+        name: 'StartupConfigError',
+        variable: 'PB_TRUSTED_PROXY',
+        message: 'PB_TRUSTED_PROXY must be 0 or 1',
+      });
+    },
+  );
+
   it.each([
     ['a trailing slash', (port: number) => `http://127.0.0.1:${port}/`, '127.0.0.1'],
     ['an uppercase scheme and host', (port: number) => `HTTP://LOCALHOST:${port}/`, 'localhost'],

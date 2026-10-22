@@ -25,6 +25,7 @@ import {
   digest,
   installIdentity,
   recordDeploymentHistory,
+  DeploymentHistoryCapacityError,
   safeBuildInfo,
   type DeploymentAttempt,
   type Distribution,
@@ -1373,6 +1374,16 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       )
         return conflict();
     }
+    if (priorJournal) {
+      const pendingHistory = structuredClone(priorJournal);
+      recordDeploymentHistory(pendingHistory, {
+        plainBinding: { name: 'PB_PUBLIC_URL', text: url },
+      });
+      recordDeploymentHistory(pendingHistory, {
+        reserveVersion: !resuming || !priorAttempt.version_id,
+        ...(endpointEnv ? { plainBinding: { name: endpointEnv, text: telemetryEndpoint! } } : {}),
+      });
+    }
     output.worker_url = url;
     output.previous_version_id = resuming
       ? priorAttempt.previous_version_id
@@ -1412,6 +1423,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         intended_settings: structuredClone(intended),
         changes: [],
       };
+      if (priorJournal) recordDeploymentHistory(priorJournal, {});
       journal.deployment = {
         attempt: a,
         last_verified: verified,
@@ -1706,16 +1718,18 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       result,
       failCommand(
         output,
-        failure instanceof CloudflareError
-          ? new CloudflareError(
-              failure.code,
-              failure.exitCode,
-              failure.retryable,
-              'deploy',
-              failure.status,
-              failure.check,
-            )
-          : new CloudflareError('provider_failure', 1, false, 'deploy'),
+        failure instanceof DeploymentHistoryCapacityError
+          ? new DeploymentHistoryCapacityError()
+          : failure instanceof CloudflareError
+            ? new CloudflareError(
+                failure.code,
+                failure.exitCode,
+                failure.retryable,
+                'deploy',
+                failure.status,
+                failure.check,
+              )
+            : new CloudflareError('provider_failure', 1, false, 'deploy'),
       ),
     );
     return result;

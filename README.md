@@ -82,6 +82,21 @@ Cloudflare caches a configuration failure for 30 seconds per environment fingerp
 Changing the configuration gets a new verification attempt immediately. Node shares each
 deferred attempt between requests and starts at most one attempt per second.
 
+## Node client IP behind a proxy
+
+Node records the socket peer address in sessions and audit `source_ip` by default,
+ignoring `cf-connecting-ip`, `x-forwarded-for` and `forwarded`. Set `PB_TRUSTED_PROXY=1` only when
+Node is reachable exclusively through a trusted proxy that removes client-supplied
+values and writes these headers. `PB_TRUSTED_PROXY=0` (or unset) keeps the default;
+other values fail startup. Programmatic servers use `trustedProxy: true`.
+
+When enabled, `cf-connecting-ip` takes precedence over the first `x-forwarded-for`
+entry, followed by the first `forwarded` element's `for` parameter. Missing, empty
+or invalid selected values fall back to the socket address (or `null` without a
+socket peer). Both IPv4 and IPv6 literals are accepted, including bracketed IPv6
+with a port in `forwarded`.
+Cloudflare's client IP handling is unchanged.
+
 ## Operating sources
 
 ### Accepting a refused source removal

@@ -417,6 +417,7 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
 }
 
 const BASE_JOBS = [
+  'core:vulnerability-sync:v1',
   'core:source-sync:v1',
   'core:source-poll:v1',
   'core:retention-scan:v1',

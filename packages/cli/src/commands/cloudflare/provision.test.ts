@@ -1,3 +1,4 @@
+import { teardown } from './teardown.js';
 import { InventoryStore, InventoryTransaction, emptyInventory } from './inventory.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -1261,4 +1262,52 @@ it('records the provider-created R2 lifecycle baseline once and ignores non-abor
   await rm(statePath(), { force: true });
   expect((await provision(options(foreign))).exitCode).toBe(0);
   expect((await journal()).resources.r2?.lifecycle_baseline).toBeUndefined();
+});
+
+it.each([false, true])('chains provision into teardown with lifecycle drift=%s', async (drift) => {
+  const h = harness();
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect((await journal()).resources.r2!.lifecycle_baseline).toEqual([DEFAULT_ABORT_RULE]);
+  const provider = h.fetch;
+  const deleted: string[] = [];
+  h.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    const path = url.pathname.split(ACCOUNT)[1]!;
+    if (init?.method === 'DELETE') {
+      deleted.push(path);
+      const id = path.split('/').at(-1);
+      for (const kind of ['d1', 'r2', 'queue'])
+        h.resources[kind] = h.resources[kind]!.filter(
+          (r) => (r.uuid ?? r.queue_id ?? r.name) !== id,
+        );
+      return ok(null);
+    }
+    if (path === '/workers/scripts') return ok([]);
+    if (path === '/queues') return ok(h.resources.queue, { total_pages: 1 });
+    if (path.endsWith('/consumers')) return ok([]);
+    if (path.endsWith('/configuration')) return ok({ queues: [] });
+    if (path.endsWith('/objects')) return ok([], { is_truncated: false });
+    if (path.endsWith('/domains/custom')) return ok({ domains: [] });
+    if (/\/(?:cors|lock)$/.test(path)) return ok({ rules: [] });
+    if (/\/(?:domains\/managed|sippy)$/.test(path)) return ok({ enabled: false });
+    if (drift && path.endsWith('/lifecycle'))
+      return ok({ rules: [{ ...DEFAULT_ABORT_RULE, conditions: { prefix: 'foreign/' } }] });
+    return provider(input, init);
+  });
+  const result = await teardown({
+    project,
+    inventory: statePath(),
+    env,
+    fetch: h.fetch,
+    now: h.now,
+    sleep: h.sleep,
+    inventoryId: identity.owner_digest,
+    iUnderstandThisDeletes: true,
+  });
+  expect(result.exitCode).toBe(drift ? 8 : 0);
+  if (drift) expect(deleted).toEqual([]);
+  else {
+    expect(deleted).toHaveLength(4);
+    expect(Object.values(h.resources).every((resources) => resources.length === 0)).toBe(true);
+  }
 });

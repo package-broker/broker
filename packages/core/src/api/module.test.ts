@@ -14,6 +14,8 @@ import * as sourceAttachment from './routes/source-attachment.js';
 import * as packages from './routes/packages.js';
 import * as audit from './routes/audit.js';
 import * as permissions from './routes/permissions.js';
+import * as packageManage from './routes/package-manage.js';
+import * as importRuns from './routes/import.js';
 
 const EXPECTED_ROUTES = [
   'GET /_pb/organization',
@@ -73,7 +75,6 @@ const EXPECTED_ROUTES = [
   'POST /_pb/sources/:source/names',
   'DELETE /_pb/sources/:source/names/:name',
   'POST /_pb/sources/:source/enable',
-  'POST /_pb/sources/:source/accept-removal',
   'PUT /_pb/projects/:project/sources/order',
   'PUT /_pb/projects/:project/sources/:source/attachment',
   'DELETE /_pb/projects/:project/sources/:source/attachment',
@@ -87,7 +88,27 @@ const EXPECTED_ROUTES = [
   'GET /_pb/projects/:project/audit',
   'GET /_pb/me/permissions',
   'GET /_pb/projects/:project/permissions',
+  'POST /_pb/packages/:package/versions/:version/quarantine',
+  'POST /_pb/packages/:package/versions/:version/tombstone',
+  'POST /_pb/packages/:package/versions/:version/release',
+  'POST /_pb/projects/:project/packages/:package/versions/:version/quarantine',
+  'POST /_pb/projects/:project/packages/:package/versions/:version/tombstone',
+  'POST /_pb/projects/:project/packages/:package/versions/:version/release',
 ];
+const IMPORT_ROUTES = [
+  'POST /_pb/import-runs',
+  'GET /_pb/import-runs',
+  'GET /_pb/import-runs/:id',
+  'POST /_pb/import-runs/:id/verify',
+  'POST /_pb/import-runs/:id/approve',
+  'POST /_pb/import-runs/:id/apply',
+  'POST /_pb/import-runs/:id/rollback',
+  'POST /_pb/import-runs/:id/accept',
+  'POST /_pb/import-runs/:id/cancel',
+  'PUT /_pb/import-runs/:id/credentials/:externalRef',
+];
+const REBUILD_ROUTE = 'POST /_pb/packages/:package/versions/:version/rebuild';
+const ACCEPT_REMOVAL_ROUTE = 'POST /_pb/sources/:source/accept-removal';
 
 function unused<T extends object>(...methods: readonly (keyof T)[]): T {
   return Object.fromEntries(
@@ -198,7 +219,36 @@ function dependencies(): ApiModuleDeps {
     },
     packages: unused('listProject', 'listOrganization', 'listVersions'),
     audit: unused('list', 'head'),
+    packageManage: {
+      ...common(),
+      service: unused('manage'),
+      sessions: unused('authenticate', 'isReauthFresh'),
+      idempotency: unused('find'),
+    },
+    imports: {
+      ...common(),
+      service: unused(
+        'get',
+        'list',
+        'createRun',
+        'approveRun',
+        'requestApply',
+        'requestVerify',
+        'cancelRun',
+        'acceptRun',
+        'requestRollback',
+      ),
+      credentials: unused('acceptImportCredential'),
+      auditStatement: vi.fn(),
+      tokenFence: vi.fn(),
+    },
   };
+}
+
+function withoutImports(): ApiModuleDeps {
+  const { imports: _imports, ...rest } = dependencies();
+  void _imports;
+  return rest;
 }
 
 function methodPaths(value: object, prefix: readonly string[] = []): string[][] {
@@ -226,9 +276,11 @@ function extended(...routes: RouteDefinition[]) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('createApiModule', () => {
-  it('registers exactly the wave-a method/path table once', () => {
+  it('registers exactly the method/path table once', () => {
     const { routes } = createApiModule(dependencies());
-    expect(routes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...EXPECTED_ROUTES].sort());
+    expect(routes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      [...EXPECTED_ROUTES, ...IMPORT_ROUTES].sort(),
+    );
     for (const r of routes) {
       expect(r.path.startsWith('/_pb/')).toBe(true);
       expect(r.api?.exempt === undefined && r.api?.operationId).toBeTruthy();
@@ -255,12 +307,90 @@ describe('createApiModule', () => {
     for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
   });
 
+  it('omits the import routes when no import dependencies are provided', () => {
+    const { routes } = createApiModule(withoutImports());
+    expect(routes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...EXPECTED_ROUTES].sort());
+  });
+
+  it('registers the rebuild route only when a rebuild port is provided', () => {
+    const deps = withoutImports();
+    const rebuild = { requestTagRebuild: vi.fn() };
+    const { routes } = createApiModule({
+      ...deps,
+      packageManage: { ...deps.packageManage, rebuild },
+    });
+    expect(routes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      [...EXPECTED_ROUTES, REBUILD_ROUTE].sort(),
+    );
+  });
+
+  it('rejects a rebuild port missing requestTagRebuild at construction', () => {
+    const deps = dependencies();
+    Object.assign(deps.packageManage, { rebuild: {} });
+    expect(() => createApiModule(deps)).toThrow(
+      new TypeError(
+        'API module requires dependency: dependencies.packageManage.rebuild.requestTagRebuild',
+      ),
+    );
+  });
+
+  it('rejects a non-callable rebuild method without exposing its value', () => {
+    const deps = dependencies();
+    Object.assign(deps.packageManage, {
+      rebuild: { requestTagRebuild: 'private-dependency-value' },
+    });
+    expect(() => createApiModule(deps)).toThrow(
+      new TypeError(
+        'API module requires dependency: dependencies.packageManage.rebuild.requestTagRebuild',
+      ),
+    );
+  });
+
+  it('omits the accept-removal route when the service method is absent', () => {
+    const deps = dependencies();
+    expect(sources.sourceRoutes(deps.sources).map((r) => `${r.method} ${r.path}`)).not.toContain(
+      ACCEPT_REMOVAL_ROUTE,
+    );
+    expect(createApiModule(deps).routes.map((r) => `${r.method} ${r.path}`)).not.toContain(
+      ACCEPT_REMOVAL_ROUTE,
+    );
+  });
+
+  it('registers the accept-removal route when its service method is provided', () => {
+    const deps = dependencies();
+    Object.assign(deps.sources.service, { acceptRemoval: vi.fn() });
+    expect(
+      createApiModule(deps)
+        .routes.map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual([...EXPECTED_ROUTES, ...IMPORT_ROUTES, ACCEPT_REMOVAL_ROUTE].sort());
+  });
+
+  it.each([null, 'private-dependency-value'])(
+    'rejects a non-callable acceptRemoval method at construction (case %#)',
+    (acceptRemoval) => {
+      const deps = dependencies();
+      Object.assign(deps.sources.service, { acceptRemoval });
+      expect(() => createApiModule(deps)).toThrow(
+        new TypeError('API module requires dependency: dependencies.sources.service.acceptRemoval'),
+      );
+    },
+  );
+
+  it('calls the package manage and import factories exactly once', () => {
+    const manage = vi.spyOn(packageManage, 'packageManageRoutes');
+    const imports = vi.spyOn(importRuns, 'importRoutes');
+    createApiModule(dependencies());
+    expect(manage).toHaveBeenCalledTimes(1);
+    expect(imports).toHaveBeenCalledTimes(1);
+  });
+
   it('adds typed extension factories once through the same registration checks', () => {
     const extra = route();
     const extension = vi.fn(() => [extra]);
     const { routes } = createApiModule({ ...dependencies(), extensions: [extension] });
     expect(extension).toHaveBeenCalledTimes(1);
-    expect(routes).toHaveLength(EXPECTED_ROUTES.length + 1);
+    expect(routes).toHaveLength(EXPECTED_ROUTES.length + IMPORT_ROUTES.length + 1);
     expect(routes.at(-1)).toEqual(extra);
     expect(Object.isFrozen(routes)).toBe(true);
   });
@@ -285,7 +415,7 @@ describe('createApiModule', () => {
 
   it('allows different methods on the same path', () => {
     expect(extended(route(), { ...route(), method: 'POST' }).routes).toHaveLength(
-      EXPECTED_ROUTES.length + 2,
+      EXPECTED_ROUTES.length + IMPORT_ROUTES.length + 2,
     );
   });
 
@@ -304,18 +434,21 @@ describe('createApiModule', () => {
   });
 
   const deps = dependencies();
-  it.each(Object.keys(deps))('rejects missing dependency group %s at construction', (key) => {
-    expect(() =>
-      createApiModule({ ...dependencies(), [key]: undefined } as unknown as ApiModuleDeps),
-    ).toThrow(TypeError);
-  });
+  it.each(Object.keys(deps).filter((key) => key !== 'imports'))(
+    'rejects missing dependency group %s at construction',
+    (key) => {
+      expect(() =>
+        createApiModule({ ...dependencies(), [key]: undefined } as unknown as ApiModuleDeps),
+      ).toThrow(TypeError);
+    },
+  );
 
   const fields = Object.entries(deps).flatMap(([group, value]) =>
     Object.keys(value).map((field) => [group, field] as const),
   );
   it.each(fields)('rejects missing %s.%s at construction', (group, field) => {
     const broken = dependencies();
-    const values = broken[group as keyof Omit<ApiModuleDeps, 'extensions'>];
+    const values = broken[group as keyof Omit<ApiModuleDeps, 'extensions'>]!;
     Object.assign(values, { [field]: undefined });
     expect(() => createApiModule(broken)).toThrow(TypeError);
   });

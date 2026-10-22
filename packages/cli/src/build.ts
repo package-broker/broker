@@ -4,7 +4,10 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
-import { brokerObservabilityProblems } from '@package-broker/core/config';
+import {
+  brokerObservabilityProblems,
+  brokerVulnerabilityProblems,
+} from '@package-broker/core/config';
 import { validatePlatformPorts } from '@package-broker/core/platform/port-config';
 import {
   collectRegistrations,
@@ -147,7 +150,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const config = await loadConfig(configPath, cwd);
   const target = options.target ?? config.platform;
 
-  const observabilityProblems = brokerObservabilityProblems(config);
+  const observabilityProblems = [
+    ...brokerObservabilityProblems(config),
+    ...brokerVulnerabilityProblems(config),
+  ];
   if (observabilityProblems.length > 0) throw new BuildDiagnosticsError(observabilityProblems);
   const pluginKeys: string[] = [];
   validatePluginShape(config.plugins, target, (key) => pluginKeys.push(key));

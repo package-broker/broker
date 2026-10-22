@@ -35,6 +35,24 @@ export interface TeardownOptions {
   repositoryId?: string;
 }
 
+export class ForeignAccountInventoryError extends CloudflareError {
+  constructor() {
+    super('ownership_conflict', 8);
+  }
+}
+
+class MultipartCleanupError extends CloudflareError {
+  constructor() {
+    super('ownership_conflict', 8);
+  }
+}
+
+class WorkerOwnershipError extends CloudflareError {
+  constructor() {
+    super('ownership_conflict', 8);
+  }
+}
+
 export function cleanupFailure(error: unknown, stage: string): CloudflareError {
   const safe =
     error instanceof CloudflareError
@@ -42,7 +60,7 @@ export function cleanupFailure(error: unknown, stage: string): CloudflareError {
       : new CloudflareError('state_io_failure', 1, false, stage);
   const messages = {
     invalid_input:
-      'Invalid cleanup input. Production teardown requires --i-understand-this-deletes and --inventory-id equal to identity.owner_digest.',
+      'Invalid cleanup input. Production teardown requires --i-understand-this-deletes and --inventory-id equal to identity.owner_digest. Adopted D1 and R2 resources always require --i-understand-this-deletes.',
     ownership_conflict:
       'Inventory ownership or live attachments differ from the selected account, run or resource.',
     outcome_unknown:
@@ -55,6 +73,12 @@ export function cleanupFailure(error: unknown, stage: string): CloudflareError {
   };
   if (Object.hasOwn(messages, safe.code))
     safe.message = messages[safe.code as keyof typeof messages];
+  if (error instanceof MultipartCleanupError)
+    safe.message =
+      'R2 remains nonempty after an empty object drain; unrecorded multipart uploads may remain. Inspect and abort them with S3 credentials, retain the inventory and rerun cleanup. Trigger attachments may already be removed.';
+  if (error instanceof WorkerOwnershipError)
+    safe.message =
+      'Worker ownership tags do not match the broker installation. Refusing to delete the Worker or its resources; retain the inventory and inspect the replacement Worker.';
   return safe;
 }
 
@@ -97,7 +121,7 @@ export async function cleanupInventory(o: TeardownOptions) {
     const identity = object(object(raw).identity);
     if (typeof identity.account_id !== 'string' || !/^[a-f0-9]{32}$/.test(identity.account_id))
       throw new CloudflareError('invalid_inventory', 2);
-    if (identity.account_id !== auth.accountId) throw new CloudflareError('ownership_conflict', 8);
+    if (identity.account_id !== auth.accountId) throw new ForeignAccountInventoryError();
     const expected = installIdentity({
       accountId: auth.accountId,
       workerName: identity.worker_name as string,
@@ -350,14 +374,24 @@ class CleanupApi {
           throw new CloudflareError('provider_failure');
         return key;
       });
-      this.drained = readOnly ? 0 : keys.length;
       if (keys.length && !readOnly) {
         const deleted = await this.request(`${path}/objects`, 'DELETE', keys, true);
-        const confirmed = Array.isArray(deleted.result)
-          ? new Set(deleted.result.map((entry) => object(entry).key))
-          : undefined;
-        if (deleted.gone || !confirmed || keys.some((key) => !confirmed.has(key)))
-          throw new CloudflareError('provider_failure');
+        if (deleted.gone || !Array.isArray(deleted.result))
+          throw new CloudflareError('outcome_unknown', 6);
+        const confirmed = new Set<string>();
+        for (const entry of deleted.result) {
+          if (
+            !entry ||
+            typeof entry !== 'object' ||
+            Array.isArray(entry) ||
+            typeof entry.key !== 'string'
+          )
+            throw new CloudflareError('outcome_unknown', 6);
+          confirmed.add(entry.key);
+        }
+        if (keys.some((key) => !confirmed.has(key)))
+          throw new CloudflareError('outcome_unknown', 6);
+        this.drained += keys.length;
       }
       if (!info.is_truncated) return true;
       if (typeof info.cursor !== 'string' || !info.cursor || seen.has(info.cursor))
@@ -579,7 +613,10 @@ function recordedBinding(
       (binding.name === 'PB_PUBLIC_URL' && attempts.some((a) => binding.text === a.worker_url)) ||
       Boolean(
         j.deployment?.history?.plain_bindings.some(
-          (b) => b.name === binding.name && b.text === binding.text,
+          (b) =>
+            b.name === binding.name &&
+            typeof binding.text === 'string' &&
+            b.texts.includes(binding.text),
         ),
       )
     );
@@ -597,18 +634,78 @@ function recordedBinding(
 
 function checkWorkerOwner(settings: unknown, j: Inventory): void {
   const tags = object(settings).tags ?? [];
+  const deployed =
+    Boolean(j.deployment?.history?.version_ids.length) ||
+    [j.deployment?.attempt, j.deployment?.last_verified].some((a) => a?.version_id != null);
   if (
     !Array.isArray(tags) ||
+    (deployed &&
+      (!tags.includes('pb-install-v1') || !tags.includes(`pb-owner-${j.identity.owner_digest}`))) ||
     tags.some(
       (tag) =>
         typeof tag !== 'string' ||
         (tag.startsWith('pb-owner-') && tag !== `pb-owner-${j.identity.owner_digest}`),
     )
   )
-    throw new CloudflareError('ownership_conflict', 8);
+    throw new WorkerOwnershipError();
 }
 
-async function preflight(api: CleanupApi, entries: Deletion[], j: Inventory): Promise<Set<string>> {
+export class WorkerReferenceScan {
+  private readonly removed = new Set<string>();
+  private readonly accounts = new Map<string, Promise<Record<string, unknown>[]>>();
+  private readonly bindings = new Map<string, Promise<unknown[]>>();
+
+  async scripts(api: CleanupApi, base: string): Promise<Record<string, unknown>[]> {
+    let result = this.accounts.get(base);
+    if (!result) {
+      result = api.snapshot(`${base}/workers/scripts`);
+      this.accounts.set(base, result);
+    }
+    return (await result).filter(
+      (worker) => !this.removed.has(`${base}/workers/scripts/${liveId(worker.id)}`),
+    );
+  }
+
+  deleted(path: string): void {
+    this.removed.add(path);
+  }
+
+  references(api: CleanupApi, path: string): Promise<unknown[]> {
+    let result = this.bindings.get(path);
+    if (!result) {
+      result = this.readReferences(api, path);
+      this.bindings.set(path, result);
+    }
+    return result;
+  }
+
+  private async readReferences(api: CleanupApi, path: string): Promise<unknown[]> {
+    const bindings: unknown[] = [];
+    const add = (raw: unknown) => {
+      if (!Array.isArray(raw)) throw new CloudflareError('ownership_conflict', 8);
+      bindings.push(...raw);
+    };
+    const settings = await api.request(`${path}/settings`, 'GET');
+    if (settings.gone) throw new CloudflareError('ownership_conflict', 8);
+    completeSnapshot(settings.result_info);
+    add(object(settings.result).bindings);
+    for (const version of await api.list(`${path}/versions`, 'items')) {
+      const id = liveId(version.id);
+      const detail = await api.request(`${path}/versions/${id}`, 'GET');
+      if (detail.gone) throw new CloudflareError('ownership_conflict', 8);
+      completeSnapshot(detail.result_info);
+      add(object(object(detail.result).resources).bindings);
+    }
+    return bindings;
+  }
+}
+
+async function preflight(
+  api: CleanupApi,
+  entries: Deletion[],
+  j: Inventory,
+  references: WorkerReferenceScan,
+): Promise<Set<string>> {
   const absent = new Set<string>();
   const base = `/accounts/${j.identity.account_id}`;
   const primary = entries.filter((entry) =>
@@ -737,7 +834,7 @@ async function preflight(api: CleanupApi, entries: Deletion[], j: Inventory): Pr
   if (selectedQueues.size || selectedBuckets.size) {
     const original = api.jurisdiction;
     try {
-      for (const jurisdiction of ['default', 'eu']) {
+      for (const jurisdiction of ['default', 'eu', 'fedramp']) {
         api.jurisdiction = jurisdiction;
         const buckets = await api.list(`${base}/r2/buckets`, 'buckets', true);
         const names = new Set(buckets.map((bucket) => liveId(bucket.name)));
@@ -767,7 +864,7 @@ async function preflight(api: CleanupApi, entries: Deletion[], j: Inventory): Pr
   }
 
   // Both current settings and inactive versions can retain references to backing resources.
-  const scripts = new Set((await api.snapshot(`${base}/workers/scripts`)).map((w) => liveId(w.id)));
+  const scripts = new Set((await references.scripts(api, base)).map((w) => liveId(w.id)));
   for (const worker of workers) scripts.add(worker);
   const affectedBinding = (b: Record<string, unknown>) =>
     livePrimary.some((entry) => {
@@ -803,6 +900,10 @@ async function preflight(api: CleanupApi, entries: Deletion[], j: Inventory): Pr
   for (const script of scripts) {
     const path = `${base}/workers/scripts/${script}`;
     const selected = workers.has(script);
+    if (!selected) {
+      checkBindings(await references.references(api, path), false);
+      continue;
+    }
     const settings = await api.request(`${path}/settings`, 'GET');
     if (settings.gone) throw new CloudflareError('ownership_conflict', 8);
     completeSnapshot(settings.result_info);
@@ -872,7 +973,10 @@ async function preflight(api: CleanupApi, entries: Deletion[], j: Inventory): Pr
   return absent;
 }
 
-export async function teardown(o: TeardownOptions): Promise<CommandResult> {
+export async function teardown(
+  o: TeardownOptions,
+  references = new WorkerReferenceScan(),
+): Promise<CommandResult> {
   const output = commandEnvelope('teardown', o.dryRun);
   let release: (() => Promise<void>) | undefined;
   let result: CommandResult;
@@ -893,9 +997,24 @@ export async function teardown(o: TeardownOptions): Promise<CommandResult> {
       )
         throw new CloudflareError('invalid_input', 2);
       if (o.inventoryId !== undefined && o.inventoryId !== journal.identity.owner_digest)
-        throw new CloudflareError('ownership_conflict', 8);
+        throw new CloudflareError('invalid_input', 2);
+      if (
+        !o.iUnderstandThisDeletes &&
+        [journal.resources.d1, journal.resources.r2].some(
+          (resource) => resource?.evidence?.source === 'adopted',
+        )
+      )
+        throw new CloudflareError('invalid_input', 2);
       const plan = deletions(journal);
-      plan.entries.sort((a, b) => Number(Boolean(b.bucket)) - Number(Boolean(a.bucket)));
+      const order = (entry: Deletion) =>
+        ['schedules', 'consumer', 'route', 'domain'].includes(entry.name)
+          ? 0
+          : entry.name === 'worker'
+            ? 1
+            : entry.bucket
+              ? 2
+              : 3;
+      plan.entries.sort((a, b) => order(a) - order(b));
       output.plan = plan.entries.map((entry) => ({
         stage: 'teardown',
         action: entry.bucket ? 'drain_then_delete' : 'delete',
@@ -903,10 +1022,13 @@ export async function teardown(o: TeardownOptions): Promise<CommandResult> {
       }));
       const api = new CleanupApi(o, auth);
       api.jurisdiction = journal.identity.jurisdiction;
-      const absent = o.dryRun ? new Set<string>() : await preflight(api, plan.entries, journal);
+      const absent = o.dryRun
+        ? new Set<string>()
+        : await preflight(api, plan.entries, journal, references);
       for (const entry of plan.entries) {
         if (o.dryRun) continue;
         if (absent.has(entry.path)) {
+          if (entry.name === 'worker') references.deleted(entry.path);
           output.checks.push({ name: entry.name, status: 'already_gone' });
           continue;
         }
@@ -926,13 +1048,14 @@ export async function teardown(o: TeardownOptions): Promise<CommandResult> {
             } catch (error) {
               if (!(error instanceof CloudflareError) || error.status !== 409) throw error;
               if (attempt === 3) {
-                if (api.drained === 0) throw new CloudflareError('ownership_conflict', 8);
+                if (api.drained === 0) throw new MultipartCleanupError();
                 throw error;
               }
             }
           }
           if (!finished) throw new CloudflareError('provider_failure');
         } else gone = (await api.request(entry.path, entry.method ?? 'DELETE', entry.body)).gone;
+        if (entry.name === 'worker') references.deleted(entry.path);
         output.checks.push({ name: entry.name, status: gone ? 'already_gone' : 'deleted' });
       }
       if (plan.unresolved) throw new CloudflareError('outcome_unknown', 6);

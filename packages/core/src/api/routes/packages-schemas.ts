@@ -47,7 +47,42 @@ const packageItem = z.strictObject({
   versionCount: z.number().int().nonnegative(),
   lastSyncedAt: z.string().nullable(),
 });
+const assessment = z.enum(['affected', 'not_affected']);
+const vulnerability = z.strictObject({
+  status: z.enum(['affected', 'not_affected', 'unknown', 'stale']),
+  reason: z
+    .enum([
+      'not_checked',
+      'disabled',
+      'unsupported_version',
+      'pending',
+      'upstream_unavailable',
+      'incomplete',
+      'expired',
+    ])
+    .nullable(),
+  source: z.literal('osv').nullable(),
+  fetchedAt: z.string().nullable(),
+  lastKnownStatus: assessment.nullable(),
+  advisoryCount: z.number().int().nonnegative(),
+  advisories: z
+    .array(
+      z.strictObject({
+        id: z.string(),
+        url: z.null(),
+        severity: z.strictObject({
+          level: z.enum(['critical', 'high', 'medium', 'low', 'unknown']),
+          entries: z.array(z.strictObject({ type: z.string(), score: z.string() })),
+        }),
+        detailsFetchedAt: z.string().nullable(),
+      }),
+    )
+    .max(20),
+  detailsComplete: z.boolean(),
+  advisoriesTruncated: z.boolean(),
+});
 const versionItem = z.strictObject({
+  vulnerability,
   id: ulid,
   version: z.string(),
   stability: z.enum(['dev', 'alpha', 'beta', 'RC', 'stable']),

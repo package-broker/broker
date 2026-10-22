@@ -409,6 +409,31 @@ describe('D1 HTTP executor: request shape', () => {
   });
 });
 
+describe('D1 HTTP executor: batch statement budget', () => {
+  it('rejects a batch above 200 statements before reading it or sending a request', async () => {
+    await withHarness(async ({ executor, requests }) => {
+      const unreadable = {
+        get sql(): string {
+          throw new Error('SQL was read');
+        },
+        get params(): readonly [] {
+          throw new Error('parameters were read');
+        },
+      };
+      const error = await rejection(executor.batch(Array.from({ length: 201 }, () => unreadable)));
+      expect(error).toMatchObject({ name: 'DbError', kind: 'too_big' });
+      expect(requests).toHaveLength(0);
+    });
+  });
+
+  it('sends a batch of exactly 200 statements', async () => {
+    await withHarness(async ({ executor, requests }) => {
+      await executor.batch(Array.from({ length: 200 }, () => ({ sql: 'SELECT 1', params: [] })));
+      expect(requests).toHaveLength(1);
+    });
+  });
+});
+
 describe('D1 HTTP executor: per-statement limits', () => {
   const rejectsWithoutRequest = async (statement: ScalarStatement): Promise<void> => {
     await withHarness(async ({ executor, requests }) => {

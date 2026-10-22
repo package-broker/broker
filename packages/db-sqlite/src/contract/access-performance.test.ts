@@ -9,6 +9,7 @@ import {
 } from '../repositories/access.js';
 import { openMigratedDatabase } from '../testing/migrated-database.js';
 import { countCalls } from './count-calls.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 const providers = [
   {
@@ -277,7 +278,7 @@ async function seed(executor: SqlExecutor, org: OrgContext): Promise<void> {
         future,
       ),
     );
-  await executor.batch(statements);
+  await batchInChunks(executor, statements);
 }
 
 describe('access performance contract', () => {

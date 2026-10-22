@@ -1,3 +1,7 @@
+import {
+  D1_STATEMENTS_PER_BATCH,
+  D1_STATEMENTS_PER_INVOCATION,
+} from '@package-broker/core/db/port';
 import { sql } from 'kysely';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
@@ -46,8 +50,8 @@ import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
 
-const MAX_STATEMENTS = 500;
-const MAX_BATCH_STATEMENTS = 200;
+const MAX_STATEMENTS = D1_STATEMENTS_PER_INVOCATION;
+const MAX_BATCH_STATEMENTS = D1_STATEMENTS_PER_BATCH;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 const encoder = new TextEncoder();
 function parameterBytes(statements: readonly Statement[]): number {
@@ -132,7 +136,7 @@ export function createCatalogueWriter(
   return {
     ...reconcile,
     statementBudget: {
-      syncPackage: 500,
+      syncPackage: D1_STATEMENTS_PER_INVOCATION,
       attachDist: 4,
       openListing: 3,
       markListing: 5,

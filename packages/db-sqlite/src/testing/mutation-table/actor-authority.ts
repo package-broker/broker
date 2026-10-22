@@ -36,7 +36,11 @@ const actorSessionIdentityOfForeignOrg = (build: AuthorityBuilder): ContractCase
       foreign.orgId,
       bad.userId,
     );
-    await seed('UPDATE session SET identity_id = ? WHERE id = ?', 'I-FOREIGN', bad.sessionId);
+    await seed.forged(
+      'UPDATE session SET identity_id = ? WHERE id = ?',
+      'I-FOREIGN',
+      bad.sessionId,
+    );
     const guardFor = (subject: Subject) =>
       build(own, fenceOf(subject), {
         permission: ORG_PERMISSION,
@@ -121,7 +125,11 @@ const sessionCases = (['actor', 'identity', 'session'] as const).map((layer): Co
     expect(await held(context, guard(), false)).toBe(true);
     if (layer === 'identity') {
       await seed.forged('UPDATE identity SET org_id = ? WHERE id = ?', foreign.orgId, 'I-actor');
-      await seed('UPDATE session SET identity_id = ? WHERE id = ?', 'I-actor', subject.sessionId);
+      await seed.forged(
+        'UPDATE session SET identity_id = ? WHERE id = ?',
+        'I-actor',
+        subject.sessionId,
+      );
     } else {
       await seed.forged(
         'UPDATE user_account SET org_id = ? WHERE id = ?',

@@ -65,7 +65,6 @@ const expectedCodes: Record<string, ApiErrorCode> = {
   wrong_state: 'conflict',
   not_suspended: 'conflict',
   indeterminate: 'unavailable',
-  scan_incomplete: 'unavailable',
   source_invalid: 'unavailable',
 };
 
@@ -292,7 +291,6 @@ describe('ProjectListError', () => {
     'invalid_limit',
     'invalid_cursor',
     'invalid_status',
-    'scan_incomplete',
     'source_invalid',
   ] as const satisfies readonly ProjectListError[];
   it('covers every member with the specified code and status', () => {

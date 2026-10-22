@@ -1,3 +1,4 @@
+import { CSPProvider } from '@base-ui/react/csp-provider';
 import {
   useCallback,
   useEffect,
@@ -158,11 +159,13 @@ export function ScopeSwitcher(props: {
 }) {
   return (
     <div className="flex items-center gap-2">
-      <Label id="scope-label">Scope</Label>
+      <Label id="scope-label" className="sr-only lg:not-sr-only">
+        Scope
+      </Label>
       <Select
         value={props.project ?? ORGANIZATION_SCOPE}
         aria-labelledby="scope-label"
-        className="w-48"
+        className="w-36 max-w-full lg:w-48"
         onChange={(event) =>
           props.onScope(event.target.value === ORGANIZATION_SCOPE ? null : event.target.value)
         }
@@ -187,15 +190,17 @@ export function Shell(props: {
   signOutError?: boolean;
   children?: ReactNode;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
-      <header className="flex flex-wrap items-center gap-4 border-b border-neutral-200 bg-white px-6 py-3">
-        <span className="font-semibold">Package Broker</span>
-        <nav aria-label="Main" className="flex flex-wrap gap-1">
+      <header className="shell-header">
+        <span className="shell-brand font-semibold">Package Broker</span>
+        <nav aria-label="Main" id="main-nav" className={`shell-nav ${menuOpen ? 'is-open' : ''}`}>
           {NAV.map((item) => (
             <a
               key={item.route}
               href={buildHash(item.route, props.project)}
+              onClick={() => setMenuOpen(false)}
               aria-current={props.route === item.route ? 'page' : undefined}
               className={cn(
                 'rounded-md px-3 py-1.5 text-sm hover:bg-neutral-100',
@@ -206,7 +211,7 @@ export function Shell(props: {
             </a>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-4">
+        <div className="ml-auto flex min-w-0 items-center gap-2">
           <ScopeSwitcher
             project={props.project}
             projects={props.projects}
@@ -218,9 +223,19 @@ export function Shell(props: {
               <DropdownMenuItem onClick={props.onSignOut}>Sign out</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          <button
+            type="button"
+            className="rounded-md border border-neutral-300 px-2 py-1.5 lg:hidden"
+            aria-label="Main menu"
+            aria-controls="main-nav"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            ☰
+          </button>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl p-6">
+      <main className="mx-auto min-w-0 max-w-7xl p-4 sm:p-6">
         {props.unknown === null ? null : (
           <Alert className="mb-4">
             <AlertDescription>Unknown page: {props.unknown}</AlertDescription>
@@ -275,6 +290,14 @@ export async function checkSession(
 }
 
 export function App(props: { client?: AuthClient }) {
+  return (
+    <CSPProvider disableStyleElements>
+      <AppContent {...props} />
+    </CSPProvider>
+  );
+}
+
+function AppContent(props: { client?: AuthClient }) {
   const client = useMemo<AuthClient>(
     () =>
       props.client ??

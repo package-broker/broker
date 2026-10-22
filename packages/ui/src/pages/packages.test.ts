@@ -239,6 +239,46 @@ describe('filter reset', () => {
 });
 
 describe('page requests and actions', () => {
+  it.each([false, true])(
+    'describes the mutation route scope (organization admin: %s)',
+    async (organizationAdmin) => {
+      const f = fixture({ status: 403, code: 'reauth_required' });
+      if (organizationAdmin)
+        f.fetch.mockImplementationOnce(async () =>
+          Response.json({ organization: ['org:packages:manage'] }),
+        );
+      await f.controller.load(query);
+      await f.controller.open(own.id);
+      await f.controller.act(versionId, 'tombstone');
+      const html = renderToString(
+        createElement(PackagesView, {
+          state: f.controller.snapshot(),
+          onOpen: vi.fn(),
+          onAction: vi.fn(),
+          onNext: vi.fn(),
+          onVersionNext: vi.fn(),
+          onRefresh: vi.fn(),
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+        }),
+      );
+      const scope = organizationAdmin ? 'Organization' : 'Project web';
+      expect(html).toContain(`<dd>${scope}</dd>`);
+      expect(html).toContain('Only this version is affected.');
+      await f.controller.confirmTombstone();
+      expect(f.requireReauth).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: organizationAdmin
+            ? `/_pb/packages/${packageId}/versions/${versionId}/tombstone`
+            : `/_pb/projects/web/packages/${packageId}/versions/${versionId}/tombstone`,
+        }),
+        expect.objectContaining({
+          display: { packageName: own.name, version: version.version, scope },
+        }),
+      );
+    },
+  );
+
   it('loads project permissions and resolves its id independently of its slug', async () => {
     const f = fixture();
     await f.controller.load(query);
@@ -401,7 +441,11 @@ describe('page requests and actions', () => {
         path: `/_pb/projects/web/packages/${packageId}/versions/${versionId}/tombstone`,
         body: {},
       }),
-      { credential: false, secretFields: [] },
+      {
+        credential: false,
+        secretFields: [],
+        display: { packageName: own.name, version: '1.2.3', scope: 'Project web' },
+      },
     );
     expect(f.controller.snapshot().confirmVersion).toBeNull();
   });
@@ -441,7 +485,6 @@ describe('package markup', () => {
     );
     for (const text of [
       'Name',
-      'Ecosystem',
       'Latest version',
       'Winning source',
       'Status',
@@ -457,6 +500,33 @@ describe('package markup', () => {
 });
 
 describe('reauth replay refresh', () => {
+  it.each([200, 409])(
+    'refreshes the selected detail and its version cursor after replay HTTP %s',
+    async (status) => {
+      const f = fixture();
+      await f.controller.load(query);
+      await f.controller.open(own.id, 'older');
+      const original = f.fetch.getMockImplementation()!;
+      f.fetch.mockImplementation((url, init) =>
+        url.includes('/versions')
+          ? Promise.resolve(
+              Response.json({ items: [{ ...version, status: 'tombstoned' }], next: null }),
+            )
+          : original(url, init),
+      );
+      await f.controller.replayed({
+        path: `/_pb/projects/web/packages/${packageId}/versions/${versionId}/tombstone`,
+        ok: status === 200,
+        status,
+      });
+      expect(f.controller.snapshot().selected?.id).toBe(own.id);
+      expect(f.controller.snapshot().versions[0]?.status).toBe('tombstoned');
+      expect(f.fetch.mock.calls.at(-1)?.[0]).toBe(
+        `/_pb/projects/web/packages/${packageId}/versions?after=older`,
+      );
+    },
+  );
+
   it.each([200, 404, 409])('refreshes package data after a replay returns %s', async (status) => {
     const f = fixture();
     await f.controller.load(query);
@@ -596,5 +666,67 @@ describe('request edge cases', () => {
     await pending;
     expect(f.controller.snapshot().query.project).toBeNull();
     expect(f.controller.snapshot().notice).toBeNull();
+  });
+});
+
+describe('detail return state', () => {
+  it('keeps the cached list across hash navigation to a detail and back', async () => {
+    const f = fixture();
+    const filters = { ...query, q: '@example', after: 'same-cursor' };
+    await f.controller.load(filters);
+    const items = f.controller.snapshot().items;
+    const next = f.controller.snapshot().next;
+    f.controller.dispose();
+    await f.controller.navigate(filters, own.id);
+    f.controller.dispose();
+    await f.controller.navigate(filters);
+    expect(f.controller.snapshot()).toMatchObject({ query: filters, selected: null, next });
+    expect(f.controller.snapshot().items).toBe(items);
+    expect(f.fetch.mock.calls.filter(([url]) => url.includes('/packages?'))).toHaveLength(1);
+    await f.controller.navigate({ project: null });
+    expect(f.controller.snapshot().access.projectSlug).toBeNull();
+    expect(f.fetch.mock.calls.map(([url]) => url)).toContain('/_pb/packages');
+  });
+
+  it.each(['dispose', 'navigate'] as const)(
+    'does not reopen detail after a refresh completes following %s',
+    async (navigation) => {
+      const f = fixture();
+      await f.controller.load(query);
+      await f.controller.open(own.id);
+      let resolve!: (response: Response) => void;
+      f.fetch.mockImplementationOnce(
+        () =>
+          new Promise<Response>((done) => {
+            resolve = done;
+          }),
+      );
+      const pending = f.controller.refresh();
+      if (navigation === 'dispose') f.controller.dispose();
+      else await f.controller.navigate({ project: null });
+      const before = f.fetch.mock.calls.length;
+      resolve(Response.json({ organization: [] }));
+      await pending;
+      expect(f.controller.snapshot().selected).toBeNull();
+      expect(f.fetch.mock.calls.length).toBe(before);
+    },
+  );
+
+  it('returns to the same package list and cursor', async () => {
+    const f = fixture();
+    const filters = { ...query, q: '@example', status: 'active' as const, after: 'same-cursor' };
+    await f.controller.load(filters);
+    await f.controller.open(own.id);
+    const items = f.controller.snapshot().items;
+    const next = f.controller.snapshot().next;
+    f.controller.close();
+    expect(f.controller.snapshot()).toMatchObject({
+      query: filters,
+      selected: null,
+      versions: [],
+      versionsLoading: false,
+    });
+    expect(f.controller.snapshot().items).toBe(items);
+    expect(f.controller.snapshot().next).toBe(next);
   });
 });

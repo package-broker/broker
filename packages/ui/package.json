@@ -28,6 +28,8 @@
     "@package-broker/core": "workspace:^",
     "@radix-ui/react-label": "catalog:",
     "@radix-ui/react-slot": "catalog:",
+    "@tanstack/react-table": "catalog:",
+    "@base-ui/react": "catalog:",
     "@radix-ui/react-tabs": "catalog:",
     "@tailwindcss/cli": "catalog:",
     "@types/react": "catalog:",

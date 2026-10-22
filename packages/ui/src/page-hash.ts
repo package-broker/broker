@@ -17,6 +17,14 @@ const FILTER_LIMITS = {
   projectId: 26,
   q: 200,
   after: 4096,
+  package: 26,
+  versionAfter: 4096,
+  cursor: 4096,
+  run: 26,
+  actor: 200,
+  action: 200,
+  filterProject: 200,
+  limit: 3,
 } as const;
 
 export type ListFilters = {
@@ -33,6 +41,11 @@ export function buildListFilterHash(route: HashRoute, filters: ListFilters = {})
       (name === 'source' || name === 'projectId') &&
       (route !== 'packages' || !/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(value))
     )
+      continue;
+    if ((name === 'package' || name === 'versionAfter') && route !== 'packages') continue;
+    if ((name === 'run' || name === 'cursor') && route !== 'import') continue;
+    if (['actor', 'action', 'filterProject', 'limit'].includes(name) && route !== 'audit') continue;
+    if ((name === 'package' || name === 'run') && !/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(value))
       continue;
     try {
       entries.push(`${name}=${encodeURIComponent(value)}`);

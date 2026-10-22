@@ -14,10 +14,18 @@ const run = {
   acceptedAt: null,
   beforeImageExpiresAt: null,
 };
-function setup(actionStatus = 204, code = 'conflict') {
+function setup(
+  actionStatus = 204,
+  code = 'conflict',
+  selectedRun: Omit<typeof run, 'approvedAt'> & { approvedAt: string | null } = run,
+) {
   const fetch = vi.fn(async (_url: string, init: RequestInit) =>
     init.method === 'GET'
-      ? Response.json(_url === '/_pb/import-runs' ? { items: [run], next: null } : run)
+      ? Response.json(
+          _url.split('?')[0] === '/_pb/import-runs'
+            ? { items: [selectedRun], next: null }
+            : selectedRun,
+        )
       : actionStatus === 204
         ? new Response(null, { status: 204 })
         : Response.json(
@@ -103,7 +111,13 @@ describe('import runs', () => {
   it.each(['approve', 'apply', 'rollback', 'cancel'] as const)(
     'passes %s to the shell on reauth_required',
     async (action) => {
-      const { controller, requireReauth } = setup(403, 'reauth_required');
+      const selectedRun =
+        action === 'apply'
+          ? { ...run, approvedAt: '2026-10-01T00:00:00Z' }
+          : action === 'rollback'
+            ? { ...run, state: 'applied' }
+            : run;
+      const { controller, requireReauth } = setup(403, 'reauth_required', selectedRun);
       await controller.select(run.id);
       if (action === 'approve') {
         controller.openApproval();
@@ -169,7 +183,9 @@ describe('import runs', () => {
         ? new Promise<Response>((resolve) => {
             finish = resolve;
           })
-        : Response.json(_url === '/_pb/import-runs' ? { items: [run], next: null } : run),
+        : Response.json(
+            _url.split('?')[0] === '/_pb/import-runs' ? { items: [run], next: null } : run,
+          ),
     );
     const controller = createImportController({
       client: createApiClient<paths>({ fetch, readCookie: () => undefined }),
@@ -183,5 +199,39 @@ describe('import runs', () => {
     expect(fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
     finish(new Response(null, { status: 204 }));
     await first;
+  });
+});
+
+describe('import return state', () => {
+  it('keeps the current cursor and list when closing detail', async () => {
+    const { controller } = setup();
+    await controller.load('current-cursor');
+    await controller.select(run.id);
+    const runs = controller.snapshot().runs;
+    controller.back();
+    expect(controller.snapshot().cursor).toBe('current-cursor');
+    expect(controller.snapshot().runs).toBe(runs);
+    expect(controller.snapshot().run).toBeNull();
+    expect(controller.snapshot().selectedId).toBeNull();
+  });
+  it('retains the failed detail selection so it can be retried or closed', async () => {
+    const controller = createImportController({
+      client: createApiClient<paths>({
+        fetch: async () => new Response(null, { status: 503 }),
+        readCookie: () => undefined,
+      }),
+      requireReauth: vi.fn(),
+    });
+    await controller.select(run.id);
+    expect(controller.snapshot()).toMatchObject({
+      selectedId: run.id,
+      detailLoading: false,
+      run: null,
+    });
+    expect(markup(controller)).toContain('Back to import runs');
+    expect(markup(controller)).toContain('Unable to load the import run.');
+    expect(markup(controller)).not.toContain('No import runs.');
+    controller.back();
+    expect(controller.snapshot().selectedId).toBeNull();
   });
 });

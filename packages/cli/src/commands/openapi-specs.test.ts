@@ -59,3 +59,13 @@ it('serves the committed UI openapi.json byte for byte', async () => {
   const committed = await readFile(new URL('../../../ui/openapi.json', import.meta.url), 'utf8');
   expect(committed).toBe(await served.text());
 });
+
+it('includes optional accept-removal and rebuild routes when constructing the full API module', () => {
+  const specs = servedApiSpecs();
+  expect(specs.map((spec) => spec.path)).toEqual(
+    expect.arrayContaining([
+      '/_pb/sources/:source/accept-removal',
+      '/_pb/packages/:package/versions/:version/rebuild',
+    ]),
+  );
+});

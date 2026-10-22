@@ -18,7 +18,11 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 
 /** Route construction never calls a dependency, so each required one is satisfied by a stub. */
 function stubDependencies(): ApiModuleDeps {
-  const deps: Record<string, unknown> = { imports: {} };
+  const deps: Record<string, unknown> = {
+    imports: {},
+    packageManage: { rebuild: { requestTagRebuild: () => undefined } },
+    sources: { service: { acceptRemoval: () => undefined } },
+  };
   for (let round = 0; round < MAX_STUB_ROUNDS; round += 1) {
     try {
       createApiModule(deps as unknown as ApiModuleDeps);

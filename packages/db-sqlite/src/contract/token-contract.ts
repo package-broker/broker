@@ -296,7 +296,7 @@ const emptySelected: Case = (open, wrap) =>
     open,
     async (executor, ctx) => {
       const plaintext = await insertToken(executor, ctx, 'pat', 'selected');
-      const expected = { alpha: 403, beta: 403, missing: 404 } as const;
+      const expected = { alpha: 404, beta: 404, missing: 404 } as const;
       for (const slug of ['alpha', 'beta', 'missing'] as const) {
         const found = await lookup(executor, ctx, slug);
         expect(found).not.toBeNull();
@@ -455,7 +455,7 @@ const projectBinding: Case = (open, wrap) =>
       expect(found?.projectVisible).toBe(true);
       expect(await decision(executor, ctx, plaintext, 'beta')).toEqual({
         allow: false,
-        status: 403,
+        status: 404,
       });
     },
     wrap,

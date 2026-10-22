@@ -154,7 +154,7 @@ async function fixture(
         records.get(`${ctx.orgId}|${principal}|${key}`) ?? null,
     ),
   };
-  const routes = packageManageRoutes({
+  const deps = {
     service,
     rebuild,
     sessions,
@@ -162,7 +162,8 @@ async function fixture(
     clock,
     ids,
     clientIp: () => null,
-  });
+  };
+  const routes = packageManageRoutes(deps);
   const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
   const bearer = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
   const projects = [
@@ -274,6 +275,7 @@ async function fixture(
   return {
     request,
     routes,
+    deps,
     service,
     manage,
     rebuild,
@@ -307,6 +309,14 @@ describe('package manage routes', () => {
       expect(route.permission).toBe(project ? 'project:packages:manage' : 'org:packages:manage');
       expect(route.api).toBeDefined();
     }
+  });
+  it('registers no rebuild route without a rebuild port', async () => {
+    const f = await fixture();
+    const { rebuild: omitted, ...deps } = f.deps;
+    void omitted;
+    const routes = packageManageRoutes(deps);
+    expect(routes).toHaveLength(6);
+    expect(routes.map((r) => r.path)).not.toContain(path('rebuild'));
   });
   for (const url of paths) {
     it.each(['none', 'malformed', 'wrong'] as const)(

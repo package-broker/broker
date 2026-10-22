@@ -1,6 +1,6 @@
 import { SCOPE_LEVELS } from './scope.js';
 import type { ScopeLevel, TokenProjectMode } from './scope.js';
-import type { AuthenticatedActor } from './fence.js';
+import type { AuthenticatedActor, AuthenticatedTokenActor } from './fence.js';
 import type { Principal, RequestContext, RouteBoundary } from '../plugin.js';
 import { buildOrganizationActor } from './actor.js';
 import type { ActorAccessSnapshot, OrganizationActor } from './actor.js';
@@ -30,6 +30,7 @@ export interface AccessContextSnapshot {
   readonly boundary: AccessRouteClass;
   readonly sessionId: string | null;
   readonly token: {
+    readonly id?: string;
     readonly kind: 'pat' | 'svc';
     readonly scope: ScopeLevel | null;
     readonly readOnly: boolean;
@@ -132,6 +133,7 @@ function tokenOf(value: unknown): AccessContextSnapshot['token'] {
   const raw = record(value);
   if (typeof raw['readOnly'] !== 'boolean') refuse();
   return Object.freeze({
+    ...(raw['id'] === undefined ? {} : { id: text(raw['id']) }),
     kind: oneOf(TOKEN_KINDS, raw['kind']),
     scope: raw['scope'] === null ? null : oneOf(SCOPE_LEVELS, raw['scope']),
     readOnly: raw['readOnly'],
@@ -290,4 +292,19 @@ export function authenticatedActorOf(ctx: RequestContext): AuthenticatedActor | 
     userId: snapshot.principal.id,
     sessionId: snapshot.sessionId,
   }) as AuthenticatedActor;
+}
+
+export function authenticatedTokenActor(ctx: RequestContext): AuthenticatedTokenActor | undefined {
+  const snapshot = snapshots.get(ctx);
+  const tokenId = snapshot?.token?.id;
+  if (snapshot?.principal == null || snapshot.sessionId !== null || tokenId === undefined) {
+    return undefined;
+  }
+  const kind = snapshot.token!.kind;
+  if (snapshot.principal.kind !== (kind === 'pat' ? 'user' : 'service')) return undefined;
+  return Object.freeze({
+    tokenId,
+    tokenKind: kind,
+    principalId: snapshot.principal.id,
+  }) as AuthenticatedTokenActor;
 }

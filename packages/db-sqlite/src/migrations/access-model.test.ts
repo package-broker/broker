@@ -159,11 +159,14 @@ describe('access model baseline', () => {
       expect(columns.get('validation_kind')).toMatchObject({ notnull: 0, dflt_value: null });
       expect(columns.get('validation_identity_id')).toMatchObject({ notnull: 0 });
       expect(columns.get('last_op_id')).toMatchObject({ notnull: 0 });
-      const keys = await rows<{ table: string; from: string; on_delete: string }>(
-        'SELECT "table", "from", on_delete FROM pragma_foreign_key_list(\'token\') WHERE "from" = \'validation_identity_id\'',
+      const keys = await rows<{ table: string; from: string; to: string; on_delete: string }>(
+        `SELECT "table", "from", "to", on_delete FROM pragma_foreign_key_list('token') WHERE "table" = 'identity' ORDER BY on_delete, seq`,
       );
       expect(keys).toEqual([
-        { table: 'identity', from: 'validation_identity_id', on_delete: 'SET NULL' },
+        { table: 'identity', from: 'org_id', to: 'org_id', on_delete: 'NO ACTION' },
+        { table: 'identity', from: 'validation_identity_id', to: 'id', on_delete: 'NO ACTION' },
+        { table: 'identity', from: 'user_id', to: 'user_id', on_delete: 'NO ACTION' },
+        { table: 'identity', from: 'validation_identity_id', to: 'id', on_delete: 'SET NULL' },
       ]);
     });
 

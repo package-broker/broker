@@ -1,3 +1,9 @@
+import {
+  createVulnerabilityRuntime,
+  VULNERABILITY_EVENT,
+  VULNERABILITY_REASON_CODES,
+} from '@package-broker/core/runtime/vulnerability';
+import { createVulnerabilityRepository } from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
 import { createApiModule } from '@package-broker/core/api/module';
 import type { AuditReader } from '@package-broker/core/api/routes/audit';
@@ -171,7 +177,18 @@ import type {
   SourceProviderContext,
 } from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
-import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
+import { createPackageManageService } from '@package-broker/core/catalogue/package-manage-service';
+import { createImportCredentialService } from '@package-broker/core/import/credentials';
+import { createImportRunService } from '@package-broker/core/import/run-service';
+import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-fence';
+import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
+import { createImportCredentialRepository } from '@package-broker/db-sqlite/repositories/import-credential';
+import { createImportRunStore } from '@package-broker/db-sqlite/repositories/import-run';
+import {
+  createBlobStore,
+  createBlobUploadAdmission,
+  type BlobStore,
+} from '@package-broker/core/platform/blob';
 import { completionSpan } from '@package-broker/core/platform/completion-span';
 import { createObservability, safeErrorName } from '@package-broker/core/platform/observability';
 import type {
@@ -317,6 +334,7 @@ export interface WorkerOptions {
   /** Registry settings; an invalid value fails startup. Dist URLs use the origin of PB_PUBLIC_URL only, so a path-prefixed public URL is unsupported. */
   readonly registry?: RegistryConfigInput;
   readonly tokens?: BrokerConfig['tokens'];
+  readonly vulnerability?: BrokerConfig['vulnerability'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -349,7 +367,7 @@ const IDENTITY_FETCH_TIMEOUT_MS = 5000;
 
 export function publicOriginOf(raw: string | undefined): string {
   try {
-    return parsePublicOrigin(raw);
+    return parsePublicOrigin(raw, { http: 'loopback' });
   } catch (error) {
     if (!(error instanceof PublicOriginError)) throw error;
     throw new SecretsConfigError(
@@ -580,7 +598,7 @@ function auditReader(executor: SqlExecutor): AuditReader {
         seq: head?.seq ?? 0,
         hash: head?.hash ?? AUDIT_GENESIS_HASH,
         pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: null,
+        lastVerifiedAt: head?.lastVerifiedAt ?? null,
       };
     },
   };
@@ -591,14 +609,16 @@ function buildApiRoutes(input: {
   readonly keyring: Keyring;
   readonly services: WorkerAccessServices;
   readonly packages: WorkerCatalogueServices;
+  readonly vulnerability: ReturnType<typeof createVulnerabilityRuntime>;
   readonly policy: OutboundPolicy;
   readonly registration: Registration;
   readonly coreRoutes: readonly RouteDefinition[];
   readonly anchors: readonly ConfiguredProviderAnchor[];
   readonly lifetime: TokenLifetimePolicy;
   readonly log: KernelLog;
+  readonly blob: BlobStore | undefined;
 }): readonly RouteDefinition[] {
-  const { executor, services, packages, lifetime, log } = input;
+  const { executor, services, packages, lifetime, log, blob } = input;
   const { anchors } = input;
   const common = { ids: { ulid }, clock: systemClock, clientIp };
   const organizations = createOrganizationRepository(executor);
@@ -610,16 +630,17 @@ function buildApiRoutes(input: {
   const sources = createSourceRepository(executor);
   const credentialRepository = createCredentialRepository(executor);
   const registeredNames = createRegisteredNameRepository(executor);
+  const credentialStore = createCredentialStore({
+    repository: credentialRepository,
+    cipher: createSecretCipher(input.keyring, 'credential-encryption'),
+    ids: { ulid },
+    clock: systemClock,
+  });
   const sourceService = createSourceService({
     sources,
     organizations,
     registeredNames,
-    credentials: createCredentialStore({
-      repository: credentialRepository,
-      cipher: createSecretCipher(input.keyring, 'credential-encryption'),
-      ids: { ulid },
-      clock: systemClock,
-    }),
+    credentials: credentialStore,
     credentialRepository,
     catalogue: packages.reader,
     policy: input.policy,
@@ -627,6 +648,9 @@ function buildApiRoutes(input: {
     ids: { ulid },
     log,
   });
+  if (blob === undefined) {
+    log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
+  }
   try {
     return createApiModule({
       organization: {
@@ -693,8 +717,59 @@ function buildApiRoutes(input: {
         projectSources: createProjectSourceReader(executor),
         projects,
       },
-      packages: createPackageAdminReader(executor),
+      sourceAttachments: {
+        ...common,
+        sources,
+        visibility: packages.visibility,
+        projectSources: createProjectSourceReader(executor),
+        projects,
+      },
+      packages: {
+        ...createPackageAdminReader(executor),
+        readStatuses: input.vulnerability.readStatuses,
+      },
       audit: auditReader(executor),
+      packageManage: {
+        ...common,
+        service: createPackageManageService({
+          reader: createPackageAdminReader(executor),
+          store: createVisibilityStore(executor, { providerAnchors: anchors }),
+          sessions: services.sessions,
+          clock: systemClock,
+          ids: { ulid },
+          log,
+        }),
+        sessions: services.sessions,
+        idempotency,
+      },
+      ...(blob === undefined
+        ? {}
+        : {
+            imports: {
+              ...common,
+              service: createImportRunService({
+                store: createImportRunStore({
+                  executor,
+                  blobs: blob,
+                  providerAnchors: anchors,
+                }),
+                ids: { ulid },
+                clock: systemClock,
+              }),
+              credentials: createImportCredentialService({
+                store: createImportCredentialRepository(executor, {
+                  blobs: blob,
+                  providerAnchors: anchors,
+                }),
+                credentials: credentialStore,
+                runtime: 'cloudflare',
+                ids: { ulid },
+                auditStatement: auditPendingStatement,
+              }),
+              auditStatement: auditPendingStatement,
+              tokenFence: importWriteTokenFence,
+            },
+          }),
     }).routes;
   } catch (error) {
     if (error instanceof TypeError && error.message.startsWith('API module requires dependency')) {
@@ -1765,6 +1840,26 @@ export function createWorker(
         },
       });
     }
+    let vulnerabilityRuntime: ReturnType<typeof createVulnerabilityRuntime> | undefined;
+    const vulnerability = (): ReturnType<typeof createVulnerabilityRuntime> =>
+      (vulnerabilityRuntime ??= createVulnerabilityRuntime({
+        config: {
+          platform: 'cloudflare',
+          plugins,
+          ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
+        },
+        repository: createVulnerabilityRepository(executor as SqlExecutor, systemClock),
+        policyFetch: createPolicyFetch({
+          fetchImpl: (...args) => globalThis.fetch(...args),
+          policy: createOutboundPolicy({
+            allowPrivateHosts: [],
+            runtime: 'cloudflare',
+            selfOrigins: publicUrl === undefined ? [] : [publicUrl],
+          }),
+          userAgent: 'PackageBroker/2.0',
+        }),
+        clock: systemClock,
+      }));
     const importJobs = createImportJobHolder();
     const reads = db === undefined ? undefined : buildPackageReads(executor as SqlExecutor);
     const collectRegistration = (): Registration =>
@@ -1785,6 +1880,15 @@ export function createWorker(
           config === null
             ? []
             : [
+                ...(db === undefined
+                  ? []
+                  : vulnerability().jobs.map((job) =>
+                      registerObservedJob(job.definition, {
+                        events: new Set([VULNERABILITY_EVENT]),
+                        reasonCodes: new Set(VULNERABILITY_REASON_CODES),
+                        routeTemplates: new Set(),
+                      }),
+                    )),
                 ...(db === undefined
                   ? []
                   : retentionRegistrations(executor as SqlExecutor, () => {
@@ -1934,6 +2038,7 @@ export function createWorker(
             keyring: built.keyring,
             services: built.access,
             packages,
+            vulnerability: vulnerability(),
             policy:
               registryModule?.policy ??
               createOutboundPolicy({
@@ -1946,6 +2051,7 @@ export function createWorker(
             anchors: built.anchors,
             lifetime,
             log,
+            blob: services?.platformServices.blob,
           });
     const authorization = options.authorization ?? auth?.authorization;
 

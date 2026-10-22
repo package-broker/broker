@@ -8,6 +8,7 @@ import { createCatalogueReconciler } from '../../repositories/catalogue-reconcil
 import { createCatalogueWriteGuard } from '../../repositories/catalogue-write-package.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { FUTURE, NOT_NULL, seedPackage, seedSource, seedVersion } from './fixtures.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 const OLD = '2020-01-01T00:00:00.000Z';
 
@@ -158,7 +159,7 @@ export const entries: readonly MutationEntry[] = [
         name: 'source mark count includes only own rows',
         locate: /package.org_id = \?(?= AND package.source_id = \?\s+AND package.name IN)/,
         neutral: NOT_NULL,
-        copies: 1,
+        copies: 3,
         caseName: reconcileCase('source').name,
       },
       {
@@ -217,6 +218,7 @@ export const entries: readonly MutationEntry[] = [
       },
     ],
     waivers: [
+      ...selectionOrgWaivers,
       {
         locate:
           /version.org_id = \?(?=\s+AND version.last_op_id = \? AND version.status = 'active')/,

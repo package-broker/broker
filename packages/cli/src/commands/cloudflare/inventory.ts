@@ -33,6 +33,61 @@ export interface Resource {
   jurisdiction?: Jurisdiction | null;
   state: 'planned' | 'creating' | 'complete' | 'binding_pending' | 'bound';
   evidence: Evidence | null;
+  lifecycle_baseline?: LifecycleRule[];
+}
+export interface LifecycleRule {
+  id: string;
+  enabled: boolean;
+  conditions: { prefix: string };
+  abortMultipartUploadsTransition: { condition: { type: 'Age'; maxAge: number } };
+}
+export function abortOnlyRule(rule: LifecycleRule): LifecycleRule {
+  return {
+    id: rule.id,
+    enabled: rule.enabled,
+    conditions: rule.conditions,
+    abortMultipartUploadsTransition: rule.abortMultipartUploadsTransition,
+  };
+}
+export function lifecycleRule(raw: unknown): raw is LifecycleRule {
+  const record = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === 'object' && !Array.isArray(v);
+  const only = (v: Record<string, unknown>, keys: string[]) =>
+    Object.keys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
+  if (!record(raw)) return false;
+  const emptyTransitions =
+    Array.isArray(raw.storageClassTransitions) && raw.storageClassTransitions.length === 0;
+  if (
+    !only(
+      raw,
+      emptyTransitions
+        ? [
+            'id',
+            'enabled',
+            'conditions',
+            'abortMultipartUploadsTransition',
+            'storageClassTransitions',
+          ]
+        : ['id', 'enabled', 'conditions', 'abortMultipartUploadsTransition'],
+    )
+  )
+    return false;
+  const { conditions, abortMultipartUploadsTransition: abort } = raw;
+  if (!record(conditions) || !only(conditions, ['prefix']) || typeof conditions.prefix !== 'string')
+    return false;
+  if (!record(abort) || !only(abort, ['condition']) || !record(abort.condition)) return false;
+  const c = abort.condition;
+  return (
+    only(c, ['type', 'maxAge']) &&
+    c.type === 'Age' &&
+    typeof c.maxAge === 'number' &&
+    Number.isSafeInteger(c.maxAge) &&
+    c.maxAge > 0 &&
+    typeof raw.id === 'string' &&
+    raw.id.length > 0 &&
+    raw.id.length <= 255 &&
+    typeof raw.enabled === 'boolean'
+  );
 }
 export interface Operation {
   id: string;
@@ -45,7 +100,7 @@ export interface Operation {
   resolved_id: string | null;
 }
 export interface Inventory {
-  schema_version: 1;
+  schema_version: 2;
   revision: number;
   identity: InstallIdentity;
   resources: Partial<Record<ResourceKey, Resource>>;
@@ -166,6 +221,58 @@ export interface SmokeCheck {
 export interface DeploymentJournal {
   attempt: DeploymentAttempt;
   last_verified: DeploymentAttempt | null;
+  history?: DeploymentHistory;
+}
+export interface DeploymentHistory {
+  version_ids: string[];
+  plain_bindings: { name: string; texts: string[] }[];
+}
+export const deploymentHistoryLimits = { versions: 10_000, plainValues: 64 } as const;
+
+export class DeploymentHistoryCapacityError extends CloudflareError {
+  constructor() {
+    super('capacity_exceeded', 2, false, 'deploy');
+    this.message =
+      'Deployment history capacity reached (10000 versions or 64 distinct plain binding values). Retain the inventory and use a new installation before deploying again.';
+  }
+}
+
+export function recordDeploymentHistory(
+  deployment: DeploymentJournal,
+  receipt: {
+    versionId?: string;
+    plainBinding?: { name: string; text: string };
+    reserveVersion?: boolean;
+  },
+): void {
+  const history = structuredClone(deployment.history ?? { version_ids: [], plain_bindings: [] });
+  for (const id of [
+    receipt.versionId,
+    deployment.attempt.version_id,
+    deployment.last_verified?.version_id,
+  ])
+    if (id && !history.version_ids.includes(id)) history.version_ids.push(id);
+  const bindings = [
+    ...[deployment.attempt, deployment.last_verified].flatMap((attempt) =>
+      attempt?.version_id && attempt.worker_url
+        ? [{ name: 'PB_PUBLIC_URL', text: attempt.worker_url }]
+        : [],
+    ),
+    ...(receipt.plainBinding ? [receipt.plainBinding] : []),
+  ];
+  for (const binding of bindings) {
+    const existing = history.plain_bindings.find((b) => b.name === binding.name);
+    if (!existing) history.plain_bindings.push({ name: binding.name, texts: [binding.text] });
+    else if (!existing.texts.includes(binding.text)) existing.texts.push(binding.text);
+  }
+  if (
+    history.version_ids.length + Number(Boolean(receipt.reserveVersion)) >
+      deploymentHistoryLimits.versions ||
+    history.plain_bindings.reduce((count, b) => count + b.texts.length, 0) >
+      deploymentHistoryLimits.plainValues
+  )
+    throw new DeploymentHistoryCapacityError();
+  deployment.history = history;
 }
 export function safeBuildInfo(raw: unknown): BuildInfo {
   const bad = () => {
@@ -403,8 +510,32 @@ function deploymentValid(raw: unknown): boolean {
       )
     );
   };
+  const history = (v: unknown): boolean =>
+    exact(v, ['version_ids', 'plain_bindings']) &&
+    Array.isArray(v.version_ids) &&
+    v.version_ids.length <= deploymentHistoryLimits.versions &&
+    v.version_ids.every(id) &&
+    new Set(v.version_ids).size === v.version_ids.length &&
+    Array.isArray(v.plain_bindings) &&
+    v.plain_bindings.length <= deploymentHistoryLimits.plainValues &&
+    new Set(v.plain_bindings.map((b) => record(b) && b.name)).size === v.plain_bindings.length &&
+    v.plain_bindings.every(
+      (b) =>
+        exact(b, ['name', 'texts']) &&
+        typeof b.name === 'string' &&
+        /^[A-Z][A-Z0-9_]{0,127}$/.test(b.name) &&
+        Array.isArray(b.texts) &&
+        b.texts.length > 0 &&
+        b.texts.every((text) => typeof text === 'string' && text.length <= 4096) &&
+        new Set(b.texts).size === b.texts.length,
+    ) &&
+    v.plain_bindings.reduce((count, b) => count + b.texts.length, 0) <=
+      deploymentHistoryLimits.plainValues;
   return (
-    exact(raw, ['attempt', 'last_verified']) &&
+    record(raw) &&
+    (Object.hasOwn(raw, 'history')
+      ? exact(raw, ['attempt', 'last_verified', 'history']) && history(raw.history)
+      : exact(raw, ['attempt', 'last_verified'])) &&
     attempt(raw.attempt) &&
     (raw.last_verified === null ||
       (record(raw.last_verified) &&
@@ -455,7 +586,7 @@ export function installIdentity(o: {
 }
 export function emptyInventory(identity: InstallIdentity, now: number): Inventory {
   return {
-    schema_version: 1,
+    schema_version: 2,
     revision: 0,
     identity,
     resources: {},
@@ -529,7 +660,7 @@ export function validateInventory(raw: unknown, expected: InstallIdentity): Inve
   if (typeof raw !== 'object' || raw === null) return bad();
   const data = raw as Inventory;
   if (
-    data.schema_version !== 1 ||
+    data.schema_version !== 2 ||
     !Number.isSafeInteger(data.revision) ||
     data.revision < 0 ||
     !iso(data.updated_at) ||
@@ -678,8 +809,19 @@ export function validateInventory(raw: unknown, expected: InstallIdentity): Inve
   for (const [key, r] of Object.entries(data.resources)) {
     if (
       Object.keys(r).some(
-        (key) => !['name', 'id', 'jurisdiction', 'state', 'evidence'].includes(key),
+        (key) =>
+          !['name', 'id', 'jurisdiction', 'state', 'evidence', 'lifecycle_baseline'].includes(key),
       )
+    )
+      return bad();
+    if (
+      r.lifecycle_baseline !== undefined &&
+      (key !== 'r2' ||
+        !Array.isArray(r.lifecycle_baseline) ||
+        r.lifecycle_baseline.length > 16 ||
+        !r.lifecycle_baseline.every(lifecycleRule) ||
+        r.evidence === null ||
+        !['created', 'pending_create'].includes(r.evidence.source))
     )
       return bad();
     if (

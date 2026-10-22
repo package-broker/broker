@@ -7,6 +7,7 @@ import {
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 import { FUTURE, HASH, OWNER, seedSource, guardPasses, ref, ALWAYS } from './fixtures.js';
 import { executing, factoryEntry } from './factory-cases.js';
+import { selectionOrgWaivers } from './source-selection.js';
 
 const handle = {
   id: 'I',
@@ -102,6 +103,14 @@ export const entries: readonly MutationEntry[] = [
     'createIngestSessionWriteGuard',
     guard,
     ref('ingest_session', 'org_id', '\\?'),
+    [
+      ...selectionOrgWaivers,
+      {
+        locate: /source\.org_id = \?/,
+        reason:
+          'The composed selection_source organization guard independently scopes the same source; sourceSelectionCondition tests that guard in isolation.',
+      },
+    ],
   ),
   factoryEntry(
     'ingest-session',

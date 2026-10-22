@@ -120,6 +120,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: |
+          pnpm openapi:sync
+          git diff --exit-code -- packages/ui/openapi.json packages/ui/src/api-types.ts
       - env:
           TARGET: ${{ matrix.target }}
         run: pnpm pb build --config broker.config.ts --target "$TARGET"

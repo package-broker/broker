@@ -75,12 +75,11 @@ it('rejects an existing directory with a fixed message and writes nothing', asyn
   expect(await readdir(out)).toEqual([]);
 });
 
-it('registers the default provider and exits 1 with no_api_specs without creating a file', async () => {
-  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+it('registers the default provider and writes the served document', async () => {
   const dir = await directory();
-  expect(await run(['openapi', '--out', join(dir, 'openapi.json')])).toBe(1);
-  expect(error).toHaveBeenCalledExactlyOnceWith('no_api_specs');
-  expect(await readdir(dir)).toEqual([]);
+  const out = join(dir, 'openapi.json');
+  expect(await run(['openapi', '--out', out])).toBe(0);
+  expect(JSON.parse(await readFile(out, 'utf8'))).toMatchObject({ openapi: '3.1.0' });
 });
 
 it('reports write failures with a fixed message', async () => {

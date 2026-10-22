@@ -387,3 +387,64 @@ describe('registry package-sync job', () => {
     expect(applyChunk).not.toHaveBeenCalled();
   });
 });
+
+it('stops a queued package refresh outside current npm scopes before acquiring a session', async () => {
+  const h = harness();
+  const record = await h.sourceGet(org, 'src-1');
+  h.sourceGet.mockResolvedValue({
+    ...record!,
+    type: 'npm_registry',
+    url: 'https://registry.test',
+    configJson: '{"scopes":["@acme"]}',
+  });
+  await h.run();
+  expect(h.calls).toEqual([]);
+  expect(h.sessions.acquire).not.toHaveBeenCalled();
+  expect(h.markPackageAbsent).not.toHaveBeenCalled();
+});
+
+it('skips queued refreshes after registered names or the package list narrow and resumes when widened', async () => {
+  const h = harness('composer');
+  const original = await h.sourceGet(org, 'src-1');
+  const record = {
+    ...original!,
+    type: 'composer_repository' as const,
+    url: 'https://registry.test',
+    configJson: JSON.stringify({ selection: { packages: [h.key] } }),
+  };
+  h.sourceGet.mockResolvedValue(record);
+  const describe = vi.fn(async () => ({ kind: 'not_found' as const, definitive: true }));
+  const deps: RegistryModuleDeps = {
+    ...h.deps,
+    providers: [
+      {
+        id: 'composer-test',
+        sourceTypes: ['composer_repository'],
+        ecosystems: ['composer'],
+        describe,
+        openDist: async () => {
+          throw new Error('unused');
+        },
+      },
+    ],
+  };
+  const run = async () => {
+    const job = createRegistryModule(deps).packageSyncJob!;
+    await job.handler(job.validate({ sourceId: 'src-1', key: h.key }), h.context);
+  };
+  await run();
+  expect(h.sessions.acquire).not.toHaveBeenCalled();
+  expect(describe).not.toHaveBeenCalled();
+  expect(h.markPackageAbsent).not.toHaveBeenCalled();
+  vi.mocked(h.deps.catalogue.covers).mockResolvedValue(true);
+  await run();
+  expect(describe).toHaveBeenCalledTimes(1);
+  expect(h.markPackageAbsent).toHaveBeenCalledTimes(1);
+  h.sourceGet.mockResolvedValue({ ...record, configJson: '{"selection":{"packages":[]}}' });
+  await run();
+  expect(describe).toHaveBeenCalledTimes(1);
+  expect(h.markPackageAbsent).toHaveBeenCalledTimes(1);
+  h.sourceGet.mockResolvedValue(record);
+  await run();
+  expect(describe).toHaveBeenCalledTimes(2);
+});

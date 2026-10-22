@@ -1,3 +1,9 @@
+import {
+  createVulnerabilityRuntime,
+  VULNERABILITY_EVENT,
+  VULNERABILITY_REASON_CODES,
+} from '@package-broker/core/runtime/vulnerability';
+import { createVulnerabilityRepository } from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
 import {
@@ -152,6 +158,7 @@ import {
 } from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
+import { nodeClientIp } from './client-ip.js';
 import { nodeCodecs } from './codec/node-codec.js';
 import { createDnsGuard } from './sources/dns-guard.js';
 import { createGuardedFetch } from './sources/guarded-fetch.js';
@@ -160,6 +167,14 @@ import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provid
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
+import { createPackageManageService } from '@package-broker/core/catalogue/package-manage-service';
+import { createImportCredentialService } from '@package-broker/core/import/credentials';
+import { createImportRunService } from '@package-broker/core/import/run-service';
+import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-fence';
+import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
+import { createImportCredentialRepository } from '@package-broker/db-sqlite/repositories/import-credential';
+import { createImportRunStore } from '@package-broker/db-sqlite/repositories/import-run';
+import type { BlobStore } from '@package-broker/core/platform/blob';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { BrokerConfig } from '@package-broker/core/config';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
@@ -295,6 +310,8 @@ export interface NodeAuthOptions {
 }
 
 export interface NodeServerOptions {
+  /** Trust client IP headers only when a proxy overwrites them. Default false. */
+  readonly trustedProxy?: boolean;
   readonly executor?: SqlExecutor;
   readonly auth?: NodeAuthOptions;
   readonly closeDatabase?: () => Promise<void>;
@@ -304,6 +321,7 @@ export interface NodeServerOptions {
   readonly authorization?: AuthorizationEngine;
   /** Token lifetime maxima; an invalid value fails server creation. */
   readonly tokens?: BrokerConfig['tokens'];
+  readonly vulnerability?: BrokerConfig['vulnerability'];
   /** Resolves true once the broker may serve; a falsy answer refuses everything except liveness. */
   readonly servingGate?: () => Promise<boolean>;
   /** Registry routes need the database, auth, platform services and this input together. */
@@ -394,6 +412,7 @@ async function assembleAccess(
   executor: SqlExecutor,
   log: KernelLog,
   tokens: TokenWiring,
+  clientIp: (request: Request) => string | null,
 ): Promise<AccessAssembly> {
   await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
   const providers = buildIdentityProviders(registration, plugins, {
@@ -410,6 +429,7 @@ async function assembleAccess(
     ids: { ulid },
     log,
     dispatch: deferredDispatch,
+    clientIp,
     registration,
     tokens,
   });
@@ -923,14 +943,6 @@ function buildCatalogue(
   });
 }
 
-function clientIp(request: Request): string | null {
-  const candidate =
-    request.headers.get('cf-connecting-ip')?.trim() ||
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    null;
-  return candidate !== null && /^[0-9a-fA-F:.]{2,45}$/.test(candidate) ? candidate : null;
-}
-
 function auditReader(executor: SqlExecutor): AuditReader {
   const audit = createAuditQueryRepository(executor);
   const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
@@ -952,26 +964,29 @@ function auditReader(executor: SqlExecutor): AuditReader {
         seq: head?.seq ?? 0,
         hash: head?.hash ?? AUDIT_GENESIS_HASH,
         pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: null,
+        lastVerifiedAt: head?.lastVerifiedAt ?? null,
       };
     },
   };
 }
 
 function buildApiRoutes(input: {
+  readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
   readonly auth: NodeAuthOptions;
   readonly access: AccessAssembly;
   readonly packages: NodeCatalogueServices;
+  readonly vulnerability: ReturnType<typeof createVulnerabilityRuntime>;
   readonly policy: OutboundPolicy;
   readonly registration: Registration;
   readonly lifetime: TokenLifetimePolicy;
   readonly log: KernelLog;
+  readonly blob: BlobStore | undefined;
 }): readonly RouteDefinition[] {
-  const { executor, access, packages, lifetime, log } = input;
+  const { executor, access, packages, lifetime, log, blob } = input;
   const { services } = access;
   const anchors = access.anchors;
-  const common = { ids: { ulid }, clock: systemClock, clientIp };
+  const common = { ids: { ulid }, clock: systemClock, clientIp: input.clientIp };
   const organizations = createOrganizationRepository(executor);
   const projects = createProjectRepository(executor, {
     reservedSlugs: reservedFirstSegments([
@@ -984,16 +999,17 @@ function buildApiRoutes(input: {
   const sources = createSourceRepository(executor);
   const credentialRepository = createCredentialRepository(executor);
   const registeredNames = createRegisteredNameRepository(executor);
+  const credentialStore = createCredentialStore({
+    repository: credentialRepository,
+    cipher: createSecretCipher(input.auth.keyring, 'credential-encryption'),
+    ids: { ulid },
+    clock: systemClock,
+  });
   const sourceService = createSourceService({
     sources,
     organizations,
     registeredNames,
-    credentials: createCredentialStore({
-      repository: credentialRepository,
-      cipher: createSecretCipher(input.auth.keyring, 'credential-encryption'),
-      ids: { ulid },
-      clock: systemClock,
-    }),
+    credentials: credentialStore,
     credentialRepository,
     catalogue: packages.reader,
     policy: input.policy,
@@ -1001,6 +1017,9 @@ function buildApiRoutes(input: {
     ids: { ulid },
     log,
   });
+  if (blob === undefined) {
+    log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
+  }
   try {
     return createApiModule({
       organization: {
@@ -1067,8 +1086,59 @@ function buildApiRoutes(input: {
         projectSources: createProjectSourceReader(executor),
         projects,
       },
-      packages: createPackageAdminReader(executor),
+      sourceAttachments: {
+        ...common,
+        sources,
+        visibility: packages.visibility,
+        projectSources: createProjectSourceReader(executor),
+        projects,
+      },
+      packages: {
+        ...createPackageAdminReader(executor),
+        readStatuses: input.vulnerability.readStatuses,
+      },
       audit: auditReader(executor),
+      packageManage: {
+        ...common,
+        service: createPackageManageService({
+          reader: createPackageAdminReader(executor),
+          store: createVisibilityStore(executor, { providerAnchors: anchors }),
+          sessions: services.sessions,
+          clock: systemClock,
+          ids: { ulid },
+          log,
+        }),
+        sessions: services.sessions,
+        idempotency,
+      },
+      ...(blob === undefined
+        ? {}
+        : {
+            imports: {
+              ...common,
+              service: createImportRunService({
+                store: createImportRunStore({
+                  executor,
+                  blobs: blob,
+                  providerAnchors: anchors,
+                }),
+                ids: { ulid },
+                clock: systemClock,
+              }),
+              credentials: createImportCredentialService({
+                store: createImportCredentialRepository(executor, {
+                  blobs: blob,
+                  providerAnchors: anchors,
+                }),
+                credentials: credentialStore,
+                runtime: 'node',
+                ids: { ulid },
+                auditStatement: auditPendingStatement,
+              }),
+              auditStatement: auditPendingStatement,
+              tokenFence: importWriteTokenFence,
+            },
+          }),
     }).routes;
   } catch (error) {
     if (error instanceof TypeError && error.message.startsWith('API module requires dependency')) {
@@ -1096,6 +1166,9 @@ export function createNodeServer(
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
   const lifetime = resolveTokenLifetime(options.tokens);
+  const remoteAddress = new AsyncLocalStorage<string | null>();
+  const clientIp = (request: Request): string | null =>
+    nodeClientIp(request, remoteAddress.getStore() ?? null, options.trustedProxy === true);
 
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);
@@ -1165,7 +1238,14 @@ export function createNodeServer(
           }),
       });
     }
-    function registerIngestJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
+    function registerIngestJob<P>(
+      definition: JobDefinition<P>,
+      registry = {
+        events: new Set([...INGEST_EVENTS]),
+        reasonCodes: INGEST_REASON_CODES,
+        routeTemplates: new Set<string>(),
+      },
+    ): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
         handler: (payload, context) => {
@@ -1183,11 +1263,7 @@ export function createNodeServer(
               jobId: context.jobId,
               attempt: context.attempt,
             },
-            {
-              events: new Set([...INGEST_EVENTS]),
-              reasonCodes: INGEST_REASON_CODES,
-              routeTemplates: new Set(),
-            },
+            registry,
           );
           return ingestScope.run(observability, () =>
             definition.handler(definition.validate(payload), { ...context, observability }),
@@ -1228,6 +1304,25 @@ export function createNodeServer(
             findOrganization: bootstrap.findSingleton,
             ingestScope,
           });
+    const vulnerabilityPolicy = createOutboundPolicy({
+      allowPrivateHosts: [],
+      runtime: 'node',
+      selfOrigins: auth === undefined ? [] : [auth.publicOrigin],
+    });
+    const vulnerability = createVulnerabilityRuntime({
+      config: {
+        platform: 'node',
+        plugins,
+        ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
+      },
+      repository: createVulnerabilityRepository(executor, systemClock),
+      policyFetch: createPolicyFetch({
+        fetchImpl: seams.transport ?? createGuardedFetch(vulnerabilityPolicy),
+        policy: vulnerabilityPolicy,
+        userAgent: 'PackageBroker/2.0',
+      }),
+      clock: systemClock,
+    });
     drainRegistry = registry?.drain;
     const packageResolver = registry?.module.visibilityPort ?? reads?.resolver;
     const retention = (
@@ -1241,6 +1336,13 @@ export function createNodeServer(
         options.platformServices === undefined
           ? []
           : [
+              ...vulnerability.jobs.map((job) =>
+                registerIngestJob(job.definition, {
+                  events: new Set([VULNERABILITY_EVENT]),
+                  reasonCodes: new Set(VULNERABILITY_REASON_CODES),
+                  routeTemplates: new Set<string>(),
+                }),
+              ),
               ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
@@ -1283,6 +1385,7 @@ export function createNodeServer(
             executor,
             log,
             tokenWiring(lifetime, patJobs, options.platformServices !== undefined),
+            clientIp,
           );
     if (access !== undefined && options.platformServices !== undefined) {
       importJobs.set({
@@ -1303,10 +1406,12 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : buildApiRoutes({
+            clientIp,
             executor,
             auth,
             access,
             packages,
+            vulnerability,
             policy: createOutboundPolicy({
               allowPrivateHosts: options.registry?.config.outbound.allowPrivateHosts ?? [],
               runtime: 'node',
@@ -1315,6 +1420,7 @@ export function createNodeServer(
             registration,
             lifetime,
             log,
+            blob: options.platformServices?.blob,
           });
     const authorization = options.authorization ?? access?.module.authorization;
     const assets = await createNodeAssets(
@@ -1402,34 +1508,35 @@ export function createNodeServer(
   const serving = async (request: Request): Promise<boolean> =>
     gate === undefined || new URL(request.url).pathname === '/health/live' || (await gate());
 
-  const server = createServer(
-    getRequestListener(async (request) =>
-      !(await serving(request))
-        ? refuse(request)
-        : kernel
-            .then(async (ready) => {
-              if (new URL(request.url).pathname !== '/health/live') await verifyOnce();
-              const setup = rewriteSetupRequest(request);
-              if (setup !== null) return ready.fetch(setup);
-              const url = new URL(request.url);
-              if (url.pathname === '/_pb/ui') {
-                const response = await ready.fetch(request);
-                if (response.status !== 200) return response;
-                url.pathname = '/_pb/ui/';
-                return new Response(null, {
-                  status: 303,
-                  headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-                });
-              }
-              if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
-              url.pathname = '/_pb/ui';
-              return ready.fetch(new Request(url, request));
-            })
-            .catch((error: unknown) => {
-              const response = errorResponse(error, crypto.randomUUID(), log);
-              return request.method === 'HEAD' ? new Response(null, response) : response;
-            }),
-    ),
+  const listener = getRequestListener(async (request) =>
+    !(await serving(request))
+      ? refuse(request)
+      : kernel
+          .then(async (ready) => {
+            if (new URL(request.url).pathname !== '/health/live') await verifyOnce();
+            const setup = rewriteSetupRequest(request);
+            if (setup !== null) return ready.fetch(setup);
+            const url = new URL(request.url);
+            if (url.pathname === '/_pb/ui') {
+              const response = await ready.fetch(request);
+              if (response.status !== 200) return response;
+              url.pathname = '/_pb/ui/';
+              return new Response(null, {
+                status: 303,
+                headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
+              });
+            }
+            if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
+            url.pathname = '/_pb/ui';
+            return ready.fetch(new Request(url, request));
+          })
+          .catch((error: unknown) => {
+            const response = errorResponse(error, crypto.randomUUID(), log);
+            return request.method === 'HEAD' ? new Response(null, response) : response;
+          }),
+  );
+  const server = createServer((incoming, outgoing) =>
+    remoteAddress.run(incoming.socket.remoteAddress ?? null, () => listener(incoming, outgoing)),
   );
 
   let closed = false;

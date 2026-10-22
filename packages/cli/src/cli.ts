@@ -15,6 +15,8 @@ import { runCloudflareProvision } from './commands/cloudflare/provision.js';
 import { runCloudflareDeploy } from './commands/cloudflare/deploy.js';
 import { runCloudflareSetup } from './commands/cloudflare/setup.js';
 import { runCloudflareSmoke } from './commands/cloudflare/smoke.js';
+import { runCloudflareTeardown } from './commands/cloudflare/teardown.js';
+import { runCloudflareJanitor } from './commands/cloudflare/janitor.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
 import { runSourceAcceptRemoval } from './commands/source.js';
@@ -29,6 +31,8 @@ const USAGE =
   '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
   '       pb cloudflare deploy --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
   '       pb cloudflare smoke --worker-name <slug> [--project <slug>] [--smoke-token-env <name>] [--deadline-seconds <1..300>] [--no-rollback] [--json] [--dry-run]\n' +
+  '       pb cloudflare teardown --inventory <file> [--config <file>] [--project <dir>] [--inventory-id <owner_digest> --i-understand-this-deletes] [--json] [--dry-run]\n' +
+  '       pb cloudflare janitor --repository-id <numeric-id> [--inventory <file>] [--config <file>] [--project <dir>] [--json] [--dry-run]\n' +
   '       pb cloudflare migrate --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
@@ -41,6 +45,7 @@ const USAGE =
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
+  'Exit codes for pb cloudflare teardown/janitor: 0 cleaned or skipped; 1 cleanup failed; 2 invalid inventory, wrong inventory id or missing destructive confirmation; 4 inventory locked; 6 unresolved resource or deletion outcome; 8 ownership conflict. Production confirmation uses identity.owner_digest as --inventory-id. Adopted D1 and R2 resources always require --i-understand-this-deletes; janitor retains them. Inventory schema version 2 records deployment history and lifecycle baselines. Janitor requires run_identity pb-e2e-<repository-id>-<epoch-seconds> (optional run suffix) and a matching worker_name stem; Worker stems may encode both numbers in lowercase base 36 to fit name limits. Both the run and inventory update must be older than 6 hours. Deleting a Worker removes its versions.\n' +
   'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
   'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)\n' +
   'Exit codes for pb admin show-provider-binding: 0 success; 1 error; 2 usage or invalid provider; 5 organization not bootstrapped; 6 no_binding; nothing is bound for that provider; 7 outcome unknown (D1 response lost, re-running is safe)';
@@ -81,6 +86,9 @@ function parseCliArgs(argv: string[]) {
         environment: { type: 'string' },
         'deployment-id': { type: 'string' },
         inventory: { type: 'string' },
+        'inventory-id': { type: 'string' },
+        'i-understand-this-deletes': { type: 'boolean' },
+        'repository-id': { type: 'string' },
         jurisdiction: { type: 'string' },
         'location-hint': { type: 'string' },
         'adopt-resource': { type: 'string', multiple: true },
@@ -211,6 +219,25 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'allow-contract',
   ],
   'cloudflare bootstrap': ['database-id', 'slug', 'name'],
+  'cloudflare teardown': [
+    'inventory',
+    'inventory-id',
+    'i-understand-this-deletes',
+    'config',
+    'project',
+    'out',
+    'json',
+    'dry-run',
+  ],
+  'cloudflare janitor': [
+    'repository-id',
+    'inventory',
+    'config',
+    'project',
+    'out',
+    'json',
+    'dry-run',
+  ],
   'secrets generate-master-key': ['key-version'],
   'admin bootstrap': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
   'admin reset-local': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
@@ -268,7 +295,9 @@ export async function run(argv: readonly string[]): Promise<number> {
     const cloudflareIndex = argv.findIndex(
       (value, index) =>
         value === 'cloudflare' &&
-        ['setup', 'provision', 'migrate', 'deploy', 'smoke'].includes(argv[index + 1] ?? ''),
+        ['setup', 'provision', 'migrate', 'deploy', 'smoke', 'teardown', 'janitor'].includes(
+          argv[index + 1] ?? '',
+        ),
     );
     if (cloudflareIndex >= 0 && argv.includes('--json')) {
       console.log(
@@ -288,6 +317,32 @@ export async function run(argv: readonly string[]): Promise<number> {
     return usageError();
   }
   const [command, subcommand] = positionals;
+
+  if (command === 'cloudflare' && (subcommand === 'teardown' || subcommand === 'janitor')) {
+    const options = {
+      env: process.env,
+      ...(values.config === undefined ? {} : { configPath: values.config }),
+      ...(values.project === undefined ? {} : { project: values.project }),
+      ...(values.out === undefined ? {} : { outDir: values.out }),
+      dryRun: values['dry-run'] ?? false,
+      json: values.json ?? false,
+    };
+    if (subcommand === 'teardown') {
+      if (!values.inventory) return usageError();
+      return runCloudflareTeardown({
+        ...options,
+        inventory: values.inventory,
+        ...(values['inventory-id'] === undefined ? {} : { inventoryId: values['inventory-id'] }),
+        iUnderstandThisDeletes: values['i-understand-this-deletes'] ?? false,
+      });
+    }
+    if (!values['repository-id']) return usageError();
+    return runCloudflareJanitor({
+      ...options,
+      repositoryId: values['repository-id'],
+      ...(values.inventory === undefined ? {} : { inventory: values.inventory }),
+    });
+  }
 
   if (command === 'source' && subcommand === 'accept-removal') {
     if (!values.url || !values.source) return usageError();

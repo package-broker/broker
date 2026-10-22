@@ -1,9 +1,12 @@
 import { sql } from 'kysely';
 import type { SourceSyncDeps } from '@package-broker/core/ingest/source-sync-job';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { sourceSelectionCondition } from './source-selection.js';
 import { compile, db } from '../kysely.js';
 
-export type SourceSyncReads = Pick<SourceSyncDeps, 'existingKeys' | 'staleHeldKeys'>;
+export type SourceSyncReads = Required<
+  Pick<SourceSyncDeps, 'existingKeys' | 'staleHeldKeys' | 'selectedKeys' | 'selectionRevision'>
+>;
 
 const NAMES_PER_STATEMENT = 98;
 
@@ -55,6 +58,15 @@ export function staleHeldKeysStatement(
       .where('p.org_id', '=', ctx.orgId)
       .where('p.source_id', '=', sourceId)
       .where(
+        sourceSelectionCondition(
+          ctx,
+          sql<string>`p.source_id`,
+          sql<string>`p.ecosystem`,
+          sql<string>`p.name`,
+          true,
+        ),
+      )
+      .where(
         'p.ecosystem',
         '=',
         sql<
@@ -88,8 +100,55 @@ export function staleHeldKeysStatement(
   );
 }
 
+export function selectedKeysStatement(
+  ctx: OrgContext,
+  sourceId: string,
+  names: readonly string[],
+): Statement {
+  requireSourceId(sourceId);
+  return compile(
+    db
+      .selectFrom(sql<{ value: string }>`json_each(${JSON.stringify(names)})`.as('candidate'))
+      .select('candidate.value as name')
+      .where(
+        sourceSelectionCondition(
+          ctx,
+          sourceId,
+          sql<string>`(SELECT ecosystem FROM source WHERE id = ${sourceId} AND org_id = ${ctx.orgId})`,
+          sql<string>`candidate.value`,
+        ),
+      ),
+  );
+}
+
+export function selectionRevisionStatement(ctx: OrgContext, sourceId: string): Statement {
+  requireSourceId(sourceId);
+  return compile(
+    db.selectNoFrom(
+      sql<string>`(SELECT json_array(source.config_json, source.status = 'active',
+          (SELECT json_group_array(registration.pattern) FROM (
+            SELECT registered_name.pattern FROM registered_name
+            WHERE registered_name.org_id = ${ctx.orgId} AND registered_name.source_id = ${sourceId}
+            ORDER BY registered_name.pattern) AS registration))
+        FROM source WHERE source.org_id = ${ctx.orgId} AND source.id = ${sourceId})`.as('revision'),
+    ),
+  );
+}
+
 export function createSourceSyncReads(executor: SqlExecutor): SourceSyncReads {
   return {
+    async selectedKeys(ctx, sourceId, names) {
+      const rows = await executor.all<{ name: string }>(
+        selectedKeysStatement(ctx, sourceId, names),
+      );
+      return rows.map((row) => row.name);
+    },
+    async selectionRevision(ctx, sourceId) {
+      const [row] = await executor.all<{ revision: string | null }>(
+        selectionRevisionStatement(ctx, sourceId),
+      );
+      return row?.revision ?? '';
+    },
     async existingKeys(ctx, sourceId, names) {
       requireSourceId(sourceId);
       const keys = new Set<string>();

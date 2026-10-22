@@ -6,11 +6,13 @@ import type { Principal, RequestContext } from '../plugin.js';
 import {
   accessContextOf,
   authenticatedActorOf,
+  authenticatedTokenActor,
   organizationActorOf,
   projectActorOf,
   setAccessContext,
 } from './access-context.js';
 import type { AccessContextSnapshot } from './access-context.js';
+import { tokenMutationFence } from './fence.js';
 
 const USER: Principal = { kind: 'user', id: 'user-1' };
 const SERVICE: Principal = { kind: 'service', id: 'svc-1' };
@@ -666,6 +668,102 @@ describe('authenticated actor', () => {
       expect(authenticatedActorOf(ctx)).toBeNull();
     },
   );
+});
+
+describe('authenticated token actor', () => {
+  it('mints a frozen actor carrying token id, kind and principal', () => {
+    const ctx = requestContext(SERVICE);
+    setAccessContext(
+      ctx,
+      serviceSnapshot({ token: { id: 'tok-1', kind: 'svc', scope: 'write', readOnly: false } }),
+    );
+    const built = authenticatedTokenActor(ctx);
+    expect(built).toEqual({ tokenId: 'tok-1', tokenKind: 'svc', principalId: 'svc-1' });
+    expect(Object.isFrozen(built)).toBe(true);
+  });
+
+  it('mints a user PAT actor with the owner as principal', () => {
+    const ctx = requestContext();
+    setAccessContext(
+      ctx,
+      snapshot({
+        sessionId: null,
+        actor: null,
+        token: { id: 'tok-2', kind: 'pat', scope: 'full', readOnly: false },
+        rateKey: userKey('project', 'abcdefghijkl'),
+      }),
+    );
+    expect(authenticatedTokenActor(ctx)).toEqual({
+      tokenId: 'tok-2',
+      tokenKind: 'pat',
+      principalId: 'user-1',
+    });
+  });
+
+  it('returns undefined for a pat token on a service principal', () => {
+    const ctx = requestContext(SERVICE);
+    setAccessContext(
+      ctx,
+      serviceSnapshot({ token: { id: 'tok-1', kind: 'pat', scope: 'write', readOnly: false } }),
+    );
+    expect(authenticatedTokenActor(ctx)).toBeUndefined();
+  });
+
+  it('returns undefined for a svc token on a user principal', () => {
+    const ctx = requestContext();
+    setAccessContext(
+      ctx,
+      snapshot({
+        sessionId: null,
+        actor: null,
+        token: { id: 'tok-2', kind: 'svc', scope: 'full', readOnly: false },
+        rateKey: userKey('project', 'abcdefghijkl'),
+      }),
+    );
+    expect(authenticatedTokenActor(ctx)).toBeUndefined();
+  });
+
+  it('returns undefined for a session request', () => {
+    const ctx = requestContext();
+    setAccessContext(ctx, snapshot());
+    expect(authenticatedTokenActor(ctx)).toBeUndefined();
+  });
+
+  it('returns undefined without a stored snapshot', () => {
+    expect(authenticatedTokenActor(requestContext())).toBeUndefined();
+  });
+
+  it('returns undefined for a token snapshot carrying no token id', () => {
+    const ctx = requestContext(SERVICE);
+    setAccessContext(ctx, serviceSnapshot());
+    expect(authenticatedTokenActor(ctx)).toBeUndefined();
+  });
+
+  it('refuses an empty token id', () => {
+    const ctx = requestContext(SERVICE);
+    expect(() =>
+      setAccessContext(
+        ctx,
+        serviceSnapshot({ token: { id: '', kind: 'svc', scope: 'write', readOnly: false } }),
+      ),
+    ).toThrow(TypeError);
+    expect(accessContextOf(ctx)).toBeNull();
+  });
+
+  it('feeds tokenMutationFence for a token request', () => {
+    const ctx = requestContext(SERVICE);
+    setAccessContext(
+      ctx,
+      serviceSnapshot({ token: { id: 'tok-1', kind: 'svc', scope: 'write', readOnly: false } }),
+    );
+    const fence = tokenMutationFence(authenticatedTokenActor(ctx)!, 'org:import:write', {});
+    expect(fence).toMatchObject({
+      tokenId: 'tok-1',
+      tokenKind: 'svc',
+      principalId: 'svc-1',
+      permission: 'org:import:write',
+    });
+  });
 });
 
 describe('project actor', () => {

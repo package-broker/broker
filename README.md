@@ -21,6 +21,10 @@ A package registry broker for Composer and npm that runs on Cloudflare Workers o
 | `@package-broker/ui-assets`          | Build-time bridge that hands the UI to `pb build`   |
 | `@package-broker/plugin-*`           | First-party plugins (`sso-oidc`, `github`)          |
 
+## Source selection
+
+Narrowing a source's package list, patterns, registered names or npm scopes stops refreshing packages outside the current selection. Those packages keep their status, metadata and visibility; narrowing does not mark them absent or include them in the mass-removal share. Widening the selection resumes refreshing them. Only upstream absence within the current selection can use the existing guarded removal path. There is no separate `outside_selection` status or flag.
+
 ## Develop
 
 ```sh
@@ -77,6 +81,19 @@ emits `keyring.reseed_ignored` at warn level.
 Cloudflare caches a configuration failure for 30 seconds per environment fingerprint.
 Changing the configuration gets a new verification attempt immediately. Node shares each
 deferred attempt between requests and starts at most one attempt per second.
+
+## Node client IP behind a proxy
+
+Node records the socket peer address in sessions and audit `source_ip` by default,
+ignoring `cf-connecting-ip` and `x-forwarded-for`. Set `PB_TRUSTED_PROXY=1` only when
+Node is reachable exclusively through a trusted proxy that removes client-supplied
+values and writes these headers. `PB_TRUSTED_PROXY=0` (or unset) keeps the default;
+other values fail startup. Programmatic servers use `trustedProxy: true`.
+
+When enabled, `cf-connecting-ip` takes precedence over the first `x-forwarded-for`
+entry. With neither header, Node uses the socket address. An empty or invalid
+selected header records `null`. Both IPv4 and IPv6 literals are accepted.
+Cloudflare's client IP handling is unchanged.
 
 ## Operating sources
 

@@ -87,7 +87,16 @@ const RULES: Readonly<Record<string, Rule>> = {
   cli: { allow: [ANY_WORKSPACE, 'esbuild', 'node', 'typescript'], testOnly: ['vitest'] },
   plugin: { allow: ws('core'), testOnly: ['vitest'] },
   ui: {
-    allow: ['react', 'react-dom', 'class-variance-authority', 'clsx', 'tailwind-merge'],
+    allow: [
+      'react',
+      'react-dom',
+      'class-variance-authority',
+      'clsx',
+      'tailwind-merge',
+      '@radix-ui/react-slot',
+      '@radix-ui/react-label',
+      '@radix-ui/react-tabs',
+    ],
     testOnly: ['vitest', '@package-broker/core'],
     testsAndScripts: ['node', 'esbuild', 'openapi-typescript', 'prettier'],
     onlySpecifiersIn: {
@@ -777,6 +786,7 @@ const ACCESS_CONTEXT_RULE: ImportRule = {
       'accessContextOf',
       'organizationActorOf',
       'authenticatedActorOf',
+      'authenticatedTokenActor',
     ],
     'packages/core/src/authz/engine': ['engineGrantOf'],
     'packages/core/src/internal/package-actor': [

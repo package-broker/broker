@@ -28,6 +28,15 @@ const ERROR_MESSAGES = {
 type ErrorCode = -32700 | -32600 | -32601 | -32602 | -32603;
 type RequestId = string | number;
 
+const calls = new WeakMap<
+  RequestContext,
+  { readonly id: RequestId | null; readonly signal: AbortSignal }
+>();
+
+export function mcpCallContextOf(ctx: RequestContext) {
+  return calls.get(ctx);
+}
+
 export class McpError extends Error {
   readonly code: -32602;
 
@@ -186,7 +195,14 @@ export function createMcpRoutes(options: McpOptions): readonly RouteDefinition[]
             serverInfo: { name: 'package-broker', version: '2.0.0' },
           };
         } else if (message.method === 'ping') result = {};
-        else result = await handler!(message.params, ctx);
+        else {
+          calls.set(ctx, { id, signal });
+          try {
+            result = await handler!(message.params, ctx);
+          } finally {
+            calls.delete(ctx);
+          }
+        }
         return notification
           ? new Response(null, { status: 202 })
           : jsonResponse(200, { jsonrpc: '2.0', id, result: result ?? null });

@@ -79,6 +79,48 @@ describe('ingest error names', () => {
 });
 
 describe('safeRecord', () => {
+  it('keeps an opaque source id unchanged', () => {
+    const record = {
+      level: 'warn',
+      event: 'ingest.budget_exhausted',
+      source_id: '01JA0000000000000000000000',
+    };
+    expect(safeRecord(record)).toEqual(record);
+    expect(projectLogFields(record)).toEqual(record);
+  });
+
+  it.each(['', 'a'.repeat(65), 'opaque@id', 'https://user:secret@example.test', 42, null])(
+    'drops an invalid source id %j',
+    (source_id) => {
+      const record = { level: 'warn', event: 'ingest.budget_exhausted' };
+      expect(safeRecord({ ...record, source_id })).toEqual(record);
+    },
+  );
+
+  it.each(['01J00000000000000000000000', 'a'.repeat(64), null])(
+    'keeps opaque user and session ids: %s',
+    (id) => {
+      const record = { level: 'info', event: 'e', user_id: id, session_id: id };
+      expect(safeRecord(record)).toEqual(record);
+      expect(projectLogFields(record)).toEqual(record);
+    },
+  );
+
+  it.each(['user_id', 'session_id'])('drops an email in %s', (field) => {
+    const record = { level: 'info', event: 'e' };
+    expect(safeRecord({ ...record, [field]: ['a', 'b.example'].join('@') })).toEqual(record);
+  });
+
+  it.each(['user_id', 'session_id'])('drops an at sign in %s', (field) => {
+    const record = { level: 'info', event: 'e' };
+    expect(safeRecord({ ...record, [field]: 'opaque@id' })).toEqual(record);
+  });
+
+  it.each(['user_id', 'session_id'])('drops a 65-character %s', (field) => {
+    const record = { level: 'info', event: 'e' };
+    expect(safeRecord({ ...record, [field]: 'a'.repeat(65) })).toEqual(record);
+  });
+
   it('keeps allowlisted fields and drops unknown ones', () => {
     const out = safeRecord({ level: 'info', event: 'http.request', status: 200, extra: SECRET });
     expect(out).toEqual({ level: 'info', event: 'http.request', status: 200 });
@@ -216,6 +258,15 @@ describe('safeErrorName', () => {
 });
 
 describe('createObservability', () => {
+  it.each(['user_id', 'session_id'])('refuses %s as a metric label', (field) => {
+    const { sink, records } = collector();
+    const obs = createObservability(sink, scope(), REGISTRY);
+    obs.counter('pb.auth.events', { [field]: 'opaque_id' });
+    expect(records).toEqual([
+      { kind: 'counter', name: 'pb.obs.dropped', labels: { signal: 'counter' }, value: 1 },
+    ]);
+  });
+
   it('stamps scope fields and service', () => {
     const { sink, records } = collector();
     createObservability(sink, scope({ route: '/p/{id}', method: 'GET' }), REGISTRY).log({
@@ -594,7 +645,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(26);
+    expect(missing).toHaveLength(29);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 

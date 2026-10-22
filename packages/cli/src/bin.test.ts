@@ -157,3 +157,51 @@ it.each(
     process.argv = previous;
   }
 });
+
+it('keeps setup JSON missing token delivery to one safe stdout object before network', async () => {
+  vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'a'.repeat(32));
+  vi.stubEnv('CLOUDFLARE_API_TOKEN', 'TEST_TOKEN');
+  const { formatMasterKey, generateMasterKey } =
+    await import('@package-broker/core/secrets/master-key');
+  vi.stubEnv('SETUP_MASTER_KEY', formatMasterKey(generateMasterKey(1)));
+  const { InventoryStore } = await import('./commands/cloudflare/inventory.js');
+  const readInventory = vi.spyOn(InventoryStore.prototype, 'read').mockResolvedValue(null);
+  const previous = process.argv;
+  process.argv = [
+    'node',
+    'pb',
+    'cloudflare',
+    'setup',
+    '--json',
+    '--worker-name',
+    'broker',
+    '--org-slug',
+    'demo',
+    '--org-name',
+    'Demo',
+    '--admin-email',
+    'admin@example.test',
+    '--master-key-env',
+    'SETUP_MASTER_KEY',
+  ];
+  const send = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('must not call network'));
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  try {
+    await import('./bin.js');
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(2));
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      command: 'setup',
+      status: 'error',
+      error: { code: 'invalid_input', stage: 'validate' },
+    });
+    expect(readInventory).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(JSON.stringify(log.mock.calls)).not.toContain('admin@example.test');
+  } finally {
+    process.argv = previous;
+  }
+});

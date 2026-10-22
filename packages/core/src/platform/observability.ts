@@ -35,6 +35,8 @@ export interface SafeLogRecord {
   readonly duration_ms?: number;
   readonly project_id?: string | null;
   readonly token_id?: string | null;
+  readonly user_id?: string | null;
+  readonly session_id?: string | null;
   readonly job_id?: string;
   readonly attempt?: number;
   readonly error_name?: ErrorName;
@@ -45,6 +47,7 @@ export interface SafeLogRecord {
   readonly head_hash?: string;
   readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
   readonly package_key?: string;
+  readonly source_id?: string;
 }
 
 export const LOG_FIELDS = [
@@ -64,6 +67,8 @@ export const LOG_FIELDS = [
   'duration_ms',
   'project_id',
   'token_id',
+  'user_id',
+  'session_id',
   'job_id',
   'attempt',
   'error_name',
@@ -74,6 +79,7 @@ export const LOG_FIELDS = [
   'head_hash',
   'reason',
   'package_key',
+  'source_id',
 ] as const satisfies readonly (keyof SafeLogRecord)[];
 
 export type LogField = (typeof LOG_FIELDS)[number];
@@ -225,6 +231,15 @@ export const PACKAGE_KEY_MAX_LENGTH = 428;
 const PACKAGE_KEY_FORBIDDEN = /[\u0000-\u0020\u007f-\u009f:?#\\]/;
 const STATUS_CLASS = /^[1-5]xx$/;
 export const MAX_METRIC_LABELS = 8;
+export const FINISH_FAILURE_DETAIL_LABELS = Object.freeze({
+  invalid_grant: true,
+  invalid_client: true,
+  invalid_request: true,
+  unauthorized_client: true,
+  unsupported_grant_type: true,
+  invalid_scope: true,
+  token_endpoint_error: true,
+} as const);
 const LABEL_KEYS = new Set([
   'method',
   'route',
@@ -235,6 +250,7 @@ const LABEL_KEYS = new Set([
   'kind',
   'adapter',
   'provider',
+  'detail',
 ]);
 const ENCODER = new TextEncoder();
 const MAX_PROTOTYPE_STEPS = 32;
@@ -283,6 +299,8 @@ const FIELD_CHECKS: Readonly<
   duration_ms: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
   project_id: nullable(matches(ENTITY_ID)),
   token_id: nullable(matches(ENTITY_ID)),
+  user_id: nullable(matches(ENTITY_ID)),
+  session_id: nullable(matches(ENTITY_ID)),
   job_id: matches(ENTITY_ID),
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),
@@ -292,6 +310,7 @@ const FIELD_CHECKS: Readonly<
   head_hash: matches(/^[0-9a-f]{64}$/),
   reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
   package_key: packageKey,
+  source_id: matches(ENTITY_ID),
 };
 
 const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;
@@ -393,6 +412,8 @@ export function metricLabelValueAllowed(
   routeTemplates: ReadonlySet<string>,
 ): boolean {
   switch (key) {
+    case 'detail':
+      return Object.hasOwn(FINISH_FAILURE_DETAIL_LABELS, value);
     case 'method':
       return METHODS.has(value);
     case 'route':

@@ -8,9 +8,9 @@ import { loadMigrationSource, type MigrationSource } from './source.js';
 
 const migrationsUrl = new URL('../../migrations/', import.meta.url);
 
-async function loadCore(only?: (name: string) => boolean): Promise<MigrationSource[]> {
+async function loadCore(): Promise<MigrationSource[]> {
   const names = readdirSync(migrationsUrl)
-    .filter((name) => name.endsWith('.sql') && (only?.(name) ?? true))
+    .filter((name) => name.endsWith('.sql'))
     .sort();
   return Promise.all(
     names.map((name) =>
@@ -58,12 +58,6 @@ async function dbErrorKind(promise: Promise<unknown>): Promise<string> {
     throw error;
   }
   throw new Error('expected the statement to fail');
-}
-
-async function migrateUpTo(prefix: string): Promise<void> {
-  await migrate(opened.executor, await loadCore((name) => name <= prefix), {
-    holder: 'access-model-test',
-  });
 }
 
 async function migrateAll(): Promise<void> {
@@ -142,62 +136,7 @@ async function columnsOf(table: string): Promise<Map<string, TableInfo>> {
   return new Map(found.map((column) => [column.name, column]));
 }
 
-describe('migration 0003 access model', () => {
-  it('1: applies after 0001 and 0002, is expand phase and leaves 0001 and 0002 checksums unchanged', async () => {
-    const sources = await loadCore((name) => name <= '0003_z');
-    expect(sources.map((source) => source.id)).toEqual([
-      'core:0001_init',
-      'core:0002_local_login',
-      'core:0003_access_model',
-    ]);
-    expect(sources[2]?.phase).toBe('expand');
-
-    const result = await migrate(opened.executor, sources, { holder: 'access-model-test' });
-
-    expect(result.applied).toEqual(sources.map((source) => source.id));
-    const stored = await rows<{ id: string; checksum: string }>(
-      'SELECT id, checksum FROM schema_migration ORDER BY id',
-    );
-    expect(stored.map((row) => row.checksum)).toEqual(sources.map((source) => source.checksum));
-    expect(stored.slice(0, 2).map((row) => row.checksum)).toEqual([
-      '149f4dfd4af9c17510838acdf4994fffe17299305a171fd2f3a9f1f8feca65bf',
-      '9c8beff72fc17beecc37558657aab839e907c0ff3450b50533d5805390b04697',
-    ]);
-  });
-
-  it('2: re-applying is skipped by the runner and a mid-file failure leaves no partial table or column', async () => {
-    await migrateUpTo('0002_local_login.sql');
-    const [real] = await loadCore((name) => name.startsWith('0003_'));
-    if (real === undefined) throw new Error('0003_access_model.sql is missing');
-    const broken = await loadMigrationSource(
-      'core',
-      '0003_access_model.sql',
-      `${real.sql}\nCREATE TABL broken (id INTEGER);\n`,
-    );
-
-    await expect(
-      migrate(opened.executor, [...(await loadCore((n) => n <= '0002_z')), broken], {
-        holder: 'access-model-test',
-      }),
-    ).rejects.toThrow();
-
-    const names = (
-      await rows<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
-    ).map((row) => row.name);
-    expect(names).not.toContain('access_mutation_guard');
-    expect(names).not.toContain('identity_block');
-    expect(names).not.toContain('service_principal_permission');
-    expect((await columnsOf('token')).has('project_mode')).toBe(false);
-    expect((await columnsOf('project')).has('revision')).toBe(false);
-
-    await migrateAll();
-    const again = await migrate(opened.executor, await loadCore((n) => n <= '0003_z'), {
-      holder: 'access-model-test',
-    });
-    expect(again.applied).toEqual([]);
-    expect(again.skipped).toHaveLength(3);
-  });
-
+describe('access model baseline', () => {
   describe('schema shape', () => {
     beforeEach(migrateAll);
 
@@ -285,9 +224,9 @@ describe('migration 0003 access model', () => {
     });
   });
 
-  describe('populated upgrade', () => {
-    it('9: an old PAT gets NULL validation_kind and project_mode selected, and no service permission rows appear', async () => {
-      await migrateUpTo('0002_local_login.sql');
+  describe('token defaults', () => {
+    it('9: a PAT gets NULL validation_kind and project_mode selected, and no service permission rows appear', async () => {
+      await migrateAll();
       await seedBase();
 
       await migrateAll();

@@ -96,6 +96,35 @@ const ORDER: Readonly<Record<Item['type'], number>> = {
   grant: 5,
   version_override: 6,
 };
+const MAX_ITEMS_PER_CHUNK = 50;
+const MAX_STATEMENTS_PER_CHUNK = 200;
+// Authority/cache epoch (3), job lease (1), and applied counter (1).
+const CHUNK_STATEMENT_OVERHEAD = 5;
+
+function itemStatementCost(item: Item): number {
+  // Match import-journal's SQL: duplicate check, journal, entity write, and audit.
+  // References resolved within the same chunk can cost less; budget every lookup check.
+  const base = 4;
+  const sourceCost = (reference: Extract<Item, { type: 'name' }>['source']) =>
+    'existing' in reference && reference.existing.project !== null ? 2 : 1;
+  switch (item.type) {
+    case 'role':
+      // Each permission row binds three of D1's 100 parameters per statement.
+      return base + Math.ceil(item.permissions.length / 33);
+    case 'project':
+      return base;
+    case 'source':
+      return base + (item.project === null ? 0 : 2);
+    case 'name':
+      return base + sourceCost(item.source) + 1; // Ecosystem check.
+    case 'attachment':
+      return base + sourceCost(item.source) + 2 + 3; // Project/audit checks and rederive.
+    case 'grant':
+      return base + 3 + (item.project === null ? 0 : 2); // Role, scope, widening, project/audit.
+    case 'version_override':
+      return base + sourceCost(item.source) + 3; // Revision check, history, package revision.
+  }
+}
 const SESSION_ONLY: ReadonlySet<string> = new Set(
   PERMISSIONS.filter((permission) => permission.sessionOnly).map((permission) => permission.name),
 );
@@ -268,8 +297,17 @@ export async function runImportApply(
   );
   const widening = new Set(manifest.widening.map((entry) => entry.external_ref));
 
-  for (let offset = 0; offset < pending.length; offset += 50) {
-    const items = pending.slice(offset, offset + 50);
+  for (let offset = 0; offset < pending.length;) {
+    const items: Item[] = [];
+    let statements = CHUNK_STATEMENT_OVERHEAD;
+    while (offset < pending.length && items.length < MAX_ITEMS_PER_CHUNK) {
+      const item = pending[offset]!;
+      const cost = itemStatementCost(item);
+      if (statements + cost > MAX_STATEMENTS_PER_CHUNK) break;
+      items.push(item);
+      statements += cost;
+      offset++;
+    }
     for (const item of items) {
       if (item.type !== 'grant') continue;
       const permissions =

@@ -674,6 +674,27 @@ describe('step 6 release gate on Miniflare D1', () => {
     const beforeQuarantine = await epoch();
     expect(
       await visibility('alpha', { cookie }, 'quarantineVersion', {
+        packageId: ownOnly.packageId,
+        expectedStatus: 'active',
+        manage: { kind: 'organization' },
+        audit: {
+          id: ulid(),
+          occurredAt: new Date().toISOString(),
+          action: 'version.state_change',
+          actor: {
+            type: 'user',
+            id: (
+              await sql<{ id: string }>('SELECT id FROM user_account WHERE org_id = ? LIMIT 1', [
+                orgId,
+              ])
+            )[0]!.id,
+          },
+          target: { type: 'version', id: ownOnly.versionId },
+          projectId: a,
+          sourceIp: null,
+          tokenSelector: null,
+          payloadJson: '{}',
+        },
         versionId: ownOnly.versionId,
         reason: 'admin_quarantine',
       }),

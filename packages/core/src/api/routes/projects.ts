@@ -16,7 +16,7 @@ import {
   settleIdempotent,
   type IdempotencyRecord,
 } from '../idempotency.js';
-import { apiRoute, IF_MATCH, type ApiOutcome, type RouteOutcome } from '../route.js';
+import { apiRoute, type ApiOutcome, type RouteOutcome } from '../route.js';
 import { callContext, projectSessionCallContext, type ApiRouteDeps } from './context.js';
 import { PROJECT_API_SPECS } from './projects-schemas.js';
 
@@ -45,16 +45,6 @@ export interface ProjectView {
   readonly tokenMaxScope: 'read' | 'write' | 'full';
   readonly requirePublishApproval: boolean;
   readonly revision: number;
-}
-
-function ifMatchRevision(
-  ctx: RequestContext,
-): number | 'precondition_required' | 'invalid_request' {
-  const header = ctx.request.headers.get('if-match');
-  if (header === null) return 'precondition_required';
-  const match = IF_MATCH.exec(header);
-  const revision = match?.[1] === undefined ? Number.NaN : Number(match[1]);
-  return Number.isSafeInteger(revision) ? revision : 'invalid_request';
 }
 
 interface ListCaller {
@@ -251,23 +241,24 @@ export function projectRoutes(deps: ProjectRouteDeps): readonly RouteDefinition[
   });
 
   const transition = (spec: typeof archiveSpec | typeof restoreSpec, restore: boolean) =>
-    apiRoute(spec, async ({ ctx, params }): Promise<RouteOutcome<typeof spec>> => {
-      const revision = ifMatchRevision(ctx);
-      if (typeof revision === 'string') return { error: revision };
-      const { org, actor, fence, call } = callContext(ctx, deps, { project: revision });
-      const project = await deps.projects.getBySlug(org, params.project);
-      if (project === null || !isUlid(project.id)) return { error: 'not_found' };
-      const result = await deps.service[restore ? 'restoreProject' : 'archiveProject'](
-        org,
-        actor,
-        fence,
-        project.id,
-        call,
-      );
-      if (result.ok) return { status: 204 };
-      if (result.error === 'conflict') return { error: 'precondition_failed' };
-      return { serviceError: result.error };
-    });
+    apiRoute(
+      spec,
+      async ({ ctx, params, expectedRevision }): Promise<RouteOutcome<typeof spec>> => {
+        const { org, actor, fence, call } = callContext(ctx, deps, { project: expectedRevision! });
+        const project = await deps.projects.getBySlug(org, params.project);
+        if (project === null || !isUlid(project.id)) return { error: 'not_found' };
+        const result = await deps.service[restore ? 'restoreProject' : 'archiveProject'](
+          org,
+          actor,
+          fence,
+          project.id,
+          call,
+        );
+        if (result.ok) return { status: 204 };
+        if (result.error === 'conflict') return { error: 'precondition_failed' };
+        return { serviceError: result.error };
+      },
+    );
 
   const routes = [
     list,

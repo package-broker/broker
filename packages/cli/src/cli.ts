@@ -13,11 +13,13 @@ import {
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
 import { runCloudflareDeploy } from './commands/cloudflare/deploy.js';
+import { runCloudflareSetup } from './commands/cloudflare/setup.js';
 import { runCloudflareSmoke } from './commands/cloudflare/smoke.js';
 import { runCloudflareTeardown } from './commands/cloudflare/teardown.js';
 import { runCloudflareJanitor } from './commands/cloudflare/janitor.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
+import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
 import { runBootstrapSqlite, runMigrateSqlite } from './commands/sqlite.js';
 
@@ -25,6 +27,7 @@ const USAGE =
   'Usage: pb build [--config <file>] [--target cloudflare|node] [--out <dir>]\n' +
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
+  '       pb cloudflare setup --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
   '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
   '       pb cloudflare deploy --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
   '       pb cloudflare smoke --worker-name <slug> [--project <slug>] [--smoke-token-env <name>] [--deadline-seconds <1..300>] [--no-rollback] [--json] [--dry-run]\n' +
@@ -38,6 +41,7 @@ const USAGE =
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
+  '       pb source accept-removal --url <https-origin> --source <id> (PB_SESSION and PB_CSRF_TOKEN)\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
@@ -52,6 +56,8 @@ function parseCliArgs(argv: string[]) {
       args: argv,
       allowPositionals: true,
       options: {
+        url: { type: 'string' },
+        source: { type: 'string' },
         config: { type: 'string' },
         target: { type: 'string' },
         out: { type: 'string' },
@@ -66,6 +72,14 @@ function parseCliArgs(argv: string[]) {
         'new-anchor': { type: 'string' },
         cloudflare: { type: 'boolean' },
         'token-file': { type: 'string' },
+        'key-file': { type: 'string' },
+        'master-key-env': { type: 'string' },
+        'org-slug': { type: 'string' },
+        'org-name': { type: 'string' },
+        'admin-email': { type: 'string' },
+        'non-interactive': { type: 'boolean' },
+        'refresh-setup-token': { type: 'boolean' },
+        migrate: { type: 'string' },
         'key-version': { type: 'string' },
         'dry-run': { type: 'boolean' },
         'worker-name': { type: 'string' },
@@ -107,6 +121,40 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   build: ['config', 'target', 'out'],
   migrate: ['sqlite', 'out', 'dry-run'],
   bootstrap: ['sqlite', 'slug', 'name'],
+  'cloudflare setup': [
+    'worker-name',
+    'config',
+    'out',
+    'environment',
+    'deployment-id',
+    'inventory',
+    'jurisdiction',
+    'location-hint',
+    'adopt-resource',
+    'abandon-intent',
+    'domain',
+    'public-url',
+    'routes',
+    'rollout',
+    'allow-contract',
+    'secret',
+    'secrets',
+    'org-slug',
+    'org-name',
+    'admin-email',
+    'key-file',
+    'master-key-env',
+    'token-file',
+    'non-interactive',
+    'refresh-setup-token',
+    'migrate',
+    'yes',
+    'json',
+    'dry-run',
+    'project',
+    'smoke-token-env',
+    'deadline-seconds',
+  ],
   'cloudflare provision': [
     'worker-name',
     'config',
@@ -212,6 +260,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'baseline',
     'mode',
   ],
+  'source accept-removal': ['url', 'source'],
   openapi: ['out'],
   version: [],
 };
@@ -246,7 +295,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     const cloudflareIndex = argv.findIndex(
       (value, index) =>
         value === 'cloudflare' &&
-        ['provision', 'migrate', 'deploy', 'smoke', 'teardown', 'janitor'].includes(
+        ['setup', 'provision', 'migrate', 'deploy', 'smoke', 'teardown', 'janitor'].includes(
           argv[index + 1] ?? '',
         ),
     );
@@ -295,6 +344,15 @@ export async function run(argv: readonly string[]): Promise<number> {
     });
   }
 
+  if (command === 'source' && subcommand === 'accept-removal') {
+    if (!values.url || !values.source) return usageError();
+    return runSourceAcceptRemoval({
+      url: values.url,
+      source: values.source,
+      env: process.env,
+    });
+  }
+
   if (command === 'openapi') return runOpenApi(values.out);
 
   if (command === 'import' && subcommand === 'satis') {
@@ -316,6 +374,61 @@ export async function run(argv: readonly string[]): Promise<number> {
         : { repositoryMap: values['repository-map'] }),
       ...(values.baseline === undefined ? {} : { baseline: values.baseline }),
       ...(mode === undefined ? {} : { mode }),
+    });
+  }
+
+  if (command === 'cloudflare' && subcommand === 'setup') {
+    if (
+      (values.migrate !== undefined && !['true', 'false'].includes(values.migrate)) ||
+      (values.jurisdiction !== undefined && !['eu', 'default'].includes(values.jurisdiction))
+    )
+      return usageError();
+    return runCloudflareSetup({
+      workerName: values['worker-name'] ?? '',
+      env: process.env,
+      ...(values.config === undefined ? {} : { configPath: values.config }),
+      ...(values.out === undefined ? {} : { outDir: values.out }),
+      ...(values.environment === undefined ? {} : { environment: values.environment }),
+      ...(values['deployment-id'] === undefined ? {} : { deploymentId: values['deployment-id'] }),
+      ...(values.inventory === undefined ? {} : { inventory: values.inventory }),
+      ...(values.jurisdiction === undefined
+        ? {}
+        : { jurisdiction: values.jurisdiction as 'eu' | 'default' }),
+      ...(values['location-hint'] === undefined ? {} : { locationHint: values['location-hint'] }),
+      ...(values['adopt-resource'] === undefined
+        ? {}
+        : { adoptResource: values['adopt-resource'] }),
+      ...(values['abandon-intent'] === undefined
+        ? {}
+        : { abandonIntent: values['abandon-intent'] }),
+      ...(values.domain === undefined ? {} : { domain: values.domain }),
+      ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }),
+      ...(values.routes === undefined ? {} : { routes: values.routes }),
+      ...(values.rollout === undefined ? {} : { rollout: Number(values.rollout) }),
+      ...(values['allow-contract'] === undefined
+        ? {}
+        : { allowContract: values['allow-contract'] }),
+      ...(values.secret === undefined ? {} : { secret: values.secret }),
+      ...(values.secrets === undefined ? {} : { secrets: values.secrets }),
+      ...(values['org-slug'] === undefined ? {} : { orgSlug: values['org-slug'] }),
+      ...(values['org-name'] === undefined ? {} : { orgName: values['org-name'] }),
+      ...(values['admin-email'] === undefined ? {} : { adminEmail: values['admin-email'] }),
+      ...(values['key-file'] === undefined ? {} : { keyFile: values['key-file'] }),
+      ...(values['master-key-env'] === undefined ? {} : { masterKeyEnv: values['master-key-env'] }),
+      ...(values['token-file'] === undefined ? {} : { tokenFile: values['token-file'] }),
+      ...(values.project === undefined ? {} : { smokeProject: values.project }),
+      ...(values['smoke-token-env'] === undefined
+        ? {}
+        : { smokeTokenEnv: values['smoke-token-env'] }),
+      ...(values['deadline-seconds'] === undefined
+        ? {}
+        : { deadlineSeconds: Number(values['deadline-seconds']) }),
+      migrate: values.migrate !== 'false',
+      nonInteractive: values['non-interactive'] ?? false,
+      refreshSetupToken: values['refresh-setup-token'] ?? false,
+      yes: values.yes ?? false,
+      json: values.json ?? false,
+      dryRun: values['dry-run'] ?? false,
     });
   }
 

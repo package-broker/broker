@@ -84,7 +84,7 @@ const sessionJoinsForeignIdentity: ContractCase = {
       "INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES ('I-FOREIGN', ?, 'U-OWN', 'oidc', 'sub', 'x@example.test')",
       foreign.orgId,
     );
-    await seed(
+    await seed.forged(
       'INSERT INTO session (id, org_id, user_id, identity_id, secret_hash, csrf_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       'SES-OWN',
       own.orgId,

@@ -1,6 +1,7 @@
 import { isReauthSessionActive } from './identity-reauth.js';
 import {
   START_FAILURE_DETAILS,
+  FINISH_FAILURE_DETAILS,
   IDENTITY_FAILURES,
   LOGIN_REFUSALS,
   REAUTH_REFUSALS,
@@ -16,7 +17,12 @@ import type { SessionRepository } from '../db/sessions.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import { isValidProviderId } from '../identity/port.js';
-import type { IdentityProvider, LoginStateData, VerifiedIdentity } from '../identity/port.js';
+import type {
+  IdentityFailureDetail,
+  IdentityProvider,
+  LoginStateData,
+  VerifiedIdentity,
+} from '../identity/port.js';
 import { ssoStartBody } from '../api/auth-schemas.js';
 import { apiError } from '../api/response.js';
 import { validateInput, type ValidationResult } from '../api/validate.js';
@@ -60,7 +66,8 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 
 type Purpose = 'login' | 'reauth';
 type Verified =
-  { readonly identity: VerifiedIdentity } | { readonly reason: string; readonly error?: unknown };
+  | { readonly identity: VerifiedIdentity }
+  | { readonly reason: string; readonly error?: unknown; readonly detail?: IdentityFailureDetail };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -223,6 +230,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     reason: string,
     error?: unknown,
     startPath = false,
+    detail?: IdentityFailureDetail,
   ): void {
     log({
       level: 'warn',
@@ -232,6 +240,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       reason,
       ...(error === undefined ? {} : { error: reportableErrorName(error) }),
       ...(startPath ? { detail: startFailureDetail(error) } : {}),
+      ...(detail === undefined ? {} : { detail }),
     });
   }
 
@@ -241,8 +250,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     reason: string,
     cookies: readonly string[] = [],
     error?: unknown,
+    detail?: IdentityFailureDetail,
   ): Response {
-    logRefusal(rc.requestId, provider, reason, error);
+    logRefusal(rc.requestId, provider, reason, error, false, detail);
     return withCookies(
       envelopeResponse(401, 'login_failed', 'Login failed', rc.requestId),
       cookies,
@@ -263,30 +273,34 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     provider: IdentityProvider,
     data: LoginStateData | null,
   ): Promise<Verified> {
-    let result: unknown;
     try {
-      result = await provider.finish({
+      const result: unknown = await provider.finish({
         request: rc.request,
         state: data,
         callbackUrl: callbackUrl(provider),
       });
+      if (!isRecord(result)) return { reason: 'provider_error' };
+      if (result['ok'] === true) {
+        const identity = result['identity'];
+        return isRecord(identity)
+          ? { identity: identity as unknown as VerifiedIdentity }
+          : { reason: 'provider_error' };
+      }
+      const reason = result['reason'];
+      const detail = reason === 'provider_error' ? result['detail'] : undefined;
+      return {
+        reason:
+          typeof reason === 'string' && (IDENTITY_FAILURES as ReadonlySet<string>).has(reason)
+            ? reason
+            : 'provider_error',
+        ...(typeof detail === 'string' &&
+        (FINISH_FAILURE_DETAILS as ReadonlySet<string>).has(detail)
+          ? { detail: detail as IdentityFailureDetail }
+          : {}),
+      };
     } catch (error) {
       return { reason: 'provider_error', error };
     }
-    if (!isRecord(result)) return { reason: 'provider_error' };
-    if (result['ok'] === true) {
-      const identity = result['identity'];
-      return isRecord(identity)
-        ? { identity: identity as unknown as VerifiedIdentity }
-        : { reason: 'provider_error' };
-    }
-    const reason = result['reason'];
-    return {
-      reason:
-        typeof reason === 'string' && (IDENTITY_FAILURES as ReadonlySet<string>).has(reason)
-          ? reason
-          : 'provider_error',
-    };
   }
 
   async function completeLogin(
@@ -389,7 +403,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       if (purpose === 'reauth') return loginFailed(rc, provider.id, 'direct_reauth');
       const verified = await verify(rc, provider, null);
       if ('reason' in verified) {
-        return loginFailed(rc, provider.id, verified.reason, [], verified.error);
+        return loginFailed(rc, provider.id, verified.reason, [], verified.error, verified.detail);
       }
       return varyOnAccept(
         await completeLogin(rc, provider, verified.identity, returnTo, [], prefersJson(request)),
@@ -467,7 +481,14 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     }
     const verified = await verify(rc, provider, state.data);
     if ('reason' in verified) {
-      return loginFailed(rc, provider.id, verified.reason, cleared, verified.error);
+      return loginFailed(
+        rc,
+        provider.id,
+        verified.reason,
+        cleared,
+        verified.error,
+        verified.detail,
+      );
     }
     if (state.purpose === 'login' || session === null) {
       return completeLogin(rc, provider, verified.identity, state.returnTo, cleared);

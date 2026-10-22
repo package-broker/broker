@@ -1,0 +1,284 @@
+import { expect } from 'vitest';
+import { createPackageAdminReader } from '../../repositories/package-admin-read.js';
+import { executing } from './factory-cases.js';
+import { NOT_NULL, seedPackage, seedProject, seedSource, seedVersion } from './fixtures.js';
+import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
+
+type Operation = 'list' | 'versions' | 'manage';
+type Boundary = 'pkg' | 'src' | 'v';
+function boundaryCase(operation: Operation, boundary: Boundary): ContractCase {
+  return {
+    name: `package admin ${operation} excludes a foreign ${boundary} row referencing own rows`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedSource(
+        seed,
+        'S',
+        boundary === 'src' ? foreign.orgId : own.orgId,
+        'npm_registry',
+        'npm',
+      );
+      await seedPackage(
+        seed.forged,
+        'K',
+        boundary === 'pkg' ? foreign.orgId : own.orgId,
+        'S',
+        'widget',
+        'npm',
+      );
+      await seedVersion(
+        seed.forged,
+        'V',
+        boundary === 'v' ? foreign.orgId : own.orgId,
+        'K',
+        '1.0.0',
+      );
+      const reader = createPackageAdminReader(executing(context));
+      if (operation === 'list') {
+        const page = await reader.listOrganization(own, { limit: 10 });
+        if (boundary === 'v') {
+          expect(page.items[0]).toMatchObject({ latestVersion: null, versionCount: 0 });
+        } else expect(page.items).toEqual([]);
+      } else if (operation === 'versions') {
+        const page = await reader.listVersions(own, { packageId: 'K', projectId: null, limit: 10 });
+        expect(page).toEqual(boundary === 'v' ? { items: [], next: null } : null);
+      } else {
+        expect(
+          await reader.findManagedVersion(own, { packageId: 'K', versionId: 'V', projectId: null }),
+        ).toBeNull();
+      }
+    },
+  };
+}
+
+type ProjectOperation = 'listProject' | 'listVersions' | 'findManagedVersion';
+function projectBoundaryCase(operation: ProjectOperation, boundary: Boundary | 'p'): ContractCase {
+  return {
+    name: `package admin ${operation} project branch excludes foreign ${boundary} rows`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedProject(seed, 'P', boundary === 'p' ? foreign.orgId : own.orgId);
+      await seedSource(
+        seed,
+        'S',
+        boundary === 'src' ? foreign.orgId : own.orgId,
+        'npm_registry',
+        'npm',
+      );
+      await seed.forged("UPDATE source SET project_id = 'P' WHERE id = 'S'");
+      const budget = operation === 'listProject' && (boundary === 'pkg' || boundary === 'src');
+      for (let i = 0; i < (budget ? 500 : 1); i++) {
+        await seedPackage(
+          seed.forged,
+          `K${i}`,
+          boundary === 'pkg' ? foreign.orgId : own.orgId,
+          'S',
+          `widget${i}`,
+          'npm',
+        );
+      }
+      await seedVersion(
+        seed.forged,
+        'V',
+        boundary === 'v' ? foreign.orgId : own.orgId,
+        'K0',
+        '1.0.0',
+      );
+      await seed.forged(
+        "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
+        own.orgId,
+      );
+      await seed.forged(
+        "INSERT INTO project_package (org_id, project_id, package_id, origin, ecosystem, name) SELECT input.org_id, input.project_id, input.package_id, input.origin, p.ecosystem, p.name FROM (SELECT ? AS org_id, 'P' AS project_id, 'K0' AS package_id, 'explicit' AS origin) AS input JOIN package AS p ON p.id = input.package_id WHERE 1",
+        own.orgId,
+      );
+      const reader = createPackageAdminReader(executing(context));
+      if (operation === 'listProject') {
+        const page = await reader.listProject(own, 'P', { limit: 10 });
+        if (boundary === 'v')
+          expect(page.items[0]).toMatchObject({ latestVersion: null, versionCount: 0 });
+        else expect(page).toEqual({ items: [], next: null });
+      } else if (operation === 'listVersions') {
+        // Exercise ownership independently of the delegated winner subquery.
+        await seed("DELETE FROM project_package WHERE project_id = 'P'");
+        expect(
+          await reader.listVersions(own, { packageId: 'K0', projectId: 'P', limit: 10 }),
+        ).toEqual(boundary === 'v' ? { items: [], next: null } : null);
+      } else {
+        expect(
+          await reader.findManagedVersion(own, { packageId: 'K0', versionId: 'V', projectId: 'P' }),
+        ).toBeNull();
+      }
+    },
+  };
+}
+const projectCases = (['listProject', 'listVersions', 'findManagedVersion'] as const).flatMap(
+  (operation) =>
+    (['pkg', 'src', 'v', 'p'] as const).map((boundary) => ({
+      operation,
+      boundary,
+      contract: projectBoundaryCase(operation, boundary),
+    })),
+);
+const mixedStatus: ContractCase = {
+  name: 'package admin keeps active plus tombstoned versions active',
+  async run(context) {
+    const { own } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seedSource(seed, 'S', own.orgId, 'npm_registry', 'npm');
+    await seedPackage(seed, 'K', own.orgId, 'S', 'widget', 'npm');
+    await seedVersion(seed, 'A', own.orgId, 'K', '1.0.0');
+    await seedVersion(seed, 'T', own.orgId, 'K', '2.0.0');
+    await seed(
+      "UPDATE version SET status = 'tombstoned', tombstoned_at = '2020-01-01' WHERE id = 'T'",
+    );
+    const page = await createPackageAdminReader(executing(context)).listOrganization(own, {
+      limit: 10,
+    });
+    expect(page.items[0]?.status).toBe('active');
+  },
+};
+
+function statusCase(status: 'quarantined' | 'tombstoned' | 'active'): ContractCase {
+  return {
+    name: `package admin ignores foreign ${status} versions when deriving status`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedSource(seed, 'S', own.orgId, 'npm_registry', 'npm');
+      await seedPackage(seed, 'K', own.orgId, 'S', 'widget', 'npm');
+      if (status === 'active') {
+        await seedVersion(seed, 'OWN', own.orgId, 'K', '1.0.0');
+        await seed(
+          "UPDATE version SET status = 'tombstoned', tombstoned_at = '2020-01-01' WHERE id = 'OWN'",
+        );
+      }
+      await seedVersion(seed.forged, 'FOREIGN', foreign.orgId, 'K', '2.0.0');
+      if (status !== 'active')
+        await seed.forged(
+          "UPDATE version SET status = ?, tombstoned_at = ? WHERE id = 'FOREIGN'",
+          status,
+          status === 'tombstoned' ? '2020-01-01' : null,
+        );
+      const page = await createPackageAdminReader(executing(context)).listOrganization(own, {
+        limit: 10,
+      });
+      expect(page.items[0]?.status).toBe(status === 'active' ? 'tombstoned' : 'active');
+    },
+  };
+}
+
+function attachmentCase(foreignProject: boolean): ContractCase {
+  return {
+    name: `package admin ignores a foreign ${foreignProject ? 'project' : 'attachment'} in attachment filtering`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedProject(seed, 'P', foreignProject ? foreign.orgId : own.orgId);
+      await seedSource(seed, 'S', own.orgId, 'npm_registry', 'npm');
+      await seedPackage(seed, 'K', own.orgId, 'S', 'widget', 'npm');
+      await seed.forged(
+        "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P', 'S')",
+        foreignProject ? own.orgId : foreign.orgId,
+      );
+      expect(
+        (
+          await createPackageAdminReader(executing(context)).listOrganization(own, {
+            projectId: 'P',
+            limit: 10,
+          })
+        ).items,
+      ).toEqual([]);
+    },
+  };
+}
+
+const boundaryCases = (['list', 'versions', 'manage'] as const).flatMap((operation) =>
+  (['pkg', 'src', 'v'] as const).map((boundary) => ({
+    operation,
+    boundary,
+    contract: boundaryCase(operation, boundary),
+  })),
+);
+const statusCases = (['quarantined', 'tombstoned', 'active'] as const).map((status) => ({
+  status,
+  contract: statusCase(status),
+}));
+const attachments = [attachmentCase(false), attachmentCase(true)];
+export const entries: readonly MutationEntry[] = [
+  {
+    file: 'repositories/package-admin-read.ts',
+    builder: 'createPackageAdminReader',
+    cases: [
+      ...boundaryCases.map((item) => item.contract),
+      ...statusCases.map((item) => item.contract),
+      ...attachments,
+      ...projectCases.map((item) => item.contract),
+    ],
+    predicates: [
+      ...boundaryCases.map(({ operation, boundary, contract }) => ({
+        name: contract.name,
+        caseName: contract.name,
+        locate: new RegExp(`(?<![\\w.])${boundary}\\.org_id = \\?`),
+        neutral: NOT_NULL,
+        copies: operation === 'list' && boundary === 'v' ? 2 : 1,
+      })),
+      ...projectCases
+        .filter(({ operation, boundary }) => operation !== 'listProject' || boundary !== 'p')
+        .map(({ operation, boundary, contract }) => ({
+          name: contract.name,
+          caseName: contract.name,
+          locate: new RegExp(`(?<![\\w.])${boundary}\\.org_id = \\?`),
+          neutral: NOT_NULL,
+          copies: operation === 'listProject' ? 2 : 1,
+          ...(operation === 'listProject' && (boundary === 'pkg' || boundary === 'src')
+            ? {
+                waivedCopies: {
+                  1: 'The resolved winner is already scoped by the w-aliased winner subquery; the scan guard is independently mutated.',
+                },
+              }
+            : {}),
+        })),
+      ...statusCases.map(({ status, contract }) => ({
+        name: contract.name,
+        caseName: contract.name,
+        locate: new RegExp(
+          `vs\\.org_id = \\?(?=\\s+and vs\\.package_id = c\\.id and vs\\.status ${status === 'active' ? "<> 'tombstoned'" : `= '${status}'`})`,
+        ),
+        neutral: NOT_NULL,
+        copies: 1,
+      })),
+      ...attachments.map((contract, index) => ({
+        name: contract.name,
+        caseName: contract.name,
+        locate: new RegExp(`(?<![\\w.])${index === 0 ? 'ps' : 'p'}\\.org_id = \\?`),
+        neutral: NOT_NULL,
+        copies: 1,
+      })),
+    ],
+    waivers: [
+      {
+        locate: /"?guard_\w+"?\."?org_id"? = /,
+        reason:
+          'Delegated catalogue-predicates scopes inside the w-aliased winner subquery have independent mutation registrations.',
+      },
+      {
+        locate: /"?w(?:pp|pkg|src|ps)"?\."?org_id"? = /,
+        reason:
+          'The w-aliased visible-winner subquery reuses the independently registered catalogue predicates.',
+      },
+    ],
+    sqlDecisions: [
+      {
+        name: mixedStatus.name,
+        pattern:
+          /and not exists \(select 1 from version as vs indexed\s+by version_package_status where vs\.org_id = \?\s+and vs\.package_id = c\.id and vs\.status <> 'tombstoned'\)/,
+        replacement: 'and (? is not null)',
+        expected: 1,
+        case: mixedStatus,
+      },
+    ],
+  },
+];

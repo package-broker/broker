@@ -12,7 +12,7 @@ import {
 
 const MAX_DETAILS = 20;
 const BODY_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH']);
-const CONCURRENCY_METHODS: ReadonlySet<string> = new Set(['PUT', 'PATCH', 'DELETE']);
+const CONCURRENCY_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 export const IF_MATCH = /^"r([1-9][0-9]*)"$/;
 
 export interface ApiRouteSpec {
@@ -75,7 +75,7 @@ export function defineApi<S extends ApiRouteSpec>(spec: S): S {
     throw new TypeError(`${label}: a body is only allowed on POST, PUT or PATCH`);
   }
   if (spec.concurrency !== undefined && !CONCURRENCY_METHODS.has(spec.method)) {
-    throw new TypeError(`${label}: concurrency is only allowed on PUT, PATCH or DELETE`);
+    throw new TypeError(`${label}: concurrency is only allowed on POST, PUT, PATCH or DELETE`);
   }
   for (const [name, schema] of schemasOf(spec.api)) {
     assertRepresentable(schema, `${label} ${name}`);

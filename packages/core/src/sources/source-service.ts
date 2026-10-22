@@ -13,6 +13,9 @@ import type { OrgContext } from '../db/port.js';
 import type {
   NewSource,
   RegisteredNameRepository,
+  RegisteredNameListQuery,
+  RegisteredNamePage,
+  RemovalRefusal,
   SourceChanges,
   SourceRecord,
   SourceRepository,
@@ -78,9 +81,22 @@ export type SourceDto = Pick<
   | 'removalPolicy'
   | 'pollIntervalSeconds'
   | 'lastSuccessAt'
-> & { readonly hasCredential: boolean };
+> & {
+  readonly hasCredential: boolean;
+  readonly lastRemovalRefusal: RemovalRefusal | null;
+  readonly removalAcceptanceArmed: boolean;
+};
 
 export interface SourceService {
+  acceptRemoval(
+    ...args: [...WriteArgs, id: string, call: ApiCall]
+  ): Promise<SourceServiceResult<null>>;
+
+  listRegisteredNames(
+    ctx: OrgContext,
+    actor: SourceActor,
+    input: RegisteredNameListQuery,
+  ): Promise<SourceServiceResult<RegisteredNamePage>>;
   /** Visibility preflight for a matching project actor with project:sources:write. */
   getVisible(
     ctx: OrgContext,
@@ -133,7 +149,15 @@ export interface SourceService {
 export interface SourceServiceDeps {
   readonly sources: Pick<
     SourceRepository,
-    'create' | 'update' | 'get' | 'getVisible' | 'delete' | 'resume' | 'list' | 'pause'
+    | 'create'
+    | 'update'
+    | 'get'
+    | 'getVisible'
+    | 'delete'
+    | 'resume'
+    | 'list'
+    | 'pause'
+    | 'acceptRemoval'
   >;
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly registeredNames: RegisteredNameRepository;
@@ -183,6 +207,8 @@ function sourceDto(source: SourceRecord): SourceDto {
     pollIntervalSeconds: source.pollIntervalSeconds,
     lastSuccessAt: source.lastSuccessAt,
     hasCredential: source.credentialId !== null,
+    lastRemovalRefusal: source.removalRefusal,
+    removalAcceptanceArmed: source.removalAccepted,
   };
 }
 
@@ -448,6 +474,78 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
   }
 
   return {
+    async acceptRemoval(ctx, who, fence, id, call) {
+      if (!orgOnly(who) || who.kind !== 'org' || !who.actor.isOrganizationAdmin)
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await deps.sources.get(ctx, id);
+      if (source === null) return fail('not_found');
+      if (
+        source.projectId !== null &&
+        (await deps.sources.getVisible(ctx, {
+          projectId: source.projectId,
+          sourceId: id,
+        })) === null
+      )
+        return fail('not_found');
+      const refusal = source.removalRefusal;
+      if (refusal === null || refusal.successful === 0 || source.removalAccepted)
+        return fail('conflict');
+      const event = auditEvent({
+        id: deps.ids.ulid(),
+        now: new Date().toISOString(),
+        action: 'source.removal_accepted',
+        actor: { type: 'user', id: who.actor.userId },
+        context: call.audit,
+        target: { type: 'source', id },
+        projectId: source.projectId,
+        changes: {
+          source_id: { new: id },
+          refused_at: { new: refusal.at },
+          absent: { new: refusal.absent },
+          listed: { new: refusal.listed },
+          successful: { new: refusal.successful },
+        },
+      });
+      if (!event.ok) throw new TypeError('Invalid source audit event');
+      const answer = await deps.sources.acceptRemoval(ctx, fence, {
+        id,
+        refusal,
+        audit: event.event,
+        providerAnchors: deps.providerAnchors,
+      });
+      return answer === 'accepted' ? success(null) : fail(answer);
+    },
+    async listRegisteredNames(ctx, who, input) {
+      if (
+        who.kind === 'org'
+          ? who.actor.kind !== 'organization' || !who.actor.permissions.has('org:sources:read')
+          : who.actor.kind !== 'project' ||
+            who.actor.orgId !== ctx.orgId ||
+            !who.actor.permissions.has('project:sources:read')
+      )
+        return fail('forbidden');
+      if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
+        return invalid('limit', 'must be an integer from 1 to 100');
+      const source =
+        who.kind === 'org'
+          ? await deps.sources.get(ctx, input.sourceId)
+          : await deps.sources.getVisible(ctx, {
+              projectId: who.actor.projectId,
+              sourceId: input.sourceId,
+            });
+      if (source === null) return fail('not_found');
+      if (
+        who.kind === 'org' &&
+        source.projectId !== null &&
+        (await deps.sources.getVisible(ctx, {
+          projectId: source.projectId,
+          sourceId: input.sourceId,
+        })) === null
+      )
+        return fail('not_found');
+      return success(await deps.registeredNames.list(ctx, input));
+    },
     async getVisible(ctx, who, input) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       const source = await deps.sources.getVisible(ctx, input);

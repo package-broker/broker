@@ -4,6 +4,7 @@ import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { countCalls } from '../contract/count-calls.js';
 import { assertGuard, compile, db, existsGuard } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import {
   createAccessRepository,
   holdsPermission,
@@ -12,6 +13,7 @@ import {
   type ProtectedHolderProvider,
   type SessionLookupInput,
 } from './access.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 const HOUR = 3600_000;
 const MINUTE = 60_000;
@@ -77,7 +79,7 @@ function seq(prefix: string): string {
 }
 
 async function seed(...statements: Statement[]): Promise<void> {
-  await executor.batch(statements);
+  await batchInChunks(executor, statements);
 }
 
 function role(
@@ -1092,7 +1094,9 @@ describe('round 2', () => {
     it('denies a session whose identity belongs to another user', async () => {
       await seed(identity(a, U2, 'u2@example.test'));
       const other = (await ids())[U2] ?? null;
-      await seed(session(a, U1, 'borrowed', { identityId: other }));
+      await withForeignKeysOff(executor, () =>
+        seed(session(a, U1, 'borrowed', { identityId: other })),
+      );
       expect(await lookup('borrowed')).toBeNull();
     });
 

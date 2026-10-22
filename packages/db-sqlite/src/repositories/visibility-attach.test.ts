@@ -24,6 +24,7 @@ import {
 } from '../testing/catalogue-fixture.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { attachSourceStatements, createVisibilityAttachRepository } from './visibility-attach.js';
+import { batchInChunks } from '../testing/chunked-batch.js';
 
 const ORG_A = '01J00000000000000000000A0A';
 const ORG_B = '01J00000000000000000000B0B';
@@ -1158,7 +1159,8 @@ describe('setOrder', () => {
   });
   it.each([194, 400])('reorders %i sources within the production batch budget', async (count) => {
     const ids = Array.from({ length: count - 2 }, () => ulid());
-    await executor.batch(
+    await batchInChunks(
+      executor,
       ids.flatMap((id, index) => [
         stmt(
           "INSERT INTO source (id, org_id, project_id, name, ecosystem, type) VALUES (?, ?, ?, ?, 'composer', 'vcs')",

@@ -15,6 +15,8 @@ import {
   createVisibilityStore,
 } from '../../repositories/catalogue-writer.js';
 import { createCatalogueWriteGuard } from '../../repositories/catalogue-write-package.js';
+import { idempotencyInsertStatement } from '../../repositories/idempotency.js';
+import { auditPendingStatement } from '../../repositories/audit-pending.js';
 import {
   orgOf,
   seeder,
@@ -418,8 +420,15 @@ function foreignPackageCase(admin: boolean): ContractCase {
         await expect(
           createVisibilityStore(executorOf(context), {
             providerAnchors: ANCHORS,
-          }).quarantineVersion(own, fence, { versionId: 'V-O', reason: 'admin_quarantine' }),
-        ).resolves.toMatchObject({ ok: true });
+          }).quarantineVersion(own, fence, {
+            packageId: 'K-F',
+            expectedStatus: 'active',
+            manage: { kind: 'organization' },
+            audit: visibilityAudit('version.state_change'),
+            versionId: 'V-O',
+            reason: 'admin_quarantine',
+          }),
+        ).resolves.toMatchObject({ ok: false, reason: 'not_found' });
       else
         await expect(
           createCatalogueWriter(executorOf(context)).quarantine(own, writerGuard(context), {
@@ -481,11 +490,31 @@ const storeCalls = {
   removeExplicit: (store, ctx, fence, suffix) =>
     store.removeExplicit(ctx, fence, { projectId: `P-${suffix}`, packageId: `K-${suffix}` }),
   quarantineVersion: (store, ctx, fence, suffix) =>
-    store.quarantineVersion(ctx, fence, { versionId: `V-${suffix}`, reason: 'admin_quarantine' }),
+    store.quarantineVersion(ctx, fence, {
+      packageId: `K-${suffix}`,
+      expectedStatus: 'active',
+      manage: { kind: 'organization' },
+      audit: visibilityAudit('version.state_change'),
+      versionId: `V-${suffix}`,
+      reason: 'admin_quarantine',
+    }),
   releaseQuarantine: (store, ctx, fence, suffix) =>
-    store.releaseQuarantine(ctx, fence, { versionId: `V-${suffix}` }),
+    store.releaseQuarantine(ctx, fence, {
+      packageId: `K-${suffix}`,
+      expectedStatus: 'quarantined',
+      manage: { kind: 'organization' },
+      audit: visibilityAudit('version.state_change'),
+      versionId: `V-${suffix}`,
+    }),
   tombstoneVersion: (store, ctx, fence, suffix) =>
-    store.tombstoneVersion(ctx, fence, { versionId: `V-${suffix}`, reason: 'admin_tombstone' }),
+    store.tombstoneVersion(ctx, fence, {
+      packageId: `K-${suffix}`,
+      expectedStatus: 'active',
+      manage: { kind: 'organization' },
+      audit: visibilityAudit('version.state_change'),
+      versionId: `V-${suffix}`,
+      reason: 'admin_tombstone',
+    }),
 } satisfies Record<
   Exclude<keyof VisibilityStore, 'setOrder'>,
   (
@@ -504,6 +533,7 @@ async function seedStore(context: CaseContext, method: keyof typeof storeCalls) 
   const subject = await seedSubject(context, 'store');
   for (const permission of [
     'org:sources:write',
+    'org:packages:manage',
     'project:sources:write',
     'project:packages:manage',
   ]) {
@@ -545,6 +575,55 @@ async function seedStore(context: CaseContext, method: keyof typeof storeCalls) 
   return fenceOf(subject);
 }
 
+const statusMethods = ['quarantineVersion', 'releaseQuarantine', 'tombstoneVersion'] as const;
+
+function collisionCase(method: (typeof statusMethods)[number], foreign: boolean): ContractCase {
+  return {
+    name: `${method} classifies only an own live idempotency collision (${foreign ? 'foreign' : 'own'})`,
+    async run(context) {
+      const fence = await seedStore(context, method);
+      const { own, foreign: other } = orgOf(context);
+      const record = {
+        principalKey: 'user:store',
+        key: 'status-collision',
+        route: '/version-state',
+        requestHash: 'a'.repeat(64),
+        status: 204,
+        responseJson: 'null',
+        createdAt: OLD,
+        expiresAt: FUTURE,
+      };
+      await context.executor.batch([idempotencyInsertStatement(foreign ? other : own, record)]);
+      const before = await foreignSnapshot(context);
+      const store = createVisibilityStore(executorOf(context), { providerAnchors: ANCHORS });
+      const input = {
+        packageId: 'K-O',
+        versionId: 'V-O',
+        expectedStatus:
+          method === 'releaseQuarantine' ? ('quarantined' as const) : ('active' as const),
+        manage: { kind: 'organization' as const },
+        audit: visibilityAudit('version.state_change'),
+        idempotency: { ...record, requestHash: 'b'.repeat(64) },
+      };
+      if (foreign) await context.executor.batch([auditPendingStatement(own, input.audit)]);
+      const result =
+        method === 'quarantineVersion'
+          ? await store.quarantineVersion(own, fence, { ...input, reason: 'admin_quarantine' })
+          : method === 'tombstoneVersion'
+            ? await store.tombstoneVersion(own, fence, { ...input, reason: 'admin_tombstone' })
+            : await store.releaseQuarantine(own, fence, input);
+      expect(result).toEqual({ ok: false, reason: foreign ? 'unclassified' : 'conflict' });
+      expect(await foreignSnapshot(context)).toEqual(before);
+      expect(
+        await context.executor.all({
+          sql: 'SELECT status, revision FROM version WHERE org_id = ? AND id = ?',
+          params: [own.orgId, 'V-O'],
+        }),
+      ).toEqual([{ status: input.expectedStatus, revision: 1 }]);
+    },
+  };
+}
+
 function storeCase(method: keyof typeof storeCalls, foreignTarget = false): ContractCase {
   return {
     name: `${method} through the store ${foreignTarget ? 'refuses a foreign target' : 'preserves every foreign row'}`,
@@ -563,11 +642,43 @@ function storeCase(method: keyof typeof storeCalls, foreignTarget = false): Cont
           ? {
               ok: false,
               ...(['quarantineVersion', 'releaseQuarantine', 'tombstoneVersion'].includes(method)
-                ? { reason: 'conflict' }
+                ? { reason: 'not_found' }
                 : {}),
             }
           : { ok: true },
       );
+      expect(await foreignSnapshot(context)).toEqual(before);
+    },
+  };
+}
+
+function foreignVersionCase(
+  method: 'quarantineVersion' | 'releaseQuarantine' | 'tombstoneVersion',
+): ContractCase {
+  return {
+    name: `${method} refuses a foreign version referencing an own package`,
+    async run(context) {
+      const fence = await seedStore(context, method);
+      const seed = seeder(context.executor);
+      await seed("UPDATE version SET version_normalized = '9.0.0' WHERE id = 'V-F'");
+      await seed.forged("UPDATE version SET package_id = 'K-O' WHERE id = 'V-F'");
+      const before = await foreignSnapshot(context);
+      const store = createVisibilityStore(executorOf(context), { providerAnchors: ANCHORS });
+      const ctx = orgOf(context).own;
+      const input = {
+        versionId: 'V-F',
+        packageId: 'K-O',
+        expectedStatus: method === 'releaseQuarantine' ? 'quarantined' : 'active',
+        manage: { kind: 'organization' },
+        audit: visibilityAudit('version.state_change'),
+      } as const;
+      const result =
+        method === 'quarantineVersion'
+          ? await store.quarantineVersion(ctx, fence, { ...input, reason: 'admin_quarantine' })
+          : method === 'tombstoneVersion'
+            ? await store.tombstoneVersion(ctx, fence, { ...input, reason: 'admin_tombstone' })
+            : await store.releaseQuarantine(ctx, fence, input);
+      expect(result).toMatchObject({ ok: false, reason: 'not_found' });
       expect(await foreignSnapshot(context)).toEqual(before);
     },
   };
@@ -746,11 +857,25 @@ export const entries: readonly MutationEntry[] = [
       .flatMap((method) => [storeCase(method), storeCase(method, true)])
       .concat(
         foreignPackageCase(true),
+        ...(['quarantineVersion', 'releaseQuarantine', 'tombstoneVersion'] as const).map(
+          foreignVersionCase,
+        ),
         foreignSubsetCase('removePattern'),
         foreignSubsetCase('removeExplicit'),
         patternLimitCase,
+        ...statusMethods.flatMap((method) => [
+          collisionCase(method, false),
+          collisionCase(method, true),
+        ]),
       ),
     predicates: [
+      ...statusMethods.map((method) => ({
+        name: `${method} collision probe excludes foreign keys`,
+        locate: /(?<=from api_idempotency where )org_id = \?/,
+        neutral: NOT_NULL,
+        copies: 1,
+        caseName: collisionCase(method, true).name,
+      })),
       ...(['removePattern', 'removeExplicit'] as const).map((method) => ({
         name: `${method} scopes the delegated delete`,
         locate: new RegExp(
@@ -776,18 +901,21 @@ export const entries: readonly MutationEntry[] = [
       },
       {
         name: 'admin quarantine advances only an own package',
-        locate: /"package"\."org_id" = \?/,
+        locate: /target_package\.org_id = \?/,
         neutral: NOT_NULL,
-        copies: 1,
+        copies: 2,
         caseName: foreignPackageCase(true).name,
       },
       ...(['quarantineVersion', 'releaseQuarantine', 'tombstoneVersion'] as const).map(
         (method) => ({
           name: `${method} target belongs to the caller organization`,
-          locate: /(?<=where id = \? and )org_id = \?/,
+          locate: /target_version\.org_id = \?/,
           neutral: NOT_NULL,
           copies: 2,
-          caseName: storeCase(method, true).name,
+          waivedCopies: {
+            0: 'The same initial guard independently scopes the version in its expected-status lookup. Removing only this occurrence still refuses the batch; the failure-probe occurrence is isolated by the foreign version referencing an own package.',
+          },
+          caseName: foreignVersionCase(method).name,
         }),
       ),
       ...(Object.keys(storeCalls) as (keyof typeof storeCalls)[]).map((method) => ({
@@ -798,7 +926,29 @@ export const entries: readonly MutationEntry[] = [
         caseName: storeCase(method).name,
       })),
     ],
+    sqlDecisions: statusMethods.map((method) => ({
+      name: `${method} detects a live key after rollback`,
+      pattern: /(?<=and )expires_at > \?/,
+      replacement: "expires_at > '9' and ? is not null",
+      expected: 1,
+      case: collisionCase(method, false),
+    })),
     waivers: [
+      {
+        locate: /(?<=WHERE )org_id = \?(?= AND principal_key = \? AND key = \? AND expires_at)/,
+        reason:
+          'The delegated idempotency insert live-row lookup is independently mutation-tested in idempotency.ts. Each status collision case exercises the insert and rollback; the separate failure probe organization scope is mutation-tested above.',
+      },
+      {
+        locate: /(?<=where id = \? and )org_id = \?/,
+        reason:
+          'The expected-status lookup repeats the target_version organization guard. Each version-state method independently rejects a foreign version referencing an own package before any transition or audit insertion.',
+      },
+      {
+        locate: /(?:release_version|bls_blob)\.org_id = \?/,
+        reason:
+          'The release lease check follows the independently tested target_version organization guard and uses its globally unique version and blob ids. T650 lease tests cover active leases; removing either repeated scope cannot admit a foreign version past the target guard.',
+      },
       {
         locate: /(?<=from project_source where )org_id = \?/,
         reason:

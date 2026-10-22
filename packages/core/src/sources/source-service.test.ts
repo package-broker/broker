@@ -55,6 +55,7 @@ const input = {
 
 function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: string[] = []) {
   const sources = {
+    acceptRemoval: vi.fn().mockResolvedValue('accepted'),
     create: vi.fn().mockResolvedValue('created'),
     update: vi.fn().mockResolvedValue('updated'),
     get: vi.fn().mockResolvedValue({
@@ -69,6 +70,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     delete: vi.fn().mockResolvedValue('deleted'),
   };
   const registeredNames = {
+    list: vi.fn().mockResolvedValue({ items: [], next: null }),
     owner: vi.fn().mockResolvedValue({ sourceId: 'source', projectId: 'project-a' }),
     add: vi.fn().mockResolvedValue('added'),
     remove: vi.fn().mockResolvedValue('removed_and_paused'),
@@ -1326,5 +1328,188 @@ describe('source list and pause', () => {
       service.pause(ctx, org, { ...fence, userId: 'other' }, 'source', call),
     ).rejects.toThrow(TypeError);
     expect(sources.pause).not.toHaveBeenCalled();
+  });
+});
+
+describe('registered-name listing', () => {
+  const reader = { ...org, actor: { ...org.actor, permissions: new Set(['org:sources:read']) } };
+  const query = { sourceId: 'source', limit: 1 };
+  it('uses the org-scoped source lookup and returns the repository page', async () => {
+    const { service, sources, registeredNames } = setup();
+    const page = {
+      items: [{ id: 'name', sourceId: 'source', ecosystem: 'composer', pattern: 'acme/*' }],
+      next: 'name',
+    };
+    registeredNames.list.mockResolvedValue(page);
+    expect(await service.listRegisteredNames(ctx, reader, query)).toEqual({
+      ok: true,
+      value: page,
+    });
+    expect(sources.get).toHaveBeenCalledWith(ctx, 'source');
+    expect(registeredNames.list).toHaveBeenCalledWith(ctx, query);
+  });
+  it('uses the visibility lookup for the matching project reader', async () => {
+    const { service, sources, registeredNames } = setup();
+    sources.getVisible.mockResolvedValue({
+      ...input,
+      id: 'source',
+      projectId: null,
+      credentialId: null,
+    } as SourceRecord);
+    expect((await service.listRegisteredNames(ctx, project, query)).ok).toBe(true);
+    expect(sources.getVisible).toHaveBeenCalledWith(ctx, {
+      projectId: 'project-a',
+      sourceId: 'source',
+    });
+    expect(sources.get).not.toHaveBeenCalled();
+    expect(registeredNames.list).toHaveBeenCalledWith(ctx, query);
+  });
+  it.each(['absent', 'foreign', 'invisible', 'archived'])('hides a %s project source', async () => {
+    const { service, registeredNames } = setup();
+    expect(await service.listRegisteredNames(ctx, project, query)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+  it('hides an absent organization source', async () => {
+    const { service, sources, registeredNames } = setup();
+    sources.get.mockResolvedValue(null);
+    expect(await service.listRegisteredNames(ctx, reader, query)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+  it.each([
+    { ...reader, actor: { ...reader.actor, permissions: new Set<string>() } },
+    { ...project, actor: { ...project.actor, orgId: orgContext('foreign').orgId } },
+    { ...project, actor: { ...project.actor, permissions: new Set(['project:sources:write']) } },
+  ])('denies unauthorized readers before a source lookup (%#)', async (actor) => {
+    const { service, sources, registeredNames } = setup();
+    expect(await service.listRegisteredNames(ctx, actor, query)).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(sources.get).not.toHaveBeenCalled();
+    expect(sources.getVisible).not.toHaveBeenCalled();
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+  it.each([0, 101, 1.5, NaN])('rejects invalid page size %s', async (limit) => {
+    const { service, registeredNames } = setup();
+    expect(await service.listRegisteredNames(ctx, reader, { ...query, limit })).toMatchObject({
+      ok: false,
+      error: 'invalid_config',
+    });
+    expect(registeredNames.list).not.toHaveBeenCalled();
+  });
+});
+
+describe('accepting a refused removal', () => {
+  const refusal = { at: '2026-10-22T10:00:00.000Z', absent: 9, listed: 1, successful: 1 };
+  const refused = (over: Partial<SourceRecord> = {}) =>
+    ({
+      ...input,
+      id: 'source',
+      credentialId: null,
+      removalRefusal: refusal,
+      removalAccepted: false,
+      ...over,
+    }) as SourceRecord;
+
+  it('requires an organization admin, including when source-write is delegated', async () => {
+    const f = setup();
+    f.sources.get.mockResolvedValue(refused());
+    expect(
+      await f.service.acceptRemoval(
+        ctx,
+        { ...org, actor: { ...org.actor, isOrganizationAdmin: false } },
+        fence,
+        'source',
+        call,
+      ),
+    ).toEqual({ ok: false, error: 'forbidden' });
+    expect(await f.service.acceptRemoval(ctx, project, fence, 'source', call)).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
+  });
+
+  it('audits the source id and the refusal facts it accepts', async () => {
+    const f = setup();
+    f.sources.get.mockResolvedValue(refused());
+    expect(await f.service.acceptRemoval(ctx, org, fence, 'source', call)).toEqual({
+      ok: true,
+      value: null,
+    });
+    const input = f.sources.acceptRemoval.mock.calls[0]?.[2];
+    expect(input).toMatchObject({
+      id: 'source',
+      refusal,
+      audit: { action: 'source.removal_accepted', target: { type: 'source', id: 'source' } },
+    });
+    expect(JSON.parse(input.audit.payloadJson).changes).toEqual({
+      source_id: { new: 'source' },
+      refused_at: { new: refusal.at },
+      absent: { new: 9 },
+      listed: { new: 1 },
+      successful: { new: 1 },
+    });
+  });
+
+  it.each([
+    ['without a recorded refusal', { removalRefusal: null }],
+    ['when nothing was listed successfully', { removalRefusal: { ...refusal, successful: 0 } }],
+    ['when an acceptance is already armed', { removalAccepted: true }],
+  ])('conflicts %s', async (_name, over) => {
+    const f = setup();
+    f.sources.get.mockResolvedValue(refused(over));
+    expect(await f.service.acceptRemoval(ctx, org, fence, 'source', call)).toEqual({
+      ok: false,
+      error: 'conflict',
+    });
+    expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
+  });
+
+  it('exposes the refusal facts and the armed flag on the source DTO', async () => {
+    const f = setup();
+    const reader = { ...org, actor: { ...org.actor, permissions: new Set(['org:sources:read']) } };
+    f.sources.list.mockResolvedValue([refused({ removalAccepted: true })]);
+    const result = await f.service.list(ctx, reader, { cursor: null, limit: 10 });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { items: [{ lastRemovalRefusal: refusal, removalAcceptanceArmed: true }] },
+    });
+  });
+
+  it('shows the refusal facts and the armed flag to project-scoped readers', async () => {
+    const f = setup();
+    const reader = {
+      ...project,
+      actor: { ...project.actor, permissions: new Set(['project:sources:read']) },
+    };
+    f.sources.list.mockResolvedValue([refused({ projectId: 'project-a', removalAccepted: true })]);
+    expect(
+      await f.service.list(ctx, reader, { projectId: 'project-a', cursor: null, limit: 10 }),
+    ).toMatchObject({
+      ok: true,
+      value: { items: [{ lastRemovalRefusal: refusal, removalAcceptanceArmed: true }] },
+    });
+  });
+
+  it('hides absent and invisible project sources', async () => {
+    const f = setup();
+    f.sources.get.mockResolvedValueOnce(null);
+    expect(await f.service.acceptRemoval(ctx, org, fence, 'source', call)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    f.sources.get.mockResolvedValueOnce(refused({ projectId: 'archived-project' }));
+    expect(await f.service.acceptRemoval(ctx, org, fence, 'source', call)).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,7 @@
+import {
+  D1_STATEMENTS_PER_BATCH,
+  D1_STATEMENTS_PER_INVOCATION,
+} from '@package-broker/core/db/port';
 import { sql } from 'kysely';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
@@ -7,6 +11,7 @@ import {
   type VisibilityWriteResult,
 } from '@package-broker/core/db/catalogue';
 import type { MutationFence } from '@package-broker/core/authz/fence';
+import { versionTransition } from '@package-broker/core/catalogue/version-rules';
 import type {
   OrgContext,
   SqlExecutor,
@@ -15,17 +20,19 @@ import type {
 } from '@package-broker/core/db/port';
 import {
   assertGuard,
+  assertCheck,
   compile,
   db,
   newOpId,
   runOrgFenced,
+  type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { versionStatusStatements } from '../internal/catalogue-status-statements.js';
 import { packageUpsertStatements } from './catalogue-write-package.js';
 import { versionInsertStatements } from './catalogue-write-version-insert.js';
 import { versionUpdateStatements } from './catalogue-write-version-update.js';
-import { distTagStatements, MAX_TAGS_PER_CALL } from './catalogue-write-tags.js';
+import { distTagStatementGroups, MAX_TAGS_PER_CALL } from './catalogue-write-tags.js';
 import { distAttachStatements } from './catalogue-write-dist.js';
 import { quarantineStatements } from './catalogue-status.js';
 import type { FinalizeGuardOptions } from '@package-broker/core/ingest/finalize-guard';
@@ -39,9 +46,12 @@ import {
   type RemoveExplicitResult,
 } from './visibility-subset.js';
 import { actorHolds } from './actor-authority.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
+import { blobLeaseNotLive } from './blob-lease-guard.js';
 
-const MAX_STATEMENTS = 500;
-const MAX_BATCH_STATEMENTS = 200;
+const MAX_STATEMENTS = D1_STATEMENTS_PER_INVOCATION;
+const MAX_BATCH_STATEMENTS = D1_STATEMENTS_PER_BATCH;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
 const encoder = new TextEncoder();
 function parameterBytes(statements: readonly Statement[]): number {
@@ -126,7 +136,7 @@ export function createCatalogueWriter(
   return {
     ...reconcile,
     statementBudget: {
-      syncPackage: 500,
+      syncPackage: D1_STATEMENTS_PER_INVOCATION,
       attachDist: 4,
       openListing: 3,
       markListing: 5,
@@ -247,7 +257,7 @@ export function createCatalogueWriter(
       const tags =
         input.tags === undefined
           ? null
-          : distTagStatements(ctx, guard, {
+          : distTagStatementGroups(ctx, guard, {
               packageId: placeholder,
               ecosystem: input.ecosystem,
               tags: input.tags,
@@ -271,22 +281,14 @@ export function createCatalogueWriter(
         placeholder,
         lookup,
       );
-      const tagAdvance = tags?.statements.at(-1);
+      const tagAdvance = tags?.groups.at(-1)?.at(-1);
       const advance = tagAdvance && bindPackage(tagAdvance, placeholder, lookup);
-      const tagGroups: Statement[][] = [];
-      const tagStatements = tags?.statements ?? [];
-      for (let offset = 0; offset < tagStatements.length;) {
-        // A tag's before-image and its following write must commit together.
-        const size = /^insert into "dist_tag_history" /i.test(tagStatements[offset]!.sql) ? 2 : 1;
-        tagGroups.push(tagStatements.slice(offset, offset + size));
-        offset += size;
-      }
       const groups = [
         upsert.statements,
         [probe],
         update?.statements ?? [],
         insert?.statements ?? [],
-        ...tagGroups,
+        ...(tags?.groups ?? []),
         [lookup],
       ].map((group) =>
         group.map((statement) => {
@@ -350,7 +352,8 @@ export function createCatalogueWriter(
       offset += update?.statements.length ?? 0;
       const inserted = insert?.result(results.slice(offset, offset + insert.statements.length));
       offset += insert?.statements.length ?? 0;
-      const tagResult = tags?.result(results.slice(offset, offset + tags.statements.length));
+      const tagStatementCount = tags?.groups.reduce((sum, group) => sum + group.length, 0) ?? 0;
+      const tagResult = tags?.result(results.slice(offset, offset + tagStatementCount));
       const packageId = results.at(-1)?.rows[0]?.['id'];
       if (typeof packageId !== 'string') throw new TypeError('catalogue package was not returned');
       const refused = input.versions.flatMap((v, index) => {
@@ -419,29 +422,90 @@ export function createVisibilityStore(
   async function status(
     ctx: OrgContext,
     fence: MutationFence,
-    versionId: string,
+    input: Parameters<VisibilityStore['releaseQuarantine']>[2],
     to: 'active' | 'quarantined' | 'tombstoned',
     reason: 'admin_release' | 'admin_quarantine' | 'admin_tombstone',
   ): Promise<VisibilityWriteResult> {
+    const { versionId, packageId, expectedStatus, manage } = input;
     const authority = actorHolds(ctx, fence, {
-      permission: 'org:sources:write',
-      projectId: null,
+      permission:
+        manage.kind === 'organization' ? 'org:packages:manage' : 'project:packages:manage',
+      projectId: manage.kind === 'organization' ? null : manage.projectId,
       providerAnchors: options.providerAnchors,
     });
-    const present = sql<boolean>`exists (select 1 from version where id = ${versionId} and org_id = ${ctx.orgId})`;
+    const ownership =
+      manage.kind === 'organization'
+        ? sql<boolean>`1`
+        : sql<boolean>`exists (
+      select 1 from source as owner_source
+      join project as owner_project on owner_project.id = owner_source.project_id
+        and owner_project.org_id = ${ctx.orgId}
+      where owner_source.id = target_package.source_id and owner_source.org_id = ${ctx.orgId}
+        and owner_source.project_id = ${manage.projectId} and owner_project.status = 'active')`;
+    const present = sql<boolean>`exists (
+      select 1 from version as target_version
+      join package as target_package on target_package.id = target_version.package_id
+        and target_package.org_id = ${ctx.orgId}
+      where target_version.id = ${versionId} and target_version.org_id = ${ctx.orgId}
+        and target_package.id = ${packageId} and ${ownership})`;
+    const statusMatches = sql<boolean>`exists (select 1 from version
+      where id = ${versionId} and org_id = ${ctx.orgId} and status = ${expectedStatus})
+      and ${versionTransition(expectedStatus, to, reason) ? sql`1` : sql`0`}`;
+    const lease = blobLeaseNotLive(ctx, 'release_version');
+    const leaseCondition = sql.join(
+      lease.sql
+        .split('?')
+        .flatMap((part, index) =>
+          index < lease.params.length
+            ? [sql.raw(part), sql`${lease.params[index]}`]
+            : [sql.raw(part)],
+        ),
+      sql``,
+    );
+    const blobReady =
+      to !== 'active'
+        ? sql<boolean>`1`
+        : sql<boolean>`exists (
+      select 1 from version as release_version where release_version.id = ${versionId}
+        and release_version.org_id = ${ctx.orgId} and ${leaseCondition})`;
     const plan = versionStatusStatements(ctx, { versionId, to, reason });
     const outcome = await runOrgFenced(
       bounded,
       ctx,
       fence,
-      assertGuard(sql<boolean>`(${authority} and ${present})`, ctx),
-      plan.statements,
-      {
-        authority: compile(db.selectNoFrom(sql<number>`(${authority}) is not 1`.as('failed'))),
-        conflict: compile(db.selectNoFrom(sql<number>`(${present}) is not 1`.as('failed'))),
-      },
+      assertGuard(sql<boolean>`(${present} and ${statusMatches} and ${blobReady})`, ctx),
+      [
+        ...assertCheck(authority),
+        ...plan.statements,
+        auditPendingStatement(ctx, input.audit),
+        ...(input.idempotency === undefined
+          ? []
+          : [idempotencyInsertStatement(ctx, input.idempotency)]),
+      ],
+      {},
     );
-    return outcome.ok ? { ok: true, opId: plan.opId } : { ok: false, reason: outcome.reason };
+    if (outcome.ok) return { ok: true, opId: plan.opId };
+    if (outcome.reason === 'indeterminate') return { ok: false, reason: outcome.reason };
+    const holds = async (condition: Guard) => {
+      const [row] = await bounded.all<{ held: number }>(
+        compile(db.selectNoFrom(sql<number>`(${condition}) is 1`.as('held'))),
+      );
+      return row?.held === 1;
+    };
+    try {
+      if (!(await holds(present))) return { ok: false, reason: 'not_found' };
+      if (!(await holds(statusMatches))) return { ok: false, reason: 'conflict' };
+      if (!(await holds(authority))) return { ok: false, reason: 'authority' };
+      if (!(await holds(blobReady))) return { ok: false, reason: 'conflict' };
+      if (
+        input.idempotency !== undefined &&
+        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
+      )
+        return { ok: false, reason: 'conflict' };
+    } catch {
+      return { ok: false, reason: 'unclassified' };
+    }
+    return { ok: false, reason: outcome.reason };
   }
   return {
     ...createVisibilityAttachRepository(bounded, options),
@@ -475,10 +539,8 @@ export function createVisibilityStore(
       );
     },
     quarantineVersion: (ctx, fence, input) =>
-      status(ctx, fence, input.versionId, 'quarantined', input.reason),
-    releaseQuarantine: (ctx, fence, input) =>
-      status(ctx, fence, input.versionId, 'active', 'admin_release'),
-    tombstoneVersion: (ctx, fence, input) =>
-      status(ctx, fence, input.versionId, 'tombstoned', input.reason),
+      status(ctx, fence, input, 'quarantined', input.reason),
+    releaseQuarantine: (ctx, fence, input) => status(ctx, fence, input, 'active', 'admin_release'),
+    tombstoneVersion: (ctx, fence, input) => status(ctx, fence, input, 'tombstoned', input.reason),
   };
 }

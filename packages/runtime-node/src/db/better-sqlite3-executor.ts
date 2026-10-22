@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { classifySqliteError } from '@package-broker/core/db/errors';
+import { assertBatchStatementCount, classifySqliteError } from '@package-broker/core/db/errors';
 import type {
   SqlExecutor,
   SqlValue,
@@ -133,6 +133,7 @@ export function openBetterSqliteExecutor(
       }
     },
     async batch(statements: readonly Statement[]): Promise<StatementResult[]> {
+      assertBatchStatementCount(statements.length);
       if (statements.length === 0) return [];
       const bound = statements.map((statement) => bindParams(statement.params));
       try {

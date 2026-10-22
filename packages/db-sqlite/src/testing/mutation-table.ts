@@ -1,5 +1,7 @@
+import { entries as catalogueWriteTagGroupsEntries } from './mutation-table/catalogue-write-tag-groups.js';
 import { entries as accessServicesEntries } from './mutation-table/access-services.js';
 import { entries as sourceVisibleEntries } from './mutation-table/source-visible.js';
+import { entries as packageAdminReadEntries } from './mutation-table/package-admin-read.js';
 import { entries as sourceListEntries } from './mutation-table/source-list.js';
 import { entries as sourcePauseEntries } from './mutation-table/source-pause.js';
 import { entries as vulnerabilityEntries } from './mutation-table/vulnerability.js';
@@ -94,6 +96,7 @@ import { entries as catalogueReblobEntries } from './mutation-table/catalogue-re
 import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
 import { entries as sourceSyncReadsEntries } from './mutation-table/source-sync-reads.js';
 import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
+import { entries as sourceRemovalEntries } from './mutation-table/source-removal.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -105,6 +108,7 @@ export { builderAllowlist, exportedBuilders, builderNames } from './mutation-tab
 
 export const mutationTable: readonly MutationEntry[] = [
   ...sourceVisibleEntries,
+  ...packageAdminReadEntries,
   ...sourceListEntries,
   ...sourcePauseEntries,
   ...fixtureVersionListingsEntries,
@@ -170,6 +174,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...cataloguePredicatesEntries,
   ...registeredNameEntries,
   ...catalogueWriteTagsEntries,
+  ...catalogueWriteTagGroupsEntries,
   ...accessEntries,
   ...accessBuilderEntries,
   ...accessServicesEntries,
@@ -199,6 +204,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...importRollbackEntries,
   ...importVerificationEntries,
   ...sourceSyncCountsEntries,
+  ...sourceRemovalEntries,
   ...sourceSyncReadsEntries,
 ];
 

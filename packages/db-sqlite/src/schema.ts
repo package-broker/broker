@@ -34,7 +34,7 @@ export interface MigrationLockTable {
   expires_at: string | null;
 }
 
-/** Mirrors `user_account` in `migrations/0001_init.sql` and `migrations/0018_pat_invalid_before.sql`. */
+/** Mirrors `user_account` in `migrations/0001_init.sql`. */
 export interface UserAccountTable {
   id: string;
   org_id: string;
@@ -48,7 +48,7 @@ export interface UserAccountTable {
   pat_invalid_before: string | null;
 }
 
-/** Mirrors `identity` in `migrations/0001_init.sql` and `migrations/0002_local_login.sql`. */
+/** Mirrors `identity` in `migrations/0001_init.sql`. */
 export interface IdentityTable {
   id: string;
   org_id: string;
@@ -157,7 +157,7 @@ export interface CredentialTable {
   updated_at: Generated<string>;
 }
 
-/** Mirrors `local_login` in `migrations/0002_local_login.sql`. */
+/** Mirrors `local_login` in `migrations/0001_init.sql`. */
 export interface LocalLoginTable {
   user_id: string;
   org_id: string;
@@ -176,7 +176,7 @@ export interface LocalLoginTable {
   updated_at: Generated<string>;
 }
 
-/** Mirrors `identity_provider_binding` in `migrations/0002_local_login.sql`. */
+/** Mirrors `identity_provider_binding` in `migrations/0001_init.sql`. */
 export interface IdentityProviderBindingTable {
   org_id: string;
   provider: string;
@@ -184,7 +184,7 @@ export interface IdentityProviderBindingTable {
   created_at: Generated<string>;
 }
 
-/** Mirrors `service_principal` in `migrations/0001_init.sql` and `migrations/0003_access_model.sql`. */
+/** Mirrors `service_principal` in `migrations/0001_init.sql`. */
 export interface ServicePrincipalTable {
   id: string;
   org_id: string;
@@ -198,7 +198,7 @@ export interface ServicePrincipalTable {
   last_op_id: string | null;
 }
 
-/** Mirrors `token` in `migrations/0001_init.sql` and `migrations/0003_access_model.sql`. */
+/** Mirrors `token` in `migrations/0001_init.sql`. */
 export interface TokenTable {
   id: string;
   org_id: string;
@@ -224,14 +224,14 @@ export interface TokenTable {
   last_op_id: string | null;
 }
 
-/** Mirrors `service_principal_permission` in `migrations/0003_access_model.sql`. */
+/** Mirrors `service_principal_permission` in `migrations/0001_init.sql`. */
 export interface ServicePrincipalPermissionTable {
   org_id: string;
   service_principal_id: string;
   permission: string;
 }
 
-/** Mirrors `identity_block` in `migrations/0003_access_model.sql`. */
+/** Mirrors `identity_block` in `migrations/0001_init.sql`. */
 export interface IdentityBlockTable {
   org_id: string;
   provider: string;
@@ -241,25 +241,25 @@ export interface IdentityBlockTable {
   blocked_by_user_id: string | null;
 }
 
-/** Mirrors `access_mutation_guard` in `migrations/0003_access_model.sql`. */
+/** Mirrors `access_mutation_guard` in `migrations/0001_init.sql`. */
 export interface AccessMutationGuardTable {
   key: string;
 }
 
-/** Mirrors `cache_epoch` in `migrations/0004_cache_epoch.sql`. */
+/** Mirrors `cache_epoch` in `migrations/0001_init.sql`. */
 export interface CacheEpochTable {
   org_id: string;
   version: string;
 }
 
-/** Mirrors `keyring_verifier` in `migrations/0015_keyring_verifier.sql`. */
+/** Mirrors `keyring_verifier` in `migrations/0001_init.sql`. */
 export interface KeyringVerifierTable {
   key_version: number;
   mac: Uint8Array;
   created_at: Generated<string>;
 }
 
-/** Mirrors `job` in `migrations/0001_init.sql` and `migrations/0006_ports.sql`. */
+/** Mirrors `job` in `migrations/0001_init.sql`. */
 export interface JobTable {
   id: string;
   org_id: string;
@@ -282,7 +282,7 @@ export interface JobTable {
   initiator_token_id: string | null;
 }
 
-/** Mirrors `job_attempt` in `migrations/0006_ports.sql`. */
+/** Mirrors `job_attempt` in `migrations/0001_init.sql`. */
 export interface JobAttemptTable {
   id: string;
   org_id: string;
@@ -308,7 +308,7 @@ export interface JobScheduleTable {
   enabled: Generated<number>;
 }
 
-/** Mirrors `blob` in `migrations/0001_init.sql`, `migrations/0006_ports.sql` and `migrations/0009_upstream_state_content_index.sql`. */
+/** Mirrors `blob` in `migrations/0001_init.sql`. */
 export interface BlobTable {
   id: string;
   org_id: string;
@@ -368,6 +368,11 @@ export interface SourceTable {
   listing_hash: string | null;
   listing_open_stamp: string | null;
   listing_opened_at: string | null;
+  last_refusal_at: string | null;
+  last_refusal_absent: number | null;
+  last_refusal_listed: number | null;
+  last_refusal_successful: number | null;
+  removal_accepted: Generated<number>;
   consecutive_failures: Generated<number>;
   last_error: string | null;
   created_at: Generated<string>;
@@ -416,7 +421,7 @@ export interface ProjectSourceTable {
   created_at: Generated<string>;
 }
 
-/** Mirrors `project_package` in `migrations/0024_closure_edge_indexes.sql`. */
+/** Mirrors `project_package` in `migrations/0001_init.sql`. */
 export interface ProjectPackageTable {
   org_id: string;
   project_id: string;
@@ -511,7 +516,7 @@ export type IngestScope = 'source' | 'package';
 export type IngestState = 'running' | 'complete' | 'abandoned';
 export type RepresentationForm = 'composer-p2' | 'composer-p2-dev';
 
-/** Mirrors `ingest_session` in `migrations/0007_registry.sql`. */
+/** Mirrors `ingest_session` in `migrations/0001_init.sql`. */
 export interface IngestSessionTable {
   id: string;
   org_id: string;
@@ -535,7 +540,7 @@ export interface IngestSessionTable {
   updated_at: string;
 }
 
-/** Mirrors `upstream_state` in `migrations/0007_registry.sql`. */
+/** Mirrors `upstream_state` in `migrations/0001_init.sql`. */
 export interface UpstreamStateTable {
   org_id: string;
   package_id: string;
@@ -549,7 +554,7 @@ export interface UpstreamStateTable {
   first_not_found_at: string | null;
 }
 
-/** Mirrors `fetch_lease` in `migrations/0007_registry.sql`. */
+/** Mirrors `fetch_lease` in `migrations/0001_init.sql`. */
 export interface FetchLeaseTable {
   org_id: string;
   lease_key: string;
@@ -571,7 +576,7 @@ export interface RepresentationClockTable {
   package_id: Generated<string>;
 }
 
-/** Mirrors `import_run` in `migrations/0001_init.sql`, `migrations/0012_import.sql` and `migrations/0019_import_rollback_counts.sql`. */
+/** Mirrors `import_run` in `migrations/0001_init.sql`. */
 export interface ImportRunTable {
   id: string;
   org_id: string;
@@ -605,7 +610,7 @@ export interface ImportRunTable {
   updated_at: Generated<string>;
 }
 
-/** Mirrors `import_ref` in `migrations/0001_init.sql`, `migrations/0012_import.sql` and `migrations/0019_import_rollback_counts.sql`. */
+/** Mirrors `import_ref` in `migrations/0001_init.sql`. */
 export interface ImportRefTable {
   id: string;
   org_id: string;
@@ -623,7 +628,7 @@ export interface ImportRefTable {
   created_at: Generated<string>;
 }
 
-/** Mirrors `audit_pending` in `migrations/0011_api_audit.sql`. */
+/** Mirrors `audit_pending` in `migrations/0001_init.sql`. */
 export interface AuditPendingTable {
   id: string;
   org_id: string;
@@ -639,7 +644,7 @@ export interface AuditPendingTable {
   payload_json: Generated<string>;
 }
 
-/** Mirrors `api_idempotency` in `migrations/0011_api_audit.sql`. */
+/** Mirrors `api_idempotency` in `migrations/0001_init.sql`. */
 export interface ApiIdempotencyTable {
   org_id: string;
   principal_key: string;

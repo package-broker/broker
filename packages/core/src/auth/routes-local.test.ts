@@ -14,6 +14,11 @@ import { fixedClock } from '../ids.js';
 import { createKernel } from '../kernel/kernel.js';
 import type { KernelLog } from '../kernel/errors.js';
 import type { PluginPorts } from '../plugin.js';
+import {
+  createObservability,
+  type ObsRecord,
+  type ObsRecordSink,
+} from '../platform/observability.js';
 import { documented } from '../test-support/documented-routes.js';
 
 const ORIGIN = 'https://broker.example.test';
@@ -74,6 +79,7 @@ interface Harness {
 }
 
 interface Options {
+  readonly sink?: ObsRecordSink;
   readonly loginResult?: LocalResult;
   readonly reauthResult?: Awaited<ReturnType<LocalLoginService['reauth']>>;
   readonly startResult?: Awaited<ReturnType<LocalSetupService['start']>>;
@@ -108,8 +114,24 @@ async function harness(options: Options = {}): Promise<Harness> {
       clock: fixedClock(NOW),
       publicOrigin: ORIGIN,
     });
+  const obs =
+    options.sink &&
+    createObservability(
+      options.sink,
+      { deploymentId: 'test', runtime: 'node', requestId: null },
+      {
+        events: new Set([
+          'auth.local.setup.completed',
+          'auth.login.succeeded',
+          'auth.reauth.succeeded',
+        ]),
+        reasonCodes: new Set(),
+        routeTemplates: new Set(),
+      },
+    );
   const log: KernelLog = (entry) => {
     entries.push(entry);
+    if (obs) obs.log(entry as Parameters<typeof obs.log>[0]);
   };
   const kernel = await createKernel({
     platform: 'node',
@@ -815,6 +837,49 @@ describe('createLocalRoutes', () => {
   });
 
   describe('logging', () => {
+    it('sends the setup user id to the observability sink', async () => {
+      const records: ObsRecord[] = [];
+      const h = await harness({ sink: { emit: (record) => void records.push(record) } });
+      const response = await h.fetch(
+        post(FINISH, {
+          token: SENTINEL.token,
+          password: SENTINEL.password,
+          code: SENTINEL.code,
+        }),
+      );
+      expect(response.status).toBe(204);
+      expect(records).toContainEqual({
+        kind: 'log',
+        record: expect.objectContaining({
+          event: 'auth.local.setup.completed',
+          user_id: GRANTED.userId,
+        }),
+      });
+    });
+
+    it('sends the reauthentication session id to the observability sink', async () => {
+      const records: ObsRecord[] = [];
+      const h = await harness({ sink: { emit: (record) => void records.push(record) } });
+      const response = await h.fetch(
+        post(
+          REAUTH,
+          {
+            password: SENTINEL.password,
+            code: SENTINEL.code,
+          },
+          sessionHeaders,
+        ),
+      );
+      expect(response.status).toBe(204);
+      expect(records).toContainEqual({
+        kind: 'log',
+        record: expect.objectContaining({
+          event: 'auth.reauth.succeeded',
+          session_id: activeSession().id,
+        }),
+      });
+    });
+
     function assertNoSentinels(entries: readonly Entry[]): void {
       const logged = JSON.stringify(entries);
       for (const value of Object.values(SENTINEL)) {

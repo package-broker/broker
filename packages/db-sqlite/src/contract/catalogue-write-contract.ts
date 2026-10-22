@@ -35,6 +35,7 @@ import { createCatalogueWriter, createVisibilityStore } from '../repositories/ca
 import { createCatalogueWriteGuard } from '../repositories/catalogue-write-package.js';
 import { createCatalogueReader } from '../repositories/catalogue.js';
 import { seedTwoOrganizations } from './two-organizations.js';
+import { describeWriterBatchContract } from './writer-batch-contract.js';
 
 export interface OpenedCatalogueWriteDatabase {
   readonly executor: SqlExecutor;
@@ -116,7 +117,12 @@ async function withWorld(open: Open, body: (w: World) => Promise<void>, wrap?: W
         "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('role', ?, 'admin', 'Admin', 'organization', 0)",
         org.orgId,
       ),
-      ...['org:sources:write', 'project:sources:write', 'project:packages:manage'].map((p) =>
+      ...[
+        'org:sources:write',
+        'org:packages:manage',
+        'project:sources:write',
+        'project:packages:manage',
+      ].map((p) =>
         st(
           "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'role', ?)",
           org.orgId,
@@ -398,6 +404,11 @@ export const catalogueWriteContractCases = {
 
 export function describeCatalogueWriteContract(name: string, open: Open): void {
   describe(`catalogue write contract: ${name}`, () => {
+    describeWriterBatchContract(async () => {
+      const opened = await open();
+      const { a: ctx } = await seedTwoOrganizations(opened.executor);
+      return { executor: opened.executor, ctx, close: () => opened.close() };
+    });
     for (const ecosystem of ['npm', 'composer'] as const) {
       const denied = [
         'token',
@@ -511,7 +522,16 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
           'id'
         ] as string;
         expect(
-          await w.store.tombstoneVersion(w.org, fence(), { versionId, reason: 'admin_tombstone' }),
+          await w.store.tombstoneVersion(w.org, fence(), {
+            packageId: (await w.rows('SELECT package_id FROM version WHERE org_id = ?'))[0]![
+              'package_id'
+            ] as string,
+            expectedStatus: 'active',
+            manage: { kind: 'organization' },
+            audit: visibilityAudit('version.state_change'),
+            versionId,
+            reason: 'admin_tombstone',
+          }),
         ).toMatchObject({ ok: true });
         expect(await w.sync()).toMatchObject({
           inserted: 0,
@@ -524,6 +544,86 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
         ]);
       });
     });
+    for (const method of ['quarantineVersion', 'tombstoneVersion', 'releaseQuarantine'] as const) {
+      it(`${method}: a live key reused for another version conflicts without writes`, async () => {
+        await withWorld(open, async (w) => {
+          const { packageId } = await w.sync([version(0), version(1)]);
+          if (method === 'releaseQuarantine')
+            await w.executor.batch([
+              st("UPDATE version SET status = 'quarantined' WHERE org_id = ?", w.org.orgId),
+            ]);
+          const versions = await w.rows(
+            'SELECT id FROM version WHERE org_id = ? ORDER BY version_normalized',
+          );
+          const record = {
+            principalKey: 'user:admin',
+            key: 'version-state',
+            route: '/version-state',
+            requestHash: 'a'.repeat(64),
+            status: 204,
+            responseJson: 'null',
+            createdAt: '2026-10-22T00:00:00.000Z',
+            expiresAt: '2999-01-01T00:00:00.000Z',
+          };
+          const run = (index: number) => {
+            const input = {
+              packageId,
+              versionId: versions[index]!['id'] as string,
+              expectedStatus:
+                method === 'releaseQuarantine' ? ('quarantined' as const) : ('active' as const),
+              manage: { kind: 'organization' as const },
+              audit: visibilityAudit('version.state_change'),
+              idempotency: index === 0 ? record : { ...record, requestHash: 'b'.repeat(64) },
+            };
+            if (method === 'quarantineVersion')
+              return w.store.quarantineVersion(w.org, fence(), {
+                ...input,
+                reason: 'admin_quarantine',
+              });
+            if (method === 'tombstoneVersion')
+              return w.store.tombstoneVersion(w.org, fence(), {
+                ...input,
+                reason: 'admin_tombstone',
+              });
+            return w.store.releaseQuarantine(w.org, fence(), input);
+          };
+          const snapshot = async () => {
+            const state = [];
+            for (const table of [
+              'version',
+              'version_revision',
+              'package',
+              'cache_epoch',
+              'audit_pending',
+              'api_idempotency',
+            ])
+              state.push(await w.rows(`SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1`));
+            return state;
+          };
+          expect(await run(0)).toMatchObject({ ok: true });
+          const before = await snapshot();
+          expect(await run(1)).toEqual({ ok: false, reason: 'conflict' });
+          expect(await snapshot()).toEqual(before);
+          expect(
+            await settleIdempotent({
+              record,
+              hash: record.requestHash,
+              now: new Date(record.createdAt),
+              find: () =>
+                createIdempotencyRepository(w.executor).find(
+                  w.org,
+                  record.principalKey,
+                  record.key,
+                  record.createdAt,
+                ),
+              run: () => run(0),
+              failed: (result) => !result.ok,
+            }),
+          ).toEqual({ kind: 'replay', record });
+          expect(await snapshot()).toEqual(before);
+        });
+      });
+    }
     for (const kind of ['source', 'package'] as const) {
       it(`${kind}: refuses incomplete and empty listing finalization`, async () => {
         await withWorld(open, async (w) => {
@@ -802,6 +902,10 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
               'id'
             ] as string;
             result = await w.store.quarantineVersion(w.org, fence(), {
+              packageId,
+              expectedStatus: 'active',
+              manage: { kind: 'organization' },
+              audit: visibilityAudit('version.state_change'),
               versionId,
               reason: 'admin_quarantine',
             });

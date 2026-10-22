@@ -19,6 +19,7 @@ it('lists only working commands in --help', async () => {
       'build',
       'migrate',
       'bootstrap',
+      'cloudflare setup',
       'cloudflare provision',
       'cloudflare deploy',
       'cloudflare smoke',
@@ -32,6 +33,7 @@ it('lists only working commands in --help', async () => {
       'admin rebind-provider',
       'admin show-provider-binding',
       'import satis plan',
+      'source accept-removal',
       'version',
     ]);
     expect(help).not.toContain('pb openapi');

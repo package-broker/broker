@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import type { ScalarStatement, StatementResult } from '@package-broker/core/db/port';
-import { loadMigrationSource, sha256Hex } from '@package-broker/db-sqlite/migrations/source';
+import { sha256Hex } from '@package-broker/db-sqlite/migrations/source';
 import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { run } from '../cli.js';
@@ -103,24 +103,10 @@ async function realInit(): Promise<string> {
   return readFile(new URL('../../../db-sqlite/migrations/0001_init.sql', import.meta.url), 'utf8');
 }
 
-const LATER = [
-  '0003_access_model',
-  '0004_cache_epoch',
-  '0005_admin_permission_topup',
-  '0006_ports',
-] as const;
-
-async function laterSql(name: string): Promise<string> {
-  return readFile(new URL(`../../../db-sqlite/migrations/${name}.sql`, import.meta.url), 'utf8');
-}
-
 async function writeBuiltInit(root: string, sql: string): Promise<void> {
   await mkdir(join(root, 'generated'), { recursive: true });
   await mkdir(join(root, 'migrations', 'core'), { recursive: true });
   await writeFile(join(root, 'migrations', 'core', '0001_init.sql'), sql);
-  for (const name of LATER) {
-    await writeFile(join(root, 'migrations', 'core', `${name}.sql`), await laterSql(name));
-  }
   await writeFile(
     join(root, 'generated', 'manifest.json'),
     JSON.stringify({
@@ -132,17 +118,6 @@ async function writeBuiltInit(root: string, sql: string): Promise<void> {
           checksum: await sha256Hex(sql),
           phase: 'expand',
         },
-        ...(await Promise.all(
-          LATER.map(async (name) => {
-            const text = await laterSql(name);
-            return {
-              id: `core:${name}`,
-              name: `${name}.sql`,
-              checksum: await sha256Hex(text),
-              phase: (await loadMigrationSource('core', `${name}.sql`, text)).phase,
-            };
-          }),
-        )),
       ],
     }),
   );
@@ -268,13 +243,7 @@ it('1. applies core:0001_init once and skips it on the second run', async () => 
     expect(await migrate(harness.fetch)).toBe(0);
     expect(console.log).toHaveBeenLastCalledWith(
       JSON.stringify({
-        applied: [
-          'core:0001_init',
-          'core:0003_access_model',
-          'core:0004_cache_epoch',
-          'core:0005_admin_permission_topup',
-          'core:0006_ports',
-        ],
+        applied: ['core:0001_init'],
         skipped: [],
         unknown: [],
         pending: [],
@@ -284,13 +253,7 @@ it('1. applies core:0001_init once and skips it on the second run', async () => 
     expect(console.log).toHaveBeenLastCalledWith(
       JSON.stringify({
         applied: [],
-        skipped: [
-          'core:0001_init',
-          'core:0003_access_model',
-          'core:0004_cache_epoch',
-          'core:0005_admin_permission_topup',
-          'core:0006_ports',
-        ],
+        skipped: ['core:0001_init'],
         unknown: [],
         pending: [],
       }),
@@ -403,13 +366,7 @@ it('7. dry run sends one SELECT and reports the migration as pending', async () 
         applied: [],
         skipped: [],
         unknown: [],
-        pending: [
-          'core:0001_init',
-          'core:0003_access_model',
-          'core:0004_cache_epoch',
-          'core:0005_admin_permission_topup',
-          'core:0006_ports',
-        ],
+        pending: ['core:0001_init'],
       }),
     );
   } finally {
@@ -705,6 +662,19 @@ it('returns typed migrate and org results without console output', async () => {
 
 it('keeps provider lock-release warnings out of typed results and diagnostic callbacks', async () => {
   await writeBuiltInit(outDir, await realInit());
+  const pendingSql = 'CREATE TABLE pending_lock_probe (id TEXT PRIMARY KEY) STRICT;';
+  await writeFile(join(outDir, 'migrations/core/0002_lock_probe.sql'), pendingSql);
+  const manifestPath = join(outDir, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+    migrations: { id: string; name: string; checksum: string; phase: string }[];
+  };
+  manifest.migrations.push({
+    id: 'core:0002_lock_probe',
+    name: '0002_lock_probe.sql',
+    checksum: await sha256Hex(pendingSql),
+    phase: 'expand',
+  });
+  await writeFile(manifestPath, JSON.stringify(manifest));
   const { harness, close } = await createHarness();
   const sentinels = [
     'person@example.com',
@@ -1004,7 +974,6 @@ it.each([
         env: ENV,
         fetch,
         diagnostic,
-        allowContract: ['core:0006_ports'],
       });
       expect(result.exitCode).toBe(outcome === 'success' ? 0 : 1);
       expect(diagnostic).toHaveBeenCalledWith(expect.stringMatching(/^lock holder /));
@@ -1049,7 +1018,6 @@ it('preserves applied migration IDs across retries under one lease and resets fo
       dryRun: false,
       env: ENV,
       fetch: harness.fetch,
-      allowContract: ['core:0006_ports'],
     };
     transaction = await InventoryTransaction.begin(store, Date.now());
     const first = await migrateCloudflare({ ...options, transaction });
@@ -1120,7 +1088,7 @@ it('uses inventory DB identity, journals contract boundaries before apply, and r
     let boundaryObserved = false;
     const applied = await migrateCloudflare({
       ...options,
-      allowContract: ['core:0006_ports', 'core:0007_contract'],
+      allowContract: ['core:0007_contract'],
       onBeforeApply: async (source) => {
         if (source.phase === 'contract') {
           const journal = await store.read();
@@ -1211,4 +1179,58 @@ it('redacts the complete token before sanitizing overlapping email text in legac
   expect(diagnostics).toContain('[redacted]');
   for (const fragment of [token, 'prefix:', ':suffix', 'person@example.com'])
     expect(diagnostics).not.toContain(fragment);
+});
+
+it('verification-only migration refuses pending schema and records a matching live ledger without applying', async () => {
+  await mkdir(resolve('.pb'), { recursive: true });
+  const project = await mkdtemp(resolve('.pb/migrate-verify-test-'));
+  const { harness, close } = await createHarness();
+  try {
+    const output = join(project, '.pb/cloudflare');
+    await writeBuiltInit(output, await realInit());
+    const identity = installIdentity({ accountId: ACCOUNT_ID, workerName: 'broker' });
+    const store = await InventoryStore.create({ project, outDir: output, identity });
+    const inventory = emptyInventory(identity, Date.now());
+    inventory.resources.d1 = {
+      name: 'broker-production-db',
+      id: DATABASE_ID,
+      jurisdiction: 'eu',
+      state: 'complete',
+      evidence: { source: 'adopted', operation_id: null, verified_at: new Date().toISOString() },
+    };
+    await store.write(inventory);
+    const onBeforeApply = vi.fn();
+    const options = {
+      workerName: 'broker',
+      configPath: join(project, 'broker.config.ts'),
+      outDir: output,
+      dryRun: false,
+      env: ENV,
+      fetch: harness.fetch,
+      onBeforeApply,
+    };
+    expect(await migrateCloudflare({ ...options, verifyOnly: true })).toMatchObject({
+      exitCode: 11,
+      output: { error: { code: 'configuration_conflict', stage: 'migrate' } },
+    });
+    expect(onBeforeApply).not.toHaveBeenCalled();
+    expect((await store.read())?.migrations.ledger).toEqual([]);
+    const applied = await migrateCloudflare(options);
+    expect(applied.exitCode).toBe(0);
+    const j = (await store.read())!;
+    j.migrations.ledger = [];
+    await store.write(j);
+    onBeforeApply.mockClear();
+    const verified = await migrateCloudflare({ ...options, verifyOnly: true });
+    expect(verified.exitCode).toBe(0);
+    expect(verified.value?.applied).toEqual([]);
+    expect(onBeforeApply).not.toHaveBeenCalled();
+    expect((await store.read())?.migrations.ledger.map((entry) => entry.id)).toEqual(
+      applied.value?.applied,
+    );
+    expect((await store.read())?.migrations.applied_this_transaction).toEqual([]);
+  } finally {
+    await close();
+    await rm(project, { recursive: true, force: true });
+  }
 });

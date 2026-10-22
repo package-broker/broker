@@ -206,6 +206,18 @@ describe('createWorkersSink', () => {
 });
 
 describe('createWorkersSink field allowlist', () => {
+  it('keeps the package key and opaque source id', () => {
+    const { sink, errors } = setup();
+    const record = {
+      level: 'warn',
+      event: 'ingest.budget_exhausted',
+      package_key: 'vendor/name',
+      source_id: '01JA0000000000000000000000',
+    } as const;
+    sink.emit({ kind: 'log', record });
+    expect(errors).toEqual([record]);
+  });
+
   it('drops fields outside the shared allowlist', () => {
     const { sink, logs, errors, points } = setup();
     sink.emit({

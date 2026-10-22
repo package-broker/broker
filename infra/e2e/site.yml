@@ -16,7 +16,9 @@
           - e2e_os_image_id | string is match('^[1-9][0-9]*$')
           - e2e_arch | default('amd64') in ['amd64', 'arm64']
           - e2e_docker_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
-          - e2e_docker_buildx_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
+          - e2e_containerd_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
+          - e2e_runc_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
+          - e2e_image_source | default('target_build') != 'target_build' or e2e_docker_buildx_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
           - e2e_cloudflared_version is match('^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$')
           - e2e_cloudflared_sha256 is match('^[a-f0-9]{64}$')
           - e2e_runner_cidrs is sequence and e2e_runner_cidrs is not string
@@ -155,96 +157,140 @@
         creates: '{{ e2e_run_dir }}/candidate-source.tar'
       when: e2e_image_source | default('target_build') == 'target_build'
 
-    - name: Create the labelled SSH-only firewall before the server
-      ansible.builtin.uri:
-        url: https://api.hetzner.cloud/v1/firewalls
-        headers:
-          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
-        method: POST
-        body_format: json
-        body:
-          name: 'pb-e2e-{{ e2e_run_id }}'
-          labels: '{{ e2e_labels }}'
-          rules:
-            - direction: in
-              protocol: tcp
-              port: '22'
-              source_ips: '{{ e2e_runner_cidrs }}'
-        status_code: 201
-        follow_redirects: none
-        use_proxy: false
-        timeout: 30
-      register: e2e_created_firewall
-      changed_when: true
-      no_log: true
+    - name: Create and journal firewalls
+      block:
+        - name: Create the labelled SSH-only firewall before the server
+          ansible.builtin.uri:
+            url: https://api.hetzner.cloud/v1/firewalls
+            headers:
+              Authorization: "Bearer {{ lookup('ansible.builtin.env', 'HCLOUD_TOKEN') }}"
+            method: POST
+            body_format: json
+            body:
+              name: 'pb-e2e-{{ e2e_run_id }}'
+              labels: '{{ e2e_labels }}'
+              rules:
+                - direction: in
+                  protocol: tcp
+                  port: '22'
+                  source_ips: '{{ e2e_runner_cidrs }}'
+            status_code: 201
+            follow_redirects: none
+            use_proxy: false
+            timeout: 30
+          register: e2e_created_firewall
+          changed_when: true
+          no_log: true
 
-    - name: Journal firewall id immediately
-      ansible.builtin.include_tasks: tasks/record-resource.yml
-      vars:
-        e2e_resource_kind: firewalls
-        e2e_resource_id: '{{ e2e_created_firewall.json.firewall.id }}'
+        - name: Journal firewall id immediately
+          ansible.builtin.include_tasks: tasks/record-resource.yml
+          vars:
+            e2e_resource_kind: firewalls
+            e2e_resource_id: '{{ e2e_created_firewall.json.firewall.id }}'
+      rescue:
+        - name: Recover accepted firewalls before failing
+          ansible.builtin.include_tasks: tasks/recover-create.yml
+          vars:
+            e2e_resource_kind: firewalls
 
-    - name: Create the labelled persistent primary IPv4
-      hetzner.hcloud.primary_ip:
-        name: 'pb-e2e-{{ e2e_run_id }}'
-        location: "{{ e2e_location | default('fsn1') }}"
-        type: ipv4
-        auto_delete: false
-        labels: '{{ e2e_labels }}'
-        state: present
-      register: e2e_created_ip
-      no_log: true
+        - name: Fail after recovering accepted firewalls
+          ansible.builtin.fail:
+            msg: 'NOT RUN: firewalls creation failed; accepted ids were journaled for destroy.'
 
-    - name: Journal primary IP id immediately
-      ansible.builtin.include_tasks: tasks/record-resource.yml
-      vars:
-        e2e_resource_kind: primary_ips
-        e2e_resource_id: '{{ e2e_created_ip.hcloud_primary_ip.id }}'
-        e2e_resource_extra:
-          ipv4: '{{ e2e_created_ip.hcloud_primary_ip.ip }}'
+    - name: Create and journal primary_ips
+      block:
+        - name: Create the labelled persistent primary IPv4
+          hetzner.hcloud.primary_ip:
+            name: 'pb-e2e-{{ e2e_run_id }}'
+            location: "{{ e2e_location | default('fsn1') }}"
+            type: ipv4
+            auto_delete: false
+            labels: '{{ e2e_labels }}'
+            state: present
+          register: e2e_created_ip
+          no_log: true
 
-    - name: Create the labelled server with only the recorded IPv4
-      hetzner.hcloud.server:
-        name: 'pb-e2e-{{ e2e_run_id }}'
-        server_type: "{{ e2e_server_type | default('cx23') }}"
-        image: '{{ e2e_os_image_id | string }}'
-        location: "{{ e2e_location | default('fsn1') }}"
-        ssh_keys: ['{{ e2e_ci_key.json.ssh_keys[0].id | string }}']
-        firewalls:
-          - '{{ e2e_state.resources.firewalls | string }}'
-        ipv4: '{{ e2e_state.resources.primary_ips | string }}'
-        enable_ipv4: true
-        enable_ipv6: false
-        labels: '{{ e2e_labels }}'
-        user_data: |
-          #cloud-config
-          ssh_pwauth: false
-        state: present
-      register: e2e_created_server
-      no_log: true
+        - name: Journal primary IP id immediately
+          ansible.builtin.include_tasks: tasks/record-resource.yml
+          vars:
+            e2e_resource_kind: primary_ips
+            e2e_resource_id: '{{ e2e_created_ip.hcloud_primary_ip.id }}'
+            e2e_resource_extra:
+              ipv4: '{{ e2e_created_ip.hcloud_primary_ip.ip }}'
+      rescue:
+        - name: Recover accepted primary_ips before failing
+          ansible.builtin.include_tasks: tasks/recover-create.yml
+          vars:
+            e2e_resource_kind: primary_ips
 
-    - name: Journal server id immediately
-      ansible.builtin.include_tasks: tasks/record-resource.yml
-      vars:
-        e2e_resource_kind: servers
-        e2e_resource_id: '{{ e2e_created_server.hcloud_server.id }}'
+        - name: Fail after recovering accepted primary_ips
+          ansible.builtin.fail:
+            msg: 'NOT RUN: primary_ips creation failed; accepted ids were journaled for destroy.'
 
-    - name: Create the labelled ext4 data volume
-      hetzner.hcloud.volume:
-        name: 'pb-e2e-{{ e2e_run_id }}'
-        size: 10
-        location: "{{ e2e_location | default('fsn1') }}"
-        format: ext4
-        labels: '{{ e2e_labels }}'
-        state: present
-      register: e2e_created_volume
-      no_log: true
+    - name: Create and journal servers
+      block:
+        - name: Create the labelled server with only the recorded IPv4
+          hetzner.hcloud.server:
+            name: 'pb-e2e-{{ e2e_run_id }}'
+            server_type: "{{ e2e_server_type | default('cx23') }}"
+            image: '{{ e2e_os_image_id | string }}'
+            location: "{{ e2e_location | default('fsn1') }}"
+            ssh_keys: ['{{ e2e_ci_key.json.ssh_keys[0].id | string }}']
+            firewalls:
+              - '{{ e2e_state.resources.firewalls | string }}'
+            ipv4: '{{ e2e_state.resources.primary_ips | string }}'
+            enable_ipv4: true
+            enable_ipv6: false
+            labels: '{{ e2e_labels }}'
+            user_data: |
+              #cloud-config
+              ssh_pwauth: false
+            state: present
+          register: e2e_created_server
+          no_log: true
 
-    - name: Journal volume id immediately before attaching
-      ansible.builtin.include_tasks: tasks/record-resource.yml
-      vars:
-        e2e_resource_kind: volumes
-        e2e_resource_id: '{{ e2e_created_volume.hcloud_volume.id }}'
+        - name: Journal server id immediately
+          ansible.builtin.include_tasks: tasks/record-resource.yml
+          vars:
+            e2e_resource_kind: servers
+            e2e_resource_id: '{{ e2e_created_server.hcloud_server.id }}'
+      rescue:
+        - name: Recover accepted servers before failing
+          ansible.builtin.include_tasks: tasks/recover-create.yml
+          vars:
+            e2e_resource_kind: servers
+
+        - name: Fail after recovering accepted servers
+          ansible.builtin.fail:
+            msg: 'NOT RUN: servers creation failed; accepted ids were journaled for destroy.'
+
+    - name: Create and journal volumes
+      block:
+        - name: Create the labelled ext4 data volume
+          hetzner.hcloud.volume:
+            name: 'pb-e2e-{{ e2e_run_id }}'
+            size: 10
+            location: "{{ e2e_location | default('fsn1') }}"
+            format: ext4
+            labels: '{{ e2e_labels }}'
+            state: present
+          register: e2e_created_volume
+          no_log: true
+
+        - name: Journal volume id immediately before attaching
+          ansible.builtin.include_tasks: tasks/record-resource.yml
+          vars:
+            e2e_resource_kind: volumes
+            e2e_resource_id: '{{ e2e_created_volume.hcloud_volume.id }}'
+      rescue:
+        - name: Recover accepted volumes before failing
+          ansible.builtin.include_tasks: tasks/recover-create.yml
+          vars:
+            e2e_resource_kind: volumes
+
+        - name: Fail after recovering accepted volumes
+          ansible.builtin.fail:
+            msg: 'NOT RUN: volumes creation failed; accepted ids were journaled for destroy.'
 
     - name: Attach the recorded volume to the recorded server by API id
       ansible.builtin.uri:
@@ -306,14 +352,8 @@
       ansible.builtin.command: cloud-init status --wait
       changed_when: false
 
-    - name: Install the exact operator-supplied Docker version
-      ansible.builtin.apt:
-        name:
-          - 'docker.io={{ e2e_docker_version }}'
-          - 'docker-cli={{ e2e_docker_version }}'
-          - 'docker-buildx={{ e2e_docker_buildx_version }}'
-        state: present
-        update_cache: true
+    - name: Install the pinned container runtime and required Docker tooling
+      ansible.builtin.include_tasks: tasks/docker.yml
 
     - name: Enable Docker
       ansible.builtin.systemd_service:

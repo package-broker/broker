@@ -602,16 +602,7 @@ const migrationsDirectory = join(
 async function migratedDatabase(): Promise<{ db: D1DatabaseLike; orgId: string }> {
   const db = (await mf.getD1Database('IDB0')) as unknown as D1DatabaseLike;
   const sources: MigrationSource[] = await Promise.all(
-    [
-      '0001_init.sql',
-      '0002_local_login.sql',
-      '0003_access_model.sql',
-      '0004_cache_epoch.sql',
-      '0005_admin_permission_topup.sql',
-      '0006_ports.sql',
-      '0015_keyring_verifier.sql',
-      '0016_keyring_version_indexes.sql',
-    ].map(async (name) =>
+    ['0001_init.sql'].map(async (name) =>
       loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),
   );

@@ -9,6 +9,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import type {
   NewRegisteredName as CoreNewRegisteredName,
   RegisteredNameRepository as CoreRegisteredNameRepository,
+  RegisteredNameRecord,
   RegisteredNameTarget as CoreRegisteredNameTarget,
 } from '@package-broker/core/db/source';
 import {
@@ -94,6 +95,15 @@ interface SourceRow {
   readonly status: string;
 }
 
+function sourceVisible(ctx: OrgContext, sourceId: string): Guard {
+  return sql<SqlBool>`exists (select 1 from source as visible_source
+    where visible_source.id = ${sourceId} and visible_source.org_id = ${ctx.orgId}
+      and (visible_source.project_id is null or exists (
+        select 1 from project as visible_project
+        where visible_project.id = visible_source.project_id
+          and visible_project.org_id = ${ctx.orgId} and visible_project.status = 'active')))`;
+}
+
 function isProxy(type: string): boolean {
   return (PROXY_TYPES as readonly string[]).includes(type);
 }
@@ -141,6 +151,30 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
   }
 
   return {
+    async list(ctx, input) {
+      if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
+        throw new RangeError('invalid registered-name page limit');
+      let query = db
+        .selectFrom('registered_name as names')
+        .select(['names.id', 'names.source_id as sourceId', 'names.ecosystem', 'names.pattern'])
+        .where('names.org_id', '=', ctx.orgId)
+        .where('names.source_id', '=', input.sourceId)
+        .where((eb) =>
+          eb.exists(
+            eb
+              .selectFrom('source as owner')
+              .select('owner.id')
+              .whereRef('owner.id', '=', 'names.source_id')
+              .where('owner.org_id', '=', ctx.orgId),
+          ),
+        );
+      if (input.after !== undefined) query = query.where('names.id', '>', input.after);
+      const rows = await executor.all<RegisteredNameRecord>(
+        compile(query.orderBy('names.id', 'asc').limit(input.limit + 1)),
+      );
+      const items = rows.slice(0, input.limit);
+      return { items, next: rows.length > input.limit ? items.at(-1)!.id : null };
+    },
     async owner(ctx, id) {
       const [row] = await executor.all<{ sourceId: string; projectId: string | null }>(
         compile(
@@ -184,6 +218,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         where owner.id = ${input.sourceId} and owner.org_id = ${ctx.orgId}
           and owner.ecosystem = ${source.ecosystem}
           and owner.type not in (${sql.join(PROXY_TYPES)}))`;
+      const visible = sourceVisible(ctx, input.sourceId);
       const insert = compile(
         db.insertInto('registered_name').values({
           id: input.id,
@@ -199,6 +234,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         fence,
         assertGuard(allOf([held, sourceUnchanged]), ctx),
         [
+          ...assertCheck(visible),
           insert,
           auditPendingStatement(ctx, input.audit),
           ...(input.idempotency === undefined
@@ -215,6 +251,8 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         },
       );
       if (outcome.ok) return 'added';
+      if (outcome.reason === 'indeterminate') return 'indeterminate';
+      if (!(await holds(visible))) return 'not_found';
       if (outcome.reason === 'authority') return 'forbidden';
       if (
         outcome.reason === 'conflict' &&
@@ -224,7 +262,6 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         return 'conflict';
       if (outcome.reason === 'conflict') return 'pattern_taken';
       if (outcome.reason === 'collision') return 'duplicate';
-      if (outcome.reason === 'indeterminate') return 'indeterminate';
       return (await readSource(ctx, input.sourceId)) === null ? 'not_found' : 'conflict';
     },
 
@@ -243,6 +280,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       const owned = sql<SqlBool>`exists (select 1 from registered_name as target
         where target.id = ${input.id} and target.org_id = ${ctx.orgId}
           and target.source_id = ${sourceId})`;
+      const visible = sourceVisible(ctx, sourceId);
       const pause = compile(
         db
           .updateTable('source')
@@ -258,6 +296,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         fence,
         assertGuard(allOf([held, owned]), ctx),
         [
+          ...assertCheck(visible),
           compile(
             db
               .deleteFrom('registered_name')
@@ -282,9 +321,10 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
           ? 'removed_and_paused'
           : 'removed';
       }
+      if (outcome.reason === 'indeterminate') return 'indeterminate';
+      if (!(await holds(visible))) return 'not_found';
       if (outcome.reason === 'authority') return 'forbidden';
       if (outcome.reason === 'conflict') return 'conflict';
-      if (outcome.reason === 'indeterminate') return 'indeterminate';
       return (await readName(ctx, input.id)) === null ? 'not_found' : 'conflict';
     },
 

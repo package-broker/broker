@@ -154,7 +154,12 @@ beforeEach(async () => {
       "INSERT INTO role (id, org_id, key, name, scope, protects_last_holder) VALUES ('role', ?, 'admin', 'Admin', 'organization', 0)",
       org.orgId,
     ),
-    ...['org:sources:write', 'project:sources:write', 'project:packages:manage'].map((p) =>
+    ...[
+      'org:sources:write',
+      'org:packages:manage',
+      'project:sources:write',
+      'project:packages:manage',
+    ].map((p) =>
       stmt(
         "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'role', ?)",
         org.orgId,
@@ -372,6 +377,13 @@ describe('catalogue cache invalidation', () => {
       'admin quarantine',
       async () =>
         store.quarantineVersion(org, fence(), {
+          packageId: (await scalar(
+            'SELECT package_id AS value FROM version WHERE org_id = ? LIMIT 1',
+            org.orgId,
+          )) as string,
+          expectedStatus: 'active',
+          manage: { kind: 'organization' },
+          audit: visibilityAudit('version.state_change'),
           versionId: await versionId(),
           reason: 'admin_quarantine',
         }),
@@ -380,6 +392,13 @@ describe('catalogue cache invalidation', () => {
       'tombstone',
       async () =>
         store.tombstoneVersion(org, fence(), {
+          packageId: (await scalar(
+            'SELECT package_id AS value FROM version WHERE org_id = ? LIMIT 1',
+            org.orgId,
+          )) as string,
+          expectedStatus: 'active',
+          manage: { kind: 'organization' },
+          audit: visibilityAudit('version.state_change'),
           versionId: await versionId(),
           reason: 'admin_tombstone',
         }),

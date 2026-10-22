@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import { noopObservability, type LogRecord } from '@package-broker/core/platform/observability';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { createAuditQueryRepository } from './audit-query.js';
 import { createAuditSealRepository } from './audit-seal.js';
 import { createAuditVerifyReader } from './audit-verify.js';
 
@@ -37,6 +39,7 @@ describe('audit verification reader on node:sqlite', () => {
     expect((await reader.page(a, 500, 500)).map((row) => row.seq)).toEqual([501, 502, 503]);
     expect(await reader.page(a, 503, 500)).toEqual([]);
     const records: LogRecord[] = [];
+    let now = new Date('2026-10-22T12:00:00.000Z');
     const ctx: JobContext = {
       org: a,
       jobId: 'verify',
@@ -46,7 +49,7 @@ describe('audit verification reader on node:sqlite', () => {
       signal: new AbortController().signal,
       ports: {
         organizations: { get: async () => null },
-        clock: { now: () => new Date() },
+        clock: { now: () => now },
         ids: { ulid: () => 'id' },
       },
       observability: { ...noopObservability, log: (record) => void records.push(record) },
@@ -56,6 +59,11 @@ describe('audit verification reader on node:sqlite', () => {
     expect(records).toContainEqual(
       expect.objectContaining({ event: 'audit.verified', rows: 503, head_seq: 503 }),
     );
+    const query = createAuditQueryRepository(executor);
+    expect((await query.head(a))?.lastVerifiedAt).toBe(now.toISOString());
+    expect((await query.head(b))?.lastVerifiedAt).toBeNull();
+    const lastVerifiedAt = now.toISOString();
+    now = new Date('2026-10-23T12:00:00.000Z');
     records.length = 0;
     await executor.batch([
       {
@@ -67,9 +75,34 @@ describe('audit verification reader on node:sqlite', () => {
     expect(records).toEqual([
       { level: 'error', event: 'audit.chain_broken', seq: 501, reason: 'hash' },
     ]);
+    expect((await query.head(a))?.lastVerifiedAt).toBe(lastVerifiedAt);
     records.length = 0;
     await job.handler({}, { ...ctx, org: b });
     expect(records).toContainEqual(expect.objectContaining({ event: 'audit.verified', rows: 503 }));
+    expect((await query.head(b))?.lastVerifiedAt).toBe(now.toISOString());
+  });
+
+  it('persists empty-chain verification and keeps overlapping completions monotonic per organization', async () => {
+    database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
+    const { a, b } = database.orgs!;
+    const reader = createAuditVerifyReader(database.executor);
+    const query = createAuditQueryRepository(database.executor);
+    const earlier = '2026-10-22T11:00:00.000Z';
+    const later = '2026-10-22T12:00:00.000Z';
+    expect(await query.head(a)).toBeNull();
+    await reader.markVerified(a, later);
+    await reader.markVerified(a, earlier);
+    await reader.markVerified(a, later);
+    expect(await query.head(a)).toEqual({
+      seq: 0,
+      hash: AUDIT_GENESIS_HASH,
+      pending: 0,
+      lastVerifiedAt: later,
+    });
+    expect(await query.head(b)).toBeNull();
+    await reader.markVerified(b, earlier);
+    expect((await query.head(b))?.lastVerifiedAt).toBe(earlier);
+    expect((await query.head(a))?.lastVerifiedAt).toBe(later);
   });
 
   it('rejects unbounded pages and invalid sequence cursors before querying', async () => {

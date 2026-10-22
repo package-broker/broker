@@ -3,6 +3,7 @@ import type { JobDefinition } from '../platform/jobs.js';
 import { AUDIT_GENESIS_HASH, type AuditRow, type ChainBreak, verifyChain } from './chain.js';
 
 export interface AuditVerifyReader {
+  markVerified(ctx: OrgContext, completedAt: string): Promise<void>;
   page(ctx: OrgContext, afterSeq: number, limit: number): Promise<readonly AuditRow[]>;
 }
 
@@ -29,6 +30,7 @@ export function auditVerifyJob(reader: AuditVerifyReader): JobDefinition<{}> {
         const first = page[0];
         if (first === undefined) {
           if (ctx.signal.aborted) return partial();
+          await reader.markVerified(ctx.org, ctx.ports.clock.now().toISOString());
           ctx.observability.log({
             level: 'info',
             event: 'audit.verified',

@@ -38,7 +38,8 @@ CREATE TABLE organization (
   token_default_expiry_days       INTEGER NOT NULL DEFAULT 90 CHECK (token_default_expiry_days > 0),
   token_ci_readonly_expiry_days   INTEGER NOT NULL DEFAULT 365 CHECK (token_ci_readonly_expiry_days > 0),
   created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  audit_last_verified_at          TEXT
 ) STRICT;
 
 CREATE TABLE project (

@@ -580,7 +580,7 @@ function auditReader(executor: SqlExecutor): AuditReader {
         seq: head?.seq ?? 0,
         hash: head?.hash ?? AUDIT_GENESIS_HASH,
         pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: null,
+        lastVerifiedAt: head?.lastVerifiedAt ?? null,
       };
     },
   };

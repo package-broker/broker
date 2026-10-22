@@ -95,6 +95,7 @@ import { entries as catalogueReblobEntries } from './mutation-table/catalogue-re
 import { entries as webhookDeliveryEntries } from './mutation-table/webhook-delivery.js';
 import { entries as sourceSyncReadsEntries } from './mutation-table/source-sync-reads.js';
 import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
+import { entries as sourceRemovalEntries } from './mutation-table/source-removal.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -201,6 +202,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...importRollbackEntries,
   ...importVerificationEntries,
   ...sourceSyncCountsEntries,
+  ...sourceRemovalEntries,
   ...sourceSyncReadsEntries,
 ];
 

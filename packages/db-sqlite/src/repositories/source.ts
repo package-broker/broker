@@ -21,6 +21,8 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
+import { acceptRemovalStatement } from './source-removal.js';
+import { permissionRows } from './access.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
@@ -165,6 +167,20 @@ interface SourceRow {
   readonly listing_hash: string | null;
   readonly poll_etag: string | null;
   readonly poll_last_modified: string | null;
+  readonly last_refusal_at: string | null;
+  readonly last_refusal_absent: number | null;
+  readonly last_refusal_listed: number | null;
+  readonly last_refusal_successful: number | null;
+  readonly removal_accepted: number;
+}
+
+function removalRefusalOf(row: SourceRow): SourceRecord['removalRefusal'] {
+  const { last_refusal_at: at, last_refusal_absent: absent } = row;
+  const { last_refusal_listed: listed, last_refusal_successful: successful } = row;
+  if (at === null && absent === null && listed === null && successful === null) return null;
+  if (at === null || absent === null || listed === null || successful === null)
+    throw new TypeError('source removal refusal facts are incomplete');
+  return { at, absent, listed, successful };
 }
 
 function toRecord(row: SourceRow): SourceRecord {
@@ -192,6 +208,8 @@ function toRecord(row: SourceRow): SourceRecord {
     listingHash: row.listing_hash,
     pollEtag: row.poll_etag,
     pollLastModified: row.poll_last_modified,
+    removalRefusal: removalRefusalOf(row),
+    removalAccepted: row.removal_accepted === 1,
   };
 }
 
@@ -219,6 +237,11 @@ const SOURCE_COLUMNS = [
   'listing_hash',
   'poll_etag',
   'poll_last_modified',
+  'last_refusal_at',
+  'last_refusal_absent',
+  'last_refusal_listed',
+  'last_refusal_successful',
+  'removal_accepted',
 ] as const;
 
 export function findByRepositoryStatement(
@@ -400,6 +423,45 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async acceptRemoval(ctx, fence, input) {
+      const held = authority(ctx, fence, null, input.providerAnchors);
+      const localAdmin = sql<SqlBool>`EXISTS (SELECT 1 FROM session
+        WHERE org_id = ${ctx.orgId} AND id = ${fence.sessionId} AND identity_id IS NULL)`;
+      const permissions = permissionRows(ctx, fence.userId, null, input.providerAnchors, {
+        localAdmin,
+      });
+      const admin = sql<SqlBool>`EXISTS (SELECT 1 FROM (${permissions}) AS removal_admin
+        WHERE removal_admin.scope = 'organization' AND removal_admin.protects = 1)`;
+      const visible = sql<SqlBool>`EXISTS (SELECT 1 FROM source
+        WHERE org_id = ${ctx.orgId} AND id = ${input.id}
+          AND (project_id IS NULL OR EXISTS (SELECT 1 FROM project
+            WHERE project.org_id = ${ctx.orgId} AND project.id = source.project_id AND project.status = 'active')))`;
+      const [permission] = await executor.all<{ held: number }>(probe(held, false));
+      const [administrator] = await executor.all<{ held: number }>(probe(admin, false));
+      if (permission?.held !== 1 || administrator?.held !== 1) return 'forbidden';
+      const [source] = await executor.all<{ held: number }>(probe(visible, false));
+      if (source?.held !== 1) return 'not_found';
+      const accept = acceptRemovalStatement(ctx, { sourceId: input.id, refusal: input.refusal });
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(held, ctx),
+        [
+          ...assertCheck(admin),
+          ...assertCheck(visible),
+          accept,
+          ...assertCheck(sql<boolean>`changes() = 1`),
+          auditPendingStatement(ctx, input.audit),
+        ],
+        { authority: probe(allOf([held, admin]), true) },
+      );
+      if (outcome.ok) return 'accepted';
+      if (outcome.reason === 'authority') return 'forbidden';
+      if (outcome.reason === 'indeterminate') return 'indeterminate';
+      const [remaining] = await executor.all<{ held: number }>(probe(visible, false));
+      return remaining?.held === 1 ? 'conflict' : 'not_found';
+    },
     async getVisible(ctx, input) {
       const [row] = await executor.all<SourceRow>(getVisibleSourceStatement(ctx, input));
       return row === undefined ? null : toRecord(row);

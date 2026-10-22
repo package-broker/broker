@@ -34,6 +34,7 @@ const statuses = {
   unsupported_media_type: 415,
   not_acceptable: 406,
   bad_gateway: 502,
+  upstream_refused: 502,
   unavailable: 503,
 } as const;
 
@@ -291,6 +292,7 @@ describe('ProjectListError', () => {
     'invalid_limit',
     'invalid_cursor',
     'invalid_status',
+    'invalid_query',
     'source_invalid',
   ] as const satisfies readonly ProjectListError[];
   it('covers every member with the specified code and status', () => {

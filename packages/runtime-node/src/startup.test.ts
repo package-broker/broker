@@ -1004,6 +1004,57 @@ describe('startNode', () => {
       expect((failure as StartupConfigError).variable).toBe('PB_BLOB_ROOT');
     });
 
+    it.each([undefined, 'debug', 'info', 'warn', 'error'] as const)(
+      'exports completion spans independently of log level %s',
+      async (level) => {
+        const calls: Array<{ url: string; body: string }> = [];
+        const out = capture();
+        const err = capture();
+        const broker = await start(
+          { PB_OTLP_ENDPOINT: 'https://collector.test' },
+          { ...ports, observability: { ...ports.observability, endpointEnv: 'PB_OTLP_ENDPOINT' } },
+          {
+            observability: level === undefined ? {} : { level },
+            stdout: out.stream,
+            stderr: err.stream,
+            fetch: async (input, init) => {
+              calls.push({ url: String(input), body: String(init?.body) });
+              return new Response('{}');
+            },
+          },
+        );
+        running.push(broker);
+        const kernel = await broker.ready();
+        expect((await kernel.fetch(new Request('http://broker.test/health/live'))).status).toBe(
+          200,
+        );
+        expect((await kernel.fetch(new Request('http://broker.test/nope'))).status).toBe(404);
+        await broker.close();
+
+        const traces = calls.filter((call) => call.url.endsWith('/v1/traces'));
+        expect(traces).toHaveLength(1);
+        const body = JSON.parse(traces[0]!.body) as {
+          resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[];
+        };
+        expect(
+          body.resourceSpans.flatMap((resource) =>
+            resource.scopeSpans.flatMap((scope) => scope.spans.map((span) => span.name)),
+          ),
+        ).toEqual(['GET /health/live', 'GET']);
+        const logs = [...out.lines(), ...err.lines()].filter(
+          (line) => line['event'] === 'http.request',
+        );
+        expect(logs).toHaveLength(
+          level === 'debug' ? 2 : level === 'warn' || level === 'error' ? 0 : 1,
+        );
+        const otlpLogs = calls
+          .filter((call) => call.url.endsWith('/v1/logs'))
+          .map((call) => call.body)
+          .join('');
+        expect(otlpLogs.includes('/health/live')).toBe(level === 'debug');
+      },
+    );
+
     it('11: flushes OTLP on a 1 s timer and before the database closes', async () => {
       const calls: Array<{ url: string; closesAtCall: number }> = [];
       const fetchImpl = (url: string | Request | URL): Promise<Response> => {

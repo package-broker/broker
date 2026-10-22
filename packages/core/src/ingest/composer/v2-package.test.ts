@@ -195,6 +195,31 @@ describe('describeComposerV2 forms', () => {
     expect(calls.filter((c) => c.url === DEV).map((c) => c.ifNoneMatch)).toEqual(['"d1"', null]);
   });
 
+  it.each(['request', 'job'] as const)(
+    'propagates a refused unconditional dev retry on the %s path',
+    async (path) => {
+      const target = `https://sentinel.invalid/private?token=${SECRET}`;
+      const { fetch, calls } = setup({
+        [P2]: [ok(stable, '"s2"')],
+        [DEV]: [{ status: 304 }, { status: 302, headers: { location: target } }],
+      });
+      const pending = describeComposerV2(
+        fetch,
+        source(),
+        NAME,
+        opts({ path, dev: true, validators, sleep: noSleep() }),
+      );
+
+      await expect(pending).rejects.toMatchObject({ name: 'ComposerV2Error', code: 'refused' });
+      expect(calls.filter((call) => call.url === DEV).map((call) => call.ifNoneMatch)).toEqual([
+        '"d1"',
+        null,
+      ]);
+      expect(calls).toHaveLength(3);
+      expect(calls.some((call) => call.url === target)).toBe(false);
+    },
+  );
+
   it('treats a 304 for a form sent without validators as an error, never not_modified', async () => {
     const { fetch } = setup({ [P2]: [{ status: 304 }] });
     await expect(describeComposerV2(fetch, source(), NAME, opts())).rejects.toMatchObject({

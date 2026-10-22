@@ -67,6 +67,7 @@ export interface PolicyFetchOptions {
   readonly userAgent: string;
   readonly observability?: Observability;
   readonly span?: SpanContext;
+  readonly sourceId?: string;
 }
 
 export type PolicyFetch = (request: UpstreamRequest) => Promise<UpstreamResponse>;
@@ -102,6 +103,33 @@ const PURPOSE_HEADERS: ReadonlyMap<string, ReadonlyMap<string, HeaderCheck>> = n
 ]);
 
 const refuse = (reason: string): UpstreamError => new UpstreamError('refused', undefined, reason);
+
+export const UPSTREAM_REFUSAL_REASON_CODES = [
+  'invalid_url',
+  'scheme',
+  'userinfo',
+  'port',
+  'zone_id',
+  'blocked_address',
+  'blocked_host',
+  'self_origin',
+  'invalid_address',
+  'origin',
+  'header',
+  'request',
+  'limit',
+  'body',
+  'downgrade',
+  'destination',
+  'credential',
+  'redirect_refused',
+  'opaque_redirect',
+  'redirect_limit',
+  'redirect_status',
+  'unknown',
+].map((reason) => `upstream.${reason}`);
+
+const REFUSAL_REASONS = new Set(UPSTREAM_REFUSAL_REASON_CODES);
 
 const GUARD_REFUSED = new Set([
   'invalid_url',
@@ -419,7 +447,18 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
       return await run(request, tracking);
     } catch (error) {
       const known = error instanceof UpstreamError ? error : new UpstreamError('network');
-      if (!arrived) emit(known.code);
+      if (!arrived) {
+        emit(known.code);
+        if (known.code === 'refused') {
+          const reason = `upstream.${known.reason}`;
+          observability?.log({
+            level: 'debug',
+            event: 'upstream.refused',
+            reason_code: REFUSAL_REASONS.has(reason) ? reason : 'upstream.unknown',
+            ...(options.sourceId === undefined ? {} : { source_id: options.sourceId }),
+          });
+        }
+      }
       throw known;
     }
   };

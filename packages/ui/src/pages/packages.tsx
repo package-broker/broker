@@ -15,14 +15,12 @@ import {
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
+import { DataTable } from '../components/ui/table.js';
+import { STATUS_LABELS, StatusBadge } from '../components/ui/status-badge.js';
+import { Time } from '../components/ui/time.js';
+import { IdText } from '../components/ui/id-text.js';
+import { ListState } from '../components/ui/list-state.js';
+import { FilterToolbar } from '../components/ui/toolbar.js';
 
 export type PackageItem =
   operations['listPackages']['responses'][200]['content']['application/json']['items'][number];
@@ -43,8 +41,13 @@ const ACTION_LABELS: Record<Action, string> = {
   tombstone: 'Tombstone',
   release: 'Release',
 };
-const statusLabel = (status: string) =>
-  status === 'removed_upstream' ? 'Removed upstream' : status;
+const statusLabel = (status: PackageStatus) => STATUS_LABELS[status];
+
+function mutationScope(access: PackageAccess): string {
+  return access.organization.includes('org:packages:manage')
+    ? 'Organization'
+    : `Project ${access.projectSlug}`;
+}
 
 export interface PackageQuery {
   project: string | null;
@@ -115,6 +118,8 @@ export interface PackagesState {
   busy: boolean;
   notice: string | null;
   confirmVersion: string | null;
+  listError?: boolean;
+  versionsError?: boolean;
 }
 
 export function createPackagesController(services: ShellServices) {
@@ -139,11 +144,15 @@ export function createPackagesController(services: ShellServices) {
   };
   let generation = 0;
   let versionGeneration = 0;
+  let navigationGeneration = 0;
+  let loadedQuery: string | null = null;
+  let versionAfter: string | undefined;
   const client = services.client;
 
   async function load(query: PackageQuery, notice: string | null = null): Promise<void> {
     const current = ++generation;
     ++versionGeneration;
+    loadedQuery = null;
     set({
       query,
       items: [],
@@ -153,6 +162,8 @@ export function createPackagesController(services: ShellServices) {
       versionsNext: null,
       confirmVersion: null,
       loading: true,
+      listError: false,
+      versionsError: false,
       versionsLoading: false,
       busy: false,
       notice,
@@ -179,8 +190,10 @@ export function createPackagesController(services: ShellServices) {
           }),
     ]);
     if (current !== generation) return;
+    loadedQuery = list.ok ? buildPackagesHash(query) : null;
     set({
       loading: false,
+      listError: !list.ok,
       access: {
         organization: permissions.ok ? permissions.data.organization : [],
         project: projectPermissions?.ok ? projectPermissions.data.project : [],
@@ -210,11 +223,13 @@ export function createPackagesController(services: ShellServices) {
     const current = ++versionGeneration;
     const scope = generation;
     const project = state.query.project;
+    versionAfter = after;
     set({
       selected,
       versions: [],
       versionsNext: null,
       versionsLoading: true,
+      versionsError: false,
       confirmVersion: null,
     });
     const result =
@@ -230,6 +245,7 @@ export function createPackagesController(services: ShellServices) {
     if (current !== versionGeneration || scope !== generation) return;
     set({
       versionsLoading: false,
+      versionsError: !result.ok,
       versions: result.ok ? result.data.items : [],
       versionsNext: result.ok ? result.data.next : null,
       notice: result.ok
@@ -238,6 +254,36 @@ export function createPackagesController(services: ShellServices) {
           ? 'Not found.'
           : 'Versions could not be loaded. Try again.',
     });
+  }
+
+  function close() {
+    ++versionGeneration;
+    versionAfter = undefined;
+    set({
+      selected: null,
+      versions: [],
+      versionsNext: null,
+      versionsLoading: false,
+      confirmVersion: null,
+    });
+  }
+
+  async function navigate(query: PackageQuery, id?: string, after?: string): Promise<void> {
+    const current = ++navigationGeneration;
+    if (loadedQuery !== buildPackagesHash(query)) await load(query);
+    if (current !== navigationGeneration) return;
+    if (id) await open(id, after);
+    else close();
+  }
+
+  async function refresh(notice: string | null = null): Promise<void> {
+    const selected = state.selected?.id;
+    const after = versionAfter;
+    const current = generation;
+    const navigation = navigationGeneration;
+    await load(state.query, notice);
+    if (generation === current + 1 && navigation === navigationGeneration && selected)
+      await open(selected, after);
   }
 
   async function execute(versionId: string, action: Action, confirmed = false): Promise<void> {
@@ -275,7 +321,15 @@ export function createPackagesController(services: ShellServices) {
     if (current !== generation || currentVersions !== versionGeneration) return;
     set({ busy: false });
     if (!result.ok && result.code === 'reauth_required') {
-      services.requireReauth(result.request, { credential: false, secretFields: [] });
+      services.requireReauth(result.request, {
+        credential: false,
+        secretFields: [],
+        display: {
+          packageName: item.name,
+          version: version.version,
+          scope: mutationScope(state.access),
+        },
+      });
       return;
     }
     if (!result.ok && result.status === 404) {
@@ -318,8 +372,7 @@ export function createPackagesController(services: ShellServices) {
         !/^[^/]+\/versions\/[^/]+\/(quarantine|tombstone|release)$/.test(suffix)
       )
         return;
-      await load(
-        state.query,
+      await refresh(
         result.ok
           ? 'Version updated.'
           : result.status === 404
@@ -331,13 +384,17 @@ export function createPackagesController(services: ShellServices) {
     },
     load,
     open,
+    navigate,
+    refresh,
     act: execute,
+    close,
     cancelTombstone: () => set({ confirmVersion: null }),
     async confirmTombstone() {
       const id = state.confirmVersion;
       if (id !== null) await execute(id, 'tombstone', true);
     },
     dispose() {
+      ++navigationGeneration;
       ++generation;
       ++versionGeneration;
     },
@@ -352,39 +409,53 @@ export function PackageVersions(props: {
   onAction: (version: string, action: Action) => void;
 }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          {['Version', 'Status', 'Published', 'Actions'].map((label) => (
-            <TableHead key={label}>{label}</TableHead>
-          ))}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {props.versions.map((version) => (
-          <TableRow key={version.id}>
-            <TableCell>{version.version}</TableCell>
-            <TableCell>{statusLabel(version.status)}</TableCell>
-            <TableCell>{version.publishedAt}</TableCell>
-            <TableCell>
-              <div className="flex flex-wrap gap-2">
-                {packageActions(props.item, version.status, props.access).map((action) => (
-                  <Button
-                    key={action}
-                    variant={action === 'tombstone' ? 'destructive' : 'outline'}
-                    disabled={props.busy}
-                    data-package-action={action}
-                    onClick={() => props.onAction(version.id, action)}
-                  >
-                    {ACTION_LABELS[action]}
-                  </Button>
-                ))}
-              </div>
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <DataTable
+      label={`Versions of ${props.item.name}`}
+      items={props.versions}
+      columns={[
+        {
+          key: 'version',
+          label: 'Version',
+          value: (version) => version.version,
+          render: (version) => <span className="font-mono">{version.version}</span>,
+        },
+        {
+          key: 'status',
+          label: 'Status',
+          value: (version) => version.status,
+          render: (version) => <StatusBadge status={version.status} />,
+        },
+        {
+          key: 'published',
+          label: 'Published',
+          priority: 2,
+          value: (version) => version.publishedAt ?? '',
+          render: (version) => <Time value={version.publishedAt} />,
+        },
+        {
+          key: 'actions',
+          label: 'Actions',
+          value: () => '',
+          render: (version) => (
+            <div className="flex flex-wrap gap-2">
+              {packageActions(props.item, version.status, props.access).map((action) => (
+                <Button
+                  key={action}
+                  size="sm"
+                  variant={action === 'tombstone' ? 'ghost' : 'outline'}
+                  className={action === 'tombstone' ? 'text-red-700' : undefined}
+                  disabled={props.busy}
+                  data-package-action={action}
+                  onClick={() => props.onAction(version.id, action)}
+                >
+                  {ACTION_LABELS[action]}
+                </Button>
+              ))}
+            </div>
+          ),
+        },
+      ]}
+    />
   );
 }
 
@@ -397,85 +468,140 @@ export function PackagesView(props: {
   onRefresh: () => void;
   onConfirm: () => void;
   onCancel: () => void;
+  onBack?: () => void;
 }) {
   const { state } = props;
+  const confirm = state.versions.find((version) => version.id === state.confirmVersion);
+  const filtered = !!(
+    state.query.q ||
+    state.query.status ||
+    state.query.source ||
+    state.query.projectId ||
+    state.query.after
+  );
   return (
     <>
-      {state.notice === null ? null : (
+      {state.notice ? (
         <Alert className="my-4">
           <AlertDescription>{state.notice}</AlertDescription>
         </Alert>
-      )}
-      <Button
-        variant="outline"
-        className="my-4"
-        onClick={props.onRefresh}
-        disabled={state.loading || state.busy}
-      >
-        Refresh
-      </Button>
-      {state.loading ? (
-        <p role="status">Loading packages…</p>
-      ) : (
-        <>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {[
-                  'Name',
-                  'Ecosystem',
-                  'Latest version',
-                  'Winning source',
-                  'Status',
-                  'Version count',
-                  'Last synced',
-                ].map((label) => (
-                  <TableHead key={label}>{label}</TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {state.items.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell>
-                    <Button
-                      variant="link"
-                      disabled={state.busy}
-                      onClick={() => props.onOpen(item.id)}
-                      aria-expanded={state.selected?.id === item.id}
-                    >
-                      {item.name}
-                    </Button>
-                  </TableCell>
-                  <TableCell>{item.ecosystem}</TableCell>
-                  <TableCell>{item.latestVersion ?? '—'}</TableCell>
-                  <TableCell>
-                    {item.source.name}
-                    <span className="block text-xs text-neutral-600">{item.source.type}</span>
-                  </TableCell>
-                  <TableCell>{statusLabel(item.status)}</TableCell>
-                  <TableCell>{item.versionCount}</TableCell>
-                  <TableCell>{item.lastSyncedAt ?? 'Never'}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          {state.items.length === 0 ? <p>No packages found.</p> : null}
-          {state.next === null ? null : (
-            <Button className="my-4" variant="outline" disabled={state.busy} onClick={props.onNext}>
-              Next packages
+      ) : null}
+      <div className="my-4 flex flex-wrap items-center gap-3">
+        <span className="mr-auto text-neutral-600">
+          {state.selected ? state.selected.name : `${state.items.length} packages on this page`}
+        </span>
+        <Button variant="outline" onClick={props.onRefresh} disabled={state.loading || state.busy}>
+          Refresh
+        </Button>
+      </div>
+      {state.selected === null ? (
+        state.loading ? (
+          <ListState kind="loading" title="Loading packages…" />
+        ) : state.items.length ? (
+          <>
+            <DataTable
+              label="Packages"
+              items={state.items}
+              columns={[
+                {
+                  key: 'name',
+                  label: 'Name',
+                  value: (item) => item.name,
+                  render: (item) => (
+                    <>
+                      <Button
+                        variant="link"
+                        className="h-auto justify-start p-0 text-left"
+                        disabled={state.busy}
+                        onClick={() => props.onOpen(item.id)}
+                      >
+                        {item.name}
+                      </Button>
+                      <span className="block text-xs text-neutral-600">{item.ecosystem}</span>
+                    </>
+                  ),
+                },
+                {
+                  key: 'status',
+                  label: 'Status',
+                  value: (item) => item.status,
+                  render: (item) => <StatusBadge status={item.status} />,
+                },
+                {
+                  key: 'latest',
+                  label: 'Latest version',
+                  value: (item) => item.latestVersion ?? '',
+                  render: (item) => <span className="font-mono">{item.latestVersion ?? '—'}</span>,
+                },
+                {
+                  key: 'source',
+                  label: 'Winning source',
+                  priority: 2,
+                  value: (item) => item.source.name,
+                  render: (item) => (
+                    <>
+                      {item.source.name}
+                      <span className="block text-xs text-neutral-600">{item.source.type}</span>
+                    </>
+                  ),
+                },
+                {
+                  key: 'count',
+                  label: 'Version count',
+                  priority: 2,
+                  value: (item) => item.versionCount,
+                },
+                {
+                  key: 'synced',
+                  label: 'Last synced',
+                  priority: 3,
+                  value: (item) => item.lastSyncedAt ?? '',
+                  render: (item) => <Time value={item.lastSyncedAt} fallback="Never" />,
+                },
+              ]}
+            />
+            {state.next ? (
+              <Button
+                className="my-4"
+                variant="outline"
+                disabled={state.busy}
+                onClick={props.onNext}
+              >
+                Next packages
+              </Button>
+            ) : null}
+          </>
+        ) : state.listError ? (
+          <ListState kind="error" title="Packages could not be loaded">
+            <Button variant="outline" onClick={props.onRefresh}>
+              Retry
             </Button>
-          )}
-        </>
-      )}
-      {state.selected === null ? null : (
-        <section className="mt-6" aria-labelledby="versions-heading">
-          <h2 id="versions-heading" className="text-lg font-semibold">
-            Versions of {state.selected.name}
-          </h2>
+          </ListState>
+        ) : (
+          <ListState
+            kind={filtered ? 'filtered-empty' : 'empty'}
+            title={filtered ? 'No packages match these filters' : 'No packages yet'}
+          >
+            {filtered
+              ? 'Change or clear the filters to see more packages.'
+              : 'Attach a source and run a sync; packages appear here as the broker resolves them.'}
+          </ListState>
+        )
+      ) : (
+        <section aria-labelledby="versions-heading" className="space-y-4">
+          <Button variant="link" className="px-0" onClick={props.onBack} disabled={state.busy}>
+            ← Back to packages
+          </Button>
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 id="versions-heading" className="text-lg font-semibold break-all">
+              Versions of {state.selected.name}
+            </h2>
+            <StatusBadge status={state.selected.status} />
+          </div>
+          <IdText value={state.selected.id} label="package ID" />
           {state.versionsLoading ? (
-            <p role="status">Loading versions…</p>
-          ) : (
+            <ListState kind="loading" title="Loading versions…" />
+          ) : state.versions.length ? (
             <>
               <PackageVersions
                 item={state.selected}
@@ -484,17 +610,21 @@ export function PackagesView(props: {
                 busy={state.busy}
                 onAction={props.onAction}
               />
-              {state.versions.length === 0 ? <p>No versions found.</p> : null}
-              {state.versionsNext === null ? null : (
+              {state.versionsNext ? (
                 <Button variant="outline" disabled={state.busy} onClick={props.onVersionNext}>
                   Next versions
                 </Button>
-              )}
+              ) : null}
             </>
+          ) : (
+            <ListState
+              kind={state.versionsError ? 'error' : 'empty'}
+              title={state.versionsError ? 'Versions could not be loaded' : 'No versions found.'}
+            />
           )}
         </section>
       )}
-      {state.confirmVersion === null ? null : (
+      {state.confirmVersion !== null ? (
         <Dialog
           open
           onOpenChange={(open) => {
@@ -503,11 +633,20 @@ export function PackagesView(props: {
         >
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Tombstone version?</DialogTitle>
+              <DialogTitle>Tombstone {confirm?.version ?? 'version'}?</DialogTitle>
               <DialogDescription>
-                This removes the version from package resolution.
+                This removes the version from package resolution. Clients can no longer install it.
+                Only this version is affected. This cannot be undone.
               </DialogDescription>
             </DialogHeader>
+            <dl className="detail-list">
+              <dt>Package</dt>
+              <dd>{state.selected?.name}</dd>
+              <dt>Version</dt>
+              <dd className="font-mono">{confirm?.version}</dd>
+              <dt>Scope</dt>
+              <dd>{mutationScope(state.access)}</dd>
+            </dl>
             <DialogFooter>
               <Button variant="outline" onClick={props.onCancel}>
                 Cancel
@@ -518,7 +657,7 @@ export function PackagesView(props: {
             </DialogFooter>
           </DialogContent>
         </Dialog>
-      )}
+      ) : null}
     </>
   );
 }
@@ -536,51 +675,75 @@ function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQ
     props.onChange(parsePackagesHash(`#/packages?${params}`));
   }
   return (
-    <form onSubmit={submit} className="my-4 flex flex-wrap items-end gap-3">
-      <div>
-        <Label htmlFor="package-q">Name prefix</Label>
-        <Input id="package-q" name="q" maxLength={100} defaultValue={props.query.q ?? ''} />
-      </div>
-      <div>
-        <Label htmlFor="package-status">Status</Label>
-        <Select id="package-status" name="status" defaultValue={props.query.status ?? ''}>
-          <option value="">All statuses</option>
-          {STATUSES.map((status) => (
-            <option key={status} value={status}>
-              {statusLabel(status)}
-            </option>
-          ))}
-        </Select>
-      </div>
-      <div>
-        <Label htmlFor="package-source">Source ID</Label>
-        <Input
-          id="package-source"
-          name="source"
-          pattern={ID.source}
-          defaultValue={props.query.source ?? ''}
-        />
-      </div>
-      {props.query.project === null ? (
+    <FilterToolbar
+      chips={(['q', 'status', 'source', 'projectId'] as const).flatMap((key) =>
+        props.query[key]
+          ? [
+              {
+                label: {
+                  q: 'Name prefix',
+                  status: 'Status',
+                  source: 'Source',
+                  projectId: 'Project',
+                }[key],
+                value: props.query[key]!,
+                onRemove: () => {
+                  const next = { ...props.query };
+                  delete next[key];
+                  delete next.after;
+                  props.onChange(next);
+                },
+              },
+            ]
+          : [],
+      )}
+    >
+      <form onSubmit={submit} className="my-4 flex flex-wrap items-end gap-3">
         <div>
-          <Label htmlFor="package-project">Project ID</Label>
+          <Label htmlFor="package-q">Name prefix</Label>
+          <Input id="package-q" name="q" maxLength={100} defaultValue={props.query.q ?? ''} />
+        </div>
+        <div>
+          <Label htmlFor="package-status">Status</Label>
+          <Select id="package-status" name="status" defaultValue={props.query.status ?? ''}>
+            <option value="">All statuses</option>
+            {STATUSES.map((status) => (
+              <option key={status} value={status}>
+                {statusLabel(status)}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div>
+          <Label htmlFor="package-source">Source ID</Label>
           <Input
-            id="package-project"
-            name="projectId"
+            id="package-source"
+            name="source"
             pattern={ID.source}
-            defaultValue={props.query.projectId ?? ''}
+            defaultValue={props.query.source ?? ''}
           />
         </div>
-      ) : null}
-      <Button type="submit">Apply filters</Button>
-      <Button
-        type="reset"
-        variant="outline"
-        onClick={() => props.onChange({ project: props.query.project })}
-      >
-        Clear filters
-      </Button>
-    </form>
+        {props.query.project === null ? (
+          <div>
+            <Label htmlFor="package-project">Project ID</Label>
+            <Input
+              id="package-project"
+              name="projectId"
+              pattern={ID.source}
+              defaultValue={props.query.projectId ?? ''}
+            />
+          </div>
+        ) : null}
+        <Button type="submit">Apply filters</Button>
+        <Button
+          type="reset"
+          variant="outline"
+          onClick={() => props.onChange({ project: props.query.project })}
+        >
+          Clear filters
+        </Button>
+      </form>
+    </FilterToolbar>
   );
 }
 
@@ -601,7 +764,12 @@ export function PackagesPage() {
     return () => window.removeEventListener('hashchange', change);
   }, []);
   useEffect(() => {
-    void controller.load(parsePackagesHash(hash));
+    const query = new URLSearchParams(hash.split('?')[1]);
+    void controller.navigate(
+      parsePackagesHash(hash),
+      query.get('package') ?? undefined,
+      query.get('versionAfter') ?? undefined,
+    );
     return () => controller.dispose();
   }, [controller, hash]);
   useEffect(
@@ -616,22 +784,32 @@ export function PackagesPage() {
   };
   return (
     <section aria-labelledby="page-heading">
-      <h1 id="page-heading" className="text-xl font-semibold">
+      <h1 id="page-heading" className="text-2xl font-semibold">
         Packages
       </h1>
-      <PackageFilters key={hash} query={parsePackagesHash(hash)} onChange={go} />
+      {state.selected === null ? (
+        <PackageFilters key={hash} query={parsePackagesHash(hash)} onChange={go} />
+      ) : null}
       <PackagesView
         state={state}
-        onOpen={(id) => void controller.open(id)}
+        onOpen={(id) => {
+          const query = new URLSearchParams(buildPackagesHash(state.query).split('?')[1]);
+          query.set('package', id);
+          window.location.hash = `#/packages?${query}`;
+        }}
+        onBack={() => go(state.query)}
         onAction={(id, action) => void controller.act(id, action)}
         onNext={() => {
           if (state.next !== null) go({ ...state.query, after: state.next });
         }}
         onVersionNext={() => {
-          if (state.selected && state.versionsNext)
-            void controller.open(state.selected.id, state.versionsNext);
+          if (state.selected && state.versionsNext) {
+            const query = new URLSearchParams(hash.split('?')[1]);
+            query.set('versionAfter', state.versionsNext);
+            window.location.hash = `#/packages?${query}`;
+          }
         }}
-        onRefresh={() => void controller.load(state.query)}
+        onRefresh={() => void controller.refresh()}
         onConfirm={() => void controller.confirmTombstone()}
         onCancel={controller.cancelTombstone}
       />

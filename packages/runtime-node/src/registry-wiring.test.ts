@@ -9,6 +9,7 @@ import { orgContext, type SqlExecutor, type SqlValue } from '@package-broker/cor
 import { systemClock, ulid } from '@package-broker/core/ids';
 import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
 import type { Jobs } from '@package-broker/core/platform/jobs';
+import { filterLogLevel } from '@package-broker/core/platform/observability';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
 import { resolveRegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -258,6 +259,7 @@ describe('node registry wiring', () => {
     transport: FetchLike,
     extra: {
       jobs?: Jobs;
+      level?: 'info' | 'debug';
       executor?: SqlExecutor;
       closeDatabase?: () => Promise<void>;
       observeCredentials?: RegistrySeams['observeCredentials'];
@@ -286,6 +288,22 @@ describe('node registry wiring', () => {
         },
         registry: { config: resolveRegistryConfig(undefined, 'node', ORIGIN) },
         log: (record) => void logged.push(JSON.stringify(record)),
+        ...(extra.level === undefined
+          ? {}
+          : {
+              observability: {
+                sink: filterLogLevel(
+                  {
+                    emit: (record) => {
+                      if (record.kind === 'log') logged.push(JSON.stringify(record.record));
+                    },
+                  },
+                  extra.level,
+                ),
+                deploymentId: 'registry-test',
+                level: extra.level,
+              },
+            }),
       },
       {
         transport,
@@ -328,6 +346,92 @@ describe('node registry wiring', () => {
   }
 
   const brokerPath = (url: string): string => new URL(url).pathname;
+
+  describe.each([undefined, 'info', 'debug'] as const)('refusals at level %s', (level) => {
+    it.each([
+      'composer-dist',
+      'composer-metadata',
+      'npm-tarball',
+      'npm-tarball-foreign',
+      'npm-packument',
+    ] as const)(
+      'returns a safe 502 and emits a refusal event only at debug for %s',
+      async (fill) => {
+        const remote = upstream();
+        let refusing = false;
+        const sentinel = vi.fn();
+        const transport: FetchLike = async (input, init) => {
+          const url = String(input);
+          if (url.includes('sentinel.invalid') || url.includes('127.0.0.1')) {
+            sentinel();
+            throw new Error('sentinel reached');
+          }
+          if (refusing && (fill !== 'composer-metadata' || !url.includes('~dev.json'))) {
+            if (fill === 'npm-packument') {
+              throw new TypeError('fetch failed', { cause: new DnsGuardError('blocked_address') });
+            }
+            return Response.redirect('https://sentinel.invalid/private?token=private-secret', 302);
+          }
+          return remote.transport(input, init);
+        };
+        await boot(transport, level === undefined ? {} : { level });
+        let path: string;
+        if (fill === 'composer-dist') {
+          const metadata = await get('/alpha/p2/acme/lib.json');
+          const body = (await metadata.json()) as {
+            packages: Record<string, { dist: { url: string } }[]>;
+          };
+          path = brokerPath(body.packages['acme/lib']![0]!.dist.url);
+          await sql(
+            "UPDATE version SET metadata_json = json_set(metadata_json, '$.dist.url', ?) WHERE org_id = ?",
+            ['https://127.0.0.1/sentinel?token=private-secret', orgId],
+          );
+        } else if (fill.startsWith('npm-tarball')) {
+          const metadata = await get('/alpha/npm/left-pad');
+          const body = (await metadata.json()) as {
+            versions: Record<string, { dist: { tarball: string } }>;
+          };
+          path = brokerPath(body.versions['1.0.0']!.dist.tarball);
+          if (fill === 'npm-tarball-foreign')
+            await sql(
+              "UPDATE version SET metadata_json = json_set(metadata_json, '$.dist.tarball', ?) WHERE org_id = ?",
+              ['https://sentinel.invalid/private?token=private-secret', orgId],
+            );
+        } else
+          path = fill === 'composer-metadata' ? '/alpha/p2/acme/fresh.json' : '/alpha/npm/fresh';
+        const before = logged.length;
+        const auditBefore = await sql('SELECT seq FROM audit_event WHERE org_id = ?', [orgId]);
+        refusing = true;
+        const response = await get(path);
+        expect(response.status).toBe(502);
+        const body = await response.text();
+        expect(body).toContain('upstream_refused');
+        expect(body).not.toMatch(/https?:|sentinel|127\.0\.0\.1|private-secret/);
+        const logs = logged
+          .slice(before)
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        const events = logs.filter((entry) => entry['event'] === 'upstream.refused');
+        expect(events).toHaveLength(level === 'debug' ? 1 : 0);
+        if (level === 'debug')
+          expect(events[0]).toMatchObject({
+            level: 'debug',
+            source_id: fill.startsWith('composer') ? sources.composer : sources.npm,
+            project_id: projectId,
+            reason_code:
+              fill === 'composer-metadata'
+                ? 'upstream.redirect_refused'
+                : fill.startsWith('npm-tarball')
+                  ? 'upstream.destination'
+                  : 'upstream.blocked_address',
+          });
+        expect(JSON.stringify(logs)).not.toMatch(/sentinel|127\.0\.0\.1|private-secret/);
+        expect(sentinel).not.toHaveBeenCalled();
+        expect(await sql('SELECT seq FROM audit_event WHERE org_id = ?', [orgId])).toEqual(
+          auditBefore,
+        );
+      },
+    );
+  });
 
   describe('built output', () => {
     it('serves Composer metadata and dist for a seeded project', async () => {

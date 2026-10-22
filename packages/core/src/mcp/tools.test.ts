@@ -370,8 +370,14 @@ async function mounted(permissions = ['project:read', 'project:packages:read']) 
     ok: true as const,
     value: {
       items: [
-        { id: ID, slug: 'alpha', name: 'Alpha', status: 'active' as const },
-        { id: '01JA0000000000000000000002', slug: 'beta', name: 'Beta', status: 'active' as const },
+        { id: ID, slug: 'alpha', name: 'Alpha', status: 'active' as const, revision: 1 },
+        {
+          id: '01JA0000000000000000000002',
+          slug: 'beta',
+          name: 'Beta',
+          status: 'active' as const,
+          revision: 1,
+        },
       ],
       nextAfterId: null,
     },

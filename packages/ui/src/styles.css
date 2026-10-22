@@ -1,2 +1,320 @@
 @import 'tailwindcss' source(none);
 @config '../tailwind.config.js';
+
+@layer base {
+  body {
+    background: #fafafa;
+    color: #171717;
+    font-size: 14px;
+  }
+  :focus-visible {
+    outline: 2px solid #155dfc;
+    outline-offset: 2px;
+  }
+  h1 {
+    letter-spacing: -0.01em;
+  }
+}
+.shell-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e5e5;
+  background: white;
+}
+.shell-brand {
+  font-size: 15px;
+  white-space: nowrap;
+}
+.shell-nav {
+  display: none;
+  order: 10;
+  width: 100%;
+  border-top: 1px solid #e5e5e5;
+  padding-top: 8px;
+}
+.shell-nav.is-open {
+  display: grid;
+}
+.shell-nav a {
+  padding: 10px 12px;
+}
+@media (min-width: 1024px) {
+  .shell-header {
+    flex-wrap: nowrap;
+  }
+  .shell-nav,
+  .shell-nav.is-open {
+    display: flex;
+    flex-wrap: wrap;
+    order: 0;
+    width: auto;
+    border: 0;
+    padding: 0;
+  }
+  .shell-nav a {
+    padding: 6px 10px;
+  }
+}
+@media (max-width: 420px) {
+  .shell-brand {
+    max-width: 62px;
+    white-space: normal;
+    line-height: 1.2;
+  }
+}
+.list-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #e5e5e5;
+  border-radius: 6px;
+  background: white;
+}
+.column-options {
+  padding: 10px 16px;
+  color: #525252;
+  border-bottom: 1px solid #e5e5e5;
+}
+.column-options summary {
+  cursor: pointer;
+}
+.card-sort {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e5e5e5;
+}
+.card-sort select,
+.column-options select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid #d4d4d4;
+  border-radius: 4px;
+  background: white;
+}
+.table-container {
+  container: broker-table / inline-size;
+  width: 100%;
+  min-width: 0;
+}
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  background:
+    linear-gradient(to right, white 30%, transparent),
+    linear-gradient(to left, white 30%, transparent),
+    linear-gradient(to right, #d4d4d4, transparent), linear-gradient(to left, #d4d4d4, transparent);
+  background-size:
+    32px 100%,
+    32px 100%,
+    12px 100%,
+    12px 100%;
+  background-position: left, right, left, right;
+  background-repeat: no-repeat;
+  background-attachment: local, local, scroll, scroll;
+}
+.table-hint {
+  padding: 6px 12px;
+  color: #525252;
+  font-size: 12px;
+  border-bottom: 1px solid #e5e5e5;
+}
+.responsive-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.responsive-table th {
+  white-space: nowrap;
+}
+.responsive-table th:first-child,
+.responsive-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: white;
+  box-shadow: 1px 0 #e5e5e5;
+}
+.responsive-table td {
+  overflow-wrap: anywhere;
+}
+.responsive-table tr[aria-selected='true'] td {
+  background: #eff6ff;
+}
+.responsive-table button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+@container broker-table (max-width: 1140px) {
+  .responsive-table .priority-3:not([data-visibility='visible']) {
+    display: none;
+  }
+}
+@container broker-table (max-width: 960px) {
+  .responsive-table .priority-2:not([data-visibility='visible']) {
+    display: none;
+  }
+}
+@container broker-table (max-width: 640px) {
+  .card-sort {
+    display: flex;
+  }
+  .table-hint {
+    display: none;
+  }
+  .responsive-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .responsive-table,
+  .responsive-table tbody {
+    display: block;
+    width: 100%;
+  }
+  .responsive-table tbody tr {
+    display: block;
+    padding: 10px 16px;
+  }
+  .responsive-table td,
+  .responsive-table td.priority-2:not([data-visibility='visible']),
+  .responsive-table td.priority-3:not([data-visibility='visible']) {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    border: 0;
+  }
+  .responsive-table td::before {
+    content: attr(data-label);
+    flex: 0 0 34%;
+    color: #525252;
+    font-size: 12px;
+  }
+  .responsive-table .cell-value {
+    min-width: 0;
+    flex: 1;
+    text-align: right;
+  }
+  .responsive-table td:first-child {
+    position: static;
+    box-shadow: none;
+    padding-bottom: 8px;
+  }
+  .responsive-table td:first-child::before {
+    display: none;
+  }
+  .responsive-table td:first-child .cell-value {
+    text-align: left;
+  }
+}
+.filter-toolbar form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+.filter-toolbar form > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 160px;
+}
+.filter-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+  border: 1px solid #d4d4d4;
+  border-radius: 999px;
+  background: white;
+  font-size: 12px;
+}
+@media (max-width: 767px) {
+  .filter-toolbar {
+    border: 1px solid #e5e5e5;
+    border-radius: 6px;
+    background: white;
+  }
+  .filter-toolbar form {
+    padding: 0 12px 12px;
+    margin: 0;
+  }
+  .filter-toolbar form > div {
+    flex-basis: 100%;
+  }
+  .filter-toolbar input,
+  .filter-toolbar select {
+    font-size: 16px;
+  }
+}
+.list-state {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 36px 16px;
+  margin: 16px 0;
+  text-align: center;
+  border: 1px dashed #d4d4d4;
+  border-radius: 8px;
+  color: #525252;
+}
+.list-state strong {
+  color: #171717;
+  font-weight: 500;
+}
+.list-state-error {
+  border-style: solid;
+  border-color: #ffc9c9;
+  background: #fef2f2;
+}
+.detail-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+}
+.detail-group {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #e5e5e5;
+  border-radius: 6px;
+  background: white;
+}
+.detail-group h3 {
+  color: #525252;
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.detail-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 20px;
+}
+.detail-list dt {
+  color: #525252;
+}
+.detail-list dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 480px) {
+  .detail-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .detail-list dd {
+    margin-bottom: 8px;
+  }
+}

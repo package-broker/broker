@@ -231,6 +231,70 @@ describe('upstream busy on the request path', () => {
     return { call: () => route.handler(ctx), versions };
   }
 
+  it('answers 502 upstream_refused when an unconditional dev retry is refused', async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    const origin = 'https://repo.example.com';
+    const target = 'https://sentinel.invalid/private?token=secret';
+    const calls: string[] = [];
+    let devCalls = 0;
+    const fetch = createPolicyFetch({
+      policy: createOutboundPolicy({ runtime: 'node', allowPrivateHosts: [], selfOrigins: [] }),
+      userAgent: 'pb-test/1',
+      fetchImpl: async (input) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.endsWith('~dev.json')) {
+          if (++devCalls === 1) return new Response(null, { status: 304 });
+          return Response.redirect(target, 302);
+        }
+        return Response.json({ packages: { 'acme/widget': [] } });
+      },
+    });
+    const root: ComposerRoot = {
+      mode: 'v2',
+      packagesJsonUrl: `${origin}/packages.json`,
+      metadataUrl: `${origin}/p2/%package%.json`,
+      inlineProviders: false,
+      partialPackages: false,
+      inlinePackages: false,
+      validator: { sha256: 'a'.repeat(64) },
+      messages: [],
+      mirrors: [],
+    };
+    h.plan.describe.mockImplementation(async () => {
+      const result = await describeComposerV2(fetch, { root, allowedOrigins: [] }, 'acme/widget', {
+        path: 'request',
+        dev: true,
+        validators: { 'composer-p2-dev': { etag: '"d1"' } },
+        probe: { secrets: [], queryParams: [] },
+        clock: systemClock,
+      });
+      if (result.kind === 'busy') throw new PackagistBusyError(result.retryAfterSeconds);
+      return result;
+    });
+    const { call, versions } = request(h);
+
+    const pending = call();
+    await vi.advanceTimersByTimeAsync(25_001);
+    const response = await pending;
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'upstream_refused',
+        message: 'Upstream request refused',
+        requestId: 'request',
+      },
+    });
+    expect(devCalls).toBe(2);
+    expect(calls).toHaveLength(3);
+    expect(calls).not.toContain(target);
+    expect(versions).not.toHaveBeenCalled();
+    expect(h.cache.set).not.toHaveBeenCalled();
+    expect(applyChunk).not.toHaveBeenCalled();
+  });
+
   it.each([
     [null, 10],
     [Number.NaN, 10],
@@ -1887,4 +1951,36 @@ describe('Composer fill that ends incomplete', () => {
     expect(h.cache.set).not.toHaveBeenCalled();
     expect(h.deps.apply.finalizer.finalize).not.toHaveBeenCalled();
   });
+});
+
+it.each(['npm', 'composer'] as const)(
+  'preserves a refusal for every coalesced %s caller',
+  async (ecosystem) => {
+    const h = setup();
+    h.describePackage.mockRejectedValue(new UpstreamError('refused', undefined, 'destination'));
+    const outcome = { ...admitted, ecosystem } as PackageVisibility;
+    expect(
+      await Promise.all(Array.from({ length: 5 }, () => h.ensure(outcome, ecosystem))),
+    ).toEqual(Array.from({ length: 5 }, () => ({ kind: 'upstream_refused' })));
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
+    expect(h.cache.set).not.toHaveBeenCalled();
+  },
+);
+
+it('preserves a policy refusal from the Composer member iterator', async () => {
+  const h = setup();
+  vi.mocked(applyChunk).mockRejectedValue(new UpstreamError('refused', undefined, 'destination'));
+  expect(
+    await h.ensure({ ...admitted, ecosystem: 'composer' } as PackageVisibility, 'composer'),
+  ).toEqual({ kind: 'upstream_refused' });
+  expect(h.cache.set).not.toHaveBeenCalled();
+});
+
+it('preserves a policy refusal translated by Composer metadata parsing', async () => {
+  const h = setup();
+  h.describePackage.mockRejectedValue(new ComposerV2Error('refused'));
+  expect(
+    await h.ensure({ ...admitted, ecosystem: 'composer' } as PackageVisibility, 'composer'),
+  ).toEqual({ kind: 'upstream_refused' });
+  expect(h.cache.set).not.toHaveBeenCalled();
 });

@@ -100,7 +100,7 @@ export function DialogContent({ className, children, ...props }: ComponentProps<
         }
       }}
       className={cn(
-        'fixed inset-0 m-auto w-full max-w-lg gap-4 rounded-lg border border-neutral-200 bg-white p-6 text-neutral-900 shadow-lg open:grid backdrop:bg-black/50',
+        'fixed inset-0 m-auto w-[calc(100%_-_2rem)] min-w-0 max-w-lg max-h-[90dvh] overflow-y-auto gap-4 rounded-lg border border-neutral-200 bg-white p-6 text-neutral-900 shadow-lg open:grid backdrop:bg-black/50',
         className,
       )}
     >
@@ -129,11 +129,11 @@ export function DialogContent({ className, children, ...props }: ComponentProps<
 }
 
 export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-col gap-1.5', className)} {...props} />;
+  return <div className={cn('flex min-w-0 flex-col gap-1.5 pr-7', className)} {...props} />;
 }
 
 export function DialogFooter({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-row justify-end gap-2', className)} {...props} />;
+  return <div className={cn('flex flex-wrap justify-end gap-2', className)} {...props} />;
 }
 
 export function DialogTitle({ className, ...props }: ComponentProps<'h2'>) {
@@ -141,7 +141,7 @@ export function DialogTitle({ className, ...props }: ComponentProps<'h2'>) {
   return (
     <h2
       id={context?.titleId}
-      className={cn('text-lg font-semibold leading-none tracking-tight', className)}
+      className={cn('break-words text-lg font-semibold leading-snug tracking-tight', className)}
       {...props}
     />
   );

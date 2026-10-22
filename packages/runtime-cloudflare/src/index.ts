@@ -693,6 +693,13 @@ function buildApiRoutes(input: {
         projectSources: createProjectSourceReader(executor),
         projects,
       },
+      sourceAttachments: {
+        ...common,
+        sources,
+        visibility: packages.visibility,
+        projectSources: createProjectSourceReader(executor),
+        projects,
+      },
       packages: createPackageAdminReader(executor),
       audit: auditReader(executor),
     }).routes;

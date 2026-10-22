@@ -54,6 +54,7 @@ export interface AuthModuleOptions {
   readonly clock: Clock;
   readonly ids: { ulid(): string };
   readonly publicOrigin: string;
+  readonly clientIp?: (request: Request) => string | null;
   readonly providers: ProviderMap;
   readonly hooks: Registration['hooks'];
   readonly log: KernelLog;
@@ -304,10 +305,18 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     stateCipher,
     clock,
     publicOrigin,
+    ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
     localLoginAvailable: true,
     log,
   });
-  const localRoutes = createLocalRoutes({ local, setup, sessions, publicOrigin, log });
+  const localRoutes = createLocalRoutes({
+    local,
+    setup,
+    sessions,
+    publicOrigin,
+    log,
+    ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
+  });
 
   return Object.freeze({
     coreRoutes: Object.freeze(

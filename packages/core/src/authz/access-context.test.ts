@@ -700,6 +700,29 @@ describe('authenticated token actor', () => {
     });
   });
 
+  it('returns undefined for a pat token on a service principal', () => {
+    const ctx = requestContext(SERVICE);
+    setAccessContext(
+      ctx,
+      serviceSnapshot({ token: { id: 'tok-1', kind: 'pat', scope: 'write', readOnly: false } }),
+    );
+    expect(authenticatedTokenActor(ctx)).toBeUndefined();
+  });
+
+  it('returns undefined for a svc token on a user principal', () => {
+    const ctx = requestContext();
+    setAccessContext(
+      ctx,
+      snapshot({
+        sessionId: null,
+        actor: null,
+        token: { id: 'tok-2', kind: 'svc', scope: 'full', readOnly: false },
+        rateKey: userKey('project', 'abcdefghijkl'),
+      }),
+    );
+    expect(authenticatedTokenActor(ctx)).toBeUndefined();
+  });
+
   it('returns undefined for a session request', () => {
     const ctx = requestContext();
     setAccessContext(ctx, snapshot());

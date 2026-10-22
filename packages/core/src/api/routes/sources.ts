@@ -24,7 +24,8 @@ import { callContext, projectSessionCallContext, type ApiRouteDeps } from './con
 import { ACCEPT_REMOVAL_API_SPEC, SOURCE_API_SPECS } from './sources-schemas.js';
 
 export interface SourceRouteDeps extends ApiRouteDeps {
-  readonly service: SourceService;
+  readonly service: Omit<SourceService, 'acceptRemoval'> &
+    Partial<Pick<SourceService, 'acceptRemoval'>>;
   readonly sources: Pick<SourceRepository, 'get'>;
   readonly projects: {
     get(
@@ -265,19 +266,22 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
       }),
     ];
   });
-  routes.push(
-    apiRoute(ACCEPT_REMOVAL_API_SPEC, async ({ ctx, params }) => {
-      const c = callContext(ctx, deps);
-      const result = await deps.service.acceptRemoval(
-        c.org,
-        { kind: 'org', actor: c.actor },
-        c.fence,
-        params.source,
-        c.call,
-      );
-      return result.ok ? { status: 204 } : failure(result);
-    }),
-  );
+  const acceptRemoval = deps.service.acceptRemoval;
+  if (acceptRemoval !== undefined) {
+    routes.push(
+      apiRoute(ACCEPT_REMOVAL_API_SPEC, async ({ ctx, params }) => {
+        const c = callContext(ctx, deps);
+        const result = await acceptRemoval(
+          c.org,
+          { kind: 'org', actor: c.actor },
+          c.fence,
+          params.source,
+          c.call,
+        );
+        return result.ok ? { status: 204 } : failure(result);
+      }),
+    );
+  }
   return routes.map((route) => ({
     ...route,
     handler: async (ctx) => {

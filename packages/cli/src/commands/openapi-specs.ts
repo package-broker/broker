@@ -2,6 +2,7 @@ import { createApiModule, type ApiModuleDeps } from '@package-broker/core/api/mo
 import { AUTH_API } from '@package-broker/core/api/auth-schemas';
 import type { ApiRouteSpec } from '@package-broker/core/api/route';
 import * as access from '@package-broker/core/api/routes/access-schemas';
+import * as imports from '@package-broker/core/api/routes/import.schemas';
 import * as organization from '@package-broker/core/api/routes/organization-schemas';
 import * as packages from '@package-broker/core/api/routes/packages-schemas';
 import * as projectAccess from '@package-broker/core/api/routes/project-access-schemas';
@@ -17,7 +18,7 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 
 /** Route construction never calls a dependency, so each required one is satisfied by a stub. */
 function stubDependencies(): ApiModuleDeps {
-  const deps: Record<string, unknown> = {};
+  const deps: Record<string, unknown> = { imports: {} };
   for (let round = 0; round < MAX_STUB_ROUNDS; round += 1) {
     try {
       createApiModule(deps as unknown as ApiModuleDeps);
@@ -47,6 +48,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
   };
   for (const module of [
     access,
+    imports,
     organization,
     packages,
     projectAccess,

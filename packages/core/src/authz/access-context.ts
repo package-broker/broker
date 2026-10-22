@@ -300,9 +300,11 @@ export function authenticatedTokenActor(ctx: RequestContext): AuthenticatedToken
   if (snapshot?.principal == null || snapshot.sessionId !== null || tokenId === undefined) {
     return undefined;
   }
+  const kind = snapshot.token!.kind;
+  if (snapshot.principal.kind !== (kind === 'pat' ? 'user' : 'service')) return undefined;
   return Object.freeze({
     tokenId,
-    tokenKind: snapshot.token!.kind,
+    tokenKind: kind,
     principalId: snapshot.principal.id,
   }) as AuthenticatedTokenActor;
 }

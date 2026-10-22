@@ -8,7 +8,7 @@ const call = {
 };
 import type { ApiCall } from '@package-broker/core/api/idempotency';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -467,6 +467,7 @@ describe('node access wiring', () => {
   async function start(
     port: number,
     tokens?: StartOptions['tokens'],
+    withBlob = false,
   ): Promise<{ broker: NodeBroker; base: string }> {
     const base = `http://127.0.0.1:${port}`;
     const broker = await startNode({
@@ -479,7 +480,25 @@ describe('node access wiring', () => {
         PB_ORG_NAME: 'Acme',
         PB_MASTER_KEY: KEY,
         PB_PUBLIC_URL: base,
+        ...(withBlob
+          ? {
+              PB_BLOB_ROOT: join(await realpath(directory), 'blobs'),
+              DEPLOYMENT_ID: 'access-wiring',
+            }
+          : {}),
       },
+      ...(withBlob
+        ? {
+            platformPorts: {
+              blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1024 },
+              cache: { adapter: 'lru', maxBytes: 1024 },
+              jobs: { adapter: 'database', maxRunning: 1 },
+              observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
+            },
+            stdout: { write: () => true, on: () => undefined },
+            stderr: { write: () => true, on: () => undefined },
+          }
+        : {}),
     });
     running.push(broker);
     services = (await broker.services()).access;
@@ -616,6 +635,79 @@ describe('node access wiring', () => {
     const again = await fetch(`${base}/probe/revoke-token?id=${id}`, { headers: { cookie } });
     expect(await again.json()).toEqual({ ok: true, value: { revoked: false } });
     expect((await fetch(`${base}/probe/project/alpha`, { headers: bearer })).status).toBe(401);
+  });
+
+  describe('import route token fence', () => {
+    const manifest = {
+      version: 1,
+      source_system: 'test',
+      widening: [],
+      items: [{ type: 'project', external_ref: 'project', slug: 'imported', name: 'Imported' }],
+    };
+
+    async function issueToken(base: string, cookie: string) {
+      const issued = await fetch(`${base}/probe/make-token`, { headers: { cookie } });
+      return (await issued.json()) as { id: string; plaintext: string };
+    }
+
+    function createRun(base: string, plaintext: string): Promise<Response> {
+      return fetch(`${base}/_pb/import-runs`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${plaintext}`, 'content-type': 'application/json' },
+        body: JSON.stringify(manifest),
+      });
+    }
+
+    async function runCount(): Promise<number> {
+      const opened = openBetterSqliteExecutor(path);
+      try {
+        const rows = await opened.executor.all<{ total: number }>({
+          sql: 'SELECT count(*) AS total FROM import_run',
+          params: [],
+        } as Statement);
+        return rows[0]!.total;
+      } finally {
+        await opened.close();
+      }
+    }
+
+    it('creates a run for a live token', async () => {
+      const { base } = await start(await freePort(), undefined, true);
+      const cookie = await loginAdmin(base);
+      const { plaintext } = await issueToken(base, cookie);
+      const response = await createRun(base, plaintext);
+      expect(response.status).toBe(201);
+      expect(await runCount()).toBe(1);
+    });
+
+    it('refuses the write when the token is revoked after kernel authorization', async () => {
+      const { base } = await start(await freePort(), undefined, true);
+      const cookie = await loginAdmin(base);
+      const { id, plaintext } = await issueToken(base, cookie);
+      let revoked = false;
+      hooks.before = async (sql) => {
+        if (revoked || !/\bblob\b/.test(sql)) return;
+        revoked = true;
+        hooks.before = undefined;
+        const response = await fetch(`${base}/probe/revoke-token?id=${id}`, {
+          headers: { cookie },
+        });
+        expect(await response.json()).toEqual({ ok: true, value: { revoked: true } });
+      };
+      const response = await createRun(base, plaintext);
+      expect(revoked).toBe(true);
+      expect(response.status).toBe(403);
+      expect(await runCount()).toBe(0);
+    });
+
+    it('refuses a request made after the token was revoked', async () => {
+      const { base } = await start(await freePort(), undefined, true);
+      const cookie = await loginAdmin(base);
+      const { id, plaintext } = await issueToken(base, cookie);
+      await fetch(`${base}/probe/revoke-token?id=${id}`, { headers: { cookie } });
+      expect((await createRun(base, plaintext)).status).toBe(401);
+      expect(await runCount()).toBe(0);
+    });
   });
 
   it('serves the protected route through the engine from the source entry in process (runEntry + startNode)', async () => {

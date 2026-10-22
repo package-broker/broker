@@ -51,7 +51,7 @@ export interface TagRebuildPort {
 
 export interface PackageManageRouteDeps extends ApiRouteDeps {
   readonly service: PackageManageService;
-  readonly rebuild: TagRebuildPort;
+  readonly rebuild?: TagRebuildPort;
   readonly sessions: Pick<SessionService, 'authenticate' | 'isReauthFresh'>;
   readonly idempotency: {
     find(
@@ -177,7 +177,7 @@ export function packageManageRoutes(deps: PackageManageRouteDeps): readonly Rout
           PackageManageResult | Awaited<ReturnType<TagRebuildPort['requestTagRebuild']>>
         > =>
           action === 'rebuild'
-            ? deps.rebuild.requestTagRebuild(org, authenticated, fence, input, call)
+            ? deps.rebuild!.requestTagRebuild(org, authenticated, fence, input, call)
             : deps.service.manage(
                 org,
                 authenticated,
@@ -253,6 +253,6 @@ export function packageManageRoutes(deps: PackageManageRouteDeps): readonly Rout
     ...(['organization', 'project'] as const).flatMap((boundary) =>
       (['quarantine', 'tombstone', 'release'] as const).map((action) => route(action, boundary)),
     ),
-    route('rebuild', 'organization'),
+    ...(deps.rebuild === undefined ? [] : [route('rebuild', 'organization')]),
   ];
 }

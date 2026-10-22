@@ -11,6 +11,7 @@ import type { MigrationSource } from '@package-broker/db-sqlite/migrations/sourc
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { createWorker, type Env } from './index.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
@@ -58,7 +59,7 @@ vi.mock('@package-broker/db-sqlite/repositories/access-services', async (origina
   };
 });
 
-const bindings = Array.from({ length: 4 }, (_, index) => `AMDB${index}`);
+const bindings = Array.from({ length: 8 }, (_, index) => `AMDB${index}`);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
@@ -148,6 +149,73 @@ describe('Workers management API mount', () => {
         key,
       ).toHaveLength(1);
     }
+  });
+
+  const mountedAfter = async (worker: ReturnType<typeof createWorker>, env: Env) => {
+    await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
+    return (built.kernels.at(-1)?.coreRoutes ?? []).map((route) => `${route.method} ${route.path}`);
+  };
+
+  it('mounts the package manage routes without a rebuild route', async () => {
+    const mounted = await mountedAfter(
+      createWorker([], { log: () => undefined }),
+      await environment(),
+    );
+    for (const action of ['quarantine', 'tombstone', 'release']) {
+      expect(mounted).toContain(`POST /_pb/packages/:package/versions/:version/${action}`);
+      expect(mounted).toContain(
+        `POST /_pb/projects/:project/packages/:package/versions/:version/${action}`,
+      );
+    }
+    expect(mounted).not.toContain('POST /_pb/packages/:package/versions/:version/rebuild');
+  });
+
+  it('omits the import routes and logs the reason without a blob store', async () => {
+    const records: unknown[] = [];
+    const worker = createWorker([], { log: (record) => records.push({ ...record }) });
+    const mounted = await mountedAfter(worker, await environment());
+    expect(mounted.filter((key) => key.includes('/_pb/import-runs'))).toEqual([]);
+    expect(records).toContainEqual({
+      level: 'info',
+      event: 'api.import_routes_omitted',
+      reason: 'blob_store_not_configured',
+    });
+  });
+
+  it('mounts the import routes when a blob store is bound', async () => {
+    const platformPorts: PlatformPortConfig = {
+      blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 4 * 1024 * 1024 },
+      cache: { adapter: 'cache-api', namespace: 'api-mount' },
+      jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
+      observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
+    };
+    const unused = async () => {
+      throw new Error('unused');
+    };
+    const env = {
+      ...(await environment()),
+      STORAGE: { head: unused, get: unused, put: unused, delete: unused },
+      JOBS: { send: unused, sendBatch: unused },
+      DEPLOYMENT_ID: 'api-mount',
+    } as unknown as Env;
+    const records: unknown[] = [];
+    const worker = createWorker([], {
+      platformPorts,
+      cacheStorage: {
+        open: async () => ({
+          match: async () => undefined,
+          put: async () => undefined,
+          delete: async () => false,
+        }),
+      },
+      log: (record) => records.push({ ...record }),
+      console: { log: () => undefined, error: () => undefined },
+    });
+    const mounted = await mountedAfter(worker, env);
+    expect(mounted.filter((key) => key.includes('/_pb/import-runs'))).toHaveLength(10);
+    expect(records).not.toContainEqual(
+      expect.objectContaining({ event: 'api.import_routes_omitted' }),
+    );
   });
 
   it('fails before serving with a named error when a required dependency is missing', async () => {

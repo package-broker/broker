@@ -2,7 +2,9 @@ import { routesConflict } from '../kernel/routes.js';
 import type { RouteDefinition } from '../plugin.js';
 import { accessRoutes } from './routes/access.js';
 import { auditRoutes } from './routes/audit.js';
+import { importRoutes } from './routes/import.js';
 import { organizationRoutes } from './routes/organization.js';
+import { packageManageRoutes } from './routes/package-manage.js';
 import { packageRoutes } from './routes/packages.js';
 import { myPermissionsRoute, myProjectPermissionsRoute } from './routes/permissions.js';
 import { projectAccessRoutes } from './routes/project-access.js';
@@ -28,6 +30,9 @@ export interface ApiModuleDeps {
   readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
   readonly packages: Parameters<typeof packageRoutes>[0];
   readonly audit: Parameters<typeof auditRoutes>[0];
+  readonly packageManage: Parameters<typeof packageManageRoutes>[0];
+  /** Import routes are mounted only when provided; they need a blob store. */
+  readonly imports?: Parameters<typeof importRoutes>[0];
   readonly extensions?: readonly ApiRouteFactory[];
 }
 
@@ -38,7 +43,8 @@ export const API_EXEMPT_ROUTES = Object.freeze({
   '/_pb/openapi.json': 'Serves the generated OpenAPI document.',
 });
 
-type RouteDependencies = Omit<ApiModuleDeps, 'extensions'>;
+type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports'> &
+  Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
   readonly [K in keyof T]?: T[K] extends (...args: never[]) => unknown
     ? true
@@ -148,6 +154,29 @@ const REQUIRED_DEPENDENCIES = {
   },
   packages: { listProject: true, listOrganization: true, listVersions: true },
   audit: { list: true, head: true },
+  packageManage: {
+    ...CONTEXT_METHODS,
+    service: { manage: true },
+    sessions: { authenticate: true, isReauthFresh: true },
+    idempotency: { find: true },
+  },
+  imports: {
+    ...CONTEXT_METHODS,
+    service: {
+      get: true,
+      list: true,
+      createRun: true,
+      approveRun: true,
+      requestApply: true,
+      requestVerify: true,
+      cancelRun: true,
+      acceptRun: true,
+      requestRollback: true,
+    },
+    credentials: { acceptImportCredential: true },
+    auditStatement: true,
+    tokenFence: true,
+  },
 } as const satisfies {
   [K in keyof RouteDependencies]: DependencyRequirements<RouteDependencies[K]>;
 };
@@ -177,7 +206,23 @@ function operationId(route: RouteDefinition): string {
 }
 
 export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDefinition[] } {
-  requireDependencies(deps, REQUIRED_DEPENDENCIES, 'dependencies');
+  const { imports, ...required } = REQUIRED_DEPENDENCIES;
+  requireDependencies(deps, required, 'dependencies');
+  if (deps.imports != null) requireDependencies(deps, { imports }, 'dependencies');
+  if (deps.packageManage.rebuild !== undefined) {
+    requireDependencies(
+      deps.packageManage.rebuild,
+      { requestTagRebuild: true },
+      'dependencies.packageManage.rebuild',
+    );
+  }
+  if (deps.sources.service.acceptRemoval !== undefined) {
+    requireDependencies(
+      deps.sources.service,
+      { acceptRemoval: true },
+      'dependencies.sources.service',
+    );
+  }
 
   const routes = [
     ...organizationRoutes(deps.organization),
@@ -191,6 +236,8 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
     ...auditRoutes(deps.audit),
+    ...packageManageRoutes(deps.packageManage),
+    ...(deps.imports == null ? [] : importRoutes(deps.imports)),
     myPermissionsRoute(),
     myProjectPermissionsRoute(),
     ...(deps.extensions ?? []).flatMap((factory) => factory()),

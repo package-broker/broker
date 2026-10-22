@@ -1,3 +1,5 @@
+import { createMcpTools } from '@package-broker/core/mcp/tools';
+import { createMcpRoutes } from '@package-broker/core/mcp/transport';
 import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
@@ -176,7 +178,7 @@ import { createImportCredentialRepository } from '@package-broker/db-sqlite/repo
 import { createImportRunStore } from '@package-broker/db-sqlite/repositories/import-run';
 import type { BlobStore } from '@package-broker/core/platform/blob';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
-import type { BrokerConfig } from '@package-broker/core/config';
+import { mcpEnabled, type BrokerConfig } from '@package-broker/core/config';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type {
@@ -322,6 +324,7 @@ export interface NodeServerOptions {
   /** Token lifetime maxima; an invalid value fails server creation. */
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
+  readonly mcp?: BrokerConfig['mcp'];
   /** Resolves true once the broker may serve; a falsy answer refuses everything except liveness. */
   readonly servingGate?: () => Promise<boolean>;
   /** Registry routes need the database, auth, platform services and this input together. */
@@ -1448,6 +1451,33 @@ export function createNodeServer(
       ...route,
       path: route.path.replace('/assets/:file', '/:file'),
     }));
+    const coreRoutes = [
+      ...(access?.module.coreRoutes ?? []),
+      ...apiRoutes,
+      ...(registry?.module.coreRoutes ?? []).map((route) => ({
+        ...route,
+        async handler(context: Parameters<typeof route.handler>[0]) {
+          const response = await route.handler(context);
+          return response.status === 401 ? new Response(null, { status: 404 }) : response;
+        },
+      })),
+      ...(assets === null ? [] : [...setupRoutes, ...uiRoutes]),
+    ];
+    if (
+      mcpEnabled({
+        platform: 'node',
+        plugins,
+        ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      })
+    ) {
+      const publicOrigin = auth?.publicOrigin ?? 'http://localhost';
+      const handlers = createMcpTools({
+        routes: [...coreRoutes, ...registration.routes],
+        publicOrigin,
+        kernel: { fetch: (request) => kernel.fetch(request) },
+      });
+      coreRoutes.push(...createMcpRoutes({ handlers, publicOrigin }));
+    }
     const kernel = await createKernel({
       platform: 'node',
       ...(packageResolver === undefined ? {} : { packageResolver }),
@@ -1463,18 +1493,7 @@ export function createNodeServer(
       ...(options.platformServices === undefined
         ? {}
         : { platformServices: options.platformServices }),
-      coreRoutes: [
-        ...(access?.module.coreRoutes ?? []),
-        ...apiRoutes,
-        ...(registry?.module.coreRoutes ?? []).map((route) => ({
-          ...route,
-          async handler(context: Parameters<typeof route.handler>[0]) {
-            const response = await route.handler(context);
-            return response.status === 401 ? new Response(null, { status: 404 }) : response;
-          },
-        })),
-        ...(assets === null ? [] : [...setupRoutes, ...uiRoutes]),
-      ],
+      coreRoutes,
       ...(authorization === undefined ? {} : { authorization }),
     });
     const services: NodeServices = Object.freeze({

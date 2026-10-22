@@ -1,3 +1,4 @@
+import { assertMcpRateLimit } from '@package-broker/core/mcp/limit';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -60,7 +61,11 @@ import { createS3ByteStore, S3ConfigError } from './blob/s3.js';
 import { createLruCache } from './cache/lru.js';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import { createNodeServer, type NodeBroker } from './index.js';
-import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
+import {
+  mcpEnabled,
+  brokerObservabilityProblems,
+  type BrokerConfig,
+} from '@package-broker/core/config';
 import {
   RegistryConfigError,
   resolveRegistryConfig,
@@ -83,6 +88,7 @@ export interface StartOptions {
   readonly registry?: BrokerConfig['registry'];
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
+  readonly mcp?: BrokerConfig['mcp'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -688,6 +694,14 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
   };
 
   try {
+    assertMcpRateLimit({
+      runtime: 'node',
+      mcpEnabled: mcpEnabled({
+        platform: 'node',
+        plugins: options.plugins,
+        ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      }),
+    });
     await mkdir(dirname(path), { recursive: true });
     opened = openBetterSqliteExecutor(path);
 
@@ -749,6 +763,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       closeDatabase,
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
+      ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
       auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
       ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined

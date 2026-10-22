@@ -1,4 +1,12 @@
 import {
+  assertMcpRateLimit,
+  createMcpLimiter,
+  McpRateLimitConfigError,
+  type McpRateLimitBinding,
+} from '@package-broker/core/mcp/limit';
+import { createMcpTools } from '@package-broker/core/mcp/tools';
+import { createMcpRoutes } from '@package-broker/core/mcp/transport';
+import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
   VULNERABILITY_REASON_CODES,
@@ -141,7 +149,11 @@ import {
   rewriteSetupRequest,
 } from '@package-broker/core/kernel/ui-routes';
 import { createWorkersAssets } from './assets.js';
-import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
+import {
+  mcpEnabled,
+  brokerObservabilityProblems,
+  type BrokerConfig,
+} from '@package-broker/core/config';
 import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
 import {
   AUDIT_EVENTS,
@@ -272,6 +284,7 @@ import type { AnalyticsEngineLike } from './observability/workers.js';
 export type Env = {
   readonly ASSETS?: { fetch(input: Request | string): Promise<Response> };
   readonly DB?: D1DatabaseLike;
+  readonly MCP_RATE_LIMIT?: McpRateLimitBinding;
   readonly STORAGE?: R2BucketLike;
   readonly JOBS?: QueueLike;
   readonly ANALYTICS?: AnalyticsEngineLike;
@@ -335,6 +348,7 @@ export interface WorkerOptions {
   readonly registry?: RegistryConfigInput;
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
+  readonly mcp?: BrokerConfig['mcp'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -1764,6 +1778,17 @@ export function createWorker(
   }
 
   async function build(env: Env | undefined): Promise<Application> {
+    const enabled = mcpEnabled({
+      platform: 'cloudflare',
+      plugins,
+      ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+    });
+    try {
+      assertMcpRateLimit({ runtime: 'workers', mcpEnabled: enabled, binding: env?.MCP_RATE_LIMIT });
+    } catch (error) {
+      if (error instanceof McpRateLimitConfigError) throw new KernelConfigError([error.message]);
+      throw error;
+    }
     const observabilityProblems = brokerObservabilityProblems({
       platform: 'cloudflare',
       plugins,
@@ -2087,6 +2112,33 @@ export function createWorker(
       path: route.path.replace('/assets/:file', '/:file'),
     }));
     try {
+      const coreRoutes = [
+        ...(auth?.coreRoutes ?? []),
+        ...apiRoutes,
+        ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
+          ...route,
+          async handler(context: Parameters<typeof route.handler>[0]) {
+            const response = await route.handler(context);
+            return response.status === 401 ? new Response(null, { status: 404 }) : response;
+          },
+        })),
+        ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
+      ];
+      if (enabled) {
+        const publicOrigin = publicOriginOf(env?.PB_PUBLIC_URL);
+        const handlers = createMcpTools({
+          routes: [...coreRoutes, ...registration.routes],
+          publicOrigin,
+          kernel: { fetch: (request) => kernel.fetch(request) },
+        });
+        coreRoutes.push(
+          ...createMcpRoutes({
+            handlers,
+            publicOrigin,
+            limiter: createMcpLimiter(env!.MCP_RATE_LIMIT!),
+          }),
+        );
+      }
       const kernel = await createKernel({
         platform: 'cloudflare',
         ...(env?.PB_PUBLIC_URL === undefined
@@ -2098,18 +2150,7 @@ export function createWorker(
         ...(services === undefined ? {} : { platformServices: services.platformServices }),
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
-        coreRoutes: [
-          ...(auth?.coreRoutes ?? []),
-          ...apiRoutes,
-          ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
-            ...route,
-            async handler(context: Parameters<typeof route.handler>[0]) {
-              const response = await route.handler(context);
-              return response.status === 401 ? new Response(null, { status: 404 }) : response;
-            },
-          })),
-          ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
-        ],
+        coreRoutes,
         ...(authorization === undefined ? {} : { authorization }),
         ...(registryModule === undefined
           ? reads === undefined

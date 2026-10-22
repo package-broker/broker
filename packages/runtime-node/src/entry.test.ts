@@ -680,3 +680,23 @@ it.each([undefined, true, false])(
       expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('vulnerability');
   },
 );
+
+it.each([undefined, true, false])('forwards the mcp deployment switch %s', async (enabled) => {
+  const { broker } = fakeBroker();
+  const h = harness(async () => broker);
+  const mcp = enabled === undefined ? undefined : { enabled };
+  await runEntry(
+    Promise.resolve({
+      plugins: [],
+      migrations: [],
+      ...(mcp === undefined ? {} : { mcp }),
+    }),
+    {},
+    h.runtime,
+  );
+  expect(h.runtime.start).toHaveBeenCalledWith(
+    expect.objectContaining(mcp === undefined ? {} : { mcp }),
+  );
+  if (mcp === undefined)
+    expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('mcp');
+});

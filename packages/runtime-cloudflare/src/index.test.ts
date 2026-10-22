@@ -1,3 +1,7 @@
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { parseMasterKey } from '@package-broker/core/secrets/master-key';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS, blobPurgeTiming } from './index.js';
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
 import type { ByteStore } from '@package-broker/core/platform/blob';
@@ -1701,3 +1705,141 @@ it.each([undefined, true, false])(
     }
   },
 );
+
+describe('runtime MCP mount', () => {
+  it.each([undefined, false])(
+    'MCP disabled (%s) matches the unknown core route',
+    async (enabled) => {
+      const worker = createWorker([], enabled === undefined ? {} : { mcp: { enabled } });
+      const snapshot = async (path: string) => {
+        const response = await worker.fetch(
+          new Request(`https://broker.test${path}`, { method: 'POST' }),
+        );
+        const body = (await response.json()) as { error: { requestId?: string } };
+        delete body.error.requestId;
+        const headers = Object.fromEntries(response.headers);
+        delete headers['x-request-id'];
+        return { status: response.status, body, headers };
+      };
+      const missing = await snapshot('/_pb/unknown');
+      expect(missing.status).toBe(404);
+      expect(await snapshot('/_pb/mcp')).toEqual(missing);
+    },
+  );
+
+  it('MCP enabled refuses startup without the binding and sanitizes the response and log', async () => {
+    const log = vi.fn();
+    const env = { PB_PUBLIC_URL: 'https://broker.test', PB_MASTER_KEY: 'environment-sentinel' };
+    const worker = createWorker([], { mcp: { enabled: true }, log });
+    await expect(worker.services(env)).rejects.toMatchObject({ name: 'KernelConfigError' });
+    const response = await worker.fetch(
+      new Request('https://broker.test/_pb/mcp', { method: 'POST' }),
+      env,
+    );
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(JSON.parse(body)).toMatchObject({
+      error: { code: 'misconfigured', message: 'Server is not configured' },
+    });
+    expect(body + JSON.stringify(log.mock.calls)).not.toContain('environment-sentinel');
+  });
+
+  it('MCP calls use the authenticated selector and return an HTTP envelope when limited', async () => {
+    const local = new Miniflare(
+      convertV4MiniflareOptions({
+        modules: true,
+        script: 'export default { fetch() { return new Response("ok") } }',
+        compatibilityDate: '2026-10-01',
+        d1Databases: ['DB'],
+      }),
+    );
+    try {
+      const { discoveredMigrations } =
+        await import('@package-broker/db-sqlite/testing/migrated-database');
+      const db = (await local.getD1Database('DB')) as unknown as D1DatabaseLike;
+      const executor = createD1Executor(db);
+      await migrate(executor, await discoveredMigrations(), { holder: 'mcp-test' });
+      const orgId = ulid();
+      await createOrganizationBootstrap(executor).bootstrap({
+        id: orgId,
+        slug: 'acme',
+        name: 'Acme',
+        now: new Date().toISOString(),
+      });
+      const key = KEY_V1;
+      const selector = 'abcdefghijkl';
+      const token = formatToken('svc', selector, new Uint8Array(32).fill(7));
+      const hash = await hashToken(createKeyring([parseMasterKey(key, 'PB_MASTER_KEY')]), 1, token);
+      await executor.batch([
+        {
+          sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+          params: ['mcp-user', orgId, 'reader@example.test'],
+        },
+        {
+          sql: 'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+          params: ['mcp-service', orgId, 'MCP reader', 'mcp-user'],
+        },
+        {
+          sql: `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name,
+          scopes_json, read_only, service_principal_id, expires_at, project_mode)
+          VALUES (?, ?, 'svc', ?, ?, 1, 'MCP reader', '["read"]', 1, ?, ?, 'all')`,
+          params: [
+            'mcp-token',
+            orgId,
+            selector,
+            hash,
+            'mcp-service',
+            new Date(Date.now() + 3600000).toISOString(),
+          ],
+        },
+      ]);
+      const limit = vi
+        .fn<(input: { key: string }) => Promise<{ success: boolean }>>()
+        .mockResolvedValue({ success: true });
+      const env: Env = {
+        DB: db,
+        PB_PUBLIC_URL: 'https://broker.test',
+        PB_MASTER_KEY: key,
+        MCP_RATE_LIMIT: { limit },
+      };
+      const worker = createWorker([], { mcp: { enabled: true }, log: () => undefined });
+      const request = () =>
+        new Request('https://broker.test/_pb/mcp', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-11-25',
+              capabilities: {},
+              clientInfo: { name: 'test', version: '1' },
+            },
+          }),
+        });
+      const initialized = await worker.fetch(request(), env);
+      expect(initialized.status).toBe(200);
+      expect(await initialized.json()).toMatchObject({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { capabilities: { tools: {} } },
+      });
+      limit.mockResolvedValue({ success: false });
+      const response = await worker.fetch(request(), env);
+      expect(limit.mock.calls).toEqual([[{ key: selector }], [{ key: selector }]]);
+      expect(response.status).toBe(429);
+      expect(response.headers.get('retry-after')).toBe('60');
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({
+        error: {
+          code: 'rate_limited',
+          message: 'Rate limit exceeded',
+          requestId: response.headers.get('x-request-id'),
+        },
+      });
+    } finally {
+      await local.dispose();
+    }
+  });
+});

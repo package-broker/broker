@@ -59,8 +59,13 @@ export interface ApiRequestDescription {
   body?: unknown;
 }
 
+export interface ApiResponseHeaders {
+  etag?: string;
+  location?: string;
+}
+
 export type ApiResult<Data> =
-  | { ok: true; status: number; data: Data }
+  | { ok: true; status: number; data: Data; headers?: ApiResponseHeaders }
   | {
       ok: false;
       status: number;
@@ -68,6 +73,13 @@ export type ApiResult<Data> =
       details: ApiErrorDetail[];
       request: ApiRequestDescription;
     };
+
+export function responseHeader<Data>(
+  result: ApiResult<Data>,
+  name: keyof ApiResponseHeaders,
+): string | undefined {
+  return result.ok ? result.headers?.[name] : undefined;
+}
 
 export interface ApiClientDeps {
   fetch: (url: string, init: RequestInit) => Promise<Response>;
@@ -268,9 +280,15 @@ export function createApiClient<P>(deps: ApiClientDeps): ApiClient<P> {
     }
 
     if (response.ok) {
-      if (response.status === 204) return { ok: true, status: 204, data: undefined };
+      const headers: ApiResponseHeaders = {};
+      for (const name of ['etag', 'location'] as const) {
+        const value = response.headers.get(name);
+        if (value !== null) headers[name] = value;
+      }
+      const metadata = Object.keys(headers).length === 0 ? {} : { headers };
+      if (response.status === 204) return { ok: true, status: 204, data: undefined, ...metadata };
       try {
-        return { ok: true, status: response.status, data: await response.json() };
+        return { ok: true, status: response.status, data: await response.json(), ...metadata };
       } catch {
         return fail(response.status, 'unknown_error');
       }

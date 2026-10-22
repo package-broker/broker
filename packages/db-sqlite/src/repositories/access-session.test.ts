@@ -4,6 +4,7 @@ import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { countCalls } from '../contract/count-calls.js';
 import { assertGuard, compile, db, existsGuard } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import {
   createAccessRepository,
   holdsPermission,
@@ -1092,7 +1093,9 @@ describe('round 2', () => {
     it('denies a session whose identity belongs to another user', async () => {
       await seed(identity(a, U2, 'u2@example.test'));
       const other = (await ids())[U2] ?? null;
-      await seed(session(a, U1, 'borrowed', { identityId: other }));
+      await withForeignKeysOff(executor, () =>
+        seed(session(a, U1, 'borrowed', { identityId: other })),
+      );
       expect(await lookup('borrowed')).toBeNull();
     });
 

@@ -23,6 +23,7 @@ import { fixedClock, isUlid } from '@package-broker/core/ids';
 import { type OrgContext, type SqlExecutor, type Statement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
+import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { createProjectRepository, ProjectSetupError, type ProjectRepository } from './project.js';
 import { seedDefaultsStatements } from './role.js';
 
@@ -705,7 +706,9 @@ describe('initial role and identity-backed actors', () => {
   });
 
   it('refuses a session whose identity belongs to another user', async () => {
-    await seedSession(uid('SA'), U1, a.orgId, { identityId: I4 });
+    await withForeignKeysOff(executor, () =>
+      seedSession(uid('SA'), U1, a.orgId, { identityId: I4 }),
+    );
     const before = await snapshot();
     expect(await create({}, fence({}, U1, uid('SA')))).toBe('authority');
     expect(await snapshot()).toBe(before);

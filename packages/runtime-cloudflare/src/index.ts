@@ -190,7 +190,11 @@ import {
   type BlobStore,
 } from '@package-broker/core/platform/blob';
 import { completionSpan } from '@package-broker/core/platform/completion-span';
-import { createObservability, safeErrorName } from '@package-broker/core/platform/observability';
+import {
+  createObservability,
+  filterLogLevel,
+  safeErrorName,
+} from '@package-broker/core/platform/observability';
 import type {
   Observability,
   ObsRecord,
@@ -928,12 +932,13 @@ function buildRegistryModule(input: {
     providerRegistry.register(provider);
     providers.push(providerRegistry.get(provider.sourceTypes[0]!, provider.id));
   }
-  const policyFetch = (userAgent: string) =>
+  const policyFetch: RegistryModuleDeps['policyFetch'] = (userAgent, context) =>
     createPolicyFetch({
       fetchImpl: (...args) => globalThis.fetch(...args),
       policy: outboundPolicy,
       userAgent,
       observability,
+      ...context,
     });
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
@@ -1271,15 +1276,9 @@ function histogramPoint(value: number): { bucketCounts: number[] } {
   return { bucketCounts };
 }
 
-function bridgeToOtlp(
-  exporter: OtlpExporter,
-  record: ObsRecord,
-  routeTemplates: ReadonlySet<string>,
-): void {
+function bridgeToOtlp(exporter: OtlpExporter, record: ObsRecord): void {
   if (record.kind === 'log') {
     exporter.export('logs', record.record);
-    const span = completionSpan(record.record, routeTemplates);
-    if (span !== null) exporter.export('traces', span);
     return;
   }
   const labels = { ...record.labels } as Record<string, string>;
@@ -1614,11 +1613,22 @@ export function createWorker(
         return;
       }
     };
+    const outputs = filterLogLevel(
+      {
+        emit(record) {
+          const httpMetric = record.kind !== 'log' && record.name.startsWith('pb.http.');
+          if (!(httpMetric && bound.analytics === undefined)) workersSink.emit(record);
+          if (exporter !== undefined) bridgeToOtlp(exporter, record);
+        },
+      },
+      options.observability?.level,
+    );
     const sink: ObsRecordSink = {
       emit(record) {
-        const httpMetric = record.kind !== 'log' && record.name.startsWith('pb.http.');
-        if (!(httpMetric && bound.analytics === undefined)) workersSink.emit(record);
-        if (exporter !== undefined) bridgeToOtlp(exporter, record, routeTemplates);
+        outputs.emit(record);
+        if (record.kind !== 'log' || exporter === undefined) return;
+        const span = completionSpan(record.record, routeTemplates);
+        if (span !== null) exporter.export('traces', span);
       },
     };
     const registry = (templates: ReadonlySet<string>): ObsRegistry => ({
@@ -2124,6 +2134,7 @@ export function createWorker(
           : {
               observability: {
                 sink: services.sink,
+                level: options.observability?.level ?? 'info',
                 deploymentId: services.deploymentId,
                 trustInboundTraceparent: options.observability?.trustInboundTraceparent === true,
               },

@@ -1,3 +1,4 @@
+import type { Observability } from '../platform/observability.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { catalogueNegativeKey } from '../catalogue/cache-keys.js';
 import type { NameEcosystem } from '../catalogue/names.js';
@@ -19,6 +20,7 @@ import {
   describeOptions,
   isSnapshotGone,
   isUpstreamFailure,
+  isUpstreamRefusal,
   pendingValidators,
   upstreamForm,
 } from './fill-shared.js';
@@ -63,17 +65,19 @@ export interface OnDemandDeps {
     ctx: OrgContext,
     sourceId: string,
     key: string,
+    observability?: Observability,
   ) => Promise<PackageFillPlan | null>;
   readonly enqueueSync: (ctx: OrgContext, payload: PackageSyncPayload) => Promise<void>;
 }
 export interface OnDemandRequest {
+  readonly observability?: Observability;
   readonly ecosystem: NameEcosystem;
   readonly key: string;
   readonly outcome: PackageVisibility;
   readonly signal?: AbortSignal;
 }
 export type OnDemandResult =
-  | { readonly kind: 'not_found' | 'filled' | 'upstream_error' }
+  | { readonly kind: 'not_found' | 'filled' | 'upstream_error' | 'upstream_refused' }
   | { readonly kind: 'busy'; readonly retryAfterSeconds: number }
   | { readonly kind: 'serve'; readonly stale: boolean; readonly background?: () => Promise<void> };
 export interface OnDemandFill {
@@ -300,7 +304,12 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
             const session = handles.get(scoped(ctx, coalescerKey));
             if (session === undefined) return 'pending';
             flight.absentAt = null;
-            const plan = await deps.planFill(ctx, sourceId, key);
+            const plan = await deps.planFill(
+              ctx,
+              sourceId,
+              key,
+              ...(request.observability === undefined ? [] : [request.observability]),
+            );
             fillSignal.throwIfAborted();
             if (plan === null) return 'negative';
             let described: DescribeResult;
@@ -318,6 +327,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
                 await deps.sessions.abandon(ctx, session);
                 return 'pending';
               }
+              if (isUpstreamRefusal(error)) throw error;
               if (isUpstreamFailure(error)) throw new UpstreamFillError();
               throw error;
             }
@@ -384,6 +394,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
                 await deps.sessions.abandon(ctx, session);
                 return 'pending';
               }
+              if (isUpstreamRefusal(error)) throw error;
               if (isUpstreamFailure(error)) throw new UpstreamFillError();
               throw error;
             }
@@ -446,6 +457,7 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
           return await hold();
         return mapped(result);
       } catch (error) {
+        if (isUpstreamRefusal(error)) return { kind: 'upstream_refused' };
         if (error instanceof PackagistBusyError)
           return {
             kind: 'busy',

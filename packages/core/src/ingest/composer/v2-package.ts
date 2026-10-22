@@ -304,6 +304,7 @@ export async function describeComposerV2(
   if (p2.kind === 'busy') return p2;
   if (dev?.kind === 'busy') return dev;
   if (p2.kind === 'failed') throw p2.error;
+  if (dev?.kind === 'failed' && dev.error.code === 'refused') throw dev.error;
   const definitiveAbsence = (bytes: Uint8Array): boolean =>
     source.credential === undefined &&
     isNotFoundShape(source.sourceType ?? 'composer_repository', bytes);
@@ -327,6 +328,7 @@ export async function describeComposerV2(
   if (dev?.kind === 'not_modified') {
     dev = await request('composer-p2-dev', false);
     if (dev.kind === 'busy') return dev;
+    if (dev.kind === 'failed' && dev.error.code === 'refused') throw dev.error;
   }
 
   const forms: FormEvidence[] = [];

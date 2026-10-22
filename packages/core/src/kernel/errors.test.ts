@@ -4,6 +4,7 @@ import type { KernelLog } from './errors.js';
 import { liveResponse, readyResponse } from './health.js';
 import { NotBootstrappedError } from './org.js';
 import { KernelConfigError } from './registry.js';
+import { UpstreamError } from '../sources/policy-fetch.js';
 import { SecretsConfigError } from '../secrets/master-key.js';
 import { DbError } from '../db/errors.js';
 import { orgContext } from '../db/port.js';
@@ -63,6 +64,35 @@ describe('envelopeResponse', () => {
 });
 
 describe('errorResponse', () => {
+  it.each(['nested', 'npm'] as const)(
+    'maps policy refusals to 502 upstream_refused (%s)',
+    async (format) => {
+      const { log, entries } = recorder();
+      const error = new UpstreamError('refused', undefined, 'destination');
+      error.message = 'https://private.example.test/?token=secret';
+      const response = errorResponse(error, 'req-refused', log, format);
+      expect(response.status).toBe(502);
+      expect(responseReason(response)).toBe('error.upstream_refused');
+      expect(await response.json()).toEqual(
+        format === 'npm'
+          ? {
+              error: 'Upstream request refused',
+              code: 'upstream_refused',
+              requestId: 'req-refused',
+            }
+          : {
+              error: {
+                message: 'Upstream request refused',
+                code: 'upstream_refused',
+                requestId: 'req-refused',
+              },
+            },
+      );
+      expect(JSON.stringify(entries)).not.toContain(error.message);
+      expect(errorResponse(new UpstreamError('network'), 'req-network', log).status).toBe(500);
+    },
+  );
+
   it.each(['nested', 'npm'] as const)(
     'maps BlobBusyError to 503 unavailable with a bounded retry hint (%s)',
     async (format) => {

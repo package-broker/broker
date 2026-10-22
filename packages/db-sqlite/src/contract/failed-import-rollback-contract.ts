@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { delegatedMutationFence } from '@package-broker/core/authz/fence';
 import type { Statement } from '@package-broker/core/db/port';
 import { fixedClock, ulid } from '@package-broker/core/ids';
@@ -35,7 +35,9 @@ export function describeFailedImportRollbackContract(
       const { executor } = database;
       try {
         const { a: ctx } = await seedTwoOrganizations(executor);
-        const committed = chunks * 50;
+        // Each override costs eight statements, plus five statements per apply chunk.
+        const overridesPerChunk = Math.floor((200 - 5) / 8);
+        const committed = chunks * overridesPerChunk;
         const manifest: Manifest = {
           version: 1,
           source_system: 'test',
@@ -131,6 +133,7 @@ export function describeFailedImportRollbackContract(
             expected,
           );
         const journal = createImportJournalStore({ executor, providerAnchors: anchors });
+        const applyChunk = vi.spyOn(journal, 'applyChunk');
         expect(
           await runImportApply(
             {
@@ -155,6 +158,7 @@ export function describeFailedImportRollbackContract(
             fences,
           ),
         ).toEqual({ status: 'failed', reason: 'conflict' });
+        expect(applyChunk).toHaveBeenCalledTimes(chunks + 1);
         expect(await journal.appliedRefs(ctx, RUN)).toHaveLength(committed);
         expect(
           await executor.all(

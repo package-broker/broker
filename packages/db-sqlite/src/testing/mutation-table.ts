@@ -1,5 +1,6 @@
 import { entries as selectedKeysEntries } from './mutation-table/selected-keys.js';
 import { entries as sourceSelectionEntries } from './mutation-table/source-selection.js';
+import { entries as catalogueWriteTagGroupsEntries } from './mutation-table/catalogue-write-tag-groups.js';
 import { entries as accessServicesEntries } from './mutation-table/access-services.js';
 import { entries as sourceVisibleEntries } from './mutation-table/source-visible.js';
 import { entries as packageAdminReadEntries } from './mutation-table/package-admin-read.js';
@@ -174,6 +175,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...cataloguePredicatesEntries,
   ...registeredNameEntries,
   ...catalogueWriteTagsEntries,
+  ...catalogueWriteTagGroupsEntries,
   ...accessEntries,
   ...accessBuilderEntries,
   ...accessServicesEntries,

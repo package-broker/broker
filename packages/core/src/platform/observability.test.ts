@@ -79,6 +79,24 @@ describe('ingest error names', () => {
 });
 
 describe('safeRecord', () => {
+  it('keeps an opaque source id unchanged', () => {
+    const record = {
+      level: 'warn',
+      event: 'ingest.budget_exhausted',
+      source_id: '01JA0000000000000000000000',
+    };
+    expect(safeRecord(record)).toEqual(record);
+    expect(projectLogFields(record)).toEqual(record);
+  });
+
+  it.each(['', 'a'.repeat(65), 'opaque@id', 'https://user:secret@example.test', 42, null])(
+    'drops an invalid source id %j',
+    (source_id) => {
+      const record = { level: 'warn', event: 'ingest.budget_exhausted' };
+      expect(safeRecord({ ...record, source_id })).toEqual(record);
+    },
+  );
+
   it.each(['01J00000000000000000000000', 'a'.repeat(64), null])(
     'keeps opaque user and session ids: %s',
     (id) => {
@@ -627,7 +645,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(28);
+    expect(missing).toHaveLength(29);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 

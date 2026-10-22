@@ -36,12 +36,7 @@ async function stored(orgId: string): Promise<string> {
 beforeEach(async () => {
   opened = openNodeSqliteExecutor();
   const init = await loadMigrationSource('core', '0001_init.sql', read('0001_init.sql'));
-  const epoch = await loadMigrationSource(
-    'core',
-    '0004_cache_epoch.sql',
-    read('0004_cache_epoch.sql'),
-  );
-  await migrate(opened.executor, [init, epoch], { holder: 't273' });
+  await migrate(opened.executor, [init], { holder: 't273' });
   orgs = await seedTwoOrganizations(opened.executor);
 });
 

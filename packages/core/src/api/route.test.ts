@@ -283,23 +283,27 @@ describe('body reading', () => {
   });
 });
 
-describe('concurrency', () => {
+describe.each(['POST', 'PUT', 'PATCH'] as const)('%s concurrency', (method) => {
+  const runForMethod: typeof run = (options = {}, handler, overrides = {}) =>
+    run({ ...options, method }, handler, { ...overrides, method });
   it('answers 428 without If-Match', async () => {
-    const response = await run();
+    const handler = vi.fn(() => Promise.resolve(ok));
+    const response = await runForMethod({}, handler);
+    expect(handler).not.toHaveBeenCalled();
     expect(response.status).toBe(428);
     expect((await envelope(response)).error.code).toBe('precondition_required');
   });
 
   it('passes If-Match "r2" as expectedRevision 2', async () => {
     const handler = vi.fn(() => Promise.resolve(ok));
-    await run({ headers: rev }, handler);
+    await runForMethod({ headers: rev }, handler);
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 2 }));
   });
 
   it.each(['abc', '"r0"', '"r-1"', '"r1.5"', 'r2', '"r2", "r3"', '"r99999999999999999999"'])(
     'answers 400 without details for If-Match %s',
     async (value) => {
-      const response = await run({ headers: { 'if-match': value } });
+      const response = await runForMethod({ headers: { 'if-match': value } });
       expect(response.status).toBe(400);
       const { error } = await envelope(response);
       expect(error.code).toBe('invalid_request');
@@ -308,25 +312,32 @@ describe('concurrency', () => {
   );
 
   it('answers 412 for a handler conflict', async () => {
-    const response = await run({ headers: rev }, () => Promise.resolve({ error: 'conflict' }));
+    const response = await runForMethod({ headers: rev }, () =>
+      Promise.resolve({ error: 'conflict' }),
+    );
     expect(response.status).toBe(412);
     expect((await envelope(response)).error.code).toBe('precondition_failed');
   });
 
   it('answers 409 for a conflict without concurrency', async () => {
-    const plain = omit(spec(), 'concurrency');
+    const plain = omit(spec({ method }), 'concurrency');
     const route = apiRoute(defineApi(plain), () => Promise.resolve({ error: 'conflict' }));
-    const response = (await route.handler(context())) as Response;
+    const response = (await route.handler(context({ method }))) as Response;
     expect(response.status).toBe(409);
     expect((await envelope(response)).error.code).toBe('conflict');
   });
 
-  it('passes null expectedRevision without concurrency', async () => {
-    const plain = omit(spec(), 'concurrency');
-    const handler = vi.fn(() => Promise.resolve(ok));
-    await (apiRoute(defineApi(plain), handler).handler(context()) as Promise<Response>);
-    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: null }));
-  });
+  it.each([undefined, 'invalid', '"r2"'])(
+    'passes null expectedRevision without concurrency with header %s',
+    async (header) => {
+      const plain = omit(spec({ method }), 'concurrency');
+      const handler = vi.fn(() => Promise.resolve(ok));
+      await (apiRoute(defineApi(plain), handler).handler(
+        context({ method, headers: header === undefined ? {} : { 'if-match': header } }),
+      ) as Promise<Response>);
+      expect(handler).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: null }));
+    },
+  );
 });
 
 describe('no-echo', () => {
@@ -439,8 +450,14 @@ describe('defineApi', () => {
     expect(() => defineApi({ ...plain, method: 'GET' })).toThrow(/body/);
   });
 
-  it('throws for concurrency on a POST', () => {
-    expect(() => defineApi(spec({ method: 'POST' }))).toThrow(/concurrency/);
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'] as const)('accepts concurrency on %s', (method) => {
+    expect(defineApi(spec({ method, api: omit(slot, 'body') })).concurrency).toBe('if-match');
+  });
+
+  it('throws for concurrency on a GET', () => {
+    expect(() => defineApi(spec({ method: 'GET', api: omit(slot, 'body') }))).toThrow(
+      /concurrency/,
+    );
   });
 
   it('throws for a non-representable schema', () => {

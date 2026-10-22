@@ -446,7 +446,7 @@ describe('Node package-sync wiring', () => {
     }
   });
 
-  it('sends ingest budget exhaustion to the sink with job_id and package_key', async () => {
+  it('sends ingest budget exhaustion to the sink with job_id, package_key and source_id', async () => {
     const upstream = remote('npm', 1);
     await boot(upstream.transport);
     budget.exhausted = true;
@@ -461,6 +461,7 @@ describe('Node package-sync wiring', () => {
             reason_code: 'budget_exhausted',
             job_id: job.id,
             package_key: upstream.key,
+            source_id: sources.npm,
           }),
         });
       },

@@ -1,7 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SqlValue } from '@package-broker/core/db/port';
-import { withForeignKeysOff } from '../testing/foreign-keys-off.js';
 import { BACKUP_SCOPE } from '../backup-scope.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
 import { migrate } from './runner.js';
@@ -9,9 +8,9 @@ import { loadMigrationSource, type MigrationSource } from './source.js';
 
 const migrationsUrl = new URL('../../migrations/', import.meta.url);
 
-async function loadCore(only: (name: string) => boolean = () => true): Promise<MigrationSource[]> {
+async function loadCore(): Promise<MigrationSource[]> {
   const names = readdirSync(migrationsUrl)
-    .filter((name) => name.endsWith('.sql') && only(name))
+    .filter((name) => name.endsWith('.sql'))
     .sort();
   return Promise.all(
     names.map((name) =>
@@ -164,61 +163,14 @@ async function indexNames(
   );
 }
 
-async function migrateTo(upTo: string | null): Promise<void> {
-  const sources = await loadCore((name) => upTo === null || name < upTo);
+async function migrateAll(): Promise<void> {
+  const sources = await loadCore();
   await migrate(opened.executor, sources, { holder: 'registry-migration-test' });
 }
 
-describe('migration 0023 version package status index', () => {
-  const migrationId = 'core:0023_version_package_status';
-
-  it.each(['fresh', 'upgrade'])('applies to a %s database', async (mode) => {
-    const sources = await loadCore((name) => name < '0024_');
-    if (mode === 'upgrade') {
-      await migrate(
-        opened.executor,
-        sources.filter((source) => source.id < migrationId),
-        {
-          holder: 'version-status-test',
-        },
-      );
-    }
-    const result = await migrate(opened.executor, sources, { holder: 'version-status-test' });
-    expect(result.applied.at(-1)).toBe(migrationId);
-    if (mode === 'upgrade') expect(result.applied).toEqual([migrationId]);
-    expect(await indexNames('version')).toContainEqual({
-      name: 'version_package_status',
-      unique: 0,
-      partial: 0,
-    });
-    expect(await rows('SELECT id FROM schema_migration ORDER BY id DESC LIMIT 1')).toEqual([
-      { id: migrationId },
-    ]);
-  });
-
-  it('skips an already applied migration', async () => {
-    const sources = await loadCore();
-    await migrate(opened.executor, sources, { holder: 'version-status-test' });
-    const result = await migrate(opened.executor, sources, { holder: 'version-status-test' });
-    expect(result.applied).toEqual([]);
-    expect(result.skipped).toContain(migrationId);
-  });
-
-  it('does not change the schema when the index SQL is reapplied', async () => {
-    await migrateTo(null);
-    const before = await rows('PRAGMA schema_version');
-    const sql = readFileSync(new URL('0023_version_package_status.sql', migrationsUrl), 'utf8');
-    await run(sql);
-    expect(await rows('PRAGMA schema_version')).toEqual(before);
-    expect(await indexNames('version')).toContainEqual({
-      name: 'version_package_status',
-      unique: 0,
-      partial: 0,
-    });
-  });
-
+describe('version package status index', () => {
   it('uses the index for a quarantined version existence probe', async () => {
-    await migrateTo(null);
+    await migrateAll();
     const plan = await rows<{ detail: string }>(
       "EXPLAIN QUERY PLAN SELECT 1 FROM version WHERE package_id = ? AND status = 'quarantined' LIMIT 1",
       [PACKAGE],
@@ -227,18 +179,9 @@ describe('migration 0023 version package status index', () => {
   });
 });
 
-describe.each([
-  ['a fresh database', async () => migrateTo('0008_')],
-  [
-    'a database migrated to 0006',
-    async () => {
-      await migrateTo('0007_');
-      await migrateTo('0008_');
-    },
-  ],
-])('migration 0007 on %s', (_label, prepare) => {
+describe('registry baseline', () => {
   beforeEach(async () => {
-    await prepare();
+    await migrateAll();
   });
 
   it('creates the four tables as STRICT, the keyed ones WITHOUT ROWID', async () => {
@@ -300,13 +243,16 @@ describe.each([
       'form:TEXT:1:3',
       'validator:TEXT:1:0',
       'last_modified:TEXT:1:0',
+      'rev:INTEGER:1:0',
+      'package_id:TEXT:1:0',
     ]);
   });
 
-  it('declares the two ingest_session indexes', async () => {
+  it('declares the ingest_session indexes', async () => {
     expect(await indexNames('ingest_session')).toEqual([
       { name: 'ingest_session_running_scope', unique: 1, partial: 1 },
       { name: 'ingest_session_scope_generation', unique: 0, partial: 0 },
+      { name: 'ingest_session_snapshot_blob', unique: 0, partial: 0 },
       { name: 'ingest_session_state_lease', unique: 0, partial: 0 },
     ]);
     expect(await indexNames('fetch_lease')).toEqual([
@@ -505,198 +451,89 @@ describe.each([
   });
 });
 
-describe('migration 0024 closure edge indexes', () => {
-  const migrationId = 'core:0024_closure_edge_indexes';
-  it.each(['fresh', 'upgrade'])(
-    'applies on %s databases and preserves org-consistent keys',
-    async (mode) => {
-      if (mode === 'upgrade') {
-        await migrateTo('0024_');
-        await seed();
-        await run('DROP INDEX organization_singleton');
-        await insert('organization', { id: 'OTHER', slug: 'other', name: 'Other' });
-        await insert('project', { id: 'OTHER-P', org_id: 'OTHER', slug: 'other', name: 'Other' });
-        await insert('source', {
-          id: 'OTHER-S',
-          org_id: 'OTHER',
-          name: 'npm',
-          ecosystem: 'npm',
-          type: 'npm_registry',
-        });
-        await insert('package', {
-          id: 'OTHER-K',
-          org_id: 'OTHER',
-          source_id: 'OTHER-S',
-          ecosystem: 'npm',
-          name: '@other/lib',
-        });
-        await insert('project_package', {
-          org_id: 'OTHER',
-          project_id: 'OTHER-P',
-          package_id: 'OTHER-K',
-          origin: 'pattern',
-          created_at: NOW,
-        });
-        await run(
-          "INSERT INTO project_package (org_id, project_id, package_id, origin, created_at) VALUES (?, ?, ?, 'explicit', ?)",
-          [ORG, PROJECT, PACKAGE, NOW],
-        );
-      }
-      const result = await migrate(opened.executor, await loadCore(), {
-        holder: 'edge-index-test',
-      });
-      expect(result.applied.at(-1)).toBe(migrationId);
-      if (mode === 'upgrade') {
-        expect(result.applied).toEqual([migrationId]);
-        expect(
-          await rows(
-            'SELECT org_id, project_id, package_id, origin, created_at, ecosystem, name FROM project_package ORDER BY org_id',
-          ),
-        ).toEqual([
-          {
-            org_id: ORG,
-            project_id: PROJECT,
-            package_id: PACKAGE,
-            origin: 'explicit',
-            created_at: NOW,
-            ecosystem: 'composer',
-            name: 'acme/lib',
-          },
-          {
-            org_id: 'OTHER',
-            project_id: 'OTHER-P',
-            package_id: 'OTHER-K',
-            origin: 'pattern',
-            created_at: NOW,
-            ecosystem: 'npm',
-            name: '@other/lib',
-          },
-        ]);
-      }
-      expect(await rows('PRAGMA foreign_key_check')).toEqual([]);
-      expect(
-        await rows(`SELECT id, seq, "table", "from", "to", on_update, on_delete, match
+describe('closure edge indexes', () => {
+  it('creates closure indexes and preserves org-consistent keys', async () => {
+    await migrateAll();
+    expect(await rows('PRAGMA foreign_key_check')).toEqual([]);
+    expect(
+      await rows(`SELECT id, seq, "table", "from", "to", on_update, on_delete, match
         FROM pragma_foreign_key_list('project_package') ORDER BY id, seq`),
-      ).toEqual([
-        {
-          id: 0,
-          seq: 0,
-          table: 'package',
-          from: 'org_id',
-          to: 'org_id',
-          on_update: 'NO ACTION',
-          on_delete: 'NO ACTION',
-          match: 'NONE',
-        },
-        {
-          id: 0,
-          seq: 1,
-          table: 'package',
-          from: 'package_id',
-          to: 'id',
-          on_update: 'NO ACTION',
-          on_delete: 'NO ACTION',
-          match: 'NONE',
-        },
-        {
-          id: 1,
-          seq: 0,
-          table: 'project',
-          from: 'org_id',
-          to: 'org_id',
-          on_update: 'NO ACTION',
-          on_delete: 'NO ACTION',
-          match: 'NONE',
-        },
-        {
-          id: 1,
-          seq: 1,
-          table: 'project',
-          from: 'project_id',
-          to: 'id',
-          on_update: 'NO ACTION',
-          on_delete: 'NO ACTION',
-          match: 'NONE',
-        },
-        {
-          id: 2,
-          seq: 0,
-          table: 'organization',
-          from: 'org_id',
-          to: 'id',
-          on_update: 'NO ACTION',
-          on_delete: 'NO ACTION',
-          match: 'NONE',
-        },
-      ]);
-      if (mode === 'fresh') await seed();
-      await expect(
-        insert('project_package', {
-          org_id: ORG,
-          project_id: PROJECT,
-          package_id: PACKAGE,
-          origin: 'invalid',
-          ecosystem: 'composer',
-          name: 'acme/lib',
-        }),
-      ).rejects.toThrow(CHECK);
+    ).toEqual([
+      {
+        id: 0,
+        seq: 0,
+        table: 'package',
+        from: 'org_id',
+        to: 'org_id',
+        on_update: 'NO ACTION',
+        on_delete: 'NO ACTION',
+        match: 'NONE',
+      },
+      {
+        id: 0,
+        seq: 1,
+        table: 'package',
+        from: 'package_id',
+        to: 'id',
+        on_update: 'NO ACTION',
+        on_delete: 'NO ACTION',
+        match: 'NONE',
+      },
+      {
+        id: 1,
+        seq: 0,
+        table: 'project',
+        from: 'org_id',
+        to: 'org_id',
+        on_update: 'NO ACTION',
+        on_delete: 'NO ACTION',
+        match: 'NONE',
+      },
+      {
+        id: 1,
+        seq: 1,
+        table: 'project',
+        from: 'project_id',
+        to: 'id',
+        on_update: 'NO ACTION',
+        on_delete: 'NO ACTION',
+        match: 'NONE',
+      },
+      {
+        id: 2,
+        seq: 0,
+        table: 'organization',
+        from: 'org_id',
+        to: 'id',
+        on_update: 'NO ACTION',
+        on_delete: 'NO ACTION',
+        match: 'NONE',
+      },
+    ]);
+    await seed();
+    await expect(
+      insert('project_package', {
+        org_id: ORG,
+        project_id: PROJECT,
+        package_id: PACKAGE,
+        origin: 'invalid',
+        ecosystem: 'composer',
+        name: 'acme/lib',
+      }),
+    ).rejects.toThrow(CHECK);
 
-      expect(await tableList('project_package')).toMatchObject({ strict: 1, wr: 1 });
-      expect(
-        (await columns('project_package'))
-          .filter((c) => ['ecosystem', 'name'].includes(c.name))
-          .map((c) => [c.name, c.notnull]),
-      ).toEqual([
-        ['ecosystem', 1],
-        ['name', 1],
-      ]);
-      expect(await indexNames('project_package')).toEqual([
-        { name: 'project_package_name', unique: 0, partial: 0 },
-        { name: 'project_package_package', unique: 0, partial: 0 },
-      ]);
-    },
-  );
-
-  it.each(['missing', 'foreign'])(
-    'aborts when the linked package is %s in the row organization',
-    async (kind) => {
-      await migrateTo('0024_');
-      await seed();
-      await run('DROP INDEX organization_singleton');
-      await insert('organization', { id: 'OTHER', slug: 'other', name: 'Other' });
-      await insert('project', { id: 'OTHER-P', org_id: 'OTHER', slug: 'other', name: 'Other' });
-      await withForeignKeysOff(opened.executor, () =>
-        insert('project_package', {
-          org_id: 'OTHER',
-          project_id: 'OTHER-P',
-          package_id: kind === 'missing' ? 'missing' : PACKAGE,
-          origin: 'explicit',
-          created_at: NOW,
-        }),
-      );
-      await expect(
-        migrate(opened.executor, await loadCore(), { holder: 'edge-index-test' }),
-      ).rejects.toThrow(/project_package.package_id.*1/);
-      expect(await rows('SELECT package_id FROM project_package')).toEqual([
-        { package_id: kind === 'missing' ? 'missing' : PACKAGE },
-      ]);
-      expect((await columns('project_package')).map((c) => c.name)).not.toContain('ecosystem');
-      expect(await rows('SELECT id FROM schema_migration WHERE id = ?', [migrationId])).toEqual([]);
-    },
-  );
-
-  it('skips 0024 on rerun and its index statements are schema no-ops', async () => {
-    const sources = await loadCore();
-    await migrate(opened.executor, sources, { holder: 'edge-index-test' });
-    const result = await migrate(opened.executor, sources, { holder: 'edge-index-test' });
-    expect(result.applied).toEqual([]);
-    expect(result.skipped).toContain(migrationId);
-    const before = await rows('PRAGMA schema_version');
-    const source = sources.find((s) => s.id === migrationId)!;
-    for (const statement of source.sql
-      .split(';')
-      .filter((s) => /CREATE INDEX IF NOT EXISTS/i.test(s)))
-      await run(statement);
-    expect(await rows('PRAGMA schema_version')).toEqual(before);
+    expect(await tableList('project_package')).toMatchObject({ strict: 1, wr: 1 });
+    expect(
+      (await columns('project_package'))
+        .filter((c) => ['ecosystem', 'name'].includes(c.name))
+        .map((c) => [c.name, c.notnull]),
+    ).toEqual([
+      ['ecosystem', 1],
+      ['name', 1],
+    ]);
+    expect(await indexNames('project_package')).toEqual([
+      { name: 'project_package_name', unique: 0, partial: 0 },
+      { name: 'project_package_package', unique: 0, partial: 0 },
+    ]);
   });
 });

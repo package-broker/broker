@@ -36,6 +36,22 @@ import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
+import { createApiModule } from '@package-broker/core/api/module';
+import type { AuditReader } from '@package-broker/core/api/routes/audit';
+import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
+import { createSourceService } from '@package-broker/core/sources/source-service';
+import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
+import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
+import { createGrantRepository } from '@package-broker/db-sqlite/repositories/grant';
+import { createIdempotencyRepository } from '@package-broker/db-sqlite/repositories/idempotency';
+import { createAuditQueryRepository } from '@package-broker/db-sqlite/repositories/audit-query';
+import { createPackageAdminReader } from '@package-broker/db-sqlite/repositories/package-admin-read';
+import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
+import { createProjectSourceReader } from '@package-broker/db-sqlite/repositories/project-source-read';
+import { createRegisteredNameRepository } from '@package-broker/db-sqlite/repositories/registered-name';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
+import type { RouteDefinition } from '@package-broker/core/plugin';
 import { createServer, type Server } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getRequestListener } from '@hono/node-server';
@@ -907,6 +923,161 @@ function buildCatalogue(
   });
 }
 
+function clientIp(request: Request): string | null {
+  const candidate =
+    request.headers.get('cf-connecting-ip')?.trim() ||
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    null;
+  return candidate !== null && /^[0-9a-fA-F:.]{2,45}$/.test(candidate) ? candidate : null;
+}
+
+function auditReader(executor: SqlExecutor): AuditReader {
+  const audit = createAuditQueryRepository(executor);
+  const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
+    if (ctx.org === null) throw new TypeError('route requires an organization context');
+    return ctx.org;
+  };
+  return {
+    list: (ctx, query) =>
+      audit.list(organization(ctx), {
+        limit: query.limit,
+        ...(query.projectId === null ? {} : { projectId: query.projectId }),
+        ...(query.actor === undefined ? {} : { actor: query.actor }),
+        ...(query.action === undefined ? {} : { action: query.action }),
+        ...(query.after === undefined ? {} : { afterId: query.after }),
+      }),
+    async head(ctx) {
+      const head = await audit.head(organization(ctx));
+      return {
+        seq: head?.seq ?? 0,
+        hash: head?.hash ?? AUDIT_GENESIS_HASH,
+        pendingCount: head?.pending ?? 0,
+        lastVerifiedAt: null,
+      };
+    },
+  };
+}
+
+function buildApiRoutes(input: {
+  readonly executor: SqlExecutor;
+  readonly auth: NodeAuthOptions;
+  readonly access: AccessAssembly;
+  readonly packages: NodeCatalogueServices;
+  readonly policy: OutboundPolicy;
+  readonly registration: Registration;
+  readonly lifetime: TokenLifetimePolicy;
+  readonly log: KernelLog;
+}): readonly RouteDefinition[] {
+  const { executor, access, packages, lifetime, log } = input;
+  const { services } = access;
+  const anchors = access.anchors;
+  const common = { ids: { ulid }, clock: systemClock, clientIp };
+  const organizations = createOrganizationRepository(executor);
+  const projects = createProjectRepository(executor, {
+    reservedSlugs: reservedFirstSegments([
+      ...input.registration.routes,
+      ...access.module.coreRoutes,
+    ]),
+    providerAnchors: anchors,
+  });
+  const idempotency = createIdempotencyRepository(executor);
+  const sources = createSourceRepository(executor);
+  const credentialRepository = createCredentialRepository(executor);
+  const registeredNames = createRegisteredNameRepository(executor);
+  const sourceService = createSourceService({
+    sources,
+    organizations,
+    registeredNames,
+    credentials: createCredentialStore({
+      repository: credentialRepository,
+      cipher: createSecretCipher(input.auth.keyring, 'credential-encryption'),
+      ids: { ulid },
+      clock: systemClock,
+    }),
+    credentialRepository,
+    catalogue: packages.reader,
+    policy: input.policy,
+    providerAnchors: anchors,
+    ids: { ulid },
+    log,
+  });
+  try {
+    return createApiModule({
+      organization: {
+        ...common,
+        organizations,
+        users: createUserRepository(executor),
+        administration: services.administration,
+        lifetime,
+      },
+      projects: {
+        ...common,
+        lister: services.projectList,
+        service: services.projects,
+        projects,
+        idempotency,
+      },
+      access: {
+        ...common,
+        administration: services.administration,
+        grants: createGrantRepository(executor, {
+          providerAnchors: anchors,
+          holderInput: () => ({ kind: 'fresh', providers: anchors }),
+        }),
+      },
+      projectAccess: {
+        ...common,
+        projectAdministration: services.projectGrants,
+        roles: {
+          get: async (ctx, id) =>
+            (await services.administration.listRoles(ctx)).find((role) => role.id === id) ?? null,
+        },
+      },
+      tokens: {
+        ...common,
+        tokens: {
+          personal: services.personalTokens,
+          service: services.serviceTokens,
+          revoke: services.tokenRevoke,
+        },
+        reader: services.tokenList,
+        idempotency,
+        sessions: services.sessions,
+        organizations,
+        lifetime,
+      },
+      servicePrincipals: {
+        ...common,
+        servicePrincipals: services.servicePrincipals,
+        principals: createServicePrincipalRepository(executor),
+      },
+      sources: {
+        ...common,
+        service: sourceService,
+        sources,
+        projects,
+        sessions: services.sessions,
+      },
+      sourceNames: {
+        ...common,
+        service: sourceService,
+        sources,
+        registeredNames,
+        visibility: packages.visibility,
+        projectSources: createProjectSourceReader(executor),
+        projects,
+      },
+      packages: createPackageAdminReader(executor),
+      audit: auditReader(executor),
+    }).routes;
+  } catch (error) {
+    if (error instanceof TypeError && error.message.startsWith('API module requires dependency')) {
+      throw new KernelConfigError([error.message]);
+    }
+    throw error;
+  }
+}
+
 function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolicy {
   try {
     return resolveTokenLifetimePolicy(input);
@@ -1128,6 +1299,23 @@ export function createNodeServer(
       access === undefined || reads === undefined
         ? null
         : buildCatalogue(executor, reads, access.anchors, log);
+    const apiRoutes =
+      auth === undefined || access === undefined || packages === null
+        ? []
+        : buildApiRoutes({
+            executor,
+            auth,
+            access,
+            packages,
+            policy: createOutboundPolicy({
+              allowPrivateHosts: options.registry?.config.outbound.allowPrivateHosts ?? [],
+              runtime: 'node',
+              selfOrigins: options.registry?.config.outbound.selfOrigins ?? [auth.publicOrigin],
+            }),
+            registration,
+            lifetime,
+            log,
+          });
     const authorization = options.authorization ?? access?.module.authorization;
     const assets = await createNodeAssets(
       fileURLToPath(new URL('./assets/', import.meta.url)),
@@ -1179,6 +1367,7 @@ export function createNodeServer(
         : { platformServices: options.platformServices }),
       coreRoutes: [
         ...(access?.module.coreRoutes ?? []),
+        ...apiRoutes,
         ...(registry?.module.coreRoutes ?? []).map((route) => ({
           ...route,
           async handler(context: Parameters<typeof route.handler>[0]) {

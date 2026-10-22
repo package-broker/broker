@@ -921,6 +921,7 @@ describe('engine grants', () => {
         kind === null
           ? null
           : {
+              id: 'tok-1',
               kind,
               scope,
               readOnly,
@@ -1017,6 +1018,7 @@ describe('engine grants', () => {
         actor: null,
         tokenSelector: kind === 'pat' ? SELECTOR : 'mnopqrstuvwx',
         token: {
+          id: 'tok-1',
           kind,
           scope: 'full',
           readOnly: false,

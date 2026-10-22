@@ -340,3 +340,41 @@ describe('ui setup build output', () => {
     BUILD_TIMEOUT_MS * 2,
   );
 });
+
+describe('whole app CSP graph', () => {
+  it(
+    'builds the actual app without scroll/style injection dependencies',
+    async () => {
+      const out = path.join(scratch, `whole-app-${counter++}`);
+      const metafile = path.join(scratch, `whole-app-${counter++}.json`);
+      await run(
+        process.execPath,
+        [
+          BUILD_SCRIPT,
+          '--out',
+          out,
+          '--budget',
+          await writeBudget(1_000_000),
+          '--metafile',
+          metafile,
+        ],
+        { timeout: BUILD_TIMEOUT_MS },
+      );
+      const graph = JSON.parse(await readFile(metafile, 'utf8')) as {
+        inputs: Record<string, unknown>;
+      };
+      const inputs = Object.keys(graph.inputs).join('\n');
+      expect(inputs).toContain('src/main.tsx');
+      expect(inputs).toContain('@base-ui/react');
+      expect(inputs).toContain('@tanstack/react-table');
+      expect(inputs).not.toMatch(/react-remove-scroll|react-style-singleton/);
+      const files = await readOutput(out);
+      for (const [name, bytes] of files)
+        if (name.endsWith('.html')) assertNoInlineCode(bytes.toString('utf8'));
+      const css = files.get(cssName(files))?.toString('utf8') ?? '';
+      expect(css).toContain('@container broker-table');
+      expect(css).toContain('content:attr(data-label)');
+    },
+    BUILD_TIMEOUT_MS,
+  );
+});

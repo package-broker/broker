@@ -292,7 +292,7 @@ describe('reauth flow', () => {
     const html = renderToString(createElement(ReauthConfirm, { flow: returned }));
     expect(html).toContain('Enter the credential again');
     expect(html).toContain('Dismiss');
-    expect(html).not.toContain('Send it now');
+    expect(html).not.toContain('Send the held action now?');
     expect(html).not.toContain(SENTINEL);
     await returned.confirm();
     expect(send).not.toHaveBeenCalled();
@@ -367,7 +367,7 @@ describe('reauth flow', () => {
         onDecline: () => undefined,
       }),
     );
-    expect(html).toContain('Repeat your last action?');
+    expect(html).toContain('Send the held action now?');
     expect(html).toContain('POST');
     expect(html).toContain('/_pb/projects/p/tokens');
     expect(html).not.toContain(SENTINEL);

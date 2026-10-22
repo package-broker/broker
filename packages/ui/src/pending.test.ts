@@ -41,6 +41,18 @@ function setup() {
 afterEach(() => vi.restoreAllMocks());
 
 describe('pending action storage', () => {
+  it.each([
+    'vendor/name',
+    'vendor.with.dots/package.name',
+    'vendor-name/package-name',
+    'vendor_name/package_name',
+  ])('round-trips Composer display metadata for %s', (packageName) => {
+    const { storage } = setup();
+    const display = { packageName, version: '1.2.3', scope: 'Organization' };
+    expect(savePending(storage, { ...action, display })).toEqual({ ok: true });
+    expect(loadPending(storage, NOW)).toMatchObject({ ok: true, action: { display } });
+  });
+
   it('removes declared nested secrets without changing the input', () => {
     const { storage, raw } = setup();
     expect(savePending(storage, action)).toEqual({ ok: true });

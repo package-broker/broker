@@ -1,19 +1,15 @@
 import { useEffect, useState } from 'react';
 import type { operations } from '../api-types.js';
 import { useServices, type AuthClient } from '../auth.js';
-import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
+import { DataTable } from '../components/ui/table.js';
+import { Time } from '../components/ui/time.js';
+import { IdText } from '../components/ui/id-text.js';
+import { FilterToolbar } from '../components/ui/toolbar.js';
+import { ListState } from '../components/ui/list-state.js';
 
 type AuditList = operations['listAudit']['responses'][200]['content']['application/json'];
 type AuditHead = operations['auditHead']['responses'][200]['content']['application/json'];
@@ -96,7 +92,7 @@ export function AuditView(props: {
 }) {
   return (
     <section aria-labelledby="page-heading" className="space-y-4">
-      <h1 id="page-heading" className="text-xl font-semibold">
+      <h1 id="page-heading" className="text-2xl font-semibold">
         Audit
       </h1>
       {props.head === null ? null : (
@@ -107,7 +103,7 @@ export function AuditView(props: {
               'never verified'
             ) : (
               <>
-                Last verified <time>{props.head.lastVerifiedAt}</time>
+                Last verified <Time value={props.head.lastVerifiedAt} />
               </>
             )}
           </Badge>
@@ -116,98 +112,164 @@ export function AuditView(props: {
           ) : null}
         </div>
       )}
-      <form
-        key={auditHash(props.filters, props.scope)}
-        className="flex flex-wrap items-end gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          const value = (key: string) => String(form.get(key) ?? '');
-          props.onNavigate({
-            actor: value('actor'),
-            action: value('action'),
-            project: value('filterProject'),
-            limit: value('limit'),
-            after: '',
-          });
-        }}
+      <FilterToolbar
+        chips={(['actor', 'action', 'project'] as const).flatMap((key) =>
+          props.filters[key] && (key !== 'project' || props.scope === null)
+            ? [
+                {
+                  label: { actor: 'Actor', action: 'Action', project: 'Project' }[key],
+                  value: props.filters[key],
+                  onRemove: () => props.onNavigate({ ...props.filters, [key]: '', after: '' }),
+                },
+              ]
+            : [],
+        )}
       >
-        <div>
-          <Label htmlFor="audit-actor">Actor</Label>
-          <Input id="audit-actor" name="actor" maxLength={200} defaultValue={props.filters.actor} />
-        </div>
-        <div>
-          <Label htmlFor="audit-action">Action</Label>
-          <Input
-            id="audit-action"
-            name="action"
-            maxLength={200}
-            defaultValue={props.filters.action}
-          />
-        </div>
-        {props.scope === null ? (
+        <form
+          key={auditHash(props.filters, props.scope)}
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            const value = (key: string) => String(form.get(key) ?? '');
+            props.onNavigate({
+              actor: value('actor'),
+              action: value('action'),
+              project: value('filterProject'),
+              limit: value('limit'),
+              after: '',
+            });
+          }}
+        >
           <div>
-            <Label htmlFor="audit-project">Project</Label>
+            <Label htmlFor="audit-actor">Actor</Label>
             <Input
-              id="audit-project"
-              name="filterProject"
+              id="audit-actor"
+              name="actor"
               maxLength={200}
-              defaultValue={props.filters.project}
+              defaultValue={props.filters.actor}
             />
           </div>
-        ) : null}
-        <div>
-          <Label htmlFor="audit-limit">Limit</Label>
-          <Input
-            id="audit-limit"
-            name="limit"
-            type="number"
-            min="1"
-            max="200"
-            required
-            defaultValue={props.filters.limit}
-          />
-        </div>
-        <Button type="submit">Filter</Button>
-      </form>
+          <div>
+            <Label htmlFor="audit-action">Action</Label>
+            <Input
+              id="audit-action"
+              name="action"
+              maxLength={200}
+              defaultValue={props.filters.action}
+            />
+          </div>
+          {props.scope === null ? (
+            <div>
+              <Label htmlFor="audit-project">Project</Label>
+              <Input
+                id="audit-project"
+                name="filterProject"
+                maxLength={200}
+                defaultValue={props.filters.project}
+              />
+            </div>
+          ) : null}
+          <div>
+            <Label htmlFor="audit-limit">Limit</Label>
+            <Input
+              id="audit-limit"
+              name="limit"
+              type="number"
+              min="1"
+              max="200"
+              required
+              defaultValue={props.filters.limit}
+            />
+          </div>
+          <Button type="submit">Filter</Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() =>
+              props.onNavigate({ actor: '', action: '', project: '', limit: '50', after: '' })
+            }
+          >
+            Clear filters
+          </Button>
+        </form>
+      </FilterToolbar>
       {props.error === null ? null : (
-        <Alert variant="destructive">
-          <AlertDescription>{props.error}</AlertDescription>
-        </Alert>
+        <ListState kind="error" title={props.error}>
+          <Button variant="outline" onClick={() => props.onNavigate({ ...props.filters })}>
+            Retry
+          </Button>
+        </ListState>
       )}
-      {props.loading ? <p role="status">Loading audit events…</p> : null}
+      {props.loading ? <ListState kind="loading" title="Loading audit events…" /> : null}
       {props.data === null ? null : (
         <>
-          <Table>
-            <caption className="sr-only">Audit events</caption>
-            <TableHeader>
-              <TableRow>
-                {['Sequence', 'Time', 'Actor', 'Action', 'Project', 'Target type', 'Target ID'].map(
-                  (label) => (
-                    <TableHead key={label}>{label}</TableHead>
+          {props.data.items.length ? (
+            <DataTable
+              label="Audit events"
+              items={props.data.items}
+              columns={[
+                { key: 'seq', label: 'Sequence', value: (item) => item.seq },
+                {
+                  key: 'time',
+                  label: 'Time',
+                  value: (item) => item.createdAt,
+                  render: (item) => <Time value={item.createdAt} />,
+                },
+                { key: 'action', label: 'Action', value: (item) => item.action },
+                {
+                  key: 'actor',
+                  label: 'Actor',
+                  value: (item) => item.actor.id ?? '',
+                  render: (item) => (
+                    <>
+                      <span className="block text-xs text-neutral-600">{item.actor.type}</span>
+                      <IdText value={item.actor.id} label="actor ID" />
+                    </>
                   ),
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {props.data.items.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell>{item.seq}</TableCell>
-                  <TableCell>
-                    <time>{item.createdAt}</time>
-                  </TableCell>
-                  <TableCell>
-                    {item.actor.type}: {item.actor.id ?? '—'}
-                  </TableCell>
-                  <TableCell>{item.action}</TableCell>
-                  <TableCell>{item.projectId ?? '—'}</TableCell>
-                  <TableCell>{item.targetType}</TableCell>
-                  <TableCell>{item.targetId ?? '—'}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          {props.data.items.length === 0 ? <p>No audit events.</p> : null}
+                },
+                {
+                  key: 'project',
+                  label: 'Project',
+                  priority: 2,
+                  value: (item) => item.projectId ?? '',
+                  render: (item) => <IdText value={item.projectId} label="project ID" />,
+                },
+                {
+                  key: 'targetType',
+                  label: 'Target type',
+                  priority: 2,
+                  value: (item) => item.targetType,
+                },
+                {
+                  key: 'targetId',
+                  label: 'Target ID',
+                  priority: 3,
+                  value: (item) => item.targetId ?? '',
+                  render: (item) => <IdText value={item.targetId} label="target ID" />,
+                },
+              ]}
+            />
+          ) : !props.loading && !props.error ? (
+            <ListState
+              kind={
+                props.filters.actor ||
+                props.filters.action ||
+                props.filters.project ||
+                props.filters.after
+                  ? 'filtered-empty'
+                  : 'empty'
+              }
+              title={
+                props.filters.actor ||
+                props.filters.action ||
+                props.filters.project ||
+                props.filters.after
+                  ? 'No audit events match these filters'
+                  : 'No audit events.'
+              }
+            />
+          ) : null}
           <div className="flex gap-2">
             {props.filters.after ? (
               <Button
@@ -242,6 +304,7 @@ export function AuditPage() {
     error: null,
   });
   const [loading, setLoading] = useState(true);
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     const update = () => setHash(window.location.hash);
     window.addEventListener('hashchange', update);
@@ -261,7 +324,7 @@ export function AuditPage() {
     return () => {
       live = false;
     };
-  }, [client, hash]);
+  }, [client, hash, reload]);
   const { filters, scope } = readAuditHash(hash);
   return (
     <AuditView
@@ -270,7 +333,9 @@ export function AuditPage() {
       scope={scope}
       loading={loading}
       onNavigate={(next) => {
-        window.location.hash = auditHash(next, scope);
+        const target = auditHash(next, scope);
+        if (window.location.hash === target) setReload((value) => value + 1);
+        else window.location.hash = target;
       }}
     />
   );

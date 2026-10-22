@@ -94,3 +94,9 @@ it('generates the committed UI document apart from its release version', async (
   document.info.version = version;
   expect(JSON.stringify(document)).toBe(await served.text());
 });
+
+it('includes optional accept-removal and excludes unmounted rebuild when constructing the full API module', () => {
+  const paths = servedApiSpecs().map((spec) => spec.path);
+  expect(paths).toContain('/_pb/sources/:source/accept-removal');
+  expect(paths).not.toContain('/_pb/packages/:package/versions/:version/rebuild');
+});

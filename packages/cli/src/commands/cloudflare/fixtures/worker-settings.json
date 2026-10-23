@@ -1,0 +1,57 @@
+{
+  "placement": {},
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "usage_model": "standard",
+  "tags": [
+    "pb-install-v1",
+    "pb-owner-0529a93fddc9799d46b3c97efc69e2c21d187c521659477cd1ebd01a3320b0e6"
+  ],
+  "tail_consumers": [],
+  "logpush": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": false,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": false
+    },
+    "traces": { "enabled": false, "persist": true, "head_sampling_rate": 1 }
+  },
+  "annotations": {
+    "workers/message": "pb-artifact-sha256:e3700173a7323bda1abffacb1896cb262a828f1ada4c798e07e69db8c3e25a79",
+    "workers/tag": "pb-ff22b8d9-a17b-4c3b-88d1-00b7ca8d810b",
+    "workers/triggered_by": "version_upload"
+  },
+  "bindings": [
+    {
+      "dataset": "package_broker_production_metrics",
+      "name": "ANALYTICS",
+      "type": "analytics_engine"
+    },
+    { "name": "ASSETS", "type": "assets" },
+    {
+      "database_id": "bec49c1e-e41a-4bba-ba18-4e1d330dc61d",
+      "id": "bec49c1e-e41a-4bba-ba18-4e1d330dc61d",
+      "name": "DB",
+      "type": "d1"
+    },
+    { "name": "DEPLOYMENT_ID", "text": "<redacted-plain>", "type": "plain_text" },
+    { "name": "JOBS", "queue_name": "package-broker-production-jobs", "type": "queue" },
+    { "name": "PB_MASTER_KEY", "type": "secret_text" },
+    {
+      "name": "PB_PUBLIC_URL",
+      "text": "https://package-broker-production.packagebroker.workers.dev",
+      "type": "plain_text"
+    },
+    {
+      "bucket_name": "package-broker-production-blobs",
+      "jurisdiction": "eu",
+      "name": "STORAGE",
+      "type": "r2_bucket"
+    }
+  ]
+}

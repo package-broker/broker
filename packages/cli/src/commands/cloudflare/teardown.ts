@@ -1,3 +1,5 @@
+import { normalizeQueueConsumer, queueConsumerScript } from './queue-consumer.js';
+import { d1BindingId } from './worker-settings.js';
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -7,6 +9,7 @@ import {
   commandEnvelope,
   failCommand,
   object,
+  paginatedList,
   type CommandResult,
 } from './api.js';
 import {
@@ -240,9 +243,7 @@ class CleanupApi {
           return {
             gone: false,
             result: parsed.result,
-            ...(parsed.result_info === undefined
-              ? {}
-              : { result_info: object(parsed.result_info) }),
+            ...(parsed.result_info == null ? {} : { result_info: object(parsed.result_info) }),
           };
         } catch {
           throw new CloudflareError(
@@ -278,61 +279,23 @@ class CleanupApi {
     throw new CloudflareError('provider_failure');
   }
   async list(path: string, field?: string, r2 = false): Promise<Record<string, unknown>[]> {
-    const all: Record<string, unknown>[] = [];
-    const seen = new Set<string>();
-    let cursor: string | undefined;
-    let total: number | undefined;
-    for (let page = 1; page <= 10_000; page++) {
-      const response = await this.request(
-        `${path}${path.includes('?') ? '&' : '?'}${cursor === undefined ? `page=${page}&per_page=100` : `cursor=${encodeURIComponent(cursor)}`}`,
-        'GET',
-        undefined,
-        r2,
-      );
-      // A missing child collection is not evidence of an empty live parent.
-      if (response.gone) throw new CloudflareError('ownership_conflict', 8);
-      const result = field === undefined ? response.result : object(response.result)[field];
-      if (!Array.isArray(result)) throw new CloudflareError('ownership_conflict', 8);
-      all.push(...result.map(object));
-      const info = response.result_info;
-      if (info?.total_count !== undefined) {
-        if (
-          typeof info.total_count !== 'number' ||
-          !Number.isSafeInteger(info.total_count) ||
-          info.total_count < all.length ||
-          (total !== undefined && total !== info.total_count)
-        )
-          throw new CloudflareError('ownership_conflict', 8);
-        total = info.total_count;
-      }
-      if (info?.page !== undefined && info.page !== page)
-        throw new CloudflareError('ownership_conflict', 8);
-      const next = info?.cursor;
-      if (typeof next === 'string' && next !== '') {
-        if (seen.has(next)) throw new CloudflareError('ownership_conflict', 8);
-        seen.add(next);
-        cursor = next;
-        continue;
-      }
-      const pages = info?.total_pages;
-      if (typeof pages === 'number' && Number.isSafeInteger(pages) && pages >= page) {
-        if (pages === page) {
-          if (total !== undefined && total !== all.length)
-            throw new CloudflareError('ownership_conflict', 8);
-          return all;
-        }
-        continue;
-      }
-      if (
-        total === all.length ||
-        (next === '' && (total === undefined || total === all.length)) ||
-        (pages === 0 && result.length === 0 && (total === undefined || total === 0))
-      )
-        return all;
+    const conflict = (): never => {
       throw new CloudflareError('ownership_conflict', 8);
-    }
-    throw new CloudflareError('ownership_conflict', 8);
+    };
+    return paginatedList(
+      path,
+      async (page) => {
+        const response = await this.request(page, 'GET', undefined, r2);
+        // A missing child collection is not evidence of an empty live parent.
+        if (response.gone) return conflict();
+        return response;
+      },
+      field,
+      conflict,
+      conflict,
+    );
   }
+
   async snapshot(path: string): Promise<Record<string, unknown>[]> {
     const response = await this.request(path, 'GET');
     if (response.gone || !Array.isArray(response.result))
@@ -415,6 +378,11 @@ interface Deletion {
 
 function matchesReceipt(live: unknown, receipt: Record<string, unknown>): boolean {
   if (live === null || typeof live !== 'object' || Array.isArray(live)) return false;
+  if (receipt.type === 'worker' && Object.hasOwn(receipt, 'consumer_id')) {
+    const actual = normalizeQueueConsumer(live as Record<string, unknown>);
+    const expected = normalizeQueueConsumer(receipt);
+    return actual !== null && expected !== null && matchesReceipt(actual, { ...expected });
+  }
   return Object.entries(receipt).every(([key, value]) => {
     const actual = (live as Record<string, unknown>)[key];
     return value !== null && typeof value === 'object'
@@ -583,12 +551,14 @@ function recordedBinding(
     (attempt) => attempt !== null && attempt !== undefined,
   );
   if (binding.type === 'd1')
-    return resources.some((r) => r === j.resources.d1 && r.id !== null && r.id === binding.id);
+    return resources.some(
+      (r) => r === j.resources.d1 && r.id !== null && r.id === d1BindingId(binding),
+    );
   if (binding.type === 'r2_bucket')
     return Boolean(
       j.resources.r2?.id &&
       binding.bucket_name === j.resources.r2.name &&
-      (binding.jurisdiction ?? 'default') === j.identity.jurisdiction,
+      binding.jurisdiction === j.identity.jurisdiction,
     );
   if (binding.type === 'queue')
     return [j.resources.jobs, j.resources.dlq].some(
@@ -781,7 +751,7 @@ async function preflight(
         entry.receipts?.some((receipt) => matchesReceipt(record, receipt)),
     );
   if (workers.size) {
-    for (const domain of await api.list(`${base}/workers/domains`)) {
+    for (const domain of await api.snapshot(`${base}/workers/domains`)) {
       liveId(domain.service);
       if (workers.has(String(domain.service)) && !owns('domain', domain))
         throw new CloudflareError('ownership_conflict', 8);
@@ -817,8 +787,10 @@ async function preflight(
       if (absent.has(`${base}/queues/${id}`)) throw new CloudflareError('ownership_conflict', 8);
       if (queues.has(`${base}/queues/${id}`)) continue;
       for (const consumer of await api.snapshot(`${base}/queues/${id}/consumers`)) {
+        const script = queueConsumerScript(consumer);
         if (
-          workers.has(String(consumer.script_name)) ||
+          (consumer.type === 'worker' && script === null) ||
+          workers.has(script ?? '') ||
           [...selectedQueues].some(([id, name]) =>
             [id, name].includes(String(consumer.dead_letter_queue)),
           )
@@ -870,11 +842,12 @@ async function preflight(
     livePrimary.some((entry) => {
       const id = entry.path.split('/').at(-1)!.split('?')[0];
       return (
-        (entry.name === 'd1' && b.type === 'd1' && b.id === id) ||
+        (entry.name === 'd1' && b.type === 'd1' && d1BindingId(b) === id) ||
         (entry.bucket &&
           b.type === 'r2_bucket' &&
           b.bucket_name === id &&
-          (b.jurisdiction ?? 'default') === j.identity.jurisdiction) ||
+          (!['default', 'eu', 'fedramp'].includes(String(b.jurisdiction)) ||
+            b.jurisdiction === j.identity.jurisdiction)) ||
         (selectedQueues.has(id!) &&
           b.type === 'queue' &&
           (b.queue_id === id || b.queue_name === selectedQueues.get(id!))) ||
@@ -883,9 +856,12 @@ async function preflight(
     });
   const checkBindings = (bindings: unknown, selected: boolean) => {
     if (!Array.isArray(bindings)) throw new CloudflareError('ownership_conflict', 8);
-    for (const binding of bindings.map(object))
+    for (const binding of bindings.map(object)) {
+      if (binding.type === 'd1' && d1BindingId(binding) === null)
+        throw new CloudflareError('ownership_conflict', 8);
       if (selected ? !recordedBinding(binding, j, queueIdsByName) : affectedBinding(binding))
         throw new CloudflareError('ownership_conflict', 8);
+    }
   };
   const attempts = [j.deployment?.attempt, j.deployment?.last_verified].filter(
     (a) => a !== null && a !== undefined,

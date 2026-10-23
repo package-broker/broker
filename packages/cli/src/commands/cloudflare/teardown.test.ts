@@ -14,6 +14,15 @@ import { janitor } from './janitor.js';
 import { provision } from './provision.js';
 import { teardown, type TeardownOptions } from './teardown.js';
 
+const providerFixtures = JSON.parse(
+  await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+);
+const consumerFixture = JSON.parse(
+  await readFile(new URL('./fixtures/queue-consumer.json', import.meta.url), 'utf8'),
+);
+const workerSettingsFixture = JSON.parse(
+  await readFile(new URL('./fixtures/worker-settings.json', import.meta.url), 'utf8'),
+) as { bindings: Record<string, unknown>[] };
 const ACCOUNT = 'a'.repeat(32);
 const TOKEN = 'token_SENTINEL';
 const DB = '11111111-1111-4111-8111-111111111111';
@@ -1266,35 +1275,36 @@ async function adoptedBucket() {
   return name;
 }
 
-it.each([1, 2])(
-  'refuses an unrecorded custom domain on page %s for an adopted Worker with no journal',
-  async (page) => {
-    await adoptedWorker();
-    expect(journal.deployment).toBeNull();
-    interceptRead(async (url, fallback) => {
-      if (!url.pathname.endsWith('/workers/domains')) return fallback;
-      const current = Number(url.searchParams.get('page'));
-      return pageResponse(
-        current === page
-          ? [
-              {
-                id: 'unrecorded-domain',
-                hostname: 'other.example.test',
-                zone_id: 'd'.repeat(32),
-                service: journal.identity.script_name,
-                environment: 'production',
-              },
-            ]
-          : [],
-        { total_pages: page },
-      );
-    });
-    await expectOwnershipConflict();
-    expect(
-      trace.some((entry) => entry.path.endsWith(`/workers/domains?page=${page}&per_page=100`)),
-    ).toBe(true);
-  },
-);
+it('refuses an unrecorded custom domain in the adopted Worker snapshot', async () => {
+  await adoptedWorker();
+  expect(journal.deployment).toBeNull();
+  interceptRead(async (url, fallback) => {
+    if (!url.pathname.endsWith('/workers/domains')) return fallback;
+    expect(url.search).toBe('');
+    return snapshotResponse([
+      {
+        id: 'unrecorded-domain',
+        hostname: 'other.example.test',
+        zone_id: 'd'.repeat(32),
+        service: journal.identity.script_name,
+        environment: 'production',
+      },
+    ]);
+  });
+  await expectOwnershipConflict();
+  expect(trace.some((entry) => entry.path.endsWith('/workers/domains'))).toBe(true);
+});
+
+it('refuses a partial domain snapshot without requesting another page', async () => {
+  await adoptedWorker();
+  interceptRead(async (url, fallback) =>
+    url.pathname.endsWith('/workers/domains') ? pageResponse([], { total_pages: 2 }) : fallback,
+  );
+  await expectOwnershipConflict();
+  expect(
+    trace.filter((entry) => entry.path.includes('/workers/domains')).map((entry) => entry.path),
+  ).toEqual([`/client/v4/accounts/${ACCOUNT}/workers/domains`]);
+});
 
 it('refuses an unrecorded consumer beside an inventoried consumer in the documented snapshot', async () => {
   await saveAttachments();
@@ -1356,7 +1366,7 @@ it.each(['partial', 'loop', 'invalid', '404'] as const)(
   },
 );
 
-it.each(['domains', 'zones', 'queues', 'versions'] as const)(
+it.each(['zones', 'queues', 'versions'] as const)(
   'discovers unrecorded implicit attachments on later %s pages',
   async (kind) => {
     await saveAttachments();
@@ -1364,7 +1374,6 @@ it.each(['domains', 'zones', 'queues', 'versions'] as const)(
     const zone = 'e'.repeat(32);
     const foreignQueue = '1'.repeat(32);
     const path = {
-      domains: '/workers/domains',
       zones: '/zones',
       queues: '/queues',
       versions: `/workers/scripts/${script}/versions`,
@@ -1372,7 +1381,6 @@ it.each(['domains', 'zones', 'queues', 'versions'] as const)(
     interceptRead(async (url, fallback) => {
       if (url.pathname.endsWith(path)) {
         const foreign = {
-          domains: { id: 'foreign-domain', service: script },
           zones: { id: zone },
           queues: { queue_id: foreignQueue, queue_name: 'foreign-queue' },
           versions: { id: 'foreign-version' },
@@ -1586,14 +1594,13 @@ it('rejects incomplete object pagination before deleting other inventoried resou
   expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
 });
 
-it.each(['domains', 'zones', 'queues', 'buckets', 'versions'] as const)(
+it.each(['zones', 'queues', 'buckets', 'versions'] as const)(
   'refuses missing completion metadata for the %s listing',
   async (kind) => {
     await saveAttachments();
     await adoptedBucket();
     const script = journal.identity.script_name;
     const suffix = {
-      domains: '/workers/domains',
       zones: '/zones',
       queues: '/queues',
       buckets: '/r2/buckets',
@@ -2319,6 +2326,215 @@ it('refuses queue references from R2 notifications in the FedRAMP jurisdiction',
     if (url.pathname.endsWith('/foreign-fedramp-bucket/configuration'))
       return response({ queues: [{ queueId: QUEUE, rules: [{ id: 'foreign-rule' }] }] });
     return fallback;
+  });
+  await expectOwnershipConflict();
+});
+
+it('accepts null cleanup metadata and metadata-free domain snapshots from recorded responses', async () => {
+  await adoptedWorker();
+  interceptRead(async (url, fallback) => {
+    if (url.pathname.endsWith('/workers/scripts'))
+      return Response.json(providerFixtures.workersEmpty);
+    if (url.pathname.endsWith('/workers/domains')) {
+      expect(url.search).toBe('');
+      return Response.json(providerFixtures.domainsEmpty);
+    }
+    return fallback;
+  });
+  expect((await teardown(options)).exitCode).toBe(0);
+});
+
+it.each([false, true, 1, 'invalid', [[]]])(
+  'rejects malformed cleanup metadata %j',
+  async (info) => {
+    await adoptedWorker();
+    interceptRead(async (url, fallback) =>
+      url.pathname.endsWith('/workers/scripts')
+        ? Response.json({ ...providerFixtures.workersEmpty, result_info: info })
+        : fallback,
+    );
+    const result = await teardown(options);
+    expect(result.output.error?.code).toBe('provider_failure');
+    expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+  },
+);
+
+it('matches the recorded script consumer receipt and settings aliases during cleanup', async () => {
+  await saveAttachments();
+  const consumer = journal.deployment!.attempt.prior_settings.consumer!;
+  Object.assign(consumer, {
+    batch_size: consumerFixture.settings.batch_size,
+    max_wait_time_ms: consumerFixture.settings.max_wait_time_ms,
+    max_retries: consumerFixture.settings.max_retries,
+    max_concurrency: consumerFixture.settings.max_concurrency,
+  });
+  await save();
+  interceptRead(async (url, fallback) =>
+    url.pathname.endsWith(`/queues/${QUEUE}/consumers`)
+      ? response([
+          {
+            ...consumerFixture,
+            consumer_id: consumer.consumer_id,
+            script: consumer.script_name,
+            dead_letter_queue: consumer.dead_letter_queue,
+          },
+        ])
+      : fallback,
+  );
+  expect((await teardown(options)).exitCode).toBe(0);
+});
+
+it.each(['script', 'conflicting'])(
+  'refuses an external recorded consumer with %s identity',
+  async (alias) => {
+    await saveAttachments();
+    const id = '1'.repeat(32);
+    interceptRead(async (url, fallback) => {
+      if (url.pathname.endsWith('/queues')) return listingResponse([{ queue_id: id }]);
+      if (url.pathname.endsWith(`/queues/${id}/consumers`))
+        return response([
+          {
+            ...consumerFixture,
+            script: journal.identity.script_name,
+            ...(alias === 'conflicting' ? { script_name: 'external' } : {}),
+          },
+        ]);
+      return fallback;
+    });
+    await expectOwnershipConflict();
+  },
+);
+
+it.each(['id', 'database_id', 'both', 'conflicting'])(
+  'checks recorded D1 %s aliases in owned settings and versions',
+  async (alias) => {
+    await saveAttachments();
+    const binding: Record<string, unknown> = {
+      ...workerSettingsFixture.bindings.find((b) => b.type === 'd1')!,
+      id: alias === 'database_id' ? undefined : DB,
+      database_id: alias === 'id' ? undefined : alias === 'conflicting' ? 'foreign' : DB,
+    };
+    interceptRead(async (url, fallback) => {
+      if (url.pathname.endsWith('/settings')) return response(ownedWorkerSettings([binding]));
+      if (url.pathname.endsWith('/versions'))
+        return listingResponse({ items: [{ id: 'version-1' }] });
+      if (url.pathname.endsWith('/versions/version-1'))
+        return response({ resources: { bindings: [binding] } });
+      return fallback;
+    });
+    if (alias === 'conflicting') await expectOwnershipConflict();
+    else expect((await teardown(options)).exitCode).toBe(0);
+  },
+);
+
+it.each(['current', 'inactive'])(
+  'refuses an external D1 database_id reference in %s bindings',
+  async (state) => {
+    await adoptedWorker();
+    const binding: Record<string, unknown> = {
+      ...workerSettingsFixture.bindings.find((b) => b.type === 'd1')!,
+      database_id: DB,
+    };
+    delete binding.id;
+    interceptRead(async (url, fallback) => {
+      if (url.pathname.endsWith('/workers/scripts')) return response([{ id: 'external' }]);
+      if (url.pathname.endsWith('/workers/scripts/external/settings'))
+        return response({ bindings: state === 'current' ? [binding] : [] });
+      if (url.pathname.endsWith('/workers/scripts/external/versions'))
+        return listingResponse({ items: state === 'inactive' ? [{ id: 'old' }] : [] });
+      if (url.pathname.endsWith('/versions/old'))
+        return response({ resources: { bindings: [binding] } });
+      return fallback;
+    });
+    await expectOwnershipConflict();
+  },
+);
+
+it.each(
+  ['eu', 'default'].flatMap((jurisdiction) =>
+    ['owned', 'external_current', 'external_inactive'].map((state) => ({
+      jurisdiction: jurisdiction as 'eu' | 'default',
+      state,
+    })),
+  ),
+)(
+  'refuses an unresolved R2 jurisdiction in $state bindings ($jurisdiction)',
+  async ({ state, jurisdiction }) => {
+    journal.identity = installIdentity({
+      accountId: ACCOUNT,
+      workerName: journal.identity.worker_name,
+      runIdentity: journal.identity.run_identity!,
+      jurisdiction,
+    });
+    journal.resources.d1!.jurisdiction = jurisdiction;
+    await adoptedWorker();
+    await adoptedBucket();
+    journal.resources.r2!.jurisdiction = jurisdiction;
+    await save();
+    const binding: Record<string, unknown> = {
+      ...workerSettingsFixture.bindings.find((b) => b.type === 'r2_bucket')!,
+      bucket_name: journal.resources.r2!.name,
+    };
+    delete binding.jurisdiction;
+    const script = state === 'owned' ? journal.identity.script_name : 'external';
+    interceptRead(async (url, fallback) => {
+      if (url.pathname.endsWith('/workers/scripts')) return response([{ id: script }]);
+      if (url.pathname.endsWith(`/workers/scripts/${script}/settings`))
+        return response(ownedWorkerSettings(state === 'external_inactive' ? [] : [binding]));
+      if (url.pathname.endsWith(`/workers/scripts/${script}/versions`))
+        return listingResponse({ items: state === 'external_inactive' ? [{ id: 'old' }] : [] });
+      if (url.pathname.endsWith('/versions/old'))
+        return response({ resources: { bindings: [binding] } });
+      return fallback;
+    });
+    await expectOwnershipConflict();
+  },
+);
+
+it('continues validated numeric cleanup pages without total_pages', async () => {
+  await adoptedWorker();
+  interceptRead(async (url, fallback) => {
+    if (!url.pathname.endsWith('/zones')) return fallback;
+    const page = Number(url.searchParams.get('page'));
+    return pageResponse([{ id: String(page).repeat(32) }], {
+      ...providerFixtures.d1Empty.result_info,
+      page,
+      count: 1,
+      total_count: 2,
+    });
+  });
+  expect((await teardown(options)).exitCode).toBe(0);
+  expect(
+    trace.some((entry) => entry.path.endsWith(`account.id=${ACCOUNT}&page=2&per_page=100`)),
+  ).toBe(true);
+});
+
+it.each([
+  'wrong_page',
+  'wrong_count',
+  'changed_total',
+  'empty_page',
+  'missing_count',
+  'bad_page_size',
+] as const)('refuses invalid numeric cleanup continuation: %s', async (shape) => {
+  await adoptedWorker();
+  interceptRead(async (url, fallback) => {
+    if (!url.pathname.endsWith('/zones')) return fallback;
+    const page = Number(url.searchParams.get('page'));
+    const info: Record<string, unknown> = {
+      ...providerFixtures.d1Empty.result_info,
+      page,
+      count: 1,
+      total_count: 2,
+    };
+    if (shape === 'wrong_page') info.page = 3;
+    if (shape === 'wrong_count') info.count = 2;
+    if (shape === 'changed_total' && page === 2) info.total_count = 3;
+    if (shape === 'missing_count') delete info.count;
+    if (shape === 'bad_page_size') info.per_page = 0;
+    const records = shape === 'empty_page' ? [] : [{ id: String(page).repeat(32) }];
+    if (shape === 'empty_page') info.count = 0;
+    return pageResponse(records, info);
   });
   await expectOwnershipConflict();
 });

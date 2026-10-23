@@ -8,10 +8,11 @@ import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/p
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import {
-  composeMcpKernel,
   provisionMcpFixture,
   runMcpContract,
+  type McpContractBroker,
 } from '@package-broker/core/mcp/contract';
+import * as mcpTools from '@package-broker/core/mcp/tools';
 import {
   loadMigrationSource,
   type MigrationSource,
@@ -73,11 +74,25 @@ async function seedPackages(
 runMcpContract(
   {
     runtime: 'node',
-    async create({ binding }) {
+    async create() {
       const directory = await mkdtemp(join(tmpdir(), 'pb-mcp-contract-'));
       const path = join(directory, 'broker.sqlite');
+      let stub: Parameters<McpContractBroker['stubRest']>[0] = null;
+      const createTools = mcpTools.createMcpTools;
+      const toolsSpy = vitest.vi
+        .spyOn(mcpTools, 'createMcpTools')
+        .mockImplementationOnce((options) =>
+          createTools({
+            ...options,
+            kernel: {
+              fetch: async (request) =>
+                stub === null ? options.kernel.fetch(request) : stub(request),
+            },
+          }),
+        );
       const broker = await startNode({
         plugins: [],
+        mcp: { enabled: true },
         migrations: await migrationSources(),
         env: {
           PB_SQLITE_PATH: path,
@@ -86,7 +101,7 @@ runMcpContract(
           PB_MASTER_KEY: KEY,
           PB_PUBLIC_URL: ORIGIN,
         },
-      });
+      }).finally(() => toolsSpy.mockRestore());
       const opened = openBetterSqliteExecutor(path);
       const close = async () => {
         await opened.close();
@@ -95,8 +110,6 @@ runMcpContract(
       };
       try {
         const kernel = await broker.ready();
-        const access = (await broker.services()).access;
-        if (access === null) throw new Error('access services missing');
         const org = await createOrganizationBootstrap(opened.executor).findSingleton();
         if (org === null) throw new Error('organization missing');
         const setupToken = randomBytes(32).toString('base64url');
@@ -122,22 +135,16 @@ runMcpContract(
           orgId: org.id,
           seedPackages: (seed) => seedPackages(opened.executor, seed),
         });
-        const mcp = await composeMcpKernel({
-          runtime: 'node',
-          origin: ORIGIN,
-          orgId: fixture.orgId,
-          authorization: access.engine,
-          rest,
-          binding,
-        });
         return {
           origin: ORIGIN,
           tokens: fixture.tokens,
           cookie: fixture.cookie,
           packagesInAlpha: fixture.packagesInAlpha,
-          mcp: mcp.fetch,
+          mcp: rest,
           rest,
-          stubRest: mcp.stubRest,
+          stubRest: (handler) => {
+            stub = handler;
+          },
           close,
         };
       } catch (error) {

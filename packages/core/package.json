@@ -92,7 +92,8 @@
   "files": [
     "dist",
     "!dist/**/*.test.*",
-    "!dist/test-support"
+    "!dist/test-support",
+    "!dist/mcp/contract.*"
   ],
   "dependencies": {
     "hono": "catalog:",

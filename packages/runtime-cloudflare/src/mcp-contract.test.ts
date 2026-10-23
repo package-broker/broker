@@ -8,11 +8,11 @@ import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/p
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import {
-  composeMcpKernel,
   provisionMcpFixture,
   runMcpContract,
+  type McpContractBroker,
 } from '@package-broker/core/mcp/contract';
-import { assertMcpRateLimit } from '@package-broker/core/mcp/limit';
+import * as mcpTools from '@package-broker/core/mcp/tools';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
@@ -87,10 +87,31 @@ runMcpContract(
   {
     runtime: 'workers',
     async create({ binding }) {
-      assertMcpRateLimit({ runtime: 'workers', mcpEnabled: true, binding });
       const raw = (await mf.getD1Database('MCPDB0')) as unknown as D1DatabaseLike;
       const executor = createD1Executor(raw);
       await migrate(executor, await migrationSources(), { holder: 'mcp-contract' });
+      const env: Env = {
+        DB: raw,
+        PB_MASTER_KEY: KEY,
+        PB_PUBLIC_URL: ORIGIN,
+        ...(binding === undefined ? {} : { MCP_RATE_LIMIT: binding }),
+      };
+      const worker = createWorker([], { mcp: { enabled: true }, log: () => undefined });
+      let stub: Parameters<McpContractBroker['stubRest']>[0] = null;
+      const createTools = mcpTools.createMcpTools;
+      const toolsSpy = vitest.vi
+        .spyOn(mcpTools, 'createMcpTools')
+        .mockImplementationOnce((options) =>
+          createTools({
+            ...options,
+            kernel: {
+              fetch: async (request) =>
+                stub === null ? options.kernel.fetch(request) : stub(request),
+            },
+          }),
+        );
+      await worker.services(env).finally(() => toolsSpy.mockRestore());
+      const rest = (request: Request) => worker.fetch(request, env);
       const orgId = ulid();
       const now = new Date();
       await createOrganizationBootstrap(executor).bootstrap({
@@ -113,11 +134,6 @@ runMcpContract(
         opId: ulid(),
         now: now.toISOString(),
       });
-      const env = { DB: raw, PB_MASTER_KEY: KEY, PB_PUBLIC_URL: ORIGIN } as unknown as Env;
-      const worker = createWorker([], { log: () => undefined });
-      const rest = (request: Request) => worker.fetch(request, env);
-      const access = (await worker.services(env)).access;
-      if (access === null) throw new Error('access services missing');
       const fixture = await provisionMcpFixture({
         origin: ORIGIN,
         call: rest,
@@ -125,22 +141,16 @@ runMcpContract(
         orgId,
         seedPackages: (seed) => seedPackages(executor, seed),
       });
-      const mcp = await composeMcpKernel({
-        runtime: 'workers',
-        origin: ORIGIN,
-        orgId: fixture.orgId,
-        authorization: access.engine,
-        rest,
-        binding,
-      });
       return {
         origin: ORIGIN,
         tokens: fixture.tokens,
         cookie: fixture.cookie,
         packagesInAlpha: fixture.packagesInAlpha,
-        mcp: mcp.fetch,
+        mcp: rest,
         rest,
-        stubRest: mcp.stubRest,
+        stubRest: (handler) => {
+          stub = handler;
+        },
         close: async () => undefined,
       };
     },

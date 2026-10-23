@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { responseHeader, type ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
 import { useServices, type ReplayResult, type ShellServices } from '../auth.js';
-import { DataTable } from '../components/ui/table.js';
 import { StatusBadge } from '../components/ui/status-badge.js';
 import { IdText } from '../components/ui/id-text.js';
 import { Time } from '../components/ui/time.js';
@@ -15,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
+import { DataTable } from '../components/ui/table.js';
 import { buildListFilterHash } from '../page-hash.js';
 
 type ResponseBody<K extends keyof operations> = operations[K] extends {
@@ -22,9 +22,8 @@ type ResponseBody<K extends keyof operations> = operations[K] extends {
 }
   ? T
   : never;
-export type Source =
-  | ResponseBody<'listOrganizationSources'>['items'][number]
-  | ResponseBody<'listProjectSources'>['items'][number];
+type SourcePage = ResponseBody<'listOrganizationSources'> | ResponseBody<'listProjectSources'>;
+export type Source = SourcePage['items'][number];
 type Names = ResponseBody<'listRegisteredNames'>;
 type Preview = ResponseBody<'resolveName'>;
 type CredentialKind =
@@ -137,7 +136,7 @@ export function createSourcesModel(
     ++previewVersion;
     set({ loading: true, listError: false, error: null, etag: null, preview: null, order: [] });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
-    const result =
+    const result: ApiResult<SourcePage> =
       project === null
         ? await client.request('get', '/_pb/sources', { query })
         : await client.request('get', '/_pb/projects/{project}/sources', {
@@ -499,9 +498,7 @@ export function SourceCard({
         <p>{source.hasCredential ? 'credential set · write-only' : 'No credential set'}</p>
         {model.project !== null && 'attached' in source ? (
           <p>Attached to this project: {source.attached ? 'Yes' : 'No'}</p>
-        ) : (
-          <p>Attached projects: unavailable</p>
-        )}
+        ) : null}
         {owned ? (
           <form
             key={model.snapshot().settingsVersion}
@@ -730,6 +727,11 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                     <span>
                       {source.projectId === null ? 'Organization source' : 'Project source'}
                     </span>
+                    {model.project === null && 'attachedProjectCount' in source ? (
+                      <Badge variant="secondary">
+                        {`Attached to ${source.attachedProjectCount} projects`}
+                      </Badge>
+                    ) : null}
                     {'attached' in source ? (
                       <span className="text-xs text-neutral-600">
                         {source.attached

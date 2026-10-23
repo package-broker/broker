@@ -66,6 +66,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     resume: vi.fn().mockResolvedValue('resumed'),
     pause: vi.fn().mockResolvedValue('paused'),
     list: vi.fn().mockResolvedValue([]),
+    countAttachedProjects: vi.fn().mockResolvedValue(new Map()),
     getVisible: vi.fn().mockResolvedValue(null),
     delete: vi.fn().mockResolvedValue('deleted'),
   };
@@ -1096,6 +1097,69 @@ it.each([
     value: { paused },
   });
   expect(registeredNames.remove).toHaveBeenCalledOnce();
+});
+
+describe('organization source attachment counts', () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+  ])(
+    'uses caller visibility (admin %s, organization project read %s)',
+    async (admin, inherited) => {
+      const { service, sources } = setup();
+      sources.list.mockResolvedValue([
+        { ...input, id: 'a', credentialId: null },
+        { ...input, id: 'b', credentialId: null },
+        { ...input, id: 'c', credentialId: null },
+      ]);
+      sources.countAttachedProjects.mockResolvedValue(new Map([['a', 2]]));
+      const result = await service.list(
+        ctx,
+        {
+          kind: 'org',
+          actor: {
+            ...org.actor,
+            isOrganizationAdmin: admin,
+            permissions: new Set(['org:sources:read', ...(inherited ? ['project:read'] : [])]),
+          },
+        },
+        { cursor: null, limit: 2 },
+      );
+      expect(result).toMatchObject({
+        ok: true,
+        value: {
+          items: [
+            { id: 'a', attachedProjectCount: 2 },
+            { id: 'b', attachedProjectCount: 0 },
+          ],
+          next: expect.any(String),
+        },
+      });
+      expect(sources.countAttachedProjects).toHaveBeenCalledExactlyOnceWith(ctx, {
+        sourceIds: ['a', 'b'],
+        userId: 'user',
+        allProjects: admin || inherited,
+        includeArchived: admin,
+        providerAnchors: [],
+      });
+    },
+  );
+
+  it('does not query counts for empty pages or project lists', async () => {
+    const { service, sources } = setup();
+    const reader = { ...org, actor: { ...org.actor, permissions: new Set(['org:sources:read']) } };
+    await service.list(ctx, reader, { cursor: null, limit: 10 });
+    sources.list.mockResolvedValue([{ ...input, id: 'a', projectId: 'project-a' }]);
+    const result = await service.list(ctx, project, {
+      projectId: 'project-a',
+      cursor: null,
+      limit: 10,
+    });
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('attachedProjectCount');
+    expect(sources.countAttachedProjects).not.toHaveBeenCalled();
+  });
 });
 
 describe('source list and pause', () => {

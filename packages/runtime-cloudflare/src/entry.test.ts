@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   manifest: {} as {
     plugins: [];
     vulnerability?: { enabled: boolean };
+    mcp?: { enabled: boolean };
     platformPorts: null;
     observability?: { trustInboundTraceparent: boolean };
     tokens?: { maxLifetimeDays: { personal: number; service: number } };
@@ -20,6 +21,9 @@ vi.mock('#pb-manifest', () => ({
   },
   get observability() {
     return state.manifest.observability;
+  },
+  get mcp() {
+    return state.manifest.mcp;
   },
   get vulnerability() {
     return state.manifest.vulnerability;
@@ -108,3 +112,16 @@ it.each([undefined, true, false])(
     else expect(options).toHaveProperty('vulnerability', vulnerability);
   },
 );
+
+it.each([undefined, true, false])('forwards the mcp deployment switch %s', async (enabled) => {
+  const mcp = enabled === undefined ? undefined : { enabled };
+  state.manifest = {
+    plugins: [],
+    platformPorts: null,
+    ...(mcp === undefined ? {} : { mcp }),
+  };
+  await import('./entry.js');
+  const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
+  if (mcp === undefined) expect(options).not.toHaveProperty('mcp');
+  else expect(options).toHaveProperty('mcp', mcp);
+});

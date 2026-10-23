@@ -1,23 +1,14 @@
-import type { APIResponse, BrowserContext, Route } from '@playwright/test';
-import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { hotp } from './browser/totp.js';
+import {
+  authCode,
+  forwardRequest,
+  type ForwardOptions,
+  type RedirectResponse,
+} from './browser/ui-fixture.js';
 
 const origin = 'http://127.0.0.1:41001';
 const other = 'http://127.0.0.1:41002';
-let fixture: {
-  authCode(secret: Uint8Array, offset?: number): Promise<string>;
-  guardContext(context: BrowserContext, origin: string): Promise<() => Promise<void>>;
-};
-
-beforeAll(async () => {
-  vi.stubEnv('PB_UI_E2E_OTHER_ORIGIN', other);
-  try {
-    const path = new URL('../tests/fixture.ts', import.meta.url).pathname;
-    fixture = await import(path);
-  } finally {
-    vi.unstubAllEnvs();
-  }
-});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -35,64 +26,53 @@ describe('UI setup TOTP timing', () => {
     test(`previous-step setup code at ${now}ms waits ${wait}ms`, async () => {
       vi.useFakeTimers();
       vi.setSystemTime(now);
-      const code = fixture.authCode(secret, -1);
+      const code = authCode(secret, -1);
       expect(vi.getTimerCount()).toBe(wait === 0 ? 0 : 1);
       await vi.advanceTimersByTimeAsync(wait);
       expect(await code).toBe(await hotp(secret, counter));
       expect(Date.now()).toBe(now + wait);
-      expect(await fixture.authCode(secret)).toBe(await hotp(secret, counter + 1));
+      expect(await authCode(secret)).toBe(await hotp(secret, counter + 1));
     });
   }
 });
 
-function response(status: number, location?: string): APIResponse {
+function response(status: number, location?: string): RedirectResponse {
   return {
     status: () => status,
     headers: () => (location ? { location } : {}),
     dispose: vi.fn(async () => {}),
-  } as unknown as APIResponse;
+  };
 }
 
 async function guardedRequest(
-  responses: APIResponse[],
+  responses: RedirectResponse[],
   method = 'GET',
   headers: Record<string, string> = { 'content-type': 'text/plain' },
 ) {
-  let handler!: (route: Route) => Promise<void>;
   let next = 0;
-  const fetch = vi.fn(async () => {
-    const result = responses[next++];
-    if (!result) throw new Error('unexpected fixture fetch');
-    return result;
-  });
-  const context = {
-    exposeBinding: async () => {},
-    addInitScript: async () => {},
-    on: () => {},
-    route: async (_pattern: string, callback: typeof handler) => {
-      handler = callback;
+  const fetch = vi.fn<(url: string, options: ForwardOptions) => Promise<RedirectResponse>>(
+    async () => {
+      const result = responses[next++];
+      if (!result) throw new Error('unexpected fixture fetch');
+      return result;
     },
-    routeWebSocket: async () => {},
-    pages: () => [],
-    request: { fetch },
-  } as unknown as BrowserContext;
-  const route = {
-    request: () => ({
-      url: () => `${origin}/start`,
-      method: () => method,
-      allHeaders: async () => ({ ...headers }),
-      postDataBuffer: () => (method === 'POST' ? Buffer.from('fixture body') : null),
-    }),
+  );
+  const fulfill = vi.fn<(response: RedirectResponse) => Promise<void>>(async () => {});
+  const failure = await forwardRequest(
+    {
+      url: `${origin}/start`,
+      method,
+      headers,
+      data: method === 'POST' ? Buffer.from('fixture body') : null,
+    },
+    [origin, other],
     fetch,
-    abort: vi.fn(async () => {}),
-    fulfill: vi.fn(async () => {}),
-  } as unknown as Route;
-  const verify = await fixture.guardContext(context, origin);
-  await handler(route);
-  return { fetch, route, verify };
+    fulfill,
+  );
+  return { fetch, fulfill, failure };
 }
 
-describe('UI context redirect guard', () => {
+describe('UI redirect forwarding', () => {
   test('keeps browser-selected authentication cookies through same-origin UI paths and hashes', async () => {
     const headers = { cookie: '__Host-pb_session=fixture-session', accept: 'text/html' };
     const responses = [
@@ -101,16 +81,15 @@ describe('UI context redirect guard', () => {
       response(303, '/_pb/ui/#/projects'),
       response(200),
     ];
-    const { fetch, route, verify } = await guardedRequest(responses, 'GET', headers);
+    const { fetch, fulfill, failure } = await guardedRequest(responses, 'GET', headers);
     expect(fetch.mock.calls).toEqual(
       ['/start', '/', '/_pb/ui', '/_pb/ui/#/projects'].map((path) => [
         `${origin}${path}`,
         expect.objectContaining({ headers, maxRedirects: 0 }),
       ]),
     );
-    expect(route.fulfill).toHaveBeenCalledExactlyOnceWith({ response: responses[3] });
-    expect(route.abort).not.toHaveBeenCalled();
-    await verify();
+    expect(fulfill).toHaveBeenCalledExactlyOnceWith(responses[3]);
+    expect(failure).toBeUndefined();
   });
 
   test('does not forward browser credentials when a redirect crosses allowed origins', async () => {
@@ -118,7 +97,7 @@ describe('UI context redirect guard', () => {
       cookie: '__Host-pb_session=fixture-session',
       authorization: 'Bearer fixture-authorization',
     };
-    const { fetch, route, verify } = await guardedRequest(
+    const { fetch, failure } = await guardedRequest(
       [response(302, `${other}/_pb/ui/#/projects`), response(200)],
       'GET',
       headers,
@@ -127,8 +106,7 @@ describe('UI context redirect guard', () => {
       [`${origin}/start`, expect.objectContaining({ headers, maxRedirects: 0 })],
       [`${other}/_pb/ui/#/projects`, expect.objectContaining({ headers: {}, maxRedirects: 0 })],
     ]);
-    expect(route.abort).not.toHaveBeenCalled();
-    await verify();
+    expect(failure).toBeUndefined();
   });
 
   test('blocks an external third hop even when it would return to loopback', async () => {
@@ -138,14 +116,13 @@ describe('UI context redirect guard', () => {
       response(302, `${origin}/finish`),
       response(200),
     ];
-    const { fetch, route, verify } = await guardedRequest(responses);
+    const { fetch, fulfill, failure } = await guardedRequest(responses);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(route.fulfill).not.toHaveBeenCalled();
-    expect(route.abort).toHaveBeenCalledWith('blockedbyclient');
+    expect(fulfill).not.toHaveBeenCalled();
     expect(
       responses.slice(0, 2).every((item) => vi.mocked(item.dispose).mock.calls.length === 1),
     ).toBe(true);
-    await expect(verify()).rejects.toThrow(/redirect outside allowed origins/);
+    expect(failure).toBe('redirect outside allowed origins');
   });
 
   test('fulfills only after every hop across both allowed origins is checked', async () => {
@@ -155,7 +132,7 @@ describe('UI context redirect guard', () => {
       response(308, `${origin}/finish`),
       response(200),
     ];
-    const { fetch, route, verify } = await guardedRequest(responses);
+    const { fetch, fulfill, failure } = await guardedRequest(responses);
     expect(fetch).toHaveBeenCalledTimes(4);
     expect(fetch.mock.calls).toEqual([
       [`${origin}/start`, expect.objectContaining({ maxRedirects: 0 })],
@@ -163,15 +140,14 @@ describe('UI context redirect guard', () => {
       [`${other}/relative`, expect.objectContaining({ maxRedirects: 0 })],
       [`${origin}/finish`, expect.objectContaining({ maxRedirects: 0 })],
     ]);
-    expect(route.fulfill).toHaveBeenCalledExactlyOnceWith({ response: responses[3] });
-    expect(route.abort).not.toHaveBeenCalled();
+    expect(fulfill).toHaveBeenCalledExactlyOnceWith(responses[3]);
+    expect(failure).toBeUndefined();
     for (const item of responses) expect(item.dispose).toHaveBeenCalledTimes(1);
-    await verify();
   });
 
   for (const status of [301, 302, 303, 307, 308]) {
     test(`preserves HTTP method and body semantics for a ${status} POST redirect`, async () => {
-      const { fetch, route, verify } = await guardedRequest(
+      const { fetch, fulfill, failure } = await guardedRequest(
         [response(status, '/finish'), response(200)],
         'POST',
       );
@@ -195,18 +171,17 @@ describe('UI context redirect guard', () => {
           },
         ],
       ]);
-      expect(route.fulfill).toHaveBeenCalledTimes(1);
-      await verify();
+      expect(fulfill).toHaveBeenCalledTimes(1);
+      expect(failure).toBeUndefined();
     });
   }
 
   test('aborts a loopback redirect cycle without fulfilling a partial chain', async () => {
     const responses = Array.from({ length: 21 }, () => response(302, '/start'));
-    const { fetch, route, verify } = await guardedRequest(responses);
+    const { fetch, fulfill, failure } = await guardedRequest(responses);
     expect(fetch).toHaveBeenCalledTimes(21);
-    expect(route.fulfill).not.toHaveBeenCalled();
-    expect(route.abort).toHaveBeenCalledWith('blockedbyclient');
+    expect(fulfill).not.toHaveBeenCalled();
     for (const item of responses) expect(item.dispose).toHaveBeenCalledTimes(1);
-    await expect(verify()).rejects.toThrow(/loopback redirect limit exceeded/);
+    expect(failure).toBe('loopback redirect limit exceeded');
   });
 });

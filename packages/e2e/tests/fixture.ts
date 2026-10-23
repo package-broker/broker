@@ -9,7 +9,8 @@ import {
   type Response,
 } from '@playwright/test';
 export { base32Decode } from '../dist/browser/totp.js';
-import { hotp, stepAt } from '../dist/browser/totp.js';
+export { authCode } from '../dist/browser/ui-fixture.js';
+import { allowedUrl as isAllowedUrl, forwardRequest } from '../dist/browser/ui-fixture.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -25,14 +26,7 @@ export const packageTarget = {
   version: '1.0.0',
 };
 export function allowedUrl(raw: string, origin: string): boolean {
-  const url = new URL(raw);
-  return (
-    url.protocol === 'http:' &&
-    url.hostname === '127.0.0.1' &&
-    url.username === '' &&
-    url.password === '' &&
-    [origin, otherOrigin].includes(url.origin)
-  );
+  return isAllowedUrl(raw, [origin, otherOrigin]);
 }
 
 export async function guardContext(
@@ -79,61 +73,24 @@ export async function guardContext(
     });
   });
   await context.route('**/*', async (route) => {
-    if (!allowedUrl(route.request().url(), origin)) {
-      failures.push('request outside allowed origins');
-      await route.abort('blockedbyclient');
-      return;
-    }
     try {
       // Redirected browser requests may bypass routing, so resolve the entire chain here.
       const request = route.request();
-      let url = request.url();
-      let method = request.method();
-      let data = request.postDataBuffer();
-      const headers = await request.allHeaders();
-      // Keep Chromium's cookie selection: the API client drops Secure cookies on HTTP 127.0.0.1.
-      delete headers['host'];
-      delete headers['content-length'];
-      for (let hop = 0; hop <= 20; hop++) {
-        const response = await context.request.fetch(url, {
-          method,
-          headers: { ...headers },
-          ...(data === null ? {} : { data }),
-          maxRedirects: 0,
-        });
-        try {
-          const status = response.status();
-          const location = response.headers()['location'];
-          if (![301, 302, 303, 307, 308].includes(status) || !location) {
-            await route.fulfill({ response });
-            return;
-          }
-          const next = new URL(location, url).href;
-          if (!allowedUrl(next, origin)) {
-            failures.push('redirect outside allowed origins');
-            await route.abort('blockedbyclient');
-            return;
-          }
-          if (new URL(next).origin !== new URL(url).origin) {
-            delete headers['authorization'];
-            delete headers['cookie'];
-          }
-          if (
-            ((status === 301 || status === 302) && method === 'POST') ||
-            (status === 303 && method !== 'GET' && method !== 'HEAD')
-          ) {
-            method = 'GET';
-            data = null;
-            delete headers['content-type'];
-            delete headers['content-encoding'];
-          }
-          url = next;
-        } finally {
-          await response.dispose();
-        }
+      const failure = await forwardRequest(
+        {
+          url: request.url(),
+          method: request.method(),
+          headers: await request.allHeaders(),
+          data: request.postDataBuffer(),
+        },
+        [origin, otherOrigin],
+        (url, options) => context.request.fetch(url, options),
+        (response) => route.fulfill({ response }),
+      );
+      if (failure) {
+        failures.push(failure);
+        await route.abort('blockedbyclient');
       }
-      failures.push('loopback redirect limit exceeded');
-      await route.abort('blockedbyclient');
     } catch {
       // Playwright request errors can include cookie-bearing request headers.
       failures.push('loopback request could not complete');
@@ -305,13 +262,4 @@ export function seedLists(fixture: Fixture): void {
       project,
     );
   });
-}
-
-export async function authCode(secret: Uint8Array, offset = 0): Promise<string> {
-  for (;;) {
-    const now = Date.now();
-    const remaining = 30_000 - (now % 30_000);
-    if (remaining >= 5_000) return hotp(secret, stepAt(now) + offset);
-    await new Promise((resolve) => setTimeout(resolve, remaining));
-  }
 }

@@ -46,7 +46,7 @@ async function run() {
         cli,
         'test',
         '--config',
-        fileURLToPath(new URL('./ui-playwright.config.mjs', import.meta.url)),
+        fileURLToPath(new URL('../tests/ui-playwright.config.mjs', import.meta.url)),
         ...process.argv.slice(2),
       ],
       {

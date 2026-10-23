@@ -394,9 +394,27 @@ test.describe('Node management UI', () => {
       admin,
     }) => {
       void admin;
+      const readSession = async () => {
+        // A URL-filtered lookup drops the Secure __Host- cookies on plain-http loopback.
+        const cookies = await context.cookies();
+        const session = await context.request
+          .get(`${broker.origin}/_pb/session`, {
+            headers: { cookie: cookies.map(({ name, value }) => `${name}=${value}`).join('; ') },
+            maxRedirects: 0,
+          })
+          .catch(() => {
+            throw new Error('session API read failed');
+          });
+        expect(session.status()).toBe(200);
+        const body = (await session.json().catch(() => {
+          throw new Error('session API response did not match its contract');
+        })) as { user: { id: string }; reauthFresh: boolean; expiresAt: string };
+        return { userId: body.user.id, reauthFresh: body.reauthFresh, expiresAt: body.expiresAt };
+      };
       const attack = await context.newPage();
       try {
         await attack.goto(otherOrigin);
+        const sessionBefore = await readSession();
         const before = authState(broker);
         if (transport === 'HTML form') {
           await attack.evaluate((origin) => {
@@ -418,12 +436,13 @@ test.describe('Node management UI', () => {
           attack.waitForResponse(
             (r) =>
               r.request().method() === 'POST' &&
-              new URL(r.url()).pathname === '/_pb/auth/local/login',
+              r.url() === `${broker.origin}/_pb/auth/local/login`,
             { timeout: 10_000 },
           ),
           transport === 'HTML form'
             ? attack.getByRole('button', { name: 'Submit cross-origin form', exact: true }).click({
                 timeout: 10_000,
+                noWaitAfter: true,
               })
             : attack.evaluate((origin) => {
                 const target = `${origin}/_pb/auth/local/login`;
@@ -441,6 +460,7 @@ test.describe('Node management UI', () => {
           expect(response.request().isNavigationRequest()).toBe(true);
           expect(response.request().headers()['content-type']).toMatch(/^text\/plain\b/);
         }
+        expect(await readSession()).toEqual(sessionBefore);
         expect(authState(broker)).toEqual(before);
       } finally {
         await attack.close();

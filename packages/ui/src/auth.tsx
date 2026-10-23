@@ -436,6 +436,7 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
 }
 
 export interface ShellServices {
+  readonly onProjectsChanged?: () => void;
   readonly subscribeReplay?: (listener: (result: ReplayResult) => void) => () => void;
   readonly client: AuthClient;
   readonly requireReauth: (

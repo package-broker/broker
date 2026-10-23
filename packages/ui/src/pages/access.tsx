@@ -6,14 +6,12 @@ import { buildListFilterHash } from '../page-hash.js';
 import { Button } from '../components/ui/button.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
+import { DataTable } from '../components/ui/table.js';
+import { IdText } from '../components/ui/id-text.js';
+import { Time } from '../components/ui/time.js';
+import { Badge } from '../components/ui/badge.js';
+import { ListState } from '../components/ui/list-state.js';
+import { ConfirmAction } from '../components/ui/confirm-action.js';
 import {
   createManagementStore,
   failureNotice,
@@ -41,6 +39,7 @@ interface Grant {
   roleId: string;
   roleName: string;
   revision: number;
+  createdAt: string;
 }
 export type AccessQuery = ManagementQuery;
 const VIEWS = ['grants', 'roles'] as const;
@@ -55,6 +54,7 @@ interface AccessState {
   organization: string[];
   permissions: string[];
   loading: boolean;
+  listError: boolean;
   busy: boolean;
   stale: boolean;
   notice: string | null;
@@ -89,6 +89,7 @@ export function createAccessController(services: ShellServices) {
     organization: [],
     permissions: [],
     loading: false,
+    listError: false,
     busy: false,
     stale: false,
     notice: null,
@@ -105,6 +106,7 @@ export function createAccessController(services: ShellServices) {
       organization: [],
       permissions: [],
       loading: true,
+      listError: false,
       busy: false,
       stale: false,
       notice,
@@ -127,7 +129,11 @@ export function createAccessController(services: ShellServices) {
         ? orgPermissions.includes(roles ? 'org:roles:read' : 'org:grants:read')
         : permissions.includes('project:grants:read');
     if (!canRead) {
-      store.set({ loading: false, notice: 'You do not have permission to view this list.' });
+      store.set({
+        loading: false,
+        listError: true,
+        notice: 'You do not have permission to view this list.',
+      });
       return;
     }
     const page = { after: query.after, limit: '50' };
@@ -136,6 +142,7 @@ export function createAccessController(services: ShellServices) {
       if (current !== generation) return;
       store.set({
         loading: false,
+        listError: !result.ok,
         roles: result.ok ? result.data.items : [],
         next: result.ok ? result.data.next : null,
         notice: result.ok ? notice : failureNotice(result),
@@ -148,6 +155,7 @@ export function createAccessController(services: ShellServices) {
       if (current !== generation) return;
       store.set({
         loading: false,
+        listError: !result.ok,
         grants: result.ok
           ? result.data.items.map((item) => ({
               id: item.id,
@@ -157,6 +165,7 @@ export function createAccessController(services: ShellServices) {
               roleId: item.role.id,
               roleName: item.role.name,
               revision: item.revision,
+              createdAt: item.createdAt,
             }))
           : [],
         next: result.ok ? result.data.next : null,
@@ -167,6 +176,7 @@ export function createAccessController(services: ShellServices) {
       if (current !== generation) return;
       store.set({
         loading: false,
+        listError: !result.ok,
         grants: result.ok
           ? result.data.items.map((item) => ({
               id: item.id,
@@ -176,6 +186,7 @@ export function createAccessController(services: ShellServices) {
               roleId: item.roleId,
               roleName: item.roleId,
               revision: item.revision,
+              createdAt: item.createdAt,
             }))
           : [],
         next: result.ok ? result.data.next : null,
@@ -322,95 +333,123 @@ export function AccessView({
       <ManagementNotice {...state} reload={() => void controller.load(state.query)} />
       {rolesView(state) ? (
         <>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {['Role', 'Scope', 'Permissions', 'Actions'].map((label) => (
-                  <TableHead key={label}>{label}</TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {model.roles.map((role) => (
-                <TableRow key={`${role.id}-${role.revision}`}>
-                  <TableCell>
-                    {role.name}
-                    <code className="block text-xs">{role.id}</code>
-                    {role.isSystem ? ' (system)' : ''}
-                    {role.protectsLastHolder ? ' (last holder protected)' : ''}
-                  </TableCell>
-                  <TableCell>{role.scope}</TableCell>
-                  <TableCell>{role.permissions.join(', ')}</TableCell>
-                  <TableCell>
-                    {model.writeRoles && !role.isSystem && revisionTag(role.revision) ? (
-                      <div className="grid gap-3">
-                        <form
-                          className="grid gap-2"
-                          onSubmit={(event) => {
-                            const values = formValues(event);
-                            void controller.updateRole(role.id, { name: values['name'] ?? '' });
-                          }}
-                        >
-                          <Field name="name" label="Role name" value={role.name} />
-                          <Button disabled={state.busy}>Rename role</Button>
-                        </form>
-                        <form
-                          className="grid gap-2"
-                          onSubmit={(event) => {
-                            const values = formValues(event);
-                            void controller.updateRole(role.id, {
-                              permissions: permissionsOf(values['permissions']),
-                            });
-                          }}
-                        >
-                          <Field
-                            name="permissions"
-                            label="Permissions (comma separated)"
-                            value={role.permissions.join(', ')}
-                            required={false}
+          {!state.loading && !state.listError && model.roles.length ? (
+            <DataTable
+              label="Roles"
+              items={model.roles}
+              columns={[
+                {
+                  key: 'name',
+                  label: 'Role',
+                  value: (role) => role.name,
+                  render: (role) => (
+                    <div className="grid gap-1">
+                      <strong>{role.name}</strong>
+                      <IdText value={role.id} label="role ID" />
+                      {role.isSystem ? <Badge variant="outline">System</Badge> : null}
+                      {role.protectsLastHolder ? (
+                        <span className="text-xs text-neutral-600">Last holder protected</span>
+                      ) : null}
+                    </div>
+                  ),
+                },
+                { key: 'scope', label: 'Scope', value: (role) => role.scope },
+                {
+                  key: 'permissions',
+                  label: 'Permissions',
+                  value: (role) => role.permissions.join(', '),
+                  render: (role) => (
+                    <div className="flex flex-wrap gap-1">
+                      {role.permissions.map((permission) => (
+                        <Badge key={permission} variant="outline">
+                          {permission}
+                        </Badge>
+                      ))}
+                    </div>
+                  ),
+                },
+                {
+                  key: 'actions',
+                  label: 'Actions',
+                  value: () => '',
+                  sortable: false,
+                  render: (role) =>
+                    model.writeRoles && !role.isSystem && revisionTag(role.revision) ? (
+                      <details>
+                        <summary className="cursor-pointer underline">Edit role</summary>
+                        <div className="mt-3 grid gap-3">
+                          <form
+                            className="grid gap-2"
+                            onSubmit={(event) => {
+                              const values = formValues(event);
+                              void controller.updateRole(role.id, { name: values['name'] ?? '' });
+                            }}
+                          >
+                            <Field name="name" label="Role name" value={role.name} />
+                            <Button disabled={state.busy}>Rename role</Button>
+                          </form>
+                          <form
+                            className="grid gap-2"
+                            onSubmit={(event) => {
+                              const values = formValues(event);
+                              void controller.updateRole(role.id, {
+                                permissions: permissionsOf(values['permissions']),
+                              });
+                            }}
+                          >
+                            <Field
+                              name="permissions"
+                              label="Permissions (comma separated)"
+                              value={role.permissions.join(', ')}
+                              required={false}
+                            />
+                            <Button disabled={state.busy}>Save permissions</Button>
+                          </form>
+                          <ConfirmAction
+                            key={`${role.id}:${role.revision}`}
+                            action="Remove role"
+                            target={`${role.name} (${role.id})`}
+                            scope="Organization"
+                            description="Deleting this role removes its permission bundle. Review grants using this role before continuing. This cannot be undone."
+                            disabled={state.busy}
+                            onConfirm={() => void controller.deleteRole(role.id)}
                           />
-                          <Button disabled={state.busy}>Save permissions</Button>
-                        </form>
-                        <Button
-                          variant="destructive"
-                          disabled={state.busy}
-                          onClick={() => void controller.deleteRole(role.id)}
-                        >
-                          Delete role
-                        </Button>
-                      </div>
-                    ) : null}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                        </div>
+                      </details>
+                    ) : null,
+                },
+              ]}
+            />
+          ) : null}
           {model.writeRoles ? (
-            <form
-              className="my-6 grid gap-3"
-              onSubmit={(event) => {
-                const values = formValues(event);
-                void controller.createRole({
-                  key: values['key'] ?? '',
-                  name: values['name'] ?? '',
-                  scope: values['scope'] as RoleInput['scope'],
-                  permissions: permissionsOf(values['permissions']),
-                });
-              }}
-            >
-              <h2 className="text-lg font-semibold">New role</h2>
-              <Field name="key" label="Role key" />
-              <Field name="name" label="Role name" />
-              <Label className="grid gap-1">
-                Scope
-                <Select name="scope">
-                  <option value="organization">Organization</option>
-                  <option value="project">Project</option>
-                </Select>
-              </Label>
-              <Field name="permissions" label="Permissions (comma separated)" required={false} />
-              <Button disabled={state.busy}>Create role</Button>
-            </form>
+            <details className="detail-group my-6">
+              <summary className="cursor-pointer font-semibold">New role</summary>
+              <form
+                className="my-6 grid gap-3"
+                onSubmit={(event) => {
+                  const values = formValues(event);
+                  void controller.createRole({
+                    key: values['key'] ?? '',
+                    name: values['name'] ?? '',
+                    scope: values['scope'] as RoleInput['scope'],
+                    permissions: permissionsOf(values['permissions']),
+                  });
+                }}
+              >
+                <h2 className="text-lg font-semibold">New role</h2>
+                <Field name="key" label="Role key" />
+                <Field name="name" label="Role name" />
+                <Label className="grid gap-1">
+                  Scope
+                  <Select name="scope">
+                    <option value="organization">Organization</option>
+                    <option value="project">Project</option>
+                  </Select>
+                </Label>
+                <Field name="permissions" label="Permissions (comma separated)" required={false} />
+                <Button disabled={state.busy}>Create role</Button>
+              </form>
+            </details>
           ) : null}
         </>
       ) : (
@@ -418,88 +457,132 @@ export function AccessView({
           <h2 className="my-3 text-lg font-semibold">
             {state.query.project === null ? 'Organization grants' : 'Members and project grants'}
           </h2>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {['Principal / grant', 'Kind', 'Role', 'Actions'].map((label) => (
-                  <TableHead key={label}>{label}</TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {model.grants.map((grant) => (
-                <TableRow key={`${grant.id}-${grant.revision}`}>
-                  <TableCell>
-                    {grant.principalName ?? grant.principalId ?? grant.id}
-                    {grant.principalName !== null ? (
-                      <code className="block text-xs">{grant.principalId}</code>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>{grant.kind}</TableCell>
-                  <TableCell>{grant.roleName}</TableCell>
-                  <TableCell>
-                    {model.writeGrants && revisionTag(grant.revision) ? (
-                      <div className="grid gap-2">
-                        <form
-                          className="grid gap-2"
-                          onSubmit={(event) => {
-                            const values = formValues(event);
-                            void controller.changeGrant(grant.id, values['roleId'] ?? '');
-                          }}
-                        >
-                          <Field name="roleId" label="Role ID" value={grant.roleId} />
-                          <Button disabled={state.busy}>Change role</Button>
-                        </form>
-                        <Button
-                          variant="destructive"
-                          disabled={state.busy}
-                          onClick={() => void controller.revoke(grant.id)}
-                        >
-                          Revoke
-                        </Button>
-                      </div>
-                    ) : null}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          {!state.loading && !state.listError && model.grants.length ? (
+            <DataTable
+              label={
+                state.query.project === null ? 'Organization grants' : 'Members and project grants'
+              }
+              items={model.grants}
+              columns={[
+                {
+                  key: 'principal',
+                  label: 'Principal / grant',
+                  value: (grant) => grant.principalName ?? grant.principalId ?? grant.id,
+                  render: (grant) => (
+                    <div className="grid gap-1">
+                      <strong>{grant.principalName ?? 'Grant'}</strong>
+                      <IdText
+                        value={grant.principalId ?? grant.id}
+                        label={grant.principalId ? 'principal ID' : 'grant ID'}
+                      />
+                    </div>
+                  ),
+                },
+                {
+                  key: 'kind',
+                  label: 'Kind',
+                  value: (grant) => grant.kind,
+                  render: (grant) => <Badge variant="outline">{grant.kind}</Badge>,
+                },
+                { key: 'role', label: 'Role', value: (grant) => grant.roleName },
+                {
+                  key: 'added',
+                  label: 'Added',
+                  value: (grant) => grant.createdAt,
+                  priority: 2,
+                  render: (grant) => <Time value={grant.createdAt} />,
+                },
+                {
+                  key: 'id',
+                  label: 'Grant ID',
+                  value: (grant) => grant.id,
+                  priority: 3,
+                  render: (grant) => <IdText value={grant.id} label="grant ID" />,
+                },
+                {
+                  key: 'actions',
+                  label: 'Actions',
+                  value: () => '',
+                  sortable: false,
+                  render: (grant) =>
+                    model.writeGrants && revisionTag(grant.revision) ? (
+                      <details>
+                        <summary className="cursor-pointer underline">Edit grants</summary>
+                        <div className="mt-3 grid gap-2">
+                          <form
+                            className="grid gap-2"
+                            onSubmit={(event) => {
+                              const values = formValues(event);
+                              void controller.changeGrant(grant.id, values['roleId'] ?? '');
+                            }}
+                          >
+                            <Field name="roleId" label="Role ID" value={grant.roleId} />
+                            <Button disabled={state.busy}>Change role</Button>
+                          </form>
+                          <ConfirmAction
+                            key={`${grant.id}:${grant.revision}`}
+                            action="Revoke"
+                            target={grant.principalName ?? grant.principalId ?? grant.id}
+                            scope={
+                              state.query.project === null
+                                ? 'Organization'
+                                : `Project: ${state.query.project}`
+                            }
+                            description="Revoking this grant removes the access it provides. Other grants still apply. To give this access again, create a new grant."
+                            disabled={state.busy}
+                            onConfirm={() => void controller.revoke(grant.id)}
+                          />
+                        </div>
+                      </details>
+                    ) : null,
+                },
+              ]}
+            />
+          ) : null}
           {model.writeGrants ? (
-            <form
-              className="my-6 grid gap-3"
-              onSubmit={(event) => {
-                const values = formValues(event);
-                void controller.createGrant({
-                  roleId: values['roleId'] ?? '',
-                  subject:
-                    values['type'] === 'group'
-                      ? {
-                          type: 'group',
-                          provider: values['provider'] ?? '',
-                          value: values['subject'] ?? '',
-                        }
-                      : { type: 'email', value: values['subject'] ?? '' },
-                });
-              }}
-            >
-              <h2 className="text-lg font-semibold">New grant</h2>
-              <Field name="roleId" label="Role ID" />
-              <Label className="grid gap-1">
-                Subject type
-                <Select name="type">
-                  <option value="email">Email</option>
-                  <option value="group">Group</option>
-                </Select>
-              </Label>
-              <Field name="subject" label="Subject value" />
-              <Field name="provider" label="Provider (groups only)" required={false} />
-              <Button disabled={state.busy}>Create grant</Button>
-            </form>
+            <details className="detail-group my-6">
+              <summary className="cursor-pointer font-semibold">New grant</summary>
+              <form
+                className="my-6 grid gap-3"
+                onSubmit={(event) => {
+                  const values = formValues(event);
+                  void controller.createGrant({
+                    roleId: values['roleId'] ?? '',
+                    subject:
+                      values['type'] === 'group'
+                        ? {
+                            type: 'group',
+                            provider: values['provider'] ?? '',
+                            value: values['subject'] ?? '',
+                          }
+                        : { type: 'email', value: values['subject'] ?? '' },
+                  });
+                }}
+              >
+                <h2 className="text-lg font-semibold">New grant</h2>
+                <Field name="roleId" label="Role ID" />
+                <Label className="grid gap-1">
+                  Subject type
+                  <Select name="type">
+                    <option value="email">Email</option>
+                    <option value="group">Group</option>
+                  </Select>
+                </Label>
+                <Field name="subject" label="Subject value" />
+                <Field name="provider" label="Provider (groups only)" required={false} />
+                <Button disabled={state.busy}>Create grant</Button>
+              </form>
+            </details>
           ) : null}
         </>
       )}
-      {!state.loading && (rolesView(state) ? model.roles : model.grants).length === 0 ? (
-        <p>No entries found on this page.</p>
+      {!state.loading &&
+      !state.listError &&
+      (rolesView(state) ? model.roles : model.grants).length === 0 ? (
+        <ListState
+          kind={state.query.q ? 'filtered-empty' : 'empty'}
+          title="No entries found on this page."
+        />
       ) : null}
       {state.next ? (
         <a
@@ -527,6 +610,9 @@ export function AccessPage() {
       <h1 id="page-heading" className="text-xl font-semibold">
         Access
       </h1>
+      <p className="mt-1 text-neutral-600">
+        Membership comes from project grants. A role is the bundle of permissions a grant carries.
+      </p>
       <ManagementFilters
         key={hash}
         route="access"

@@ -6,14 +6,11 @@ import { buildListFilterHash } from '../page-hash.js';
 import { Button } from '../components/ui/button.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
+import { DataTable } from '../components/ui/table.js';
+import { StatusBadge } from '../components/ui/status-badge.js';
+import { IdText } from '../components/ui/id-text.js';
+import { ListState } from '../components/ui/list-state.js';
+import { ConfirmAction } from '../components/ui/confirm-action.js';
 import {
   createManagementStore,
   failureNotice,
@@ -38,6 +35,61 @@ export const parseProjectsHash = (hash: string): ProjectsQuery =>
   parseManagementHash(hash, STATUSES) as ProjectsQuery;
 export const buildProjectsHash = (query: ProjectsQuery) =>
   buildListFilterHash('projects', parseProjectsHash(buildListFilterHash('projects', query)));
+type ProjectPage = { items: ProjectItem[]; next: string | null };
+async function loadProjectList(
+  client: ShellServices['client'],
+  query: ProjectsQuery,
+): Promise<ApiResult<ProjectPage>> {
+  if (query.status)
+    return client.request('get', '/_pb/projects', {
+      query: { status: query.status, after: query.after, limit: '50' },
+    });
+  let cursors: (string | null | undefined)[] = [query.after, undefined];
+  if (query.after?.startsWith('all:')) {
+    try {
+      const parsed: unknown = JSON.parse(query.after.slice(4));
+      if (
+        !Array.isArray(parsed) ||
+        parsed.length !== 2 ||
+        !parsed.every((value) => value === null || typeof value === 'string')
+      )
+        throw new Error('Invalid cursor');
+      cursors = parsed;
+    } catch {
+      return {
+        ok: false,
+        status: 400,
+        code: 'invalid_request',
+        details: [],
+        request: { method: 'GET', path: '/_pb/projects' },
+      };
+    }
+  }
+  const pages = await Promise.all(
+    STATUSES.map((status, index) =>
+      cursors[index] === null
+        ? null
+        : client.request('get', '/_pb/projects', {
+            query: { status, after: cursors[index] ?? undefined, limit: '50' },
+          }),
+    ),
+  );
+  const items: ProjectItem[] = [];
+  const next: (string | null)[] = [];
+  for (const page of pages) {
+    if (page && !page.ok) return page;
+    if (page?.ok) items.push(...page.data.items);
+    next.push(page?.ok ? page.data.next : null);
+  }
+  return {
+    ok: true,
+    status: 200,
+    data: {
+      items,
+      next: next.some((cursor) => cursor !== null) ? `all:${JSON.stringify(next)}` : null,
+    },
+  };
+}
 interface ProjectsState {
   query: ProjectsQuery;
   items: ProjectItem[];
@@ -47,6 +99,7 @@ interface ProjectsState {
   organization: string[];
   permissions: string[];
   loading: boolean;
+  listError: boolean;
   busy: boolean;
   stale: boolean;
   notice: string | null;
@@ -62,6 +115,8 @@ export function projectsViewModel(state: ProjectsState) {
     settings:
       ready && selected.status === 'active' && state.permissions.includes('project:settings:write'),
     transition: ready && state.organization.includes('org:projects:archive'),
+    transitionItems:
+      !state.loading && !state.stale && state.organization.includes('org:projects:archive'),
   };
 }
 export function createProjectsController(services: ShellServices) {
@@ -74,6 +129,7 @@ export function createProjectsController(services: ShellServices) {
     organization: [],
     permissions: [],
     loading: false,
+    listError: false,
     busy: false,
     stale: false,
     notice: null,
@@ -91,14 +147,13 @@ export function createProjectsController(services: ShellServices) {
       organization: [],
       permissions: [],
       loading: true,
+      listError: false,
       busy: false,
       stale: false,
       notice,
     });
     const [list, organization, selected, permissions] = await Promise.all([
-      client.request('get', '/_pb/projects', {
-        query: { status: query.status, after: query.after, limit: '50' },
-      }),
+      loadProjectList(client, query),
       client.request('get', '/_pb/me/permissions'),
       query.project === null
         ? null
@@ -112,6 +167,7 @@ export function createProjectsController(services: ShellServices) {
     if (current !== generation) return;
     store.set({
       loading: false,
+      listError: !list.ok,
       items: list.ok ? list.data.items : [],
       next: list.ok ? list.data.next : null,
       organization: organization.ok ? organization.data.organization : [],
@@ -131,6 +187,7 @@ export function createProjectsController(services: ShellServices) {
     const current = generation;
     store.set({ busy: true, notice: null });
     const result = await run();
+    if (result.ok) services.onProjectsChanged?.();
     if (current !== generation) return;
     store.set({ busy: false });
     if (requireReauth(services, result)) {
@@ -180,10 +237,30 @@ export function createProjectsController(services: ShellServices) {
           ),
         );
     },
+    async transitionItem(id: string) {
+      const state = store.snapshot();
+      const item = state.items.find((entry) => entry.id === id);
+      if (!item?.etag || !projectsViewModel(state).transitionItems) return;
+      await write(() =>
+        client.request(
+          'post',
+          item.status === 'active'
+            ? '/_pb/projects/{project}/archive'
+            : '/_pb/projects/{project}/restore',
+          {
+            params: { project: item.slug },
+            headers: { 'If-Match': item.etag },
+            idempotencyKey: crypto.randomUUID(),
+          },
+        ),
+      );
+    },
     async replayed(result: ReplayResult) {
       const project = store.snapshot().query.project;
       const path = project === null ? null : `/_pb/projects/${encodeURIComponent(project)}`;
+      const listTransition = /^\/_pb\/projects\/[^/]+\/(?:archive|restore)$/.test(result.path);
       if (
+        !listTransition &&
         result.path !== '/_pb/projects' &&
         (path === null || ![path, `${path}/archive`, `${path}/restore`].includes(result.path))
       )
@@ -235,32 +312,94 @@ export function ProjectsView({
     <>
       <ManagementNotice {...state} reload={() => void controller.load(state.query)} />
       {state.query.q ? <p>Filtering loaded projects on this page.</p> : null}
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Slug</TableHead>
-            <TableHead>Status</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {model.items.map((item) => (
-            <TableRow key={item.id}>
-              <TableCell>
-                <a
-                  className="underline"
-                  href={buildProjectsHash({ ...state.query, project: item.slug })}
-                >
-                  {item.name}
-                </a>
-              </TableCell>
-              <TableCell>{item.slug}</TableCell>
-              <TableCell>{item.status}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      {!state.loading && model.items.length === 0 ? <p>No projects found on this page.</p> : null}
+      {!state.loading && !state.listError ? (
+        model.items.length ? (
+          <>
+            <p className="my-3 text-sm text-neutral-600">
+              {model.items.length} projects on this page
+            </p>
+            <DataTable
+              label="Projects"
+              items={model.items}
+              selectedId={state.selected?.id ?? ''}
+              columns={[
+                {
+                  key: 'name',
+                  label: 'Name',
+                  value: (item) => item.name,
+                  render: (item) => (
+                    <div className="grid gap-1">
+                      <a
+                        className="font-medium underline"
+                        href={buildProjectsHash({ ...state.query, project: item.slug })}
+                      >
+                        {item.name}
+                      </a>
+                      <code className="text-xs text-neutral-600">{item.slug}</code>
+                    </div>
+                  ),
+                },
+                {
+                  key: 'status',
+                  label: 'Status',
+                  value: (item) => item.status,
+                  render: (item) => <StatusBadge status={item.status} />,
+                },
+                {
+                  key: 'id',
+                  label: 'Project ID',
+                  value: (item) => item.id,
+                  render: (item) => <IdText value={item.id} label="project ID" />,
+                  priority: 3,
+                },
+                {
+                  key: 'actions',
+                  label: 'Actions',
+                  value: () => '',
+                  sortable: false,
+                  render: (item) => (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <a
+                        className="underline"
+                        href={buildProjectsHash({ ...state.query, project: item.slug })}
+                      >
+                        Open settings
+                      </a>
+                      {model.transitionItems && item.etag ? (
+                        item.status === 'active' ? (
+                          <ConfirmAction
+                            key={`${item.id}:${item.etag}`}
+                            action="Archive"
+                            target={`${item.name} (${item.id})`}
+                            scope={`Project: ${item.slug}`}
+                            description="Archiving keeps project history and blocks new publishes. You can restore this project later."
+                            disabled={state.busy}
+                            onConfirm={() => void controller.transitionItem(item.id)}
+                          />
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={state.busy}
+                            onClick={() => void controller.transitionItem(item.id)}
+                          >
+                            Restore
+                          </Button>
+                        )
+                      ) : null}
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          </>
+        ) : (
+          <ListState
+            kind={state.query.q || state.query.status ? 'filtered-empty' : 'empty'}
+            title="No projects found on this page."
+          />
+        )
+      ) : null}
       {state.next ? (
         <a
           className="my-4 inline-block underline"
@@ -270,27 +409,33 @@ export function ProjectsView({
         </a>
       ) : null}
       {model.create ? (
-        <form
-          className="my-6 grid gap-3"
-          onSubmit={(event) => {
-            const values = formValues(event);
-            void controller.create({
-              name: values['name'] ?? '',
-              slug: values['slug'] ?? '',
-              tokenMaxScope: values['tokenMaxScope'] as Project['tokenMaxScope'],
-              requirePublishApproval: values['requirePublishApproval'] === 'true',
-            });
-          }}
-        >
-          <h2 className="text-lg font-semibold">New project</h2>
-          <Field name="name" label="Project name" />
-          <Field name="slug" label="Slug" />
-          <TokenPolicy />
-          <Button disabled={state.busy}>Create project</Button>
-        </form>
+        <details className="detail-group my-6">
+          <summary className="cursor-pointer font-semibold">New project</summary>
+          <p className="mt-3 text-neutral-600">
+            The slug is the API and CLI name; it cannot change after creation.
+          </p>
+          <form
+            className="my-6 grid gap-3"
+            onSubmit={(event) => {
+              const values = formValues(event);
+              void controller.create({
+                name: values['name'] ?? '',
+                slug: values['slug'] ?? '',
+                tokenMaxScope: values['tokenMaxScope'] as Project['tokenMaxScope'],
+                requirePublishApproval: values['requirePublishApproval'] === 'true',
+              });
+            }}
+          >
+            <h2 className="text-lg font-semibold">New project</h2>
+            <Field name="name" label="Project name" />
+            <Field name="slug" label="Slug" />
+            <TokenPolicy />
+            <Button disabled={state.busy}>Create project</Button>
+          </form>
+        </details>
       ) : null}
       {state.selected ? (
-        <section className="my-6 grid gap-3" aria-label="Project settings">
+        <section className="detail-group my-6 grid gap-3" aria-label="Project settings">
           <h2 className="text-lg font-semibold">Settings: {state.selected.name}</h2>
           <p>
             Maximum token scope: {state.selected.tokenMaxScope}. Publish approval:{' '}
@@ -315,13 +460,25 @@ export function ProjectsView({
             </form>
           ) : null}
           {model.transition ? (
-            <Button
-              variant="outline"
-              disabled={state.busy}
-              onClick={() => void controller.transition()}
-            >
-              {state.selected.status === 'active' ? 'Archive' : 'Restore'}
-            </Button>
+            state.selected.status === 'active' ? (
+              <ConfirmAction
+                key={`${state.selected.id}:${state.etag}`}
+                action="Archive"
+                target={state.selected.name}
+                scope={`Project: ${state.selected.slug}`}
+                description="Archiving keeps project history and blocks new publishes. You can restore this project later."
+                disabled={state.busy}
+                onConfirm={() => void controller.transition()}
+              />
+            ) : (
+              <Button
+                variant="outline"
+                disabled={state.busy}
+                onClick={() => void controller.transition()}
+              >
+                Restore
+              </Button>
+            )
           ) : null}
         </section>
       ) : null}
@@ -342,6 +499,9 @@ export function ProjectsPage() {
       <h1 id="page-heading" className="text-xl font-semibold">
         Projects
       </h1>
+      <p className="mt-1 text-neutral-600">
+        Scopes for sources, packages and tokens. Archiving keeps history and blocks new publishes.
+      </p>
       <ManagementFilters
         key={hash}
         route="projects"

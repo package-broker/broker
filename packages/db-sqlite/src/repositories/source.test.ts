@@ -1173,6 +1173,22 @@ describe('source attachment counts', () => {
     expect(await repository.countAttachedProjects(a, query([SRC_ORG]))).toEqual(new Map());
   });
 
+  it('intersects attachment visibility with the token project cap, including empty caps', async () => {
+    const input = query([SRC_ORG], true, true);
+    expect(await repository.countAttachedProjects(a, { ...input, restrictTo: [P1] })).toEqual(
+      new Map([[SRC_ORG, 1]]),
+    );
+    expect(await repository.countAttachedProjects(a, { ...input, restrictTo: [] })).toEqual(
+      new Map(),
+    );
+    expect(await repository.countAttachedProjects(b, { ...input, restrictTo: [P1] })).toEqual(
+      new Map(),
+    );
+    expect(
+      await repository.countAttachedProjects(a, { ...query([SRC_ORG]), restrictTo: [P2] }),
+    ).toEqual(new Map());
+  });
+
   it('returns the full count for an organization administrator, including archived projects', async () => {
     expect(await repository.countAttachedProjects(a, query([SRC_ORG], true, true))).toEqual(
       new Map([[SRC_ORG, 3]]),

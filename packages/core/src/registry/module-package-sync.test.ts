@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as composerRepository from '../ingest/composer/composer-repository.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { orgContext, type OrgContext } from '../db/port.js';
 import type { SourceRecord } from '../db/source.js';
@@ -182,6 +183,8 @@ function harness(ecosystem: 'npm' | 'composer' = 'npm') {
     run,
   };
 }
+
+afterEach(() => vi.restoreAllMocks());
 
 beforeEach(() => {
   vi.mocked(applyChunk).mockReset().mockResolvedValue({
@@ -414,22 +417,17 @@ it('skips queued refreshes after registered names or the package list narrow and
   };
   h.sourceGet.mockResolvedValue(record);
   const describe = vi.fn(async () => ({ kind: 'not_found' as const, definitive: true }));
-  const deps: RegistryModuleDeps = {
-    ...h.deps,
-    providers: [
-      {
-        id: 'composer-test',
-        sourceTypes: ['composer_repository'],
-        ecosystems: ['composer'],
-        describe,
-        openDist: async () => {
-          throw new Error('unused');
-        },
-      },
-    ],
-  };
+  vi.spyOn(composerRepository, 'createComposerRepositoryProvider').mockReturnValue({
+    id: 'composer-repository',
+    sourceTypes: ['composer_repository'],
+    ecosystems: ['composer'],
+    describe,
+    openDist: async () => {
+      throw new Error('unused');
+    },
+  });
   const run = async () => {
-    const job = createRegistryModule(deps).packageSyncJob!;
+    const job = createRegistryModule(h.deps).packageSyncJob!;
     await job.handler(job.validate({ sourceId: 'src-1', key: h.key }), h.context);
   };
   await run();
@@ -447,4 +445,38 @@ it('skips queued refreshes after registered names or the package list narrow and
   h.sourceGet.mockResolvedValue(record);
   await run();
   expect(describe).toHaveBeenCalledTimes(2);
+});
+
+it('uses a plugin claiming composer_repository before the built-in default', async () => {
+  const h = harness('composer');
+  const original = await h.sourceGet(org, 'src-1');
+  h.sourceGet.mockResolvedValue({
+    ...original!,
+    type: 'composer_repository',
+    url: 'https://registry.test',
+    configJson: JSON.stringify({ selection: { packages: [h.key] } }),
+  });
+  vi.mocked(h.deps.catalogue.covers).mockResolvedValue(true);
+  const describe = vi.fn(async () => ({ kind: 'not_found' as const, definitive: true }));
+  Object.assign(h.deps, {
+    providers: [
+      {
+        id: 'custom-composer',
+        sourceTypes: ['composer_repository'],
+        ecosystems: ['composer'],
+        describe,
+        openDist: async () => {
+          throw new Error('unused');
+        },
+      },
+    ],
+  });
+  await h.run();
+  expect(describe).toHaveBeenCalledExactlyOnceWith(
+    expect.anything(),
+    expect.objectContaining({ type: 'composer_repository', providerId: 'custom-composer' }),
+    h.key,
+    { validators: {} },
+  );
+  expect(h.transport).not.toHaveBeenCalled();
 });

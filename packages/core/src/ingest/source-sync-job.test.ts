@@ -1,3 +1,4 @@
+import { repositoryListing } from '../internal/composer-repository-listing.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
@@ -715,6 +716,65 @@ describe('source sync job: never removes on an incomplete or untrusted listing',
   });
 });
 
+describe('source sync job: non-enumerable Composer repositories', () => {
+  it('continues held refreshes after selected candidates exhaust the invocation budget', async () => {
+    const candidates = Array.from({ length: FANOUT_PER_INVOCATION }, (_, i) => `a/p${i}`);
+    const t = setup({
+      pages: { '': repositoryListing(page([], null), { candidates, enumerable: false }) },
+      held: { '': { keys: ['a/held'], next: null } },
+    });
+    await t.run(payload());
+    expect(t.fanout()).toHaveLength(FANOUT_PER_INVOCATION);
+    expect(t.calls.held).toBe(0);
+    expect(t.polls).toEqual([]);
+    await t.run(t.continuations()[0]?.payload);
+    expect(t.calls.list).toEqual([null]);
+    expect(t.fanout().at(-1)?.payload['key']).toBe('a/held');
+    expect(t.finalizes).toEqual([]);
+    expect(t.polls).toEqual([{ id: 'src', outcome: 'success' }]);
+  });
+
+  it('records held refresh failures without publishing a successful poll', async () => {
+    const t = setup({
+      pages: { '': repositoryListing(page([], null), { candidates: [], enumerable: false }) },
+      heldError: true,
+    });
+    await expect(t.run(payload())).rejects.toMatchObject({ code: 'handler_error' });
+    expect(t.finalizes).toEqual([]);
+    expect(t.polls).toEqual([{ id: 'src', outcome: 'failure', error: 'internal' }]);
+  });
+
+  it('refreshes selected candidates and stale held names, paging held names without relisting', async () => {
+    const t = setup({
+      pages: {
+        '': repositoryListing(page([], null), { candidates: ['a/selected'], enumerable: false }),
+      },
+      held: {
+        '': { keys: ['a/held'], next: 'a/held' },
+        'a/held': { keys: ['a/last'], next: null },
+      },
+    });
+    await t.run(payload(), 'poll-1');
+    expect(t.fanout().map((e) => e.payload['key'])).toEqual(['a/selected', 'a/held']);
+    expect(t.polls).toEqual([]);
+    const next = t.continuations()[0];
+    expect(next?.payload).toMatchObject({ cursor: 'a/held', generation: expect.any(String) });
+    await t.run(next?.payload, 'continuation');
+    expect(t.calls.list).toEqual([null]);
+    expect(t.fanout().map((e) => e.payload['key'])).toEqual(['a/selected', 'a/held', 'a/last']);
+    expect(t.finalizes).toEqual([]);
+    expect(t.polls).toEqual([{ id: 'src', outcome: 'success' }]);
+    await t.run(payload(), 'poll-2');
+    expect(t.fanout().map((e) => e.payload['key'])).toEqual([
+      'a/selected',
+      'a/held',
+      'a/last',
+      'a/selected',
+      'a/held',
+    ]);
+  });
+});
+
 describe('source sync job: proxy sources', () => {
   for (const type of ['packagist_proxy', 'npmjs_proxy', 'npm_registry'] as const) {
     it(`${type} refreshes only held packages and never lists or finalizes`, async () => {
@@ -966,5 +1026,45 @@ describe('source sync job: fix round 1', () => {
     await t.run(payload()).catch(() => undefined);
     expect(t.finalizes).toEqual([]);
     expect(t.calls.abandon).toBe(1);
+  });
+});
+
+describe('built-in Composer repository listing evidence', () => {
+  it('keeps non-enumerable availability safe across fan-out continuations', async () => {
+    const confirmed = 'acme/present';
+    const candidates = Array.from({ length: FANOUT_PER_INVOCATION + 1 }, (_, i) => `acme/p${i}`);
+    const listing = repositoryListing(page([confirmed], null), {
+      candidates,
+      enumerable: false,
+    });
+    const h = setup({ pages: { '': listing }, existing: (names) => [...names], unseen: 1 });
+    await h.run(payload());
+    expect(h.fanout()).toHaveLength(FANOUT_PER_INVOCATION);
+    expect(h.finalizes).toEqual([]);
+    expect(h.continuations()).toHaveLength(1);
+    await h.run(h.continuations()[0]!.payload);
+    expect(h.fanout()).toHaveLength(candidates.length + 1);
+    expect(h.marks.flatMap((mark) => mark.present)).toEqual([confirmed]);
+    expect(h.finalizes).toEqual([]);
+    expect(h.calls.abandon).toBe(1);
+    expect(h.polls).toEqual([{ id: 'src', outcome: 'success' }]);
+  });
+
+  it('dispatches unconfirmed candidates but stamps only upstream names for enumerable availability', async () => {
+    const listing = repositoryListing(page(['acme/present'], null), {
+      candidates: ['acme/missing'],
+      enumerable: true,
+    });
+    const h = setup({ pages: { '': listing }, existing: (names) => [...names], unseen: 1 });
+    await h.run(payload());
+    expect(h.fanout().map((job) => job.payload.key)).toEqual(['acme/present', 'acme/missing']);
+    expect(h.marks.flatMap((mark) => mark.present)).toEqual(['acme/present']);
+    expect(h.finalizes).toEqual([
+      expect.objectContaining({
+        successfulCandidates: 1,
+        definitiveAbsent: 1,
+        upstreamComplete: true,
+      }),
+    ]);
   });
 });

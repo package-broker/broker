@@ -1,11 +1,32 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { describe, expect, it, type TestContext } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, type TestContext } from 'vitest';
+
+async function launchBrowser() {
+  const require = createRequire(new URL('../../e2e/package.json', import.meta.url));
+  const { chromium, expect: browserExpect } = await import(require.resolve('@playwright/test'));
+  try {
+    return { browser: await chromium.launch(), browserExpect };
+  } catch (error) {
+    if (/bootstrap_check_in.*Permission denied|Executable doesn't exist/.test(String(error)))
+      return undefined;
+    throw error;
+  }
+}
+
+let fixture: Awaited<ReturnType<typeof launchBrowser>>;
+
+beforeAll(async () => {
+  fixture = await launchBrowser();
+});
+
+afterAll(async () => {
+  await fixture?.browser.close();
+});
 
 async function mounted(context: TestContext, contents: string) {
-  const require = createRequire(new URL('../../e2e/package.json', import.meta.url));
-  const { chromium } = await import(require.resolve('@playwright/test'));
+  if (!fixture) context.skip('Chromium cannot start in this environment');
   const bundle = await build({
     stdin: {
       contents: `import React from 'react'; import { createRoot } from 'react-dom/client'; ${contents}`,
@@ -18,28 +39,20 @@ async function mounted(context: TestContext, contents: string) {
     jsx: 'automatic',
     define: { 'process.env.NODE_ENV': '"production"' },
   });
-  let browser;
+  const page = await fixture!.browser.newPage();
   try {
-    browser = await chromium.launch();
-  } catch (error) {
-    if (/bootstrap_check_in.*Permission denied|Executable doesn't exist/.test(String(error)))
-      context.skip('Chromium cannot start in this environment');
-    throw error;
-  }
-  try {
-    const page = await browser.newPage();
     await page.setContent('<div id="root"></div>');
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    return { page, browser };
+    return { page, browserExpect: fixture!.browserExpect };
   } catch (error) {
-    await browser.close();
+    await page.close();
     throw error;
   }
 }
 
 describe('mounted review regressions', () => {
   it('keeps source drafts with their IDs after filtering and reordering', async (context) => {
-    const { page, browser } = await mounted(
+    const { page, browserExpect } = await mounted(
       context,
       `
       import { SourcesView } from './pages/sources';
@@ -61,22 +74,23 @@ describe('mounted review regressions', () => {
       await page.getByLabel('Name (loaded sources)', { exact: true }).fill('Beta');
       await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
       await row('Beta').getByText('Edit source', { exact: true }).click();
-      expect(await row('Beta').locator('input[name="interval"]').inputValue()).toBe('300');
+      await browserExpect(row('Beta').locator('input[name="interval"]')).toHaveValue('300');
       await row('Beta').getByRole('button', { name: 'Save settings', exact: true }).click();
       expect(await page.evaluate('globalThis.edits')).toEqual([['beta', 300, 'flag']]);
       await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
       await row('Alpha').getByText('Edit source', { exact: true }).click();
       await row('Alpha').locator('input[name="interval"]').fill('888');
       await page.evaluate('globalThis.reorder()');
-      expect(await row('Alpha').locator('input[name="interval"]').inputValue()).toBe('888');
-      expect(await row('Beta').locator('input[name="interval"]').inputValue()).toBe('300');
+      await browserExpect(page.locator('tbody tr').first()).toContainText('Beta');
+      await browserExpect(row('Alpha').locator('input[name="interval"]')).toHaveValue('888');
+      await browserExpect(row('Beta').locator('input[name="interval"]')).toHaveValue('300');
     } finally {
-      await browser.close();
+      await page.close();
     }
   });
 
   it('clears rendered unapplied text and select values before another submit', async (context) => {
-    const { page, browser } = await mounted(
+    const { page, browserExpect } = await mounted(
       context,
       `
       import { LoadedListFilters } from './components/ui/toolbar';
@@ -88,15 +102,20 @@ describe('mounted review regressions', () => {
     `,
     );
     try {
-      await page.getByLabel('Name', { exact: true }).fill('unapplied');
-      await page.getByLabel('Status', { exact: true }).selectOption('revoked');
+      const name = page.getByLabel('Name', { exact: true });
+      const status = page.getByLabel('Status', { exact: true });
+      await name.waitFor({ state: 'visible' });
+      await name.fill('unapplied');
+      await status.selectOption('revoked');
+      await browserExpect(name).toHaveValue('unapplied');
+      await browserExpect(status).toHaveValue('revoked');
       await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
-      expect(await page.getByLabel('Name', { exact: true }).inputValue()).toBe('');
-      expect(await page.getByLabel('Status', { exact: true }).inputValue()).toBe('');
+      await browserExpect(name).toHaveValue('');
+      await browserExpect(status).toHaveValue('');
       await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
-      expect(await page.locator('output').textContent()).toBe('{"q":"","status":""}');
+      await browserExpect(page.locator('output')).toHaveText('{"q":"","status":""}');
     } finally {
-      await browser.close();
+      await page.close();
     }
   });
 });

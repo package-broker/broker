@@ -39,7 +39,8 @@ import { ImportPage } from './pages/import.js';
 import { PackagesPage } from './pages/packages.js';
 import { ProjectsPage } from './pages/projects.js';
 import { SourcesPage } from './pages/sources.js';
-import { TokensPage } from './pages/tokens.js';
+import { clearPendingTokenIssue, TokensPage } from './pages/tokens.js';
+import type { PendingStorage } from './pending.js';
 
 export const PAGES = {
   projects: ProjectsPage,
@@ -133,13 +134,25 @@ export async function loadProjects(client: AuthClient): Promise<ProjectSummary[]
 export async function signOut(deps: {
   client: AuthClient;
   clearPending: () => void;
+  storage?: PendingStorage;
   onSignedOut: () => void;
 }): Promise<boolean> {
   const result = await deps.client.request('post', '/_pb/auth/logout');
   if (!result.ok) return false;
   deps.clearPending();
+  if (deps.storage) clearPendingTokenIssue(deps.storage);
   deps.onSignedOut();
   return true;
+}
+
+export function bindProjectReplay(
+  flow: Pick<ReturnType<typeof createReauthFlow>, 'subscribeReplay'>,
+  onProjectsChanged: () => void,
+) {
+  return flow.subscribeReplay((result) => {
+    if (result.ok && /^\/_pb\/projects(?:\/[^/]+(?:\/(?:archive|restore))?)?$/.test(result.path))
+      onProjectsChanged();
+  });
 }
 
 const NAV: readonly { route: PageRoute; label: string }[] = [
@@ -318,19 +331,25 @@ function AppContent(props: { client?: AuthClient }) {
   const initialProbe = useRef(true);
   const [signOutError, setSignOutError] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsVersion, setProjectsVersion] = useState(0);
+  const onProjectsChanged = useCallback(() => setProjectsVersion((version) => version + 1), []);
+  const storage = useMemo<PendingStorage>(
+    () => ({
+      getItem: (key) => window.sessionStorage.getItem(key),
+      setItem: (key, value) => window.sessionStorage.setItem(key, value),
+      removeItem: (key) => window.sessionStorage.removeItem(key),
+    }),
+    [],
+  );
   const flow = useMemo(
     () =>
       createReauthFlow({
         client,
-        storage: {
-          getItem: (key) => window.sessionStorage.getItem(key),
-          setItem: (key, value) => window.sessionStorage.setItem(key, value),
-          removeItem: (key) => window.sessionStorage.removeItem(key),
-        },
+        storage,
         now: Date.now,
         navigate: go,
       }),
-    [client, go],
+    [client, go, storage],
   );
 
   useEffect(() => {
@@ -356,16 +375,19 @@ function AppContent(props: { client?: AuthClient }) {
     return () => {
       live = false;
     };
-  }, [client, session]);
+  }, [client, session, projectsVersion]);
+
+  useEffect(() => bindProjectReplay(flow, onProjectsChanged), [flow, onProjectsChanged]);
 
   const services = useMemo<ShellServices>(
     () => ({
       client,
       subscribeReplay: flow.subscribeReplay,
+      onProjectsChanged,
       requireReauth: (request, options) =>
         flow.requireReauth(request, options, window.location.hash),
     }),
-    [client, flow],
+    [client, flow, onProjectsChanged],
   );
 
   const onSignedIn = useCallback(() => {
@@ -407,6 +429,7 @@ function AppContent(props: { client?: AuthClient }) {
           void signOut({
             client,
             clearPending: () => flow.clear(),
+            storage,
             onSignedOut: () => {
               setProjects([]);
               setSession('out');

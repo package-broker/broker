@@ -26,6 +26,7 @@ function fixture(
     status?: number;
     code?: string;
     etag?: boolean;
+    listEtag?: boolean;
     permissions?: boolean;
     archived?: boolean;
   } = {},
@@ -56,7 +57,10 @@ function fixture(
     const data = { ...project, status: options.archived ? 'archived' : 'active' };
     if (url === '/_pb/projects/web')
       return Response.json(data, { headers: options.etag === false ? {} : { ETag: '"r7"' } });
-    return Response.json({ items: [data], next: null });
+    return Response.json({
+      items: [{ ...data, ...(options.listEtag ? { etag: '"r7"' } : {}) }],
+      next: null,
+    });
   });
   const client = createApiClient<paths>({ fetch, readCookie: () => undefined });
   const requireReauth = vi.fn();
@@ -75,6 +79,123 @@ describe('projects', () => {
       '#/projects?status=active&q=ab',
     );
     expect(parseProjectsHash(buildProjectsHash(parsed))).toEqual(parsed);
+  });
+  it('loads both statuses when All statuses is selected, with independent pagination', async () => {
+    const { controller, fetch } = fixture();
+    fetch.mockImplementation(async (url: string) => {
+      if (url === '/_pb/me/permissions') return Response.json({ organization: [] });
+      const params = new URL(url, 'https://broker.test').searchParams;
+      const archived = params.get('status') === 'archived';
+      const later = params.has('after');
+      return Response.json({
+        items: [
+          {
+            ...project,
+            id: archived ? 'archived' : later ? 'active-2' : 'active',
+            status: archived ? 'archived' : 'active',
+          },
+        ],
+        next: !archived && !later ? 'active/+=' : null,
+      });
+    });
+    await controller.load({ project: null });
+    expect(controller.snapshot().items.map((item) => item.id)).toEqual(['active', 'archived']);
+    const after = controller.snapshot().next;
+    expect(after).toBeTruthy();
+    fetch.mockClear();
+    await controller.load({ project: null, after: after! });
+    expect(controller.snapshot().items.map((item) => item.id)).toEqual(['active-2']);
+    expect(controller.snapshot().next).toBeNull();
+    expect(
+      fetch.mock.calls.filter(([url]) => url.startsWith('/_pb/projects')).map(([url]) => url),
+    ).toEqual(['/_pb/projects?status=active&after=active%2F%2B%3D&limit=50']);
+  });
+  it('reports an error instead of a partial All statuses list when archived loading fails', async () => {
+    const f = fixture();
+    const original = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (url, init) =>
+      url.includes('status=archived')
+        ? Response.json({ error: { code: 'forbidden' } }, { status: 403 })
+        : original(url, init),
+    );
+    await f.controller.load({ project: null });
+    expect(f.controller.snapshot().listError).toBe(true);
+    expect(f.controller.snapshot().items).toEqual([]);
+    expect(f.controller.snapshot().next).toBeNull();
+  });
+  it.each(['active', 'archived'] as const)(
+    'keeps the %s filter on a single API cursor',
+    async (status) => {
+      const f = fixture();
+      await f.controller.load({ project: null, status, after: 'opaque/+=' });
+      expect(
+        f.fetch.mock.calls.filter(([url]) => url.startsWith('/_pb/projects')).map(([url]) => url),
+      ).toEqual([`/_pb/projects?status=${status}&after=opaque%2F%2B%3D&limit=50`]);
+    },
+  );
+  it('rejects a malformed combined project cursor without sending it upstream', async () => {
+    const f = fixture();
+    await f.controller.load({ project: null, after: 'all:[{},null]' });
+    expect(f.controller.snapshot().listError).toBe(true);
+    expect(f.fetch.mock.calls.some(([url]) => url.startsWith('/_pb/projects'))).toBe(false);
+  });
+  it.each(['create', 'update', 'archive', 'restore'] as const)(
+    'invalidates shared scope options after %s succeeds',
+    async (action) => {
+      const f = fixture({ listEtag: true, archived: action === 'restore' });
+      const onProjectsChanged = vi.fn();
+      const controller = createProjectsController({
+        client: f.client,
+        requireReauth: f.requireReauth,
+        onProjectsChanged,
+      });
+      await controller.load(query);
+      expect(onProjectsChanged).not.toHaveBeenCalled();
+      if (action === 'create')
+        await controller.create({
+          name: 'New',
+          slug: 'new',
+          tokenMaxScope: 'read',
+          requirePublishApproval: false,
+        });
+      else if (action === 'update') await controller.update({ name: 'Renamed' });
+      else await controller.transitionItem(project.id);
+      expect(onProjectsChanged).toHaveBeenCalledOnce();
+    },
+  );
+  it('invalidates scope options when an in-flight project mutation succeeds after leaving the page', async () => {
+    const f = fixture();
+    const onProjectsChanged = vi.fn();
+    const controller = createProjectsController({
+      client: f.client,
+      requireReauth: f.requireReauth,
+      onProjectsChanged,
+    });
+    await controller.load(query);
+    let finish!: (response: Response) => void;
+    f.fetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const saving = controller.update({ name: 'Renamed' });
+    controller.dispose();
+    finish(new Response(null, { status: 204 }));
+    await saving;
+    expect(onProjectsChanged).toHaveBeenCalledOnce();
+  });
+  it('does not invalidate scope options after a refused project mutation', async () => {
+    const f = fixture({ status: 403 });
+    const onProjectsChanged = vi.fn();
+    const controller = createProjectsController({
+      client: f.client,
+      requireReauth: f.requireReauth,
+      onProjectsChanged,
+    });
+    await controller.load(query);
+    await controller.update({ name: 'Refused' });
+    expect(onProjectsChanged).not.toHaveBeenCalled();
   });
   it('drops unknown keys', () => {
     expect(buildProjectsHash(parseProjectsHash('#/projects?unknown=private'))).toBe('#/projects');
@@ -263,4 +384,93 @@ describe('projects', () => {
     expect(fetch.mock.calls).toHaveLength(count);
     expect(markup(controller)).toContain('Changed elsewhere. Reload');
   });
+});
+
+describe('project list presentation', () => {
+  it('renders responsive columns, the status badge and copyable ID', async () => {
+    const { controller } = fixture();
+    await controller.load({ project: null });
+    const html = markup(controller);
+    expect(html).toContain('responsive-table');
+    expect(html).toContain('data-label="Status"');
+    expect(html).toContain('>Active<');
+    expect(html).toContain('aria-label="Copy project ID"');
+    expect(html).toContain(`title="${project.id}"`);
+    expect(html).toContain('New project');
+    expect(html).not.toContain('<dialog');
+  });
+  it('distinguishes loading, empty, filtered-empty and failed loading', async () => {
+    const fetch = vi.fn(async (url: string) =>
+      Response.json(
+        url === '/_pb/me/permissions' ? { organization: [] } : { items: [], next: null },
+      ),
+    );
+    const controller = createProjectsController({
+      client: createApiClient<paths>({ fetch, readCookie: () => undefined }),
+      requireReauth: vi.fn(),
+    });
+    const loading = controller.load({ project: null });
+    expect(markup(controller)).toContain('data-list-state="loading"');
+    await loading;
+    expect(markup(controller)).toContain('data-list-state="empty"');
+    await controller.load({ project: null, q: 'none' });
+    expect(markup(controller)).toContain('data-list-state="filtered-empty"');
+    fetch.mockImplementation(async () =>
+      Response.json({ error: { code: 'forbidden', message: 'private-response' } }, { status: 403 }),
+    );
+    await controller.load({ project: null });
+    expect(markup(controller)).toContain('data-list-state="error"');
+    expect(markup(controller)).not.toContain('data-list-state="empty"');
+    expect(markup(controller)).not.toContain('private-response');
+  });
+});
+
+describe('project row actions', () => {
+  it.each([false, true])(
+    'transitions an unselected project with its list ETag; archived=%s',
+    async (archived) => {
+      const { controller, fetch } = fixture({ archived, listEtag: true });
+      await controller.load({ project: null });
+      expect(controller.snapshot().selected).toBeNull();
+      expect(markup(controller)).toContain(archived ? '>Restore<' : '>Archive<');
+      expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
+      await controller.transitionItem(project.id);
+      expect(fetch.mock.calls.find(([, init]) => init.method === 'POST')).toMatchObject([
+        `/_pb/projects/web/${archived ? 'restore' : 'archive'}`,
+        { headers: { 'If-Match': '"r7"' } },
+      ]);
+    },
+  );
+  it.each([{ permissions: false, listEtag: true }, { listEtag: false }])(
+    'refuses row writes without permission or an ETag: %j',
+    async (options) => {
+      const { controller, fetch } = fixture(options);
+      await controller.load({ project: null });
+      await controller.transitionItem(project.id);
+      await controller.transitionItem('unknown');
+      expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
+      expect(markup(controller)).not.toContain('>Archive<');
+    },
+  );
+  it('does not retry a conflicted row transition until reload', async () => {
+    const { controller, fetch } = fixture({ listEtag: true, status: 412 });
+    await controller.load({ project: null });
+    await controller.transitionItem(project.id);
+    await controller.transitionItem(project.id);
+    expect(fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
+    expect(markup(controller)).toContain('Changed elsewhere. Reload');
+  });
+  it.each([null, 'web'])(
+    'refreshes a list action replay and preserves filters and cursor; selected=%s',
+    async (selected) => {
+      const { controller, fetch } = fixture({ listEtag: true });
+      const query = { project: selected, q: 'Web', after: 'cursor', status: 'active' as const };
+      await controller.load(query);
+      const before = fetch.mock.calls.length;
+      await controller.replayed({ path: '/_pb/projects/web/archive', ok: true, status: 204 });
+      expect(fetch.mock.calls.length).toBeGreaterThan(before);
+      expect(controller.snapshot().query).toEqual(query);
+      expect(markup(controller)).toContain('Project updated.');
+    },
+  );
 });

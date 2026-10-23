@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useSyncExternalStore, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
 import { useServices, type ShellServices } from '../auth.js';
@@ -8,14 +8,14 @@ import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
-import {
-  Table,
-  TableHeader,
-  TableHead,
-  TableBody,
-  TableRow,
-  TableCell,
-} from '../components/ui/table.js';
+import { DataTable } from '../components/ui/table.js';
+import { StatusBadge } from '../components/ui/status-badge.js';
+import { IdText } from '../components/ui/id-text.js';
+import { Time } from '../components/ui/time.js';
+import { Badge } from '../components/ui/badge.js';
+import { LoadedListFilters } from '../components/ui/toolbar.js';
+import { ListState } from '../components/ui/list-state.js';
+import { ConfirmAction } from '../components/ui/confirm-action.js';
 
 type Token =
   operations['listMyTokens']['responses'][200]['content']['application/json']['items'][number];
@@ -60,6 +60,7 @@ interface State {
   renewal: Token | null;
   busy: boolean;
   loading: boolean;
+  listError: boolean;
   notice: string | null;
 }
 interface Deps {
@@ -95,6 +96,9 @@ function pendingStorage(storage: PendingStorage): PendingStorage {
     setItem: (key, value) => storage.setItem(`tokens:${key}`, value),
     removeItem: (key) => storage.removeItem(`tokens:${key}`),
   };
+}
+export function clearPendingTokenIssue(storage: PendingStorage): void {
+  loadPending(pendingStorage(storage), Date.now());
 }
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -176,6 +180,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     renewal: null,
     busy: false,
     loading: false,
+    listError: false,
     notice: null,
   };
   let epoch = 0;
@@ -377,7 +382,16 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       after?: string,
     ) {
       const version = ++listing;
-      set({ target, project, loading: true, items: [], next: null, lifetime: null });
+      set({
+        target,
+        project,
+        loading: true,
+        listError: false,
+        notice: null,
+        items: [],
+        next: null,
+        lifetime: null,
+      });
       const result =
         target === 'personal'
           ? await services.client.request('get', '/_pb/me/tokens', { query: { after } })
@@ -396,7 +410,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
               lifetime: result.data.lifetime,
               loading: false,
             }
-          : { loading: false, lifetime: null, notice: 'Unable to load tokens.' },
+          : { loading: false, listError: true, lifetime: null, notice: 'Unable to load tokens.' },
       );
     },
     async loadPrincipals(after?: string) {
@@ -533,6 +547,187 @@ export function createTokensController(services: ShellServices, deps: Deps) {
 }
 type Controller = ReturnType<typeof createTokensController>;
 
+export interface TokenFilters {
+  q: string;
+  scope: string;
+  status: string;
+}
+export function filterTokens(items: Token[], filters: TokenFilters) {
+  return items.filter(
+    (item) =>
+      item.name.toLowerCase().includes(filters.q.toLowerCase()) &&
+      (!filters.scope || item.scope === filters.scope) &&
+      (!filters.status || item.status === filters.status),
+  );
+}
+export function TokenList({ state: s, controller: c }: { state: State; controller: Controller }) {
+  const [filters, setFilters] = useState<TokenFilters>({ q: '', scope: '', status: '' });
+  const filtered = !!(filters.q || filters.scope || filters.status);
+  const items = filterTokens(s.items, filters);
+  const scope =
+    s.target === 'personal'
+      ? 'My personal tokens'
+      : s.target === 'project'
+        ? `Project: ${s.project}`
+        : 'Organization';
+  return (
+    <>
+      <LoadedListFilters
+        values={filters}
+        fields={[
+          { key: 'q', label: 'Name (this page)' },
+          { key: 'scope', label: 'Scope', options: ['read', 'write', 'full'] },
+          { key: 'status', label: 'Status', options: ['active', 'expired', 'revoked'] },
+        ]}
+        onChange={setFilters}
+      />
+      <div className="my-3 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-neutral-600">
+          {items.length} tokens on this page ·{' '}
+          {items.filter((token) => token.status === 'active').length} active
+        </p>
+        <Button variant="outline" disabled={s.loading || s.busy} onClick={() => void c.load()}>
+          Reload tokens
+        </Button>
+      </div>
+      {s.loading ? (
+        <ListState kind="loading" title="Loading tokens…" />
+      ) : s.listError ? (
+        <ListState kind="error" title="Unable to load tokens." />
+      ) : items.length === 0 ? (
+        <ListState
+          kind={filtered ? 'filtered-empty' : 'empty'}
+          title={
+            filtered ? 'No tokens match these filters on this page.' : 'No tokens on this page.'
+          }
+        />
+      ) : (
+        <DataTable
+          label="Tokens"
+          items={items}
+          columns={[
+            {
+              key: 'name',
+              label: 'Token',
+              value: (token) => token.name,
+              render: (token) => (
+                <div className="grid gap-1">
+                  <strong>{token.name}</strong>
+                  <IdText value={token.id} label="token ID" />
+                </div>
+              ),
+            },
+            {
+              key: 'status',
+              label: 'Status',
+              value: (token) => token.status,
+              render: (token) => <StatusBadge status={token.status} />,
+            },
+            {
+              key: 'scope',
+              label: 'Scope',
+              value: (token) => token.scope,
+              render: (token) => <Badge variant="outline">{token.scope}</Badge>,
+            },
+            {
+              key: 'project',
+              label: 'Project',
+              value: (token) =>
+                token.projectId === null
+                  ? token.kind === 'pat'
+                    ? token.projectMode === 'all'
+                      ? 'All accessible projects'
+                      : `${token.projectCount} selected projects`
+                    : 'Organization'
+                  : (s.projectSlugs[token.projectId] ?? token.projectId),
+              priority: 2,
+              render: (token) =>
+                token.projectId !== null && !s.projectSlugs[token.projectId] ? (
+                  <IdText value={token.projectId} label="project ID" />
+                ) : token.projectId !== null ? (
+                  s.projectSlugs[token.projectId]
+                ) : token.kind === 'pat' ? (
+                  token.projectMode === 'all' ? (
+                    'All accessible projects'
+                  ) : (
+                    `${token.projectCount} selected projects`
+                  )
+                ) : (
+                  'Organization'
+                ),
+            },
+            {
+              key: 'lastUsedAt',
+              label: 'Last used',
+              value: (token) => token.lastUsedAt ?? '',
+              priority: 2,
+              render: (token) => <Time value={token.lastUsedAt} fallback="Never" />,
+            },
+            {
+              key: 'expiresAt',
+              label: 'Expires',
+              value: (token) => token.expiresAt ?? '',
+              priority: 3,
+              render: (token) => <Time value={token.expiresAt} fallback="None" />,
+            },
+            {
+              key: 'issuer',
+              label: 'Issued by',
+              value: (token) =>
+                token.kind === 'svc' && token.createdByUserId !== null
+                  ? (s.names[token.createdByUserId] ?? 'a member')
+                  : 'a member',
+              priority: 3,
+            },
+            {
+              key: 'actions',
+              label: 'Actions',
+              value: () => '',
+              sortable: false,
+              render: (token) => (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      s.busy ||
+                      token.status !== 'active' ||
+                      (token.kind === 'pat' && token.userId !== s.userId)
+                    }
+                    onClick={() => c.renew(token)}
+                  >
+                    Renew
+                  </Button>
+                  <ConfirmAction
+                    key={`${token.id}:${token.status}`}
+                    action="Revoke"
+                    target={`${token.name} (${token.id})`}
+                    scope={scope}
+                    description="Revoking this token stops clients using it from authenticating. This cannot be undone. Create a new token to restore client access."
+                    disabled={s.busy || token.status === 'revoked'}
+                    onConfirm={() => void c.revoke(token.id)}
+                  />
+                </div>
+              ),
+            },
+          ]}
+        />
+      )}
+      {s.next === null ? null : (
+        <Button
+          disabled={s.busy || s.loading}
+          onClick={() => void c.load(s.target, s.project, s.next!)}
+        >
+          Next tokens
+        </Button>
+      )}
+      <p className="mt-3 text-xs text-neutral-600">
+        Secrets are never listed. Only tokens in your accessible scope appear here.
+      </p>
+    </>
+  );
+}
+
 export function TokensView({ state: s, controller: c }: { state: State; controller: Controller }) {
   const personal = s.renewal?.kind === 'pat' || s.target === 'personal';
   const policy = s.lifetime?.[personal ? 'personal' : 'service'];
@@ -585,7 +780,10 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
       <h1 id="page-heading" className="text-xl font-semibold">
         Tokens
       </h1>
-      <p>Management writes use your signed-in session. Secrets are shown once.</p>
+      <p className="text-neutral-600">
+        Credentials for Composer and npm clients. Management writes use your signed-in session.
+        Secrets are shown once.
+      </p>
       <Label htmlFor="token-list">Token list</Label>
       <Select
         id="token-list"
@@ -599,28 +797,24 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
         {s.project === null ? null : <option value="project">Project tokens</option>}
         <option value="organization">Organization tokens</option>
       </Select>
-      <p>
-        Your personal tokens are revoked when you leave the organization or your account is
-        suspended. Access stops at once; the tokens are marked revoked shortly after.
-      </p>
-      <p>
-        Service tokens keep working when the person who created them leaves. Project owners can see,
-        renew and revoke every service token of their project.
-      </p>
-      <Table>
-        <caption>Token kinds and maximum lifetime</caption>
-        <TableBody>
-          <TableRow>
-            <TableCell>Personal</TableCell>
-            <TableCell>1 year (the operator can set less)</TableCell>
-          </TableRow>
-          <TableRow>
-            <TableCell>Service</TableCell>
-            <TableCell>1 year for every scope (the operator can change it)</TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
-      {s.notice === null ? null : (
+      <details className="detail-group">
+        <summary className="cursor-pointer font-medium">Token lifetimes and access</summary>
+        <p className="mt-3">
+          Your personal tokens are revoked when you leave the organization or your account is
+          suspended. Access stops at once; the tokens are marked revoked shortly after.
+        </p>
+        <p>
+          Service tokens keep working when the person who created them leaves. Project owners can
+          see, renew and revoke every service token of their project.
+        </p>
+        <dl className="detail-list mt-3">
+          <dt>Personal maximum lifetime</dt>
+          <dd>1 year (the operator can set less)</dd>
+          <dt>Service maximum lifetime</dt>
+          <dd>1 year for every scope (the operator can change it)</dd>
+        </dl>
+      </details>
+      {s.notice === null || s.listError ? null : (
         <Alert>
           <AlertDescription>{s.notice}</AlertDescription>
         </Alert>
@@ -641,10 +835,13 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
         </section>
       )}
       {s.secret === null ? null : (
-        <section aria-label="Token secret" className="space-y-2">
+        <section aria-label="Token secret" className="detail-group space-y-3 border-emerald-200">
           <h2>Token secret — shown once</h2>
-          <p>Save it before closing this panel or navigating.</p>
-          <pre className="overflow-x-auto whitespace-pre-wrap break-all">
+          <p>
+            Copy it now. This value will not be shown again. Closing this panel keeps the token
+            active.
+          </p>
+          <pre className="rounded-md border bg-neutral-50 p-3 overflow-x-auto whitespace-pre-wrap break-all">
             <code>{s.secret}</code>
           </pre>
           <Button onClick={() => void c.copy()}>Copy token</Button>
@@ -652,244 +849,224 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
             Close secret panel
           </Button>
           {s.oldPersonalId !== null ? (
-            <Button
-              variant="destructive"
+            <ConfirmAction
+              action="Revoke old personal token"
+              target={s.oldPersonalId!}
+              scope="My personal tokens"
+              description="Clients using the old token will lose access immediately. This cannot be undone. Update clients to the new token before revoking."
               disabled={s.busy}
-              onClick={() => void c.revoke(s.oldPersonalId!, true)}
-            >
-              Revoke old personal token
-            </Button>
+              onConfirm={() => void c.revoke(s.oldPersonalId!, true)}
+            />
           ) : null}
         </section>
       )}
       {s.pending !== null || s.secret !== null ? null : (
-        <form
-          key={`${s.target}:${renewal?.id ?? ''}:${policy?.defaultDays}`}
-          onSubmit={issue}
-          className="grid gap-2"
+        <details
+          key={`${s.target}:${renewal?.id ?? ''}`}
+          open={renewal !== null}
+          className="detail-group"
         >
-          <h2>{renewal === null ? 'Issue token' : 'Renew token'}</h2>
-          <Label htmlFor="token-name">Name</Label>
-          <Input id="token-name" name="name" defaultValue={renewal?.name ?? ''} required />
-          <Label htmlFor="token-scope">Scope</Label>
-          <Select
-            id="token-scope"
-            name="scope"
-            defaultValue={renewal?.scope ?? 'read'}
-            disabled={renewal?.kind === 'svc'}
+          <summary className="cursor-pointer font-semibold">
+            {renewal === null ? 'Issue token' : 'Renew token'}
+          </summary>
+          <form
+            key={`${s.target}:${renewal?.id ?? ''}:${policy?.defaultDays}`}
+            onSubmit={issue}
+            className="grid gap-2"
           >
-            <option value="read">Read</option>
-            <option value="write">Write</option>
-            <option value="full">Full</option>
-          </Select>
-          <Label htmlFor="token-lifetime">Lifetime</Label>
-          <Select
-            id="token-lifetime"
-            name="lifetimeDays"
-            defaultValue={policy?.defaultDays}
-            required
-          >
-            {policy === undefined
-              ? null
-              : lifetimeChoices(policy).map((days) => (
-                  <option key={days} value={days}>
-                    {days} days
-                  </option>
-                ))}
-          </Select>
-          {personal ? (
-            <>
-              <Label htmlFor="token-project-mode">Projects</Label>
-              <Select
-                id="token-project-mode"
-                name="projectMode"
-                defaultValue={renewal?.projectMode ?? 'all'}
-              >
-                <option value="all">All accessible projects</option>
-                <option value="selected">Selected projects</option>
-              </Select>
-              <Label htmlFor="token-project-ids">
-                Selected project IDs (space separated; re-enter when renewing)
-              </Label>
-              <Input
-                id="token-project-ids"
-                name="projectIds"
-                required={renewal?.projectMode === 'selected'}
-              />
-            </>
-          ) : (
-            <>
-              <Label htmlFor="token-principal">Service principal</Label>
-              <Select
-                id="token-principal"
-                name="principal"
-                defaultValue={renewal?.servicePrincipalId ?? ''}
-                disabled={renewal?.kind === 'svc'}
-                required={renewal?.kind !== 'svc'}
-              >
-                <option value="" disabled>
-                  Select a principal
-                </option>
-                {principalChoices
-                  .filter((p) => p.projectId === projectId)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
+            <h2>{renewal === null ? 'Issue token' : 'Renew token'}</h2>
+            <Label htmlFor="token-name">Name</Label>
+            <Input id="token-name" name="name" defaultValue={renewal?.name ?? ''} required />
+            <Label htmlFor="token-scope">Scope</Label>
+            <Select
+              id="token-scope"
+              name="scope"
+              defaultValue={renewal?.scope ?? 'read'}
+              disabled={renewal?.kind === 'svc'}
+            >
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+              <option value="full">Full</option>
+            </Select>
+            <Label htmlFor="token-lifetime">Lifetime</Label>
+            <Select
+              id="token-lifetime"
+              name="lifetimeDays"
+              defaultValue={policy?.defaultDays}
+              required
+            >
+              {policy === undefined
+                ? null
+                : lifetimeChoices(policy).map((days) => (
+                    <option key={days} value={days}>
+                      {days} days
                     </option>
                   ))}
-              </Select>
-              {s.principalsRestricted ? (
+            </Select>
+            {personal ? (
+              <>
+                <Label htmlFor="token-project-mode">Projects</Label>
+                <Select
+                  id="token-project-mode"
+                  name="projectMode"
+                  defaultValue={renewal?.projectMode ?? 'all'}
+                >
+                  <option value="all">All accessible projects</option>
+                  <option value="selected">Selected projects</option>
+                </Select>
+                <Label htmlFor="token-project-ids">
+                  Selected project IDs (space separated; re-enter when renewing)
+                </Label>
+                <Input
+                  id="token-project-ids"
+                  name="projectIds"
+                  required={renewal?.projectMode === 'selected'}
+                />
+              </>
+            ) : (
+              <>
+                <Label htmlFor="token-principal">Service principal</Label>
+                <Select
+                  id="token-principal"
+                  name="principal"
+                  defaultValue={renewal?.servicePrincipalId ?? ''}
+                  disabled={renewal?.kind === 'svc'}
+                  required={renewal?.kind !== 'svc'}
+                >
+                  <option value="" disabled>
+                    Select a principal
+                  </option>
+                  {principalChoices
+                    .filter((p) => p.projectId === projectId)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                </Select>
+                {s.principalsRestricted ? (
+                  <p>
+                    Principal discovery is limited to principals referenced by the tokens you can
+                    see.
+                  </p>
+                ) : null}
+              </>
+            )}
+            {renewal?.kind !== 'svc' ? null : (
+              <>
+                <Label htmlFor="token-overlap">Overlap</Label>
+                <Select id="token-overlap" name="overlap" defaultValue="0">
+                  <option value="0">None</option>
+                  <option value="1">1 day</option>
+                  <option value="7">7 days</option>
+                </Select>
                 <p>
-                  Principal discovery is limited to principals referenced by the tokens you can see.
+                  The old token stops at the end of the overlap or when the new token expires,
+                  whichever is first.
                 </p>
-              ) : null}
-            </>
-          )}
-          {renewal?.kind !== 'svc' ? null : (
-            <>
-              <Label htmlFor="token-overlap">Overlap</Label>
-              <Select id="token-overlap" name="overlap" defaultValue="0">
-                <option value="0">None</option>
-                <option value="1">1 day</option>
-                <option value="7">7 days</option>
-              </Select>
-              <p>
-                The old token stops at the end of the overlap or when the new token expires,
-                whichever is first.
-              </p>
-            </>
-          )}
-          <Button disabled={s.busy || s.loading || policy === undefined}>
-            {renewal === null ? 'Issue token' : 'Renew token'}
-          </Button>
-          {renewal === null ? null : (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={s.busy}
-              onClick={() => c.closeSecret()}
-            >
-              Cancel renewal
+              </>
+            )}
+            <Button disabled={s.busy || s.loading || policy === undefined}>
+              {renewal === null ? 'Issue token' : 'Renew token'}
             </Button>
-          )}
-        </form>
+            {renewal === null ? null : (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={s.busy}
+                onClick={() => c.closeSecret()}
+              >
+                Cancel renewal
+              </Button>
+            )}
+          </form>
+        </details>
       )}
-      <Button variant="outline" disabled={s.loading || s.busy} onClick={() => void c.load()}>
-        Reload tokens
-      </Button>
-      {s.loading ? <p role="status">Loading tokens…</p> : null}
-      <Table>
-        <caption>Tokens</caption>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Selector</TableHead>
-            <TableHead>Scope</TableHead>
-            <TableHead>Expiry</TableHead>
-            <TableHead>Last use</TableHead>
-            <TableHead>Issued by</TableHead>
-            <TableHead>Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {s.items.map((t) => (
-            <TableRow key={t.id}>
-              <TableCell>{t.id}</TableCell>
-              <TableCell>{t.scope}</TableCell>
-              <TableCell>{t.expiresAt ?? 'None'}</TableCell>
-              <TableCell>{t.lastUsedAt ?? 'Never'}</TableCell>
-              <TableCell>
-                {t.kind === 'svc' && t.createdByUserId !== null
-                  ? (s.names[t.createdByUserId] ?? 'a member')
-                  : 'a member'}
-              </TableCell>
-              <TableCell>
-                <Button
-                  variant="outline"
-                  disabled={
-                    s.busy || t.status !== 'active' || (t.kind === 'pat' && t.userId !== s.userId)
-                  }
-                  onClick={() => c.renew(t)}
-                >
-                  Renew
-                </Button>
-                <Button
-                  variant="destructive"
-                  disabled={s.busy || t.status === 'revoked'}
-                  onClick={() => void c.revoke(t.id)}
-                >
-                  Revoke
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      {s.next === null ? null : (
-        <Button
-          disabled={s.busy || s.loading}
-          onClick={() => void c.load(s.target, s.project, s.next!)}
+      <TokenList key={`${s.target}:${s.project}`} state={s} controller={c} />
+      <details className="detail-group">
+        <summary className="cursor-pointer font-semibold">Service principals</summary>
+        <h2>Service principals</h2>
+        <form
+          className="grid gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const data = new FormData(form);
+            void c.createPrincipal(
+              String(data.get('name')),
+              String(data.get('project')),
+              String(data.get('permissions')).split(/\s+/).filter(Boolean),
+            );
+            form.reset();
+          }}
         >
-          Next tokens
+          <Label htmlFor="principal-name">Principal name</Label>
+          <Input id="principal-name" name="name" required />
+          <Label htmlFor="principal-project">Project ID (empty for organization)</Label>
+          <Input id="principal-project" name="project" />
+          <Label htmlFor="principal-permissions">Permissions (space separated)</Label>
+          <Input id="principal-permissions" name="permissions" />
+          <Button disabled={s.busy}>Create service principal</Button>
+        </form>
+        <Button variant="outline" disabled={s.busy} onClick={() => void c.loadPrincipals()}>
+          Reload service principals
         </Button>
-      )}
-      <h2>Service principals</h2>
-      <form
-        className="grid gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const form = event.currentTarget;
-          const data = new FormData(form);
-          void c.createPrincipal(
-            String(data.get('name')),
-            String(data.get('project')),
-            String(data.get('permissions')).split(/\s+/).filter(Boolean),
-          );
-          form.reset();
-        }}
-      >
-        <Label htmlFor="principal-name">Principal name</Label>
-        <Input id="principal-name" name="name" required />
-        <Label htmlFor="principal-project">Project ID (empty for organization)</Label>
-        <Input id="principal-project" name="project" />
-        <Label htmlFor="principal-permissions">Permissions (space separated)</Label>
-        <Input id="principal-permissions" name="permissions" />
-        <Button disabled={s.busy}>Create service principal</Button>
-      </form>
-      <Button variant="outline" disabled={s.busy} onClick={() => void c.loadPrincipals()}>
-        Reload service principals
-      </Button>
-      <Table>
-        <caption>Service principals</caption>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Action</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {s.principals.map((p) => (
-            <TableRow key={p.id}>
-              <TableCell>{p.name}</TableCell>
-              <TableCell>{p.status}</TableCell>
-              <TableCell>
-                <Button
-                  variant="destructive"
-                  disabled={s.busy || p.status !== 'active'}
-                  onClick={() => void c.suspendPrincipal(p)}
-                >
-                  Revoke principal access
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      {s.principalsNext === null ? null : (
-        <Button disabled={s.busy} onClick={() => void c.loadPrincipals(s.principalsNext!)}>
-          Next service principals
-        </Button>
-      )}
+        {s.principalsRestricted ? (
+          <ListState kind="placeholder" title="Service principal discovery is restricted." />
+        ) : s.principals.length === 0 ? (
+          <ListState kind="empty" title="No service principals loaded." />
+        ) : (
+          <DataTable
+            label="Service principals"
+            items={s.principals}
+            columns={[
+              {
+                key: 'name',
+                label: 'Name',
+                value: (principal) => principal.name,
+                render: (principal) => (
+                  <div className="grid gap-1">
+                    <strong>{principal.name}</strong>
+                    <IdText value={principal.id} label="principal ID" />
+                  </div>
+                ),
+              },
+              {
+                key: 'status',
+                label: 'Status',
+                value: (principal) => principal.status,
+                render: (principal) => <StatusBadge status={principal.status} />,
+              },
+              {
+                key: 'actions',
+                label: 'Actions',
+                value: () => '',
+                sortable: false,
+                render: (principal) => (
+                  <ConfirmAction
+                    key={`${principal.id}:${principal.status}`}
+                    action="Revoke principal access"
+                    target={`${principal.name} (${principal.id})`}
+                    scope={
+                      principal.projectId === null
+                        ? 'Organization'
+                        : `Project: ${s.projectSlugs[principal.projectId] ?? principal.projectId}`
+                    }
+                    description="Suspending this principal stops all of its tokens from working. Update clients before continuing."
+                    disabled={s.busy || principal.status !== 'active'}
+                    onConfirm={() => void c.suspendPrincipal(principal)}
+                  />
+                ),
+              },
+            ]}
+          />
+        )}
+        {s.principalsNext === null ? null : (
+          <Button disabled={s.busy} onClick={() => void c.loadPrincipals(s.principalsNext!)}>
+            Next service principals
+          </Button>
+        )}
+      </details>
     </section>
   );
 }
@@ -912,6 +1089,20 @@ export function bindTokensLifecycle(
     events.removeEventListener('pageshow', clear);
     controller.dispose();
   };
+}
+export function bindTokensReplay(controller: Controller, services: ShellServices) {
+  return services.subscribeReplay?.((result) => {
+    if (!result.ok) return;
+    if (
+      /^\/_pb\/(?:me\/)?tokens\/[^/]+$/.test(result.path) ||
+      /^\/_pb\/projects\/[^/]+\/tokens\/[^/]+$/.test(result.path) ||
+      /^\/_pb\/service-principals(?:\/[^/]+\/suspend)?$/.test(result.path) ||
+      /^\/_pb\/projects\/[^/]+\/service-principals\/[^/]+\/suspend$/.test(result.path)
+    ) {
+      void controller.load();
+      void controller.loadPrincipals();
+    }
+  });
 }
 export function TokensPage() {
   const services = useServices();
@@ -948,5 +1139,6 @@ export function TokensPage() {
     void controller.loadPrincipals();
     return bindTokensLifecycle(controller, window, change);
   }, [controller]);
+  useEffect(() => bindTokensReplay(controller, services), [controller, services]);
   return <TokensView state={state} controller={controller} />;
 }

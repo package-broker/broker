@@ -57,6 +57,12 @@ function renderTable() {
 }
 
 describe('responsive table controls', () => {
+  it('keys rows and their editable cells by source identity', () => {
+    const view = renderTable();
+    expect(view.table.getRowModel().rows.map((row: { id: string }) => row.id)).toEqual(['b', 'a']);
+    view.change('Sort Runs on this page', 'id:asc');
+    expect(view.table.getRowModel().rows.map((row: { id: string }) => row.id)).toEqual(['a', 'b']);
+  });
   it('can explicitly show a responsive priority column, hide it, and restore automatic visibility', () => {
     const view = renderTable();
     expect(view.html).toContain('aria-label="Sort Runs on this page"');

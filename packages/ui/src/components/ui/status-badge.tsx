@@ -2,6 +2,13 @@ import { Badge } from './badge.js';
 
 export const STATUS_LABELS = {
   active: 'Active',
+  archived: 'Archived',
+  paused: 'Paused',
+  degraded: 'Degraded',
+  failing: 'Failing',
+  expired: 'Expired',
+  revoked: 'Revoked',
+  suspended: 'Suspended',
   yanked: 'Yanked',
   quarantined: 'Quarantined',
   tombstoned: 'Tombstoned',
@@ -17,6 +24,13 @@ export const STATUS_LABELS = {
 } as const;
 export type Status = keyof typeof STATUS_LABELS;
 export const STATUS_COLORS: Record<Status, string> = {
+  archived: 'border-neutral-200 bg-neutral-100 text-neutral-700',
+  paused: 'border-neutral-200 bg-neutral-100 text-neutral-700',
+  expired: 'border-neutral-200 bg-neutral-100 text-neutral-700',
+  revoked: 'border-red-200 bg-red-50 text-red-800',
+  suspended: 'border-red-200 bg-red-50 text-red-800',
+  degraded: 'border-amber-300 bg-amber-50 text-amber-900',
+  failing: 'border-red-200 bg-red-50 text-red-800',
   yanked: 'border-red-200 bg-red-50 text-red-800',
   active: 'border-emerald-200 bg-emerald-50 text-emerald-800',
   applied: 'border-emerald-200 bg-emerald-50 text-emerald-800',

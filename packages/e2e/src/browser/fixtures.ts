@@ -14,6 +14,7 @@ export interface Fixture {
   readonly runtime: RuntimeName;
   readonly origin: string;
   readonly email: string;
+  readonly database?: string;
   /** The one-time setup token. Never log it. */
   readonly token: string;
   stop(): Promise<void>;
@@ -159,6 +160,7 @@ export async function startNodeFixture(): Promise<Fixture> {
     const started = child;
     return {
       runtime: 'node',
+      database,
       origin,
       email: ADMIN_EMAIL,
       token,

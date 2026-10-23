@@ -14,6 +14,7 @@ import {
   scopeOptions,
   loadProjects,
   signOut,
+  bindProjectReplay,
 } from './app.js';
 
 import {
@@ -23,6 +24,7 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu.js';
 import { createReauthFlow, type AuthClient } from './auth.js';
+import { createTokensController } from './pages/tokens.js';
 
 const PAGE_ROUTES = ['projects', 'access', 'sources', 'packages', 'tokens', 'audit', 'import'];
 
@@ -152,6 +154,44 @@ describe('shell requests', () => {
     expect(html).toContain('Sign-out failed');
   });
 
+  it.each([true, false])(
+    'clears token issuance drafts only after successful logout (%s)',
+    async (ok) => {
+      const entries = new Map<string, string>();
+      const storage = {
+        getItem: (key: string) => entries.get(key) ?? null,
+        setItem: (key: string, value: string) => void entries.set(key, value),
+        removeItem: (key: string) => void entries.delete(key),
+      };
+      const client = {
+        request: vi.fn().mockResolvedValue({ ok: false, status: 403, code: 'reauth_required' }),
+      } as unknown as AuthClient;
+      const services = { client, requireReauth: vi.fn() };
+      const deps = {
+        storage,
+        now: Date.now,
+        navigate: vi.fn(),
+        clipboard: vi.fn(),
+        newKey: () => 'key',
+      };
+      await createTokensController(services, deps).issue({
+        name: 'Previous account draft',
+        scope: 'read',
+        lifetimeDays: 30,
+        servicePrincipalId: '',
+        projectMode: 'all',
+        projectIds: [],
+      });
+      expect(entries.size).toBe(1);
+      vi.mocked(client.request).mockResolvedValueOnce({ ok, status: ok ? 204 : 500 } as never);
+      await signOut({ client, storage, clearPending: vi.fn(), onSignedOut: vi.fn() });
+      const next = createTokensController(services, deps);
+      next.restore();
+      expect(next.snapshot().pending === null).toBe(ok);
+      if (ok) expect(entries.size).toBe(0);
+    },
+  );
+
   it.each(['persisted', 'restored'])(
     'clears the %s pending action after successful logout',
     async (phase) => {
@@ -180,6 +220,49 @@ describe('shell requests', () => {
       expect(onSignedOut).toHaveBeenCalledOnce();
     },
   );
+});
+
+describe('scope invalidation after replay', () => {
+  it.each([
+    ['/_pb/projects', true, true],
+    ['/_pb/projects/web', true, true],
+    ['/_pb/projects/web/archive', true, true],
+    ['/_pb/projects/web/restore', true, true],
+    ['/_pb/projects/web/archive', false, false],
+    ['/_pb/projects/web/tokens/id', true, false],
+    ['/_pb/service-principals', true, false],
+  ])('invalidates project scope options for %s with success=%s', async (path, ok, expected) => {
+    const entries = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    };
+    const client = {
+      request: vi.fn().mockResolvedValue({ ok, status: ok ? 204 : 403 }),
+    } as unknown as AuthClient;
+    const flow = createReauthFlow({ client, storage, now: Date.now, navigate: vi.fn() });
+    const changed = vi.fn();
+    const cleanup = bindProjectReplay(flow, changed);
+    flow.requireReauth(
+      { method: 'POST', path },
+      { credential: false, secretFields: [] },
+      '#/projects',
+    );
+    flow.restore();
+    expect(changed).not.toHaveBeenCalled();
+    await flow.confirm();
+    expect(changed).toHaveBeenCalledTimes(expected ? 1 : 0);
+    cleanup();
+    flow.requireReauth(
+      { method: 'POST', path: '/_pb/projects' },
+      { credential: false, secretFields: [] },
+      '#/projects',
+    );
+    flow.restore();
+    await flow.confirm();
+    expect(changed).toHaveBeenCalledTimes(expected ? 1 : 0);
+  });
 });
 
 describe('anonymous entry', () => {

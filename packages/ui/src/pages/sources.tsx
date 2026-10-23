@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { responseHeader, type ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
 import { useServices, type ReplayResult, type ShellServices } from '../auth.js';
-import { Alert, AlertDescription } from '../components/ui/alert.js';
+import { DataTable } from '../components/ui/table.js';
+import { StatusBadge } from '../components/ui/status-badge.js';
+import { IdText } from '../components/ui/id-text.js';
+import { Time } from '../components/ui/time.js';
+import { Badge } from '../components/ui/badge.js';
+import { LoadedListFilters } from '../components/ui/toolbar.js';
+import { ListState } from '../components/ui/list-state.js';
+import { ConfirmAction } from '../components/ui/confirm-action.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Input } from '../components/ui/input.js';
@@ -45,6 +52,7 @@ interface SourcesState {
   items: Source[];
   next: string | null;
   loading: boolean;
+  listError: boolean;
   settingsVersion: number;
   busy: boolean;
   error: string | null;
@@ -82,6 +90,7 @@ export function createSourcesModel(
     items: [],
     next: null,
     loading: true,
+    listError: false,
     settingsVersion: 0,
     busy: false,
     error: null,
@@ -126,7 +135,7 @@ export function createSourcesModel(
     const after = more ? state.next : null;
     const previousEtag = state.etag;
     ++previewVersion;
-    set({ loading: true, error: null, etag: null, preview: null, order: [] });
+    set({ loading: true, listError: false, error: null, etag: null, preview: null, order: [] });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
     const result =
       project === null
@@ -137,7 +146,7 @@ export function createSourcesModel(
           });
     if (version !== listVersion) return;
     if (failure(result) || !result.ok) {
-      set({ loading: false });
+      set({ loading: false, listError: true });
       return;
     }
     const etag = responseHeader(result, 'etag') ?? null;
@@ -479,20 +488,15 @@ export function SourceCard({
         <CardTitle>{source.name}</CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
-        <div>
-          <Label htmlFor={`source-${source.id}`}>Source ID</Label>
-          <Input
-            id={`source-${source.id}`}
-            value={source.id}
-            readOnly
-            onFocus={(event) => event.currentTarget.select()}
-          />
+        <IdText value={source.id} label="source ID" />
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">
+            {source.ecosystem} · {source.type}
+          </Badge>
+          <StatusBadge status={source.status} />
         </div>
-        <p>
-          {source.ecosystem} · {source.type} · {source.status}
-        </p>
         <p className="break-all">{displayUrl(source.url) ?? 'No displayable URL'}</p>
-        <p>{source.hasCredential ? 'credential set' : 'No credential set'}</p>
+        <p>{source.hasCredential ? 'credential set · write-only' : 'No credential set'}</p>
         {model.project !== null && 'attached' in source ? (
           <p>Attached to this project: {source.attached ? 'Yes' : 'No'}</p>
         ) : (
@@ -540,16 +544,26 @@ export function SourceCard({
           {owned ? (
             <>
               {canTogglePause(model.project, source) ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => {
-                    void model.togglePause(source);
-                  }}
-                >
-                  {source.status === 'paused' ? 'Enable' : 'Pause'}
-                </Button>
+                source.status === 'paused' ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void model.togglePause(source)}
+                  >
+                    Enable
+                  </Button>
+                ) : (
+                  <ConfirmAction
+                    key={`${source.id}:${source.status}`}
+                    action="Pause"
+                    target={`${source.name} (${source.id})`}
+                    scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
+                    description="Pausing this source stops it from resolving packages in this scope. You can enable it again later."
+                    disabled={busy}
+                    onConfirm={() => void model.togglePause(source)}
+                  />
+                )
               ) : null}
               <Button
                 type="button"
@@ -577,18 +591,58 @@ export function SourceCard({
   );
 }
 
+export interface SourceFilters {
+  q: string;
+  type: string;
+  scope: string;
+}
+export function filterSources(items: Source[], filters: SourceFilters) {
+  return items.filter(
+    (item) =>
+      item.name.toLowerCase().includes(filters.q.toLowerCase()) &&
+      (!filters.type || item.type === filters.type) &&
+      (!filters.scope ||
+        (filters.scope === 'organization' ? item.projectId === null : item.projectId !== null)),
+  );
+}
 export function SourcesView({ model }: { model: SourcesModel }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
+  const [filters, setFilters] = useState<SourceFilters>({ q: '', type: '', scope: '' });
+  const filtered = !!(filters.q || filters.type || filters.scope);
+  const items = filterSources(state.items, filters).sort((a, b) => {
+    const position = (id: string) => {
+      const index = state.order.indexOf(id);
+      return index < 0 ? Infinity : index;
+    };
+    return position(a.id) - position(b.id);
+  });
   return (
     <section aria-labelledby="page-heading" className="grid gap-6">
       <h1 id="page-heading" className="text-xl font-semibold">
         Sources
       </h1>
-      {state.error ? (
-        <Alert variant="destructive">
-          <AlertDescription>{state.error}</AlertDescription>
-        </Alert>
-      ) : null}
+      <p className="text-neutral-600">
+        Upstream registries and private repositories. Attached sources are tried in precedence
+        order.
+      </p>
+      <p className="rounded-md border border-blue-200 bg-blue-50 p-3">
+        Credentials are write-only. The broker never shows them again; set a new credential to
+        rotate a secret.
+      </p>
+      <LoadedListFilters
+        values={filters}
+        fields={[
+          { key: 'q', label: 'Name (loaded sources)' },
+          {
+            key: 'type',
+            label: 'Type',
+            options: [...new Set(state.items.map((item) => item.type))].sort(),
+          },
+          { key: 'scope', label: 'Source scope', options: ['organization', 'project'] },
+        ]}
+        onChange={setFilters}
+      />
+      {state.error ? <ListState kind="error" title={state.error} /> : null}
       <Button
         type="button"
         variant="outline"
@@ -600,13 +654,131 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         Refresh sources
       </Button>
       {state.loading ? (
-        <p role="status">Loading sources…</p>
-      ) : state.items.length === 0 ? (
-        <p>No sources.</p>
+        <ListState kind="loading" title="Loading sources…" />
+      ) : !state.listError && items.length === 0 ? (
+        <ListState
+          kind={filtered ? 'filtered-empty' : 'empty'}
+          title={filtered ? 'No sources match these filters.' : 'No sources.'}
+        />
       ) : null}
-      {state.items.map((source) => (
-        <SourceCard key={source.id} source={source} model={model} busy={state.busy} />
-      ))}
+      {!state.loading && !state.listError && items.length ? (
+        <>
+          <p className="text-sm text-neutral-600">
+            {items.length} sources loaded{filtered ? ' matching filters' : ''}
+          </p>
+          <DataTable
+            label="Sources in precedence order"
+            items={items}
+            columns={[
+              {
+                key: 'name',
+                label: 'Source',
+                value: (source) => source.name,
+                render: (source) => (
+                  <div className="grid gap-1">
+                    <strong>{source.name}</strong>
+                    <span className="text-xs text-neutral-600">
+                      {source.ecosystem} · {source.type}
+                    </span>
+                    <StatusBadge status={source.status} />
+                  </div>
+                ),
+              },
+              {
+                key: 'precedence',
+                label: 'Precedence',
+                value: (source) =>
+                  state.order.indexOf(source.id) < 0 ? '—' : state.order.indexOf(source.id) + 1,
+                render: (source) => {
+                  const index = state.order.indexOf(source.id);
+                  return index < 0 ? (
+                    '—'
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <strong>{index + 1}</strong>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Move up ${source.name}`}
+                        disabled={state.busy || state.next !== null || index === 0}
+                        onClick={() => model.moveSource(source.id, -1)}
+                      >
+                        Move up
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Move down ${source.name}`}
+                        disabled={
+                          state.busy || state.next !== null || index === state.order.length - 1
+                        }
+                        onClick={() => model.moveSource(source.id, 1)}
+                      >
+                        Move down
+                      </Button>
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'scope',
+                label: 'Attached to',
+                value: (source) =>
+                  source.projectId === null ? 'Organization source' : 'Project source',
+                render: (source) => (
+                  <div className="grid gap-1">
+                    <span>
+                      {source.projectId === null ? 'Organization source' : 'Project source'}
+                    </span>
+                    {'attached' in source ? (
+                      <span className="text-xs text-neutral-600">
+                        {source.attached
+                          ? 'Attached to this project'
+                          : 'Not attached to this project'}
+                      </span>
+                    ) : null}
+                  </div>
+                ),
+              },
+              {
+                key: 'credential',
+                label: 'Credentials',
+                value: (source) => (source.hasCredential ? 'Set · write-only' : 'None'),
+                render: (source) =>
+                  source.hasCredential ? <Badge variant="outline">Set · write-only</Badge> : 'None',
+              },
+              {
+                key: 'sync',
+                label: 'Last successful sync',
+                value: (source) => source.lastSuccessAt ?? '',
+                priority: 2,
+                render: (source) => <Time value={source.lastSuccessAt} fallback="Never" />,
+              },
+              {
+                key: 'id',
+                label: 'Source ID',
+                value: (source) => source.id,
+                priority: 3,
+                render: (source) => <IdText value={source.id} label="source ID" />,
+              },
+              {
+                key: 'actions',
+                label: 'Actions',
+                value: () => '',
+                sortable: false,
+                render: (source) => (
+                  <details>
+                    <summary className="cursor-pointer underline">Edit source</summary>
+                    <div className="mt-3">
+                      <SourceCard source={source} model={model} busy={state.busy} />
+                    </div>
+                  </details>
+                ),
+              },
+            ]}
+          />
+        </>
+      ) : null}
       {state.next !== null ? (
         <Button
           disabled={state.loading || state.busy}
@@ -623,7 +795,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             <CardTitle>Set credential</CardTitle>
           </CardHeader>
           <CardContent>
-            <p>Source: {state.credentialSource}</p>
+            <IdText value={state.credentialSource} label="source ID" />
             <CredentialEditor
               key={state.credentialVersion}
               model={model}
@@ -636,7 +808,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       {state.savedCredential ? (
         <p role="status">
           credential set · {state.savedCredential.source} ·{' '}
-          <time dateTime={state.savedCredential.at}>{state.savedCredential.at}</time>
+          <Time value={state.savedCredential.at} />
         </p>
       ) : null}
       {state.names ? (
@@ -645,20 +817,19 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             <CardTitle>Registered names</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-3">
-            <p>Source: {state.names.source}</p>
+            <IdText value={state.names.source} label="source ID" />
             <ul>
               {state.names.items.map((name) => (
                 <li key={name.id} className="flex items-center gap-3">
                   <span>{name.pattern}</span>
-                  <Button
-                    variant="outline"
+                  <ConfirmAction
+                    action={`Remove ${name.pattern}`}
+                    target={name.pattern}
+                    scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
+                    description="Removing this registered pattern can stop the source from resolving matching packages. Add the pattern again to restore it."
                     disabled={state.busy}
-                    onClick={() => {
-                      void model.removeName(name.sourceId, name.id);
-                    }}
-                  >
-                    Remove {name.pattern}
-                  </Button>
+                    onConfirm={() => void model.removeName(name.sourceId, name.id)}
+                  />
                 </li>
               ))}
             </ul>
@@ -697,38 +868,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           <CardContent className="grid gap-3">
             <p>Earlier sources take precedence. Only attached sources are ordered.</p>
             {state.next !== null ? <p>Load all sources before changing their order.</p> : null}
-            <ol className="grid gap-3">
-              {state.order.map((id, index) => (
-                <li key={id} className="flex flex-wrap items-center gap-3">
-                  <span>
-                    {state.items.find((item) => item.id === id)?.name} · {id}
-                  </span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={state.loading || state.busy || state.next !== null || index === 0}
-                    aria-label={`Move up ${id}`}
-                    onClick={() => model.moveSource(id, -1)}
-                  >
-                    Move up
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={
-                      state.loading ||
-                      state.busy ||
-                      state.next !== null ||
-                      index === state.order.length - 1
-                    }
-                    aria-label={`Move down ${id}`}
-                    onClick={() => model.moveSource(id, 1)}
-                  >
-                    Move down
-                  </Button>
-                </li>
-              ))}
-            </ol>
+
             <Button
               disabled={state.loading || state.busy || state.next !== null || state.etag === null}
               onClick={() => {
@@ -760,11 +900,14 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             {state.preview ? (
               <div aria-live="polite">
                 <p>{state.preview.name}</p>
-                <p>Winning source: {state.preview.winner ?? 'None'}</p>
+                <p>
+                  Winning source: <IdText value={state.preview.winner} label="winning source ID" />
+                </p>
                 <ol>
                   {state.preview.candidates.map((candidate) => (
                     <li key={candidate.sourceId}>
-                      {candidate.sourceName} · {candidate.sourceId} ·{' '}
+                      {candidate.sourceName} ·{' '}
+                      <IdText value={candidate.sourceId} label="candidate source ID" /> ·{' '}
                       {candidate.eligible ? 'Eligible' : 'Ineligible'}
                     </li>
                   ))}

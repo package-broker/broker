@@ -7,6 +7,8 @@ import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
+import { FilterToolbar } from '../components/ui/toolbar.js';
+import { ListState } from '../components/ui/list-state.js';
 
 export interface ManagementQuery {
   project: string | null;
@@ -91,10 +93,13 @@ export function ManagementNotice(props: {
   loading: boolean;
   busy: boolean;
   reload: () => void;
+  listError?: boolean;
 }) {
   return (
     <>
-      {props.notice ? (
+      {props.listError ? (
+        <ListState kind="error" title={props.notice ?? 'Unable to load this list.'} />
+      ) : props.notice ? (
         <Alert className="my-4">
           <AlertDescription>{props.notice}</AlertDescription>
         </Alert>
@@ -107,7 +112,7 @@ export function ManagementNotice(props: {
       >
         Reload
       </Button>
-      {props.loading ? <p role="status">Loading…</p> : null}
+      {props.loading ? <ListState kind="loading" title="Loading…" /> : null}
     </>
   );
 }
@@ -121,38 +126,83 @@ export function ManagementFilters(props: {
     window.location.hash = buildListFilterHash(props.route, query);
   };
   return (
-    <form
-      className="my-4 flex flex-wrap items-end gap-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        go({
-          project: props.query.project,
-          status: String(data.get('status') ?? ''),
-          q: String(data.get('q') ?? ''),
-        });
-      }}
+    <FilterToolbar
+      chips={[
+        ...(props.query.q
+          ? [
+              {
+                label: 'Name prefix',
+                value: props.query.q,
+                onRemove: () =>
+                  go({
+                    project: props.query.project,
+                    ...(props.query.status ? { status: props.query.status } : {}),
+                  }),
+              },
+            ]
+          : []),
+        ...(props.query.status
+          ? [
+              {
+                label: props.route === 'projects' ? 'Status' : 'View',
+                value: props.query.status,
+                onRemove: () =>
+                  go({
+                    project: props.query.project,
+                    ...(props.query.q ? { q: props.query.q } : {}),
+                  }),
+              },
+            ]
+          : []),
+      ]}
     >
-      <Label className="grid gap-1">
-        {props.route === 'projects' ? 'Name prefix (filtering loaded projects)' : 'Name prefix'}
-        <Input name="q" maxLength={200} defaultValue={props.query.q ?? ''} />
-      </Label>
-      <Label className="grid gap-1">
-        {props.route === 'projects' ? 'Status' : 'View'}
-        <Select name="status" defaultValue={props.query.status ?? props.statuses[0]}>
-          {props.statuses.map((status) => (
-            <option key={status} value={status}>
-              {status}
-            </option>
-          ))}
-        </Select>
-      </Label>
-      <Button type="submit">Apply filters</Button>
-      <Button type="button" variant="outline" onClick={() => go({ project: props.query.project })}>
-        Clear filters
-      </Button>
-      {props.children}
-    </form>
+      <form
+        className="my-4 flex flex-wrap items-end gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const data = new FormData(event.currentTarget);
+          go({
+            project: props.query.project,
+            status: String(data.get('status') ?? ''),
+            q: String(data.get('q') ?? ''),
+          });
+        }}
+      >
+        <div>
+          <Label className="grid gap-1">
+            {props.route === 'projects' ? 'Name prefix (filtering loaded projects)' : 'Name prefix'}
+            <Input name="q" maxLength={200} defaultValue={props.query.q ?? ''} />
+          </Label>
+        </div>
+        <div>
+          <Label className="grid gap-1">
+            {props.route === 'projects' ? 'Status' : 'View'}
+            <Select
+              name="status"
+              defaultValue={
+                props.query.status ?? (props.route === 'projects' ? '' : props.statuses[0])
+              }
+            >
+              {props.route === 'projects' ? <option value="">All statuses</option> : null}
+              {props.statuses.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </Select>
+          </Label>
+        </div>
+        <Button type="submit">Apply filters</Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => go({ project: props.query.project })}
+        >
+          Clear filters
+        </Button>
+        {props.children}
+      </form>
+    </FilterToolbar>
   );
 }
 export function useManagementHash<Q>(

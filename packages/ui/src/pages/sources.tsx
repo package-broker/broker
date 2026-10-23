@@ -3,11 +3,13 @@ import { responseHeader, type ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
 import { useServices, type ReplayResult, type ShellServices } from '../auth.js';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
+import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
+import { DataTable } from '../components/ui/table.js';
 import { buildListFilterHash } from '../page-hash.js';
 
 type ResponseBody<K extends keyof operations> = operations[K] extends {
@@ -15,9 +17,8 @@ type ResponseBody<K extends keyof operations> = operations[K] extends {
 }
   ? T
   : never;
-export type Source =
-  | ResponseBody<'listOrganizationSources'>['items'][number]
-  | ResponseBody<'listProjectSources'>['items'][number];
+type SourcePage = ResponseBody<'listOrganizationSources'> | ResponseBody<'listProjectSources'>;
+export type Source = SourcePage['items'][number];
 type Names = ResponseBody<'listRegisteredNames'>;
 type Preview = ResponseBody<'resolveName'>;
 type CredentialKind =
@@ -128,7 +129,7 @@ export function createSourcesModel(
     ++previewVersion;
     set({ loading: true, error: null, etag: null, preview: null, order: [] });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
-    const result =
+    const result: ApiResult<SourcePage> =
       project === null
         ? await client.request('get', '/_pb/sources', { query })
         : await client.request('get', '/_pb/projects/{project}/sources', {
@@ -495,9 +496,7 @@ export function SourceCard({
         <p>{source.hasCredential ? 'credential set' : 'No credential set'}</p>
         {model.project !== null && 'attached' in source ? (
           <p>Attached to this project: {source.attached ? 'Yes' : 'No'}</p>
-        ) : (
-          <p>Attached projects: unavailable</p>
-        )}
+        ) : null}
         {owned ? (
           <form
             key={model.snapshot().settingsVersion}
@@ -603,6 +602,28 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         <p role="status">Loading sources…</p>
       ) : state.items.length === 0 ? (
         <p>No sources.</p>
+      ) : null}
+      {model.project === null && state.items.length > 0 ? (
+        <DataTable
+          label="Sources"
+          items={state.items}
+          columns={[
+            { key: 'name', label: 'Name', value: (source) => source.name },
+            { key: 'type', label: 'Type', value: (source) => source.type, priority: 2 },
+            {
+              key: 'attachedProjectCount',
+              label: 'Attached projects',
+              value: (source) =>
+                'attachedProjectCount' in source ? source.attachedProjectCount : 0,
+              render: (source) =>
+                'attachedProjectCount' in source ? (
+                  <Badge variant="secondary">
+                    {`Attached to ${source.attachedProjectCount} projects`}
+                  </Badge>
+                ) : null,
+            },
+          ]}
+        />
       ) : null}
       {state.items.map((source) => (
         <SourceCard key={source.id} source={source} model={model} busy={state.busy} />

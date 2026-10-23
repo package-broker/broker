@@ -25,12 +25,38 @@ for (const name of ['server.js', 'package.json', 'build-info.json', 'migrations'
 async function copyDependencies(target, manifestPath) {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   const require = createRequire(manifestPath);
-  for (const name of Object.keys(manifest.dependencies ?? {})) {
-    const sourceManifest = require.resolve(`${name}/package.json`);
+  const dependencies = { ...manifest.dependencies, ...manifest.optionalDependencies };
+  for (const name of Object.keys(dependencies)) {
+    let sourceManifest;
+    try {
+      sourceManifest = await resolveManifest(require, name);
+    } catch (error) {
+      if (error.code === 'MODULE_NOT_FOUND' && name in (manifest.optionalDependencies ?? {})) continue;
+      throw error;
+    }
     const destination = join(target, 'node_modules', name);
-    await cp(dirname(sourceManifest), destination, { recursive: true });
+    await cp(dirname(sourceManifest), destination, {
+      recursive: true,
+      filter: (path) => !path.endsWith('/node_modules'),
+    });
     await copyDependencies(destination, sourceManifest);
   }
+}
+async function resolveManifest(require, name) {
+  try {
+    return require.resolve(`${name}/package.json`);
+  } catch (error) {
+    if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  for (let dir = dirname(require.resolve(name)); dir !== dirname(dir); dir = dirname(dir)) {
+    const candidate = join(dir, 'package.json');
+    try {
+      if (JSON.parse(await readFile(candidate, 'utf8')).name === name) return candidate;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  throw new Error('Dependency package manifest not found');
 }
 const manifest = JSON.parse(await readFile('/out/package.json', 'utf8'));
 const require = createRequire('/build/packages/runtime-node/package.json');
@@ -40,6 +66,13 @@ for (const name of Object.keys(manifest.dependencies)) {
   await cp(dirname(sourceManifest), destination, { recursive: true });
   await copyDependencies(destination, sourceManifest);
 }
+await mkdir('/out/cli', { recursive: true });
+await cp('/build/packages/cli/dist', '/out/cli/dist', {
+  recursive: true,
+  filter: (path) => !path.includes('.test.'),
+});
+await cp('/build/packages/cli/package.json', '/out/cli/package.json');
+await copyDependencies('/out/cli', '/build/packages/cli/package.json');
 NODE
 
 FROM node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS runtime
@@ -54,6 +87,7 @@ COPY --from=build /out/ ./
 COPY --from=build /build/LICENSE ./LICENSE
 # Apply the private creation mask before the server opens the database or blob store.
 RUN printf '%s\n' 'process.umask(0o077);' > umask.cjs
+RUN chmod 0555 /app/cli/dist/bin.js && ln -s /app/cli/dist/bin.js /usr/local/bin/pb
 
 ENV NODE_ENV=production \
     DEPLOYMENT_ID=docker \

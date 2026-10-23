@@ -1,3 +1,7 @@
+import { createSecretCipher } from '@package-broker/core/secrets/cipher';
+import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
+import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import { createHash } from 'node:crypto';
 import { createLocalLoginSeed } from './testing/local-login.js';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -5,7 +9,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { newSessionSecrets } from '@package-broker/core/auth/session';
 import { orgContext, type SqlValue } from '@package-broker/core/db/port';
-import { ulid } from '@package-broker/core/ids';
+import { systemClock, ulid } from '@package-broker/core/ids';
 import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
 import type { ObsRecord } from '@package-broker/core/platform/observability';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
@@ -110,6 +114,61 @@ function remote(ecosystem: 'npm' | 'composer', count: number) {
     });
   };
   return { key, versions, calls, state, transport };
+}
+
+function composerRepositoryFixture(
+  mode: 'v2' | 'v1' | 'inline',
+  badShasum = false,
+  distUrl?: string,
+) {
+  const origin = 'https://composer.example.com';
+  const key = 'acme/widget';
+  const archive = 'composer fixture archive';
+  const calls: Request[] = [];
+  const member = {
+    name: key,
+    version: '1.0.0',
+    version_normalized: '1.0.0.0',
+    dist: {
+      type: 'zip',
+      url: distUrl ?? `${origin}/archive.zip`,
+      reference: 'abc',
+      shasum: badShasum ? '0'.repeat(40) : createHash('sha1').update(archive).digest('hex'),
+    },
+  };
+  const body = JSON.stringify({ packages: { [key]: { '1.0.0': member } } });
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+  const include = JSON.stringify({ providers: { [key]: { sha256: digest(body) } } });
+  const root =
+    mode === 'v2'
+      ? { 'metadata-url': '/p2/%package%.json', 'available-packages': [key, 'acme/ignored'] }
+      : mode === 'v1'
+        ? {
+            'providers-url': '/p/%package%$%hash%.json',
+            'provider-includes': { 'providers.json': { sha256: digest(include) } },
+          }
+        : {
+            packages: {
+              [key]: { '1.0.0': member },
+              'acme/ignored': { '1.0.0': { ...member, name: 'acme/ignored' } },
+            },
+          };
+  const transport = async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    calls.push(request);
+    if (url.origin === 'https://dist.example.com' && url.pathname === '/archive.zip')
+      return new Response(archive);
+    if (url.origin !== origin) throw new Error('unexpected fixture origin');
+    if (url.pathname === '/packages.json') return Response.json(root);
+    if (url.pathname === '/providers.json') return new Response(include);
+    if (url.pathname === `/p/${key}%24${digest(body)}.json`) return new Response(body);
+    if (url.pathname === `/p2/${key}.json`) return Response.json({ packages: { [key]: [member] } });
+    if (url.pathname === `/p2/${key}~dev.json`) return Response.json({ packages: { [key]: [] } });
+    if (url.pathname === '/archive.zip') return new Response(archive);
+    return Response.json({}, { status: 404 });
+  };
+  return { origin, key, archive, transport, calls };
 }
 
 describe('Node package-sync wiring', () => {
@@ -323,6 +382,263 @@ describe('Node package-sync wiring', () => {
       initiatorTokenId: null,
     });
   }
+
+  it.each(['v2', 'v1', 'inline'] as const)(
+    'activates and job-syncs a %s Composer repository, then serves its archive',
+    async (mode) => {
+      const upstream = composerRepositoryFixture(
+        mode,
+        false,
+        'https://dist.example.com/archive.zip',
+      );
+      const sourceId = sources.composer;
+      await sql(
+        "UPDATE source SET type = 'composer_repository', url = ?, config_json = ?, status = 'paused' WHERE org_id = ? AND id = ?",
+        [
+          upstream.origin,
+          JSON.stringify({
+            selection: { packages: [upstream.key], patterns: [] },
+            distHosts: ['dist.example.com'],
+          }),
+          orgId,
+          sourceId,
+        ],
+      );
+      await sql(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'acme/*')",
+        [ulid(), orgId, sourceId],
+      );
+      await sql(
+        "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'org:sources:write' FROM role WHERE org_id = ? AND key = 'reader'",
+        [orgId],
+      );
+
+      const credentialId = await createCredentialStore({
+        repository: createCredentialRepository(db.executor),
+        cipher: createSecretCipher(
+          createKeyring([
+            parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
+          ]),
+          'credential-encryption',
+        ),
+        ids: { ulid },
+        clock: systemClock,
+      }).put(orgContext(orgId), {
+        kind: 'bearer',
+        projectId: null,
+        plaintext: new TextEncoder().encode(JSON.stringify({ token: 'composer-private-token' })),
+      });
+      await sql('UPDATE source SET credential_id = ? WHERE org_id = ? AND id = ?', [
+        credentialId,
+        orgContext(orgId).orgId,
+        sourceId,
+      ]);
+      const kernel = await boot(upstream.transport);
+      const enabled = await kernel.fetch(
+        new Request(`${ORIGIN}/_pb/sources/${sourceId}/enable`, {
+          method: 'POST',
+          headers: {
+            cookie,
+            origin: ORIGIN,
+            'x-csrf-token': /__Host-pb_csrf=([^;]+)/.exec(cookie)![1]!,
+          },
+        }),
+      );
+      expect(enabled.status).toBe(204);
+      await createJobRepository(db.executor).enqueue(orgContext(orgId), {
+        id: ulid(),
+        type: 'core:source-sync:v1',
+        payloadJson: JSON.stringify({ sourceId, reason: 'admin' }),
+        idempotencyKey: ulid(),
+        resourceKey: `source:${sourceId}`,
+        runAt: null,
+        maxAttempts: 25,
+        projectId: null,
+        initiatorTokenId: null,
+      });
+      await startLoop();
+      await completed();
+      const response = await get('composer', upstream.key);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        packages: Record<string, { version: string; dist: { url: string } }[]>;
+      };
+      expect(body.packages[upstream.key]!.map((member) => member.version)).toEqual(['1.0.0']);
+      const dist = await kernel.fetch(
+        new Request(body.packages[upstream.key]![0]!.dist.url, { headers: { cookie } }),
+      );
+      expect(dist.status).toBe(200);
+      expect(await dist.text()).toBe(upstream.archive);
+      expect(upstream.calls.some((call) => call.url.startsWith('https://dist.example.com/'))).toBe(
+        true,
+      );
+      expect(
+        upstream.calls.every(
+          (call) => call.headers.get('authorization') === 'Bearer composer-private-token',
+        ),
+      ).toBe(true);
+      expect(
+        await sql('SELECT name FROM package WHERE org_id = ? AND source_id = ?', [orgId, sourceId]),
+      ).toEqual([{ name: upstream.key }]);
+      expect(await sql('SELECT count(*) AS n FROM blob WHERE org_id = ?', [orgId])).toEqual([
+        { n: 1 },
+      ]);
+      await sql('UPDATE source SET config_json = ? WHERE org_id = ? AND id = ?', [
+        JSON.stringify({ selection: { packages: [], patterns: ['other/*'] } }),
+        orgId,
+        sourceId,
+      ]);
+      await createJobRepository(db.executor).enqueue(orgContext(orgId), {
+        id: ulid(),
+        type: 'core:source-sync:v1',
+        payloadJson: JSON.stringify({ sourceId, reason: 'admin' }),
+        idempotencyKey: ulid(),
+        resourceKey: `source:${sourceId}`,
+        runAt: null,
+        maxAttempts: 25,
+        projectId: null,
+        initiatorTokenId: null,
+      });
+      await startLoop();
+      await vi.waitFor(
+        async () =>
+          expect(
+            await sql("SELECT state FROM job WHERE org_id = ? AND type = 'core:source-sync:v1'", [
+              orgId,
+            ]),
+          ).toEqual([{ state: 'succeeded' }, { state: 'succeeded' }]),
+        { timeout: 5000 },
+      );
+      expect((await get('composer', upstream.key)).status).toBe(200);
+    },
+    30_000,
+  );
+
+  it('records Composer repository poll backoff when root fetching fails', async () => {
+    const sourceId = sources.composer;
+    await sql(
+      "UPDATE source SET type = 'composer_repository', url = 'https://composer.example.com', config_json = ?, poll_interval_seconds = 3600 WHERE org_id = ? AND id = ?",
+      [JSON.stringify({ selection: { packages: ['acme/widget'] } }), orgId, sourceId],
+    );
+    await boot(async () => new Response(null, { status: 503 }));
+    await createJobRepository(db.executor).enqueue(orgContext(orgId), {
+      id: ulid(),
+      type: 'core:source-sync:v1',
+      payloadJson: JSON.stringify({ sourceId, reason: 'poll' }),
+      idempotencyKey: ulid(),
+      resourceKey: `source:${sourceId}`,
+      runAt: null,
+      maxAttempts: 25,
+      projectId: null,
+      initiatorTokenId: null,
+    });
+    const before = Date.now();
+    await startLoop();
+    await vi.waitFor(
+      async () => {
+        const [row] = await sql<{
+          consecutive_failures: number;
+          last_error: string;
+          next_poll_at: string;
+        }>(
+          'SELECT consecutive_failures, last_error, next_poll_at FROM source WHERE org_id = ? AND id = ?',
+          [orgId, sourceId],
+        );
+        expect(row!.consecutive_failures).toBe(1);
+        expect(row!.last_error).toBe('http_error');
+        expect(Date.parse(row!.next_poll_at) - before).toBeGreaterThanOrEqual(299_000);
+      },
+      { timeout: 5000 },
+    );
+    const retriedAt = Date.now();
+    await createJobRepository(db.executor).enqueue(orgContext(orgId), {
+      id: ulid(),
+      type: 'core:source-sync:v1',
+      payloadJson: JSON.stringify({ sourceId, reason: 'poll' }),
+      idempotencyKey: ulid(),
+      resourceKey: `source:${sourceId}`,
+      runAt: null,
+      maxAttempts: 25,
+      projectId: null,
+      initiatorTokenId: null,
+    });
+    await vi.waitFor(
+      async () => {
+        const [row] = await sql<{ consecutive_failures: number; next_poll_at: string }>(
+          'SELECT consecutive_failures, next_poll_at FROM source WHERE org_id = ? AND id = ?',
+          [orgId, sourceId],
+        );
+        expect(row!.consecutive_failures).toBe(2);
+        expect(Date.parse(row!.next_poll_at) - retriedAt).toBeGreaterThanOrEqual(599_000);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it.each(['shasum', 'host', 'redirect'] as const)(
+    'rejects a Composer archive with invalid %s over HTTP',
+    async (issue) => {
+      const upstream = composerRepositoryFixture(
+        'inline',
+        issue === 'shasum',
+        issue === 'host' ? 'https://foreign.example.com/archive.zip' : undefined,
+      );
+      const sourceId = sources.composer;
+      await sql(
+        "UPDATE source SET type = 'composer_repository', url = ?, config_json = ? WHERE org_id = ? AND id = ?",
+        [
+          upstream.origin,
+          JSON.stringify({ selection: { packages: [upstream.key] } }),
+          orgId,
+          sourceId,
+        ],
+      );
+      await sql(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'acme/*')",
+        [ulid(), orgId, sourceId],
+      );
+      const calls: Request[] = [];
+      const kernel = await boot(async (input, init) => {
+        const request = new Request(input, init);
+        calls.push(request);
+        if (issue === 'redirect' && request.url.endsWith('/archive.zip'))
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://foreign.example.com/stolen.zip' },
+          });
+        return upstream.transport(input, init);
+      });
+      await enqueue(upstream.key, sourceId);
+      await startLoop();
+      await completed();
+      const response = await get('composer', upstream.key);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        packages: Record<string, { dist: { url: string } }[]>;
+      };
+      const dist = await kernel.fetch(
+        new Request(body.packages[upstream.key]![0]!.dist.url, { headers: { cookie } }),
+      );
+      expect(dist.status).toBe(502);
+      expect(await sql('SELECT count(*) AS n FROM blob WHERE org_id = ?', [orgId])).toEqual([
+        { n: 0 },
+      ]);
+      if (issue === 'shasum')
+        expect(await sql('SELECT status FROM version WHERE org_id = ?', [orgId])).toEqual([
+          { status: 'quarantined' },
+        ]);
+      else {
+        expect(calls.some((call) => call.url.includes('foreign.example.com'))).toBe(false);
+        expect(
+          records.filter(
+            (record) => record.kind === 'log' && record.record.event === 'upstream.refused',
+          ),
+        ).toEqual([
+          expect.objectContaining({ record: expect.objectContaining({ level: 'debug' }) }),
+        ]);
+      }
+    },
+  );
 
   it('registers package-sync alongside the audit jobs and preserves existing auth jobs', async () => {
     const kernel = await boot(remote('npm', 1).transport);

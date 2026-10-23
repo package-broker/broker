@@ -1,3 +1,4 @@
+import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
 import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
@@ -536,6 +537,18 @@ function credentialOrigins(
   }
   if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
   if (source.type !== 'npm_registry' && source.type !== 'composer_repository') return null;
+  if (source.type === 'composer_repository') {
+    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
+      runtime: 'cloudflare',
+      policy,
+      hasCredential: source.credentialId !== null,
+    });
+    if (!parsed.ok || !('distHosts' in parsed.config) || source.url === null) return null;
+    return [
+      new URL(source.url).origin,
+      ...parsed.config.distHosts.map((host) => `https://${host}`),
+    ];
+  }
   return source.url === null || !URL.canParse(source.url) ? null : [new URL(source.url).origin];
 }
 
@@ -814,6 +827,7 @@ function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolic
 function registryJobDependencies(input: {
   readonly executor: SqlExecutor;
   readonly providers: ReturnType<typeof createProviderRegistry>;
+  readonly sourceProviders: readonly SourceProvider[];
   readonly policy: Parameters<typeof parseSourceConfig>[4]['policy'];
   readonly fetch: (record: SourceRecord) => ProviderContext['fetch'];
   readonly credential: (ctx: OrgContext, record: SourceRecord) => Promise<SourceCredential | null>;
@@ -869,7 +883,18 @@ function registryJobDependencies(input: {
         const source = (
           record.type === 'vcs'
             ? { ...base, type: 'vcs' }
-            : { ...base, type: record.type, providerId: providers.get(record.type).id }
+            : {
+                ...base,
+                type: record.type,
+                providerId: providers.get(
+                  record.type,
+                  record.type === 'composer_repository'
+                    ? (input.sourceProviders.find((provider) =>
+                        provider.sourceTypes.includes('composer_repository'),
+                      )?.id ?? 'composer-repository')
+                    : undefined,
+                ).id,
+              }
         ) as ProviderSource;
         sourceFetches.set(source, input.fetch(record));
         return source;
@@ -946,6 +971,7 @@ function buildRegistryModule(input: {
   });
   const credential = openSourceCredential(credentialRepository, credentialStore, outboundPolicy);
   const providerRegistry = createProviderRegistry();
+  providerRegistry.register(createComposerRepositoryProvider(outboundPolicy));
   const providers: SourceProvider[] = [];
   for (const provider of input.registration.sourceProviders.values()) {
     providerRegistry.register(provider);
@@ -964,6 +990,7 @@ function buildRegistryModule(input: {
     registryJobs: registryJobDependencies({
       executor,
       providers: providerRegistry,
+      sourceProviders: providers,
       policy: outboundPolicy,
       credential,
       webhook: {

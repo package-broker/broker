@@ -1,3 +1,4 @@
+import { repositoryListingEvidence } from '../internal/composer-repository-listing.js';
 import { sha256Hex } from '../auth/primitives.js';
 import {
   CATALOGUE_KEY_LIST_MAX,
@@ -118,6 +119,7 @@ interface ListingCursor {
   readonly h?: string;
   readonly r?: string;
   readonly e?: 1;
+  readonly p?: 1;
 }
 
 class SyncFailure extends Error {
@@ -209,6 +211,7 @@ function parseCursor(session: IngestSessionHandle): ListingCursor {
       (value.x === undefined || value.x === 1) &&
       (value.d === undefined || value.d === 1) &&
       (value.e === undefined || value.e === 1) &&
+      (value.p === undefined || value.p === 1) &&
       (value.r === undefined || (typeof value.r === 'string' && HEX_64.test(value.r))) &&
       (value.h === undefined || (typeof value.h === 'string' && HEX_64.test(value.h)))
     ) {
@@ -272,12 +275,16 @@ async function refreshHeld(
   payload: SourceSyncPayload,
   job: JobContext,
   record: SourceRecord,
+  budget = FANOUT_PER_INVOCATION,
 ): Promise<void> {
   const generation = payload.generation ?? (await digest(['v1', 'proxy', job.idempotencyKey]));
-  const held = await deps.staleHeldKeys(job.org, record.id, {
-    after: payload.cursor ?? null,
-    limit: FANOUT_PER_INVOCATION,
-  });
+  const held =
+    budget > 0
+      ? await deps.staleHeldKeys(job.org, record.id, {
+          after: payload.cursor ?? null,
+          limit: budget,
+        })
+      : { keys: [], next: payload.cursor ?? '' };
   for (const key of held.keys) {
     await fanOut(job, { sourceId: record.id, key, generation: ['proxy', generation] });
   }
@@ -288,7 +295,12 @@ async function refreshHeld(
   await jobsOf(job).enqueue(
     job.org,
     SOURCE_SYNC,
-    { sourceId: record.id, reason: payload.reason, cursor: held.next, generation },
+    {
+      sourceId: record.id,
+      reason: payload.reason,
+      ...(held.next === '' ? {} : { cursor: held.next }),
+      generation,
+    },
     {
       idempotencyKey: await digest(['v1', 'proxy-next', record.id, generation, held.next]),
       resourceKey: `source:${record.id}`,
@@ -391,10 +403,12 @@ async function syncListing(
       adopt({ ...session, stamp, snapshotId: page.snapshot.id });
     }
 
-    const names = [...new Set(page.names.filter(isKey))];
+    const evidence = repositoryListingEvidence(page);
+    const advertised = new Set(page.names.filter(isKey));
+    const names = [...new Set([...advertised, ...(evidence?.candidates ?? []).filter(isKey)])];
     const pageDigest = await digest(names);
     if (cursor.o > 0 && cursor.h !== pageDigest) throw invalidListing();
-    const unreadable = cursor.x === 1 || names.length !== new Set(page.names).size;
+    const unreadable = cursor.x === 1 || advertised.size !== new Set(page.names).size;
     const slice = names.slice(cursor.o, cursor.o + budget);
     const selection = await deps.selectionSnapshot?.(ctx, record.id, slice);
     const rawRevision = selection === undefined ? await revisionOf() : selection.revision;
@@ -428,7 +442,7 @@ async function syncListing(
     }
     budget -= slice.length;
 
-    const present = selected.filter((key) => existing.has(key));
+    const present = selected.filter((key) => advertised.has(key) && existing.has(key));
     for (let offset = 0; offset < present.length; offset += CATALOGUE_KEY_LIST_MAX) {
       await deps.writer.markListing(ctx, listingGuard, {
         scope: { kind: 'source', sourceId: record.id },
@@ -440,6 +454,7 @@ async function syncListing(
 
     const consumed = cursor.o + slice.length >= names.length;
     const flags = {
+      ...(cursor.p === 1 || evidence?.enumerable === false ? ({ p: 1 } as const) : {}),
       ...(unreadable ? ({ x: 1 } as const) : {}),
       ...(filteredExisting ? ({ e: 1 } as const) : {}),
       ...(revision === undefined ? {} : { r: revision }),
@@ -468,6 +483,22 @@ async function syncListing(
   }
 
   if (cursor.x === 1) throw invalidListing();
+  if (cursor.p === 1) {
+    await deps.sessions.abandon(ctx, session);
+    run.session = null;
+    await refreshHeld(
+      deps,
+      {
+        sourceId: record.id,
+        reason: payload.reason,
+        generation: await digest([session.id, session.generation, 'held']),
+      },
+      job,
+      record,
+      budget,
+    );
+    return;
+  }
   let unseen: number;
   let marked: number;
   try {
@@ -550,7 +581,9 @@ export function createSourceSyncJob(deps: SourceSyncDeps): JobDefinition<SourceS
 
       const run: Run = { session: null };
       let acquired: IngestSessionHandle | null = null;
-      if (!NO_LISTING.has(record.type)) {
+      const heldContinuation =
+        record.type === 'composer_repository' && payload.generation !== undefined;
+      if (!NO_LISTING.has(record.type) && !heldContinuation) {
         const handle = await deps.sessions.acquire(
           ctx,
           { scope: 'source', sourceId: record.id },

@@ -121,6 +121,8 @@ export interface SourceListQuery {
 }
 
 export interface SourceAttachmentCountQuery {
+  /** Token project cap, intersected with caller visibility; empty means no projects. */
+  readonly restrictTo?: readonly string[];
   readonly sourceIds: readonly string[];
   readonly userId: string;
   /** Service-token reads use this principal's stored read permission and project binding. */

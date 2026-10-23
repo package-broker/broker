@@ -58,6 +58,8 @@ async function fixture(
     tokenInherited?: boolean;
     tokenAdmin?: boolean;
     tokenKind?: 'pat' | 'svc';
+    tokenProjectMode?: 'all' | 'selected' | null;
+    tokenProjectIds?: readonly string[];
     acceptRemoval?: boolean;
     refusal?: SourceRecord['removalRefusal'];
     armed?: boolean;
@@ -224,7 +226,13 @@ async function fixture(
                 userId: options.tokenKind === 'svc' ? null : 'user-1',
                 servicePrincipalId: options.tokenKind === 'svc' ? 'service-1' : null,
                 bindingOk: true,
-                projectMode: options.tokenKind === 'svc' ? 'selected' : 'all',
+                projectMode:
+                  options.tokenProjectMode === undefined
+                    ? options.tokenKind === 'svc'
+                      ? 'selected'
+                      : 'all'
+                    : options.tokenProjectMode,
+                boundProjectIds: options.tokenProjectIds ?? [],
                 scope: { level: 'read', readOnly: true },
               },
               principalStatus: 'active',
@@ -565,6 +573,29 @@ it.each([
     });
   },
 );
+
+it.each([
+  ['selected', [PROJECT]],
+  ['selected', []],
+  [null, []],
+] as const)('passes PAT project caps to attachment counts: %s %j', async (mode, ids) => {
+  const f = await fixture({
+    tokenProjectMode: mode,
+    tokenProjectIds: ids,
+    tokenInherited: true,
+    tokenAdmin: true,
+  });
+  const response = await f.request('GET', '/_pb/sources', undefined, true);
+  expect(response.status).toBe(200);
+  expect(f.sources.countAttachedProjects).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), {
+    sourceIds: [SOURCE],
+    userId: 'user-1',
+    allProjects: true,
+    includeArchived: false,
+    providerAnchors: [],
+    restrictTo: ids,
+  });
+});
 
 it('uses service token authority to count only projects within its scope', async () => {
   const f = await fixture({ tokenKind: 'svc' });

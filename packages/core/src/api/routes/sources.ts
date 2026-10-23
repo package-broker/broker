@@ -119,6 +119,9 @@ function reader(ctx: RequestContext): SourceActor {
   if (ctx.projectId === null)
     return {
       kind: 'org',
+      ...(access.token.kind === 'pat' && access.token.projectMode !== 'all'
+        ? { restrictTo: access.token.projectIds ?? [] }
+        : {}),
       ...(access.token.kind === 'svc' && ctx.principal.kind === 'service'
         ? { servicePrincipalId: ctx.principal.id }
         : {}),

@@ -1,6 +1,15 @@
+import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
 import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
+import {
+  assertMcpRateLimit,
+  createMcpLimiter,
+  McpRateLimitConfigError,
+  type McpRateLimitBinding,
+} from '@package-broker/core/mcp/limit';
+import { createMcpTools } from '@package-broker/core/mcp/tools';
+import { createMcpRoutes } from '@package-broker/core/mcp/transport';
 import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
@@ -144,7 +153,11 @@ import {
   rewriteSetupRequest,
 } from '@package-broker/core/kernel/ui-routes';
 import { createWorkersAssets } from './assets.js';
-import { brokerObservabilityProblems, type BrokerConfig } from '@package-broker/core/config';
+import {
+  mcpEnabled,
+  brokerObservabilityProblems,
+  type BrokerConfig,
+} from '@package-broker/core/config';
 import { parsePublicOrigin, PublicOriginError } from '@package-broker/core/kernel/public-origin';
 import {
   AUDIT_EVENTS,
@@ -279,6 +292,7 @@ import type { AnalyticsEngineLike } from './observability/workers.js';
 export type Env = {
   readonly ASSETS?: { fetch(input: Request | string): Promise<Response> };
   readonly DB?: D1DatabaseLike;
+  readonly MCP_RATE_LIMIT?: McpRateLimitBinding;
   readonly STORAGE?: R2BucketLike;
   readonly JOBS?: QueueLike;
   readonly ANALYTICS?: AnalyticsEngineLike;
@@ -342,6 +356,7 @@ export interface WorkerOptions {
   readonly registry?: RegistryConfigInput;
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
+  readonly mcp?: BrokerConfig['mcp'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -522,6 +537,18 @@ function credentialOrigins(
   }
   if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
   if (source.type !== 'npm_registry' && source.type !== 'composer_repository') return null;
+  if (source.type === 'composer_repository') {
+    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
+      runtime: 'cloudflare',
+      policy,
+      hasCredential: source.credentialId !== null,
+    });
+    if (!parsed.ok || !('distHosts' in parsed.config) || source.url === null) return null;
+    return [
+      new URL(source.url).origin,
+      ...parsed.config.distHosts.map((host) => `https://${host}`),
+    ];
+  }
   return source.url === null || !URL.canParse(source.url) ? null : [new URL(source.url).origin];
 }
 
@@ -800,6 +827,7 @@ function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolic
 function registryJobDependencies(input: {
   readonly executor: SqlExecutor;
   readonly providers: ReturnType<typeof createProviderRegistry>;
+  readonly sourceProviders: readonly SourceProvider[];
   readonly policy: Parameters<typeof parseSourceConfig>[4]['policy'];
   readonly fetch: (record: SourceRecord) => ProviderContext['fetch'];
   readonly credential: (ctx: OrgContext, record: SourceRecord) => Promise<SourceCredential | null>;
@@ -855,7 +883,18 @@ function registryJobDependencies(input: {
         const source = (
           record.type === 'vcs'
             ? { ...base, type: 'vcs' }
-            : { ...base, type: record.type, providerId: providers.get(record.type).id }
+            : {
+                ...base,
+                type: record.type,
+                providerId: providers.get(
+                  record.type,
+                  record.type === 'composer_repository'
+                    ? (input.sourceProviders.find((provider) =>
+                        provider.sourceTypes.includes('composer_repository'),
+                      )?.id ?? 'composer-repository')
+                    : undefined,
+                ).id,
+              }
         ) as ProviderSource;
         sourceFetches.set(source, input.fetch(record));
         return source;
@@ -932,6 +971,7 @@ function buildRegistryModule(input: {
   });
   const credential = openSourceCredential(credentialRepository, credentialStore, outboundPolicy);
   const providerRegistry = createProviderRegistry();
+  providerRegistry.register(createComposerRepositoryProvider(outboundPolicy));
   const providers: SourceProvider[] = [];
   for (const provider of input.registration.sourceProviders.values()) {
     providerRegistry.register(provider);
@@ -950,6 +990,7 @@ function buildRegistryModule(input: {
     registryJobs: registryJobDependencies({
       executor,
       providers: providerRegistry,
+      sourceProviders: providers,
       policy: outboundPolicy,
       credential,
       webhook: {
@@ -1157,7 +1198,14 @@ const STARTUP_EVENTS = [
   'deferred.untracked',
 ] as const;
 const MAX_CACHED_APPLICATIONS = 8;
-const FINGERPRINT_BINDINGS = ['ASSETS', 'DB', 'STORAGE', 'JOBS', 'ANALYTICS'] as const;
+const FINGERPRINT_BINDINGS = [
+  'ASSETS',
+  'DB',
+  'STORAGE',
+  'JOBS',
+  'ANALYTICS',
+  'MCP_RATE_LIMIT',
+] as const;
 const HISTOGRAM_BOUNDS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 
 type Handler = (input: unknown) => Promise<void>;
@@ -1779,6 +1827,17 @@ export function createWorker(
   }
 
   async function build(env: Env | undefined): Promise<Application> {
+    const enabled = mcpEnabled({
+      platform: 'cloudflare',
+      plugins,
+      ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+    });
+    try {
+      assertMcpRateLimit({ runtime: 'workers', mcpEnabled: enabled, binding: env?.MCP_RATE_LIMIT });
+    } catch (error) {
+      if (error instanceof McpRateLimitConfigError) throw new KernelConfigError([error.message]);
+      throw error;
+    }
     const observabilityProblems = brokerObservabilityProblems({
       platform: 'cloudflare',
       plugins,
@@ -2102,6 +2161,34 @@ export function createWorker(
       path: route.path.replace('/assets/:file', '/:file'),
     }));
     try {
+      const coreRoutes = [
+        ...(auth?.coreRoutes ?? []),
+        ...apiRoutes,
+        openApiRoute(openApiDocument),
+        ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
+          ...route,
+          async handler(context: Parameters<typeof route.handler>[0]) {
+            const response = await route.handler(context);
+            return response.status === 401 ? new Response(null, { status: 404 }) : response;
+          },
+        })),
+        ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
+      ];
+      if (enabled) {
+        const publicOrigin = publicOriginOf(env?.PB_PUBLIC_URL);
+        const handlers = createMcpTools({
+          routes: [...coreRoutes, ...registration.routes],
+          publicOrigin,
+          kernel: { fetch: (request) => kernel.fetch(request) },
+        });
+        coreRoutes.push(
+          ...createMcpRoutes({
+            handlers,
+            publicOrigin,
+            limiter: createMcpLimiter(env!.MCP_RATE_LIMIT!),
+          }),
+        );
+      }
       const kernel = await createKernel({
         platform: 'cloudflare',
         ...(env?.PB_PUBLIC_URL === undefined
@@ -2113,19 +2200,7 @@ export function createWorker(
         ...(services === undefined ? {} : { platformServices: services.platformServices }),
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
-        coreRoutes: [
-          ...(auth?.coreRoutes ?? []),
-          ...apiRoutes,
-          openApiRoute(openApiDocument),
-          ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
-            ...route,
-            async handler(context: Parameters<typeof route.handler>[0]) {
-              const response = await route.handler(context);
-              return response.status === 401 ? new Response(null, { status: 404 }) : response;
-            },
-          })),
-          ...(env?.ASSETS === undefined ? [] : [...setupRoutes, ...uiRoutes]),
-        ],
+        coreRoutes,
         ...(authorization === undefined ? {} : { authorization }),
         ...(registryModule === undefined
           ? reads === undefined

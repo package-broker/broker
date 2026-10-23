@@ -1,3 +1,4 @@
+import { entries as sourceAttachmentCountsEntries } from './mutation-table/source-attachment-counts.js';
 import { entries as projectGrantReadEntries } from './mutation-table/project-grant-read.js';
 import { entries as selectedKeysEntries } from './mutation-table/selected-keys.js';
 import { entries as sourceSelectionRevisionEntries } from './mutation-table/source-selection-revision.js';
@@ -112,6 +113,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...sourceAttachmentCountsEntries,
   ...sourceSelectionRevisionEntries,
   ...sourceVisibleEntries,
   ...packageAdminReadEntries,

@@ -1,10 +1,15 @@
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { parseMasterKey } from '@package-broker/core/secrets/master-key';
+import { createSecretCipher } from '@package-broker/core/secrets/cipher';
+import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
+import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
 import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { orgContext, type SqlValue, type Statement } from '@package-broker/core/db/port';
-import { ulid } from '@package-broker/core/ids';
+import { systemClock, ulid } from '@package-broker/core/ids';
 import { jobErrorCode, type JobContext } from '@package-broker/core/platform/jobs';
 import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
 import * as kernelModule from '@package-broker/core/kernel/kernel';
@@ -48,7 +53,7 @@ async function miniflareBinding(): Promise<D1DatabaseLike> {
       modules: true,
       script: 'export default { fetch() { return new Response("ok") } }',
       compatibilityDate: '2026-10-01',
-      d1Databases: Array.from({ length: 12 }, (_, i) => `SYNC${i}`),
+      d1Databases: Array.from({ length: 16 }, (_, i) => `SYNC${i}`),
     }),
   );
   return (await mf.getD1Database(`SYNC${next++}`)) as unknown as D1DatabaseLike;
@@ -245,6 +250,61 @@ function upstream(ecosystem: 'npm' | 'composer', count: number) {
   };
 }
 
+function composerRepositoryFixture(
+  mode: 'v2' | 'v1' | 'inline',
+  badShasum = false,
+  distUrl?: string,
+) {
+  const origin = 'https://composer.example.com';
+  const key = 'acme/widget';
+  const archive = 'composer fixture archive';
+  const calls: Request[] = [];
+  const member = {
+    name: key,
+    version: '1.0.0',
+    version_normalized: '1.0.0.0',
+    dist: {
+      type: 'zip',
+      url: distUrl ?? `${origin}/archive.zip`,
+      reference: 'abc',
+      shasum: badShasum ? '0'.repeat(40) : createHash('sha1').update(archive).digest('hex'),
+    },
+  };
+  const body = JSON.stringify({ packages: { [key]: { '1.0.0': member } } });
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+  const include = JSON.stringify({ providers: { [key]: { sha256: digest(body) } } });
+  const root =
+    mode === 'v2'
+      ? { 'metadata-url': '/p2/%package%.json', 'available-packages': [key, 'acme/ignored'] }
+      : mode === 'v1'
+        ? {
+            'providers-url': '/p/%package%$%hash%.json',
+            'provider-includes': { 'providers.json': { sha256: digest(include) } },
+          }
+        : {
+            packages: {
+              [key]: { '1.0.0': member },
+              'acme/ignored': { '1.0.0': { ...member, name: 'acme/ignored' } },
+            },
+          };
+  const transport = async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    calls.push(request);
+    if (url.origin === 'https://dist.example.com' && url.pathname === '/archive.zip')
+      return new Response(archive);
+    if (url.origin !== origin) throw new Error('unexpected fixture origin');
+    if (url.pathname === '/packages.json') return Response.json(root);
+    if (url.pathname === '/providers.json') return new Response(include);
+    if (url.pathname === `/p/${key}%24${digest(body)}.json`) return new Response(body);
+    if (url.pathname === `/p2/${key}.json`) return Response.json({ packages: { [key]: [member] } });
+    if (url.pathname === `/p2/${key}~dev.json`) return Response.json({ packages: { [key]: [] } });
+    if (url.pathname === '/archive.zip') return new Response(archive);
+    return Response.json({}, { status: 404 });
+  };
+  return { origin, key, archive, transport, calls };
+}
+
 async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
   const db = await open();
   const executor = createD1Executor(db);
@@ -413,6 +473,18 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
     drain,
     enqueue,
     catalogue,
+    request: (request: Request) =>
+      worker.fetch(
+        new Request(request, {
+          headers: {
+            ...Object.fromEntries(request.headers),
+            cookie,
+            origin: PUBLIC_URL,
+            'x-csrf-token': /__Host-pb_csrf=([^;]+)/.exec(cookie)![1]!,
+          },
+        }),
+        env,
+      ),
   };
 }
 
@@ -446,6 +518,163 @@ describe.each([
   beforeEach(() => {
     open = binding;
   });
+
+  it.each(['v2', 'v1', 'inline'] as const)(
+    'activates and syncs a %s Composer repository through the assembled Worker',
+    async (mode) => {
+      const upstream = composerRepositoryFixture(
+        mode,
+        false,
+        'https://dist.example.com/archive.zip',
+      );
+      const h = await boot('composer');
+      vi.mocked(globalThis.fetch).mockImplementation(upstream.transport);
+      const sourceId = ulid();
+      await h.seed(
+        "INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json, status) VALUES (?, ?, 'composer', 'composer', 'composer_repository', ?, ?, 'paused')",
+        [
+          sourceId,
+          h.org.orgId,
+          upstream.origin,
+          JSON.stringify({
+            selection: { packages: [upstream.key], patterns: [] },
+            distHosts: ['dist.example.com'],
+          }),
+        ],
+      );
+      await h.seed(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'composer', 'acme/*')",
+        [ulid(), h.org.orgId, sourceId],
+      );
+      await h.seed("DELETE FROM project_source WHERE org_id = ? AND project_id = 'P1'", [
+        h.org.orgId,
+      ]);
+      await h.seed(
+        "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'P1', ?)",
+        [h.org.orgId, sourceId],
+      );
+
+      const credentialId = await createCredentialStore({
+        repository: createCredentialRepository(h.executor),
+        cipher: createSecretCipher(
+          createKeyring([
+            parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
+          ]),
+          'credential-encryption',
+        ),
+        ids: { ulid },
+        clock: systemClock,
+      }).put(h.org, {
+        kind: 'bearer',
+        projectId: null,
+        plaintext: new TextEncoder().encode(JSON.stringify({ token: 'composer-private-token' })),
+      });
+      await h.seed('UPDATE source SET credential_id = ? WHERE org_id = ? AND id = ?', [
+        credentialId,
+        h.org.orgId,
+        sourceId,
+      ]);
+      expect(
+        (
+          await h.request(
+            new Request(`${PUBLIC_URL}/_pb/sources/${sourceId}/enable`, { method: 'POST' }),
+          )
+        ).status,
+      ).toBe(204);
+      const row = await h.repository.enqueue(h.org, {
+        id: ulid(),
+        type: 'core:source-sync:v1',
+        payloadJson: JSON.stringify({ sourceId, reason: 'admin' }),
+        idempotencyKey: ulid(),
+        resourceKey: `source:${sourceId}`,
+        runAt: null,
+        maxAttempts: 25,
+        projectId: null,
+        initiatorTokenId: null,
+      });
+      await h.deliver({ v: 1, org: h.org.orgId, job: row.id });
+      await h.drain();
+      const response = await h.get(upstream.key);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        packages: Record<string, { version: string; dist: { url: string } }[]>;
+      };
+      expect(body.packages[upstream.key]!.map((member) => member.version)).toEqual(['1.0.0']);
+      const dist = await h.request(new Request(body.packages[upstream.key]![0]!.dist.url));
+      expect(dist.status).toBe(200);
+      expect(await dist.text()).toBe(upstream.archive);
+      expect(upstream.calls.some((call) => call.url.startsWith('https://dist.example.com/'))).toBe(
+        true,
+      );
+      expect(
+        upstream.calls.every(
+          (call) => call.headers.get('authorization') === 'Bearer composer-private-token',
+        ),
+      ).toBe(true);
+      expect(
+        await h.executor.all({
+          sql: 'SELECT name FROM package WHERE org_id = ? AND source_id = ?',
+          params: [h.org.orgId, sourceId],
+        }),
+      ).toEqual([{ name: upstream.key }]);
+    },
+    30_000,
+  );
+
+  it.each(['shasum', 'host', 'redirect'] as const)(
+    'rejects a Composer archive with invalid %s through the assembled Worker',
+    async (issue) => {
+      const upstream = composerRepositoryFixture(
+        'inline',
+        issue === 'shasum',
+        issue === 'host' ? 'https://foreign.example.com/archive.zip' : undefined,
+      );
+      const h = await boot('composer');
+      const calls: Request[] = [];
+      vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+        const request = new Request(input, init);
+        calls.push(request);
+        if (issue === 'redirect' && request.url.endsWith('/archive.zip'))
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://foreign.example.com/stolen.zip' },
+          });
+        return upstream.transport(input, init);
+      });
+      await h.seed(
+        "UPDATE source SET type = 'composer_repository', url = ?, config_json = ? WHERE org_id = ? AND id = 'S1'",
+        [upstream.origin, JSON.stringify({ selection: { packages: [upstream.key] } }), h.org.orgId],
+      );
+      await h.seed(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, 'S1', 'composer', 'acme/*')",
+        [ulid(), h.org.orgId],
+      );
+      await h.deliver(await h.enqueue(upstream.key));
+      await h.drain();
+      const response = await h.get(upstream.key);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        packages: Record<string, { dist: { url: string } }[]>;
+      };
+      const dist = await h.request(new Request(body.packages[upstream.key]![0]!.dist.url));
+      expect(dist.status).toBe(502);
+      expect(
+        await h.executor.all({
+          sql: 'SELECT count(*) AS n FROM blob WHERE org_id = ?',
+          params: [h.org.orgId],
+        }),
+      ).toEqual([{ n: 0 }]);
+      if (issue === 'shasum')
+        expect(
+          await h.executor.all({
+            sql: 'SELECT status FROM version WHERE org_id = ?',
+            params: [h.org.orgId],
+          }),
+        ).toEqual([{ status: 'quarantined' }]);
+      else expect(calls.some((call) => call.url.includes('foreign.example.com'))).toBe(false);
+    },
+  );
+
   it('registers package-sync alongside the existing core jobs and fails closed before binding', async () => {
     const kernel = vi.spyOn(kernelModule, 'createKernel');
     const original = coreJobsModule.registerCoreJob;

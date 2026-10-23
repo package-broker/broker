@@ -1,3 +1,4 @@
+import { CSPProvider } from '@base-ui/react/csp-provider';
 import {
   useCallback,
   useEffect,
@@ -38,7 +39,8 @@ import { ImportPage } from './pages/import.js';
 import { PackagesPage } from './pages/packages.js';
 import { ProjectsPage } from './pages/projects.js';
 import { SourcesPage } from './pages/sources.js';
-import { TokensPage } from './pages/tokens.js';
+import { clearPendingTokenIssue, TokensPage } from './pages/tokens.js';
+import type { PendingStorage } from './pending.js';
 
 export const PAGES = {
   projects: ProjectsPage,
@@ -132,13 +134,25 @@ export async function loadProjects(client: AuthClient): Promise<ProjectSummary[]
 export async function signOut(deps: {
   client: AuthClient;
   clearPending: () => void;
+  storage?: PendingStorage;
   onSignedOut: () => void;
 }): Promise<boolean> {
   const result = await deps.client.request('post', '/_pb/auth/logout');
   if (!result.ok) return false;
   deps.clearPending();
+  if (deps.storage) clearPendingTokenIssue(deps.storage);
   deps.onSignedOut();
   return true;
+}
+
+export function bindProjectReplay(
+  flow: Pick<ReturnType<typeof createReauthFlow>, 'subscribeReplay'>,
+  onProjectsChanged: () => void,
+) {
+  return flow.subscribeReplay((result) => {
+    if (result.ok && /^\/_pb\/projects(?:\/[^/]+(?:\/(?:archive|restore))?)?$/.test(result.path))
+      onProjectsChanged();
+  });
 }
 
 const NAV: readonly { route: PageRoute; label: string }[] = [
@@ -158,11 +172,13 @@ export function ScopeSwitcher(props: {
 }) {
   return (
     <div className="flex items-center gap-2">
-      <Label id="scope-label">Scope</Label>
+      <Label id="scope-label" className="sr-only lg:not-sr-only">
+        Scope
+      </Label>
       <Select
         value={props.project ?? ORGANIZATION_SCOPE}
         aria-labelledby="scope-label"
-        className="w-48"
+        className="w-36 max-w-full lg:w-48"
         onChange={(event) =>
           props.onScope(event.target.value === ORGANIZATION_SCOPE ? null : event.target.value)
         }
@@ -187,15 +203,17 @@ export function Shell(props: {
   signOutError?: boolean;
   children?: ReactNode;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
-      <header className="flex flex-wrap items-center gap-4 border-b border-neutral-200 bg-white px-6 py-3">
-        <span className="font-semibold">Package Broker</span>
-        <nav aria-label="Main" className="flex flex-wrap gap-1">
+      <header className="shell-header">
+        <span className="shell-brand font-semibold">Package Broker</span>
+        <nav aria-label="Main" id="main-nav" className={`shell-nav ${menuOpen ? 'is-open' : ''}`}>
           {NAV.map((item) => (
             <a
               key={item.route}
               href={buildHash(item.route, props.project)}
+              onClick={() => setMenuOpen(false)}
               aria-current={props.route === item.route ? 'page' : undefined}
               className={cn(
                 'rounded-md px-3 py-1.5 text-sm hover:bg-neutral-100',
@@ -206,7 +224,7 @@ export function Shell(props: {
             </a>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-4">
+        <div className="ml-auto flex min-w-0 items-center gap-2">
           <ScopeSwitcher
             project={props.project}
             projects={props.projects}
@@ -218,9 +236,19 @@ export function Shell(props: {
               <DropdownMenuItem onClick={props.onSignOut}>Sign out</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          <button
+            type="button"
+            className="rounded-md border border-neutral-300 px-2 py-1.5 lg:hidden"
+            aria-label="Main menu"
+            aria-controls="main-nav"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            ☰
+          </button>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl p-6">
+      <main className="mx-auto min-w-0 max-w-7xl p-4 sm:p-6">
         {props.unknown === null ? null : (
           <Alert className="mb-4">
             <AlertDescription>Unknown page: {props.unknown}</AlertDescription>
@@ -275,6 +303,14 @@ export async function checkSession(
 }
 
 export function App(props: { client?: AuthClient }) {
+  return (
+    <CSPProvider disableStyleElements>
+      <AppContent {...props} />
+    </CSPProvider>
+  );
+}
+
+function AppContent(props: { client?: AuthClient }) {
   const client = useMemo<AuthClient>(
     () =>
       props.client ??
@@ -295,19 +331,25 @@ export function App(props: { client?: AuthClient }) {
   const initialProbe = useRef(true);
   const [signOutError, setSignOutError] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsVersion, setProjectsVersion] = useState(0);
+  const onProjectsChanged = useCallback(() => setProjectsVersion((version) => version + 1), []);
+  const storage = useMemo<PendingStorage>(
+    () => ({
+      getItem: (key) => window.sessionStorage.getItem(key),
+      setItem: (key, value) => window.sessionStorage.setItem(key, value),
+      removeItem: (key) => window.sessionStorage.removeItem(key),
+    }),
+    [],
+  );
   const flow = useMemo(
     () =>
       createReauthFlow({
         client,
-        storage: {
-          getItem: (key) => window.sessionStorage.getItem(key),
-          setItem: (key, value) => window.sessionStorage.setItem(key, value),
-          removeItem: (key) => window.sessionStorage.removeItem(key),
-        },
+        storage,
         now: Date.now,
         navigate: go,
       }),
-    [client, go],
+    [client, go, storage],
   );
 
   useEffect(() => {
@@ -333,16 +375,19 @@ export function App(props: { client?: AuthClient }) {
     return () => {
       live = false;
     };
-  }, [client, session]);
+  }, [client, session, projectsVersion]);
+
+  useEffect(() => bindProjectReplay(flow, onProjectsChanged), [flow, onProjectsChanged]);
 
   const services = useMemo<ShellServices>(
     () => ({
       client,
       subscribeReplay: flow.subscribeReplay,
+      onProjectsChanged,
       requireReauth: (request, options) =>
         flow.requireReauth(request, options, window.location.hash),
     }),
-    [client, flow],
+    [client, flow, onProjectsChanged],
   );
 
   const onSignedIn = useCallback(() => {
@@ -384,6 +429,7 @@ export function App(props: { client?: AuthClient }) {
           void signOut({
             client,
             clearPending: () => flow.clear(),
+            storage,
             onSignedOut: () => {
               setProjects([]);
               setSession('out');

@@ -64,6 +64,17 @@ describe('envelopeResponse', () => {
 });
 
 describe('errorResponse', () => {
+  it('logs upstream refusals only at debug through both error entry points', () => {
+    const { log, entries } = recorder();
+    const error = new UpstreamError('refused', undefined, 'destination');
+    error.message = 'private request data';
+    errorResponse(error, 'response', log);
+    logError(log, 'direct', error);
+    expect(entries).toHaveLength(2);
+    expect(entries.every((entry) => entry['level'] === 'debug')).toBe(true);
+    expect(JSON.stringify(entries)).not.toContain(error.message);
+  });
+
   it.each(['nested', 'npm'] as const)(
     'maps policy refusals to 502 upstream_refused (%s)',
     async (format) => {

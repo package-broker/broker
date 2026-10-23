@@ -9,7 +9,13 @@ import {
 } from 'react';
 import type { ApiClient, ApiErrorCode, ApiRequestDescription, ApiResult } from './api.js';
 import type { paths } from './api-types.js';
-import { loadPending, savePending, type PendingAction, type PendingStorage } from './pending.js';
+import {
+  loadPending,
+  savePending,
+  type PendingAction,
+  type PendingStorage,
+  type PendingDisplay,
+} from './pending.js';
 import { encodeQr, type QrMatrix } from './qr.js';
 import { buildListFilterHash, type HashRoute } from './page-hash.js';
 import { Alert, AlertDescription } from './components/ui/alert.js';
@@ -23,6 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from './components/ui/dialog.js';
+import { CopyButton, IdText } from './components/ui/id-text.js';
 import { Input } from './components/ui/input.js';
 import { Label } from './components/ui/label.js';
 
@@ -95,6 +102,14 @@ export function safePageHash(hash: string): string {
     projectId: query.get('projectId'),
     q: query.get('q'),
     after: query.get('after'),
+    package: query.get('package'),
+    versionAfter: query.get('versionAfter'),
+    cursor: query.get('cursor'),
+    run: query.get('run'),
+    actor: query.get('actor'),
+    action: query.get('action'),
+    filterProject: query.get('filterProject'),
+    limit: query.get('limit'),
   });
 }
 
@@ -202,7 +217,7 @@ export function createReauthFlow(deps: {
 
     requireReauth(
       request: ApiRequestDescription,
-      options: { credential: boolean; secretFields: readonly string[] },
+      options: { credential: boolean; secretFields: readonly string[]; display?: PendingDisplay },
       returnHash: string,
     ): void {
       const saved = savePending(deps.storage, {
@@ -211,6 +226,7 @@ export function createReauthFlow(deps: {
         ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
         ...(request.body === undefined ? {} : { body: request.body }),
         ...(request.headers === undefined ? {} : { headers: request.headers }),
+        ...(options.display === undefined ? {} : { display: options.display }),
         credential: options.credential,
         secretFields: options.secretFields,
       });
@@ -420,11 +436,12 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
 }
 
 export interface ShellServices {
+  readonly onProjectsChanged?: () => void;
   readonly subscribeReplay?: (listener: (result: ReplayResult) => void) => () => void;
   readonly client: AuthClient;
   readonly requireReauth: (
     request: ApiRequestDescription,
-    options: { credential: boolean; secretFields: readonly string[] },
+    options: { credential: boolean; secretFields: readonly string[]; display?: PendingDisplay },
   ) => void;
 }
 
@@ -655,25 +672,116 @@ export function ReauthConfirmDialog(props: {
   );
 }
 
+export function pendingActionDescription(action: PendingAction | null) {
+  const match = action?.path.match(
+    /\/(quarantine|tombstone|release|approve|apply|cancel|rollback)$/,
+  );
+  const verb = match?.[1];
+  const labels: Record<string, string> = {
+    quarantine: 'Quarantine version',
+    tombstone: 'Tombstone version',
+    release: 'Release version',
+    approve: 'Approve import run',
+    apply: 'Apply import run',
+    cancel: 'Cancel import run',
+    rollback: 'Roll back import run',
+  };
+  const effects: Record<string, string> = {
+    quarantine:
+      'Clients cannot resolve this version until it is released. Only this version is affected.',
+    tombstone:
+      'Clients can no longer install this version. Only this version is affected. This cannot be undone.',
+    release: 'Clients can resolve this version again. Only this version is affected.',
+    approve: 'Approve the reviewed plan hash for this run.',
+    apply: 'Apply the approved import plan.',
+    cancel: 'Cancel this planned import run.',
+    rollback: 'Restore retained before-images where rollback is possible.',
+  };
+  return {
+    label: verb ? (labels[verb] ?? 'Send held action') : 'Send held action',
+    effect: verb
+      ? (effects[verb] ?? 'Send the request you started before confirming your identity.')
+      : 'Send the request you started before confirming your identity.',
+    destructive: ['tombstone', 'cancel', 'rollback'].includes(verb ?? ''),
+  };
+}
+
 export function ReauthConfirmContent(props: {
   action: PendingAction | null;
   onConfirm: () => void;
   onDecline: () => void;
 }) {
+  const description = pendingActionDescription(props.action);
+  const display = props.action?.display;
+  const packageIds = props.action?.path.match(/\/packages\/([^/]+)\/versions\/([^/]+)/);
+  const runId = props.action?.path.match(/\/import-runs\/([^/]+)/)?.[1];
+  const request = props.action ? `${props.action.method} ${props.action.path}` : '';
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Repeat your last action?</DialogTitle>
+        <DialogTitle>Send the held action now?</DialogTitle>
         <DialogDescription>
-          You confirmed your identity. The action below was not sent yet
-          {props.action ? `: ${props.action.method} ${props.action.path}` : '.'}
+          You confirmed your identity. The action below was held while you signed in and has not
+          been sent yet.
         </DialogDescription>
       </DialogHeader>
+      <dl className="detail-list">
+        <dt>Action</dt>
+        <dd className="font-medium">{description.label}</dd>
+        {display ? (
+          <>
+            <dt>Package</dt>
+            <dd>{display.packageName}</dd>
+            <dt>Version</dt>
+            <dd className="font-mono">{display.version}</dd>
+          </>
+        ) : packageIds ? (
+          <>
+            <dt>Package ID</dt>
+            <dd>
+              <IdText value={packageIds[1]!} label="package ID" />
+            </dd>
+            <dt>Version ID</dt>
+            <dd>
+              <IdText value={packageIds[2]!} label="version ID" />
+            </dd>
+          </>
+        ) : null}
+        {runId ? (
+          <>
+            <dt>Run</dt>
+            <dd>
+              <IdText value={runId} label="run ID" />
+            </dd>
+          </>
+        ) : null}
+        <dt>Scope</dt>
+        <dd>
+          {display?.scope ??
+            (props.action?.path.startsWith('/_pb/projects/') ? 'Project' : 'Organization')}
+        </dd>
+        <dt>Effect</dt>
+        <dd>{description.effect}</dd>
+      </dl>
+      {request ? (
+        <details>
+          <summary className="cursor-pointer text-sm text-blue-700">Request details</summary>
+          <div className="mt-2 flex min-w-0 items-start gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+            <code className="min-w-0 break-all text-xs">{request}</code>
+            <CopyButton value={request} label="Copy request" />
+          </div>
+        </details>
+      ) : null}
       <DialogFooter>
         <Button variant="outline" onClick={props.onDecline}>
           Discard
         </Button>
-        <Button onClick={props.onConfirm}>Send it now</Button>
+        <Button
+          variant={description.destructive ? 'destructive' : 'default'}
+          onClick={props.onConfirm}
+        >
+          {description.label}
+        </Button>
       </DialogFooter>
     </>
   );

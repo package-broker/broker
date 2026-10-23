@@ -84,7 +84,7 @@ function mappingOf(error: unknown): Mapping {
 export function logError(log: KernelLog, requestId: string, error: unknown): void {
   try {
     log({
-      level: 'error',
+      level: error instanceof UpstreamError && error.code === 'refused' ? 'debug' : 'error',
       event: 'http.error',
       request_id: requestId,
       error_name: reportableErrorName(error),

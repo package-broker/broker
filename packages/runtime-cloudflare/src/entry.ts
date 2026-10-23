@@ -1,4 +1,5 @@
 import {
+  mcp,
   observability,
   platformPorts,
   plugins,
@@ -19,4 +20,5 @@ export default createWorker(plugins, {
   ...(registry === undefined ? {} : { registry }),
   ...(tokens === undefined ? {} : { tokens }),
   ...(vulnerability === undefined ? {} : { vulnerability }),
+  ...(mcp === undefined ? {} : { mcp }),
 });

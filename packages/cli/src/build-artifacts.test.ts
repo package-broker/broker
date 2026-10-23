@@ -181,6 +181,7 @@ describe('renderBuildManifest', () => {
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
         'export const vulnerability = config.vulnerability;',
+        'export const mcp = config.mcp;',
         '',
       ].join('\n'),
     );
@@ -205,6 +206,7 @@ describe('renderBuildManifest', () => {
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
         'export const vulnerability = config.vulnerability;',
+        'export const mcp = config.mcp;',
         '',
       ].join('\n'),
     );
@@ -231,6 +233,7 @@ describe('renderBuildManifest', () => {
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
         'export const vulnerability = config.vulnerability;',
+        'export const mcp = config.mcp;',
         '',
       ].join('\n'),
     );
@@ -721,6 +724,26 @@ describe('built plugin order round trip', () => {
         vulnerability: unknown;
       };
       expect(loaded.vulnerability).toEqual({ enabled: false });
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
+    'carries the enabled MCP setting into the %s bundle',
+    async (target) => {
+      const configPath = path.join(project, 'mcp.config.ts');
+      await writeFile(
+        configPath,
+        `export default ${JSON.stringify({ platform: target, plugins: [], mcp: { enabled: true } })};`,
+      );
+      await writeFile(runtimeEntry, "export { mcp } from '#pb-manifest';\n");
+      const result = await build({
+        configPath,
+        target,
+        outDir: path.join(project, target),
+        runtimeEntry,
+      });
+      const loaded = (await import(pathToFileURL(result.bundle).href)) as { mcp: unknown };
+      expect(loaded.mcp).toEqual({ enabled: true });
     },
   );
 

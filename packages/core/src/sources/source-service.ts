@@ -27,7 +27,12 @@ import { CredentialError, parseCredentialMaterial, type CredentialKind } from '.
 import { classifyUrl, type OutboundPolicy } from './url-policy.js';
 
 export type SourceActor =
-  | { readonly kind: 'org'; readonly actor: ActorContext }
+  | {
+      readonly kind: 'org';
+      readonly actor: ActorContext;
+      readonly servicePrincipalId?: string;
+      readonly restrictTo?: readonly string[];
+    }
   | { readonly kind: 'project'; readonly actor: ProjectActor };
 
 export interface SourceCredentialInput {
@@ -87,6 +92,8 @@ export type SourceDto = Pick<
   readonly removalAcceptanceArmed: boolean;
 };
 
+export type SourceListDto = SourceDto & { readonly attachedProjectCount?: number };
+
 export interface SourceService {
   acceptRemoval(
     ...args: [...WriteArgs, id: string, call: ApiCall]
@@ -108,7 +115,7 @@ export interface SourceService {
     actor: SourceActor,
     input: { readonly projectId?: string; readonly cursor: string | null; readonly limit: number },
   ): Promise<
-    SourceServiceResult<{ readonly items: readonly SourceDto[]; readonly next: string | null }>
+    SourceServiceResult<{ readonly items: readonly SourceListDto[]; readonly next: string | null }>
   >;
   pause(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   create(
@@ -156,6 +163,7 @@ export interface SourceServiceDeps {
     | 'delete'
     | 'resume'
     | 'list'
+    | 'countAttachedProjects'
     | 'pause'
     | 'acceptRemoval'
   >;
@@ -575,7 +583,26 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         }
       }
       const rows = await deps.sources.list(ctx, { projectId, after, limit: input.limit });
-      const items = rows.slice(0, input.limit).map(sourceDto);
+      const page = rows.slice(0, input.limit);
+      const counts =
+        projectId === null && who.kind === 'org' && page.length > 0
+          ? await deps.sources.countAttachedProjects(ctx, {
+              sourceIds: page.map((source) => source.id),
+              userId: who.actor.userId,
+              ...(who.servicePrincipalId === undefined
+                ? {}
+                : { servicePrincipalId: who.servicePrincipalId }),
+              ...(who.restrictTo === undefined ? {} : { restrictTo: who.restrictTo }),
+              allProjects:
+                who.actor.isOrganizationAdmin || who.actor.permissions.has('project:read'),
+              includeArchived: who.actor.isOrganizationAdmin,
+              providerAnchors: deps.providerAnchors,
+            })
+          : null;
+      const items = page.map((source) => ({
+        ...sourceDto(source),
+        ...(counts === null ? {} : { attachedProjectCount: counts.get(source.id) ?? 0 }),
+      }));
       const last = items.at(-1);
       return success({
         items,

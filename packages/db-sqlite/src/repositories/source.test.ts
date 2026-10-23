@@ -1134,6 +1134,170 @@ describe('source repository lookup', () => {
   });
 });
 
+describe('source attachment counts', () => {
+  beforeEach(async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'attached'),
+      seedSource(SRC_PROXY, 'unattached'),
+      seedSource(SRC_NEW, 'next-page'),
+      ...[P1, P2, P_ARCHIVED].map((projectId) =>
+        stmt(
+          'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+          a.orgId,
+          projectId,
+          SRC_ORG,
+        ),
+      ),
+      stmt(
+        'INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)',
+        a.orgId,
+        P2,
+        SRC_NEW,
+      ),
+    ]);
+  });
+
+  const query = (sourceIds: readonly string[], allProjects = false, includeArchived = false) => ({
+    sourceIds,
+    userId: P1_MAINTAINER,
+    allProjects,
+    includeArchived,
+    providerAnchors: ANCHORS,
+  });
+
+  it('counts only readable active projects, excluding hidden and archived attachments', async () => {
+    expect(await repository.countAttachedProjects(a, query([SRC_ORG]))).toEqual(
+      new Map([[SRC_ORG, 1]]),
+    );
+    await executor.batch([stmt('DELETE FROM access_grant WHERE project_id = ?', P1)]);
+    expect(await repository.countAttachedProjects(a, query([SRC_ORG]))).toEqual(new Map());
+  });
+
+  it('intersects attachment visibility with the token project cap, including empty caps', async () => {
+    const input = query([SRC_ORG], true, true);
+    expect(await repository.countAttachedProjects(a, { ...input, restrictTo: [P1] })).toEqual(
+      new Map([[SRC_ORG, 1]]),
+    );
+    expect(await repository.countAttachedProjects(a, { ...input, restrictTo: [] })).toEqual(
+      new Map(),
+    );
+    expect(await repository.countAttachedProjects(b, { ...input, restrictTo: [P1] })).toEqual(
+      new Map(),
+    );
+    expect(
+      await repository.countAttachedProjects(a, { ...query([SRC_ORG]), restrictTo: [P2] }),
+    ).toEqual(new Map());
+  });
+
+  it('returns the full count for an organization administrator, including archived projects', async () => {
+    expect(await repository.countAttachedProjects(a, query([SRC_ORG], true, true))).toEqual(
+      new Map([[SRC_ORG, 3]]),
+    );
+  });
+
+  it('counts only projects in a service token scope using its own read authority', async () => {
+    await executor.batch([
+      stmt(
+        'INSERT INTO service_principal (id, org_id, name, project_id, created_by_user_id, status) VALUES (?, ?, ?, ?, ?, ?)',
+        'service-1',
+        a.orgId,
+        'source-reader',
+        P2,
+        ORG_ADMIN,
+        'active',
+      ),
+      stmt(
+        'INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, ?)',
+        a.orgId,
+        'service-1',
+        'project:read',
+      ),
+    ]);
+    const input = {
+      ...query([SRC_ORG, SRC_NEW]),
+      userId: 'service-1',
+      servicePrincipalId: 'service-1',
+    };
+    expect(await repository.countAttachedProjects(a, input)).toEqual(
+      new Map([
+        [SRC_ORG, 1],
+        [SRC_NEW, 1],
+      ]),
+    );
+    await executor.batch([
+      stmt('UPDATE service_principal SET project_id = NULL WHERE id = ?', 'service-1'),
+    ]);
+    expect(await repository.countAttachedProjects(a, input)).toEqual(
+      new Map([
+        [SRC_ORG, 2],
+        [SRC_NEW, 1],
+      ]),
+    );
+    expect(await repository.countAttachedProjects(b, input)).toEqual(new Map());
+    await executor.batch([
+      stmt('UPDATE service_principal SET status = ? WHERE id = ?', 'suspended', 'service-1'),
+    ]);
+    expect(await repository.countAttachedProjects(a, input)).toEqual(new Map());
+    await executor.batch([
+      stmt('UPDATE service_principal SET status = ? WHERE id = ?', 'active', 'service-1'),
+    ]);
+    await executor.batch([
+      stmt('DELETE FROM service_principal_permission WHERE service_principal_id = ?', 'service-1'),
+    ]);
+    expect(await repository.countAttachedProjects(a, input)).toEqual(new Map());
+  });
+
+  it('counts active projects for inherited organization project read authority', async () => {
+    expect(await repository.countAttachedProjects(a, query([SRC_ORG], true))).toEqual(
+      new Map([[SRC_ORG, 2]]),
+    );
+  });
+
+  it('returns no count rows for zero attachments or a foreign organization', async () => {
+    expect(await repository.countAttachedProjects(a, query([SRC_PROXY], true))).toEqual(new Map());
+    expect(await repository.countAttachedProjects(b, query([SRC_ORG], true))).toEqual(new Map());
+  });
+
+  it('uses one grouped read per page and counts only that page, including 100 source ids', async () => {
+    const counted = countCalls(executor);
+    const store = createSourceRepository(counted.executor);
+    const first = await store.list(a, { projectId: null, after: null, limit: 2 });
+    expect(
+      await store.countAttachedProjects(
+        a,
+        query(
+          first.slice(0, 2).map((row) => row.id),
+          true,
+        ),
+      ),
+    ).toEqual(new Map([[SRC_ORG, 2]]));
+    const second = await store.list(a, { projectId: null, after: SRC_PROXY, limit: 2 });
+    expect(
+      await store.countAttachedProjects(
+        a,
+        query(
+          second.map((row) => row.id),
+          true,
+        ),
+      ),
+    ).toEqual(new Map([[SRC_NEW, 1]]));
+    expect(counted.counts()).toEqual({ all: 4, batch: 0 });
+    expect(
+      await store.countAttachedProjects(
+        a,
+        query([SRC_ORG, ...Array.from({ length: 99 }, (_, n) => `missing-${String(n)}`)]),
+      ),
+    ).toEqual(new Map([[SRC_ORG, 1]]));
+    expect(
+      await store.countAttachedProjects(
+        a,
+        query([SRC_ORG, ...Array.from({ length: 99 }, (_, n) => `missing-${String(n)}`)], true),
+      ),
+    ).toEqual(new Map([[SRC_ORG, 2]]));
+    expect(counted.counts()).toEqual({ all: 6, batch: 0 });
+  });
+});
+
 describe('source paginated list and pause', () => {
   function pauseInput(id = SRC_ORG) {
     return {

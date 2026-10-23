@@ -1,3 +1,8 @@
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { parseMasterKey } from '@package-broker/core/secrets/master-key';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS, blobPurgeTiming } from './startup.js';
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
 import type { ByteStore } from '@package-broker/core/platform/blob';
@@ -393,6 +398,137 @@ describe('startNode', () => {
       (error: unknown) => error,
     );
   }
+
+  it.each([undefined, false])(
+    'MCP disabled (%s) matches the unknown core route',
+    async (enabled) => {
+      const broker = await startNode({
+        plugins: [],
+        migrations: [await initSource()],
+        ...(enabled === undefined ? {} : { mcp: { enabled } }),
+        env: {
+          PB_SQLITE_PATH: databasePath(),
+          PB_ORG_SLUG: 'acme',
+          PB_ORG_NAME: 'Acme',
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'http://127.0.0.1',
+        },
+        log: () => undefined,
+      });
+      running.push(broker);
+      const kernel = await broker.ready();
+      const snapshot = async (path: string) => {
+        const response = await kernel.fetch(
+          new Request(`http://127.0.0.1${path}`, { method: 'POST' }),
+        );
+        const body = (await response.json()) as { error: { requestId?: string } };
+        delete body.error.requestId;
+        const headers = Object.fromEntries(response.headers);
+        delete headers['x-request-id'];
+        return { status: response.status, body, headers };
+      };
+      const missing = await snapshot('/_pb/unknown');
+      expect(missing.status).toBe(404);
+      expect(await snapshot('/_pb/mcp')).toEqual(missing);
+    },
+  );
+
+  it('MCP enabled initializes with a read token and dispatches the runtime tools', async () => {
+    const key = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+    const path = databasePath();
+    const broker = await startNode({
+      plugins: [],
+      migrations: [await initSource()],
+      mcp: { enabled: true },
+      env: {
+        PB_SQLITE_PATH: path,
+        PB_ORG_SLUG: 'acme',
+        PB_ORG_NAME: 'Acme',
+        PB_MASTER_KEY: key,
+        PB_PUBLIC_URL: 'http://127.0.0.1',
+      },
+      log: () => undefined,
+    });
+    running.push(broker);
+    const opened = openBetterSqliteExecutor(path);
+    let token: string;
+    try {
+      const executor = opened.executor;
+      const org = await createOrganizationBootstrap(executor).findSingleton();
+      const orgId = org!.id;
+      const selector = 'abcdefghijkl';
+      token = formatToken('svc', selector, new Uint8Array(32).fill(7));
+      const hash = await hashToken(createKeyring([parseMasterKey(key, 'PB_MASTER_KEY')]), 1, token);
+      await executor.batch([
+        {
+          sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+          params: ['mcp-user', orgId, 'reader@example.test'],
+        },
+        {
+          sql: 'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+          params: ['mcp-service', orgId, 'MCP reader', 'mcp-user'],
+        },
+        {
+          sql: `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name,
+          scopes_json, read_only, service_principal_id, expires_at, project_mode)
+          VALUES (?, ?, 'svc', ?, ?, 1, 'MCP reader', '["read"]', 1, ?, ?, 'all')`,
+          params: [
+            'mcp-token',
+            orgId,
+            selector,
+            hash,
+            'mcp-service',
+            new Date(Date.now() + 3600000).toISOString(),
+          ],
+        },
+      ]);
+    } finally {
+      await opened.close();
+    }
+    const kernel = await broker.ready();
+    const initialized = await kernel.fetch(
+      new Request('http://127.0.0.1/_pb/mcp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-11-25',
+            capabilities: {},
+            clientInfo: { name: 'test', version: '1' },
+          },
+        }),
+      }),
+    );
+    expect(initialized.status).toBe(200);
+    expect(await initialized.json()).toMatchObject({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { capabilities: { tools: {} } },
+    });
+    const call = async (method: string, params: unknown = {}) =>
+      kernel.fetch(
+        new Request('http://127.0.0.1/_pb/mcp', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method, params }),
+        }),
+      );
+    const listed = await call('tools/list');
+    expect(await listed.json()).toMatchObject({
+      result: { tools: expect.arrayContaining([expect.objectContaining({ name: 'whoami' })]) },
+    });
+    const rest = await kernel.fetch(
+      new Request('http://127.0.0.1/_pb/me', { headers: { authorization: `Bearer ${token}` } }),
+    );
+    expect(rest.status).toBe(200);
+    const tool = await call('tools/call', { name: 'whoami' });
+    expect(await tool.json()).toMatchObject({
+      result: { content: [{ type: 'text', text: await rest.text() }] },
+    });
+  });
 
   it('1: migrates, bootstraps, resolves ready, and close() closes the database', async () => {
     const path = databasePath();

@@ -532,6 +532,20 @@ describe('archive and restore', () => {
     expect(await projects.get(a, P1)).toMatchObject({ status: 'active', revision: 3 });
   });
 
+  it('uses the archived list revision for restore and refuses it after a concurrent revision change', async () => {
+    expect(await archive(1)).toBe('archived');
+    const [listed] = await projects.list(a, { status: 'archived', q: 'Al', limit: 10 });
+    expect(listed).toMatchObject({ id: P1, revision: 2 });
+    expect(await restore(listed!.revision)).toBe('restored');
+    expect(await archive(3)).toBe('archived');
+    const [current] = await projects.list(a, { status: 'archived', q: 'alpha', limit: 10 });
+    expect(current).toMatchObject({ id: P1, revision: 4 });
+    const before = await snapshot();
+    expect(await restore(listed!.revision)).toBe('conflict');
+    expect(await snapshot()).toBe(before);
+    expect(await restore(current!.revision)).toBe('restored');
+  });
+
   it('refuses restore without recent reauth and changes nothing', async () => {
     await archive(1);
     const before = await snapshot();

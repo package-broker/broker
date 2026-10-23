@@ -21,6 +21,7 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
+import { sourceAttachmentCountsStatement } from './source-attachment-counts.js';
 import { acceptRemovalStatement } from './source-removal.js';
 import { permissionRows } from './access.js';
 import { actorHolds } from './actor-authority.js';
@@ -469,6 +470,12 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     async list(ctx, input) {
       const rows = await executor.all<SourceRow>(listSourcesStatement(ctx, input));
       return rows.map(toRecord);
+    },
+    async countAttachedProjects(ctx, input) {
+      const rows = await executor.all<{ sourceId: string; count: number }>(
+        sourceAttachmentCountsStatement(ctx, input),
+      );
+      return new Map(rows.map((row) => [row.sourceId, row.count]));
     },
     async pause(ctx, fence, input) {
       const current = await locate(ctx, fence, input.id, input.providerAnchors);

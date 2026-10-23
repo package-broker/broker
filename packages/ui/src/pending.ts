@@ -11,6 +11,7 @@ const STORED_KEYS = new Set([
   'headers',
   'requiresCredential',
   'savedAt',
+  'display',
 ]);
 const CONCURRENCY_HEADERS = ['If-Match', 'If-None-Match'] as const;
 const MAX_HEADER_LENGTH = 4096;
@@ -22,12 +23,23 @@ type RequestFields = Pick<
   'method' | 'path' | 'idempotencyKey' | 'body' | 'headers'
 >;
 
+export interface PendingDisplay {
+  packageName: string;
+  version: string;
+  scope: string;
+}
+
 export type PendingInput = RequestFields & {
+  display?: PendingDisplay;
   credential: boolean;
   secretFields: readonly string[];
 };
 
-export type PendingAction = RequestFields & { savedAt: number; requiresCredential?: true };
+export type PendingAction = RequestFields & {
+  savedAt: number;
+  requiresCredential?: true;
+  display?: PendingDisplay;
+};
 
 type SaveResult = { ok: true } | { ok: false };
 type LoadResult = { ok: true; action: PendingAction | null } | { ok: false };
@@ -95,11 +107,22 @@ function validRequest(value: Record<string, unknown>): boolean {
   );
 }
 
+function validDisplay(value: unknown): value is PendingDisplay {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 3 &&
+    ['packageName', 'version', 'scope'].every(
+      (key) => typeof value[key] === 'string' && value[key].length > 0 && value[key].length <= 256,
+    )
+  );
+}
+
 function validStored(value: unknown): value is PendingAction {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) => STORED_KEYS.has(key)) &&
     validRequest(value) &&
+    (value.display === undefined || validDisplay(value.display)) &&
     validStoredHeaders(value.headers) &&
     (value.requiresCredential === undefined ||
       (value.requiresCredential === true && value.body === undefined)) &&
@@ -132,6 +155,7 @@ export function savePending(storage: PendingStorage, action: PendingInput): Save
   try {
     if (
       !validRequest(action) ||
+      (action.display !== undefined && !validDisplay(action.display)) ||
       typeof action.credential !== 'boolean' ||
       !Array.isArray(action.secretFields) ||
       !action.secretFields.every((field) => typeof field === 'string')
@@ -149,6 +173,7 @@ export function savePending(storage: PendingStorage, action: PendingInput): Save
       ...(!action.credential && action.body !== undefined
         ? { body: redact(action.body, action.secretFields) }
         : {}),
+      ...(action.display === undefined ? {} : { display: { ...action.display } }),
       savedAt: Date.now(),
     };
     storage.setItem(STORAGE_KEY, JSON.stringify(pending));

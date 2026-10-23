@@ -96,6 +96,8 @@ const RULES: Readonly<Record<string, Rule>> = {
       '@radix-ui/react-slot',
       '@radix-ui/react-label',
       '@radix-ui/react-tabs',
+      '@base-ui/react',
+      '@tanstack/react-table',
     ],
     testOnly: ['vitest', '@package-broker/core'],
     testsAndScripts: ['node', 'esbuild', 'openapi-typescript', 'prettier'],

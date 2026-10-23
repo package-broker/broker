@@ -1,3 +1,4 @@
+import { createComposerRepositoryProvider } from '../ingest/composer/composer-repository.js';
 import { isSelected } from '../ingest/composer/v1-index.js';
 import { displayName } from '../catalogue/names.js';
 import { createPackageAccess } from '../catalogue/package-access.js';
@@ -198,8 +199,15 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     return entry;
   }
 
+  const composerRepositoryProvider = createComposerRepositoryProvider(deps.outboundPolicy);
+
   function providerFor(ctx: OrgContext, source: ProviderSource): SourceProvider | null {
     switch (source.type) {
+      case 'composer_repository':
+        return (
+          deps.providers?.find((provider) => provider.sourceTypes.includes(source.type)) ??
+          composerRepositoryProvider
+        );
       case 'packagist_proxy':
         return packagistProxyProvider;
       case 'npmjs_proxy':
@@ -207,13 +215,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       case 'npm_registry':
         return npmProvidersFor(ctx.orgId).scoped;
       default:
-        return (
-          deps.providers?.find((provider) =>
-            source.type === 'vcs'
-              ? provider.id === source.config.provider
-              : provider.sourceTypes.includes(source.type),
-          ) ?? null
-        );
+        return deps.providers?.find((provider) => provider.id === source.config.provider) ?? null;
     }
   }
 

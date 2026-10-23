@@ -321,6 +321,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/registered-name.ts',
   'db-sqlite/src/repositories/session-liveness.ts',
   'db-sqlite/src/repositories/session.ts',
+  'db-sqlite/src/repositories/source-attachment-counts.ts',
   'db-sqlite/src/repositories/source-removal.ts',
   'db-sqlite/src/repositories/source-selection-revision.ts',
   'db-sqlite/src/repositories/source-selection.ts',
@@ -328,6 +329,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/visibility-attach.ts',
   'db-sqlite/src/repositories/visibility-audit.ts',
   'db-sqlite/src/repositories/visibility-derive.ts',
+  'db-sqlite/src/sql/project-prefix.ts',
   'db-sqlite/src/sql/scan.ts',
   'db-sqlite/src/testing/foreign-keys-off.ts',
   'db-sqlite/src/testing/migrated-database.ts',
@@ -416,6 +418,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/session-liveness.ts': '',
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
+  'db-sqlite/src/repositories/source-attachment-counts.ts': '',
   'db-sqlite/src/repositories/source-removal.ts': 'UPDATE source',
   'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
@@ -434,6 +437,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     'DELETE FROM vulnerability_advisory; DELETE FROM vulnerability_match x2; DELETE FROM vulnerability_refresh x3; DELETE FROM vulnerability_result; INSERT INTO vulnerability_advisory x3; INSERT INTO vulnerability_match; INSERT INTO vulnerability_refresh; INSERT INTO vulnerability_result x2; INSERT INTO vulnerability_sync_state; UPDATE vulnerability_refresh; UPDATE vulnerability_result; UPDATE vulnerability_sync_state x12',
   'db-sqlite/src/repositories/webhook-delivery.ts':
     'INSERT INTO webhook_delivery; UPDATE webhook_delivery',
+  'db-sqlite/src/sql/project-prefix.ts': '',
   'db-sqlite/src/sql/scan.ts': '',
   'db-sqlite/src/testing/catalogue-fixture.ts':
     'INSERT INTO cache_epoch; INSERT INTO organization; INSERT INTO package; INSERT INTO project; INSERT INTO project_package x2; INSERT INTO project_package_pattern; INSERT INTO project_source; INSERT INTO registered_name; INSERT INTO source; INSERT INTO version',
@@ -676,6 +680,25 @@ function reads(source: string): ReadSite[] {
 // Keys preserve exact expression text, including SQL whitespace and interpolation expressions.
 const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
+    {
+      reason:
+        'Read-only grouped attachment count and JSON page-id filter; neither expression writes rows or reads executor changes.',
+      sites: [
+        'db-sqlite/src/repositories/source-attachment-counts.ts:SQL template: sql<number>`count(*)` #1',
+        'db-sqlite/src/repositories/source-attachment-counts.ts:SQL template: sql<boolean>`attachment.source_id in (select value from json_each(${JSON.stringify(input.sourceIds)}))` #1',
+      ],
+    },
+    {
+      reason:
+        'The prefix helper only validates input and builds comparison predicates with Kysely; it neither mutates rows nor reads executor change counts.',
+      sites: [
+        "db-sqlite/src/sql/project-prefix.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/sql/project-prefix.ts:opaque dependency: import { isValidProjectListPrefix } from '@package-broker/core/authz/project-list'; #1",
+        'db-sqlite/src/sql/project-prefix.ts:SQL template: sql<SqlBool>`${sql.ref(column)} >= ${q}` #1',
+        'db-sqlite/src/sql/project-prefix.ts:SQL template: sql<SqlBool>`(${sql.ref(column)} >= ${q} AND ${sql.ref(column)} < ${upper})` #1',
+        'db-sqlite/src/sql/project-prefix.ts:SQL template: sql<SqlBool>`(${range(slug)} OR ${range(name)})` #1',
+      ],
+    },
     {
       reason:
         'Project revision increments change no referenced key; attachment change predicates and their parenthesized true fallback preserve scope filters in the existing fenced batch without consuming executor change counts.',
@@ -3244,6 +3267,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/provider-binding.ts:opaque dependency: import {\n  isReservedProviderId,\n  isValidProviderId,\n  isValidTrustAnchor,\n} from '@package-broker/core/identity/port'; #1",
         "db-sqlite/src/repositories/registered-name.ts:opaque dependency: import {\n  MAX_PATTERN_BYTES,\n  MAX_PATTERN_WILDCARDS,\n  isValidPattern,\n} from '@package-broker/core/catalogue/patterns'; #1",
         "db-sqlite/src/repositories/session-liveness.ts:opaque dependency: import { SESSION_ABSOLUTE_MS } from '@package-broker/core/auth/session'; #1",
+        "db-sqlite/src/repositories/source-attachment-counts.ts:opaque dependency: import { sql } from 'kysely'; #1",
         "db-sqlite/src/repositories/source.ts:opaque dependency: import { DbError } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/repositories/upstream-state.ts:opaque dependency: import { assertHeaderValue } from '@package-broker/core/ingest/validators'; #1",
         "db-sqlite/src/repositories/visibility-attach.ts:opaque dependency: import { isUlid } from '@package-broker/core/ids'; #1",

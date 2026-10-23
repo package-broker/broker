@@ -1,17 +1,7 @@
-import type { ApiRouteSpec } from '../api/route.js';
-import { getMeSpec } from '../api/routes/organization-schemas.js';
-import { PACKAGE_API_SPECS } from '../api/routes/packages-schemas.js';
-import { PROJECT_API_SPECS } from '../api/routes/projects-schemas.js';
 import { base32Decode, totpCode } from '../auth/totp.js';
-import { orgContext } from '../db/port.js';
-import { ulid, systemClock } from '../ids.js';
-import type { AuthorizationEngine } from '../kernel/authorize.js';
-import { createKernel } from '../kernel/kernel.js';
-import { assertMcpRateLimit, createMcpLimiter, type McpRateLimitBinding } from './limit.js';
-import { createMcpTools } from './tools.js';
-import { createMcpRoutes } from './transport.js';
+import { ulid } from '../ids.js';
+import type { McpRateLimitBinding } from './limit.js';
 
-const specs: readonly ApiRouteSpec[] = [...PROJECT_API_SPECS, ...PACKAGE_API_SPECS, getMeSpec];
 const PASSWORD = 'correct horse battery staple 42';
 const EMAIL = 'admin@example.test';
 const SELECTOR_PATTERN = /^[A-Za-z0-9]{12}$/;
@@ -38,58 +28,8 @@ export interface McpContractBroker {
 
 export interface McpContractFactory {
   readonly runtime: McpRuntime;
-  /** Rejects with McpRateLimitConfigError on Workers when `binding` is absent. */
+  /** Rejects with the runtime startup error on Workers when `binding` is absent. */
   create(options: { readonly binding?: McpRateLimitBinding }): Promise<McpContractBroker>;
-}
-
-export interface McpCompositionInput {
-  readonly runtime: McpRuntime;
-  readonly origin: string;
-  readonly orgId: string;
-  readonly authorization: AuthorizationEngine;
-  readonly rest: Handler;
-  readonly binding?: McpRateLimitBinding | undefined;
-}
-
-/** Mounts the MCP routes in a kernel whose tools reach the runtime's own REST application. */
-export async function composeMcpKernel(input: McpCompositionInput) {
-  assertMcpRateLimit({ runtime: input.runtime, mcpEnabled: true, binding: input.binding });
-  let stub: Handler | null = null;
-  const handlers = createMcpTools({
-    routes: specs,
-    publicOrigin: input.origin,
-    kernel: { fetch: async (request) => (stub === null ? input.rest(request) : stub(request)) },
-  });
-  const limiter =
-    input.runtime === 'workers' && input.binding !== undefined
-      ? createMcpLimiter(input.binding)
-      : undefined;
-  const kernel = await createKernel({
-    platform: input.runtime === 'node' ? 'node' : 'cloudflare',
-    plugins: [],
-    publicOrigin: input.origin,
-    ports: {
-      organizations: { get: async () => null },
-      clock: systemClock,
-      ids: { ulid: () => ulid() },
-    },
-    packageResolver: { resolve: async () => ({ kind: 'absent' }) },
-    resolveOrg: async () => orgContext(input.orgId),
-    health: async () => true,
-    log: () => undefined,
-    coreRoutes: createMcpRoutes({
-      handlers,
-      publicOrigin: input.origin,
-      ...(limiter === undefined ? {} : { limiter }),
-    }),
-    authorization: input.authorization,
-  });
-  return {
-    fetch: (request: Request) => kernel.fetch(request),
-    stubRest: (handler: Handler | null) => {
-      stub = handler;
-    },
-  };
 }
 
 export interface McpFixtureInput {
@@ -605,7 +545,7 @@ export function runMcpContract(factory: McpContractFactory, harness: McpTestHarn
 
         it('fails to start without the rate limiting binding', async () => {
           await expect(factory.create({})).rejects.toMatchObject({
-            name: 'McpRateLimitConfigError',
+            name: 'KernelConfigError',
           });
         });
       } else {

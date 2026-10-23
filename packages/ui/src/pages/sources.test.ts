@@ -7,6 +7,7 @@ import { createReauthFlow, type ShellServices } from '../auth.js';
 import { loadPending } from '../pending.js';
 import {
   createSourcesModel,
+  filterSources,
   SourceCard,
   CredentialFields,
   SourcesView,
@@ -246,7 +247,8 @@ describe('sources and registered names', () => {
     await model.load(true);
     expect(fetch.mock.calls[1]?.[0]).toContain(`after=${SOURCE}`);
     expect(model.snapshot().items).toHaveLength(2);
-    expect(html()).toContain(`value="${SOURCE}"`);
+    expect(html()).toContain(`title="${SOURCE}"`);
+    expect(html()).toContain('aria-label="Copy source ID"');
     expect(html()).toContain('Source ID');
   });
 
@@ -831,5 +833,53 @@ describe('round 2 regressions', () => {
     fetch.mockClear();
     await model.togglePause(paused);
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('source list presentation', () => {
+  it('filters loaded sources by name, type and ownership together without reordering the input', () => {
+    const items: Source[] = [
+      source,
+      {
+        ...source,
+        id: 'project-source',
+        name: 'Build registry',
+        projectId: 'project',
+        type: 'npmjs_proxy',
+      },
+    ];
+    expect(
+      filterSources(items, { q: 'BUILD', type: 'npmjs_proxy', scope: 'project' }).map(
+        (item) => item.id,
+      ),
+    ).toEqual(['project-source']);
+    expect(filterSources(items, { q: '', type: '', scope: 'organization' })).toEqual([source]);
+    expect(filterSources(items, { q: 'Build', type: 'npm_registry', scope: '' })).toEqual([]);
+    expect(items.map((item) => item.id)).toEqual([SOURCE, 'project-source']);
+  });
+  it('renders source status, credential presence, exact sync time and responsive cells', async () => {
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValue(
+          json({ items: [{ ...source, hasCredential: true, lastSuccessAt: NOW }], next: null }),
+        ),
+    );
+    await model.load();
+    expect(html()).toContain('responsive-table');
+    expect(html()).toContain('data-label="Credentials"');
+    expect(html()).toContain('Set · write-only');
+    expect(html()).toContain(`dateTime="${NOW}"`);
+    expect(html()).toContain('>Active<');
+    expect(html()).not.toContain('<dialog');
+  });
+  it('does not label a failed refresh as an empty list', async () => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(json({ error: { code: 'forbidden', message: SECRET } }, 403)),
+    );
+    await model.load();
+    expect(html()).toContain('data-list-state="error"');
+    expect(html()).not.toContain('data-list-state="empty"');
+    expect(html()).not.toContain(SECRET);
   });
 });

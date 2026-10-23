@@ -104,6 +104,7 @@ export function DataTable<T extends { id: string }>({
   const table = useTable({
     features,
     data: items as T[],
+    getRowId: (item) => item.id,
     columns: columns.map((column) => ({
       id: column.key,
       accessorFn: column.value,

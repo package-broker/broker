@@ -3,9 +3,13 @@ import { renderToString } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApiClient } from '../api.js';
 import type { paths } from '../api-types.js';
+import { createReauthFlow } from '../auth.js';
 import {
   TokensView,
+  TokenList,
+  filterTokens,
   bindTokensLifecycle,
+  bindTokensReplay,
   createTokensController,
   lifetimeChoices,
   tokensReducer,
@@ -107,6 +111,136 @@ function setup(status = 201, code = 'invalid_request', clearAfterCopy = false) {
 function markup(controller: ReturnType<typeof createTokensController>) {
   return renderToString(createElement(TokensView, { state: controller.snapshot(), controller }));
 }
+
+describe('token mutation replay refresh', () => {
+  it.each([
+    '/_pb/me/tokens/token-id',
+    '/_pb/tokens/token-id',
+    '/_pb/projects/demo/tokens/token-id',
+    '/_pb/service-principals',
+    '/_pb/service-principals/principal-id/suspend',
+    '/_pb/projects/demo/service-principals/principal-id/suspend',
+  ])('refreshes current lists after a successful replay at %s', async (path) => {
+    const f = setup();
+    await f.controller.load('project', 'demo', 'old-page');
+    const listeners = new Set<(result: { path: string; ok: boolean; status: number }) => void>();
+    const services = {
+      ...f.services,
+      subscribeReplay: (
+        listener: (result: { path: string; ok: boolean; status: number }) => void,
+      ) => {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
+    };
+    const cleanup = bindTokensReplay(f.controller, services);
+    f.fetch.mockClear();
+    for (const listener of listeners) listener({ path, ok: true, status: 204 });
+    await vi.waitFor(() =>
+      expect(f.fetch.mock.calls.some(([url]) => url === '/_pb/projects/demo/tokens')).toBe(true),
+    );
+    expect(f.fetch.mock.calls.some(([url]) => url === '/_pb/service-principals')).toBe(true);
+    cleanup!();
+    expect(listeners.size).toBe(0);
+  });
+  it.each(['revoke', 'create', 'suspend'] as const)(
+    'updates displayed records after confirming reauthenticated %s',
+    async (action) => {
+      const f = setup();
+      const original = f.fetch.getMockImplementation()!;
+      let attempts = 0;
+      let replayed = false;
+      f.fetch.mockImplementation(async (url, init) => {
+        if (init.method !== 'GET') {
+          if (++attempts === 1)
+            return Response.json({ error: { code: 'reauth_required' } }, { status: 403 });
+          replayed = true;
+          return new Response(null, { status: 204 });
+        }
+        if (url.startsWith('/_pb/me/tokens'))
+          return Response.json({
+            items: [{ ...item, status: replayed && action === 'revoke' ? 'revoked' : 'active' }],
+            next: null,
+            lifetime,
+          });
+        if (url.startsWith('/_pb/service-principals'))
+          return Response.json({
+            items: replayed
+              ? [
+                  {
+                    id,
+                    name: 'build',
+                    status: action === 'suspend' ? 'suspended' : 'active',
+                    projectId: null,
+                  },
+                ]
+              : [],
+            next: null,
+          });
+        return original(url, init);
+      });
+      const flow = createReauthFlow({
+        client: f.services.client,
+        storage: f.session,
+        now: Date.now,
+        navigate: vi.fn(),
+      });
+      const services = {
+        client: f.services.client,
+        subscribeReplay: flow.subscribeReplay,
+        requireReauth: (
+          request: Parameters<typeof flow.requireReauth>[0],
+          options: Parameters<typeof flow.requireReauth>[1],
+        ) => flow.requireReauth(request, options, '#/tokens'),
+      };
+      const before = createTokensController(services, f.deps);
+      await before.load();
+      if (action === 'revoke') await before.revoke(id);
+      else if (action === 'create') await before.createPrincipal('build', '', []);
+      else
+        await before.suspendPrincipal({
+          id,
+          name: 'build',
+          projectId: null,
+          status: 'active',
+          revision: 1,
+          createdByUserId: 'me',
+          permissions: [],
+        });
+      before.dispose();
+      const returned = createTokensController(services, f.deps);
+      await returned.load();
+      await returned.loadPrincipals();
+      const cleanup = bindTokensReplay(returned, services);
+      flow.restore();
+      expect(replayed).toBe(false);
+      await flow.confirm();
+      await vi.waitFor(() => {
+        if (action === 'revoke') expect(returned.snapshot().items[0]?.status).toBe('revoked');
+        else
+          expect(returned.snapshot().principals[0]?.status).toBe(
+            action === 'suspend' ? 'suspended' : 'active',
+          );
+      });
+      cleanup!();
+    },
+  );
+  it('ignores failures and unrelated replay results', () => {
+    const f = setup();
+    let replay!: (result: { path: string; ok: boolean; status: number }) => void;
+    const cleanup = bindTokensReplay(f.controller, {
+      ...f.services,
+      subscribeReplay: (listener) => {
+        replay = listener;
+        return vi.fn();
+      },
+    });
+    replay({ path: '/_pb/me/tokens/id', ok: false, status: 403 });
+    replay({ path: '/_pb/projects/demo/archive', ok: true, status: 204 });
+    expect(f.fetch).not.toHaveBeenCalled();
+    cleanup!();
+  });
+});
 
 describe('tokens show once', () => {
   it('clears the secret from state and second render on navigate', async () => {
@@ -710,5 +844,46 @@ describe('round 1 regressions', () => {
     await initializing;
     expect(controller.snapshot().principals.map((principal) => principal.id)).toEqual([id]);
     expect(controller.snapshot().target).toBe('organization');
+  });
+});
+
+describe('token list presentation', () => {
+  it('filters the loaded page by name, scope and status together', async () => {
+    const { controller } = setup();
+    await controller.load();
+    const items = controller.snapshot().items;
+    expect(filterTokens(items, { q: 'AUTO', scope: 'read', status: 'active' })).toEqual(items);
+    expect(filterTokens(items, { q: '', scope: 'write', status: 'active' })).toEqual([]);
+    expect(filterTokens(items, { q: '', scope: '', status: 'revoked' })).toEqual([]);
+  });
+  it('shows token names, status, copyable selectors and exact time without secrets', async () => {
+    const { controller } = setup();
+    await controller.load();
+    const html = markup(controller);
+    expect(html).toContain('responsive-table');
+    expect(html).toContain('data-label="Token"');
+    expect(html).toContain('automation');
+    expect(html).toContain('>Active<');
+    expect(html).toContain('aria-label="Copy token ID"');
+    expect(html).toContain('dateTime="2026-11-01"');
+    expect(html).toContain('Never');
+    expect(html).not.toContain(sentinel);
+    expect(html).not.toContain('<dialog');
+  });
+  it('shows failed token loading as an error and recovers on reload', async () => {
+    const { controller, fetch } = setup();
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: { code: 'forbidden', message: sentinel } }, { status: 403 }),
+    );
+    await controller.load();
+    const html = renderToString(
+      createElement(TokenList, { state: controller.snapshot(), controller }),
+    );
+    expect(html).toContain('data-list-state="error"');
+    expect(html).not.toContain('data-list-state="empty"');
+    expect(html).not.toContain(sentinel);
+    await controller.load();
+    expect(controller.snapshot().listError).toBe(false);
+    expect(markup(controller)).toContain('automation');
   });
 });

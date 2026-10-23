@@ -245,7 +245,7 @@ describe('access', () => {
   it('does not allow mutation of system roles', async () => {
     const { controller, fetch } = fixture({ system: true });
     await controller.load({ project: null, status: 'roles' });
-    expect(markup(controller)).not.toContain('>Delete role<');
+    expect(markup(controller)).not.toContain('>Remove role<');
     await controller.deleteRole(role.id);
     await controller.updateRole(role.id, { name: 'Changed' });
     expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
@@ -310,5 +310,26 @@ describe('access', () => {
     const { controller } = fixture();
     await controller.load({ project: null, status: 'roles' });
     expect(markup(controller)).toContain(role.id);
+  });
+});
+
+describe('access list presentation', () => {
+  it('renders copyable principal and grant IDs and a formatted added time without account e-mail', async () => {
+    const { controller } = fixture();
+    await controller.load({ project: 'web' });
+    const html = markup(controller);
+    expect(html).toContain('responsive-table');
+    expect(html).toContain('data-label="Added"');
+    expect(html).toContain(`dateTime="${grant.createdAt}"`);
+    expect(html).toContain('aria-label="Copy principal ID"');
+    expect(html).toContain('aria-label="Copy grant ID"');
+    expect(html).not.toContain(member.principal.email);
+    expect(html).not.toContain('<dialog');
+  });
+  it('shows denied list access as an error without claiming the list is empty', async () => {
+    const { controller } = fixture({ permissions: false });
+    await controller.load({ project: null });
+    expect(markup(controller)).toContain('data-list-state="error"');
+    expect(markup(controller)).not.toContain('data-list-state="empty"');
   });
 });

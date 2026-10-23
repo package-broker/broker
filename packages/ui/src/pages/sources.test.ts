@@ -31,6 +31,7 @@ const source: Source = {
   hasCredential: false,
   lastRemovalRefusal: null,
   removalAcceptanceArmed: false,
+  attachedProjectCount: 3,
 };
 const json = (data: unknown, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), { status, headers });
@@ -202,6 +203,39 @@ describe('source credentials', () => {
 });
 
 describe('sources and registered names', () => {
+  it('shows each organization source attachment count in the sources table, including zero and later pages', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [source], next: SOURCE }))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, id: 'second', attachedProjectCount: 0 }], next: null }),
+      );
+    const { model, html } = setup(fetch);
+    await model.load();
+    expect(model.snapshot().items[0]).toHaveProperty('attachedProjectCount', 3);
+    expect(html()).toMatch(/<table\b[\s\S]*Attached to 3 projects[\s\S]*<\/table>/);
+    await model.load(true);
+    expect(html()).toMatch(/<table\b[\s\S]*Attached to 0 projects[\s\S]*<\/table>/);
+    expect(html()).toContain('Attached to 3 projects');
+    expect(html()).not.toContain('Attached projects: unavailable');
+  });
+
+  it('keeps project attachment state separate from organization attachment counts', async () => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(
+        json({
+          items: [{ ...source, attachedProjectCount: undefined, attached: true, precedence: 0 }],
+          next: null,
+        }),
+      ),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toMatch(/Attached to this project: (?:<!-- -->)?Yes/);
+    expect(html()).not.toMatch(/Attached to \d+ projects/);
+    expect(html()).not.toContain('undefined');
+  });
+
   it('displays source IDs as copyable text and loads later source pages', async () => {
     const fetch = vi
       .fn()

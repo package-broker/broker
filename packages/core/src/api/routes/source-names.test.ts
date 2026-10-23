@@ -70,6 +70,7 @@ async function fixture(
   } as SourceRecord;
   const sources = {
     acceptRemoval: vi.fn().mockResolvedValue('accepted'),
+    countAttachedProjects: vi.fn().mockResolvedValue(new Map()),
     get: vi.fn(async (_org: unknown, id: string) =>
       options.sourceState
         ? null

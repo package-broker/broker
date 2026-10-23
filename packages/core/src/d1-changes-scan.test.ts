@@ -321,6 +321,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/registered-name.ts',
   'db-sqlite/src/repositories/session-liveness.ts',
   'db-sqlite/src/repositories/session.ts',
+  'db-sqlite/src/repositories/source-attachment-counts.ts',
   'db-sqlite/src/repositories/source-removal.ts',
   'db-sqlite/src/repositories/source-selection-revision.ts',
   'db-sqlite/src/repositories/source-selection.ts',
@@ -417,6 +418,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/session-liveness.ts': '',
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
+  'db-sqlite/src/repositories/source-attachment-counts.ts': '',
   'db-sqlite/src/repositories/source-removal.ts': 'UPDATE source',
   'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
@@ -678,6 +680,14 @@ function reads(source: string): ReadSite[] {
 // Keys preserve exact expression text, including SQL whitespace and interpolation expressions.
 const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
+    {
+      reason:
+        'Read-only grouped attachment count and JSON page-id filter; neither expression writes rows or reads executor changes.',
+      sites: [
+        'db-sqlite/src/repositories/source-attachment-counts.ts:SQL template: sql<number>`count(*)` #1',
+        'db-sqlite/src/repositories/source-attachment-counts.ts:SQL template: sql<boolean>`attachment.source_id in (select value from json_each(${JSON.stringify(input.sourceIds)}))` #1',
+      ],
+    },
     {
       reason:
         'The prefix helper only validates input and builds comparison predicates with Kysely; it neither mutates rows nor reads executor change counts.',
@@ -3257,6 +3267,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/provider-binding.ts:opaque dependency: import {\n  isReservedProviderId,\n  isValidProviderId,\n  isValidTrustAnchor,\n} from '@package-broker/core/identity/port'; #1",
         "db-sqlite/src/repositories/registered-name.ts:opaque dependency: import {\n  MAX_PATTERN_BYTES,\n  MAX_PATTERN_WILDCARDS,\n  isValidPattern,\n} from '@package-broker/core/catalogue/patterns'; #1",
         "db-sqlite/src/repositories/session-liveness.ts:opaque dependency: import { SESSION_ABSOLUTE_MS } from '@package-broker/core/auth/session'; #1",
+        "db-sqlite/src/repositories/source-attachment-counts.ts:opaque dependency: import { sql } from 'kysely'; #1",
         "db-sqlite/src/repositories/source.ts:opaque dependency: import { DbError } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/repositories/upstream-state.ts:opaque dependency: import { assertHeaderValue } from '@package-broker/core/ingest/validators'; #1",
         "db-sqlite/src/repositories/visibility-attach.ts:opaque dependency: import { isUlid } from '@package-broker/core/ids'; #1",

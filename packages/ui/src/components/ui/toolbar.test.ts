@@ -11,6 +11,12 @@ function find(node: ReactNode, type: string): Record<string, unknown> | undefine
 afterEach(() => vi.unstubAllGlobals());
 
 describe('loaded list filters', () => {
+  it.each([false, true])('initially follows the desktop media query (%s)', (matches) => {
+    vi.stubGlobal('window', { matchMedia: () => ({ matches }) });
+    const html = renderToString(fixture().tree);
+    expect(/<details[^>]*\sopen=""/.test(html)).toBe(matches);
+  });
+
   function fixture() {
     const onChange = vi.fn();
     const tree = LoadedListFilters({

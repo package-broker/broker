@@ -672,7 +672,18 @@ export function ReauthConfirmDialog(props: {
   );
 }
 
+function restoredProjectSlug(action: PendingAction | null) {
+  return action?.path.match(/^\/_pb\/projects\/([^/]+)\/restore$/)?.[1];
+}
+
 export function pendingActionDescription(action: PendingAction | null) {
+  if (restoredProjectSlug(action)) {
+    return {
+      label: 'Restore project',
+      effect: 'Restore this archived project.',
+      destructive: false,
+    };
+  }
   const match = action?.path.match(
     /\/(quarantine|tombstone|release|approve|apply|cancel|rollback)$/,
   );
@@ -713,6 +724,7 @@ export function ReauthConfirmContent(props: {
 }) {
   const description = pendingActionDescription(props.action);
   const display = props.action?.display;
+  const projectSlug = restoredProjectSlug(props.action);
   const packageIds = props.action?.path.match(/\/packages\/([^/]+)\/versions\/([^/]+)/);
   const runId = props.action?.path.match(/\/import-runs\/([^/]+)/)?.[1];
   const request = props.action ? `${props.action.method} ${props.action.path}` : '';
@@ -728,6 +740,12 @@ export function ReauthConfirmContent(props: {
       <dl className="detail-list">
         <dt>Action</dt>
         <dd className="font-medium">{description.label}</dd>
+        {projectSlug ? (
+          <>
+            <dt>Project</dt>
+            <dd>{projectSlug}</dd>
+          </>
+        ) : null}
         {display ? (
           <>
             <dt>Package</dt>

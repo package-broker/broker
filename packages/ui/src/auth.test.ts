@@ -373,6 +373,30 @@ describe('reauth flow', () => {
     expect(html).not.toContain(SENTINEL);
   });
 
+  it.each(['browser-archive', 'another-project'])(
+    'names the restored project %s in the visible confirmation summary',
+    (slug) => {
+      const html = renderToString(
+        createElement(ReauthConfirmContent, {
+          action: {
+            method: 'POST',
+            path: `/_pb/projects/${slug}/restore`,
+            savedAt: 1,
+          },
+          onConfirm: vi.fn(),
+          onDecline: vi.fn(),
+        }),
+      );
+      const summary = html.match(/<dl\b[^>]*>([\s\S]*?)<\/dl>/)?.[1];
+      expect(summary).toContain('<dt>Action</dt><dd class="font-medium">Restore project</dd>');
+      expect(summary).toContain(`<dt>Project</dt><dd>${slug}</dd>`);
+      expect(summary).toContain('<dt>Scope</dt><dd>Project</dd>');
+      expect(summary).toContain('<dt>Effect</dt><dd>Restore this archived project.</dd>');
+      expect(summary).not.toContain('<dt>Version</dt>');
+      expect(html).toMatch(/<button[^>]*>Restore project<\/button>/);
+    },
+  );
+
   it('stays on the current page with a recoverable error when persistence fails', () => {
     const { storage } = memoryStorage();
     storage.setItem = () => {

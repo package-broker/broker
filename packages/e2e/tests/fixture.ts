@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
+import type { Fixture } from '../dist/browser/fixtures.js';
 import {
   expect,
+  type APIResponse,
   type BrowserContext,
   type Locator,
   type Page,
@@ -15,25 +17,28 @@ function required(name: string): string {
   return value;
 }
 
-export const fixture = {
-  origin: required('PB_UI_E2E_ORIGIN'),
-  otherOrigin: required('PB_UI_E2E_OTHER_ORIGIN'),
-  email: required('PB_UI_E2E_EMAIL'),
-  token: required('PB_UI_E2E_TOKEN'),
+export const otherOrigin = required('PB_UI_E2E_OTHER_ORIGIN');
+export const packageTarget = {
+  id: '01J00000000000000000000003',
+  versionId: '01J00000000000000000000006',
+  name: '@browser-fixture/a-long-package-name-for-horizontal-overflow',
+  version: '1.0.0',
 };
-const allowed = new Set([fixture.origin, fixture.otherOrigin]);
-export function allowedUrl(raw: string): boolean {
+export function allowedUrl(raw: string, origin: string): boolean {
   const url = new URL(raw);
   return (
     url.protocol === 'http:' &&
     url.hostname === '127.0.0.1' &&
     url.username === '' &&
     url.password === '' &&
-    allowed.has(url.origin)
+    [origin, otherOrigin].includes(url.origin)
   );
 }
 
-export async function guardContext(context: BrowserContext): Promise<() => Promise<void>> {
+export async function guardContext(
+  context: BrowserContext,
+  origin: string,
+): Promise<() => Promise<void>> {
   const failures: string[] = [];
   await context.exposeBinding('__pbCspFailure', () => {
     failures.push('CSP violation or injected style element');
@@ -69,35 +74,66 @@ export async function guardContext(context: BrowserContext): Promise<() => Promi
       }
     });
     page.on('framenavigated', (frame) => {
-      if (frame.url() !== 'about:blank' && !allowedUrl(frame.url()))
+      if (frame.url() !== 'about:blank' && !allowedUrl(frame.url(), origin))
         failures.push('navigation outside allowed origins');
     });
   });
   await context.route('**/*', async (route) => {
-    if (!allowedUrl(route.request().url())) {
+    if (!allowedUrl(route.request().url(), origin)) {
       failures.push('request outside allowed origins');
       await route.abort('blockedbyclient');
       return;
     }
     try {
-      // Redirected requests may bypass routing; inspect Location before the browser sees it.
-      const response = await route.fetch({ maxRedirects: 0 });
-      try {
-        const location = response.headers()['location'];
-        if (
-          response.status() >= 300 &&
-          response.status() < 400 &&
-          location &&
-          !allowedUrl(new URL(location, route.request().url()).href)
-        ) {
-          failures.push('redirect outside allowed origins');
-          await route.abort('blockedbyclient');
-          return;
+      // Redirected browser requests may bypass routing, so resolve the entire chain here.
+      const request = route.request();
+      let url = request.url();
+      let method = request.method();
+      let data = request.postDataBuffer();
+      const headers = await request.allHeaders();
+      // Keep Chromium's cookie selection: the API client drops Secure cookies on HTTP 127.0.0.1.
+      delete headers['host'];
+      delete headers['content-length'];
+      for (let hop = 0; hop <= 20; hop++) {
+        const response = await context.request.fetch(url, {
+          method,
+          headers: { ...headers },
+          ...(data === null ? {} : { data }),
+          maxRedirects: 0,
+        });
+        try {
+          const status = response.status();
+          const location = response.headers()['location'];
+          if (![301, 302, 303, 307, 308].includes(status) || !location) {
+            await route.fulfill({ response });
+            return;
+          }
+          const next = new URL(location, url).href;
+          if (!allowedUrl(next, origin)) {
+            failures.push('redirect outside allowed origins');
+            await route.abort('blockedbyclient');
+            return;
+          }
+          if (new URL(next).origin !== new URL(url).origin) {
+            delete headers['authorization'];
+            delete headers['cookie'];
+          }
+          if (
+            ((status === 301 || status === 302) && method === 'POST') ||
+            (status === 303 && method !== 'GET' && method !== 'HEAD')
+          ) {
+            method = 'GET';
+            data = null;
+            delete headers['content-type'];
+            delete headers['content-encoding'];
+          }
+          url = next;
+        } finally {
+          await response.dispose();
         }
-        await route.fulfill({ response });
-      } finally {
-        await response.dispose();
       }
+      failures.push('loopback redirect limit exceeded');
+      await route.abort('blockedbyclient');
     } catch {
       // Playwright request errors can include cookie-bearing request headers.
       failures.push('loopback request could not complete');
@@ -111,14 +147,14 @@ export async function guardContext(context: BrowserContext): Promise<() => Promi
   return async () => {
     expect(failures, 'browser origin and CSP guard').toEqual([]);
     for (const page of context.pages()) {
-      if (allowedUrl(page.url()) && new URL(page.url()).pathname.startsWith('/_pb/ui')) {
+      if (allowedUrl(page.url(), origin) && new URL(page.url()).pathname.startsWith('/_pb/ui')) {
         expect(await page.locator('style').count()).toBe(0);
       }
     }
   };
 }
 
-export async function readSecret(response: Response, field: string): Promise<string> {
+export async function readSecret(response: Response | APIResponse, field: string): Promise<string> {
   try {
     const body: unknown = await response.json();
     if (body && typeof body === 'object' && field in body) {
@@ -175,6 +211,12 @@ export async function openDetails(page: Page, label: string): Promise<void> {
   if (!open) await summary.click();
 }
 
+export function activeDialog(page: Page, title: string): Locator {
+  return page.locator('dialog[open]').filter({
+    has: page.getByText(title, { exact: true }),
+  });
+}
+
 export async function assertLayout(page: Page): Promise<void> {
   await expect
     .poll(() => page.locator('table tbody tr').count(), { message: 'populated list table' })
@@ -204,8 +246,9 @@ export async function assertLayout(page: Page): Promise<void> {
   expect(confined, 'tables keep horizontal scrolling inside their container').toBe(true);
 }
 
-export function fixtureDatabase<T>(run: (db: DatabaseSync, org: string) => T): T {
-  const db = new DatabaseSync(required('PB_UI_E2E_DATABASE'));
+export function fixtureDatabase<T>(fixture: Fixture, run: (db: DatabaseSync, org: string) => T): T {
+  if (!fixture.database) throw new Error('fixture database missing');
+  const db = new DatabaseSync(fixture.database);
   try {
     db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000');
     const org = db.prepare('SELECT id FROM organization WHERE slug = ?').get('e2e')?.id;
@@ -216,8 +259,8 @@ export function fixtureDatabase<T>(run: (db: DatabaseSync, org: string) => T): T
   }
 }
 
-export function seedLists(): void {
-  fixtureDatabase((db, org) => {
+export function seedLists(fixture: Fixture): void {
+  fixtureDatabase(fixture, (db, org) => {
     const project = '01J00000000000000000000001';
     const source = '01J00000000000000000000002';
     db.prepare('INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)').run(
@@ -227,16 +270,26 @@ export function seedLists(): void {
       'Browser fixture with a long project name for narrow screens',
     );
     db.prepare(
-      "INSERT INTO source (id, org_id, name, ecosystem, type, url, status) VALUES (?, ?, ?, 'npm', 'npm_registry', ?, 'paused')",
-    ).run(source, org, 'Browser fixture source', fixture.otherOrigin);
+      "INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json, status) VALUES (?, ?, ?, 'npm', 'npm_registry', ?, ?, 'paused')",
+    ).run(
+      source,
+      org,
+      'Browser fixture source',
+      'https://registry.example.test',
+      JSON.stringify({ scopes: ['@browser-fixture'], distHosts: [] }),
+    );
     db.prepare(
       "INSERT INTO package (id, org_id, source_id, ecosystem, name, description) VALUES (?, ?, ?, 'npm', ?, ?)",
+    ).run(packageTarget.id, org, source, packageTarget.name, 'Browser fixture package');
+    db.prepare(
+      "INSERT INTO version (id, org_id, package_id, version, version_normalized, published_at, published_at_basis, metadata_json) VALUES (?, ?, ?, ?, ?, ?, 'import_time', '{}')",
     ).run(
-      '01J00000000000000000000003',
+      packageTarget.versionId,
       org,
-      source,
-      '@browser-fixture/a-long-package-name-for-horizontal-overflow',
-      'Browser fixture package',
+      packageTarget.id,
+      packageTarget.version,
+      packageTarget.version,
+      new Date().toISOString(),
     );
     db.prepare(
       "INSERT INTO import_run (id, org_id, source_system, state, plan_hash, planned_count) VALUES (?, ?, 'satis', 'planned', ?, 1)",
@@ -254,6 +307,11 @@ export function seedLists(): void {
   });
 }
 
-export function authCode(secret: Uint8Array, offset = 0): Promise<string> {
-  return hotp(secret, stepAt(Date.now()) + offset);
+export async function authCode(secret: Uint8Array, offset = 0): Promise<string> {
+  for (;;) {
+    const now = Date.now();
+    const remaining = 30_000 - (now % 30_000);
+    if (remaining >= 5_000) return hotp(secret, stepAt(now) + offset);
+    await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
 }

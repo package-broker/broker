@@ -15,7 +15,11 @@ export function FilterToolbar({
   children: ReactNode;
   chips?: readonly FilterChip[];
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(() =>
+    typeof window === 'undefined' || !window.matchMedia
+      ? true
+      : window.matchMedia('(min-width: 768px)').matches,
+  );
   useEffect(() => {
     const media = window.matchMedia('(min-width: 768px)');
     const change = () => setOpen(media.matches);

@@ -16,9 +16,8 @@ async function run() {
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
-  const { startNodeFixture, REPO_ROOT } = await import('../dist/browser/fixtures.js');
+  const { REPO_ROOT } = await import('../dist/browser/fixtures.js');
   const scratch = await mkdtemp(join(tmpdir(), 'pb-ui-e2e-'));
-  let fixture;
   let child;
   const other = createServer((request, response) => {
     if (request.url === '/external-redirect') {
@@ -35,7 +34,6 @@ async function run() {
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
   try {
-    fixture = await startNodeFixture();
     await new Promise((resolve, reject) => {
       other.once('error', reject);
       other.listen(0, '127.0.0.1', resolve);
@@ -55,11 +53,7 @@ async function run() {
         cwd: REPO_ROOT,
         env: {
           ...process.env,
-          PB_UI_E2E_ORIGIN: fixture.origin,
           PB_UI_E2E_OTHER_ORIGIN: `http://127.0.0.1:${address.port}`,
-          PB_UI_E2E_EMAIL: fixture.email,
-          PB_UI_E2E_TOKEN: fixture.token,
-          PB_UI_E2E_DATABASE: fixture.database,
           PB_UI_E2E_OUTPUT: scratch,
           PLAYWRIGHT_NO_COPY_PROMPT: '1',
         },
@@ -82,7 +76,6 @@ async function run() {
     process.removeListener('SIGTERM', stop);
     process.removeListener('SIGINT', stop);
     await new Promise((resolve) => other.close(resolve));
-    await fixture?.stop();
     await rm(scratch, { recursive: true, force: true });
   }
 }

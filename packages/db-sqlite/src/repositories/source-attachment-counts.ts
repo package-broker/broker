@@ -21,6 +21,9 @@ export function sourceAttachmentCountsStatement(
     .where(
       sql<boolean>`attachment.source_id in (select value from json_each(${JSON.stringify(input.sourceIds)}))`,
     );
+  if (input.restrictTo !== undefined) {
+    query = query.where('attached_project.id', 'in', input.restrictTo);
+  }
   if (!input.includeArchived) query = query.where('attached_project.status', '=', 'active');
   const servicePrincipalId = input.servicePrincipalId;
   if (servicePrincipalId !== undefined) {

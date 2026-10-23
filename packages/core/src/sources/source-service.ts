@@ -31,6 +31,7 @@ export type SourceActor =
       readonly kind: 'org';
       readonly actor: ActorContext;
       readonly servicePrincipalId?: string;
+      readonly restrictTo?: readonly string[];
     }
   | { readonly kind: 'project'; readonly actor: ProjectActor };
 
@@ -591,6 +592,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
               ...(who.servicePrincipalId === undefined
                 ? {}
                 : { servicePrincipalId: who.servicePrincipalId }),
+              ...(who.restrictTo === undefined ? {} : { restrictTo: who.restrictTo }),
               allProjects:
                 who.actor.isOrganizationAdmin || who.actor.permissions.has('project:read'),
               includeArchived: who.actor.isOrganizationAdmin,

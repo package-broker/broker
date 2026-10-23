@@ -1,0 +1,5 @@
+{
+  "packages": {},
+  "metadata-url": "/p2/%package%.json",
+  "available-packages": ["docker-smoke/fixture"]
+}

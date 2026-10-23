@@ -1,0 +1,7 @@
+{
+  "name": "docker-smoke/fixture",
+  "version": "1.0.0",
+  "type": "library",
+  "license": "MIT",
+  "description": "Local Docker smoke fixture"
+}

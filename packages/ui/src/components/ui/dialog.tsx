@@ -73,7 +73,12 @@ export function DialogClose({ onClick, ...props }: ComponentProps<'button'>) {
   );
 }
 
-export function DialogContent({ className, children, ...props }: ComponentProps<'dialog'>) {
+export function DialogContent({
+  className,
+  children,
+  variant,
+  ...props
+}: ComponentProps<'dialog'> & { variant?: 'source' }) {
   const context = useContext(DialogContext);
   const ref = useRef<HTMLDialogElement>(null);
   const open = context?.open ?? false;
@@ -101,12 +106,17 @@ export function DialogContent({ className, children, ...props }: ComponentProps<
       }}
       className={cn(
         'fixed inset-0 m-auto w-[calc(100%_-_2rem)] min-w-0 max-w-lg max-h-[90dvh] overflow-y-auto gap-4 rounded-lg border border-neutral-200 bg-white p-6 text-neutral-900 shadow-lg open:grid backdrop:bg-black/50',
+        variant === 'source' &&
+          'h-dvh max-h-none w-full max-w-none rounded-none p-0 overflow-hidden open:flex flex-col gap-0 sm:h-auto sm:max-h-[90dvh] sm:w-[calc(100%_-_2rem)] sm:max-w-lg sm:rounded-lg',
         className,
       )}
     >
       {children}
       <DialogClose
-        className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+        className={cn(
+          'absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600',
+          variant === 'source' && 'flex h-11 w-11 items-center justify-center',
+        )}
         aria-label="Close"
       >
         <svg

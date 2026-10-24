@@ -436,20 +436,29 @@ test.describe('Node management UI', () => {
     await page.getByRole('button', { name: 'Add source', exact: true }).click();
     const create = activeDialog(page, 'Add source');
     await expect(create).toBeVisible();
-    await create.getByLabel('Ecosystem', { exact: true }).selectOption('npm');
-    await expect(create.getByLabel('Scopes (one per line)', { exact: true })).toBeVisible();
-    await expect(create.getByLabel('Packages (one per line)', { exact: true })).toHaveCount(0);
-    await expect(create.getByLabel('Type', { exact: true }).locator('option')).toHaveText([
-      'npm_registry',
-      'npmjs_proxy',
-    ]);
-    await create.getByLabel('Ecosystem', { exact: true }).selectOption('composer');
-    await expect(create.getByLabel('Scopes (one per line)', { exact: true })).toHaveCount(0);
-    await create.getByLabel('Name', { exact: true }).fill('Browser Composer repository');
+    await create.getByRole('radio', { name: 'npm', exact: true }).check();
+    await create.getByRole('radio', { name: /^Private npm registry/ }).check();
+    await expect(create.getByLabel('Package scopes (one per line)', { exact: true })).toBeVisible();
+    await expect(create.getByLabel('Package names (one per line)', { exact: true })).toHaveCount(0);
+    await expect(
+      create
+        .getByRole('group', { name: 'Source type', exact: true })
+        .locator('label > span > span:first-child'),
+    ).toHaveText(['npmjs proxy', 'Private npm registry']);
+    await create.getByRole('radio', { name: 'Composer', exact: true }).check();
+    await create.getByRole('radio', { name: /^Composer repository/ }).check();
+    await expect(create.getByLabel('Package scopes (one per line)', { exact: true })).toHaveCount(
+      0,
+    );
     await create
-      .getByLabel('Repository URL', { exact: true })
+      .getByLabel('Source name (required)', { exact: true })
+      .fill('Browser Composer repository');
+    await create
+      .getByLabel('Repository URL (required)', { exact: true })
       .fill('https://composer.example.test');
-    await create.getByLabel('Packages (one per line)', { exact: true }).fill('browser/package');
+    await create
+      .getByLabel('Package names (one per line)', { exact: true })
+      .fill('browser/package');
     const created = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
     );
@@ -465,9 +474,10 @@ test.describe('Node management UI', () => {
 
     await sourceRow().getByRole('button', { name: 'Edit', exact: true }).click();
     const edit = activeDialog(page, 'Edit source');
-    await edit.getByLabel('Poll interval (seconds)', { exact: true }).fill('600');
+    await edit.getByText('Advanced settings', { exact: true }).click();
+    await edit.getByLabel('Sync interval (seconds)', { exact: true }).fill('600');
     await edit.getByLabel('Replace type-specific configuration', { exact: true }).check();
-    await edit.getByLabel('Packages (one per line)', { exact: true }).fill('browser/updated');
+    await edit.getByLabel('Package names (one per line)', { exact: true }).fill('browser/updated');
     const updated = page.waitForResponse(
       (r) =>
         r.request().method() === 'PATCH' &&
@@ -531,15 +541,21 @@ test.describe('Node management UI', () => {
     await go(page, 'sources');
     await page.getByRole('button', { name: 'Add source', exact: true }).click();
     const create = activeDialog(page, 'Add source');
-    await create.getByLabel('Name', { exact: true }).fill('Browser GitHub token');
-    await create.getByLabel('Type', { exact: true }).selectOption('vcs');
+    await create.getByLabel('Source name (required)', { exact: true }).fill('Browser GitHub token');
+    await create.getByRole('radio', { name: /^Git repository/ }).check();
     await expect(
-      create.getByLabel('GitHub authentication', { exact: true }).locator('option'),
+      create
+        .getByRole('group', { name: 'GitHub authentication', exact: true })
+        .locator('label > span > span:first-child'),
     ).toHaveText(['GitHub App', 'Personal access token']);
-    await expect(create.getByLabel('Installation ID', { exact: true })).toBeVisible();
-    await create.getByLabel('GitHub authentication', { exact: true }).selectOption('token');
-    await expect(create.getByLabel('Installation ID', { exact: true })).toHaveCount(0);
-    await create.getByLabel('Repository', { exact: true }).fill('browser/token');
+    await expect(
+      create.getByLabel('GitHub App installation ID (required)', { exact: true }),
+    ).toBeVisible();
+    await create.getByRole('radio', { name: /^Personal access token/ }).check();
+    await expect(
+      create.getByLabel('GitHub App installation ID (required)', { exact: true }),
+    ).toHaveCount(0);
+    await create.getByLabel('GitHub repository (required)', { exact: true }).fill('browser/token');
     const created = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
     );

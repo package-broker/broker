@@ -18,6 +18,7 @@ import { DataTable } from '../components/ui/table.js';
 import { buildListFilterHash } from '../page-hash.js';
 import {
   SourceForm,
+  SOURCE_TYPE_LABELS,
   sourceFieldErrors,
   type CreateSource,
   type SourceChanges,
@@ -44,6 +45,17 @@ const CREDENTIAL_FIELDS = {
   ssh_key: ['privateKeyPem', 'knownHosts'],
 } as const satisfies Record<CredentialKind, readonly string[]>;
 const CREDENTIAL_KINDS = Object.keys(CREDENTIAL_FIELDS) as CredentialKind[];
+
+export function sourceCredentialKind(body: CreateSource): CredentialKind {
+  if (body.type === 'composer_repository') return 'http_basic';
+  if (body.type === 'npm_registry') return 'npm_token';
+  if (body.type === 'vcs') {
+    const config = body.config as { provider?: string; installationId?: number } | undefined;
+    if (config?.provider === 'ssh') return 'ssh_key';
+    if (config?.provider === 'github' && config.installationId !== undefined) return 'github_app';
+  }
+  return 'bearer';
+}
 
 function isProxy(source: Source) {
   return ['packagist_proxy', 'npmjs_proxy'].includes(source.type);
@@ -72,6 +84,7 @@ interface SourcesState {
   createdSource: string | null;
   credentialSource: string | null;
   credentialVersion: number;
+  credentialKind: CredentialKind;
   savedCredential: { source: string; at: string } | null;
   names: (Names & { source: string }) | null;
   preview: Preview | null;
@@ -119,6 +132,7 @@ export function createSourcesModel(
     createdSource: null,
     credentialSource: null,
     credentialVersion: 0,
+    credentialKind: 'bearer',
     savedCredential: null,
     names: null,
     preview: null,
@@ -235,11 +249,23 @@ export function createSourcesModel(
     return state.items.find((item) => item.id === source);
   }
 
-  async function revealCreated(source: string) {
+  async function revealCreated(source: string, body?: CreateSource) {
     const created = await findLoadedSource(source);
     if (created) set({ createdSource: source });
     if (created && !isProxy(created) && created.type !== 'hosted') {
-      set({ credentialSource: source, credentialVersion: state.credentialVersion + 1 });
+      set({
+        credentialSource: source,
+        credentialVersion: state.credentialVersion + 1,
+        credentialKind: body
+          ? sourceCredentialKind(body)
+          : created.type === 'composer_repository'
+            ? 'http_basic'
+            : created.type === 'npm_registry'
+              ? 'npm_token'
+              : created.githubAuthentication === 'app'
+                ? 'github_app'
+                : 'bearer',
+      });
     }
   }
 
@@ -330,7 +356,7 @@ export function createSourcesModel(
         set({ editor: null, fieldErrors: {}, formError: null });
         await load();
         if (editor === 'create' && result.data && 'id' in result.data) {
-          await revealCreated(result.data.id);
+          await revealCreated(result.data.id, body as CreateSource);
         }
       } finally {
         set({ busy: false });
@@ -404,6 +430,7 @@ export function createSourcesModel(
       set({
         credentialSource: source,
         credentialVersion: state.credentialVersion + 1,
+        credentialKind: 'bearer',
         error: null,
       });
     },
@@ -590,12 +617,14 @@ function CredentialEditor({
   model,
   source,
   busy,
+  initialKind,
 }: {
   model: SourcesModel;
   source: string;
   busy: boolean;
+  initialKind: CredentialKind;
 }) {
-  const [kind, setKind] = useState<CredentialKind>('bearer');
+  const [kind, setKind] = useState<CredentialKind>(initialKind);
   return (
     <form
       className="grid gap-3"
@@ -691,7 +720,8 @@ export function SourceCard({
         <IdText value={source.id} label="source ID" />
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="outline">
-            {source.ecosystem} · {source.type}
+            {source.ecosystem === 'composer' ? 'Composer' : 'npm'} ·{' '}
+            {SOURCE_TYPE_LABELS[source.type]}
           </Badge>
           <StatusBadge status={source.status} />
         </div>
@@ -869,17 +899,25 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         rotate a secret.
       </p>
       <LoadedListFilters
-        values={filters}
+        values={{ ...filters, type: SOURCE_TYPE_LABELS[filters.type as Source['type']] ?? '' }}
         fields={[
           { key: 'q', label: 'Name (loaded sources)' },
           {
             key: 'type',
             label: 'Type',
-            options: [...new Set(combined.map((item) => item.type))].sort(),
+            options: [...new Set(combined.map((item) => SOURCE_TYPE_LABELS[item.type]))].sort(),
           },
           { key: 'scope', label: 'Source scope', options: ['organization', 'project'] },
         ]}
-        onChange={setFilters}
+        onChange={(next) =>
+          setFilters({
+            ...next,
+            type:
+              Object.keys(SOURCE_TYPE_LABELS).find(
+                (key) => SOURCE_TYPE_LABELS[key as Source['type']] === next.type,
+              ) ?? '',
+          })
+        }
       />
       {state.notice ? <p role="status">{state.notice}</p> : null}
       {created?.status === 'paused' && !isProxy(created) ? (
@@ -942,7 +980,8 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   <div className="grid gap-1">
                     <strong>{source.name}</strong>
                     <span className="text-xs text-neutral-600">
-                      {source.ecosystem} · {source.type}
+                      {source.ecosystem === 'composer' ? 'Composer' : 'npm'} ·{' '}
+                      {SOURCE_TYPE_LABELS[source.type]}
                     </span>
                     <StatusBadge status={source.status} />
                   </div>
@@ -1111,6 +1150,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               key={state.credentialVersion}
               model={model}
               source={state.credentialSource}
+              initialKind={state.credentialKind}
               busy={state.busy}
             />
           </CardContent>

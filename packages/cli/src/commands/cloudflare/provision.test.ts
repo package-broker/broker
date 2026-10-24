@@ -1482,3 +1482,28 @@ it.each([false, true])('chains provision into teardown with lifecycle drift=%s',
     expect(Object.values(h.resources).every((resources) => resources.length === 0)).toBe(true);
   }
 });
+
+it.each([true, false, null])(
+  'preserves dirty provenance in provision output (%s)',
+  async (dirty) => {
+    const file = join(project, '.pb/cloudflare/build-info.json');
+    const info = JSON.parse(await readFile(file, 'utf8'));
+    info.dirty = dirty;
+    await writeFile(file, JSON.stringify(info));
+    const result = await provision(options(harness(), { dryRun: true }));
+    expect(result.exitCode).toBe(0);
+    expect(result.output.build_info).toEqual(info);
+  },
+);
+
+it('rejects invalid dirty provenance before provisioning requests', async () => {
+  const file = join(project, '.pb/cloudflare/build-info.json');
+  const info = JSON.parse(await readFile(file, 'utf8'));
+  info.dirty = 'SENTINEL';
+  await writeFile(file, JSON.stringify(info));
+  const h = harness();
+  const result = await provision(options(h));
+  expect(result.output.error?.code).toBe('invalid_input');
+  expect(h.trace).toHaveLength(0);
+  expect(JSON.stringify(result)).not.toContain('SENTINEL');
+});

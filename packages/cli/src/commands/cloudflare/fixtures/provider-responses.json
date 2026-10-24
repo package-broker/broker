@@ -141,5 +141,14 @@
   "domainsEmpty": {
     "success": true,
     "result": []
+  },
+  "workerNameOnly": {
+    "success": true,
+    "result": [
+      {
+        "id": "broker"
+      }
+    ],
+    "result_info": null
   }
 }

@@ -815,6 +815,17 @@ it('checks the restored version canonical origin when rollback reverts PB_PUBLIC
   expect(rollbacks(h)).toHaveLength(1);
 });
 
+it.each([true, false, null])('prints revision, dirty=%s and artifact hash', async (dirty) => {
+  await change((a) => {
+    a.build_info = { ...a.build_info, gitSha: 'd'.repeat(40), dirty };
+  });
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  expect(await runCloudflareSmoke(options(harness(), { dryRun: true }))).toBe(0);
+  expect(log.mock.calls.flat()).toContain(`revision: ${'d'.repeat(40)}; dirty: ${dirty}`);
+  expect(log.mock.calls.flat()).toContain(`artifact_sha256: ${'a'.repeat(64)}`);
+});
+
 it('prints planned paths and the rollback result in human-readable mode', async () => {
   const h = harness();
   const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);

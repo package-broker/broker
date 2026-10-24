@@ -62,6 +62,19 @@ const reauth: ContractCase = {
   },
 };
 
+const windows: ContractCase = {
+  name: 'a foreign import run has no credential window in the organization',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    await seeder(context.executor)(
+      "INSERT INTO import_run (id, org_id, source_system, credential_window_until) VALUES ('foreign-window', ?, 'test', ?)",
+      foreign.orgId,
+      new Date(Date.now() + 3600000).toISOString(),
+    );
+    expect([...(await storeFor(context).credentialWindows(own, ['foreign-window']))]).toEqual([]);
+  },
+};
+
 function storeFor(context: CaseContext) {
   return createImportRunStore({
     executor: {
@@ -88,8 +101,15 @@ export const entries: readonly MutationEntry[] = [
   {
     builder: 'createImportRunStore',
     file: 'repositories/import-run.ts',
-    cases: [read, reauth],
+    cases: [read, reauth, windows],
     predicates: [
+      {
+        name: 'credential window reads are scoped to the organization',
+        locate: /(?<!\.)\borg_id = \?/,
+        neutral: NOT_NULL,
+        caseName: windows.name,
+        copies: 1,
+      },
       {
         name: 'run reads are scoped to the organization',
         locate: /(?<!\.)\borg_id = \?/,

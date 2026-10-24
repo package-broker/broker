@@ -15,6 +15,7 @@ import {
   type ImportRunWrite,
 } from '@package-broker/core/import/run-service';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import type { BlobStore } from '@package-broker/core/platform/blob';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { blobEligibleCondition } from './blob-references.js';
@@ -263,6 +264,77 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
         stmt('SELECT id, source_system FROM import_run WHERE org_id = ?', ctx.orgId),
       ),
     ).toEqual([{ id: input.id, source_system: 'test' }]);
+  });
+  const record = (overrides: Partial<IdempotencyRecord> = {}): IdempotencyRecord => ({
+    principalKey: 'user:actor',
+    key: 'create-key',
+    route: '/_pb/import-runs',
+    requestHash: 'c'.repeat(64),
+    status: 201,
+    responseJson: JSON.stringify({ id: input.id, planHash: input.planHash, state: 'planned' }),
+    createdAt: now,
+    expiresAt: new Date(Date.parse(now) + 86400000).toISOString(),
+    ...overrides,
+  });
+  it('stores the idempotency record in the creation batch and finds it', async () => {
+    expect(await store.createRun(ctx, fence, { ...input, idempotency: record() })).toMatchObject({
+      ok: true,
+    });
+    expect(batches.at(-1)!.some((statement) => statement.sql.includes('api_idempotency'))).toBe(
+      true,
+    );
+    expect(await store.findIdempotency(ctx, 'user:actor', 'create-key', now)).toEqual(record());
+    expect(await store.findIdempotency(foreign, 'user:actor', 'create-key', now)).toBeNull();
+  });
+  it('refuses a second run under a live idempotency key as a conflict and writes nothing', async () => {
+    await store.createRun(ctx, fence, { ...input, idempotency: record() });
+    expect(
+      await store.createRun(ctx, fence, {
+        ...input,
+        id: 'second',
+        idempotency: record({ requestHash: 'd'.repeat(64), responseJson: '{}' }),
+      }),
+    ).toMatchObject({ ok: false, reason: 'conflict' });
+    expect(
+      await executor.all(stmt('SELECT id FROM import_run WHERE org_id = ?', ctx.orgId)),
+    ).toEqual([{ id: input.id }]);
+    expect(
+      await executor.all(
+        stmt('SELECT request_hash FROM api_idempotency WHERE org_id = ?', ctx.orgId),
+      ),
+    ).toEqual([{ request_hash: 'c'.repeat(64) }]);
+  });
+  it('reads credential windows of own runs only', async () => {
+    const until = new Date(Date.parse(now) + 3600000).toISOString();
+    await executor.batch([
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system, credential_window_until) VALUES ('open', ?, 'test', ?)",
+        ctx.orgId,
+        until,
+      ),
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system) VALUES ('closed', ?, 'test')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system, credential_window_until) VALUES ('foreign-open', ?, 'test', ?)",
+        foreign.orgId,
+        until,
+      ),
+    ]);
+    expect(
+      await store.credentialWindows(ctx, ['open', 'closed', 'foreign-open', 'absent']),
+    ).toEqual(
+      new Map([
+        ['open', until],
+        ['closed', null],
+      ]),
+    );
+    expect(await store.credentialWindows(ctx, [])).toEqual(new Map());
+    const many = Array.from({ length: 100 }, (_, i) => `run-${String(i)}`);
+    expect(await store.credentialWindows(ctx, many)).toEqual(new Map());
+    expect(statements.at(-1)!.params.length).toBeLessThanOrEqual(100);
+    await expect(store.credentialWindows(ctx, [...many, 'one-more'])).rejects.toThrow(TypeError);
   });
   it('ignores a refetchable blob in another organization when creating a run', async () => {
     await executor.batch([

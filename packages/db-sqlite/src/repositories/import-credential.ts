@@ -34,7 +34,7 @@ export function createImportCredentialRepository(
       .select('icr.id')
       .where('icr.org_id', '=', ctx.orgId)
       .where('icr.id', '=', runId);
-  const source = (ctx: OrgContext, runId: string, externalRef: string) =>
+  const source = (ctx: OrgContext, runId: string, externalRef: string | null) =>
     db
       .selectFrom('import_ref as icf')
       .innerJoin('source as ics', (join) =>
@@ -43,7 +43,7 @@ export function createImportCredentialRepository(
       .where('icf.org_id', '=', ctx.orgId)
       .where('icf.import_run_id', '=', runId)
       .where('icf.entity_type', '=', 'source')
-      .where('icf.external_ref', '=', externalRef)
+      .$if(externalRef !== null, (query) => query.where('icf.external_ref', '=', externalRef!))
       .where('icf.action', '=', 'create')
       .where('icf.rolled_back_at', 'is', null);
   return {
@@ -87,6 +87,24 @@ export function createImportCredentialRepository(
           source: stored.source,
         },
       };
+    },
+    async bindings(ctx, runId) {
+      const bound = source(ctx, runId, null)
+        .where('ics.credential_id', 'is not', null)
+        .select(sql<string>`json_group_array(icf.external_ref)`.as('refs'));
+      const [row] = await executor.all<{ manifest: string | null; bound: string }>(
+        compile(
+          target(ctx, runId)
+            .clearSelect()
+            .select(['icr.manifest_blob_sha256 as manifest', bound.as('bound')]),
+        ),
+      );
+      if (row === undefined) return null;
+      const refs = JSON.parse(row.bound) as string[];
+      if (row.manifest === null) return { manifest: null, bound: refs };
+      const blob = await options.blobs.get(ctx, parseSha256(row.manifest));
+      if (blob === null) return 'unavailable';
+      return { manifest: await new Response(blob.body).text(), bound: refs };
     },
     async setCredential(ctx, fence, input) {
       const allowed = importWriteAuthority(ctx, fence, anchors);

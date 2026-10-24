@@ -20,6 +20,10 @@ const run = z.strictObject({
   approvedByUserId: z.string().nullable(),
   acceptedAt: z.string().nullable(),
   beforeImageExpiresAt: z.string().nullable(),
+  credentialWindowUntil: z.string().nullable().optional(),
+});
+const runDetail = run.extend({
+  credentials: z.array(z.strictObject({ sourceRef: z.string(), bound: z.boolean() })).optional(),
 });
 const base = { boundary: 'organization', permission: 'org:import:write' } as const;
 
@@ -64,7 +68,7 @@ export const IMPORT_GET_SPEC = {
     summary: 'Read an import run',
     tags: ['imports'],
     params,
-    responses: { 200: run },
+    responses: { 200: runDetail },
   },
 } as const satisfies ApiRouteSpec;
 

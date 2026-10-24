@@ -1,4 +1,5 @@
 import { expect } from 'vitest';
+import { auditEvent } from '@package-broker/core/audit/actions';
 import { createLocalLoginSuccessWriter } from '../../repositories/local-login-success.js';
 import { createLocalLoginReader } from '../../repositories/local-login.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
@@ -35,8 +36,19 @@ const foreignSession: ContractCase = {
     );
     expect(snapshot?.adminEligible).toBe(true);
     if (snapshot === null) throw new Error('missing login control');
+    const id = '01K7R5V0000000000000000001';
+    const audit = auditEvent({
+      id,
+      now: '2026-10-17T10:00:00.000Z',
+      action: 'session.reauth',
+      actor: { type: 'user', id: subject.userId },
+      target: { type: 'session', id: 'FOREIGN' },
+      context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    });
+    if (!audit.ok) throw new Error('invalid test audit');
     expect(
       await createLocalLoginSuccessWriter(executing(context)).succeed(own, {
+        audit: audit.event,
         snapshot,
         step: 2,
         rehash: null,
@@ -56,8 +68,13 @@ export const entries: readonly MutationEntry[] = [
     'local-login-success',
     'createLocalLoginSuccessWriter',
     foreignSession,
-    /(?<=from "session" where )"session"\."org_id" = \?/,
+    /(?<=from "session" where )"session"\."org_id" = \?(?= and "session"\."id")/,
     [
+      {
+        locate: /(?<=from "session" where )"session"\."org_id" = \?(?= and "session"\."user_id")/,
+        reason:
+          'The audit effect lookup repeats the globally unique session id already scoped by the effect statement and requires the organization-scoped operation marker.',
+      },
       {
         locate: /"(?:local_login|guard_\w+)"\."org_id" = /,
         reason:

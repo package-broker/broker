@@ -197,7 +197,7 @@ describe('Node management API personal access token lifecycle', () => {
     const used = await fetch(`${base}/_pb/projects`, { headers: bearer });
     expect(used.status).toBe(200);
 
-    expect(await pendingActions()).toEqual(['token.issue']);
+    expect(await pendingActions()).toEqual(['session.login', 'session.reauth', 'token.issue']);
 
     const revoked = await fetch(`${base}/_pb/me/tokens/${id}`, {
       method: 'DELETE',
@@ -207,7 +207,12 @@ describe('Node management API personal access token lifecycle', () => {
 
     const after = await fetch(`${base}/_pb/projects`, { headers: bearer });
     expect(after.status).toBe(401);
-    expect(await pendingActions()).toEqual(['token.issue', 'token.revoke']);
+    expect(await pendingActions()).toEqual([
+      'session.login',
+      'session.reauth',
+      'token.issue',
+      'token.revoke',
+    ]);
   });
   it('reorders the real attachment set while a project-owned source stays unattached', async () => {
     const base = await start();

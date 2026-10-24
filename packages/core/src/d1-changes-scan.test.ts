@@ -3353,6 +3353,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/node-sqlite-executor.ts:opaque dependency: import { DatabaseSync, type StatementSync } from 'node:sqlite'; #1",
       ],
     },
+    {
+      reason:
+        'Audit condition embeds only the compiled organization-scoped operation marker and session effect guards with bound parameters; no D1 changes() read.',
+      sites: [
+        'db-sqlite/src/repositories/local-login-success.ts:SQL input: sql: `(${when.sql}) = 1` #1',
+      ],
+    },
   ].flatMap(({ reason, sites }) => sites.map((site) => [site, reason])),
 );
 

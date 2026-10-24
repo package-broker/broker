@@ -1,0 +1,89 @@
+{
+  "scriptCreated": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "id": "broker",
+      "etag": "script-etag",
+      "startup_time_ms": 1
+    }
+  },
+  "assetSession": {
+    "success": true,
+    "errors": null,
+    "messages": null,
+    "result": {
+      "jwt": "SESSION_SENTINEL",
+      "buckets": [["129d0bf9c674d4cc340cf5f8feeb9f36"], ["2bc926e0a131a6279c79f1e99279a6c8"]]
+    }
+  },
+  "assetBatch": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {}
+  },
+  "assetComplete": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "jwt": "COMPLETION_SENTINEL"
+    }
+  },
+  "assetsCached": {
+    "success": true,
+    "errors": null,
+    "messages": null,
+    "result": {
+      "jwt": "COMPLETION_SENTINEL",
+      "buckets": []
+    }
+  },
+  "versionUploaded": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "number": 2,
+      "annotations": {},
+      "metadata": {
+        "created_on": "2026-10-23T12:00:00.000Z"
+      },
+      "resources": {
+        "bindings": [],
+        "script": {
+          "etag": "script-etag",
+          "handlers": ["fetch"]
+        },
+        "script_runtime": {
+          "compatibility_date": "2026-10-01",
+          "compatibility_flags": ["nodejs_compat"]
+        }
+      }
+    }
+  },
+  "deployments": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "deployments": [
+        {
+          "id": "77777777-7777-4777-8777-777777777777",
+          "created_on": "2026-10-23T12:00:00.000Z",
+          "source": "api",
+          "strategy": "percentage",
+          "versions": [
+            {
+              "version_id": "22222222-2222-4222-8222-222222222222",
+              "percentage": 100
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

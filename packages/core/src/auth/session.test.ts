@@ -6,6 +6,7 @@ import {
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
+  clientIpOf,
   createSessionService,
   newSessionSecrets,
   sessionMetaOf,
@@ -125,6 +126,7 @@ describe('sessionMetaOf', () => {
   it('prefers cf-connecting-ip over x-forwarded-for', async () => {
     const meta = await sessionMetaOf(
       requestWith(null, { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }),
+      'test-request-id',
     );
     expect(meta.ip).toBe('203.0.113.7');
   });
@@ -132,47 +134,63 @@ describe('sessionMetaOf', () => {
   it('takes the first x-forwarded-for entry', async () => {
     const meta = await sessionMetaOf(
       requestWith(null, { 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9, 192.0.2.10' }),
+      'test-request-id',
     );
     expect(meta.ip).toBe('198.51.100.1');
   });
 
   it('returns null ip when no header gives an address', async () => {
-    expect((await sessionMetaOf(requestWith(null))).ip).toBeNull();
+    expect((await sessionMetaOf(requestWith(null), 'test-request-id')).ip).toBeNull();
     expect(
-      (await sessionMetaOf(requestWith(null, { 'x-forwarded-for': ' , 192.0.2.9' }))).ip,
+      (
+        await sessionMetaOf(
+          requestWith(null, { 'x-forwarded-for': ' , 192.0.2.9' }),
+          'test-request-id',
+        )
+      ).ip,
     ).toBeNull();
-    expect((await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': '  ' }))).ip).toBeNull();
+    expect(
+      (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': '  ' }), 'test-request-id')).ip,
+    ).toBeNull();
   });
 
   it('keeps only addresses of at most 64 characters from [0-9A-Fa-f:.]', async () => {
     const accepted = ['203.0.113.7', '2001:db8::1', '::ffff:192.0.2.1', 'a'.repeat(64)];
     for (const ip of accepted) {
-      expect((await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }))).ip).toBe(ip);
+      expect(
+        (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }), 'test-request-id')).ip,
+      ).toBe(ip);
     }
     const rejected = ['a'.repeat(65), 'unknown', '1.2.3.4<script>', '203.0.113.7:80x', '1.2.3.4 5'];
     for (const ip of rejected) {
-      expect((await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }))).ip).toBeNull();
-      expect((await sessionMetaOf(requestWith(null, { 'x-forwarded-for': ip }))).ip).toBeNull();
+      expect(
+        (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }), 'test-request-id')).ip,
+      ).toBeNull();
+      expect(
+        (await sessionMetaOf(requestWith(null, { 'x-forwarded-for': ip }), 'test-request-id')).ip,
+      ).toBeNull();
     }
   });
 
   it('does not fall back to x-forwarded-for when cf-connecting-ip is present but invalid', async () => {
     const meta = await sessionMetaOf(
       requestWith(null, { 'cf-connecting-ip': 'unknown', 'x-forwarded-for': '198.51.100.1' }),
+      'test-request-id',
     );
     expect(meta.ip).toBeNull();
   });
 
   it('returns the user agent or null', async () => {
     expect(
-      (await sessionMetaOf(requestWith(null, { 'user-agent': 'TestAgent/1.0' }))).userAgent,
+      (await sessionMetaOf(requestWith(null, { 'user-agent': 'TestAgent/1.0' }), 'test-request-id'))
+        .userAgent,
     ).toBe('TestAgent/1.0');
-    expect((await sessionMetaOf(requestWith(null))).userAgent).toBeNull();
+    expect((await sessionMetaOf(requestWith(null), 'test-request-id')).userAgent).toBeNull();
   });
 
   it('returns the hash of a well-formed session cookie', async () => {
     const secret = randomToken(32);
-    const meta = await sessionMetaOf(requestWith(sessionCookie(secret)));
+    const meta = await sessionMetaOf(requestWith(sessionCookie(secret)), 'test-request-id');
     expect(meta.previousSecretHash).toBe(await sha256Hex(secret));
   });
 
@@ -186,7 +204,9 @@ describe('sessionMetaOf', () => {
       `${sessionCookie(secret)}; ${sessionCookie(secret)}`,
     ];
     for (const cookie of cookies) {
-      expect((await sessionMetaOf(requestWith(cookie))).previousSecretHash).toBeNull();
+      expect(
+        (await sessionMetaOf(requestWith(cookie), 'test-request-id')).previousSecretHash,
+      ).toBeNull();
     }
   });
 });
@@ -465,7 +485,10 @@ describe('logout', () => {
   it('revokes by the cookie hash and returns the clearing cookies', async () => {
     const secret = randomToken(32);
     const h = harness();
-    const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)));
+    const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)), {
+      requestId: 'test-request-id',
+      ip: null,
+    });
     expect(h.revokeBySecretHash).toHaveBeenCalledTimes(1);
     expect(h.revokeBySecretHash).toHaveBeenCalledWith(ctx, await sha256Hex(secret), NOW);
     expect(cookies).toEqual(h.service.clearCookies());
@@ -475,13 +498,19 @@ describe('logout', () => {
     const h = harness();
     h.revokeBySecretHash.mockRejectedValueOnce(new Error('db down'));
     await expect(
-      h.service.logout(ctx, requestWith(sessionCookie(randomToken(32)))),
+      h.service.logout(ctx, requestWith(sessionCookie(randomToken(32))), {
+        requestId: 'test-request-id',
+        ip: null,
+      }),
     ).rejects.toThrow('db down');
   });
 
   it('clears without a repository call when there is no cookie', async () => {
     const h = harness();
-    const cookies = await h.service.logout(ctx, requestWith(null));
+    const cookies = await h.service.logout(ctx, requestWith(null), {
+      requestId: 'test-request-id',
+      ip: null,
+    });
     expect(h.repositoryCalls()).toBe(0);
     expect(cookies).toEqual(h.service.clearCookies());
   });
@@ -494,7 +523,10 @@ describe('logout', () => {
       `${sessionCookie(secret)}; ${sessionCookie(secret)}`,
     ]) {
       const h = harness();
-      const cookies = await h.service.logout(ctx, requestWith(cookie));
+      const cookies = await h.service.logout(ctx, requestWith(cookie), {
+        requestId: 'test-request-id',
+        ip: null,
+      });
       expect(h.repositoryCalls()).toBe(0);
       expect(cookies).toEqual(h.service.clearCookies());
     }
@@ -528,5 +560,17 @@ describe('createSessionService', () => {
         publicOrigin: ORIGIN,
       }),
     ).not.toThrow();
+  });
+});
+
+describe('clientIpOf', () => {
+  it.each([
+    [{ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }, '203.0.113.7'],
+    [{ 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9' }, '198.51.100.1'],
+    [{ 'cf-connecting-ip': 'unknown', 'x-forwarded-for': '198.51.100.1' }, null],
+    [{ 'x-forwarded-for': 'unknown' }, null],
+    [{}, null],
+  ])('resolves client address from %j', (headers, expected) => {
+    expect(clientIpOf(requestWith(null, headers))).toBe(expected);
   });
 });

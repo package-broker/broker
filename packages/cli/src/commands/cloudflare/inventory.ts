@@ -171,6 +171,11 @@ export interface DeploymentAttempt {
   previous_version_id: string | null;
   previous_deployment_id: string | null;
   previous_distribution: Distribution[];
+  script_creation?: {
+    state: 'pending' | 'complete';
+    deployment_id: string | null;
+    version_id: string | null;
+  };
   requested_rollout: number;
   worker_url: string;
   candidate_probe_url: string | null;
@@ -404,6 +409,7 @@ function deploymentValid(raw: unknown): boolean {
         'previous_version_id',
         'previous_deployment_id',
         'previous_distribution',
+        ...(Object.hasOwn(v, 'script_creation') ? ['script_creation'] : []),
         'requested_rollout',
         'worker_url',
         'candidate_probe_url',
@@ -442,6 +448,19 @@ function deploymentValid(raw: unknown): boolean {
       [v.version_id, v.previous_version_id, v.previous_deployment_id].every(
         (x) => x === null || id(x),
       ) &&
+      (v.script_creation === undefined ||
+        (record(v.script_creation) &&
+          exact(v.script_creation, ['state', 'deployment_id', 'version_id']) &&
+          v.previous_version_id === null &&
+          v.previous_deployment_id === null &&
+          v.requested_rollout === 100 &&
+          (v.script_creation.state === 'pending'
+            ? v.script_creation.deployment_id === null &&
+              v.script_creation.version_id === null &&
+              v.phase === 'preparing_upload'
+            : v.script_creation.state === 'complete' &&
+              id(v.script_creation.deployment_id) &&
+              id(v.script_creation.version_id)))) &&
       Array.isArray(v.previous_distribution) &&
       v.previous_distribution.every(
         (d) => exact(d, ['version_id', 'percentage']) && id(d.version_id) && d.percentage === 100,

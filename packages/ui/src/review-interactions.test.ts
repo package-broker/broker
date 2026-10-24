@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it, type TestContext } from 'vitest';
 
@@ -21,11 +22,11 @@ async function launchBrowser() {
 
 const components = {
   sources: `
-      import { SourcesView } from './pages/sources';
+      import { SourcesView, createSourcesModel } from './pages/sources';
       const source = { projectId: null, ecosystem: 'npm', type: 'npm_registry', url: 'https://registry.example', status: 'active', removalPolicy: 'flag', pollIntervalSeconds: 300, hasCredential: false, lastSuccessAt: null };
       const alpha = { ...source, id: 'alpha', name: 'Alpha', attached: true, precedence: 0 };
       const beta = { ...source, id: 'beta', name: 'Beta', attached: true, precedence: 1 };
-      let state = { items: [alpha, beta], order: ['alpha', 'beta'], settingsVersion: 0, loading: false, busy: false, listError: false, next: null, credentialSource: null, names: null, preview: null, savedCredential: null, error: null, etag: '"r1"' };
+      let state = { ...createSourcesModel({ client: {}, requireReauth: () => {} }, null).snapshot(), items: [alpha, beta], order: ['alpha', 'beta'], settingsVersion: 0, loading: false, busy: false, listError: false, next: null, credentialSource: null, names: null, preview: null, savedCredential: null, error: null, etag: '"r1"' };
       const listeners = new Set();
       globalThis.edits = [];
       const model = { project: null, snapshot: () => state, subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); }, edit: (...args) => globalThis.edits.push(args) };
@@ -81,11 +82,39 @@ async function mounted(context: TestContext, component: keyof typeof components)
   return { page, browserExpect };
 }
 
+it('renders the mounted sources fixture with all model state initialized without a browser', async () => {
+  const contents = components.sources.replace(
+    "createRoot(document.getElementById('root')).render",
+    'globalThis.fixtureHtml = renderToString',
+  );
+  const bundle = await build({
+    stdin: {
+      contents: `import React from 'react'; import { renderToString } from 'react-dom/server'; ${contents}`,
+      loader: 'tsx',
+      resolveDir: fileURLToPath(new URL('.', import.meta.url)),
+    },
+    bundle: true,
+    write: false,
+    platform: 'node',
+    external: ['react', 'react-dom', 'react-dom/*'],
+    format: 'cjs',
+    jsx: 'automatic',
+    define: { 'process.env.NODE_ENV': '"production"' },
+  });
+  const context = { require: createRequire(import.meta.url), queueMicrotask, fixtureHtml: '' };
+  runInNewContext(bundle.outputFiles[0]!.text, context);
+  expect(context.fixtureHtml).toContain('Alpha');
+  expect(context.fixtureHtml).toContain('Beta');
+  expect(context.fixtureHtml).not.toContain('<dialog');
+});
+
 describe('mounted review regressions', () => {
   it('keeps source drafts with their IDs after filtering and reordering', async (context) => {
     let step = 'mount sources';
     context.onTestFailed(() => console.error(`Mounted source regression stopped at: ${step}`));
     const { page, browserExpect } = await mounted(context, 'sources');
+    await browserExpect(page.locator('tbody tr')).toHaveCount(2);
+    await browserExpect(page.locator('dialog[open]')).toHaveCount(0);
     const row = (name: string) => page.locator('tbody tr').filter({ hasText: name });
     step = 'open Alpha settings';
     await row('Alpha').getByText('Edit source', { exact: true }).click();

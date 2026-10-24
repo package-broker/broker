@@ -4,7 +4,14 @@ import { openLoginState, sealLoginState } from './login-state.js';
 import type { LoginOutcome } from './identity-login.js';
 import { createSsoRoutes } from './routes-sso.js';
 import type { ReauthOutcome, SsoRouteDeps } from './routes-sso.js';
-import { createSessionService, newSessionSecrets, SESSION_IDLE_MS } from './session.js';
+import {
+  createSessionService,
+  newSessionSecrets,
+  SESSION_IDLE_MS,
+  SESSION_TOUCH_MS,
+} from './session.js';
+import * as auditActions from '../audit/actions.js';
+import type { AuditEvent } from '../audit/actions.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import type { Clock } from '../ids.js';
@@ -101,6 +108,7 @@ async function build(options: Options = {}) {
   const logs: Log[] = [];
   let now = NOW;
   const clock: Clock = { now: () => new Date(now) };
+  const audits: AuditEvent[] = [];
   const rows = new Map<string, { session: ActiveSession; revoked: boolean }>();
   let revokeFails = false;
   let findFails = false;
@@ -120,11 +128,19 @@ async function build(options: Options = {}) {
       const entry = [...rows].find(([, row]) => row.session.id === id);
       return repository.findActive(ctx, entry?.[0] ?? '', cutoffs);
     },
-    touch: () => Promise.resolve(),
-    revokeBySecretHash: (_ctx, hash) => {
+    touch: (_ctx, id, now) => {
+      for (const row of rows.values()) {
+        if (row.session.id === id) row.session = { ...row.session, lastSeenAt: now };
+      }
+      return Promise.resolve();
+    },
+    revokeBySecretHash: (_ctx, hash, _now, audit) => {
       if (revokeFails) return Promise.reject(new Error('database offline'));
       const row = rows.get(hash);
-      if (row !== undefined) row.revoked = true;
+      if (row !== undefined && !row.revoked) {
+        row.revoked = true;
+        if (audit !== undefined) audits.push(audit);
+      }
       return Promise.resolve(row !== undefined);
     },
     revoke: () => Promise.reject(new Error('unexpected revoke')),
@@ -227,6 +243,9 @@ async function build(options: Options = {}) {
   });
   return {
     kernel,
+    rows,
+    audits,
+    repository,
     logs,
     login,
     reauth,
@@ -1678,6 +1697,65 @@ describe('POST /_pb/auth/logout', () => {
     );
     expect(after.status).toBe(401);
   });
+
+  it('leaves last_seen_at unchanged and stages exactly one logout event', async () => {
+    const app = await build();
+    const { cookie, csrf, id } = await app.seed();
+    const row = [...app.rows.values()].find((row) => row.session.id === id)!;
+    const lastSeenAt = row.session.lastSeenAt;
+    app.advance(SESSION_TOUCH_MS + 1);
+    const touch = vi.spyOn(app.repository, 'touch');
+
+    const response = await app.kernel.fetch(
+      post('/_pb/auth/logout', '', { cookie, 'x-csrf-token': csrf }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(row.revoked).toBe(true);
+    expect(row.session.lastSeenAt).toBe(lastSeenAt);
+    expect(touch).not.toHaveBeenCalled();
+    expect(app.audits).toEqual([
+      expect.objectContaining({ action: 'session.logout', target: { type: 'session', id } }),
+    ]);
+  });
+
+  it.each(['refuses', 'throws'] as const)(
+    'revokes, clears cookies and logs once when audit construction %s',
+    async (failure) => {
+      const app = await build();
+      const { cookie, csrf, id } = await app.seed();
+      const row = [...app.rows.values()].find((row) => row.session.id === id)!;
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const buildAudit = auditActions.auditEvent;
+      const audit = vi.spyOn(auditActions, 'auditEvent');
+      if (failure === 'refuses') {
+        audit.mockImplementationOnce((input) =>
+          buildAudit({ ...input, context: { ...input.context, requestId: 'invalid-request-id' } }),
+        );
+      } else {
+        audit.mockImplementationOnce(() => {
+          throw new Error('private request data');
+        });
+      }
+      try {
+        const response = await app.kernel.fetch(
+          post('/_pb/auth/logout', '', { cookie, 'x-csrf-token': csrf }),
+        );
+
+        expect(response.status).toBe(204);
+        expect(row.revoked).toBe(true);
+        expect(app.audits).toEqual([]);
+        expect(cookieValue(response, SESSION_COOKIE)).toBe('');
+        expect(cookieValue(response, CSRF_COOKIE)).toBe('');
+        expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
+        expect(log).toHaveBeenCalledExactlyOnceWith('Session logout audit event unavailable');
+        expect(JSON.stringify(app.logs)).not.toContain('private request data');
+      } finally {
+        audit.mockRestore();
+        log.mockRestore();
+      }
+    },
+  );
 
   it('still clears the cookies when revocation fails', async () => {
     const app = await build();

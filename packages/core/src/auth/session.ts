@@ -8,7 +8,7 @@ import {
 } from './cookies.js';
 import { assertCsrfToken, assertSameOrigin } from './csrf.js';
 import { randomToken, sha256Hex } from './primitives.js';
-import { auditEvent, isIpLiteral } from '../audit/actions.js';
+import { auditEvent, isIpLiteral, type AuditEvent } from '../audit/actions.js';
 import type { OrgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { ulid, type Clock } from '../ids.js';
@@ -42,8 +42,12 @@ export interface AuthenticatedSession {
 }
 
 export interface SessionService {
-  /** A failing `touch` rejects the whole call: the request fails closed. */
-  authenticate(ctx: OrgContext, request: Request): Promise<AuthenticatedSession | null>;
+  /** Touches by default; a failing `touch` rejects the whole call. */
+  authenticate(
+    ctx: OrgContext,
+    request: Request,
+    options?: { readonly touch: boolean },
+  ): Promise<AuthenticatedSession | null>;
   assertCsrf(request: Request, session: AuthenticatedSession): Promise<void>;
   isReauthFresh(session: AuthenticatedSession): boolean;
   setCookies(secrets: SessionSecrets, expiresAt: string): readonly string[];
@@ -127,7 +131,7 @@ export function createSessionService(deps: {
   ];
 
   return {
-    async authenticate(ctx, request) {
+    async authenticate(ctx, request, options) {
       const secret = sessionSecretOf(request);
       if (secret === null) {
         return null;
@@ -141,7 +145,7 @@ export function createSessionService(deps: {
         return null;
       }
       const lastSign = timestampMs(session.lastSeenAt ?? session.createdAt);
-      if (now - lastSign > SESSION_TOUCH_MS) {
+      if (options?.touch !== false && now - lastSign > SESSION_TOUCH_MS) {
         await sessions.touch(
           ctx,
           session.id,
@@ -200,22 +204,30 @@ export function createSessionService(deps: {
         if (session === null) {
           await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString());
         } else {
-          const id = ulid(now.getTime());
-          const audit = auditEvent({
-            id,
-            now: now.toISOString(),
-            action: 'session.logout',
-            actor: { type: 'user', id: session.userId },
-            target: { type: 'session', id: session.id },
-            context: {
-              opId: id,
-              requestId: meta.requestId,
-              sourceIp: isIpLiteral(meta.ip) ? meta.ip : null,
-              tokenSelector: null,
-            },
-          });
-          if (!audit.ok) throw new TypeError('Invalid session logout audit event');
-          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString(), audit.event);
+          let event: AuditEvent | undefined;
+          try {
+            const id = ulid(now.getTime());
+            const audit = auditEvent({
+              id,
+              now: now.toISOString(),
+              action: 'session.logout',
+              actor: { type: 'user', id: session.userId },
+              target: { type: 'session', id: session.id },
+              context: {
+                opId: id,
+                requestId: meta.requestId,
+                sourceIp: isIpLiteral(meta.ip) ? meta.ip : null,
+                tokenSelector: null,
+              },
+            });
+            if (audit.ok) event = audit.event;
+          } catch {
+            // Audit construction must not prevent revocation.
+          }
+          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString(), event);
+          if (event === undefined) {
+            console.error('Session logout audit event unavailable');
+          }
         }
       }
       return clearCookies();

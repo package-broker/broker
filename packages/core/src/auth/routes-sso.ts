@@ -546,7 +546,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       throw error;
     }
     const org = orgOf(rc);
-    const session = await sessions.authenticate(org, rc.request);
+    const session = await sessions.authenticate(org, rc.request, { touch: false });
     if (session === null) {
       return withCookies(
         envelopeResponse(401, 'unauthorized', 'Unauthorized', rc.requestId),

@@ -26,6 +26,8 @@ import {
   active,
   cloudflareDeployContract,
   deploy,
+  deploymentDomain,
+  workersDevOrigin,
   validateDeploymentArtifact,
   type DeployOptions,
 } from './deploy.js';
@@ -626,6 +628,16 @@ export async function setup(
       if (!worker) invalid();
       const current = await active(api, `/workers/scripts/${identity.script_name}`);
       if (!current.versions.length) invalid();
+      if (!cloudflareDeployContract.preview)
+        throw new CloudflareError('capability_unknown', 1, false, 'deploy');
+    }
+    if (!o.publicUrl && !o.domain) await workersDevOrigin(api, identity.script_name);
+    if (o.domain && !(await deploymentDomain(api, identity.script_name, o.domain))) {
+      if (!cloudflareDeployContract.domainZone)
+        throw new CloudflareError('capability_unknown', 1, false, 'deploy');
+      const zone = await cloudflareDeployContract.domainZone(api, o.domain);
+      if (!/^[a-f0-9]{32}$/.test(zone))
+        throw new CloudflareError('capability_unknown', 1, false, 'deploy');
     }
     for (const name of [...selectedSecrets, ...(headersEnv ? [headersEnv] : [])]) {
       if (name !== 'PB_MASTER_KEY' && !retainedNames.has(name)) {

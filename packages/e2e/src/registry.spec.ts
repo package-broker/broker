@@ -197,7 +197,11 @@ function gitRemote() {
 }
 
 export function createRegistryFixture() {
-  const state = { versions: ['1.0.0'], corrupt: false };
+  const state = {
+    versions: ['1.0.0'],
+    corrupt: false,
+    satisPackages: ['satis/first', 'satis/second'],
+  };
   const calls: string[] = [];
   const git = gitRemote();
   const commits = new Map<string, string>();
@@ -318,6 +322,13 @@ export function createRegistryFixture() {
       }
       return new Response(state.corrupt ? ZIP.map((byte) => byte ^ 0xff) : ZIP);
     }
+    if (url.hostname === 'repo.packagist.org' && url.pathname === '/satis/packages.json') {
+      return Response.json({
+        packages: Object.fromEntries(
+          state.satisPackages.map((name) => [name, { '1.0.0': member(name, '1.0.0') }]),
+        ),
+      });
+    }
     if (url.hostname === 'repo.packagist.org') {
       return Response.json(
         {
@@ -427,6 +438,11 @@ function totp(secret: string, step: number): string {
 async function status(response: Response, expected: number, label: string): Promise<Response> {
   assert.equal(response.status, expected, `${label}:HTTP:${response.status}`);
   return response;
+}
+
+function cause(error: unknown): string {
+  const message = (error instanceof Error ? error.message : '').split('\n')[0]!.slice(0, 200);
+  return /^[\w:./,@ -]+$/.test(message) ? ` (${message})` : ` (${error?.constructor?.name})`;
 }
 
 async function session(broker: LocalBroker) {
@@ -681,6 +697,61 @@ export async function registryScenario(
       assert(value.error.message && value.error.requestId, 'MissingErrorEnvelope');
       return { code: value.error.code, message: value.error.message };
     };
+    stage = 'composer-source-repoll';
+    const satis = await api(
+      '/_pb/sources',
+      {
+        name: 'satis',
+        ecosystem: 'composer',
+        type: 'composer_repository',
+        url: 'https://repo.packagist.org/satis/packages.json',
+        config: { selection: { packages: ['satis/first'] } },
+      },
+      201,
+    );
+    const { id: satisId } = (await satis.json()) as { id: string };
+    await api(`/_pb/sources/${satisId}/names`, { pattern: 'satis/*' }, 201);
+    await api(`/_pb/projects/alpha/sources/${satisId}/attachment`, {}, 204, 'PUT');
+    const waitForPackage = async (name: string) => {
+      await local.pollTick(orgId);
+      await until(async () => {
+        const response = await admin.request(`/_pb/projects/alpha/packages`, undefined, 'GET');
+        assert.equal(response.status, 200);
+        const page = (await response.json()) as { items: { name: string }[] };
+        return page.items.some((item) => item.name === name);
+      }, `composer-source-repoll:${name}`);
+    };
+    await api(`/_pb/sources/${satisId}/enable`, undefined);
+    await waitForPackage('satis/first');
+    await api(
+      `/_pb/sources/${satisId}`,
+      {
+        config: { selection: { packages: ['satis/first', 'satis/second', 'satis/third'] } },
+      },
+      204,
+      'PATCH',
+    );
+    await api(`/_pb/sources/${satisId}/sync`, undefined, 409);
+    await api(`/_pb/sources/${satisId}/enable`, undefined);
+    await waitForPackage('satis/second');
+    // The upstream adds a selected package while the source remains active.
+    remote.state.satisPackages.push('satis/third');
+    await api(`/_pb/sources/${satisId}/sync`, undefined, 202);
+    await waitForPackage('satis/third');
+    const sourceList = await admin.request('/_pb/sources', undefined, 'GET');
+    const sourcePage = (await sourceList.json()) as {
+      items: { id: string; pollIntervalSeconds: number }[];
+    };
+    assert.equal(sourcePage.items.find((item) => item.id === satisId)?.pollIntervalSeconds, 86400);
+
+    await until(async () => {
+      const pending = await rows<{ state: string }>(
+        // eslint-disable-next-line no-restricted-syntax -- Scoped infrastructure observation; seeding uses session APIs.
+        "SELECT state FROM job WHERE org_id = ? AND type IN ('core:source-poll:v1', 'core:source-sync:v1') AND state NOT IN ('succeeded', 'failed', 'dead')",
+      );
+      return pending.length === 0;
+    }, 'source-jobs-settled');
+
     stage = 'authorization';
     await envelope('/alpha/packages.json', 401, 'unauthorized', false);
     const hook = async (ref: string, valid = true) => {
@@ -736,27 +807,39 @@ export async function registryScenario(
     ) => {
       type Metadata = { packages: Record<string, { version: string; dist: { url: string } }[]> };
       let body: Metadata | undefined;
-      await until(
-        async () => {
-          await local.tick();
-          const response = await get(`/alpha/p2/${name}.json`);
-          if (response.status !== 200) return false;
-          body = (await response.json()) as Metadata;
-          return body.packages[name]?.some((version) => version.version === wanted) === true;
-        },
-        'composer-metadata',
-        timeoutMs,
-      );
+      let observed = 'none';
+      try {
+        await until(
+          async () => {
+            await local.tick();
+            const response = await get(`/alpha/p2/${name}.json`);
+            if (response.status !== 200) {
+              observed = `HTTP:${response.status}`;
+              return false;
+            }
+            body = (await response.json()) as Metadata;
+            const versions = body.packages[name]?.map((version) => version.version);
+            observed = `versions:${versions?.join(',') ?? 'missing'}`;
+            return versions?.includes(wanted) === true;
+          },
+          'composer-metadata',
+          timeoutMs,
+        );
+      } catch (error) {
+        throw new Error(`${(error as Error).message}:${name}:${wanted}:${observed}`, {
+          cause: error,
+        });
+      }
       const versions = body!.packages[name]!;
       const version = versions.find((version) => version.version === wanted)!;
       const dist = new URL(version.dist.url);
-      assert.equal(dist.origin, local.origin);
+      assert.equal(dist.origin, local.origin, `composer-dist-origin:${dist.origin}`);
       const archive = await status(await get(dist.pathname), 200, 'composer-archive');
       assert.deepEqual(new Uint8Array(await archive.arrayBuffer()), expected);
       return { path: dist.pathname, versions: versions.map((version) => version.version).sort() };
     };
     stage = 'registry-reads';
-    assert.deepEqual((await composer('acme/mirror')).versions, ['1.0.0']);
+    assert.deepEqual((await composer('acme/mirror')).versions, ['1.0.0'], 'mirror-versions');
     for (const path of [
       '/app/installations/123/access_tokens',
       '/contents/composer.json',
@@ -833,7 +916,11 @@ export async function registryScenario(
       versions: Record<string, { dist: { tarball: string; integrity: string } }>;
     };
     const dist = npm.versions['1.0.0']!.dist;
-    assert.equal(new URL(dist.tarball).origin, local.origin);
+    assert.equal(
+      new URL(dist.tarball).origin,
+      local.origin,
+      `npm-tarball-origin:${new URL(dist.tarball).origin}`,
+    );
     assert.equal(dist.integrity, `sha512-${createHash('sha512').update(TGZ).digest('base64')}`);
     const tarball = await status(await get(new URL(dist.tarball).pathname), 200, 'npm-tarball');
     assert.deepEqual(new Uint8Array(await tarball.arrayBuffer()), TGZ);
@@ -846,6 +933,18 @@ export async function registryScenario(
     assert(JSON.stringify(await betaMetadata.json()).includes('acme/proxy'), 'BetaPackageMissing');
     const betaArchive = await status(await get(betaPath, true, betaToken), 200, 'beta-archive');
     assert.deepEqual(new Uint8Array(await betaArchive.arrayBuffer()), ZIP);
+    await until(
+      async () => {
+        await local.tick();
+        const pending = await rows(
+          // eslint-disable-next-line no-restricted-syntax -- Scoped infrastructure observation of unsettled jobs.
+          "SELECT id FROM job WHERE org_id = ? AND (state = 'running' OR (state = 'queued' AND run_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
+        );
+        return pending.length === 0;
+      },
+      'jobs-settled',
+      60_000,
+    );
     const deniedCalls = remote.calls.length;
     const beta = await envelope(betaPath, 404, 'not_found');
     await envelope('/beta/p2/acme/proxy.json', 404, 'not_found');
@@ -862,7 +961,11 @@ export async function registryScenario(
     );
     assert.equal(beta.code, missing.code);
     assert.deepEqual(beta, absentProject);
-    assert.equal(remote.calls.length, deniedCalls);
+    assert.equal(
+      remote.calls.length,
+      deniedCalls,
+      `denied-upstream-calls:${remote.calls.length - deniedCalls}`,
+    );
     stage = 're-mirror';
     await local.loseBlob(orgId, hash(ZIP));
     const beforeRemirror = remote.count('/acme/proxy/legacy.zip/');
@@ -942,7 +1045,7 @@ export async function registryScenario(
             error.actual === 404 &&
             error.expected === 202
               ? `${runtime}: signed webhook returned HTTP 404.`
-              : `${runtime}: registry assembly scenario failed at ${stage}.${composerFailure && ` Composer output: ${composerFailure}`}`,
+              : `${runtime}: registry assembly scenario failed at ${stage}${cause(error)}.${composerFailure && ` Composer output: ${composerFailure}`}`,
         };
   } finally {
     try {

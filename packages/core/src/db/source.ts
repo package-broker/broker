@@ -158,6 +158,14 @@ export type PollOutcome =
  * re-read. `conflict` also covers a failure that could not be classified.
  */
 export interface SourceRepository {
+  syncNow(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
+  ): Promise<
+    'requested' | 'source_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
+  >;
+
   acceptRemoval(
     ctx: OrgContext,
     fence: MutationFence,

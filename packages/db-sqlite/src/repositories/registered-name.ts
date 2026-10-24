@@ -358,6 +358,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               .updateTable('source')
               .set({
                 status: 'active',
+                next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
                 updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
               })
               .where('id', '=', input.id)

@@ -60,6 +60,7 @@ export type SourceError =
   | 'has_packages'
   | 'has_history'
   | 'invalid_pattern'
+  | 'source_paused'
   | 'proxy_source'
   | 'pattern_taken'
   | 'invalid_name';
@@ -86,6 +87,9 @@ export type SourceDto = Pick<
   | 'removalPolicy'
   | 'pollIntervalSeconds'
   | 'lastSuccessAt'
+  | 'lastError'
+  | 'lastPolledAt'
+  | 'nextPollAt'
 > & {
   readonly hasCredential: boolean;
   readonly lastRemovalRefusal: RemovalRefusal | null;
@@ -95,6 +99,7 @@ export type SourceDto = Pick<
 export type SourceListDto = SourceDto & { readonly attachedProjectCount?: number };
 
 export interface SourceService {
+  syncNow(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   acceptRemoval(
     ...args: [...WriteArgs, id: string, call: ApiCall]
   ): Promise<SourceServiceResult<null>>;
@@ -166,6 +171,7 @@ export interface SourceServiceDeps {
     | 'countAttachedProjects'
     | 'pause'
     | 'acceptRemoval'
+    | 'syncNow'
   >;
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly registeredNames: RegisteredNameRepository;
@@ -184,6 +190,24 @@ const invalid = (field: string, message: string): SourceServiceResult<never> => 
   error: 'invalid_config',
   problems: [{ field, message }],
 });
+
+function safeSourceError(code: string | null): string | null {
+  const codes = [
+    'network',
+    'timeout',
+    'http_error',
+    'unauthorized',
+    'rate_limited',
+    'not_found',
+    'invalid_response',
+    'mass_absence',
+    'too_large',
+    'policy_denied',
+    'credential_unavailable',
+    'internal',
+  ];
+  return code !== null && codes.includes(code) ? code : null;
+}
 
 function sourceDto(source: SourceRecord): SourceDto {
   let url: string | null = null;
@@ -214,6 +238,9 @@ function sourceDto(source: SourceRecord): SourceDto {
     removalPolicy: source.removalPolicy,
     pollIntervalSeconds: source.pollIntervalSeconds,
     lastSuccessAt: source.lastSuccessAt,
+    lastError: safeSourceError(source.lastError),
+    lastPolledAt: source.lastPolledAt,
+    nextPollAt: source.nextPollAt,
     hasCredential: source.credentialId !== null,
     lastRemovalRefusal: source.removalRefusal,
     removalAcceptanceArmed: source.removalAccepted,
@@ -524,6 +551,19 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
   }
 
   return {
+    async syncNow(ctx, who, fence, id, call) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await owned(ctx, who, id);
+      if (source === null) return fail('not_found');
+      const answer = await deps.sources.syncNow(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+        ...mutationAudit(call, who, 'source.sync_requested', 'source', id, source.projectId),
+      });
+      return answer === 'requested' ? success(null) : fail(answer);
+    },
     async acceptRemoval(ctx, who, fence, id, call) {
       if (!orgOnly(who) || who.kind !== 'org' || !who.actor.isOrganizationAdmin)
         return fail('forbidden');

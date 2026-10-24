@@ -423,7 +423,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
   'db-sqlite/src/repositories/source.ts':
-    "deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x6",
+    "deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x7",
   'db-sqlite/src/repositories/upstream-state.ts':
     "insertInto('upstream_state') [onConflict:doUpdateSet]; updateTable('upstream_state') x2",
   'db-sqlite/src/repositories/visibility-attach.ts':
@@ -680,6 +680,16 @@ function reads(source: string): ReadSite[] {
 // Keys preserve exact expression text, including SQL whitespace and interpolation expressions.
 const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
+    {
+      reason:
+        'Sync request checks status and updates only scheduling timestamps under the owner fence; source keys are unchanged.',
+      sites: [
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source\n        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')` #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(active),\n          compile(\n            db\n              .updateTable('source')\n              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('status', '!=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        { authority: probe(held, true), conflict: probe(collision, false) },\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'requested'; #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'authority' || outcome.reason === 'indeterminate')\n        return failureResult(ctx, input.id, outcome.reason); #1",
+      ],
+    },
     {
       reason:
         'Read-only grouped attachment count and JSON page-id filter; neither expression writes rows or reads executor changes.',
@@ -2373,7 +2383,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #2",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'conflict') return 'conflict'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'indeterminate') return 'indeterminate'; #2",
-        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(paused),\n          ...assertCheck(activatable),\n          compile(\n            db\n              .updateTable('source')\n              .set({\n                status: 'active',\n                updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n              })\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId)\n              .where('status', '=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,\n            false,\n          ),\n          collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),\n        },\n      ); #1",
+        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(paused),\n          ...assertCheck(activatable),\n          compile(\n            db\n              .updateTable('source')\n              .set({\n                status: 'active',\n                next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n                updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n              })\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId)\n              .where('status', '=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,\n            false,\n          ),\n          collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),\n        },\n      ); #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) return 'enabled'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #3",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (\n        outcome.reason === 'conflict' &&\n        input.idempotency !== undefined &&\n        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))\n      )\n        return 'conflict'; #2",

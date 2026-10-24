@@ -887,6 +887,44 @@ describe('source pollState', () => {
     pollLastModified: 'Wed, 15 Oct 2026 12:00:00 GMT',
   };
 
+  it('exposes credential_unavailable in the DTO and clears it after recovery', async () => {
+    expect(
+      await repository.pollState(a, guard, {
+        id: SRC_ORG,
+        outcome: 'failure',
+        error: 'credential_unavailable',
+      }),
+    ).toBe('written');
+    const service = createSourceService({
+      sources: repository,
+      providerAnchors: ANCHORS,
+    } as unknown as Parameters<typeof createSourceService>[0]);
+    const actor = {
+      kind: 'org' as const,
+      actor: {
+        kind: 'organization' as const,
+        userId: ORG_ADMIN,
+        isOrganizationAdmin: true,
+        permissions: new Set(['org:sources:read'] as const),
+      },
+    };
+    const list = () => service.list(a, actor, { cursor: null, limit: 10 });
+    expect(await list()).toMatchObject({
+      ok: true,
+      value: {
+        items: [
+          {
+            lastError: 'credential_unavailable',
+            lastPolledAt: expect.any(String),
+            nextPollAt: expect.any(String),
+          },
+        ],
+      },
+    });
+    expect(await repository.pollState(a, guard, success)).toBe('written');
+    expect(await list()).toMatchObject({ ok: true, value: { items: [{ lastError: null }] } });
+  });
+
   it('records a success', async () => {
     await executor.batch([
       stmt(
@@ -1316,6 +1354,74 @@ describe('source paginated list and pause', () => {
       },
     };
   }
+
+  it('requests immediate polling without changing the daily interval and stages an audit', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'daily', {
+        status: 'degraded',
+        next_poll_at: at(86400),
+        poll_interval_seconds: 86400,
+      }),
+    ]);
+    const input = {
+      ...pauseInput(),
+      audit: { ...pauseInput().audit, action: 'source.sync_requested' as const },
+    };
+    expect(await repository.syncNow(a, orgFence(), input)).toBe('requested');
+    const row = await repository.get(a, SRC_ORG);
+    expect(near(row?.nextPollAt, 0)).toBe(true);
+    expect(row).toMatchObject({ status: 'degraded', pollIntervalSeconds: 86400 });
+    expect(await rows('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([
+      { action: 'source.sync_requested' },
+    ]);
+  });
+
+  it('does not schedule paused, foreign or unauthorized sources', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'paused', { status: 'paused', next_poll_at: at(86400) }),
+    ]);
+    const before = await snapshot();
+    expect(await repository.syncNow(a, orgFence(), pauseInput())).toBe('source_paused');
+    expect(await repository.syncNow(b, orgFence(), pauseInput())).toBe('forbidden');
+    expect(await repository.syncNow(a, p1Fence(), pauseInput())).toBe('forbidden');
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('rechecks paused status inside the sync fence', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'racing', { status: 'active', next_poll_at: at(86400) }),
+    ]);
+    const before = (await repository.get(a, SRC_ORG))!.nextPollAt;
+    const racing: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: async (statements) => {
+        await executor.batch([
+          stmt("UPDATE source SET status = 'paused' WHERE org_id = ? AND id = ?", a.orgId, SRC_ORG),
+        ]);
+        return executor.batch(statements);
+      },
+    };
+    expect(await createSourceRepository(racing).syncNow(a, orgFence(), pauseInput())).toBe(
+      'source_paused',
+    );
+    expect((await repository.get(a, SRC_ORG))!.nextPollAt).toBe(before);
+    expect(await rows('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([]);
+  });
+
+  it('rolls back a sync request when staging its audit fails', async () => {
+    await executor.batch([
+      seedSource(SRC_ORG, 'daily', { status: 'active', next_poll_at: at(86400) }),
+    ]);
+    const before = await snapshot();
+    expect(
+      await repository.syncNow(a, orgFence(), {
+        ...pauseInput(),
+        audit: { ...pauseInput().audit, payloadJson: 'invalid-json' },
+      }),
+    ).toBe('conflict');
+    expect(await snapshot()).toBe(before);
+  });
 
   it('lists in id order without repeating rows when an earlier source is inserted', async () => {
     await executor.batch([

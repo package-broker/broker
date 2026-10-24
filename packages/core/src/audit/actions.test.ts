@@ -42,9 +42,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 56 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(56);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(56);
+  it('has 57 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(57);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(57);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {

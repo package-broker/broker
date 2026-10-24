@@ -257,15 +257,27 @@ export function createSourcePollJob(deps: {
         if (job.signal.aborted) return;
         if (source.nextPollAt === null) continue;
         try {
-          await jobsOf(job).enqueue(
+          const jobs = jobsOf(job);
+          // A terminal match stays due and gets a fresh key on the next minute tick.
+          const minute = job.ports.clock.now().toISOString().slice(0, 16);
+          const dueMinute = source.nextPollAt.slice(0, 16);
+          const enqueued = await jobs.enqueue(
             ctx,
             SOURCE_SYNC,
             { sourceId: source.id, reason: 'poll' },
             {
-              idempotencyKey: await digest(['poll', source.id, source.nextPollAt]),
+              idempotencyKey: await digest([
+                'poll',
+                source.id,
+                dueMinute > minute ? dueMinute : minute,
+              ]),
               resourceKey: `source:${source.id}`,
             },
           );
+          if (!enqueued.created) {
+            const existing = await jobs.get(ctx, enqueued.id);
+            if (existing?.state !== 'queued' && existing?.state !== 'running') continue;
+          }
           await deps.sources.deferPoll(ctx, source.id, source.nextPollAt);
         } catch {
           job.observability.counter('pb.source.poll_failure', undefined, 1);

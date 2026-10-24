@@ -478,7 +478,7 @@ describe('source poll', () => {
         'core:source-sync:v1',
         { sourceId: 's1', reason: 'poll' },
         {
-          idempotencyKey: digest(['poll', 's1', '2026-10-20T09:59:00.000Z']),
+          idempotencyKey: digest(['poll', 's1', '2026-10-20T10:00']),
           resourceKey: 'source:s1',
         },
       ],
@@ -487,7 +487,7 @@ describe('source poll', () => {
         'core:source-sync:v1',
         { sourceId: 's2', reason: 'poll' },
         {
-          idempotencyKey: digest(['poll', 's2', '2026-10-20T09:58:00.000Z']),
+          idempotencyKey: digest(['poll', 's2', '2026-10-20T10:00']),
           resourceKey: 'source:s2',
         },
       ],
@@ -506,6 +506,46 @@ describe('source poll', () => {
     await poll.handler(poll.validate({}), second.job);
     expect(first.enqueue.mock.calls).toEqual(second.enqueue.mock.calls);
   });
+
+  it('coalesces sync requests in one minute and admits a later minute', async () => {
+    const sources = {
+      deferPoll: vi.fn(async () => true),
+      listDue: vi.fn(async () => [due('s1', '2026-10-20T09:59:01.123Z')]),
+    };
+    const poll = createSourcePollJob({ sources });
+    const keys = new Set<string>();
+    const { job, enqueue } = context();
+    enqueue.mockImplementation(async (_ctx, _type, _payload, options) => {
+      keys.add((options as { idempotencyKey: string }).idempotencyKey);
+      return { id: 'queued', created: true };
+    });
+    await poll.handler({}, job);
+    sources.listDue.mockResolvedValue([due('s1', '2026-10-20T09:59:59.999Z')]);
+    await poll.handler({}, job);
+    expect(keys.size).toBe(1);
+    sources.listDue.mockResolvedValue([due('s1', '2026-10-20T10:01:00.000Z')]);
+    await poll.handler({}, job);
+    expect(keys.size).toBe(2);
+  });
+
+  it.each(['queued', 'running', 'succeeded', 'dead', null] as const)(
+    'defers a duplicate only while it is pending: %s',
+    async (state) => {
+      const sources = {
+        deferPoll: vi.fn(async () => true),
+        listDue: vi.fn(async () => [due('s1', NOW.toISOString())]),
+      };
+      const { job, enqueue } = context();
+      enqueue.mockResolvedValue({ id: 'j', created: false });
+      const get = vi.fn(async () => (state === null ? null : { state }));
+      Object.assign(job.ports.platform!.jobs!, { get });
+      await createSourcePollJob({ sources }).handler({}, job);
+      expect(get).toHaveBeenCalledExactlyOnceWith(org, 'j');
+      expect(sources.deferPoll).toHaveBeenCalledTimes(
+        state === 'queued' || state === 'running' ? 1 : 0,
+      );
+    },
+  );
 
   it('skips a source without next_poll_at and stops once aborted', async () => {
     const sources = {

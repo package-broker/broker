@@ -1,0 +1,54 @@
+# Changelog
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.0...ui-v2.0.0-rc.1) (2026-10-24)
+
+
+### Features
+
+* **core:** attach and detach a source to a project ([#774](https://github.com/package-broker/broker/issues/774)) ([bd042b2](https://github.com/package-broker/broker/commit/bd042b26d72e8a2c9b5e451c4a0ff11688a2612e))
+* **core:** create, list and read service principals over HTTP ([#788](https://github.com/package-broker/broker/issues/788)) ([4788669](https://github.com/package-broker/broker/commit/4788669dedac1a5128a0a978b48733ac6ddf11e2))
+* **core:** idempotent import run creation with credential window and binding status ([#841](https://github.com/package-broker/broker/issues/841)) ([855a7ce](https://github.com/package-broker/broker/commit/855a7ce7eb2ca5d159df5b7bcf98eb6180e4f9ad))
+* **core:** management API wave b: package manage and import routes with the token fence ([#780](https://github.com/package-broker/broker/issues/780)) ([11e6e05](https://github.com/package-broker/broker/commit/11e6e05fa6dbf4fcce99f1ec5322c47798cd6853))
+* **core:** organization source list carries an attached-project count ([#799](https://github.com/package-broker/broker/issues/799)) ([03fd0a2](https://github.com/package-broker/broker/commit/03fd0a294cdb11f4d5914e07a11b9084b25843b1))
+* **core:** project grants list and source attachment and precedence for the UI ([#791](https://github.com/package-broker/broker/issues/791)) ([7873621](https://github.com/package-broker/broker/commit/787362114847001464624aaaabe42818fbad911f))
+* **core:** projects list prefix filter and per-item ETags for restore ([#798](https://github.com/package-broker/broker/issues/798)) ([a45bea3](https://github.com/package-broker/broker/commit/a45bea3a0fc2f699b3948a032c2de1aad2814752))
+* **core:** vulnerability status in the API and job wiring on Node and Workers ([#779](https://github.com/package-broker/broker/issues/779)) ([89a54fc](https://github.com/package-broker/broker/commit/89a54fc78a8a6d0e4e5154969389de66090cc8a9))
+* **runtime:** serve /_pb/openapi.json and complete the API document ([#790](https://github.com/package-broker/broker/issues/790)) ([ec277e2](https://github.com/package-broker/broker/commit/ec277e2baf6226aa7e26be126fa30f39e7258a30))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+* **sources:** sync now, immediate poll on enable, sync outcome in the source DTO ([#826](https://github.com/package-broker/broker/issues/826)) ([9dcaf07](https://github.com/package-broker/broker/commit/9dcaf071593524d4c467a2bb52ed2576bd5695a0))
+* UI pending-action store for reauth replay ([#563](https://github.com/package-broker/broker/issues/563)) ([4f99bee](https://github.com/package-broker/broker/commit/4f99beeaf27649ed40172fbe467e7a20399814c1))
+* **ui:** add, edit, attach and detach sources ([#808](https://github.com/package-broker/broker/issues/808)) ([a3b30be](https://github.com/package-broker/broker/commit/a3b30be85bbbea4122e9a3f70cac727d0f139674))
+* **ui:** admin shell with login, setup, reauth and scope switcher ([#781](https://github.com/package-broker/broker/issues/781)) ([5e7f06e](https://github.com/package-broker/broker/commit/5e7f06ed87a76aee44a773d9a8a2ca6a3f4d6ab2))
+* **ui:** API client and types generated from openapi.json ([#551](https://github.com/package-broker/broker/issues/551)) ([b905b30](https://github.com/package-broker/broker/commit/b905b30562243be03a7599ef3657da2e87711f0c))
+* **ui:** apply the readability components to projects, access, sources and tokens ([#803](https://github.com/package-broker/broker/issues/803)) ([09d184d](https://github.com/package-broker/broker/commit/09d184d3d1c9b1ea3555104047e5156717cd67f8))
+* **ui:** asset provider bridge between core and ui builds ([#603](https://github.com/package-broker/broker/issues/603)) ([cb1adf0](https://github.com/package-broker/broker/commit/cb1adf05c93c1f2627bb30cc0c64788977aefa43))
+* **ui:** audit and import pages ([#787](https://github.com/package-broker/broker/issues/787)) ([2097bfe](https://github.com/package-broker/broker/commit/2097bfe3a35f564e1bef01fb90f1d15122ecdef7))
+* **ui:** browser first-admin setup with a local QR and automated Playwright end to end ([#718](https://github.com/package-broker/broker/issues/718)) ([8fcda6e](https://github.com/package-broker/broker/commit/8fcda6ed00991b21ee544f410893d0750f9a05f1))
+* **ui:** client returns ETag and Location; reauth keeps page filters ([#785](https://github.com/package-broker/broker/issues/785)) ([7470b28](https://github.com/package-broker/broker/commit/7470b288b3a27258ad654581fec825ffd672c15c))
+* **ui:** committed openapi.json and generated UI types with a drift check ([#765](https://github.com/package-broker/broker/issues/765)) ([ab87962](https://github.com/package-broker/broker/commit/ab879625da660e2eca35e6a35968b6d9a050d856))
+* **ui:** packages page with versions and manage actions ([#792](https://github.com/package-broker/broker/issues/792)) ([c81eaaf](https://github.com/package-broker/broker/commit/c81eaafe600a9c5eef1d3ebba3a6c90a3656ad7c))
+* **ui:** projects and access pages ([#797](https://github.com/package-broker/broker/issues/797)) ([fff3f19](https://github.com/package-broker/broker/commit/fff3f1955332e2c2edee3d3f010cd04b5564cc7e))
+* **ui:** readable, responsive tables, status badges and confirmations ([#801](https://github.com/package-broker/broker/issues/801)) ([2b284a2](https://github.com/package-broker/broker/commit/2b284a2fccd97725a38e1aa5d289cb42a02cdfa8))
+* **ui:** show advisory status per package version ([#811](https://github.com/package-broker/broker/issues/811)) ([2603b30](https://github.com/package-broker/broker/commit/2603b3072a7206850a8dccd9f0982a8d16799a44))
+* **ui:** show Composer and npm configuration with a new token ([#813](https://github.com/package-broker/broker/issues/813)) ([a61e757](https://github.com/package-broker/broker/commit/a61e757023774ea6ed69cce9ecc74a805ccfcd49))
+* **ui:** simpler source form with radio choices, advanced settings and a full-screen mobile dialog ([#843](https://github.com/package-broker/broker/issues/843)) ([9b60b50](https://github.com/package-broker/broker/commit/9b60b5068e5f0606c351bf37afb630ff19cf7c34))
+* **ui:** sources page with write-only credentials and ordering ([#800](https://github.com/package-broker/broker/issues/800)) ([7b9718c](https://github.com/package-broker/broker/commit/7b9718cc5fdcb5335fca530657d1ec76643c0474))
+* **ui:** sync now and sync status on the Sources page ([#833](https://github.com/package-broker/broker/issues/833)) ([52ee73b](https://github.com/package-broker/broker/commit/52ee73b85053cb91fb163e01e1bd1ed59d29fcf5))
+* **ui:** tokens and service principals page with show-once secrets ([#794](https://github.com/package-broker/broker/issues/794)) ([fe40a55](https://github.com/package-broker/broker/commit/fe40a55d4677bf64c44f5f89f8bb6370e0c972ad))
+
+
+### Bug Fixes
+
+* **core:** allow enabling the Packagist GitHub token mode through the API ([#831](https://github.com/package-broker/broker/issues/831)) ([6a7ecd8](https://github.com/package-broker/broker/commit/6a7ecd8f06c0685ef09f72b31a60b9eb5783f749))
+* **core:** refused upstream answers 502 upstream_refused; refusal log at debug only ([#796](https://github.com/package-broker/broker/issues/796)) ([5bd73b1](https://github.com/package-broker/broker/commit/5bd73b13197e92f05c5b32457b6017fcc944a03b))
+* **plugin-github:** harden token sources after review ([#836](https://github.com/package-broker/broker/issues/836)) ([c903d15](https://github.com/package-broker/broker/commit/c903d15f99b84753cbc48af8bbebe8732acb7dd1))
+* **ui:** projects page keeps a valid selection and lists active projects for members ([#817](https://github.com/package-broker/broker/issues/817)) ([253d521](https://github.com/package-broker/broker/commit/253d5219ddaecba7708375ef8f9cbb07d4d0c9de))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1

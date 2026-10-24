@@ -188,7 +188,24 @@ export function createLocalLoginSetupWriter(executor: SqlExecutor): LocalLoginSe
       }
       const opId = newOpId();
       const guard = opGuard(ctx, 'local_login', { userId: input.userId }, opId);
-      const when = compile(db.selectNoFrom((eb) => eb.and([guard]).as('allowed')));
+      const when = compile(
+        db.selectNoFrom((eb) =>
+          eb
+            .and([
+              guard,
+              eb.exists(
+                eb
+                  .selectFrom('session')
+                  .select(sql.lit(1).as('one'))
+                  .where('session.org_id', '=', ctx.orgId)
+                  .where('session.user_id', '=', input.userId)
+                  .where('session.id', '=', input.session.id)
+                  .where('session.secret_hash', '=', input.session.secretHash),
+              ),
+            ])
+            .as('allowed'),
+        ),
+      );
       const statements: Statement[] = [
         compile(
           db

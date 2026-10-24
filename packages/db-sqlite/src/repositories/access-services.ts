@@ -107,6 +107,13 @@ export interface AccessServicesOptions {
 }
 
 export interface AccessAssembly {
+  readonly repositories: {
+    readonly organizations: ReturnType<typeof createOrganizationRepository>;
+    readonly projects: ReturnType<typeof createProjectRepository>;
+    readonly users: ReturnType<typeof createUserRepository>;
+    readonly grants: ReturnType<typeof createGrantRepository>;
+    readonly principals: ReturnType<typeof createServicePrincipalRepository>;
+  };
   readonly anchors: readonly ConfiguredProviderAnchor[];
   readonly module: AuthModule;
   readonly providerAnchors: ProviderAnchorReader;
@@ -175,6 +182,21 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     createServicePrincipalAuthority({ executor, providerAnchors: anchorList }),
   );
   const organizations = wired('organization repository', createOrganizationRepository(executor));
+  const users = wired('user repository', createUserRepository(executor));
+  const grants = wired(
+    'grant repository',
+    createGrantRepository(executor, {
+      providerAnchors: anchorList,
+      holderInput: () => ({ kind: 'fresh', providers: anchorList }),
+    }),
+  );
+  const repositories = Object.freeze({
+    organizations,
+    projects: projectRepository,
+    users,
+    grants,
+    principals: principalRepository,
+  });
   const common = { clock, ids, log };
   const servicePrincipals = createServicePrincipalService({
     sessions: module.sessions,
@@ -192,11 +214,8 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     lifetime: tokens.lifetime,
     administration: createAdministration({
       roles: createRoleRepository(executor, { providerAnchors: anchorList }),
-      grants: createGrantRepository(executor, {
-        providerAnchors: anchorList,
-        holderInput: () => ({ kind: 'fresh', providers: anchorList }),
-      }),
-      users: createUserRepository(executor),
+      grants,
+      users,
       providers,
       onCreatorOffboarded,
       ...(tokens.offboarding.onUserOffboarded === undefined
@@ -253,5 +272,5 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     }),
     tokenList: wired('token reader', createTokenReader(executor)),
   });
-  return Object.freeze({ module, providerAnchors, services, anchors: anchorList });
+  return Object.freeze({ repositories, module, providerAnchors, services, anchors: anchorList });
 }

@@ -190,15 +190,21 @@ interface Requirements {
   readonly [field: string]: true | null | Requirements;
 }
 
+export class ApiModuleDependencyError extends TypeError {
+  constructor(readonly dependency: string) {
+    super(`API module requires dependency: ${dependency}`);
+  }
+}
+
 function requireDependencies(value: unknown, requirements: Requirements, label: string): void {
   if (value === null || typeof value !== 'object') {
-    throw new TypeError(`API module requires dependency: ${label}`);
+    throw new ApiModuleDependencyError(label);
   }
   for (const [field, requirement] of Object.entries(requirements)) {
     const dependency = (value as Record<string, unknown>)[field];
     const path = `${label}.${field}`;
     if (dependency == null || (requirement === true && typeof dependency !== 'function')) {
-      throw new TypeError(`API module requires dependency: ${path}`);
+      throw new ApiModuleDependencyError(path);
     }
     if (requirement !== true && requirement !== null) {
       requireDependencies(dependency, requirement, path);

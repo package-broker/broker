@@ -362,6 +362,17 @@ describe('Node management API mount', () => {
     }
   });
 
+  it('does not expose spoofed forwarding headers as the API client IP without a trusted peer', async () => {
+    await create().ready();
+    const request = new Request('https://broker.test/_pb/projects', {
+      headers: { 'x-forwarded-for': '198.51.100.123' },
+    });
+    const deps = built.dependencies[0]!;
+    expect(deps.projects.clientIp(request)).toBeNull();
+    expect(deps.organization.clientIp(request)).toBeNull();
+    expect(deps.tokens.clientIp(request)).toBeNull();
+  });
+
   it('mounts every management route exactly once', async () => {
     const kernel = await create().ready();
     expect(built.routes).toHaveLength(1);

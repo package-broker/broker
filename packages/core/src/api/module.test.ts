@@ -7,7 +7,12 @@ import { createKeyring } from '../secrets/keyring.js';
 import { formatToken } from '../secrets/token-format.js';
 import { hashToken } from '../secrets/token-hash.js';
 import type { RouteDefinition } from '../plugin.js';
-import { API_EXEMPT_ROUTES, createApiModule, type ApiModuleDeps } from './module.js';
+import {
+  API_EXEMPT_ROUTES,
+  ApiModuleDependencyError,
+  createApiModule,
+  type ApiModuleDeps,
+} from './module.js';
 import * as organization from './routes/organization.js';
 import * as projects from './routes/projects.js';
 import * as access from './routes/access.js';
@@ -421,9 +426,7 @@ describe('createApiModule', () => {
     const deps = dependencies();
     Object.assign(deps.packageManage, { rebuild: {} });
     expect(() => createApiModule(deps)).toThrow(
-      new TypeError(
-        'API module requires dependency: dependencies.packageManage.rebuild.requestTagRebuild',
-      ),
+      new ApiModuleDependencyError('dependencies.packageManage.rebuild.requestTagRebuild'),
     );
   });
 
@@ -433,9 +436,7 @@ describe('createApiModule', () => {
       rebuild: { requestTagRebuild: 'private-dependency-value' },
     });
     expect(() => createApiModule(deps)).toThrow(
-      new TypeError(
-        'API module requires dependency: dependencies.packageManage.rebuild.requestTagRebuild',
-      ),
+      new ApiModuleDependencyError('dependencies.packageManage.rebuild.requestTagRebuild'),
     );
   });
 
@@ -465,7 +466,7 @@ describe('createApiModule', () => {
       const deps = dependencies();
       Object.assign(deps.sources.service, { acceptRemoval });
       expect(() => createApiModule(deps)).toThrow(
-        new TypeError('API module requires dependency: dependencies.sources.service.acceptRemoval'),
+        new ApiModuleDependencyError('dependencies.sources.service.acceptRemoval'),
       );
     },
   );
@@ -559,7 +560,7 @@ describe('createApiModule', () => {
     for (const field of path.slice(0, -1)) owner = Reflect.get(owner, field) as object;
     Reflect.deleteProperty(owner, path.at(-1)!);
     expect(() => createApiModule(broken)).toThrow(
-      new TypeError(`API module requires dependency: dependencies.${label}`),
+      new ApiModuleDependencyError(`dependencies.${label}`),
     );
   });
 
@@ -569,7 +570,7 @@ describe('createApiModule', () => {
     for (const field of path.slice(0, -1)) owner = Reflect.get(owner, field) as object;
     Object.assign(owner, { [path.at(-1)!]: 'private-dependency-value' });
     expect(() => createApiModule(broken)).toThrow(
-      new TypeError(`API module requires dependency: dependencies.${label}`),
+      new ApiModuleDependencyError(`dependencies.${label}`),
     );
   });
 
@@ -586,6 +587,8 @@ describe('createApiModule', () => {
       error = caught;
     }
     expect(error).toBeInstanceOf(TypeError);
+    expect(error).toBeInstanceOf(ApiModuleDependencyError);
+    expect((error as ApiModuleDependencyError).dependency).toBe('dependencies.organization.ids');
     expect((error as Error).message).not.toContain(sentinel);
   });
 });

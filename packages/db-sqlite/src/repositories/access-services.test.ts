@@ -11,6 +11,8 @@ import { createAccessServices, type AccessServicesOptions } from './access-servi
 import * as access from './access.js';
 import * as project from './project.js';
 import * as tokens from './token-read.js';
+import * as users from './user.js';
+import * as grants from './grant.js';
 
 const ANCHOR = 'oidc:https://idp.example.test';
 const HOUR = 3_600_000;
@@ -111,13 +113,19 @@ describe.each(['node', 'cloudflare'])('%s access services contract', () => {
     ).toEqual({ items: [], next: null });
   });
 
-  it.each(['access', 'project', 'token reader'] as const)(
+  it.each(['access', 'project', 'user', 'grant', 'token reader'] as const)(
     'fails closed with the same wired() error for %s',
     (missing) => {
       if (missing === 'access')
         vi.spyOn(access, 'createAccessRepository').mockReturnValueOnce(undefined as never);
       if (missing === 'project')
         vi.spyOn(project, 'createProjectRepository').mockReturnValueOnce(undefined as never);
+      if (missing === 'user')
+        vi.spyOn(users, 'createUserRepository')
+          .mockReturnValueOnce(users.createUserRepository(options.executor))
+          .mockReturnValueOnce(undefined as never);
+      if (missing === 'grant')
+        vi.spyOn(grants, 'createGrantRepository').mockReturnValueOnce(undefined as never);
       if (missing === 'token reader')
         vi.spyOn(tokens, 'createTokenReader').mockReturnValueOnce(undefined as never);
       const name = missing === 'token reader' ? missing : `${missing} repository`;

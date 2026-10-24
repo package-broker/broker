@@ -472,6 +472,7 @@ const NPM_PACKAGE_PATHS = [
   '/:project/npm/:a/:b/:c/:d',
 ];
 
+// Management routes, dependencies and jobs are covered by api-mount.test.ts.
 const REGISTRY_ASSEMBLY: readonly RegistryAssemblyEntry[] = Object.freeze([
   {
     dependency: 'composer routes over the catalogue reader, on-demand fill and dist service',
@@ -500,12 +501,6 @@ const REGISTRY_ASSEMBLY: readonly RegistryAssemblyEntry[] = Object.freeze([
     routes: [],
     jobs: [],
     ownerPacket: 'T432c',
-  },
-  {
-    dependency: 'management API mount',
-    routes: [],
-    jobs: [],
-    ownerPacket: 'T531',
   },
 ]);
 

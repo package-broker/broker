@@ -1,5 +1,6 @@
 import { dirname, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { normalizeQueueConsumer } from './queue-consumer.js';
 import {
   CloudflareApi,
   CloudflareError,
@@ -12,7 +13,9 @@ import {
 import {
   reconcileCandidatePreview,
   rollbackDeployment,
-  unverifiedDeployContract,
+  active,
+  cloudflareDeployContract,
+  versionAnnotationsMatch,
   withCandidatePreview,
   type DeployProviderContract,
 } from './deploy.js';
@@ -92,31 +95,9 @@ function candidate(a: DeploymentAttempt): Distribution[] {
   ];
 }
 async function liveDistribution(api: CloudflareApi, base: string): Promise<Distribution[]> {
-  const raw = object((await api.request(`${base}/deployments`)).result);
-  if (!record(raw.active)) return conflict();
-  const d = raw.active;
-  if (!Array.isArray(d.versions) || d.versions.length < 1 || d.versions.length > 2)
-    return conflict();
-  const versions = d.versions.map((raw) => {
-    if (!record(raw)) return conflict();
-    const v = raw;
-    if (
-      typeof v.version_id !== 'string' ||
-      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(v.version_id) ||
-      typeof v.percentage !== 'number' ||
-      !Number.isInteger(v.percentage) ||
-      v.percentage <= 0 ||
-      v.percentage > 100
-    )
-      return conflict();
-    return { version_id: v.version_id, percentage: v.percentage };
-  });
-  if (
-    versions.reduce((n, v) => n + v.percentage, 0) !== 100 ||
-    new Set(versions.map((v) => v.version_id)).size !== versions.length
-  )
-    return conflict();
-  return versions;
+  const live = await active(api, base);
+  if (!live.versions.length) return conflict();
+  return live.versions;
 }
 async function ownership(api: CloudflareApi, base: string, j: Inventory) {
   const settings = object((await api.request(`${base}/settings`)).result);
@@ -199,15 +180,10 @@ async function verifyRestoredSettings(api: CloudflareApi, base: string, j: Inven
     return failed();
   if (consumers.length !== (expected.consumer ? 1 : 0)) return failed();
   if (expected.consumer) {
-    const c = consumers[0]!;
-    const settings = object(c.settings);
+    const c = normalizeQueueConsumer(consumers[0]!);
     if (
-      c.type !== 'worker' ||
-      c.script_name !== expected.consumer.script_name ||
-      c.dead_letter_queue !== expected.consumer.dead_letter_queue ||
-      !(['batch_size', 'max_wait_time_ms', 'max_retries', 'max_concurrency'] as const).every(
-        (key) => settings[key] === expected.consumer![key],
-      )
+      !c ||
+      !isDeepStrictEqual({ ...c, consumer_id: null }, { ...expected.consumer, consumer_id: null })
     )
       return failed();
   }
@@ -257,13 +233,8 @@ async function verifyRestoredSettings(api: CloudflareApi, base: string, j: Inven
 }
 async function candidateArtifact(api: CloudflareApi, base: string, a: DeploymentAttempt) {
   const v = object((await api.request(`${base}/versions/${a.version_id}`)).result);
-  const annotations = object(object(v.metadata).annotations);
-  if (
-    v.id !== a.version_id ||
-    annotations['pb-operation'] !== a.operation_id ||
-    annotations['pb-artifact-sha256'] !== a.artifact_sha256
-  )
-    return failed();
+  const annotations = object(v.annotations);
+  if (v.id !== a.version_id || !versionAnnotationsMatch(annotations, a)) return failed();
 }
 
 interface ProbeContext {
@@ -685,7 +656,7 @@ export async function smoke(o: SmokeOptions): Promise<CommandResult> {
         if (a) await candidateArtifact(api, base, a);
         await probes(ctx, canonical, 'canonical', project, canonical, token);
         if (a && a.requested_rollout < 100) {
-          if (!a.candidate_probe_url || !(o.contract ?? unverifiedDeployContract).preview)
+          if (!a.candidate_probe_url || !(o.contract ?? cloudflareDeployContract).preview)
             throw new CloudflareError('capability_unknown', 2, false, 'smoke');
           const previewApi = new CloudflareApi({
             ...apiOptions,
@@ -696,7 +667,7 @@ export async function smoke(o: SmokeOptions): Promise<CommandResult> {
             previewApi,
             store,
             j,
-            o.contract ?? unverifiedDeployContract,
+            o.contract ?? cloudflareDeployContract,
             async (url) => {
               await probes(ctx, origin(url), 'candidate', project, canonical, token);
             },

@@ -23,6 +23,7 @@ import {
 } from '@package-broker/db-sqlite/repositories/access-services';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { sourceCredentialOrigins } from '@package-broker/core/sources/credential-origins';
 import {
   createProviderRegistry,
   type ProviderContext,
@@ -118,7 +119,7 @@ import {
   parseCredentialMaterial,
   type CredentialKind,
 } from '@package-broker/core/sources/credentials';
-import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
+import { GITHUB_API } from '@package-broker/core/ingest/composer/packagist-proxy';
 import {
   type UpstreamCredential,
   createPolicyFetch,
@@ -499,37 +500,7 @@ export function credentialOrigins(
   source: SourceRecord,
   policy: Parameters<typeof parseSourceConfig>[4]['policy'],
 ): readonly string[] | null {
-  if (source.type === 'vcs') {
-    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
-      runtime: 'cloudflare',
-      policy,
-      hasCredential: source.credentialId !== null,
-    });
-    if (!parsed.ok || !('provider' in parsed.config)) return null;
-    switch (parsed.config.provider) {
-      case 'github':
-        return [GITHUB_API];
-      case 'git':
-        return [new URL(parsed.config.repository).origin];
-      case 'ssh':
-        return [];
-    }
-  }
-  if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
-  if (source.type !== 'npm_registry' && source.type !== 'composer_repository') return null;
-  if (source.type === 'composer_repository') {
-    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
-      runtime: 'cloudflare',
-      policy,
-      hasCredential: source.credentialId !== null,
-    });
-    if (!parsed.ok || !('distHosts' in parsed.config) || source.url === null) return null;
-    return [
-      new URL(source.url).origin,
-      ...parsed.config.distHosts.map((host) => `https://${host}`),
-    ];
-  }
-  return source.url === null || !URL.canParse(source.url) ? null : [new URL(source.url).origin];
+  return sourceCredentialOrigins(source, { runtime: 'cloudflare', policy });
 }
 
 function openSourceCredential(

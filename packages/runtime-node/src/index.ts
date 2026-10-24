@@ -15,6 +15,7 @@ import {
   type AccessAssembly,
 } from '@package-broker/db-sqlite/repositories/access-services';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { sourceCredentialOrigins } from '@package-broker/core/sources/credential-origins';
 import {
   createProviderRegistry,
   type ProviderContext,
@@ -93,7 +94,7 @@ import {
 import { createAccessRecorder } from '@package-broker/core/registry/access-recorder';
 import type { RegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createScopedAdmittingAccess } from '@package-broker/core/registry/scoped-access';
-import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
+import { GITHUB_API } from '@package-broker/core/ingest/composer/packagist-proxy';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '@package-broker/core/ingest/finalize-guard';
 import { createRepositoryJobs, type JobsFactory } from '@package-broker/core/platform/jobs-port';
 import {
@@ -464,36 +465,7 @@ export function credentialOrigins(
   record: SourceRecord,
   policy: Parameters<typeof parseSourceConfig>[4]['policy'],
 ): readonly string[] | null {
-  if (record.type === 'vcs') {
-    const parsed = parseSourceConfig(record.type, record.ecosystem, record.url, record.configJson, {
-      runtime: 'node',
-      policy,
-      hasCredential: record.credentialId !== null,
-    });
-    if (!parsed.ok || !('provider' in parsed.config)) return null;
-    switch (parsed.config.provider) {
-      case 'github':
-        return [GITHUB_API];
-      case 'git':
-        return [new URL(parsed.config.repository).origin];
-      case 'ssh':
-        return [];
-    }
-  }
-  if (record.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
-  if (record.type === 'composer_repository') {
-    const parsed = parseSourceConfig(record.type, record.ecosystem, record.url, record.configJson, {
-      runtime: 'node',
-      policy,
-      hasCredential: record.credentialId !== null,
-    });
-    if (!parsed.ok || !('distHosts' in parsed.config) || record.url === null) return null;
-    return [
-      new URL(record.url).origin,
-      ...parsed.config.distHosts.map((host) => `https://${host}`),
-    ];
-  }
-  return record.url === null || !URL.canParse(record.url) ? null : [new URL(record.url).origin];
+  return sourceCredentialOrigins(record, { runtime: 'node', policy });
 }
 
 function credentialAccess(

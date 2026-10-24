@@ -1,4 +1,4 @@
-import { createSecretCipher } from '@package-broker/core/secrets/cipher';
+import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
 import { createHash } from 'node:crypto';
@@ -382,6 +382,108 @@ describe('Node package-sync wiring', () => {
       initiatorTokenId: null,
     });
   }
+
+  it.each([false, true])(
+    'opens the Packagist bearer credential only when githubToken is %s',
+    async (githubToken) => {
+      const credentialId = await createCredentialStore({
+        repository: createCredentialRepository(db.executor),
+        cipher: createSecretCipher(
+          createKeyring([
+            parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
+          ]),
+          'credential-encryption',
+        ),
+        ids: { ulid },
+        clock: systemClock,
+      }).put(orgContext(orgId), {
+        kind: 'bearer',
+        projectId: null,
+        plaintext: new TextEncoder().encode(JSON.stringify({ token: 'packagist-test-token' })),
+      });
+      await sql(
+        'UPDATE source SET credential_id = ?, config_json = ? WHERE org_id = ? AND id = ?',
+        [credentialId, JSON.stringify({ githubToken }), orgContext(orgId).orgId, sources.composer],
+      );
+      const calls: Request[] = [];
+      const transport = async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        calls.push(request);
+        const url = new URL(request.url);
+        if (url.origin === 'https://api.github.com')
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://codeload.github.com/acme/widget/zip/abc123' },
+          });
+        if (url.origin === 'https://codeload.github.com') return new Response('archive');
+        expect(url.origin).toBe('https://repo.packagist.org');
+        return Response.json({
+          packages: {
+            'acme/widget': url.pathname.includes('~dev')
+              ? []
+              : [
+                  {
+                    name: 'acme/widget',
+                    version: '1.0.0',
+                    version_normalized: '1.0.0.0',
+                    type: 'library',
+                    dist: {
+                      type: 'zip',
+                      url: 'https://api.github.com/repos/acme/widget/zipball/abc123?archive=1',
+                      reference: 'abc123',
+                      shasum: '',
+                    },
+                  },
+                ],
+          },
+        });
+      };
+      const decrypt = vi.spyOn(crypto.subtle, 'decrypt');
+      try {
+        const kernel = await boot(transport);
+        const response = await get('composer', 'acme/widget');
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          packages: Record<string, { dist: { url: string } }[]>;
+        };
+        const dist = await kernel.fetch(
+          new Request(body.packages['acme/widget']![0]!.dist.url, { headers: { cookie } }),
+        );
+        expect(dist.status).toBe(200);
+        expect(await dist.text()).toBe('archive');
+        const aad = credentialAad({
+          id: credentialId,
+          orgId: orgContext(orgId).orgId,
+          kind: 'bearer',
+        });
+        const opens = decrypt.mock.calls.filter(
+          ([algorithm]) =>
+            typeof algorithm === 'object' &&
+            'additionalData' in algorithm &&
+            algorithm.additionalData instanceof Uint8Array &&
+            new TextDecoder().decode(algorithm.additionalData) === aad,
+        );
+        if (githubToken) expect(opens.length).toBeGreaterThan(0);
+        else expect(opens).toHaveLength(0);
+        for (const origin of [
+          'https://repo.packagist.org',
+          'https://api.github.com',
+          'https://codeload.github.com',
+        ]) {
+          const requests = calls.filter((call) => new URL(call.url).origin === origin);
+          expect(requests.length).toBeGreaterThan(0);
+          for (const request of requests)
+            expect(request.headers.get('authorization')).toBe(
+              githubToken && origin !== 'https://repo.packagist.org'
+                ? 'Bearer packagist-test-token'
+                : null,
+            );
+        }
+      } finally {
+        decrypt.mockRestore();
+      }
+    },
+  );
 
   it.each(['v2', 'v1', 'inline'] as const)(
     'activates and job-syncs a %s Composer repository, then serves its archive',

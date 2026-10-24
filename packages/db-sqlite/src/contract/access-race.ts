@@ -715,7 +715,12 @@ export function describeAccessRace(label: string, open: Open): void {
   const TARGET_SUBJECT = 'sub-target';
   const NEW_SUBJECT = 'sub-target-new';
   const TARGET_SESSION = 'session-target';
-  const META: SessionMeta = { ip: null, userAgent: null, previousSecretHash: null };
+  const META: SessionMeta = {
+    requestId: 'request-test',
+    ip: null,
+    userAgent: null,
+    previousSecretHash: null,
+  };
 
   const provider: IdentityProvider = {
     id: PROVIDER,

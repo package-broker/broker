@@ -110,7 +110,10 @@ function run(
   identity: VerifiedIdentity,
   loginState: ReauthLoginState = loginStateOf(),
 ): Promise<ReauthResult> {
-  return reauthenticate(deps, ctx, session, provider, identity, loginState);
+  return reauthenticate(deps, ctx, session, provider, identity, loginState, {
+    requestId: 'test-request-id',
+    ip: null,
+  });
 }
 
 function resolving(plugin: string, handler: ResolveHandler): ResolveHook {

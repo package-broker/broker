@@ -264,11 +264,11 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
         (result) => !result.ok,
         (scoped) => localService.login(scoped, input, meta),
       ),
-    reauth: (ctx, session, input) =>
+    reauth: (ctx, session, input, meta) =>
       withLockScope(
         ctx,
         (result) => !result.ok,
-        (scoped) => localService.reauth(scoped, session, input),
+        (scoped) => localService.reauth(scoped, session, input, meta),
       ),
   };
   const setup: LocalSetupService = {
@@ -293,7 +293,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
         identity,
         meta,
       ),
-    reauth: (ctx, session, provider, identity, loginState) =>
+    reauth: (ctx, session, provider, identity, loginState, meta) =>
       reauthenticateWithIdentity(
         { ...reauthDeps, onHookError: onHookError(ctx), onDenied: onDenied(ctx) },
         ctx,
@@ -301,6 +301,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
         provider,
         identity,
         loginState,
+        meta,
       ),
     stateCipher,
     clock,

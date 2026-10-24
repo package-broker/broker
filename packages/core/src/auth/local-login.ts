@@ -1,7 +1,7 @@
 import { isReauthSessionActive } from './identity-reauth.js';
 import { hashPassword, verifyDummy, verifyPassword } from './password.js';
 import { SESSION_ABSOLUTE_MS, newSessionSecrets } from './session.js';
-import type { AuthenticatedSession, SessionMeta, SessionService } from './session.js';
+import type { AuthCallMeta, AuthenticatedSession, SessionMeta, SessionService } from './session.js';
 import { decodeTotpEnvelope, encodeTotpEnvelope, verifyTotp } from './totp.js';
 import type {
   LocalLoginReader,
@@ -37,6 +37,7 @@ export interface LocalLoginService {
     ctx: OrgContext,
     session: AuthenticatedSession,
     input: { readonly password: string; readonly code: string },
+    meta: AuthCallMeta,
   ): Promise<LocalReauthResult>;
 }
 

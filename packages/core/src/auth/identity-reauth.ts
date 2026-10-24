@@ -1,5 +1,5 @@
 import { REAUTH_WINDOW_MS, SESSION_IDLE_MS } from './session.js';
-import type { AuthenticatedSession } from './session.js';
+import type { AuthCallMeta, AuthenticatedSession } from './session.js';
 import type { OrgContext } from '../db/port.js';
 import type { SessionRepository } from '../db/sessions.js';
 import type { UserRepository } from '../db/users.js';
@@ -102,6 +102,8 @@ export async function reauthenticateWithIdentity(
   provider: IdentityProvider,
   identity: VerifiedIdentity,
   loginState: ReauthLoginState,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Reserved for audit context.
+  _meta: AuthCallMeta,
 ): Promise<ReauthResult> {
   if (!(await isReauthSessionActive(deps, ctx, session.session.id))) {
     return refuse('session_inactive');

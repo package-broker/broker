@@ -21,6 +21,7 @@ import { createLocalLoginReader } from '../repositories/local-login.js';
 import { createLocalLoginSetupWriter } from '../repositories/local-login-setup.js';
 import { createLocalLoginSuccessWriter } from '../repositories/local-login-success.js';
 import { createLoginWriter } from '../repositories/login.js';
+import { createSessionRepository } from '../repositories/session.js';
 import { seedDefaultsStatements } from '../repositories/role.js';
 import { assertGuard, newOpId } from '../kysely.js';
 import { seedTwoOrganizations } from './two-organizations.js';
@@ -1558,7 +1559,75 @@ const accessMutationGuard: Case = async (open) => {
   });
 };
 
+const sessionReauth: Case = async (open, wrap = (executor) => executor) => {
+  await withWorld(open, async ({ pair, a }) => {
+    await pair.executor.batch([
+      userRow(a, ADMIN, EMAIL),
+      st(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
+        IDENTITY_X,
+        a.orgId,
+        ADMIN,
+        PROVIDER,
+        SUBJECT,
+        EMAIL,
+      ),
+      sessionRow(a, OLD_SESSION, ADMIN),
+      st(
+        'UPDATE session SET identity_id = ?, reauth_at = ? WHERE org_id = ? AND id = ?',
+        IDENTITY_X,
+        PAST,
+        a.orgId,
+        OLD_SESSION,
+      ),
+    ]);
+    const repository = createSessionRepository(wrap(pair.executor));
+    const reauthAt = () =>
+      rowsOf(
+        pair.executor,
+        'SELECT reauth_at FROM session WHERE org_id = ? AND id = ?',
+        a.orgId,
+        OLD_SESSION,
+      );
+    const pending = () =>
+      rowsOf(
+        pair.executor,
+        'SELECT id, action, target_type, target_id FROM audit_pending WHERE org_id = ? AND action = ?',
+        a.orgId,
+        'session.reauth',
+      );
+    const audit = mutationAudit('session.reauth', OLD_SESSION);
+    expect(
+      await repository.markReauthenticatedByIdentity(a, {
+        audit,
+        sessionId: OLD_SESSION,
+        identityId: IDENTITY_X,
+        authTime: NOW,
+        now: NOW,
+      }),
+    ).toBe(true);
+    expect(await reauthAt()).toEqual([{ reauth_at: NOW }]);
+    const staged = [
+      { id: audit.id, action: 'session.reauth', target_type: 'session', target_id: OLD_SESSION },
+    ];
+    expect(await pending()).toEqual(staged);
+
+    expect(
+      await repository.markReauthenticatedByIdentity(a, {
+        audit: mutationAudit('session.reauth', OLD_SESSION),
+        sessionId: OLD_SESSION,
+        identityId: IDENTITY_X,
+        authTime: NOW,
+        now: NOW,
+      }),
+    ).toBe(false);
+    expect(await reauthAt()).toEqual([{ reauth_at: NOW }]);
+    expect(await pending()).toEqual(staged);
+  });
+};
+
 export const authContractCases = {
+  sessionReauth,
   upgrade,
   resetCleanup,
   totpReplay,
@@ -1575,6 +1644,8 @@ export const authContractCases = {
 
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
+    it('SSO reauth stages one audit with the timestamp update and stages nothing on replay', () =>
+      authContractCases.sessionReauth(open));
     it(
       '1. baseline rerun keeps populated rows, adds no authority and gives 55 tables',
       () => authContractCases.upgrade(open),

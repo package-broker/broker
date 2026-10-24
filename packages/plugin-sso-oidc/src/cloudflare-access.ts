@@ -199,6 +199,7 @@ export function createCloudflareAccessProvider(
   const checked = inspection.policy as DomainPolicy;
   const policy: DomainPolicy = Object.freeze({
     verifiedDomains: Object.freeze([...checked.verifiedDomains]),
+    emailAuthoritativeDomains: Object.freeze([...(checked.emailAuthoritativeDomains ?? [])]),
     autoJoin: checked.autoJoin,
   });
   const issuer = `https://${teamDomain}`;

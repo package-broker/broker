@@ -234,7 +234,7 @@ const TOKEN_SELECTOR = /^[a-z2-7]{12}$/;
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 const IPV6_CHARS = /^[0-9a-fA-F:.]+$/;
 
-function isIpLiteral(value: unknown): boolean {
+export function isIpLiteral(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   if (IPV4.test(value)) return true;
   if (!value.includes(':') || !IPV6_CHARS.test(value)) return false;

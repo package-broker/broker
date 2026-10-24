@@ -305,7 +305,11 @@ describe('createCloudflareAccessProvider', () => {
     expect(provider.trustAnchor).toBe(`access:${TEAM}/${AUDIENCE}`);
     expect(isValidTrustAnchor(provider.trustAnchor)).toBe(true);
     expect(provider.supportsReauth).toBe(false);
-    expect(provider.policy).toEqual({ verifiedDomains: ['example.test'], autoJoin: false });
+    expect(provider.policy).toEqual({
+      verifiedDomains: ['example.test'],
+      emailAuthoritativeDomains: [],
+      autoJoin: false,
+    });
     expect(typeof provider.displayName).toBe('string');
     expect(
       await provider.start({

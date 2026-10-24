@@ -238,6 +238,8 @@ function parseVcs(
     c.add('provider', 'must be github, git or ssh');
   } else if (provider === 'ssh' && runtime === 'cloudflare') {
     c.add('provider', 'ssh is not available on cloudflare');
+  } else if (provider === 'git' && runtime === 'cloudflare') {
+    c.add('provider', 'git is not available on cloudflare: archive building requires node');
   }
   const repository = obj.repository;
   if (typeof repository !== 'string') {

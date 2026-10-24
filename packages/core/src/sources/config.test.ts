@@ -331,6 +331,20 @@ describe('url rules', () => {
     ]);
     expect(parse('vcs', 'composer', null, cfg, { runtime: 'node' }).ok).toBe(true);
   });
+
+  it.each([false, true])('refuses git on cloudflare with hasCredential=%s', (hasCredential) => {
+    const cfg = { provider: 'git', repository: 'https://git.example.com/repo.git' };
+    expect(parse('vcs', 'composer', null, cfg, { runtime: 'cloudflare', hasCredential })).toEqual({
+      ok: false,
+      problems: [
+        {
+          field: 'provider',
+          message: 'git is not available on cloudflare: archive building requires node',
+        },
+      ],
+    });
+    expect(parse('vcs', 'composer', null, cfg, { runtime: 'node', hasCredential }).ok).toBe(true);
+  });
 });
 
 describe('proxies', () => {

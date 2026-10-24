@@ -197,7 +197,7 @@ describe.each([
       );
       await worker.scheduled({}, env);
       const repository = createJobRepository(executor);
-      async function deliver(body: (typeof notifications)[number]) {
+      async function deliver(body: (typeof notifications)[number], state = 'succeeded') {
         const ack = vi.fn();
         const retry = vi.fn();
         const waited: Promise<unknown>[] = [];
@@ -209,7 +209,7 @@ describe.each([
         await Promise.all(waited);
         expect(ack).toHaveBeenCalledOnce();
         expect(retry).not.toHaveBeenCalled();
-        expect(await repository.status(org, body.job)).toMatchObject({ state: 'succeeded' });
+        expect(await repository.status(org, body.job)).toMatchObject({ state });
       }
       const poll = await executor.all<{ id: string }>({
         sql: 'SELECT id FROM job WHERE org_id = ? AND type = ?',
@@ -269,7 +269,23 @@ describe.each([
         initiatorTokenId: null,
         runAt: null,
       });
-      await deliver({ v: 1, org: org.orgId, job: queued.id });
+      const unsupportedGit = 'provider' in fixture.config && fixture.config.provider === 'git';
+      await deliver(
+        { v: 1, org: org.orgId, job: queued.id },
+        unsupportedGit ? 'queued' : 'succeeded',
+      );
+      if (unsupportedGit) {
+        expect(listing).not.toHaveBeenCalled();
+        expect(describe).not.toHaveBeenCalled();
+        expect(sent).toEqual([]);
+        expect(
+          await executor.all({
+            sql: "SELECT id FROM ingest_session WHERE org_id = ? AND source_id = ? AND state = 'complete'",
+            params: [org.orgId, listingSource],
+          }),
+        ).toEqual([]);
+        return;
+      }
       expect(listing).toHaveBeenCalledOnce();
       expect(listing.mock.calls[0]![0].org).toEqual(org);
       const credential = listing.mock.calls[0]![0].credential;

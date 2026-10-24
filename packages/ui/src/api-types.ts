@@ -5905,6 +5905,8 @@ export interface operations {
                   attached: true;
                   /** @enum {string} */
                   ecosystem: 'composer' | 'npm';
+                  /** @enum {string} */
+                  githubAuthentication?: 'app' | 'token';
                   hasCredential: boolean;
                   id: string;
                   lastError: string | null;
@@ -5941,6 +5943,8 @@ export interface operations {
                   attached: false;
                   /** @enum {string} */
                   ecosystem: 'composer' | 'npm';
+                  /** @enum {string} */
+                  githubAuthentication?: 'app' | 'token';
                   hasCredential: boolean;
                   id: string;
                   lastError: string | null;
@@ -8328,6 +8332,8 @@ export interface operations {
               attachedProjectCount: number;
               /** @enum {string} */
               ecosystem: 'composer' | 'npm';
+              /** @enum {string} */
+              githubAuthentication?: 'app' | 'token';
               hasCredential: boolean;
               id: string;
               lastError: string | null;

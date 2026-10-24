@@ -419,8 +419,12 @@ function verifyAssets(value: unknown): void {
 async function fullVersion(api: CloudflareApi, base: string, id: string) {
   const script = base.split('/').at(-1);
   const workers = (await api.snapshot('/workers/scripts')).filter((w) => w.id === script);
-  if (workers.length !== 1 || !safeId(workers[0]!.worker_id)) return conflict('worker:identity');
-  const path = `/workers/workers/${workers[0]!.worker_id}`;
+  if (workers.length !== 1) return conflict('worker:identity');
+  // The live scripts listing may carry no worker_id; /workers/workers/{id} also accepts the name.
+  const listed = workers[0]!.worker_id;
+  const workerId = typeof listed === 'string' && listed !== '' ? listed : script;
+  if (!safeId(workerId)) return conflict('worker:identity');
+  const path = `/workers/workers/${workerId}`;
   const v = object((await api.request(`${path}/versions/${id}`)).result);
   if (v.id !== id) return conflict('version_id');
   return v;

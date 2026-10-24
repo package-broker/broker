@@ -158,7 +158,9 @@ export function SourceForm({
   );
   const [type, setType] = useState<CreateSource['type']>(source?.type ?? 'composer_repository');
   const [provider, setProvider] = useState<'github' | 'git' | 'ssh'>('github');
-  const [githubAuthentication, setGithubAuthentication] = useState('app');
+  const [githubAuthentication, setGithubAuthentication] = useState(
+    source?.githubAuthentication ?? 'app',
+  );
   const [replaceConfig, setReplaceConfig] = useState(false);
   const [replaceNetwork, setReplaceNetwork] = useState(false);
   const [replaceDefaults, setReplaceDefaults] = useState(false);
@@ -405,15 +407,28 @@ export function SourceForm({
                       <>
                         {field(
                           'githubAuthentication',
-                          <Select
-                            id="source-githubAuthentication"
-                            name="githubAuthentication"
-                            value={githubAuthentication}
-                            onChange={(event) => setGithubAuthentication(event.currentTarget.value)}
-                          >
-                            <option value="app">GitHub App</option>
-                            <option value="token">Personal access token</option>
-                          </Select>,
+                          editing ? (
+                            <Input
+                              id="source-githubAuthentication"
+                              name="githubAuthentication"
+                              value={githubAuthentication}
+                              readOnly
+                            />
+                          ) : (
+                            <Select
+                              id="source-githubAuthentication"
+                              name="githubAuthentication"
+                              value={githubAuthentication}
+                              onChange={(event) =>
+                                setGithubAuthentication(
+                                  event.currentTarget.value as 'app' | 'token',
+                                )
+                              }
+                            >
+                              <option value="app">GitHub App</option>
+                              <option value="token">Personal access token</option>
+                            </Select>
+                          ),
                         )}
                         {githubAuthentication === 'app' ? (
                           input('config/installationId', {

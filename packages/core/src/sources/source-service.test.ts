@@ -1961,3 +1961,58 @@ describe('Packagist stored credentials', () => {
     },
   );
 });
+
+describe('GitHub source editing metadata', () => {
+  it.each([
+    ['app', { installationId: 42 }],
+    ['token', {}],
+  ] as const)(
+    'returns only the %s authentication choice, without configuration',
+    async (mode, extra) => {
+      const f = setup();
+      const reader = {
+        ...org,
+        actor: { ...org.actor, permissions: new Set(['org:sources:read']) },
+      };
+      f.sources.list.mockResolvedValue([
+        {
+          ...input,
+          id: 'source',
+          type: 'vcs',
+          url: null,
+          credentialId: 'stored',
+          configJson: JSON.stringify({ provider: 'github', repository: 'private/repo', ...extra }),
+        } as SourceRecord,
+      ]);
+      const result = await f.service.list(ctx, reader, { cursor: null, limit: 10 });
+      expect(result).toMatchObject({
+        ok: true,
+        value: { items: [{ githubAuthentication: mode }] },
+      });
+      expect(JSON.stringify(result)).not.toContain('private/repo');
+      expect(JSON.stringify(result)).not.toContain('installationId');
+    },
+  );
+  it('uses the merged source type when checking a stored GitHub credential', async () => {
+    const f = setup();
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      credentialId: 'stored',
+    } as SourceRecord);
+    f.credentialRepository.get.mockResolvedValue({ id: 'stored', projectId: null, kind: 'bearer' });
+    const changes = {
+      type: 'vcs' as const,
+      url: null,
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/repo',
+        installationId: 42,
+      }),
+    };
+    const result = await f.service.update(ctx, org, fence, 'source', changes);
+    expect(f.credentialRepository.get).toHaveBeenCalledWith(ctx, 'stored');
+    expect(result).toMatchObject({ ok: false, problems: [{ field: 'installationId' }] });
+    expect(f.sources.update).not.toHaveBeenCalled();
+  });
+});

@@ -55,6 +55,7 @@ const input = {
 
 function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: string[] = []) {
   const sources = {
+    syncNow: vi.fn().mockResolvedValue('requested'),
     acceptRemoval: vi.fn().mockResolvedValue('accepted'),
     create: vi.fn().mockResolvedValue('created'),
     update: vi.fn().mockResolvedValue('updated'),
@@ -149,7 +150,7 @@ describe('source visibility for mutation preflight', () => {
       if (result.ok) {
         expect(result.value).not.toHaveProperty('credentialId');
         expect(result.value).not.toHaveProperty('configJson');
-        expect(result.value).not.toHaveProperty('lastError');
+        expect(result.value.lastError).toBe(null);
       }
       expect(sources.getVisible).toHaveBeenCalledExactlyOnceWith(ctx, target);
       expect(sources.list).not.toHaveBeenCalled();
@@ -1192,7 +1193,7 @@ describe('source list and pause', () => {
         items: [{ id: 'a', hasCredential: true, url: 'https://packages.example.com/path' }],
       },
     });
-    expect(JSON.stringify(first)).not.toMatch(/secret|credentialId|configJson|lastError/);
+    expect(JSON.stringify(first)).not.toMatch(/secret|credentialId|configJson/);
     if (!first.ok) throw new Error('expected page');
     expect(first.value.next).toEqual(expect.any(String));
     expect(first.value.next).not.toBe('a');

@@ -424,6 +424,44 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async syncNow(ctx, fence, input) {
+      const current = await locate(ctx, fence, input.id, input.providerAnchors);
+      if (typeof current === 'string') return current;
+      if (current.status === 'paused') return 'source_paused';
+      const held = authority(ctx, fence, current.projectId, input.providerAnchors);
+      const owned = sourceOwnedBy(ctx, input.id, current.projectId);
+      const active = sql<SqlBool>`exists (select 1 from source
+        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')`;
+      const collision = liveIdempotencyCollision(ctx, input.idempotency);
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(allOf([held, owned]), ctx),
+        [
+          ...assertCheck(active),
+          compile(
+            db
+              .updateTable('source')
+              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })
+              .where('org_id', '=', ctx.orgId)
+              .where('id', '=', input.id)
+              .where('status', '!=', 'paused'),
+          ),
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
+        { authority: probe(held, true), conflict: probe(collision, false) },
+      );
+      if (outcome.ok) return 'requested';
+      if (outcome.reason === 'authority' || outcome.reason === 'indeterminate')
+        return failureResult(ctx, input.id, outcome.reason);
+      const after = await read(ctx, input.id);
+      if (after === null || after.projectId !== current.projectId) return 'not_found';
+      return after.status === 'paused' ? 'source_paused' : 'conflict';
+    },
     async acceptRemoval(ctx, fence, input) {
       const held = authority(ctx, fence, null, input.providerAnchors);
       const localAdmin = sql<SqlBool>`EXISTS (SELECT 1 FROM session

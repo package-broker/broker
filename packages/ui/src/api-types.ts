@@ -950,6 +950,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/projects/{project}/sources/{source}/sync': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request a source sync */
+    post: operations['syncProjectSource'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/projects/{project}/tokens': {
     parameters: {
       query?: never;
@@ -1291,6 +1308,23 @@ export interface paths {
     put?: never;
     /** Resume a proxy source */
     post: operations['resumeOrganizationSource'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/{source}/sync': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request a source sync */
+    post: operations['syncOrganizationSource'];
     delete?: never;
     options?: never;
     head?: never;
@@ -5867,6 +5901,8 @@ export interface operations {
                   ecosystem: 'composer' | 'npm';
                   hasCredential: boolean;
                   id: string;
+                  lastError: string | null;
+                  lastPolledAt: string | null;
                   lastRemovalRefusal: {
                     absent: number;
                     at: string;
@@ -5875,6 +5911,7 @@ export interface operations {
                   } | null;
                   lastSuccessAt: string | null;
                   name: string;
+                  nextPollAt: string | null;
                   pollIntervalSeconds: number;
                   precedence: number;
                   projectId: string | null;
@@ -5900,6 +5937,8 @@ export interface operations {
                   ecosystem: 'composer' | 'npm';
                   hasCredential: boolean;
                   id: string;
+                  lastError: string | null;
+                  lastPolledAt: string | null;
                   lastRemovalRefusal: {
                     absent: number;
                     at: string;
@@ -5908,6 +5947,7 @@ export interface operations {
                   } | null;
                   lastSuccessAt: string | null;
                   name: string;
+                  nextPollAt: string | null;
                   pollIntervalSeconds: number;
                   projectId: string | null;
                   removalAcceptanceArmed: boolean;
@@ -6731,6 +6771,81 @@ export interface operations {
       };
     };
   };
+  syncProjectSource: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+        source: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   listProjectTokens: {
     parameters: {
       query?: {
@@ -7142,7 +7257,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7731,7 +7846,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8209,6 +8324,8 @@ export interface operations {
               ecosystem: 'composer' | 'npm';
               hasCredential: boolean;
               id: string;
+              lastError: string | null;
+              lastPolledAt: string | null;
               lastRemovalRefusal: {
                 absent: number;
                 at: string;
@@ -8217,6 +8334,7 @@ export interface operations {
               } | null;
               lastSuccessAt: string | null;
               name: string;
+              nextPollAt: string | null;
               pollIntervalSeconds: number;
               projectId: string | null;
               removalAcceptanceArmed: boolean;
@@ -8582,7 +8700,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
       409: {
         headers: {
           [name: string]: unknown;
@@ -9139,6 +9257,80 @@ export interface operations {
       };
     };
   };
+  syncOrganizationSource: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        source: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   listTokens: {
     parameters: {
       query?: {
@@ -9526,7 +9718,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
       409: {
         headers: {
           [name: string]: unknown;

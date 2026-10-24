@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -64,6 +65,21 @@ export function removeWebhookRegistration(bundle: string): string {
   return bundle.replace(pattern, 'coreRoutes: Object.freeze([])');
 }
 
+export function injectSourcePollClock(bundle: string): string {
+  const target =
+    /(function createSourcePollJob\(deps\) \{)(\s+return defineJob\(\{\s+\.\.\.sourcePollJob,\s+validate: validatePoll,\s+async handler\(input, job\) \{\s+validatePoll\(input\);)/g;
+  assert.equal([...bundle.matchAll(target)].length, 1, 'SourcePollClockTargetMissing');
+  // Keep database time and every other job's clock real. Only poll-key minutes advance.
+  return bundle.replace(
+    target,
+    `$1
+  let pollTime = Date.now();$2
+    pollTime = Math.max(pollTime + 60_000, Date.now());
+    const now = new Date(pollTime);
+    job = { ...job, ports: { ...job.ports, clock: { now: () => now } } };`,
+  );
+}
+
 export async function reserveLoopbackPort(): Promise<number> {
   const server = createServer();
   try {
@@ -119,6 +135,7 @@ export interface LocalBroker {
   read<T extends Record<string, unknown>>(sql: string, params?: (string | number)[]): Promise<T[]>;
   loseBlob(orgId: string, sha256: string): Promise<void>;
   moduleEvidence(): Promise<void>;
+  pollTick(orgId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -167,6 +184,7 @@ export async function startLocal(
     const copy = join(directory, 'bundle');
     await cp(output, copy, { recursive: true });
     const script = join(copy, entry);
+    await writeFile(script, injectSourcePollClock(await readFile(script, 'utf8')));
     if (options.removeWebhook) {
       assert.equal(runtime, 'node');
       await writeFile(script, removeWebhookRegistration(await readFile(script, 'utf8')));
@@ -183,6 +201,9 @@ export async function startLocal(
     let worker:
       | {
           ready: Promise<URL>;
+          getWorker(): Promise<{
+            scheduled(options: { scheduledTime: number; cron: string }): Promise<unknown>;
+          }>;
           getD1Database(name: string): Promise<{
             prepare(sql: string): {
               bind(...params: unknown[]): {
@@ -409,6 +430,38 @@ syncBuiltinESMExports();
           await rm(path);
           await rm(`${path}.media`, { force: true });
         }
+      },
+      async pollTick(orgId) {
+        // A unique ULID-shaped test ID also passes the Worker's queue notification validation.
+        const id = '01' + randomBytes(12).toString('hex').toUpperCase();
+        // Enqueue a due tick, then let the production runners claim and settle it.
+        const sql =
+          // eslint-disable-next-line no-restricted-syntax -- Scoped test infrastructure enqueue; production handlers perform polling and sync.
+          "INSERT INTO job (id, org_id, type) SELECT ?, id, 'core:source-poll:v1' FROM organization WHERE id = ?";
+        if (worker) {
+          await (await worker.getD1Database('DB')).prepare(sql).bind(id, orgId).all();
+        } else {
+          const db = new DatabaseSync(database);
+          try {
+            db.prepare(sql).run(id, orgId);
+          } finally {
+            db.close();
+          }
+        }
+        await until(async () => {
+          if (worker)
+            await (
+              await worker.getWorker()
+            ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
+          const [job] = await read<{ state: string }>(
+            // eslint-disable-next-line no-restricted-syntax -- Observe the scoped infrastructure enqueue.
+            'SELECT state FROM job WHERE org_id = ? AND id = ?',
+            [orgId, id],
+          );
+          assert(job, 'SourcePollJobMissing');
+          assert.notEqual(job.state, 'dead', 'SourcePollJobFailed');
+          return job.state === 'succeeded';
+        }, 'source-poll');
       },
       async moduleEvidence() {
         assert(!logOverflow, 'IncompleteLogEvidence');

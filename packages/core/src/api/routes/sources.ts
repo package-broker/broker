@@ -176,18 +176,28 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
     orgPause,
     orgResume,
     orgCredential,
+    orgSync,
     projectList,
     projectCreate,
     projectUpdate,
     projectPause,
     projectResume,
     projectCredential,
+    projectSync,
   ] = SOURCE_API_SPECS;
   const groups = [
-    [orgList, orgCreate, orgUpdate, orgPause, orgResume, orgCredential],
-    [projectList, projectCreate, projectUpdate, projectPause, projectResume, projectCredential],
+    [orgList, orgCreate, orgUpdate, orgPause, orgResume, orgCredential, orgSync],
+    [
+      projectList,
+      projectCreate,
+      projectUpdate,
+      projectPause,
+      projectResume,
+      projectCredential,
+      projectSync,
+    ],
   ] as const;
-  const routes = groups.flatMap(([list, create, update, pause, resume, credential]) => {
+  const routes = groups.flatMap(([list, create, update, pause, resume, credential, sync]) => {
     return [
       apiRoute(list, async ({ ctx, query }) => {
         const org = ctx.org;
@@ -271,6 +281,13 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
         const c = writeContext(ctx, deps);
         const result = await deps.service.resume(c.org, c.actor, c.fence, params.source);
         return result.ok ? { status: 204 } : failure(result);
+      }),
+      apiRoute(sync, async ({ ctx, params }) => {
+        const denied = await mutationPreflight(ctx, params.source);
+        if (denied !== null) return denied;
+        const c = writeContext(ctx, deps);
+        const result = await deps.service.syncNow(c.org, c.actor, c.fence, params.source, c.call);
+        return result.ok ? { status: 202 } : failure(result);
       }),
       apiRoute(credential, async ({ ctx, params, body }) => {
         const denied = await mutationPreflight(ctx, params.source);

@@ -312,6 +312,7 @@ describe('organization scope', () => {
 });
 
 describe('source poll', () => {
+  const clock = fixedClock(new Date().toISOString());
   async function source(id: string, org: OrgContext, nextPollAt: string, status = 'active') {
     await exec(
       'INSERT INTO source (id, org_id, name, ecosystem, type, status, next_poll_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -351,7 +352,7 @@ describe('source poll', () => {
       poll.handler(poll.validate({}), {
         org: a,
         signal: new AbortController().signal,
-        ports: { platform: { jobs } },
+        ports: { clock, platform: { jobs } },
       } as unknown as JobContext);
     await tick();
     await tick();
@@ -389,7 +390,7 @@ describe('source poll', () => {
             handler: (input, job) => sourceSyncJob.handler(sourceSyncJob.validate(input), job),
           }),
         ],
-        clock: fixedClock(new Date().toISOString()),
+        clock,
         ids: { ulid },
       })('core', { projectId: null, tokenId: null });
       const enqueue = vi.fn(jobs.enqueue);
@@ -398,7 +399,7 @@ describe('source poll', () => {
         poll.handler(poll.validate({}), {
           org: a,
           signal: new AbortController().signal,
-          ports: { platform: { jobs: { ...jobs, enqueue } } },
+          ports: { clock, platform: { jobs: { ...jobs, enqueue } } },
           observability: { counter: vi.fn(), histogram: vi.fn(), log: vi.fn() },
         } as unknown as JobContext);
 
@@ -457,7 +458,7 @@ describe('source poll', () => {
       poll.handler(poll.validate({}), {
         org: a,
         signal: new AbortController().signal,
-        ports: { platform: { jobs } },
+        ports: { clock, platform: { jobs } },
       } as unknown as JobContext);
     for (let round = 0; round < 3; round += 1) await tick();
     expect(new Set(created.map((payload) => (payload as { sourceId: string }).sourceId)).size).toBe(

@@ -48,6 +48,9 @@ const fields = [
   'removalPolicy',
   'pollIntervalSeconds',
   'lastSuccessAt',
+  'lastError',
+  'lastPolledAt',
+  'nextPollAt',
   'hasCredential',
 ].sort();
 
@@ -113,10 +116,13 @@ async function fixture(
     removalPolicy: 'flag',
     pollIntervalSeconds: 300,
     lastSuccessAt: null,
+    lastPolledAt: null,
+    nextPollAt: null,
     removalRefusal: options.refusal === undefined ? null : options.refusal,
     removalAccepted: options.armed ?? false,
   } as SourceRecord;
   const sources = {
+    syncNow: vi.fn().mockResolvedValue('requested'),
     acceptRemoval: vi.fn().mockResolvedValue('accepted'),
     countAttachedProjects: vi.fn().mockResolvedValue(new Map([[SOURCE, 2]])),
     get: vi.fn(async () => (options.sourceAbsent ? null : row)),
@@ -168,6 +174,7 @@ async function fixture(
   const list = vi.spyOn(service, 'list');
   const getVisible = vi.spyOn(service, 'getVisible');
   const resume = vi.spyOn(service, 'resume');
+  const syncNow = vi.spyOn(service, 'syncNow');
   const sessions = {
     authenticate: vi.fn().mockResolvedValue({
       session: { id: options.sessionMismatch ? 'other-session' : 'session-1', userId: 'user-1' },
@@ -290,6 +297,7 @@ async function fixture(
     list,
     getVisible,
     resume,
+    syncNow,
     projects,
     sessions,
     clientIp,
@@ -307,8 +315,8 @@ async function normalized(response: Response) {
   };
 }
 
-it('declares all twelve routes as exportable API specs', () => {
-  expect(SOURCE_API_SPECS).toHaveLength(12);
+it('declares all fourteen routes as exportable API specs', () => {
+  expect(SOURCE_API_SPECS).toHaveLength(14);
   for (const spec of SOURCE_API_SPECS) expect(() => defineApi(spec)).not.toThrow();
 });
 
@@ -317,6 +325,42 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
   const setup = (extra: Parameters<typeof fixture>[0] = {}) =>
     fixture({ sourceProject: project ? PROJECT : null, ...extra });
   describe(base, () => {
+    it('requests a sync with 202 using the source write fence and audit context', async () => {
+      const f = await setup();
+      const response = await f.request('POST', `${base}/${SOURCE}/sync`);
+      expect(response.status).toBe(202);
+      expect(await response.json()).toBe(null);
+      expect(f.sources.syncNow).toHaveBeenCalledOnce();
+      expect(f.sources.syncNow.mock.calls[0]).toMatchObject([
+        { orgId: 'org-1' },
+        { userId: 'user-1', sessionId: 'session-1' },
+        {
+          id: SOURCE,
+          audit: { action: 'source.sync_requested', projectId: project ? PROJECT : null },
+        },
+      ]);
+    });
+    it('returns the stable paused-source problem', async () => {
+      const f = await setup();
+      f.sources.syncNow.mockResolvedValue('source_paused');
+      const response = await f.request('POST', `${base}/${SOURCE}/sync`);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: 'source_paused', message: 'Source is paused' },
+      });
+    });
+    it('applies the same token denial and missing-source semantics to sync and pause', async () => {
+      const f = await setup();
+      expect(
+        await normalized(await f.request('POST', `${base}/${SOURCE}/sync`, undefined, true)),
+      ).toEqual(
+        await normalized(await f.request('POST', `${base}/${SOURCE}/pause`, undefined, true)),
+      );
+      expect(f.sources.syncNow).not.toHaveBeenCalled();
+      const missing = await setup({ sourceAbsent: true });
+      expect((await missing.request('POST', `${base}/${SOURCE}/sync`)).status).toBe(404);
+      expect(missing.sources.syncNow).not.toHaveBeenCalled();
+    });
     it.each([
       ['material', credential, 204],
       ['wrong-typed field', { ...credential, material: { token: SENTINEL } }, 400],
@@ -483,6 +527,8 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
         removalPolicy: 'flag',
         pollIntervalSeconds: 60,
         lastSuccessAt: null,
+        lastPolledAt: null,
+        nextPollAt: null,
       } as SourceRecord;
       const f = await setup({ rows: [raw] });
       const response = await f.request('GET', base);
@@ -626,6 +672,8 @@ it('pages in id order using after and next IDs', async () => {
         removalPolicy: 'flag',
         pollIntervalSeconds: 60,
         lastSuccessAt: null,
+        lastPolledAt: null,
+        nextPollAt: null,
       }) as SourceRecord,
   );
   const f = await fixture({ rows });
@@ -645,6 +693,7 @@ it('pages in id order using after and next IDs', async () => {
 const mutations = [
   ['PATCH', '', { userAgent: null }],
   ['POST', '/pause', undefined],
+  ['POST', '/sync', undefined],
   ['POST', '/resume', undefined],
   ['PUT', '/credential', credential],
 ] as const;
@@ -699,13 +748,22 @@ describe.each(mutations)('project source %s %s', (method, suffix, body) => {
 
   it('reaches the owned-source mutation with write permission alone', async () => {
     const f = await fixture({ ...writer, sourceProject: PROJECT });
-    expect((await f.request(method, path, body)).status).toBe(suffix === '/resume' ? 409 : 204);
+    expect((await f.request(method, path, body)).status).toBe(
+      suffix === '/resume' ? 409 : suffix === '/sync' ? 202 : 204,
+    );
     expect(f.getVisible).toHaveBeenCalledOnce();
     expect(f.sources.getVisible).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), {
       projectId: PROJECT,
       sourceId: SOURCE,
     });
-    const operation = suffix === '/resume' ? f.resume : suffix === '/pause' ? f.pause : f.update;
+    const operation =
+      suffix === '/sync'
+        ? f.syncNow
+        : suffix === '/resume'
+          ? f.resume
+          : suffix === '/pause'
+            ? f.pause
+            : f.update;
     expect(operation).toHaveBeenCalledOnce();
   });
 
@@ -879,6 +937,8 @@ it('marks attachments using the complete attachment reader, preserving unattache
     removalPolicy: 'flag',
     pollIntervalSeconds: 300,
     lastSuccessAt: null,
+    lastPolledAt: null,
+    nextPollAt: null,
   } as SourceRecord;
   const f = await fixture({ rows: [row, { ...row, id: SECOND, projectId: null }] });
   const response = await f.request('GET', '/_pb/projects/demo/sources?limit=1');

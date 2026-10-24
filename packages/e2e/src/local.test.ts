@@ -1,11 +1,13 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   assertBuiltModules,
   assertWorkerBundle,
   fixtureDestination,
+  injectSourcePollClock,
   repository,
   removeWebhookRegistration,
   upstreamOrigins,
@@ -96,6 +98,44 @@ describe('local production assembly', () => {
       (match) => match[1]!,
     );
     expect(imports.every((path) => path.startsWith('node:'))).toBe(true);
+  });
+
+  it('advances poll minutes without advancing database or other job clocks', async () => {
+    const bundle = `function createSourcePollJob(deps) {
+      return defineJob({ ...sourcePollJob, validate: validatePoll, async handler(input, job) {
+        validatePoll(input);
+        return deps.capture(job);
+      } });
+    }`;
+    const capture = vi.fn();
+    const validatePoll = vi.fn();
+    const defineJob = vi.fn((definition: unknown) => definition);
+    const create = runInNewContext(injectSourcePollClock(bundle) + '\ncreateSourcePollJob;', {
+      Date,
+      sourcePollJob: {},
+      defineJob,
+      validatePoll,
+    }) as (deps: { capture: typeof capture }) => {
+      handler(input: unknown, job: unknown): Promise<void>;
+    };
+    const clock = { now: () => new Date('2026-10-24T12:00:00Z') };
+    const platform = {};
+    const job = { org: { orgId: 'acme' }, ports: { clock, platform } };
+    const poll = create({ capture });
+    await poll.handler({}, job);
+    await poll.handler({}, job);
+    const [first, second] = capture.mock.calls.map(([value]) => value as typeof job);
+    expect(
+      second!.ports.clock.now().getTime() - first!.ports.clock.now().getTime(),
+    ).toBeGreaterThanOrEqual(60_000);
+    expect(first!.org).toBe(job.org);
+    expect(first!.ports.platform).toBe(platform);
+    expect(job.ports.clock).toBe(clock);
+    expect(clock.now().toISOString()).toBe('2026-10-24T12:00:00.000Z');
+    expect(defineJob).toHaveBeenCalledOnce();
+    expect(validatePoll).toHaveBeenCalledTimes(2);
+    expect(() => injectSourcePollClock('')).toThrow('SourcePollClockTargetMissing');
+    expect(() => injectSourcePollClock(bundle + bundle)).toThrow('SourcePollClockTargetMissing');
   });
 
   it.each([
@@ -203,6 +243,18 @@ describe('production bundle HTTP scenario', () => {
     for (const script of ['build', 'bundle'])
       await run('pnpm', [script], { cwd: repository, maxBuffer: 64 * 1024 * 1024 });
   }, 600_000);
+
+  it.each(['node', 'cloudflare'])(
+    'can inject the poll clock into the %s bundle',
+    async (runtime) => {
+      const entry = runtime === 'node' ? 'server.js' : 'worker.js';
+      const bundle = await readFile(
+        new URL(`../../../.pb/${runtime}/${entry}`, import.meta.url),
+        'utf8',
+      );
+      expect(() => injectSourcePollClock(bundle)).not.toThrow();
+    },
+  );
 
   it('passes both production assemblies and fails the patched Node webhook leg', async () => {
     const result = await runRegistryAssembly();

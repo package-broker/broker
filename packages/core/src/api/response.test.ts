@@ -23,6 +23,7 @@ const statuses = {
   reauth_required: 403,
   not_found: 404,
   conflict: 409,
+  source_paused: 409,
   duplicate: 409,
   last_holder: 409,
   idempotency_mismatch: 409,
@@ -59,6 +60,7 @@ const expectedCodes: Record<string, ApiErrorCode> = {
   duplicate: 'duplicate',
   last_holder: 'last_holder',
   conflict: 'conflict',
+  source_paused: 'source_paused',
   locked: 'conflict',
   system_role: 'conflict',
   in_use: 'conflict',
@@ -314,6 +316,7 @@ describe('ProjectListError', () => {
 
 describe('SourceError', () => {
   const members = [
+    'source_paused',
     'forbidden',
     'not_found',
     'invalid_config',

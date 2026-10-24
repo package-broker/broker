@@ -589,7 +589,7 @@ describe('OpenAPI follow-ups', () => {
   it.each([
     [
       409,
-      'Conflict; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required',
+      'Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required',
     ],
     [503, API_ERROR_CODES.unavailable.message],
     [418, 'Error'],
@@ -651,5 +651,22 @@ it('publishes the same required nested vulnerability contract on both version re
         },
       },
     });
+  }
+});
+
+it('declares the paused-source conflict for both source sync operations', async () => {
+  const { SOURCE_API_SPECS } = await import('./routes/sources-schemas.js');
+  const doc = generateOpenApi(SOURCE_API_SPECS, info);
+  for (const path of [
+    '/_pb/sources/{source}/sync',
+    '/_pb/projects/{project}/sources/{source}/sync',
+  ]) {
+    const responses = doc.paths[path]!.post!.responses;
+    expect(responses).toHaveProperty('202');
+    expect(responses).toHaveProperty('409.content.application/json');
+    expect(responses).toHaveProperty(
+      '409.description',
+      expect.stringContaining('Source is paused'),
+    );
   }
 });

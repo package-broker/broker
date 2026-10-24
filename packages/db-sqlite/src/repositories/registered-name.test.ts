@@ -337,6 +337,9 @@ describe('enable', () => {
     expect(await snapshot()).toBe(before);
 
     expect(await add(orgFence(), NAME_1, SRC_ORG, 'acme/*')).toBe('added');
+    await executor.batch([
+      stmt("UPDATE source SET next_poll_at = '2999-01-01T00:00:00.000Z' WHERE id = ?", SRC_ORG),
+    ]);
     const epochBefore = await epoch();
     expect(
       await names.enable(a, orgFence(), {
@@ -346,6 +349,9 @@ describe('enable', () => {
       }),
     ).toBe('enabled');
     expect(await status(SRC_ORG)).toBe('active');
+    const source = await createSourceRepository(executor).get(a, SRC_ORG);
+    expect(Math.abs(Date.parse(source!.nextPollAt!) - Date.now())).toBeLessThan(5000);
+    expect(source!.pollIntervalSeconds).toBe(86400);
     expect(await epoch()).not.toBe(epochBefore);
   });
 

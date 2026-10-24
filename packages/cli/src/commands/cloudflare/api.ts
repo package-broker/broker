@@ -93,6 +93,9 @@ export class CloudflareError extends Error {
     'capability_unknown'
       ? 'provider_contract'
       : null,
+    readonly providerCode: number | null = null,
+    readonly source: string | null = null,
+    readonly fields: readonly string[] = [],
   ) {
     super(MESSAGES[code]);
     this.name = 'CloudflareError';
@@ -144,8 +147,11 @@ export type CommandEnvelope = ReturnType<typeof commandEnvelope>;
 export interface CommandCheck {
   name: string;
   status: string;
+  enabled?: boolean;
+  previews_enabled?: boolean;
   attempt?: number;
   elapsed_ms?: number;
+  source?: string;
 }
 export interface CommandResult {
   exitCode: number;
@@ -155,7 +161,13 @@ export interface CommandResult {
 export function failCommand(output: CommandEnvelope, error: unknown): CommandResult {
   const safe = error instanceof CloudflareError ? error : new CloudflareError('provider_failure');
   output.status = 'error';
-  if (safe.check !== null) output.checks.push({ name: safe.check, status: safe.code });
+  if (safe.check !== null)
+    output.checks.push({
+      name: safe.check,
+      status: safe.code,
+      ...(safe.source === null ? {} : { source: safe.source }),
+    });
+  for (const name of safe.fields) output.checks.push({ name, status: safe.code });
   output.error = {
     code: safe.code,
     message: safe.message,
@@ -284,6 +296,21 @@ export class CloudflareApi {
   ): Promise<ApiResponse> {
     return this.enqueue(path, method, body, undefined, undefined, headers);
   }
+  async analyticsEngineTables(): Promise<void> {
+    const { result } = await this.request('/analytics_engine/sql', 'POST', 'SHOW TABLES');
+    const tables = object(result);
+    if (
+      !Array.isArray(tables.meta) ||
+      tables.meta.length !== 1 ||
+      object(tables.meta[0]).name !== 'dataset' ||
+      object(tables.meta[0]).type !== 'String' ||
+      !Array.isArray(tables.data) ||
+      !Number.isSafeInteger(tables.rows) ||
+      tables.rows !== tables.data.length ||
+      !tables.data.every((row: unknown) => typeof object(row).dataset === 'string')
+    )
+      throw new CloudflareError('provider_failure');
+  }
   requestZone(
     zone: string,
     path: string,
@@ -332,10 +359,13 @@ export class CloudflareApi {
       path.startsWith('//')
     )
       throw new CloudflareError('invalid_input', 2);
+    // SQL is a read-only POST with a plain-text request and a non-v4 JSON response.
+    const analyticsQuery =
+      path === '/analytics_engine/sql' && method === 'POST' && body === 'SHOW TABLES';
     for (let attempt = 0; attempt < (method === 'GET' ? 5 : 1); attempt++) {
       try {
         await this.pause(Math.max(0, this.scheduler.next - this.now()));
-        if (method !== 'GET') this.assertCreateBudget();
+        if (method !== 'GET' && !analyticsQuery) this.assertCreateBudget();
       } catch (error) {
         if (method !== 'GET' && error instanceof CloudflareError) UNSENT.add(error);
         throw error;
@@ -350,6 +380,8 @@ export class CloudflareApi {
         controller.signal.addEventListener('abort', () => reject(new Error()), { once: true }),
       );
       let response: Response | undefined;
+      let responseFailure: CloudflareError | undefined;
+      let errorTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         response = await Promise.race([
           (this.options.fetch ?? fetch)(
@@ -361,24 +393,49 @@ export class CloudflareApi {
               headers: {
                 ...extraHeaders,
                 authorization: `Bearer ${token ?? this.options.apiToken}`,
-                ...(body instanceof FormData ? {} : { 'content-type': 'application/json' }),
+                ...(body instanceof FormData
+                  ? {}
+                  : { 'content-type': analyticsQuery ? 'text/plain' : 'application/json' }),
               },
               ...(body === undefined
                 ? {}
-                : { body: body instanceof FormData ? body : JSON.stringify(body) }),
+                : {
+                    body:
+                      body instanceof FormData || analyticsQuery
+                        ? (body as string | FormData)
+                        : JSON.stringify(body),
+                  }),
             },
           ),
           aborted,
         ]);
-        if (!response.ok) {
+        if (response.status === 403 || response.status === 401) {
           controller.abort();
           void response.body?.cancel().catch(() => undefined);
-        }
-        if (response.status === 403 || response.status === 401)
           throw new CloudflareError('permission_denied', 1, false, 'provision', response.status);
+        }
         const transient = [408, 429, 500, 502, 503, 504].includes(response.status);
         if (!response.ok)
-          throw new CloudflareError('provider_failure', 1, transient, 'provision', response.status);
+          responseFailure = new CloudflareError(
+            'provider_failure',
+            1,
+            transient,
+            'provision',
+            response.status,
+          );
+        if (responseFailure) {
+          // Only Queues plan rejection needs a numeric code; other HTTP failures need no body.
+          if (
+            method !== 'GET' ||
+            !/^\/queues(?:\?|$)/.test(path) ||
+            !response.headers.get('content-type')?.includes('application/json')
+          ) {
+            controller.abort();
+            void response.body?.cancel().catch(() => undefined);
+            throw responseFailure;
+          }
+          errorTimer = setTimeout(() => controller.abort(), 1000);
+        }
         const reader = response.body?.getReader();
         if (!reader) throw new Error();
         const chunks: Uint8Array[] = [];
@@ -399,16 +456,47 @@ export class CloudflareApi {
           reader.releaseLock();
         }
         const parsed = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        if (!response.ok || parsed.success === false) {
+          const planRejected =
+            method === 'GET' &&
+            /^\/queues(?:\?|$)/.test(path) &&
+            Array.isArray(parsed.errors) &&
+            parsed.errors.some(
+              (entry: unknown) =>
+                entry !== null &&
+                typeof entry === 'object' &&
+                !Array.isArray(entry) &&
+                (entry as Record<string, unknown>).code === 10253,
+            );
+          if (planRejected)
+            throw new CloudflareError(
+              'provider_failure',
+              1,
+              false,
+              'provision',
+              response.status,
+              null,
+              10253,
+            );
+          if (responseFailure) throw responseFailure;
+          throw new Error();
+        }
+        if (analyticsQuery) {
+          if (response.status !== 200) throw new Error();
+          return { result: parsed };
+        }
         if (parsed.success !== true || !Object.hasOwn(parsed, 'result')) throw new Error();
         return {
           result: parsed.result,
-          ...(parsed.result_info === undefined ? {} : { result_info: object(parsed.result_info) }),
+          ...(parsed.result_info == null ? {} : { result_info: object(parsed.result_info) }),
         };
       } catch (error) {
         const safe =
-          error instanceof CloudflareError
-            ? error
-            : new CloudflareError('provider_failure', 1, true);
+          responseFailure && !(error instanceof CloudflareError && error.providerCode === 10253)
+            ? responseFailure
+            : error instanceof CloudflareError
+              ? error
+              : new CloudflareError('provider_failure', 1, true);
         const header = response?.headers.get('retry-after');
         if (safe.retryable && header) {
           const requested = /^\d+$/.test(header)
@@ -426,6 +514,7 @@ export class CloudflareApi {
         );
         await this.pause(delay);
       } finally {
+        clearTimeout(errorTimer);
         clearTimeout(timer);
       }
     }
@@ -446,40 +535,91 @@ export class CloudflareApi {
       throw new CloudflareError('capability_unknown');
     return result.map(object);
   }
-  async list(path: string, field?: string): Promise<Record<string, unknown>[]> {
-    const all: Record<string, unknown>[] = [];
-    let cursor: string | undefined;
-    const seen = new Set<string>();
-    for (let page = 1; page <= 10_000; page++) {
-      const separator = path.includes('?') ? '&' : '?';
-      const response = await this.request(
-        `${path}${separator}${cursor === undefined ? `page=${page}&per_page=100` : `cursor=${encodeURIComponent(cursor)}`}`,
-      );
-      const result = field === undefined ? response.result : object(response.result)[field];
-      if (!Array.isArray(result)) throw new CloudflareError('provider_failure');
-      all.push(...result.map(object));
-      const info = response.result_info;
-      const next = info?.cursor;
-      if (typeof next === 'string' && next !== '') {
-        if (seen.has(next)) throw new CloudflareError('provider_failure');
-        seen.add(next);
-        cursor = next;
-        continue;
-      }
-      const pages = info?.total_pages;
-      if (typeof pages === 'number' && Number.isSafeInteger(pages) && pages >= page) {
-        if (pages === page) return all;
-        continue;
-      }
-      if (
-        info?.total_count === all.length ||
-        (cursor !== undefined && next === '') ||
-        (pages === 0 && result.length === 0)
-      )
-        return all;
-      // Absence requires explicit pagination completion, never a short-page guess.
-      throw new CloudflareError('capability_unknown');
-    }
-    throw new CloudflareError('provider_failure');
+  async list(
+    path: string,
+    field?: string,
+    headers?: Record<string, string>,
+  ): Promise<Record<string, unknown>[]> {
+    return paginatedList(path, (page) => this.request(page, 'GET', undefined, headers), field);
   }
+}
+
+export async function paginatedList(
+  path: string,
+  read: (path: string) => Promise<ApiResponse>,
+  field?: string,
+  unknown: () => never = () => {
+    throw new CloudflareError('capability_unknown');
+  },
+  malformed: () => never = () => {
+    throw new CloudflareError('provider_failure');
+  },
+): Promise<Record<string, unknown>[]> {
+  const all: Record<string, unknown>[] = [];
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  let totalCount: number | undefined;
+  let totalPages: number | undefined;
+  for (let page = 1; page <= 10_000; page++) {
+    const separator = path.includes('?') ? '&' : '?';
+    const response = await read(
+      `${path}${separator}${cursor === undefined ? `page=${page}&per_page=100` : `cursor=${encodeURIComponent(cursor)}`}`,
+    );
+    const result = field === undefined ? response.result : object(response.result)[field];
+    if (!Array.isArray(result)) return malformed();
+    all.push(...result.map(object));
+    const info = response.result_info;
+    const next = info?.cursor;
+    const pages = info?.total_pages;
+    const count = info?.total_count;
+    for (const value of [pages, count, info?.count, info?.page])
+      if (value !== undefined && (!Number.isSafeInteger(value) || Number(value) < 0)) unknown();
+    if (
+      (next !== undefined && typeof next !== 'string') ||
+      (info?.page !== undefined && cursor === undefined && info.page !== page) ||
+      (info?.count !== undefined && info.count !== result.length) ||
+      (totalCount !== undefined && count !== undefined && totalCount !== count) ||
+      (totalPages !== undefined && pages !== undefined && totalPages !== pages)
+    )
+      unknown();
+    if (typeof count === 'number') totalCount = count;
+    if (typeof pages === 'number') totalPages = pages;
+    if (
+      (totalCount !== undefined && all.length > totalCount) ||
+      (pages === 0 && (all.length !== 0 || (next !== undefined && next !== '')))
+    )
+      unknown();
+    const complete = () => {
+      if (totalCount !== undefined && totalCount !== all.length) unknown();
+      return all;
+    };
+    if (typeof next === 'string' && next !== '') {
+      if (seen.has(next)) return malformed();
+      seen.add(next);
+      cursor = next;
+      continue;
+    }
+    if (typeof pages === 'number' && Number.isSafeInteger(pages) && pages >= page) {
+      if (pages === page) return complete();
+      continue;
+    }
+    if (info?.total_count === all.length || next === '' || (pages === 0 && result.length === 0))
+      return complete();
+    if (
+      totalPages === undefined &&
+      cursor === undefined &&
+      next === undefined &&
+      typeof count === 'number' &&
+      count > all.length &&
+      info?.page === page &&
+      info.count === result.length &&
+      result.length > 0 &&
+      Number.isSafeInteger(info.per_page) &&
+      Number(info.per_page) >= result.length
+    )
+      continue;
+    // Absence requires explicit pagination completion, never a short-page guess.
+    unknown();
+  }
+  return malformed();
 }

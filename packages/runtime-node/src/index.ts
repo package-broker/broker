@@ -1,16 +1,19 @@
+import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { createMcpTools } from '@package-broker/core/mcp/tools';
 import { createMcpRoutes } from '@package-broker/core/mcp/transport';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
-import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
 import {
   createVulnerabilityRuntime,
   VULNERABILITY_EVENT,
   VULNERABILITY_REASON_CODES,
 } from '@package-broker/core/runtime/vulnerability';
 import { createVulnerabilityRepository } from '@package-broker/db-sqlite/repositories/vulnerability';
-import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
+import {
+  createAccessServices,
+  type AccessAssembly,
+} from '@package-broker/db-sqlite/repositories/access-services';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
 import {
   createProviderRegistry,
@@ -48,26 +51,9 @@ import { auditSealJob } from '@package-broker/core/audit/sealer';
 import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
-import { createApiModule } from '@package-broker/core/api/module';
-import type { AuditReader } from '@package-broker/core/api/routes/audit';
-import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
-import { createSourceService } from '@package-broker/core/sources/source-service';
-import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
-import { createGrantRepository } from '@package-broker/db-sqlite/repositories/grant';
-import { createIdempotencyRepository } from '@package-broker/db-sqlite/repositories/idempotency';
-import { createAuditQueryRepository } from '@package-broker/db-sqlite/repositories/audit-query';
-import { createPackageAdminReader } from '@package-broker/db-sqlite/repositories/package-admin-read';
-import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
-import { createProjectSourceReader } from '@package-broker/db-sqlite/repositories/project-source-read';
-import { createRegisteredNameRepository } from '@package-broker/db-sqlite/repositories/registered-name';
-import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
-import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
-import type { RouteDefinition } from '@package-broker/core/plugin';
 import { createServer, type Server } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getRequestListener } from '@hono/node-server';
-import type { AuthModule } from '@package-broker/core/auth/module';
 import type { SessionService } from '@package-broker/core/auth/session';
 import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
 import type { ProjectAdministration } from '@package-broker/core/authz/project-administration';
@@ -174,14 +160,6 @@ import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provid
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
-import { createPackageManageService } from '@package-broker/core/catalogue/package-manage-service';
-import { createImportCredentialService } from '@package-broker/core/import/credentials';
-import { createImportRunService } from '@package-broker/core/import/run-service';
-import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-fence';
-import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
-import { createImportCredentialRepository } from '@package-broker/db-sqlite/repositories/import-credential';
-import { createImportRunStore } from '@package-broker/db-sqlite/repositories/import-run';
-import type { BlobStore } from '@package-broker/core/platform/blob';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
 import { mcpEnabled, type BrokerConfig } from '@package-broker/core/config';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
@@ -404,13 +382,6 @@ function rejectingExecutor(): SqlExecutor {
   const unavailable = (): Promise<never> =>
     Promise.reject(new Error('no SQL executor configured for this runtime'));
   return { driver: 'node-sqlite', all: unavailable, batch: unavailable };
-}
-
-interface AccessAssembly {
-  readonly anchors: readonly ConfiguredProviderAnchor[];
-  readonly module: AuthModule;
-  readonly providerAnchors: ProviderAnchorReader;
-  readonly services: NodeAccessServices;
 }
 
 async function assembleAccess(
@@ -977,213 +948,6 @@ function buildCatalogue(
   });
 }
 
-function auditReader(executor: SqlExecutor): AuditReader {
-  const audit = createAuditQueryRepository(executor);
-  const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
-    if (ctx.org === null) throw new TypeError('route requires an organization context');
-    return ctx.org;
-  };
-  return {
-    list: (ctx, query) =>
-      audit.list(organization(ctx), {
-        limit: query.limit,
-        ...(query.projectId === null ? {} : { projectId: query.projectId }),
-        ...(query.actor === undefined ? {} : { actor: query.actor }),
-        ...(query.action === undefined ? {} : { action: query.action }),
-        ...(query.after === undefined ? {} : { afterId: query.after }),
-      }),
-    async head(ctx) {
-      const head = await audit.head(organization(ctx));
-      return {
-        seq: head?.seq ?? 0,
-        hash: head?.hash ?? AUDIT_GENESIS_HASH,
-        pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: head?.lastVerifiedAt ?? null,
-      };
-    },
-  };
-}
-
-function buildApiRoutes(input: {
-  readonly clientIp: (request: Request) => string | null;
-  readonly executor: SqlExecutor;
-  readonly auth: NodeAuthOptions;
-  readonly access: AccessAssembly;
-  readonly packages: NodeCatalogueServices;
-  readonly vulnerability: ReturnType<typeof createVulnerabilityRuntime>;
-  readonly policy: OutboundPolicy;
-  readonly registration: Registration;
-  readonly lifetime: TokenLifetimePolicy;
-  readonly log: KernelLog;
-  readonly blob: BlobStore | undefined;
-}): readonly RouteDefinition[] {
-  const { executor, access, packages, lifetime, log, blob } = input;
-  const { services } = access;
-  const anchors = access.anchors;
-  const common = { ids: { ulid }, clock: systemClock, clientIp: input.clientIp };
-  const organizations = createOrganizationRepository(executor);
-  const projects = createProjectRepository(executor, {
-    reservedSlugs: reservedFirstSegments([
-      ...input.registration.routes,
-      ...access.module.coreRoutes,
-    ]),
-    providerAnchors: anchors,
-  });
-  const idempotency = createIdempotencyRepository(executor);
-  const sources = createSourceRepository(executor);
-  const credentialRepository = createCredentialRepository(executor);
-  const registeredNames = createRegisteredNameRepository(executor);
-  const credentialStore = createCredentialStore({
-    repository: credentialRepository,
-    cipher: createSecretCipher(input.auth.keyring, 'credential-encryption'),
-    ids: { ulid },
-    clock: systemClock,
-  });
-  const sourceService = createSourceService({
-    sources,
-    organizations,
-    registeredNames,
-    credentials: credentialStore,
-    credentialRepository,
-    catalogue: packages.reader,
-    policy: input.policy,
-    providerAnchors: anchors,
-    ids: { ulid },
-    log,
-  });
-  if (blob === undefined) {
-    log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
-  }
-  try {
-    return createApiModule({
-      organization: {
-        ...common,
-        organizations,
-        users: createUserRepository(executor),
-        administration: services.administration,
-        lifetime,
-      },
-      projects: {
-        ...common,
-        lister: services.projectList,
-        service: services.projects,
-        projects,
-        idempotency,
-      },
-      access: {
-        ...common,
-        administration: services.administration,
-        grants: createGrantRepository(executor, {
-          providerAnchors: anchors,
-          holderInput: () => ({ kind: 'fresh', providers: anchors }),
-        }),
-      },
-      projectAccess: {
-        ...common,
-        projectAdministration: services.projectGrants,
-        reader: createProjectGrantReader(executor),
-        roles: {
-          get: async (ctx, id) =>
-            (await services.administration.listRoles(ctx)).find((role) => role.id === id) ?? null,
-        },
-      },
-      tokens: {
-        ...common,
-        tokens: {
-          personal: services.personalTokens,
-          service: services.serviceTokens,
-          revoke: services.tokenRevoke,
-        },
-        reader: services.tokenList,
-        idempotency,
-        sessions: services.sessions,
-        organizations,
-        lifetime,
-      },
-      servicePrincipals: {
-        ...common,
-        servicePrincipals: services.servicePrincipals,
-        principals: createServicePrincipalRepository(executor),
-      },
-      sources: {
-        ...common,
-        service: sourceService,
-        sources,
-        projectSources: createProjectSourceReader(executor),
-        projects,
-        sessions: services.sessions,
-      },
-      sourceNames: {
-        ...common,
-        service: sourceService,
-        sources,
-        registeredNames,
-        visibility: packages.visibility,
-        projectSources: createProjectSourceReader(executor),
-        projects,
-      },
-      sourceAttachments: {
-        ...common,
-        sources,
-        visibility: packages.visibility,
-        projectSources: createProjectSourceReader(executor),
-        projects,
-      },
-      packages: {
-        ...createPackageAdminReader(executor),
-        readStatuses: input.vulnerability.readStatuses,
-      },
-      audit: auditReader(executor),
-      packageManage: {
-        ...common,
-        service: createPackageManageService({
-          reader: createPackageAdminReader(executor),
-          store: createVisibilityStore(executor, { providerAnchors: anchors }),
-          sessions: services.sessions,
-          clock: systemClock,
-          ids: { ulid },
-          log,
-        }),
-        sessions: services.sessions,
-        idempotency,
-      },
-      ...(blob === undefined
-        ? {}
-        : {
-            imports: {
-              ...common,
-              service: createImportRunService({
-                store: createImportRunStore({
-                  executor,
-                  blobs: blob,
-                  providerAnchors: anchors,
-                }),
-                ids: { ulid },
-                clock: systemClock,
-              }),
-              credentials: createImportCredentialService({
-                store: createImportCredentialRepository(executor, {
-                  blobs: blob,
-                  providerAnchors: anchors,
-                }),
-                credentials: credentialStore,
-                runtime: 'node',
-                ids: { ulid },
-                auditStatement: auditPendingStatement,
-              }),
-              auditStatement: auditPendingStatement,
-              tokenFence: importWriteTokenFence,
-            },
-          }),
-    }).routes;
-  } catch (error) {
-    if (error instanceof TypeError && error.message.startsWith('API module requires dependency')) {
-      throw new KernelConfigError([error.message]);
-    }
-    throw error;
-  }
-}
-
 function resolveTokenLifetime(input: BrokerConfig['tokens']): TokenLifetimePolicy {
   try {
     return resolveTokenLifetimePolicy(input);
@@ -1438,10 +1202,11 @@ export function createNodeServer(
     const apiRoutes =
       auth === undefined || access === undefined || packages === null
         ? []
-        : buildApiRoutes({
+        : createApiRoutes({
             clientIp,
             executor,
-            auth,
+            runtime: 'node',
+            keyring: auth.keyring,
             access,
             packages,
             vulnerability,
@@ -1450,7 +1215,6 @@ export function createNodeServer(
               runtime: 'node',
               selfOrigins: options.registry?.config.outbound.selfOrigins ?? [auth.publicOrigin],
             }),
-            registration,
             lifetime,
             log,
             blob: options.platformServices?.blob,

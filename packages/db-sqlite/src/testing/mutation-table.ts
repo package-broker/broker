@@ -1,3 +1,4 @@
+import { entries as apiServicesEntries } from './mutation-table/api-services.js';
 import { entries as sourceAttachmentCountsEntries } from './mutation-table/source-attachment-counts.js';
 import { entries as projectGrantReadEntries } from './mutation-table/project-grant-read.js';
 import { entries as selectedKeysEntries } from './mutation-table/selected-keys.js';
@@ -186,6 +187,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...accessEntries,
   ...accessBuilderEntries,
   ...accessServicesEntries,
+  ...apiServicesEntries,
   ...actorAuthorityEntries,
   ...servicePrincipalAuthorityEntries,
   ...blobReferencesEntries,

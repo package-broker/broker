@@ -741,22 +741,27 @@ it.each(['pending', 'complete'] as const)(
     expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
   },
 );
-function providerReadback(h: ReturnType<typeof harness>, o: DeployOptions) {
+function providerReadback(
+  h: ReturnType<typeof harness>,
+  o: DeployOptions,
+  listing: 'worker_id' | 'name_only' = 'worker_id',
+) {
   const inner = o.fetch!;
   o.fetch = (async (input, init) => {
     const path = new URL(String(input)).pathname;
     if (path.endsWith('/workers/scripts')) {
       const response = await inner(input, init);
       const envelope = object(await response.json());
-      envelope.result = (envelope.result as Record<string, unknown>[]).map((w) => ({
-        ...w,
-        worker_id: providerFixtures.workerWithId.result[0]!.worker_id,
-      }));
+      envelope.result = (envelope.result as Record<string, unknown>[]).map((w) =>
+        listing === 'name_only'
+          ? w
+          : { ...w, worker_id: providerFixtures.workerWithId.result[0]!.worker_id },
+      );
       return Response.json(envelope);
     }
     if (path.includes('/workers/workers/')) {
       expect(path).toContain(
-        `/workers/workers/${providerFixtures.workerWithId.result[0]!.worker_id}/versions/`,
+        `/workers/workers/${listing === 'name_only' ? script : providerFixtures.workerWithId.result[0]!.worker_id}/versions/`,
       );
       const v = h.versions.get(path.split('/').at(-1)!)!;
       const resources = v.resources as Record<string, unknown>;
@@ -3593,32 +3598,52 @@ it.each(['versions', 'plainValues'] as const)(
   },
 );
 
-it.each(['missing', 'unsafe'])(
-  'refuses unresolved Worker identity for version lookup: %s',
-  async (identity) => {
-    const { h, o } = firstInstall();
-    providerReadback(h, o);
-    const inner = o.fetch!;
-    let fullReads = 0;
-    o.fetch = (async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      if (path.includes('/workers/workers/')) fullReads++;
-      const response = await inner(input, init);
-      if (!path.endsWith('/workers/scripts')) return response;
-      const envelope = object(await response.json());
-      for (const worker of envelope.result as Record<string, unknown>[]) {
-        if (identity === 'missing') delete worker.worker_id;
-        else worker.worker_id = '../foreign';
-      }
-      return Response.json(envelope);
-    }) as typeof fetch;
-    const result = await deploy(o);
-    expect(result.output.error?.code).toBe('configuration_conflict');
-    expect(result.output.checks).toContainEqual({
-      name: 'worker:identity',
-      status: 'configuration_conflict',
-    });
-    expect(fullReads).toBe(0);
-    expect(h.endpoints.enabled).toBe(false);
-  },
-);
+it('looks up versions by Worker name when the scripts listing carries no worker_id', async () => {
+  const { h, o } = firstInstall();
+  providerReadback(h, o, 'name_only');
+  const inner = o.fetch!;
+  const fullPaths: string[] = [];
+  let loseCreate = true;
+  o.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.includes('/workers/workers/')) fullPaths.push(path);
+    const response = await inner(input, init);
+    if (loseCreate && path.endsWith(base) && init?.method === 'PUT') {
+      loseCreate = false;
+      throw new Error('create acknowledgement lost');
+    }
+    return response;
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.output.version_id).toBe(CREATED);
+  expect(fullPaths.length).toBeGreaterThan(0);
+  for (const path of fullPaths) expect(path).toContain(`/workers/workers/${script}/versions/`);
+});
+
+it('refuses an unsafe Worker identity for version lookup', async () => {
+  const { h, o } = firstInstall();
+  providerReadback(h, o);
+  const inner = o.fetch!;
+  let fullReads = 0;
+  o.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.includes('/workers/workers/')) fullReads++;
+    const response = await inner(input, init);
+    if (!path.endsWith('/workers/scripts')) return response;
+    const envelope = object(await response.json());
+    for (const worker of envelope.result as Record<string, unknown>[]) {
+      worker.worker_id = '../foreign';
+    }
+    return Response.json(envelope);
+  }) as typeof fetch;
+  const result = await deploy(o);
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(result.output.checks).toContainEqual({
+    name: 'worker:identity',
+    status: 'configuration_conflict',
+  });
+  expect(fullReads).toBe(0);
+  expect(h.endpoints.enabled).toBe(false);
+});

@@ -15,6 +15,7 @@ const credential: UpstreamCredential = {
     return { headers, url };
   },
 };
+const resetAt = (epochSeconds: number | undefined) => epochSeconds ?? 1234;
 const sha = 'a'.repeat(40);
 describe('token REST reads', () => {
   it('pages tags until the final short page', async () => {
@@ -28,7 +29,7 @@ describe('token REST reads', () => {
         })),
       ).body,
     }));
-    const refs = await tokenRest(fetch, credential, 'owner/repo').refs('tags');
+    const refs = await tokenRest(fetch, credential, 'owner/repo', resetAt).refs('tags');
     expect(refs).toHaveLength(101);
     expect(fetch.mock.calls.map(([request]) => request.url)).toEqual([
       'https://api.github.com/repos/owner/repo/tags?per_page=100&page=1',
@@ -43,7 +44,9 @@ describe('token REST reads', () => {
         headers: new Headers(),
         body: Response.json(value).body,
       });
-      await expect(tokenRest(fetch, credential, 'owner/repo').refs('tags')).rejects.toMatchObject({
+      await expect(
+        tokenRest(fetch, credential, 'owner/repo', resetAt).refs('tags'),
+      ).rejects.toMatchObject({
         code: 'invalid_response',
         message: 'GitHub provider invalid_response',
       });
@@ -77,7 +80,7 @@ describe('token REST reads', () => {
       name: `refs/tags/v1.0.${index}`,
       oid: index.toString(16).padStart(40, '0'),
     }));
-    const files = await tokenRest(fetch, credential, 'owner/repo').files(refs);
+    const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files(refs);
     expect(files).toHaveLength(250);
     expect(files.map((file) => file.ref)).toEqual(refs.map((ref) => ref.name));
     expect(fetch).toHaveBeenCalledTimes(6);
@@ -96,7 +99,7 @@ describe('token REST reads', () => {
         },
       }).body,
     });
-    const files = await tokenRest(fetch, credential, 'owner/repo').files(
+    const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files(
       ['missing', 'malformed', 'ok'].map((name) => ({ name, oid: sha })),
     );
     expect(files.map((file) => file.text)).toEqual([null, '{bad', '{"name":"vendor/package"}']);
@@ -106,7 +109,7 @@ describe('token REST reads', () => {
     async (error) => {
       const fetch: PolicyFetch = () => Promise.reject(error);
       await expect(
-        tokenRest(fetch, credential, 'owner/repo').files([{ name: 'ref', oid: sha }]),
+        tokenRest(fetch, credential, 'owner/repo', resetAt).files([{ name: 'ref', oid: sha }]),
       ).rejects.toBe(error);
     },
   );
@@ -116,6 +119,7 @@ describe('token REST reads', () => {
         vi.fn(),
         { ...credential, apply: (headers, url) => ({ headers, url }) },
         'owner/repo',
+        resetAt,
       ),
     ).toThrow(expect.objectContaining({ name: 'UpstreamError', code: 'http_status', status: 401 }));
   });
@@ -128,7 +132,7 @@ describe('token REST reads', () => {
         body: Response.json({ name: 'release/1.x', commit: { sha } }).body,
       })
       .mockRejectedValueOnce(new UpstreamError('http_status', 404));
-    const rest = tokenRest(fetch, credential, 'owner/repo');
+    const rest = tokenRest(fetch, credential, 'owner/repo', resetAt);
     expect(await rest.branch('release/1.x')).toEqual({ name: 'refs/heads/release/1.x', oid: sha });
     expect(await rest.branch('removed')).toBeNull();
     expect(fetch.mock.calls.map(([request]) => request.url)).toEqual([
@@ -151,7 +155,7 @@ describe('token REST reads', () => {
           },
         }).body,
       });
-      const files = await tokenRest(fetch, credential, 'owner/repo').files([
+      const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files([
         { name: 'bad', oid: sha },
         { name: 'ok', oid: sha },
       ]);
@@ -190,7 +194,7 @@ describe('token REST reads', () => {
         }).body,
       };
     };
-    const files = await tokenRest(fetch, credential, 'owner/repo').files([
+    const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files([
       { name: 'oversize', oid: sha },
       { name: 'one', oid: 'b'.repeat(40) },
       { name: 'two', oid: 'c'.repeat(40) },
@@ -217,10 +221,10 @@ describe('token REST reads', () => {
       body: Response.json({ errors: [{ type, message: 'secret' }] }).body,
     });
     await expect(
-      tokenRest(fetch, credential, 'owner/repo').files([{ name: 'ref', oid: sha }]),
+      tokenRest(fetch, credential, 'owner/repo', resetAt).files([{ name: 'ref', oid: sha }]),
     ).rejects.toMatchObject(expected);
   });
-  it.each(['OTHER', 'FORBIDDEN', 'RATE_LIMITED'])(
+  it.each(['OTHER', 'FORBIDDEN'])(
     'keeps an alias %s error local when other data is present',
     async (type) => {
       const fetch: PolicyFetch = async (request) => {
@@ -236,7 +240,7 @@ describe('token REST reads', () => {
           }).body,
         };
       };
-      const files = await tokenRest(fetch, credential, 'owner/repo').files([
+      const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files([
         { name: 'bad', oid: sha },
         { name: 'ok', oid: sha },
       ]);
@@ -250,7 +254,89 @@ describe('token REST reads', () => {
       body: Response.json({ errors: [{ type: 'RATE_LIMITED' }] }).body,
     });
     await expect(
-      tokenRest(fetch, credential, 'owner/repo').files([{ name: 'ref', oid: sha }]),
+      tokenRest(fetch, credential, 'owner/repo', resetAt).files([{ name: 'ref', oid: sha }]),
     ).rejects.toBeInstanceOf(RateLimited);
+  });
+  it.each(['OTHER', 'FORBIDDEN'])(
+    'keeps alias %s errors local when another alias is explicitly null',
+    async (type) => {
+      const fetch = vi.fn<PolicyFetch>(async () => ({
+        status: 200,
+        headers: new Headers(),
+        body: Response.json({
+          errors: [{ type, path: ['repository', 'a0'] }],
+          data: { repository: { a0: null, a1: null } },
+        }).body,
+      }));
+      const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files([
+        { name: 'bad', oid: sha },
+        { name: 'missing', oid: sha },
+      ]);
+      expect(files.map((file) => file.text)).toEqual([null, null]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('keeps a non-rate-limit alias error partial during text reads', async () => {
+    const fetch: PolicyFetch = async (request) => {
+      const { query } = JSON.parse(new TextDecoder().decode(request.body)) as { query: string };
+      return {
+        status: 200,
+        headers: new Headers(),
+        body: Response.json({
+          ...(query.includes('byteSize text')
+            ? { errors: [{ type: 'OTHER', path: ['repository', 'a0'] }] }
+            : {}),
+          data: {
+            repository: { a0: { byteSize: 2, text: '{}' }, a1: { byteSize: 2, text: '{}' } },
+          },
+        }).body,
+      };
+    };
+    const files = await tokenRest(fetch, credential, 'owner/repo', resetAt).files([
+      { name: 'bad', oid: sha },
+      { name: 'ok', oid: sha },
+    ]);
+    expect(files.map((file) => file.text)).toEqual([null, '{}']);
+  });
+  it.each([null, { byteSize: 2, text: '{}' }])(
+    'pauses on an alias rate limit even when another alias is present (%j)',
+    async (other) => {
+      const fetch: PolicyFetch = async () => ({
+        status: 200,
+        headers: new Headers({
+          'x-ratelimit-limit': '5000',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '9999',
+        }),
+        body: Response.json({
+          errors: [{ type: 'RATE_LIMITED', path: ['repository', 'a0'] }],
+          data: { repository: { a0: null, a1: other } },
+        }).body,
+      });
+      const boundedReset = vi.fn(() => 1300);
+      await expect(
+        tokenRest(fetch, credential, 'owner/repo', boundedReset).files([
+          { name: 'bad', oid: sha },
+          { name: 'other', oid: sha },
+        ]),
+      ).rejects.toEqual(new RateLimited(1300));
+      expect(boundedReset).toHaveBeenCalledWith(9999);
+    },
+  );
+  it('does not treat an absent other alias as a partial response', async () => {
+    const fetch: PolicyFetch = async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: Response.json({
+        errors: [{ type: 'FORBIDDEN', path: ['repository', 'a0'] }],
+        data: { repository: { a0: null } },
+      }).body,
+    });
+    await expect(
+      tokenRest(fetch, credential, 'owner/repo', resetAt).files([
+        { name: 'bad', oid: sha },
+        { name: 'absent', oid: sha },
+      ]),
+    ).rejects.toMatchObject({ code: 'http_status', status: 403 });
   });
 });

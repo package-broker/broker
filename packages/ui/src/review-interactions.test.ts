@@ -21,6 +21,11 @@ async function launchBrowser() {
 }
 
 const components = {
+  githubForm: `
+      import { SourceForm } from './pages/sources/source-form';
+      const source = { id: 'github', name: 'GitHub', ecosystem: 'composer', type: 'vcs', githubAuthentication: globalThis.authentication, pollIntervalSeconds: 300, removalPolicy: 'flag' };
+      createRoot(document.getElementById('root')).render(<SourceForm source={globalThis.creating ? null : source} busy={false} errors={{}} alert={null} onSubmit={() => {}} onClose={() => {}} />);
+    `,
   sources: `
       import { SourcesView, createSourcesModel } from './pages/sources';
       const source = { projectId: null, ecosystem: 'npm', type: 'npm_registry', url: 'https://registry.example', status: 'active', removalPolicy: 'flag', pollIntervalSeconds: 300, hasCredential: false, lastSuccessAt: null };
@@ -172,4 +177,45 @@ describe('mounted review regressions', () => {
     step = 'verify empty values after submitting again';
     await browserExpect(page.locator('output')).toHaveText('{"q":"","status":""}');
   });
+});
+
+it.for(['app', 'token'])('fixes the edited GitHub form in %s mode', async (mode, context) => {
+  if (!fixture) context.skip('Chromium cannot start in this environment');
+  const { page, browserExpect } = fixture!;
+  await page.goto('about:blank');
+  await page.setContent('<div id="root"></div>');
+  await page.evaluate((value: string) => {
+    Object.assign(globalThis, { authentication: value });
+  }, mode);
+  await page.addScriptTag({ content: bundles.githubForm! });
+  await page.getByLabel('Replace type-specific configuration', { exact: true }).check();
+  await browserExpect(page.locator('select[name="githubAuthentication"]')).toHaveCount(0);
+  await browserExpect(page.locator('input[name="githubAuthentication"]')).toHaveValue(mode);
+  await browserExpect(page.locator('input[name="githubAuthentication"]')).toHaveAttribute(
+    'readonly',
+    '',
+  );
+  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(
+    mode === 'app' ? 1 : 0,
+  );
+});
+
+it('offers both GitHub authentication modes when creating a source', async (context) => {
+  if (!fixture) context.skip('Chromium cannot start in this environment');
+  const { page, browserExpect } = fixture!;
+  await page.goto('about:blank');
+  await page.setContent('<div id="root"></div>');
+  await page.evaluate(() => {
+    Object.assign(globalThis, { creating: true });
+  });
+  await page.addScriptTag({ content: bundles.githubForm! });
+  await page.locator('select[name="type"]').selectOption('vcs');
+  const authentication = page.locator('select[name="githubAuthentication"]');
+  await browserExpect(authentication).toHaveValue('app');
+  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(1);
+  await authentication.selectOption('token');
+  await browserExpect(authentication).toHaveValue('token');
+  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
+  await authentication.selectOption('app');
+  await browserExpect(authentication).toHaveValue('app');
 });

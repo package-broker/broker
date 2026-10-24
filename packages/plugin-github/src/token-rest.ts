@@ -22,7 +22,12 @@ export class GithubRestError extends Error {
   }
 }
 
-export function tokenRest(fetch: PolicyFetch, credential: UpstreamCredential, repo: string) {
+export function tokenRest(
+  fetch: PolicyFetch,
+  credential: UpstreamCredential,
+  repo: string,
+  resetAt: (epochSeconds: number | undefined) => number,
+) {
   const authorization = credential.apply(new Headers(), new URL(API)).headers.get('authorization');
   if (authorization === null || !authorization.startsWith('Bearer '))
     throw new UpstreamError('http_status', 401);
@@ -174,6 +179,9 @@ export function tokenRest(fetch: PolicyFetch, credential: UpstreamCredential, re
           )
             failed.add(path[1]);
         }
+        if (errors.some((error) => record(error) && error.type === 'RATE_LIMITED')) {
+          throw new RateLimited(resetAt(parseRateLimit(response.headers)?.reset));
+        }
         const partial =
           repository !== null &&
           failed.size > 0 &&
@@ -182,14 +190,9 @@ export function tokenRest(fetch: PolicyFetch, credential: UpstreamCredential, re
               record(error) && Array.isArray(error.path) && failed.has(error.path[1] as string),
           ) &&
           chunk.some(
-            (ref) => !failed.has(aliases.get(ref)!) && record(repository[aliases.get(ref)!]),
+            (ref) => !failed.has(aliases.get(ref)!) && Object.hasOwn(repository, aliases.get(ref)!),
           );
         if (!partial) {
-          if (errors.some((error) => record(error) && error.type === 'RATE_LIMITED')) {
-            throw new RateLimited(
-              parseRateLimit(response.headers)?.reset ?? Math.floor(Date.now() / 1000) + 60,
-            );
-          }
           if (errors.some((error) => record(error) && error.type === 'FORBIDDEN'))
             throw new UpstreamError('http_status', 403);
           throw new GithubRestError();

@@ -76,7 +76,7 @@ describe('baseline schema', () => {
     await insert('organization', { id: ORG, slug: 'acme', name: 'Acme' });
   });
 
-  it('creates both STRICT tables and all three indexes in the expand phase without triggers', async () => {
+  it('creates both STRICT tables and all three indexes in the expand phase without audit triggers', async () => {
     expect(
       await rows(
         "SELECT name FROM sqlite_master WHERE name IN ('audit_pending', 'api_idempotency', 'audit_pending_org_id', 'api_idempotency_expiry', 'audit_event_action') ORDER BY name",
@@ -104,7 +104,11 @@ describe('baseline schema', () => {
       readFileSync(new URL('0001_init.sql', migrationsUrl), 'utf8'),
     );
     expect(source.phase).toBe('expand');
-    expect(await rows("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([]);
+    expect(
+      await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger'
+      AND name NOT IN ('package_ecosystem_matches_source_insert',
+        'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages')`),
+    ).toEqual([]);
     for (const [index, columns] of [
       ['audit_pending_org_id', ['org_id', 'id']],
       ['api_idempotency_expiry', ['org_id', 'expires_at']],

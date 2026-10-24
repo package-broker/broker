@@ -372,6 +372,36 @@ test.describe('Node management UI', () => {
     await confirmIdentity(page, admin);
     await go(page, 'sources');
     await openDetails(page, 'Edit source');
+    await expect(page.getByText('Last success:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Last error:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Next poll:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+    await expect(page.getByText('Enable before syncing.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByLabel('Registered pattern', { exact: true }).fill('@browser-fixture/*');
+    const registered = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/names'),
+    );
+    await page.getByRole('button', { name: 'Add name', exact: true }).click();
+    expect((await registered).status()).toBe(201);
+    await expect(page.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled();
+    const enabled = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/enable'),
+    );
+    await page.getByRole('button', { name: 'Enable', exact: true }).click();
+    expect((await enabled).status()).toBe(204);
+    await openDetails(page, 'Edit source');
+    const synced = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/sync'),
+    );
+    const refreshed = page.waitForResponse(
+      (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await page.getByRole('button', { name: 'Sync now', exact: true }).click();
+    expect((await synced).status()).toBe(202);
+    expect((await refreshed).status()).toBe(200);
+    await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
+    await openDetails(page, 'Edit source');
     await page.getByRole('button', { name: 'Set credential', exact: true }).click();
     const material = randomBytes(32).toString('base64url');
     await page

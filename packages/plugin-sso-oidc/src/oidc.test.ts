@@ -786,6 +786,37 @@ describe('oidcProblems', () => {
 });
 
 describe('issuer canonical form', () => {
+  it('refuses an uppercase host with exactly the lowercase-host suggestion', () => {
+    expect(oidcProblems(config({ issuer: 'https://IDP.example.com/dex' }))).toEqual([
+      'issuer host must be lowercase: https://idp.example.com/dex',
+    ]);
+  });
+
+  it('preserves the scheme, port and path in the lowercase-host suggestion', () => {
+    expect(oidcProblems(config({ issuer: 'https://IDP.example.com:8443/Dex' }))).toEqual([
+      'issuer host must be lowercase: https://idp.example.com:8443/Dex',
+    ]);
+  });
+
+  it('accepts an uppercase path and keeps the trust anchor exact', () => {
+    const issuer = 'https://idp.example.com/Dex';
+    expect(oidcProblems(config({ issuer }))).toEqual([]);
+    expect(provider(harness(), { issuer }).trustAnchor).toBe(`oidc:${issuer}`);
+  });
+
+  it('reports only the earlier issuer problem for userinfo with an uppercase host', () => {
+    expect(oidcProblems(config({ issuer: 'https://u:p@IDP.example.com/dex' }))).toEqual([
+      'issuer must be an https URL (or http on a loopback host) without query, fragment, credentials or trailing slash',
+    ]);
+  });
+
+  it('does not suggest an issuer beyond the existing trust-anchor length limit', () => {
+    const issuer = `https://IDP.example.com/${'a'.repeat(512)}`;
+    expect(oidcProblems(config({ issuer }))).toEqual([
+      'issuer must be an https URL (or http on a loopback host) without query, fragment, credentials or trailing slash',
+    ]);
+  });
+
   it.each([
     ['https default port', 'https://idp.example.com:443'],
     ['https default port with path', 'https://idp.example.com:443/dex'],

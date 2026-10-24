@@ -5,7 +5,13 @@ import { randomToken, sha256Hex } from './primitives.js';
 import { createSessionService } from './session.js';
 import type { SessionMeta } from './session.js';
 import { PASSWORD_ITERATIONS, verifyPassword } from './password.js';
-import { base32Decode, encodeTotpEnvelope, generateTotpSecret, totpCode } from './totp.js';
+import {
+  base32Decode,
+  base32Encode,
+  encodeTotpEnvelope,
+  generateTotpSecret,
+  totpCode,
+} from './totp.js';
 import type { CredentialRecord, CredentialRepository } from '../db/credentials.js';
 import type {
   LocalLoginReader,
@@ -30,7 +36,7 @@ const EMAIL = 'admin@example.test';
 const PASSWORD = 'correct horse battery staple';
 const ORIGIN = 'https://broker.example.test';
 const META: SessionMeta = {
-  requestId: 'test-request-id',
+  requestId: '01K00000000000000000000001',
   ip: '203.0.113.7',
   userAgent: 'vitest',
   previousSecretHash: null,
@@ -362,6 +368,51 @@ describe('start', () => {
 });
 
 describe('finish', () => {
+  it('builds setup.complete with only operation and request correlation in the payload', async () => {
+    const h = await harness();
+    const { secret } = await started(h);
+    expect(
+      (
+        await h.service.finish(
+          ctx,
+          { token: h.token, password: PASSWORD, code: await codeFor(secret) },
+          META,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(h.completions).toHaveLength(1);
+    const input = h.completions[0]!;
+    expect(input.audit).toEqual({
+      id: expect.any(String),
+      occurredAt: NOW,
+      action: 'setup.complete',
+      actor: { type: 'user', id: USER },
+      target: { type: 'user', id: USER },
+      projectId: null,
+      sourceIp: META.ip,
+      tokenSelector: null,
+      payloadJson: JSON.stringify({ op_id: input.audit?.id, request_id: META.requestId }),
+    });
+    expect(input.audit.id).not.toBe(input.session.id);
+    for (const sentinel of [EMAIL, PASSWORD, input.passwordHash, base32Encode(secret)]) {
+      expect(input.audit.payloadJson.includes(sentinel)).toBe(false);
+    }
+  });
+
+  it('throws a fixed error before the writer if auditEvent refuses the envelope', async () => {
+    const h = await harness();
+    const { secret } = await started(h);
+    await expect(
+      h.service.finish(
+        ctx,
+        { token: h.token, password: PASSWORD, code: await codeFor(secret) },
+        { ...META, requestId: 'invalid' },
+      ),
+    ).rejects.toThrow('Invalid local setup audit event');
+    expect(h.completions).toHaveLength(0);
+    expect(h.sessions).toHaveLength(0);
+  });
+
   it('opens a session after start with a correct code, and the token cannot be reused', async () => {
     const h = await harness();
     const { secret } = await started(h);

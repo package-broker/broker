@@ -1,6 +1,6 @@
 # Package Broker 2.0
 
-A package registry broker for Composer and npm that runs on Cloudflare Workers or on Node. This repository is the 2.0 monorepo skeleton: the build composition, versioning, dependency and CI mechanisms are wired; there are no product features yet.
+A package registry broker for Composer and npm that runs on Cloudflare Workers or on Node. 2.0 is pre-release with no tagged release. This repository already has sessions and local login, personal access tokens with a 90-day maximum, service tokens, an OIDC single sign-on plugin, and the Cloudflare Workers and Node runtimes.
 
 > Pre-release. The 2.0 line is under active development towards its first release candidate: no tagged release exists yet, the API and the plugin contract still change, and contributions are welcome under the Developer Certificate of Origin, see [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute. Security reports are welcome at any time, see [SECURITY.md](SECURITY.md).
 

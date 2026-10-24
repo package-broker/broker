@@ -1,4 +1,4 @@
-import { fork, spawn } from 'node:child_process';
+import { execFileSync, fork, spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
@@ -927,6 +927,17 @@ async function run() {
     assert.deepEqual(await envelopeOf(hiddenResponse), await envelopeOf(missingResponse));
     console.log(
       'smoke:cloudflare package route: 401 without credentials, 200 visible, uniform 404 invisible',
+    );
+
+    step = 'checking the hostile held batch';
+    await disposeMiniflare();
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../../../scripts/held-batch-smoke.mjs', import.meta.url)),
+        'cloudflare',
+      ],
+      { stdio: 'inherit' },
     );
 
     step = 'done';

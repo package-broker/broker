@@ -20,6 +20,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { checkHeldBatch } from './held-batch-smoke.mjs';
+
 import { checkUiBundle } from '../packages/runtime-cloudflare/scripts/ui-bundle-regression.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -770,6 +772,7 @@ async function run() {
   console.log('smoke:node SIGTERM exit code 0');
 
   await checkPackageRoute();
+  await checkHeldBatch('node');
 
   console.log('smoke:node ok');
 }

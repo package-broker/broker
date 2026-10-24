@@ -1,3 +1,5 @@
+import type { AuditEvent } from '@package-broker/core/audit/actions';
+import { auditPendingStatement } from './audit-pending.js';
 import { sql, type Compilable, type Kysely, type SqlBool } from 'kysely';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
@@ -154,6 +156,7 @@ export interface UnlinkRepository {
     ctx: OrgContext,
     fence: MutationFence,
     input: UnlinkIdentityInput,
+    audit: { readonly unlink: AuditEvent; readonly block: AuditEvent },
   ): Promise<UnlinkIdentityOutcome>;
 }
 
@@ -162,8 +165,8 @@ export function createUnlinkRepository(
   options: UnlinkRepositoryOptions,
 ): UnlinkRepository {
   return {
-    unlinkIdentity: async (ctx, fence, input) =>
-      unlinkIdentity(executor, ctx, fence, input, await options.holderInput(ctx)),
+    unlinkIdentity: async (ctx, fence, input, audit) =>
+      unlinkIdentity(executor, ctx, fence, input, await options.holderInput(ctx), audit),
   };
 }
 
@@ -171,6 +174,7 @@ export function createUnlinkRepository(
  * One fenced batch: proves the actor, the expected identity, the provider anchor and the remaining
  * protected holders, then blocks the subject, revokes the personal tokens bound to the identity,
  * deletes its sessions and this provider's group rows for the user, and deletes the identity.
+ * Stages the unlink audit row and, when placing a new block, its block audit row in the same batch.
  * Sessions are deleted, never detached: a NULL session identity would read as a local session.
  */
 export async function unlinkIdentity(
@@ -179,6 +183,7 @@ export async function unlinkIdentity(
   fence: MutationFence,
   input: UnlinkIdentityInput,
   holders: ProtectedHolderInput,
+  audit: { readonly unlink: AuditEvent; readonly block: AuditEvent },
 ): Promise<UnlinkIdentityOutcome> {
   requireText(input.identityId, 'identityId');
   requireText(input.userId, 'userId');
@@ -270,7 +275,9 @@ export async function unlinkIdentity(
     guard,
     [
       ...checks,
+      auditPendingStatement(ctx, audit.unlink),
       block,
+      auditPendingStatement(ctx, audit.block, { sql: 'changes() = 1', params: [] }),
       ...assertCheck(blocked),
       revokeTokens,
       deleteSessions,

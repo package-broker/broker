@@ -75,7 +75,7 @@ import { createAuditSealRepository } from '@package-broker/db-sqlite/repositorie
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
 import type { AuthModule } from '@package-broker/core/auth/module';
-import type { SessionService } from '@package-broker/core/auth/session';
+import { clientIpOf, type SessionService } from '@package-broker/core/auth/session';
 import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
 import type { ProjectAdministration } from '@package-broker/core/authz/project-administration';
 import type { ProjectLister } from '@package-broker/core/authz/project-list';
@@ -603,14 +603,6 @@ function resolveRegistry(
   }
 }
 
-function clientIp(request: Request): string | null {
-  const candidate =
-    request.headers.get('cf-connecting-ip')?.trim() ||
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    null;
-  return candidate !== null && /^[0-9a-fA-F:.]{2,45}$/.test(candidate) ? candidate : null;
-}
-
 function auditReader(executor: SqlExecutor): AuditReader {
   const audit = createAuditQueryRepository(executor);
   const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
@@ -654,7 +646,7 @@ function buildApiRoutes(input: {
 }): readonly RouteDefinition[] {
   const { executor, services, packages, lifetime, log, blob } = input;
   const { anchors } = input;
-  const common = { ids: { ulid }, clock: systemClock, clientIp };
+  const common = { ids: { ulid }, clock: systemClock, clientIp: clientIpOf };
   const organizations = createOrganizationRepository(executor);
   const projects = createProjectRepository(executor, {
     reservedSlugs: reservedFirstSegments([...input.registration.routes, ...input.coreRoutes]),
@@ -2142,7 +2134,7 @@ export function createWorker(
       });
       return (assets = pending);
     };
-    const ui = createUiRoutes(
+    const uiRoutes = createUiRoutes(
       {
         manifest: async () => (await uiAssets())?.manifest() ?? null,
         read: async (name) => (await uiAssets())?.read(name) ?? null,
@@ -2156,10 +2148,6 @@ export function createWorker(
       },
       { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
     );
-    const uiRoutes = ui.map((route) => ({
-      ...route,
-      path: route.path.replace('/assets/:file', '/:file'),
-    }));
     try {
       const coreRoutes = [
         ...(auth?.coreRoutes ?? []),
@@ -2361,19 +2349,7 @@ export function createWorker(
         try {
           const setup = rewriteSetupRequest(request);
           if (setup !== null) return await application.kernel.fetch(setup, ctx);
-          const url = new URL(request.url);
-          if (url.pathname === '/_pb/ui') {
-            const response = await application.kernel.fetch(request, ctx);
-            if (response.status !== 200) return response;
-            url.pathname = '/_pb/ui/';
-            return new Response(null, {
-              status: 303,
-              headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-            });
-          }
-          if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request, ctx);
-          url.pathname = '/_pb/ui';
-          return await application.kernel.fetch(new Request(url, request), ctx);
+          return await application.kernel.fetch(request, ctx);
         } catch (error) {
           return withoutBodyForHead(request, errorResponse(error, requestId, log));
         }

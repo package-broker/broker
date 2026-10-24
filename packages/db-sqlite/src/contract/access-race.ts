@@ -24,6 +24,7 @@ import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { seedTwoOrganizations } from './two-organizations.js';
 import { createAccessRepository } from '../repositories/access.js';
+import { createIdentityBlockRepository } from '../repositories/identity-block.js';
 import { createLoginWriter } from '../repositories/login.js';
 import { createServicePrincipalAuthority } from '../repositories/service-principal-authority.js';
 import { createSessionRepository } from '../repositories/session.js';
@@ -445,6 +446,82 @@ export function describeAccessRace(label: string, open: Open): void {
     });
   });
 
+  describe(`access races: unblock audit (${label}, two connections)`, () => {
+    const key = { provider: PROVIDER, issuer: ANCHOR, subject: 'blocked-subject' };
+    const unblock = (executor: SqlExecutor) =>
+      createIdentityBlockRepository(executor, {
+        holderInput: async () => ({ kind: 'fresh', now: iso(0), providers: anchors }),
+      }).unblock(world.a, fence(), key, mutationAudit('identity.unblock', null));
+    const blocks = () =>
+      world.executor.all(st('SELECT subject FROM identity_block WHERE org_id = ?', world.a.orgId));
+    const events = () =>
+      world.executor.all(
+        st(
+          'SELECT action, target_id, project_id FROM audit_pending WHERE org_id = ?',
+          world.a.orgId,
+        ),
+      );
+
+    beforeEach(async () => {
+      world = await openWorld();
+      await world.executor.batch([
+        st(
+          'UPDATE role SET protects_last_holder = 1 WHERE org_id = ? AND id = ?',
+          world.a.orgId,
+          ROLE_ALL,
+        ),
+        st(
+          'INSERT INTO identity_block (org_id, provider, issuer, subject, blocked_by_user_id) VALUES (?, ?, ?, ?, ?)',
+          world.a.orgId,
+          key.provider,
+          key.issuer,
+          key.subject,
+          ADMIN,
+        ),
+      ]);
+    });
+    afterEach(async () => {
+      await world.database.close();
+    });
+
+    it('deletes the block after the audit insert and stages exactly one event', async () => {
+      expect(await unblock(world.executor)).toBe('unblocked');
+      expect(await blocks()).toEqual([]);
+      expect(await events()).toEqual([
+        { action: 'identity.unblock', target_id: null, project_id: null },
+      ]);
+    });
+
+    it('stages no event when another connection removes the block before the batch', async () => {
+      const gate = gateBefore(world.executor, 'batch');
+      const pending = unblock(gate.executor);
+      await gate.parked;
+      await world.other.batch([st('DELETE FROM identity_block WHERE org_id = ?', world.a.orgId)]);
+      gate.release();
+      expect(await pending).toBe('not_found');
+      expect(await blocks()).toEqual([]);
+      expect(await events()).toEqual([]);
+    });
+
+    it('preserves the block and stages no event when authority is revoked before the batch', async () => {
+      const gate = gateBefore(world.executor, 'batch');
+      const pending = unblock(gate.executor);
+      await gate.parked;
+      await world.other.batch([
+        st(
+          'UPDATE session SET revoked_at = ? WHERE org_id = ? AND id = ?',
+          iso(-1000),
+          world.a.orgId,
+          ADMIN_SESSION,
+        ),
+      ]);
+      gate.release();
+      expect(await pending).toBe('authority');
+      expect(await blocks()).toEqual([{ subject: key.subject }]);
+      expect(await events()).toEqual([]);
+    });
+  });
+
   describe(`access races: issuance policy reduction (${label}, two connections)`, () => {
     beforeEach(async () => {
       world = await openWorld();
@@ -715,7 +792,12 @@ export function describeAccessRace(label: string, open: Open): void {
   const TARGET_SUBJECT = 'sub-target';
   const NEW_SUBJECT = 'sub-target-new';
   const TARGET_SESSION = 'session-target';
-  const META: SessionMeta = { ip: null, userAgent: null, previousSecretHash: null };
+  const META: SessionMeta = {
+    requestId: 'request-test',
+    ip: null,
+    userAgent: null,
+    previousSecretHash: null,
+  };
 
   const provider: IdentityProvider = {
     id: PROVIDER,
@@ -775,14 +857,22 @@ export function describeAccessRace(label: string, open: Open): void {
           },
         ],
       }),
-    }).unlinkIdentity(world.a, fence(), {
-      identityId: TARGET_IDENTITY,
-      userId: TARGET,
-      provider: PROVIDER,
-      subject: TARGET_SUBJECT,
-      anchor: ANCHOR,
-      now: new Date().toISOString(),
-    });
+    }).unlinkIdentity(
+      world.a,
+      fence(),
+      {
+        identityId: TARGET_IDENTITY,
+        userId: TARGET,
+        provider: PROVIDER,
+        subject: TARGET_SUBJECT,
+        anchor: ANCHOR,
+        now: new Date().toISOString(),
+      },
+      {
+        unlink: mutationAudit('identity.unlink', null),
+        block: mutationAudit('identity.block', null),
+      },
+    );
   }
 
   async function counts() {

@@ -17,7 +17,12 @@ const EMAIL = 'victim@example.test';
 const VICTIM_USER = '01J0USERVICTIM00000000000V1';
 const VICTIM_SUBJECT = 'sub-victim';
 const ATTACKER_SUBJECT = 'sub-attacker';
-const META: SessionMeta = { ip: null, userAgent: null, previousSecretHash: null };
+const META: SessionMeta = {
+  requestId: 'request-test',
+  ip: null,
+  userAgent: null,
+  previousSecretHash: null,
+};
 
 const provider: IdentityProvider = {
   id: 'dex',

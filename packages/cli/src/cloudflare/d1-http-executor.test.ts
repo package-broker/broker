@@ -455,6 +455,34 @@ describe('D1 HTTP executor: per-statement limits', () => {
     await rejectsWithoutRequest({ sql: "SELECT 'unterminated", params: [] });
   });
 
+  it('executes a complete trigger as one statement and enforces its guard', async () => {
+    await withHarness(async ({ executor }) => {
+      await createTables(executor, 'CREATE TABLE item (value TEXT)');
+      await executor.batch([
+        {
+          sql: `/* migration */ CREATE TRIGGER guard BEFORE INSERT ON item
+                WHEN NEW.value != 'allowed; END'
+                BEGIN SELECT RAISE(ABORT, 'guard refused; END'); END;`,
+          params: [],
+        },
+      ]);
+      await executor.all({ sql: 'INSERT INTO item VALUES (?)', params: ['allowed; END'] });
+      await expect(
+        executor.all({ sql: 'INSERT INTO item VALUES (?)', params: ['denied'] }),
+      ).rejects.toBeInstanceOf(DbError);
+      expect(await executor.all({ sql: 'SELECT value FROM item', params: [] })).toEqual([
+        { value: 'allowed; END' },
+      ]);
+    });
+  });
+
+  it.each([
+    'CREATE TRIGGER guard AFTER INSERT ON item BEGIN SELECT 1; END; SELECT 2',
+    'CREATE TRIGGER guard AFTER INSERT ON item BEGIN SELECT 1;',
+  ])('rejects incomplete or multiple trigger statements before sending: %s', async (sql) => {
+    await rejectsWithoutRequest({ sql, params: [] });
+  });
+
   it.each(['', '   \n\t', ';', ' ; \n', '-- only a comment', '/* c */ ;'])(
     'rejects the empty statement %j',
     async (sql) => {

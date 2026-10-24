@@ -1994,3 +1994,57 @@ describe('SSO start location response', () => {
     expect(genericRefusal(await bodyOf(json))).toEqual(genericRefusal(await bodyOf(plain)));
   });
 });
+
+describe('auth call metadata', () => {
+  it.each(['login', 'reauth', 'logout'] as const)(
+    'passes request metadata to SSO %s',
+    async (action) => {
+      const app = await build();
+      const logout = vi.spyOn(app.deps.sessions, 'logout');
+      const { cookie, csrf } = await app.seed();
+      let request: Request;
+      if (action === 'logout') {
+        request = post('/_pb/auth/logout', '', { cookie, 'x-csrf-token': csrf });
+      } else {
+        const login = await loginCookieOf(
+          app,
+          'dex',
+          { purpose: action, returnTo: '/' },
+          action === 'reauth' ? { cookie, 'x-csrf-token': csrf } : {},
+        );
+        request = callback('dex', `${login}; ${cookie}`);
+      }
+      request.headers.set('cf-connecting-ip', '203.0.113.7');
+      const response = await app.kernel.fetch(request);
+      expect(response.status).toBe(action === 'logout' ? 204 : 303);
+      const requestId = response.headers.get('x-request-id');
+      expect(requestId).toEqual(expect.any(String));
+      const spy = action === 'logout' ? logout : action === 'reauth' ? app.reauth : app.login;
+      const meta = spy.mock.calls[0]?.at(-1);
+      expect(meta).toEqual(
+        action === 'login'
+          ? expect.objectContaining({ requestId, ip: '203.0.113.7' })
+          : { requestId, ip: '203.0.113.7' },
+      );
+    },
+  );
+
+  it.each(['reauth', 'logout'] as const)('preserves a null runtime IP for %s', async (action) => {
+    const clientIp = vi.fn(() => null);
+    const app = await build({ clientIp });
+    const logout = vi.spyOn(app.deps.sessions, 'logout');
+    const { cookie, csrf } = await app.seed();
+    const request =
+      action === 'logout'
+        ? post('/_pb/auth/logout', '', { cookie, 'x-csrf-token': csrf })
+        : callback(
+            'dex',
+            `${await loginCookieOf(app, 'dex', { purpose: 'reauth' }, { cookie, 'x-csrf-token': csrf })}; ${cookie}`,
+          );
+    request.headers.set('cf-connecting-ip', '203.0.113.7');
+    expect((await app.kernel.fetch(request)).status).toBe(action === 'logout' ? 204 : 303);
+    expect(clientIp).toHaveBeenCalledExactlyOnceWith(request);
+    const spy = action === 'logout' ? logout : app.reauth;
+    expect(spy.mock.calls[0]?.at(-1)).toEqual(expect.objectContaining({ ip: null }));
+  });
+});

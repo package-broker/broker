@@ -1,10 +1,9 @@
 import { scanSql, SqlScanError, type Segment } from '../sql/scan.js';
 
 const MAX_STATEMENT_BYTES = 100_000;
-const SEMICOLON = 59;
 const utf8 = new TextEncoder();
 const LEADING_WORD = /^[A-Za-z_]+/;
-const CREATE_TRIGGER = /^CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i;
+const TEMP_TRIGGER = /^CREATE\s+(?:TEMP\s+|TEMPORARY\s+)TRIGGER\b/i;
 
 const FORBIDDEN_KEYWORDS = new Set([
   'BEGIN',
@@ -31,7 +30,7 @@ export class MigrationSyntaxError extends Error {
 
 function reject(statement: string, index: number): void {
   const word = LEADING_WORD.exec(statement)?.[0]?.toUpperCase();
-  if ((word !== undefined && FORBIDDEN_KEYWORDS.has(word)) || CREATE_TRIGGER.test(statement)) {
+  if ((word !== undefined && FORBIDDEN_KEYWORDS.has(word)) || TEMP_TRIGGER.test(statement)) {
     throw new MigrationSyntaxError(`statement ${index} is not allowed in a migration`, index);
   }
   if (utf8.encode(statement).length > MAX_STATEMENT_BYTES) {
@@ -40,6 +39,42 @@ function reject(statement: string, index: number): void {
       index,
     );
   }
+}
+
+function triggerBodyStart(): (token: string, quoted?: boolean) => boolean {
+  let phase: 'on' | 'table' | 'after-table' | 'when' = 'on';
+  let depth = 0;
+  let operand = true;
+
+  return (token, quoted = false) => {
+    if (phase === 'on') {
+      if (!quoted && token === 'ON') phase = 'table';
+    } else if (phase === 'table') {
+      phase = 'after-table';
+    } else if (phase === 'after-table') {
+      if (!quoted && token === '.') phase = 'table';
+      else if (!quoted && token === 'WHEN') phase = 'when';
+      else if (!quoted && token === 'BEGIN') return true;
+    } else if (quoted) {
+      operand = false;
+    } else {
+      if (token === 'BEGIN' && depth === 0 && !operand) return true;
+      if (token === '(' || token === 'CASE') {
+        depth += 1;
+        operand = true;
+      } else if (token === ')' || (token === 'END' && !operand)) {
+        depth -= 1;
+        operand = false;
+      } else {
+        operand =
+          /^[.,+*/%<>=~!&|?:@$-]$/.test(token) ||
+          /^(?:AND|OR|NOT|IS|DISTINCT|FROM|IN|LIKE|GLOB|REGEXP|MATCH|BETWEEN|ESCAPE|WHEN|THEN|ELSE|AS|COLLATE)$/.test(
+            token,
+          );
+      }
+    }
+    return false;
+  };
 }
 
 export function splitStatements(sql: string): string[] {
@@ -55,10 +90,26 @@ export function splitStatements(sql: string): string[] {
 
   const statements: string[] = [];
   let current = '';
+  let leadingWords: string[] = [];
+  let trigger = false;
+  let body = false;
+  let closed = false;
+  let bodyStatementStart = false;
+  let startsBody = triggerBodyStart();
 
   const flush = (): void => {
     const statement = current.trim();
+    if (trigger && !closed) {
+      const index = statements.length;
+      throw new MigrationSyntaxError(`statement ${index} has an unterminated trigger`, index);
+    }
     current = '';
+    leadingWords = [];
+    trigger = false;
+    body = false;
+    closed = false;
+    bodyStatementStart = false;
+    startsBody = triggerBodyStart();
     if (statement.length > 0) statements.push(statement);
   };
 
@@ -69,15 +120,36 @@ export function splitStatements(sql: string): string[] {
     }
     if (segment.kind !== 'code') {
       current += segment.text;
+      if (trigger && !body) startsBody(segment.text, true);
       continue;
     }
 
     let start = 0;
-    for (let index = 0; index < segment.text.length; index += 1) {
-      if (segment.text.charCodeAt(index) === SEMICOLON) {
-        current += segment.text.slice(start, index);
-        flush();
-        start = index + 1;
+    for (const token of segment.text.matchAll(/[A-Za-z_][A-Za-z_0-9$]*|[0-9]+|\S/g)) {
+      const word = token[0].toUpperCase();
+      if (word === ';') {
+        if (!trigger || closed) {
+          current += segment.text.slice(start, token.index);
+          flush();
+          start = token.index + 1;
+        } else {
+          bodyStatementStart = true;
+        }
+        continue;
+      }
+      if (leadingWords.length < 2 && /^[A-Z_]/.test(word)) {
+        leadingWords.push(word);
+        trigger = leadingWords[0] === 'CREATE' && leadingWords[1] === 'TRIGGER';
+      }
+      if (!trigger) continue;
+      if (!body) {
+        if (startsBody(word)) {
+          body = true;
+          bodyStatementStart = true;
+        }
+      } else {
+        if (word === 'END' && bodyStatementStart) closed = true;
+        bodyStatementStart = false;
       }
     }
     current += segment.text.slice(start);

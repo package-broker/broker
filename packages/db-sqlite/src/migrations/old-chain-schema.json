@@ -1049,6 +1049,24 @@
       "name": "webhook_delivery",
       "tbl_name": "webhook_delivery",
       "sql": "CREATE TABLE webhook_delivery (\n  org_id       TEXT NOT NULL REFERENCES organization (id),\n  provider     TEXT NOT NULL,\n  delivery_id  TEXT NOT NULL,\n  source_id    TEXT REFERENCES source (id),\n  event        TEXT NOT NULL,\n  outcome      TEXT NOT NULL DEFAULT 'received' CHECK (outcome IN ('received', 'processed', 'ignored', 'failed')),\n  received_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  processed_at TEXT,\n  PRIMARY KEY (provider, delivery_id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "trigger",
+      "name": "package_ecosystem_matches_source_insert",
+      "tbl_name": "package",
+      "sql": "CREATE TRIGGER package_ecosystem_matches_source_insert\nBEFORE INSERT ON package\nWHEN (SELECT ecosystem FROM source WHERE id = NEW.source_id) IS NOT NEW.ecosystem\nBEGIN\n  SELECT RAISE(ABORT, 'package ecosystem does not match source ecosystem');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "package_ecosystem_matches_source_update",
+      "tbl_name": "package",
+      "sql": "CREATE TRIGGER package_ecosystem_matches_source_update\nBEFORE UPDATE OF source_id, ecosystem ON package\nWHEN (SELECT ecosystem FROM source WHERE id = NEW.source_id) IS NOT NEW.ecosystem\nBEGIN\n  SELECT RAISE(ABORT, 'package ecosystem does not match source ecosystem');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "source_ecosystem_locked_with_packages",
+      "tbl_name": "source",
+      "sql": "CREATE TRIGGER source_ecosystem_locked_with_packages\nBEFORE UPDATE OF ecosystem ON source\nWHEN NEW.ecosystem IS NOT OLD.ecosystem\n  AND EXISTS (SELECT 1 FROM package WHERE source_id = OLD.id)\nBEGIN\n  SELECT RAISE(ABORT, 'source ecosystem cannot change while the source holds packages');\nEND"
     }
   ],
   "indexes": [

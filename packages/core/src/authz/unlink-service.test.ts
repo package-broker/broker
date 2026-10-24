@@ -1,3 +1,5 @@
+import type { ApiCall } from '../api/idempotency.js';
+import type { AuditEvent } from '../audit/actions.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   REAUTH_WINDOW_MS,
@@ -19,6 +21,15 @@ import {
   type UnlinkStoreInput,
   type UnlinkStoreOutcome,
 } from './unlink-service.js';
+
+const call: ApiCall = {
+  audit: {
+    opId: '01K7R5V0000000000000000001',
+    requestId: '01K7R5V0000000000000000002',
+    sourceIp: null,
+    tokenSelector: null,
+  },
+};
 
 const ctx = orgContext('org-a');
 const NOW = '2026-10-16T12:00:00.000Z';
@@ -89,12 +100,16 @@ function setup(
     clock,
     publicOrigin: 'https://broker.example.test',
   });
-  const calls: { fence: MutationFence; input: UnlinkStoreInput }[] = [];
+  const calls: {
+    fence: MutationFence;
+    input: UnlinkStoreInput;
+    audit: { unlink: AuditEvent; block: AuditEvent };
+  }[] = [];
   const unlinks: IdentityUnlinkStore = {
-    unlinkIdentity: (c, f, input) => {
-      calls.push({ fence: f, input });
+    unlinkIdentity: (c, f, input, audit) => {
+      calls.push({ fence: f, input, audit });
       return options.store
-        ? options.store(c, f, input)
+        ? options.store(c, f, input, audit)
         : Promise.resolve(options.outcome ?? 'unlinked');
     },
   };
@@ -143,7 +158,7 @@ describe('unlinkIdentity success', () => {
   it('unlinks for an organization admin with a fresh session, through the fence', async () => {
     const { service, calls } = setup();
     const f = fence();
-    const result = await service.unlinkIdentity(ctx, authenticated(), snapshot(), f, REQUEST);
+    const result = await service.unlinkIdentity(ctx, authenticated(), snapshot(), f, REQUEST, call);
     expect(result).toEqual({ ok: true });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.fence).toBe(f);
@@ -152,7 +167,7 @@ describe('unlinkIdentity success', () => {
 
   it('emits exactly one info event with ids only', async () => {
     const { service, log } = setup();
-    await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST);
+    await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST, call);
     expect(log.mock.calls).toEqual([
       [
         {
@@ -178,6 +193,7 @@ describe('unlinkIdentity success', () => {
         snapshot(),
         fence(),
         REQUEST,
+        call,
       ),
     ).toEqual({ ok: true });
     const late = setup({ now: new Date(Date.parse(NOW) + 1).toISOString() });
@@ -188,6 +204,7 @@ describe('unlinkIdentity success', () => {
         snapshot(),
         fence(),
         REQUEST,
+        call,
       ),
     ).toEqual({ ok: false, error: 'reauth_required' });
     expect(late.calls).toHaveLength(0);
@@ -199,7 +216,7 @@ describe('unlinkIdentity success', () => {
       throw new Error('sink down');
     });
     expect(
-      await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST),
+      await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST, call),
     ).toEqual({ ok: true });
   });
 });
@@ -231,6 +248,7 @@ describe('unlinkIdentity snapshots its inputs once', () => {
       snapshot(),
       fence(),
       request as unknown as UnlinkIdentityRequest,
+      call,
     );
     expect(result).toEqual({ ok: true });
     expect(calls[0]?.input).toMatchObject(REQUEST);
@@ -247,7 +265,7 @@ describe('unlinkIdentity snapshots its inputs once', () => {
         return reads === 1 ? NOW : null;
       },
     });
-    expect(await service.unlinkIdentity(ctx, auth, snapshot(), fence(), REQUEST)).toEqual({
+    expect(await service.unlinkIdentity(ctx, auth, snapshot(), fence(), REQUEST, call)).toEqual({
       ok: true,
     });
     expect(reads).toBe(1);
@@ -264,6 +282,7 @@ describe('unlinkIdentity refusals', () => {
       snapshot(),
       fence(),
       REQUEST,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'reauth_required' });
     expect(calls).toHaveLength(0);
@@ -278,6 +297,7 @@ describe('unlinkIdentity refusals', () => {
       snapshot({ organizationPermissions: ['org:users:read'] }),
       fence(),
       { ...REQUEST, subject: '' },
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(anchors).not.toHaveBeenCalled();
@@ -293,6 +313,7 @@ describe('unlinkIdentity refusals', () => {
       snapshot({ protectedHolder: false }),
       fence(),
       REQUEST,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -307,6 +328,7 @@ describe('unlinkIdentity refusals', () => {
       snapshot({ protectedHolder: false }),
       fence(),
       REQUEST,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
   });
@@ -323,6 +345,7 @@ describe('unlinkIdentity refusals', () => {
       }),
       fence(),
       REQUEST,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -337,6 +360,7 @@ describe('unlinkIdentity refusals', () => {
       snapshot(),
       fence(),
       REQUEST,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -351,6 +375,7 @@ describe('unlinkIdentity refusals', () => {
       snapshot(),
       fence(),
       REQUEST,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -366,7 +391,7 @@ describe('unlinkIdentity refusals', () => {
     ] as unknown as AuthenticatedSession[];
     for (const value of missing) {
       const { service, calls, log } = setup();
-      expect(await service.unlinkIdentity(ctx, value, snapshot(), fence(), REQUEST)).toEqual({
+      expect(await service.unlinkIdentity(ctx, value, snapshot(), fence(), REQUEST, call)).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -385,7 +410,9 @@ describe('unlinkIdentity refusals', () => {
     ] as unknown as ActorAccessSnapshot[];
     for (const value of foreign) {
       const { service, calls, log } = setup();
-      expect(await service.unlinkIdentity(ctx, authenticated(), value, fence(), REQUEST)).toEqual({
+      expect(
+        await service.unlinkIdentity(ctx, authenticated(), value, fence(), REQUEST, call),
+      ).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -397,7 +424,9 @@ describe('unlinkIdentity refusals', () => {
   it('refuses a fence issued for another user or session', async () => {
     for (const f of [fence('admin-2'), fence('admin-1', 'session-2')]) {
       const { service, calls, log } = setup();
-      expect(await service.unlinkIdentity(ctx, authenticated(), snapshot(), f, REQUEST)).toEqual({
+      expect(
+        await service.unlinkIdentity(ctx, authenticated(), snapshot(), f, REQUEST, call),
+      ).toEqual({
         ok: false,
         error: 'forbidden',
       });
@@ -410,7 +439,7 @@ describe('unlinkIdentity refusals', () => {
     const { service, calls } = setup();
     for (const f of [null, undefined, {}]) {
       await expect(
-        service.unlinkIdentity(ctx, authenticated(), snapshot(), f as never, REQUEST),
+        service.unlinkIdentity(ctx, authenticated(), snapshot(), f as never, REQUEST, call),
       ).rejects.toThrow(TypeError);
     }
     expect(calls).toHaveLength(0);
@@ -429,7 +458,7 @@ describe('unlinkIdentity refusals', () => {
     ];
     for (const input of bad) {
       expect(
-        await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), input),
+        await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), input, call),
       ).toEqual({
         ok: false,
         error: 'invalid_input',
@@ -441,7 +470,14 @@ describe('unlinkIdentity refusals', () => {
 
   it('refuses a provider with no configured anchor as a conflict, without naming it', async () => {
     const { service, calls, log } = setup({ anchors: [] });
-    const result = await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST);
+    const result = await service.unlinkIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      fence(),
+      REQUEST,
+      call,
+    );
     expect(result).toEqual({ ok: false, error: 'conflict' });
     expectNoLeak(result);
     expectNoLeak(log.mock.calls);
@@ -454,7 +490,14 @@ describe('unlinkIdentity refusals', () => {
     ['indeterminate', 'indeterminate'],
   ] as const)('maps a %s outcome to %s with no event', async (outcome, error) => {
     const { service, log } = setup({ outcome });
-    const result = await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST);
+    const result = await service.unlinkIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      fence(),
+      REQUEST,
+      call,
+    );
     expect(result).toEqual({ ok: false, error });
     expectNoLeak(result);
     expect(log).not.toHaveBeenCalled();
@@ -462,7 +505,14 @@ describe('unlinkIdentity refusals', () => {
 
   it('maps a batch authority refusal to forbidden with one warn event and no leak', async () => {
     const { service, log } = setup({ outcome: 'authority' });
-    const result = await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST);
+    const result = await service.unlinkIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      fence(),
+      REQUEST,
+      call,
+    );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expectNoLeak(result);
     expectOneDenied(log, 'admin-1');
@@ -479,7 +529,7 @@ describe('unlinkIdentity refusals', () => {
       },
     });
     expect(
-      await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST),
+      await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST, call),
     ).toEqual({ ok: false, error: 'reauth_required' });
     expect(log).not.toHaveBeenCalled();
   });
@@ -506,12 +556,12 @@ function setupUnblock(
     clock,
     publicOrigin: 'https://broker.example.test',
   });
-  const calls: { fence: MutationFence; request: UnblockIdentityRequest }[] = [];
+  const calls: { fence: MutationFence; request: UnblockIdentityRequest; audit: AuditEvent }[] = [];
   const blocks: IdentityBlockStore = {
-    unblock: (c, f, request) => {
-      calls.push({ fence: f, request });
+    unblock: (c, f, request, audit) => {
+      calls.push({ fence: f, request, audit });
       return options.store
-        ? options.store(c, f, request)
+        ? options.store(c, f, request, audit)
         : Promise.resolve(options.outcome ?? 'unblocked');
     },
   };
@@ -542,7 +592,14 @@ describe('unblockIdentity success', () => {
   it('unblocks through the fence with the validated request', async () => {
     const { service, calls } = setupUnblock();
     const f = fence();
-    const result = await service.unblockIdentity(ctx, authenticated(), snapshot(), f, UNBLOCK);
+    const result = await service.unblockIdentity(
+      ctx,
+      authenticated(),
+      snapshot(),
+      f,
+      UNBLOCK,
+      call,
+    );
     expect(result).toEqual({ ok: true });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.fence).toBe(f);
@@ -551,7 +608,7 @@ describe('unblockIdentity success', () => {
 
   it('emits exactly one info event with ids only', async () => {
     const { service, log } = setupUnblock();
-    await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK);
+    await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call);
     expect(log.mock.calls).toEqual([
       [
         {
@@ -576,6 +633,7 @@ describe('unblockIdentity success', () => {
         snapshot(),
         fence(),
         UNBLOCK,
+        call,
       ),
     ).toEqual({ ok: true });
     const late = setupUnblock({ now: new Date(Date.parse(NOW) + 1).toISOString() });
@@ -586,6 +644,7 @@ describe('unblockIdentity success', () => {
         snapshot(),
         fence(),
         UNBLOCK,
+        call,
       ),
     ).toEqual({ ok: false, error: 'reauth_required' });
     expect(late.calls).toHaveLength(0);
@@ -597,7 +656,7 @@ describe('unblockIdentity success', () => {
       throw new Error('sink down');
     });
     expect(
-      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call),
     ).toEqual({ ok: true });
   });
 
@@ -633,6 +692,7 @@ describe('unblockIdentity snapshots its inputs once', () => {
       snapshot(),
       fence(),
       request as unknown as UnblockIdentityRequest,
+      call,
     );
     expect(result).toEqual({ ok: true });
     expect(calls[0]?.request).toEqual(UNBLOCK);
@@ -649,7 +709,7 @@ describe('unblockIdentity snapshots its inputs once', () => {
         return reads === 1 ? NOW : null;
       },
     });
-    expect(await service.unblockIdentity(ctx, auth, snapshot(), fence(), UNBLOCK)).toEqual({
+    expect(await service.unblockIdentity(ctx, auth, snapshot(), fence(), UNBLOCK, call)).toEqual({
       ok: true,
     });
     expect(reads).toBe(1);
@@ -667,6 +727,7 @@ describe('unblockIdentity refusals', () => {
         snapshot(),
         fence(),
         UNBLOCK,
+        call,
       ),
     ).toEqual({ ok: false, error: 'reauth_required' });
     expect(calls).toHaveLength(0);
@@ -682,6 +743,7 @@ describe('unblockIdentity refusals', () => {
         snapshot({ organizationPermissions: ['org:users:read'] }),
         fence(),
         { ...UNBLOCK, subject: '' },
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -697,6 +759,7 @@ describe('unblockIdentity refusals', () => {
         snapshot({ protectedHolder: false }),
         fence(),
         UNBLOCK,
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -716,6 +779,7 @@ describe('unblockIdentity refusals', () => {
         }),
         fence(),
         UNBLOCK,
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -730,6 +794,7 @@ describe('unblockIdentity refusals', () => {
         snapshot(),
         fence(),
         UNBLOCK,
+        call,
       ),
     ).toEqual({ ok: false, error: 'forbidden' });
     expect(calls).toHaveLength(0);
@@ -748,7 +813,7 @@ describe('unblockIdentity refusals', () => {
     for (const [auth, snap, f] of cases) {
       const { service, calls, log } = setupUnblock();
       expect(
-        await service.unblockIdentity(ctx, auth, snap as ActorAccessSnapshot, f, UNBLOCK),
+        await service.unblockIdentity(ctx, auth, snap as ActorAccessSnapshot, f, UNBLOCK, call),
       ).toEqual({ ok: false, error: 'forbidden' });
       expect(calls).toHaveLength(0);
       expect(log).toHaveBeenCalledTimes(1);
@@ -760,7 +825,7 @@ describe('unblockIdentity refusals', () => {
     const { service, calls } = setupUnblock();
     for (const f of [null, undefined, {}]) {
       await expect(
-        service.unblockIdentity(ctx, authenticated(), snapshot(), f as never, UNBLOCK),
+        service.unblockIdentity(ctx, authenticated(), snapshot(), f as never, UNBLOCK, call),
       ).rejects.toThrow('identity unblock requires a mutation fence');
     }
     expect(calls).toHaveLength(0);
@@ -778,7 +843,7 @@ describe('unblockIdentity refusals', () => {
     ];
     for (const input of bad) {
       expect(
-        await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), input),
+        await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), input, call),
       ).toEqual({ ok: false, error: 'invalid_input' });
     }
     expect(calls).toHaveLength(0);
@@ -796,6 +861,7 @@ describe('unblockIdentity refusals', () => {
       snapshot(),
       fence(),
       UNBLOCK,
+      call,
     );
     expect(result).toEqual({ ok: false, error });
     expectNoLeak(result);
@@ -810,6 +876,7 @@ describe('unblockIdentity refusals', () => {
       snapshot(),
       fence(),
       UNBLOCK,
+      call,
     );
     expect(result).toEqual({ ok: false, error: 'forbidden' });
     expectNoLeak(result);
@@ -830,7 +897,7 @@ describe('unblockIdentity refusals', () => {
   it('reports reauth_required when the window closes between the service check and the batch', async () => {
     const { service, log } = setupUnblock(reauthCheckingStore(REAUTH_WINDOW_MS + 1));
     expect(
-      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call),
     ).toEqual({ ok: false, error: 'reauth_required' });
     expect(log).not.toHaveBeenCalled();
   });
@@ -838,14 +905,50 @@ describe('unblockIdentity refusals', () => {
   it('unblocks when the window is still open at the batch', async () => {
     const { service } = setupUnblock(reauthCheckingStore(REAUTH_WINDOW_MS));
     expect(
-      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+      await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call),
     ).toEqual({ ok: true });
   });
 
   it('throws on an outcome the store must never answer', async () => {
     const { service } = setupUnblock({ outcome: 'conflict' as unknown as UnblockStoreOutcome });
     await expect(
-      service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK),
+      service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call),
     ).rejects.toThrow('identity unblock answered an unknown outcome');
+  });
+});
+
+describe('identity audit events', () => {
+  it('passes an anonymous unblock target and request context to the store', async () => {
+    const { service, calls } = setupUnblock();
+    await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call);
+    expect(calls[0]?.audit).toMatchObject({
+      action: 'identity.unblock',
+      actor: { type: 'user', id: 'admin-1' },
+      target: { type: 'identity_block', id: null },
+      projectId: null,
+    });
+    expect(JSON.parse(calls[0]!.audit.payloadJson)).toEqual({
+      op_id: call.audit.opId,
+      request_id: call.audit.requestId,
+    });
+    expectNoLeak(calls[0]?.audit);
+  });
+  it('passes distinct unlink and block events without identity details', async () => {
+    const { service, calls } = setup();
+    await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST, call);
+    expect(calls[0]?.audit.unlink).toMatchObject({
+      action: 'identity.unlink',
+      actor: { type: 'user', id: 'admin-1' },
+      target: { type: 'identity_block', id: null },
+      projectId: null,
+    });
+    expect(calls[0]?.audit.block).toMatchObject({
+      action: 'identity.block',
+      actor: { type: 'user', id: 'admin-1' },
+      target: { type: 'identity_block', id: null },
+      projectId: null,
+    });
+    expect(calls[0]?.audit.unlink.id).not.toBe(calls[0]?.audit.block.id);
+    expectNoLeak(calls[0]?.audit);
   });
 });

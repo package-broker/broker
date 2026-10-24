@@ -532,6 +532,10 @@ describe('concurrent last-admin operations', () => {
         anchor: ANCHOR,
         now: now(),
       },
+      {
+        unlink: mutationAudit('identity.unlink', null),
+        block: mutationAudit('identity.block', null),
+      },
     );
   }
 

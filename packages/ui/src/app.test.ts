@@ -168,6 +168,7 @@ describe('shell requests', () => {
       } as unknown as AuthClient;
       const services = { client, requireReauth: vi.fn() };
       const deps = {
+        origin: 'https://broker.example',
         storage,
         now: Date.now,
         navigate: vi.fn(),

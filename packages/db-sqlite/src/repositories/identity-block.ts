@@ -1,3 +1,5 @@
+import type { AuditEvent } from '@package-broker/core/audit/actions';
+import { auditPendingStatement } from './audit-pending.js';
 import { sql, type Compilable, type Kysely, type SqlBool } from 'kysely';
 import { REAUTH_WINDOW_MS } from '@package-broker/core/auth/session';
 import type { MutationFence } from '@package-broker/core/authz/fence';
@@ -49,6 +51,7 @@ export interface IdentityBlockRepository {
     ctx: OrgContext,
     fence: MutationFence,
     key: IdentityBlockKey,
+    audit: AuditEvent,
   ): Promise<UnblockIdentityOutcome>;
 }
 
@@ -112,16 +115,16 @@ export function createIdentityBlockRepository(
   options: IdentityBlockRepositoryOptions,
 ): IdentityBlockRepository {
   return {
-    unblock: async (ctx, fence, key) => {
+    unblock: async (ctx, fence, key, audit) => {
       const checked = requireKey(key);
-      return unblockIdentity(executor, ctx, fence, checked, await options.holderInput(ctx));
+      return unblockIdentity(executor, ctx, fence, checked, await options.holderInput(ctx), audit);
     },
   };
 }
 
 /**
  * One fenced batch: proves the actor's live session, reauthentication within the window,
- * `org:users:write` and protected-holder reach on database time, then deletes exactly the one block
+ * `org:users:write` and protected-holder reach on database time, then stages the audit row and deletes exactly the one block
  * row of this organization.
  */
 export async function unblockIdentity(
@@ -130,6 +133,7 @@ export async function unblockIdentity(
   fence: MutationFence,
   key: IdentityBlockKey,
   holders: ProtectedHolderInput,
+  audit: AuditEvent,
 ): Promise<UnblockIdentityOutcome> {
   const { provider, issuer, subject } = requireKey(key);
   const { live, reach } = unblockAuthority(ctx, fence, holders);
@@ -148,15 +152,24 @@ export async function unblockIdentity(
       .where('identity_block.org_id', '=', ctx.orgId)
       .where('identity_block.provider', '=', provider)
       .where('identity_block.issuer', '=', issuer)
-      .where('identity_block.subject', '=', subject),
+      .where('identity_block.subject', '=', subject)
+      .where(sql<SqlBool>`changes() = 1`),
   );
+
+  const when = compile(
+    db.selectNoFrom(sql<SqlBool>`${present} and ${live} and ${reach}`.as('allowed')),
+  );
+  const pending = auditPendingStatement(ctx, audit, {
+    sql: `(${when.sql}) = 1`,
+    params: when.params,
+  });
 
   const outcome = await runOrgFenced(
     executor,
     ctx,
     fence,
     assertGuard(live, ctx),
-    [...assertCheck(reach), remove, ...assertCheck(sql<SqlBool>`changes() = 1`)],
+    [...assertCheck(reach), pending, remove, ...assertCheck(sql<SqlBool>`changes() = 1`)],
     {
       authority: probe(sql<SqlBool>`(${live} and ${reach}) is not 1`),
       conflict: probe(sql<SqlBool>`${present} is not 1`),

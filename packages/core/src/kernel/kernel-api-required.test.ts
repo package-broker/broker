@@ -64,7 +64,7 @@ describe('createKernel api requirement for core routes', () => {
 
   it.each([
     ['GET', '/_pb/ui'],
-    ['GET', '/_pb/ui/assets/:file'],
+    ['GET', '/_pb/ui/'],
     ['GET', '/_pb/ui/:file'],
     ['POST', '/_pb/hooks/github/:credentialId'],
     ['GET', '/_pb/mcp'],
@@ -74,23 +74,24 @@ describe('createKernel api requirement for core routes', () => {
     expect(await problemsOf(options([route(path, method)]))).toEqual([]);
   });
 
+  it('requires API documentation for the obsolete UI asset route', async () => {
+    expect(await problemsOf(options([route('/_pb/ui/assets/:file')]))).toEqual([
+      'core route GET /_pb/ui/assets/:file: api is required under /_pb/',
+    ]);
+  });
+
   it('rejects an undocumented route next to an exempt path', async () => {
     expect(await problemsOf(options([route('/_pb/ui/assets/:file/raw')]))).toEqual([
       'core route GET /_pb/ui/assets/:file/raw: api is required under /_pb/',
     ]);
   });
 
-  it('accepts the UI routes as built and as the runtimes mount them', async () => {
+  it('mounts the kernel UI routes without runtime remapping', async () => {
     const ui = createUiRoutes(
       { manifest: async () => null, read: async () => null },
       { publicOrigin: 'https://broker.test' },
     );
-    const mounted = ui.map((definition) => ({
-      ...definition,
-      path: definition.path.replace('/assets/:file', '/:file'),
-    }));
-    expect(await problemsOf(options(ui))).toEqual([]);
-    expect(await problemsOf(options(mounted))).toEqual([]);
+    await expect(createKernel(options(ui))).resolves.toMatchObject({ coreRoutes: ui });
   });
 
   it('leaves undocumented ecosystem routes to their own validation', async () => {

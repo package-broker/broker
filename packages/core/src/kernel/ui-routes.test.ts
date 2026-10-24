@@ -40,7 +40,7 @@ const MANIFEST: UiManifest = {
 };
 
 const BODIES: Record<string, string> = {
-  'index.html': '<!doctype html><script src="/_pb/ui/assets/app.abc123.js"></script>',
+  'index.html': '<!doctype html><script src="/_pb/ui/app.abc123.js"></script>',
   'app.abc123.js': 'console.log(1)',
   'app.abc123.css': 'body{}',
   'app.012345abcdef.js': 'console.log(2)',
@@ -125,7 +125,7 @@ describe('public UI boundary', () => {
       coreRoutes: createUiRoutes(fakeAssets(), { publicOrigin: HTTPS }),
       log: () => undefined,
     });
-    for (const path of ['/_pb/ui', '/_pb/ui/assets/app.012345abcdef.js']) {
+    for (const path of ['/_pb/ui/', '/_pb/ui/app.012345abcdef.js']) {
       for (const method of ['GET', 'HEAD']) {
         const anonymous = await kernel.fetch(new Request(`${HTTPS}${path}`, { method }));
         const signedIn = await kernel.fetch(
@@ -157,6 +157,23 @@ describe('public UI boundary', () => {
         );
       }
     }
+    for (const [path, status] of [
+      ['/_pb/ui', 303],
+      ['/_pb/ui/manifest.json', 404],
+    ] as const) {
+      for (const method of ['GET', 'HEAD']) {
+        for (const cookie of [undefined, '__Host-pb_session=valid']) {
+          const response = await kernel.fetch(
+            new Request(`${HTTPS}${path}`, {
+              method,
+              headers: cookie === undefined ? {} : { cookie },
+            }),
+          );
+          expect(response.status).toBe(status);
+          expect(response.headers.get('set-cookie')).toBeNull();
+        }
+      }
+    }
     expect(resolveOrg).not.toHaveBeenCalled();
     expect(authorize).not.toHaveBeenCalled();
   });
@@ -164,7 +181,7 @@ describe('public UI boundary', () => {
 
 describe('UI response headers', () => {
   it('sends the exact content security policy', async () => {
-    const response = await (await app()).fetch(get('/_pb/ui'));
+    const response = await (await app()).fetch(get('/_pb/ui/'));
     expect(UI_CSP).toBe(CSP);
     expect(response.headers.get('content-security-policy')).toBe(CSP);
   });
@@ -174,11 +191,11 @@ describe('UI response headers', () => {
     ['x-content-type-options', 'nosniff'],
     ['referrer-policy', 'no-referrer'],
   ])('sends %s', async (name, value) => {
-    const response = await (await app()).fetch(get('/_pb/ui'));
+    const response = await (await app()).fetch(get('/_pb/ui/'));
     expect(response.headers.get(name)).toBe(value);
   });
 
-  it.each(['/_pb/ui', '/_pb/ui/assets/app.abc123.js', '/_pb/ui/assets/missing.js'])(
+  it.each(['/_pb/ui/', '/_pb/ui/app.abc123.js', '/_pb/ui/missing.js'])(
     'sends the policy headers on %s',
     async (path) => {
       const response = await (await app()).fetch(get(path));
@@ -190,21 +207,84 @@ describe('UI response headers', () => {
   );
 
   it('sends HSTS for an https public origin', async () => {
-    const response = await (await app(fakeAssets(), HTTPS)).fetch(get('/_pb/ui'));
+    const response = await (await app(fakeAssets(), HTTPS)).fetch(get('/_pb/ui/'));
     expect(response.headers.get('strict-transport-security')).toBe(
       'max-age=31536000; includeSubDomains',
     );
   });
 
   it('omits HSTS for an http public origin', async () => {
-    const response = await (await app(fakeAssets(), HTTP)).fetch(get('/_pb/ui'));
+    const response = await (await app(fakeAssets(), HTTP)).fetch(get('/_pb/ui/'));
     expect(response.headers.has('strict-transport-security')).toBe(false);
   });
 });
 
-describe('GET /_pb/ui', () => {
+describe('canonical UI redirect and manifest response', () => {
+  it.each(['GET', 'HEAD'])(
+    'redirects %s with the query preserved and secured headers',
+    async (method) => {
+      const response = await (
+        await app()
+      ).fetch(new Request(`${HTTPS}/_pb/ui?view=packages`, { method }));
+      expect(response.status).toBe(303);
+      expect(response.headers.get('location')).toBe('/_pb/ui/?view=packages');
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('content-security-policy')).toBe(CSP);
+      expect(response.headers.get('x-request-id')).toBeTruthy();
+      expect(await response.text()).toBe('');
+    },
+  );
+
+  it('preserves entry failures instead of redirecting', async () => {
+    for (const assets of [fakeAssets(null), { ...fakeAssets(), read: async () => null }]) {
+      const response = await (await app(assets)).fetch(get('/_pb/ui'));
+      expect(response.status).toBe(404);
+      expect(response.headers.has('location')).toBe(false);
+    }
+  });
+
+  it('preserves entry revalidation on the redirect path', async () => {
+    const kernel = await app();
+    const entry = await kernel.fetch(get('/_pb/ui/'));
+    const response = await kernel.fetch(
+      new Request(`${HTTPS}/_pb/ui`, {
+        headers: { 'if-none-match': entry.headers.get('etag')! },
+      }),
+    );
+    expect(response.status).toBe(304);
+    expect(response.headers.has('location')).toBe(false);
+  });
+
+  it.each([HTTPS, HTTP])('secures the unchanged manifest 404 for %s', async (origin) => {
+    for (const method of ['GET', 'HEAD']) {
+      const response = await (
+        await app(fakeAssets(), origin)
+      ).fetch(new Request(`${HTTPS}/_pb/ui/manifest.json`, { method }));
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-security-policy')).toBe(CSP);
+      expect(response.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+      expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(response.headers.get('strict-transport-security')).toBe(
+        origin === HTTPS ? 'max-age=31536000; includeSubDomains' : null,
+      );
+      expect(response.headers.get('x-request-id')).toBeTruthy();
+      if (method === 'HEAD') expect(await response.text()).toBe('');
+      else
+        expect(await response.json()).toEqual({
+          error: {
+            code: 'not_found',
+            message: 'Route not found',
+            requestId: response.headers.get('x-request-id'),
+          },
+        });
+    }
+  });
+});
+
+describe('GET /_pb/ui/', () => {
   it('serves the entry file with no-cache', async () => {
-    const response = await (await app()).fetch(get('/_pb/ui'));
+    const response = await (await app()).fetch(get('/_pb/ui/'));
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-cache');
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
@@ -212,12 +292,12 @@ describe('GET /_pb/ui', () => {
   });
 
   it('does not mark the entry file immutable', async () => {
-    const response = await (await app()).fetch(get('/_pb/ui'));
+    const response = await (await app()).fetch(get('/_pb/ui/'));
     expect(response.headers.get('cache-control')).not.toContain('immutable');
   });
 
   it('answers the 404 envelope when no manifest is available', async () => {
-    const response = await (await app(fakeAssets(null))).fetch(get('/_pb/ui'));
+    const response = await (await app(fakeAssets(null))).fetch(get('/_pb/ui/'));
     expect(await errorOf(response)).toEqual({
       status: 404,
       code: 'not_found',
@@ -229,9 +309,9 @@ describe('GET /_pb/ui', () => {
     const manifest = vi.fn(() => Promise.resolve<UiManifest | null>(MANIFEST));
     const assets: StaticAssets = { ...fakeAssets(), manifest };
     const kernel = await app(assets);
-    await kernel.fetch(get('/_pb/ui'));
-    await kernel.fetch(get('/_pb/ui'));
-    await kernel.fetch(get('/_pb/ui/assets/app.abc123.js'));
+    await kernel.fetch(get('/_pb/ui/'));
+    await kernel.fetch(get('/_pb/ui/'));
+    await kernel.fetch(get('/_pb/ui/app.abc123.js'));
     expect(manifest).toHaveBeenCalledTimes(3);
   });
 
@@ -239,14 +319,15 @@ describe('GET /_pb/ui', () => {
     const routes = createUiRoutes(fakeAssets(), { publicOrigin: HTTPS });
     expect(routes.map((r) => [r.method, r.path, r.permission, r.needsOrg])).toEqual([
       ['GET', '/_pb/ui', null, false],
-      ['GET', '/_pb/ui/assets/:file', null, false],
+      ['GET', '/_pb/ui/', null, false],
+      ['GET', '/_pb/ui/:file', null, false],
     ]);
   });
 });
 
-describe('GET /_pb/ui/assets/:file', () => {
+describe('GET /_pb/ui/:file', () => {
   it('serves a hashed listed file as immutable with its content type', async () => {
-    const response = await (await app()).fetch(get('/_pb/ui/assets/app.012345abcdef.js'));
+    const response = await (await app()).fetch(get('/_pb/ui/app.012345abcdef.js'));
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     expect(response.headers.get('content-type')).toBe('text/javascript');
@@ -254,21 +335,20 @@ describe('GET /_pb/ui/assets/:file', () => {
   });
 
   it('does not serve the entry file as an immutable asset', async () => {
-    const response = await (await app()).fetch(get('/_pb/ui/assets/index.html'));
+    const response = await (await app()).fetch(get('/_pb/ui/index.html'));
     expect(response.status).toBe(404);
   });
 
-  const missing = async () =>
-    errorOf(await (await app()).fetch(get('/_pb/ui/assets/does-not-exist.js')));
+  const missing = async () => errorOf(await (await app()).fetch(get('/_pb/ui/does-not-exist.js')));
 
   it.each([
-    ['an encoded slash traversal', '/_pb/ui/assets/..%2f..%2fpackage.json'],
-    ['an encoded dot traversal', '/_pb/ui/assets/%2e%2e/x'],
-    ['a plain dot traversal', '/_pb/ui/assets/../x'],
-    ['an encoded slash', '/_pb/ui/assets/app%2fabc.js'],
-    ['an empty name', '/_pb/ui/assets/'],
-    ['a dot-prefixed name', '/_pb/ui/assets/.env'],
-    ['an unlisted name', '/_pb/ui/assets/app.zzz999.js'],
+    ['an encoded slash traversal', '/_pb/ui/..%2f..%2fpackage.json'],
+    ['an encoded dot traversal', '/_pb/ui/%2e%2e/x'],
+    ['a plain dot traversal', '/_pb/ui/../x'],
+    ['an encoded slash', '/_pb/ui/app%2fabc.js'],
+    ['an empty name', '/_pb/ui//'],
+    ['a dot-prefixed name', '/_pb/ui/.env'],
+    ['an unlisted name', '/_pb/ui/app.zzz999.js'],
   ])('answers the uniform 404 for %s', async (_name, path) => {
     const response = await (await app()).fetch(get(path));
     expect(await errorOf(response)).toEqual(await missing());
@@ -277,29 +357,29 @@ describe('GET /_pb/ui/assets/:file', () => {
   it('never passes an unlisted name to the port', async () => {
     const assets = fakeAssets();
     const kernel = await app(assets);
-    await kernel.fetch(get('/_pb/ui/assets/..%2f..%2fpackage.json'));
-    await kernel.fetch(get('/_pb/ui/assets/.env'));
-    await kernel.fetch(get('/_pb/ui/assets/app.zzz999.js'));
+    await kernel.fetch(get('/_pb/ui/..%2f..%2fpackage.json'));
+    await kernel.fetch(get('/_pb/ui/.env'));
+    await kernel.fetch(get('/_pb/ui/app.zzz999.js'));
     expect(assets.reads).toEqual([]);
   });
 
   it('refuses a manifest entry that is not a safe file name', async () => {
     const assets = fakeAssets();
-    const response = await (await app(assets)).fetch(get('/_pb/ui/assets/..%2fx'));
+    const response = await (await app(assets)).fetch(get('/_pb/ui/..%2fx'));
     expect(response.status).toBe(404);
     expect(assets.reads).toEqual([]);
   });
 
   it('answers 404 when the port returns null for a listed name', async () => {
     const assets: StaticAssets = { ...fakeAssets(), read: () => Promise.resolve(null) };
-    const response = await (await app(assets)).fetch(get('/_pb/ui/assets/app.abc123.js'));
+    const response = await (await app(assets)).fetch(get('/_pb/ui/app.abc123.js'));
     expect(response.status).toBe(404);
   });
 
   it('selects the file from the path only, never from the request host', async () => {
     const assets = fakeAssets();
     const kernel = await app(assets);
-    const request = new Request('https://app.abc123.js.evil.test/_pb/ui/assets/app.abc123.css', {
+    const request = new Request('https://app.abc123.js.evil.test/_pb/ui/app.abc123.css', {
       headers: { host: 'app.abc123.js' },
     });
     const response = await kernel.fetch(request);
@@ -321,8 +401,8 @@ describe('UI asset metadata', () => {
         }),
     };
     const kernel = await app(assets, HTTPS, log);
-    const response = await kernel.fetch(get('/_pb/ui/assets/app.abc123.js'));
-    const missing = await kernel.fetch(get('/_pb/ui/assets/missing.js'));
+    const response = await kernel.fetch(get('/_pb/ui/app.abc123.js'));
+    const missing = await kernel.fetch(get('/_pb/ui/missing.js'));
     expect(await errorOf(response)).toEqual(await errorOf(missing));
     expect(log.mock.calls).toEqual([
       [
@@ -336,7 +416,7 @@ describe('UI asset metadata', () => {
   });
 
   it('revalidates a listed file without a twelve-digit content hash', async () => {
-    const response = await (await app()).fetch(get('/_pb/ui/assets/app.abc123.js'));
+    const response = await (await app()).fetch(get('/_pb/ui/app.abc123.js'));
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-cache');
   });
@@ -347,12 +427,45 @@ describe('UI asset metadata', () => {
       ...fakeAssets(),
       read: () => Promise.resolve({ body, contentType: 'text/javascript', bytes: 999 }),
     };
-    const response = await (await app(assets)).fetch(get('/_pb/ui/assets/app.abc123.js'));
+    const response = await (await app(assets)).fetch(get('/_pb/ui/app.abc123.js'));
     expect(response.headers.get('content-length')).toBe(String(body.byteLength));
     expect(await response.text()).toBe('π');
   });
 
-  it.each(['/_pb/ui', '/_pb/ui/assets/app.012345abcdef.js'])(
+  it.each(['GET', 'HEAD'])(
+    'preserves the byte length for %s when Workers offers compression',
+    async (method) => {
+      const body = new TextEncoder().encode('console.log("π")');
+      const assets: StaticAssets = {
+        ...fakeAssets(),
+        read: () =>
+          Promise.resolve({
+            body: new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(body);
+                controller.close();
+              },
+            }),
+            contentType: 'text/javascript',
+            bytes: 999,
+          }),
+      };
+      const kernel = await app(assets);
+      const response = await kernel.fetch(
+        new Request(`${HTTPS}/_pb/ui/app.012345abcdef.js`, {
+          method,
+          headers: { 'accept-encoding': 'br, gzip' },
+        }),
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-length')).toBe(String(body.byteLength));
+      // Workers compression would remove the length of this uncompressed representation.
+      expect(response.headers.get('content-encoding')).toBe('identity');
+      expect(await response.text()).toBe(method === 'HEAD' ? '' : 'console.log("π")');
+    },
+  );
+
+  it.each(['/_pb/ui/', '/_pb/ui/app.012345abcdef.js'])(
     'serves HEAD %s with GET status and headers and no body',
     async (path) => {
       const kernel = await app();
@@ -416,7 +529,9 @@ describe('GET /', () => {
     const kernel = await app(assets);
     const redirect = await kernel.fetch(get('/', 'text/html'));
     expect(redirect.status).toBe(303);
-    const entry = await kernel.fetch(get(redirect.headers.get('location')!));
+    const canonical = await kernel.fetch(get(redirect.headers.get('location')!));
+    expect(canonical.status).toBe(303);
+    const entry = await kernel.fetch(get(canonical.headers.get('location')!));
     expect(await entry.text()).toBe('custom');
   });
 
@@ -523,7 +638,7 @@ describe('single sign-on under the UI policy', () => {
       log: () => undefined,
     });
 
-    const page = await kernel.fetch(get('/_pb/ui'));
+    const page = await kernel.fetch(get('/_pb/ui/'));
     const csp = page.headers.get('content-security-policy') ?? '';
     const directives = new Map(
       csp.split('; ').map((d) => [d.split(' ')[0], d.split(' ').slice(1).join(' ')]),
@@ -645,7 +760,7 @@ describe('setup UI routes', () => {
     expect(SETUP_ASSET_PREFIX).toBe('/_pb/ui/setup/assets/');
     expect(
       createUiRoutes(setupAssets(), { publicOrigin: HTTPS }).map((route) => route.path),
-    ).toEqual(['/_pb/ui', '/_pb/ui/assets/:file']);
+    ).toEqual(['/_pb/ui', '/_pb/ui/', '/_pb/ui/:file']);
   });
 
   it('serves the setup document without credentials, no-store, no-referrer and under the CSP', async () => {
@@ -734,7 +849,7 @@ describe('setup UI routes', () => {
     ['an external script', '<script src="https://cdn.example/x.js"></script>'],
     ['a protocol-relative script', '<script src="//cdn.example/x.js"></script>'],
     ['a relative reference', '<script src="setup.0123456789ab.js"></script>'],
-    ['the app prefix', '<script src="/_pb/ui/assets/app.abc123.js"></script>'],
+    ['the app prefix', '<script src="/_pb/ui/app.abc123.js"></script>'],
     ['the manifest', '<script src="/_pb/ui/setup/assets/manifest.json"></script>'],
     ['the entry document', '<link href="/_pb/ui/setup/assets/index.html">'],
     ['itself', '<link href="/_pb/ui/setup/assets/setup.html">'],

@@ -23,6 +23,8 @@ import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor } from '@package-broker/runtime-cloudflare/db/d1-executor';
 import { createCacheApiAdapter } from '../dist/cache/cache-api.js';
 
+import { checkUiBundle } from './ui-bundle-regression.mjs';
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEADLINE_MS = 60_000;
 const DISPOSE_GRACE_MS = 5_000;
@@ -431,6 +433,19 @@ async function run() {
     assert.equal(stagedAssets.run_worker_first, true);
     assert.equal(stagedAssets.html_handling, 'none');
     assert.equal(stagedAssets.not_found_handling, 'none');
+    await checkUiBundle({
+      assetsDir: stagedAssets.directory,
+      https: true,
+      request: (path, options) =>
+        within(
+          mf.dispatchFetch(`${PUBLIC_ORIGIN}${path}`, {
+            ...options,
+            redirect: 'manual',
+          }),
+          limitMs,
+          'UI bundle regression',
+        ),
+    });
     const uiManifest = JSON.parse(
       await readFile(join(stagedAssets.directory, 'manifest.json'), 'utf8'),
     );

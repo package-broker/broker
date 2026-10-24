@@ -1463,7 +1463,7 @@ export function createNodeServer(
       log({ level: 'info', event: 'ui.assets_absent' });
       return null;
     });
-    const ui = createUiRoutes(
+    const uiRoutes = createUiRoutes(
       {
         manifest: async () => assets?.manifest() ?? null,
         read: async (name) => assets?.read(name) ?? null,
@@ -1477,10 +1477,6 @@ export function createNodeServer(
       },
       { publicOrigin: auth?.publicOrigin ?? 'http://localhost', log },
     );
-    const uiRoutes = ui.map((route) => ({
-      ...route,
-      path: route.path.replace('/assets/:file', '/:file'),
-    }));
     const coreRoutes = [
       ...(access?.module.coreRoutes ?? []),
       ...apiRoutes,
@@ -1558,19 +1554,7 @@ export function createNodeServer(
             if (new URL(request.url).pathname !== '/health/live') await verifyOnce();
             const setup = rewriteSetupRequest(request);
             if (setup !== null) return ready.fetch(setup);
-            const url = new URL(request.url);
-            if (url.pathname === '/_pb/ui') {
-              const response = await ready.fetch(request);
-              if (response.status !== 200) return response;
-              url.pathname = '/_pb/ui/';
-              return new Response(null, {
-                status: 303,
-                headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-              });
-            }
-            if (url.pathname !== '/_pb/ui/') return ready.fetch(request);
-            url.pathname = '/_pb/ui';
-            return ready.fetch(new Request(url, request));
+            return ready.fetch(request);
           })
           .catch((error: unknown) => {
             const response = errorResponse(error, crypto.randomUUID(), log);

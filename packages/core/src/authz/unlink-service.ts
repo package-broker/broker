@@ -1,7 +1,9 @@
+import type { ApiCall } from '../api/idempotency.js';
+import { auditEvent, type AuditEvent, type AuditAction } from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
-import { isoTimestamp } from '../ids.js';
+import { isoTimestamp, ulid, systemClock } from '../ids.js';
 import { isValidProviderId, isValidSubject, isValidTrustAnchor } from '../identity/port.js';
 import { buildOrganizationActor, type ActorAccessSnapshot } from './actor.js';
 import type { AdminLog } from './administration.js';
@@ -27,6 +29,7 @@ export interface IdentityUnlinkStore {
     ctx: OrgContext,
     fence: MutationFence,
     input: UnlinkStoreInput,
+    audit: { readonly unlink: AuditEvent; readonly block: AuditEvent },
   ): Promise<UnlinkStoreOutcome>;
 }
 
@@ -63,6 +66,7 @@ export interface UnlinkService {
     snapshot: ActorAccessSnapshot,
     fence: MutationFence,
     request: UnlinkIdentityRequest,
+    call: ApiCall,
   ): Promise<UnlinkResult>;
 }
 
@@ -163,7 +167,7 @@ export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
   }
 
   return {
-    async unlinkIdentity(ctx, authenticated, snapshot, fence, request) {
+    async unlinkIdentity(ctx, authenticated, snapshot, fence, request, call) {
       requireFence(fence, 'identity unlink');
       const copy = copySession(authenticated);
       if (!isAuthorized(copy, snapshot, fence)) return denied(ctx, copy.userId);
@@ -176,11 +180,20 @@ export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
       const anchor = anchors.find((entry) => entry.provider === input.provider)?.anchor;
       if (anchor === undefined) return fail('conflict');
 
-      const outcome = await unlinks.unlinkIdentity(ctx, fence, {
-        ...input,
-        anchor,
-        now: isoTimestamp(clock.now()),
-      });
+      const now = isoTimestamp(clock.now());
+      const outcome = await unlinks.unlinkIdentity(
+        ctx,
+        fence,
+        {
+          ...input,
+          anchor,
+          now,
+        },
+        {
+          unlink: identityAudit('identity.unlink', fence, call, now),
+          block: identityAudit('identity.block', fence, call, now),
+        },
+      );
       switch (outcome) {
         case 'unlinked':
           emit({
@@ -223,6 +236,7 @@ export interface IdentityBlockStore {
     ctx: OrgContext,
     fence: MutationFence,
     request: UnblockIdentityRequest,
+    audit: AuditEvent,
   ): Promise<UnblockStoreOutcome>;
 }
 
@@ -249,6 +263,7 @@ export interface UnblockService {
     snapshot: ActorAccessSnapshot,
     fence: MutationFence,
     request: UnblockIdentityRequest,
+    call: ApiCall,
   ): Promise<UnblockResult>;
 }
 
@@ -289,7 +304,7 @@ export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
   }
 
   return {
-    async unblockIdentity(ctx, authenticated, snapshot, fence, request) {
+    async unblockIdentity(ctx, authenticated, snapshot, fence, request, call) {
       requireFence(fence, 'identity unblock');
       const copy = copySession(authenticated);
       if (!isAuthorized(copy, snapshot, fence)) return denied(ctx, copy.userId, null);
@@ -298,7 +313,12 @@ export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
       const input = copyUnblockRequest(request);
       if (input === null) return failUnblock('invalid_input');
 
-      const outcome = await blocks.unblock(ctx, fence, input);
+      const outcome = await blocks.unblock(
+        ctx,
+        fence,
+        input,
+        identityAudit('identity.unblock', fence, call, isoTimestamp(systemClock.now())),
+      );
       switch (outcome) {
         case 'unblocked':
           emit({
@@ -321,4 +341,23 @@ export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
       }
     },
   };
+}
+
+function identityAudit(
+  action: AuditAction,
+  fence: MutationFence,
+  call: ApiCall,
+  now: string,
+): AuditEvent {
+  const result = auditEvent({
+    id: ulid(),
+    now,
+    action,
+    actor: { type: 'user', id: fence.userId },
+    target: { type: 'identity_block', id: null },
+    projectId: null,
+    context: call.audit,
+  });
+  if (!result.ok) throw new TypeError('identity audit event is invalid');
+  return result.event;
 }

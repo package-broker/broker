@@ -99,6 +99,7 @@ function setup(status = 201, code = 'invalid_request', clearAfterCopy = false) {
   };
   const deps = {
     storage: session,
+    origin: 'https://broker.example:8443',
     clipboard,
     navigate,
     newKey: () => 'new-key',
@@ -885,5 +886,99 @@ describe('token list presentation', () => {
     await controller.load();
     expect(controller.snapshot().listError).toBe(false);
     expect(markup(controller)).toContain('automation');
+  });
+});
+
+describe('one-time client configuration', () => {
+  it('renders and copies the project registry configuration, including the port', async () => {
+    const f = setup();
+    await f.controller.load('project', 'demo');
+    expect(markup(f.controller)).not.toContain('Copy Composer configuration');
+    await f.controller.issue(draft);
+    const composer = `composer config repositories.demo composer https://broker.example:8443/demo\ncomposer config --auth bearer.broker.example:8443 ${sentinel}`;
+    const npm = `registry=https://broker.example:8443/demo/npm/\n//broker.example:8443/demo/npm/:_authToken=${sentinel}`;
+    expect(markup(f.controller)).toContain(composer);
+    expect(markup(f.controller)).toContain(npm);
+    expect(markup(f.controller)).toContain('Copy Composer configuration');
+    expect(markup(f.controller)).toContain('Copy npm configuration');
+    for (const label of ['Copy Composer configuration', 'Copy npm configuration']) {
+      const button = control(f.controller, (props) => props.children === label);
+      (button.onClick as () => void)();
+      await vi.waitFor(() =>
+        expect(f.clipboard).toHaveBeenLastCalledWith(label.includes('Composer') ? composer : npm),
+      );
+    }
+    expect(f.clipboard).toHaveBeenLastCalledWith(npm);
+    expect(f.controller.snapshot().secret).toBe(sentinel);
+    expect([...f.session.values.values(), ...f.local.values.values()].join()).not.toContain(
+      sentinel,
+    );
+    f.controller.closeSecret();
+    expect(f.controller.clientConfig()).toBeNull();
+    expect(markup(f.controller)).not.toContain(sentinel);
+    expect(markup(f.controller)).not.toContain('Copy npm configuration');
+    await f.controller.copy('npm');
+    expect(f.clipboard).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['personal', 'organization'] as const)(
+    'shows a project hint for %s tokens',
+    async (target) => {
+      const f = setup();
+      await f.controller.load(target, 'demo');
+      await f.controller.issue(draft);
+      expect(markup(f.controller)).toContain('Choose a project this token can access');
+      expect(f.controller.clientConfig()).toBeNull();
+      expect(markup(f.controller)).not.toContain('Copy Composer configuration');
+      expect(markup(f.controller)).not.toContain('_authToken=');
+      await f.controller.copy('npm');
+      expect(f.clipboard).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses the renewed token’s project when rotating from the organization list', async () => {
+    const f = setup();
+    await f.controller.identity();
+    await f.controller.load('organization', null);
+    f.controller.renew({
+      ...f.controller.snapshot().items[0]!,
+      kind: 'svc',
+      projectId: 'project-id',
+    });
+    await f.controller.issue(draft);
+    expect(f.controller.clientConfig()?.npm).toContain('/demo/npm/');
+    expect(markup(f.controller)).not.toContain('Choose a project this token can access');
+    f.controller.navigate();
+    expect(f.controller.clientConfig()).toBeNull();
+    expect(markup(f.controller)).not.toContain(sentinel);
+  });
+
+  it('keeps copy failures generic and does not expose clipboard errors', async () => {
+    const f = setup();
+    await f.controller.load('project', 'demo');
+    await f.controller.issue(draft);
+    f.clipboard.mockRejectedValueOnce(new Error(sentinel));
+    await f.controller.copy('npm');
+    expect(f.controller.snapshot().notice).toBe('Unable to copy configuration.');
+    expect(f.controller.snapshot().secret).toBe(sentinel);
+  });
+
+  it('ignores a late configuration copy result after navigation', async () => {
+    const f = setup();
+    await f.controller.load('project', 'demo');
+    await f.controller.issue(draft);
+    let finish!: () => void;
+    f.clipboard.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const copying = f.controller.copy('composer');
+    f.controller.navigate();
+    finish();
+    await copying;
+    expect(f.controller.snapshot().notice).toBeNull();
+    expect(markup(f.controller)).not.toContain(sentinel);
   });
 });

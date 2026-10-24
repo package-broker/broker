@@ -20,6 +20,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { checkUiBundle } from '../packages/runtime-cloudflare/scripts/ui-bundle-regression.mjs';
+
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SOURCE = join(REPO_ROOT, '.pb', 'node');
 const READY_TIMEOUT_MS = 15_000;
@@ -683,6 +685,16 @@ async function run() {
 
   step = 'checking the public UI mount';
   const assetsDir = join(copy, 'assets');
+  await checkUiBundle({
+    assetsDir,
+    https: false,
+    request: (path, options) =>
+      fetch(`${base}${path}`, {
+        ...options,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      }),
+  });
   const uiManifest = JSON.parse(await readFile(join(assetsDir, 'manifest.json'), 'utf8'));
   const uiDocument = await readFile(join(assetsDir, uiManifest.entry), 'utf8');
   const referenced = [...uiDocument.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]);

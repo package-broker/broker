@@ -11,14 +11,17 @@ import { renderManifestJson } from '../../manifest.js';
 import { installIdentity, type Inventory, type ResourceKind } from './inventory.js';
 import {
   provision,
+  cloudflareProviderContract,
   runCloudflareProvision,
   type ProviderContract,
   type ProvisionOptions,
-  unverifiedProviderContract,
 } from './provision.js';
 
 const ACCOUNT = 'a'.repeat(32);
 const TOKEN = 'token_SENTINEL';
+const realConsumer = JSON.parse(
+  await readFile(new URL('./fixtures/queue-consumer.json', import.meta.url), 'utf8'),
+);
 const DB = '11111111-1111-4111-8111-111111111111';
 const IDS = [DB, 'broker-production-blobs', 'b'.repeat(32), 'c'.repeat(32)];
 const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: TOKEN };
@@ -53,7 +56,7 @@ interface Remote {
 }
 interface Harness {
   resources: Record<string, Remote[]>;
-  trace: { path: string; method: string; body?: unknown }[];
+  trace: { path: string; method: string; headers: Headers; body?: unknown }[];
   worker: Record<string, unknown> | null;
   planDenied: boolean;
   subdomain: string | null;
@@ -82,7 +85,7 @@ const DEFAULT_ABORT_RULE = {
 function harness(): Harness {
   let time = Date.parse('2026-10-19T12:00:00Z');
   const resources: Record<string, Remote[]> = { d1: [], r2: [], queue: [] };
-  const trace: { path: string; method: string; body?: unknown }[] = [];
+  const trace: Harness['trace'] = [];
   let createCount = 0;
   const h: Harness = {
     resources,
@@ -113,7 +116,15 @@ function harness(): Harness {
       trace.push({
         path: path + url.search,
         method,
-        ...(init?.body ? { body: JSON.parse(String(init.body)) as unknown } : {}),
+        headers: new Headers(init?.headers),
+        ...(init?.body
+          ? {
+              body:
+                path === '/analytics_engine/sql'
+                  ? String(init.body)
+                  : (JSON.parse(String(init.body)) as unknown),
+            }
+          : {}),
       });
       const override = h.hook?.(path, method);
       if (override) return override;
@@ -149,9 +160,10 @@ function harness(): Harness {
         const remote: Remote = {
           ...body,
           ...(kind === 'd1' ? { uuid: id } : kind === 'queue' ? { queue_id: id } : {}),
-          ...(kind !== 'queue'
-            ? { jurisdiction: url.searchParams.get('jurisdiction') ?? body.jurisdiction }
-            : {}),
+          jurisdiction:
+            kind === 'r2'
+              ? (new Headers(init?.headers).get('cf-r2-jurisdiction') ?? 'default')
+              : (body.jurisdiction ?? 'default'),
           created_at: new Date(time).toISOString(),
         };
         if (h.loseCreate !== createCount || h.loseMode !== 'absent') resources[kind]!.push(remote);
@@ -251,12 +263,13 @@ it('creates only D1, R2, DLQ, jobs with EU jurisdiction, records logical analyti
   expect(h.trace.filter((r) => r.method === 'POST').map((r) => r.body)).toEqual([
     { name: 'broker-production-db', jurisdiction: 'eu' },
     { name: 'broker-production-blobs' },
-    { queue_name: 'broker-production-jobs-dlq' },
-    { queue_name: 'broker-production-jobs' },
+    { queue_name: 'broker-production-jobs-dlq', jurisdiction: 'eu' },
+    { queue_name: 'broker-production-jobs', jurisdiction: 'eu' },
   ]);
-  expect(
-    h.trace.some((r) => r.path.includes('/r2/buckets?jurisdiction=eu') && r.method === 'POST'),
-  ).toBe(true);
+  const bucketCalls = h.trace.filter((r) => r.path.startsWith('/r2/buckets'));
+  expect(bucketCalls.some((r) => r.path === '/r2/buckets' && r.method === 'POST')).toBe(true);
+  expect(bucketCalls.every((r) => r.headers.get('cf-r2-jurisdiction') === 'eu')).toBe(true);
+  expect(bucketCalls.every((r) => !r.path.includes('jurisdiction='))).toBe(true);
   expect((await journal()).resources.analytics).toMatchObject({
     id: null,
     state: 'binding_pending',
@@ -269,12 +282,92 @@ it('creates only D1, R2, DLQ, jobs with EU jurisdiction, records logical analyti
   expect(prompt).not.toHaveBeenCalled();
   expect(h.trace.every((r) => ['GET', 'POST'].includes(r.method))).toBe(true);
 });
+it('creates R2 in EU with the jurisdiction header and real bucket collection envelopes', async () => {
+  const h = harness();
+  h.hook = (path, method) =>
+    path === '/analytics_engine/sql'
+      ? Response.json({ meta: [{ name: 'dataset', type: 'String' }], data: [], rows: 0 })
+      : path === '/r2/buckets' && method === 'GET'
+        ? new Response(
+            JSON.stringify({
+              success: true,
+              errors: null,
+              messages: null,
+              result: { buckets: h.resources.r2 },
+              result_info: { total_count: h.resources.r2!.length },
+            }),
+          )
+        : undefined;
+  expect((await provision(options(h, { contract: cloudflareProviderContract }))).exitCode).toBe(0);
+  const create = h.trace.find((r) => r.path === '/r2/buckets' && r.method === 'POST');
+  expect(create?.headers.get('cf-r2-jurisdiction')).toBe('eu');
+  expect(create?.body).toEqual({ name: 'broker-production-blobs' });
+  expect(
+    h.trace
+      .filter((r) => r.path.startsWith('/r2/buckets'))
+      .every((r) => r.headers.get('cf-r2-jurisdiction') === 'eu'),
+  ).toBe(true);
+});
 it('provisions no default-port superset for a build without platform ports', async () => {
   await build(null);
   const h = harness();
-  expect((await provision(options(h, { contract: unverifiedProviderContract }))).exitCode).toBe(0);
+  const defaultOptions = options(h);
+  delete defaultOptions.contract;
+  expect((await provision(defaultOptions)).exitCode).toBe(0);
   expect(h.creates()).toBe(1);
 });
+it.each([200, 403])(
+  'uses SQL evidence for a read-only provision plan without billing permission (%s)',
+  async (sqlStatus) => {
+    const h = harness();
+    h.hook = (path) =>
+      path === '/analytics_engine/sql'
+        ? new Response(
+            JSON.stringify({ meta: [{ name: 'dataset', type: 'String' }], data: [], rows: 0 }),
+            { status: sqlStatus },
+          )
+        : undefined;
+    const defaultOptions = options(h, { dryRun: true });
+    delete defaultOptions.contract;
+    const result = await provision(defaultOptions);
+    expect(result.output.checks).toContainEqual({
+      name: 'plan_identification',
+      status: 'unavailable_optional',
+    });
+    expect(result.output.checks).toContainEqual({
+      name: 'analytics_engine',
+      status: sqlStatus === 200 ? 'supported' : 'capability_unknown',
+      source: 'analytics_engine_sql',
+    });
+    if (sqlStatus === 200) {
+      expect(result.exitCode).toBe(0);
+      expect(result.output.status).toBe('planned');
+      expect(result.output.checks).toContainEqual({
+        name: 'provider_semantics',
+        status: 'documented',
+      });
+      expect(result.output.plan.filter((entry) => entry.action === 'create')).toHaveLength(4);
+    } else {
+      expect(result.exitCode).toBe(1);
+      expect(result.output.error).toMatchObject({
+        code: 'capability_unknown',
+        message: expect.stringMatching(/Analytics Engine.*Read.*permission/),
+      });
+    }
+    expect(
+      h.trace.every(
+        (request) =>
+          request.method === 'GET' ||
+          (request.path === '/analytics_engine/sql' &&
+            request.method === 'POST' &&
+            request.body === 'SHOW TABLES'),
+      ),
+    ).toBe(true);
+    expect(h.creates()).toBe(0);
+    expect(h.trace.some((request) => request.path.startsWith('/queues?page='))).toBe(true);
+    await expect(stat(statePath())).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
 it.each([false, true])(
   'accepts generated identity and source bindings with platform ports: %s',
   async (enabled) => {
@@ -694,6 +787,17 @@ it('supports explicit default jurisdiction, ignores reuse location hints and ref
     (await provision(options(h, { jurisdiction: 'default', locationHint: 'eeur' }))).exitCode,
   ).toBe(0);
   expect(h.creates()).toBe(4);
+  expect(h.trace.filter((r) => r.method === 'POST').map((r) => r.body)).toEqual([
+    { name: 'broker-production-db', primary_location_hint: 'weur' },
+    { name: 'broker-production-blobs', locationHint: 'weur' },
+    { queue_name: 'broker-production-jobs-dlq' },
+    { queue_name: 'broker-production-jobs' },
+  ]);
+  expect(
+    h.trace
+      .filter((r) => r.path.startsWith('/r2/buckets'))
+      .every((r) => r.headers.get('cf-r2-jurisdiction') === 'default'),
+  ).toBe(true);
   const unsupported = harness();
   await build({ ...ports, blob: { adapter: 's3' } });
   expect((await provision(options(unsupported))).exitCode).toBe(2);
@@ -777,6 +881,38 @@ it('rejects an array resource map before provider requests and preserves its byt
   expect(h.creates()).toBe(0);
   expect(await readFile(statePath(), 'utf8')).toBe(bytes);
 });
+
+it.each(['recorded', 'owned-worker', 'foreign-worker', 'foreign-dlq', 'conflicting-alias'])(
+  'R8 reconciles the real consumer script field during provision: %s',
+  async (evidence) => {
+    const h = harness();
+    expect((await provision(options(h))).exitCode).toBe(0);
+    if (evidence === 'owned-worker') {
+      await rm(join(project, '.pb/state'), { recursive: true });
+      h.worker = {
+        tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`],
+        bindings: [
+          { type: 'd1', name: 'DB', id: DB },
+          { type: 'r2_bucket', name: 'STORAGE', bucket_name: 'broker-production-blobs' },
+          { type: 'queue', name: 'JOBS', queue_name: 'broker-production-jobs' },
+        ],
+      };
+    }
+    const consumer = {
+      ...realConsumer,
+      script: evidence === 'foreign-worker' ? 'foreign-worker' : identity.script_name,
+      dead_letter_queue:
+        evidence === 'foreign-dlq' ? 'foreign-dlq' : `${identity.script_name}-jobs-dlq`,
+      ...(evidence === 'conflicting-alias' ? { script_name: 'foreign-worker' } : {}),
+    };
+    h.hook = (path) => (path === `/queues/${IDS[3]}/consumers` ? ok([consumer]) : undefined);
+    const result = await provision(options(h));
+    expect(result.exitCode).toBe(['recorded', 'owned-worker'].includes(evidence) ? 0 : 8);
+    expect(h.creates()).toBe(4);
+    if (evidence === 'owned-worker')
+      expect((await journal()).resources.dlq?.evidence?.source).toBe('worker_binding');
+  },
+);
 
 it.each(['valid', 'missing', 'foreign-dlq', 'foreign-worker', 'ambiguous'])(
   'recovers default DLQ ownership only through an owned jobs consumer: %s',
@@ -865,10 +1001,39 @@ it('waits for create Retry-After before provision reconciliation without duplica
   expect(h.creates()).toBe(4);
 });
 
-it('starts the ten-minute budget after the confirmation prompt', async () => {
+it('budgets every queue scan when provisioning near the account limit', async () => {
+  const h = harness();
+  h.pageSize = 100;
+  h.resources.queue = Array.from({ length: 9998 }, (_, index) => ({
+    queue_id: index.toString(16).padStart(32, '0'),
+    queue_name: `existing-${index}`,
+  }));
+  const fixtures = JSON.parse(
+    await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+  ) as Record<string, unknown>;
+  h.hook = (path) =>
+    path === '/analytics_engine/sql'
+      ? new Response(JSON.stringify(fixtures.analyticsTablesEmpty))
+      : undefined;
+  const defaultOptions = options(h);
+  delete defaultOptions.contract;
+  const started = h.now();
+  const result = await provision(defaultOptions);
+  expect(result.exitCode).toBe(0);
+  expect(h.creates()).toBe(4);
+  expect(
+    h.trace.filter((read) => read.method === 'GET' && read.path.startsWith('/queues?')),
+  ).toHaveLength(800);
+  expect(h.now() - started).toBeGreaterThan(800_000);
+  expect((await journal()).operations.every((operation) => operation.state === 'confirmed')).toBe(
+    true,
+  );
+});
+
+it('starts the provision budget after the confirmation prompt', async () => {
   const h = harness();
   const prompt = vi.fn(async () => {
-    await h.sleep(900_000);
+    await h.sleep(1_800_000);
     return 'yes';
   });
   const result = await provision(options(h, { yes: false, interactive: true, prompt }));
@@ -882,7 +1047,7 @@ it('sends no POST once the remaining budget cannot cover a request and its recon
   h.hook = (_path, method) => {
     if (method === 'GET' && h.creates() === 1 && !jumped) {
       jumped = true;
-      void h.sleep(560_000);
+      void h.sleep(1_160_000);
     }
     return undefined;
   };
@@ -901,7 +1066,7 @@ it('keeps creating while the remaining budget covers a request and its reconcili
   h.hook = (_path, method) => {
     if (method === 'GET' && h.creates() === 1 && !jumped) {
       jumped = true;
-      void h.sleep(500_000);
+      void h.sleep(1_100_000);
     }
     return undefined;
   };
@@ -1273,6 +1438,12 @@ it.each([false, true])('chains provision into teardown with lifecycle drift=%s',
   h.fetch = vi.fn(async (input, init) => {
     const url = new URL(String(input));
     const path = url.pathname.split(ACCOUNT)[1]!;
+    if (path.startsWith('/r2/buckets')) {
+      const jurisdiction = new Headers(init?.headers).get('cf-r2-jurisdiction');
+      expect(jurisdiction).toEqual(
+        path === '/r2/buckets' ? expect.stringMatching(/^(?:eu|default|fedramp)$/) : 'eu',
+      );
+    }
     if (init?.method === 'DELETE') {
       deleted.push(path);
       const id = path.split('/').at(-1);

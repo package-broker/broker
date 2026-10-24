@@ -1,3 +1,4 @@
+import type { IdempotencyRecord } from '../api/idempotency.js';
 import type { OrgContext, OrgId, Statement } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import {
@@ -56,7 +57,9 @@ export interface ImportRun {
 }
 
 /** Public run summary: never includes stored manifests, credential data or before-images. */
-export type ImportRunDto = Omit<ImportRun, 'orgId'>;
+export type ImportRunDto = Omit<ImportRun, 'orgId'> & {
+  readonly credentialWindowUntil: string | null;
+};
 
 export interface ImportRunPage {
   readonly items: readonly ImportRunDto[];
@@ -89,8 +92,25 @@ export interface CreateRunInput {
   readonly manifest: unknown;
   readonly now: string;
   readonly audit: Statement;
-  readonly idempotency?: Statement;
+  /** Builds the record that stores the created run's response; its createdAt must equal now. */
+  readonly idempotency?: (response: CreatedImportRun) => IdempotencyRecord;
 }
+
+export interface CreatedImportRun {
+  readonly id: string;
+  readonly planHash: string;
+  readonly state: 'planned';
+}
+
+/** States in which an open credential window can still lead to a bound source. */
+const CREDENTIAL_STATES: ReadonlySet<ImportRunState> = new Set([
+  'planned',
+  'applying',
+  'failed',
+  'applied',
+  'verifying',
+  'verified',
+]);
 
 type CreateFence = MutationFence | TokenMutationFence;
 export type ImportRunOperation =
@@ -117,7 +137,8 @@ export interface ImportRunWrite extends ImportRunInput {
   readonly credentialWindowUntil?: string;
 }
 
-export interface ImportRunCreateWrite extends Omit<CreateRunInput, 'manifest'> {
+export interface ImportRunCreateWrite extends Omit<CreateRunInput, 'manifest' | 'idempotency'> {
+  readonly idempotency?: IdempotencyRecord;
   readonly id: string;
   readonly sourceSystem: string;
   readonly manifest: string;
@@ -146,6 +167,17 @@ export interface ImportRunStore {
   /** Runs are organization resources. Callers authorize org:import:write before reading. */
   get(ctx: OrgContext, runId: string): Promise<ImportRun | null>;
   list(ctx: OrgContext, input: ImportRunReadQuery): Promise<readonly ImportRun[]>;
+  /** At most 100 run ids; ids that are absent or foreign are missing from the map. */
+  credentialWindows(
+    ctx: OrgContext,
+    runIds: readonly string[],
+  ): Promise<ReadonlyMap<string, string | null>>;
+  findIdempotency(
+    ctx: OrgContext,
+    principalKey: string,
+    key: string,
+    now: string,
+  ): Promise<IdempotencyRecord | null>;
   inspect(
     ctx: OrgContext,
     fence: CreateFence,
@@ -211,6 +243,12 @@ export type ImportRunResult<T = null> =
 export interface ImportRunService {
   get(ctx: OrgContext, runId: string): Promise<ImportRunResult<ImportRunDto>>;
   list(ctx: OrgContext, input: ImportRunListInput): Promise<ImportRunResult<ImportRunPage>>;
+  findIdempotency(
+    ctx: OrgContext,
+    principalKey: string,
+    key: string,
+    now: string,
+  ): Promise<IdempotencyRecord | null>;
   createRun(
     ctx: OrgContext,
     fence: CreateFence,
@@ -273,7 +311,17 @@ function outcome<T>(answer: ImportRunWriteOutcome, value: T): ImportRunResult<T>
   }
 }
 
-function dto(run: ImportRun): ImportRunDto {
+function openWindow(run: ImportRun, until: string | null | undefined, nowMs: number) {
+  if (until == null || run.approvedAt === null || !CREDENTIAL_STATES.has(run.state)) return null;
+  const end = timestamp(until);
+  return end !== null && nowMs < end ? until : null;
+}
+
+function dto(
+  run: ImportRun,
+  windows: ReadonlyMap<string, string | null>,
+  nowMs: number,
+): ImportRunDto {
   return {
     id: run.id,
     state: run.state,
@@ -282,6 +330,7 @@ function dto(run: ImportRun): ImportRunDto {
     approvedByUserId: run.approvedByUserId,
     acceptedAt: run.acceptedAt,
     beforeImageExpiresAt: run.beforeImageExpiresAt,
+    credentialWindowUntil: openWindow(run, windows.get(run.id), nowMs),
   };
 }
 
@@ -403,7 +452,8 @@ export function createImportRunService(deps: {
     async get(ctx, runId) {
       const run = await store.get(ctx, runId);
       if (run === null || run.orgId !== ctx.orgId || run.id !== runId) return fail('not_found');
-      return { ok: true, value: dto(run) };
+      const windows = await store.credentialWindows(ctx, [run.id]);
+      return { ok: true, value: dto(run, windows, clock.now().getTime()) };
     },
     async list(ctx, input) {
       const requested = input.limit ?? 50;
@@ -417,7 +467,13 @@ export function createImportRunService(deps: {
       const rows = (await store.list(ctx, { after, limit: limit + 1 })).filter(
         (run) => run.orgId === ctx.orgId,
       );
-      const items = rows.slice(0, limit).map(dto);
+      const page = rows.slice(0, limit);
+      const windows = await store.credentialWindows(
+        ctx,
+        page.map((run) => run.id),
+      );
+      const nowMs = clock.now().getTime();
+      const items = page.map((run) => dto(run, windows, nowMs));
       const last = items.at(-1);
       return {
         ok: true,
@@ -427,6 +483,8 @@ export function createImportRunService(deps: {
         },
       };
     },
+    findIdempotency: (ctx, principalKey, key, now) =>
+      store.findIdempotency(ctx, principalKey, key, now),
     async createRun(ctx, fence, input) {
       const kind = fenceKind(fence);
       if (kind !== 'session' && kind !== 'token')
@@ -444,18 +502,22 @@ export function createImportRunService(deps: {
         return fail('invalid_manifest');
       const hash = await planHash(parsed.data);
       const id = deps.ids.ulid();
+      const created: CreatedImportRun = { id, planHash: hash, state: 'planned' };
+      const record = input.idempotency?.(created);
+      if (record !== undefined && record.createdAt !== input.now)
+        throw new TypeError('import creation idempotency must share the creation time');
       return outcome(
         await store.createRun(ctx, fence, {
           id,
           now: input.now,
           audit: input.audit,
-          ...(input.idempotency === undefined ? {} : { idempotency: input.idempotency }),
+          ...(record === undefined ? {} : { idempotency: record }),
           manifest,
           planHash: hash,
           sourceSystem: parsed.data.source_system,
           plannedCount: parsed.data.items.length,
         }),
-        { id, planHash: hash, state: 'planned' as const },
+        created,
       );
     },
     approveRun: (ctx, fence, input) => transition(ctx, fence, 'approveRun', input, input.planHash),

@@ -2496,6 +2496,7 @@ export interface operations {
               approvedAt: string | null;
               approvedByUserId: string | null;
               beforeImageExpiresAt: string | null;
+              credentialWindowUntil?: string | null;
               id: string;
               planHash: string | null;
               /** @enum {string} */
@@ -2638,6 +2639,11 @@ export interface operations {
             approvedAt: string | null;
             approvedByUserId: string | null;
             beforeImageExpiresAt: string | null;
+            credentialWindowUntil?: string | null;
+            credentials?: {
+              bound: boolean;
+              sourceRef: string;
+            }[];
             id: string;
             planHash: string | null;
             /** @enum {string} */

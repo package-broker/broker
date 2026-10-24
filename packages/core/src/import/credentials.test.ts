@@ -89,6 +89,9 @@ function setup(overrides: Partial<CredentialTarget> = {}, runtime: 'node' | 'clo
     setCredential: vi
       .fn<ImportCredentialStore['setCredential']>()
       .mockResolvedValue({ ok: true, results: [] }),
+    bindings: vi
+      .fn<ImportCredentialStore['bindings']>()
+      .mockResolvedValue({ manifest: target.manifest, bound: [] }),
   };
   const sealedPlaintexts: string[] = [];
   const prepare = vi
@@ -126,7 +129,7 @@ function setup(overrides: Partial<CredentialTarget> = {}, runtime: 'node' | 'clo
     expect(store.setCredential).not.toHaveBeenCalled();
     expect(auditStatement).not.toHaveBeenCalled();
   };
-  return { access, store, prepare, sealedPlaintexts, auditStatement, call, refused };
+  return { access, store, prepare, sealedPlaintexts, auditStatement, call, refused, service };
 }
 
 describe('import credential window', () => {
@@ -357,5 +360,56 @@ describe('import credential window', () => {
     expect(await h.call()).toEqual({ ok: false, error: 'unavailable' });
     expect(h.store.setCredential).not.toHaveBeenCalled();
     expect(h.auditStatement).not.toHaveBeenCalled();
+  });
+});
+
+describe('import credential binding status', () => {
+  const plain = {
+    ...sourceItem,
+    external_ref: 'plain',
+    name: 'public',
+    url: 'https://public.example.test/',
+    credential_ref: null,
+  };
+  const second = {
+    ...sourceItem,
+    external_ref: 'second',
+    name: 'second',
+    url: 'https://second.example.test/',
+  };
+
+  it('lists every credential-bearing source with its binding state and nothing else', async () => {
+    const { store, service } = setup();
+    store.bindings.mockResolvedValue({
+      manifest: manifest([sourceItem, plain, second]),
+      bound: ['second', 'plain'],
+    });
+    const result = await service.credentialStatus(ctx, id);
+    if (!result.ok) throw new Error('status refused');
+    expect([...result.value].sort((a, b) => a.sourceRef.localeCompare(b.sourceRef))).toEqual([
+      { sourceRef: 'second', bound: true },
+      { sourceRef: 'source', bound: false },
+    ]);
+    expect(JSON.stringify(result)).not.toContain('REGISTRY_TOKEN');
+    expect(store.bindings).toHaveBeenCalledWith(ctx, id);
+  });
+  it('hides an absent or foreign run', async () => {
+    const { store, service } = setup();
+    store.bindings.mockResolvedValue(null);
+    expect(await service.credentialStatus(ctx, id)).toEqual({ ok: false, error: 'not_found' });
+  });
+  it('reports no sources for a run without a stored manifest', async () => {
+    const { store, service } = setup();
+    store.bindings.mockResolvedValue({ manifest: null, bound: [] });
+    expect(await service.credentialStatus(ctx, id)).toEqual({ ok: true, value: [] });
+  });
+  it('reports an unreadable stored manifest as unavailable', async () => {
+    const { store, service } = setup();
+    store.bindings.mockResolvedValue({ manifest: '{', bound: [] });
+    expect(await service.credentialStatus(ctx, id)).toEqual({ ok: false, error: 'unavailable' });
+    store.bindings.mockResolvedValue({ manifest: '{}', bound: [] });
+    expect(await service.credentialStatus(ctx, id)).toEqual({ ok: false, error: 'unavailable' });
+    store.bindings.mockResolvedValue('unavailable');
+    expect(await service.credentialStatus(ctx, id)).toEqual({ ok: false, error: 'unavailable' });
   });
 });

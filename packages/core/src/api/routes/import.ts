@@ -13,13 +13,22 @@ import type {
 } from '../../import/credentials.js';
 import { MAX_MANIFEST_BYTES, parseManifest } from '../../import/manifest.js';
 import type {
+  CreatedImportRun,
   ImportRunService as RunService,
   ImportRunDto,
   ImportRunError,
 } from '../../import/run-service.js';
+import { isUlid } from '../../ids.js';
 import { denialResponse } from '../../kernel/denial-page.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
+import {
+  buildIdempotencyRecord,
+  parseIdempotencyKey,
+  principalKey,
+  requestHash,
+  settleIdempotent,
+} from '../idempotency.js';
 import { apiError, jsonResponse, type ApiErrorCode } from '../response.js';
 import { apiRoute, defineApi } from '../route.js';
 import { readJsonBody, VALIDATION_CODES, type ValidationCode } from '../validate.js';
@@ -99,7 +108,20 @@ function view(run: ImportRunDto): ImportRunDto {
     approvedByUserId: run.approvedByUserId,
     acceptedAt: run.acceptedAt,
     beforeImageExpiresAt: run.beforeImageExpiresAt,
+    credentialWindowUntil: run.credentialWindowUntil,
   };
+}
+
+function replayedRun(responseJson: string): { id: string; state: 'planned' } | null {
+  let stored: unknown;
+  try {
+    stored = JSON.parse(responseJson);
+  } catch {
+    return null;
+  }
+  if (typeof stored !== 'object' || stored === null) return null;
+  const { id, state } = stored as Record<string, unknown>;
+  return typeof id === 'string' && isUlid(id) && state === 'planned' ? { id, state } : null;
 }
 
 function audit(
@@ -153,15 +175,67 @@ export function importRoutes(deps: ImportRouteDeps): readonly RouteDefinition[] 
             code: VALIDATION_CODES.has(code) ? (code as ValidationCode) : 'invalid',
           })),
         );
-      const now = deps.clock.now().toISOString();
-      const result = await deps.service.createRun(orgOf(ctx), await fenceOf(ctx, deps), {
+      const key = parseIdempotencyKey(ctx.request.headers.get('idempotency-key'));
+      if (!key.ok)
+        return apiError('invalid_request', ctx.requestId, [
+          { path: '/headers/idempotency-key', code: 'invalid' },
+        ]);
+      const org = orgOf(ctx);
+      const fence = await fenceOf(ctx, deps);
+      const clockNow = deps.clock.now();
+      const now = clockNow.toISOString();
+      const input = {
         manifest: parsed.data,
         now,
         audit: audit(ctx, deps, 'import_run.create', null, now),
+      };
+      const created = (result: Awaited<ReturnType<ImportRunService['createRun']>>) => {
+        if (!result.ok) return apiError(ERRORS[result.error], ctx.requestId);
+        const { id, planHash, state } = result.value;
+        return jsonResponse(201, { id, planHash, state });
+      };
+      if (key.key === null) return created(await deps.service.createRun(org, fence, input));
+      const { principal } = ctx;
+      if (principal === null) throw new TypeError('import route requires a principal');
+      const hash = await requestHash({
+        method: IMPORT_CREATE_SPEC.method,
+        route: IMPORT_CREATE_SPEC.path,
+        params: {},
+        body: parsed.data,
       });
-      if (!result.ok) return apiError(ERRORS[result.error], ctx.requestId);
-      const { id, planHash, state } = result.value;
-      return jsonResponse(201, { id, planHash, state });
+      // The plan hash is left out: its hex digest trips the shared credential-value check, and a
+      // replay reads it back from the run, where it never changes.
+      const record = ({ id, state }: Pick<CreatedImportRun, 'id' | 'state'>) =>
+        buildIdempotencyRecord({
+          principal,
+          key: key.key!,
+          route: IMPORT_CREATE_SPEC.path,
+          hash,
+          status: 201,
+          response: { id, state },
+          now: clockNow,
+        });
+      const settled = await settleIdempotent({
+        record: record({ id: '', state: 'planned' }),
+        hash,
+        now: clockNow,
+        find: () => deps.service.findIdempotency(org, principalKey(principal), key.key!, now),
+        run: () => deps.service.createRun(org, fence, { ...input, idempotency: record }),
+        failed: (result) => !result.ok,
+      });
+      if (settled.kind === 'mismatch') return apiError('idempotency_mismatch', ctx.requestId);
+      if (settled.kind === 'result') return created(settled.result);
+      const stored = replayedRun(settled.record.responseJson);
+      if (stored === null) return apiError('conflict', ctx.requestId);
+      const run = await deps.service.get(org, stored.id);
+      if (!run.ok || run.value.planHash === null) return apiError('conflict', ctx.requestId);
+      const response = jsonResponse(201, {
+        id: stored.id,
+        planHash: run.value.planHash,
+        state: stored.state,
+      });
+      response.headers.set('Idempotent-Replayed', 'true');
+      return response;
     },
   };
   const list = apiRoute(IMPORT_LIST_SPEC, async ({ ctx, query }) => {
@@ -175,7 +249,16 @@ export function importRoutes(deps: ImportRouteDeps): readonly RouteDefinition[] 
   });
   const get = apiRoute(IMPORT_GET_SPEC, async ({ ctx, params }) => {
     const result = await deps.service.get(orgOf(ctx), params.id);
-    return result.ok ? { status: 200, body: view(result.value) } : { error: ERRORS[result.error] };
+    if (!result.ok) return { error: ERRORS[result.error] };
+    const credentials = await deps.credentials.credentialStatus(orgOf(ctx), params.id);
+    if (!credentials.ok) return { error: ERRORS[credentials.error] };
+    return {
+      status: 200,
+      body: {
+        ...view(result.value),
+        credentials: credentials.value.map(({ sourceRef, bound }) => ({ sourceRef, bound })),
+      },
+    };
   });
   const actions = (Object.keys(IMPORT_ACTIONS) as (keyof typeof IMPORT_ACTIONS)[]).map((action) =>
     apiRoute(importActionSpec(action), async ({ ctx, params, body }) => {

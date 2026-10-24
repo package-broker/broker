@@ -30,3 +30,29 @@ it('binds GitHub VCS bearer credentials to exactly the API origin', async () => 
   ).headers;
   expect(headers.has('authorization')).toBe(false);
 });
+
+it.each([
+  ['{}', null],
+  ['{"githubToken":false}', null],
+  ['{"githubToken":"true"}', null],
+  ['{', null],
+  ['{"githubToken":true}', ['https://api.github.com', 'https://codeload.github.com']],
+])('uses parsed Packagist credential origins for config %s', async (configJson, expected) => {
+  const { credentialOrigins } = await import('./index.js');
+  expect(
+    credentialOrigins(
+      {
+        type: 'packagist_proxy',
+        ecosystem: 'composer',
+        url: 'https://repo.packagist.org',
+        credentialId: 'token',
+        configJson,
+      } as import('@package-broker/core/db/source').SourceRecord,
+      {
+        runtime: 'cloudflare',
+        selfOrigins: [],
+        allowPrivateHosts: [],
+      },
+    ),
+  ).toEqual(expected);
+});

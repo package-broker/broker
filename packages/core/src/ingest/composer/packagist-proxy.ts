@@ -1,3 +1,4 @@
+import { GITHUB_API, GITHUB_CODELOAD } from '../../sources/github-origins.js';
 import { UPSTREAM_DEFAULTS } from '../../sources/config.js';
 import {
   UpstreamError,
@@ -15,9 +16,9 @@ import type { Clock } from '../../ids.js';
 import type { ComposerRoot } from './root.js';
 import { describeComposerV2, type ComposerV2Result } from './v2-package.js';
 
+export { GITHUB_API, GITHUB_CODELOAD } from '../../sources/github-origins.js';
+
 const PACKAGIST = UPSTREAM_DEFAULTS.packagist.url;
-export const GITHUB_API = 'https://api.github.com';
-export const GITHUB_CODELOAD = 'https://codeload.github.com';
 const GITHUB_ORIGINS: readonly string[] = [GITHUB_API, GITHUB_CODELOAD];
 const REPO_SEGMENT = /^[\w.-]+$/;
 const DOTS_ONLY = /^\.+$/;

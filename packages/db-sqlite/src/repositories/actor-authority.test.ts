@@ -564,22 +564,32 @@ async function callWriter(
       );
     case 'unlink':
       return (
-        (await repository.unlink.unlinkIdentity(a, fence(), {
-          identityId: OTHER_IDENTITY,
-          userId: USER_B,
-          provider: 'oidc',
-          subject: `subject-${OTHER_IDENTITY}`,
-          anchor: ANCHORS[0]!.anchor,
-          now: NOW,
-        })) === 'unlinked'
+        (await repository.unlink.unlinkIdentity(
+          a,
+          fence(),
+          {
+            identityId: OTHER_IDENTITY,
+            userId: USER_B,
+            provider: 'oidc',
+            subject: `subject-${OTHER_IDENTITY}`,
+            anchor: ANCHORS[0]!.anchor,
+            now: NOW,
+          },
+          { unlink: writerAudit('identity.unlink'), block: writerAudit('identity.block') },
+        )) === 'unlinked'
       );
     case 'unblock':
       return (
-        (await repository.unblock.unblock(a, fence(), {
-          provider: 'oidc',
-          issuer: ANCHORS[0]!.anchor,
-          subject: 'blocked-target',
-        })) === 'unblocked'
+        (await repository.unblock.unblock(
+          a,
+          fence(),
+          {
+            provider: 'oidc',
+            issuer: ANCHORS[0]!.anchor,
+            subject: 'blocked-target',
+          },
+          writerAudit('identity.unblock'),
+        )) === 'unblocked'
       );
   }
 }
@@ -655,8 +665,8 @@ describe('shared actor session identity binding', () => {
     'role update': [34, 1, 1, 4, 3, 5, 12],
     'role permissions': [34, 1, 1, 4, 3, 6, 6, 4, 12],
     'role delete': [34, 1, 1, 4, 3, 3, 12],
-    unlink: [10, 1, 1, 6, 6, 4, 14, 5, 5, 3, 2, 3, 5, 1],
-    unblock: [13, 1, 1, 6, 4, 1],
+    unlink: [10, 1, 1, 6, 6, 4, 14, 12, 5, 12, 5, 3, 2, 3, 5, 1],
+    unblock: [13, 1, 1, 6, 31, 4, 1],
   } as const;
   type Operation = keyof typeof baseline;
   const parameterCases = (Object.keys(baseline) as Operation[]).flatMap((operation) =>

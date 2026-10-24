@@ -1,3 +1,5 @@
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { expect } from 'vitest';
 import type { SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { createIdentityBlockRepository } from '../../repositories/identity-block.js';
@@ -27,11 +29,22 @@ const foreignBlock: ContractCase = {
       issuer,
       subject.userId,
     );
-    expect(
-      await createIdentityBlockRepository(executing(context), {
+    await seed(
+      "INSERT INTO identity_block (org_id, provider, issuer, subject, blocked_by_user_id) VALUES (?, 'oidc', ?, 'blocked', ?)",
+      own.orgId,
+      issuer,
+      subject.userId,
+    );
+    await expect(
+      createIdentityBlockRepository(executing(context), {
         holderInput: () => ({ kind: 'fresh', now: new Date().toISOString(), providers: ANCHORS }),
-      }).unblock(own, fenceOf(subject), { provider: 'oidc', issuer, subject: 'blocked' }),
-    ).toBe('not_found');
+      }).unblock(
+        own,
+        fenceOf(subject),
+        { provider: 'oidc', issuer, subject: 'blocked' },
+        unblockAudit(),
+      ),
+    ).resolves.toBe('unblocked');
     expect(
       await context.executor.all({
         sql: "SELECT subject FROM identity_block WHERE subject = 'blocked'",
@@ -54,7 +67,7 @@ const entry = factoryEntry(
     {
       locate: /"(?:guard_\w+|la_session|hp_session|present)"\."org_id" = |(?:au|s)\.org_id = /,
       reason:
-        'The actor is an own control; live session, permissionRows and protected-holder authority are independently covered by access and service-principal authority registrations. The present probe only classifies a failed deletion.',
+        'The actor is an own control; live session, permissionRows and protected-holder authority are independently covered by access and service-principal authority registrations. The present predicate gates the audit insert and classifies a failed deletion; the foreign-block case covers the delete organization scope while the matching own block satisfies presence.',
     },
   ],
 );
@@ -119,6 +132,7 @@ const sessionCases = (['actor', 'identity', 'session'] as const).map((layer): Co
         own,
         fenceOf(subject),
         key,
+        unblockAudit(),
       ),
     ).toBe('unblocked');
     await block();
@@ -158,10 +172,15 @@ const sessionCases = (['actor', 'identity', 'session'] as const).map((layer): Co
       },
     };
     expect(
-      await createIdentityBlockRepository(executor, options).unblock(own, fenceOf(subject), key),
+      await createIdentityBlockRepository(executor, options).unblock(
+        own,
+        fenceOf(subject),
+        key,
+        unblockAudit(),
+      ),
     ).toBe('authority');
-    // Observe both copies independently even when another authority condition refuses the batch.
-    expect(live).toEqual([0, 0]);
+    // Observe all copies independently even when another authority condition refuses the batch.
+    expect(live).toEqual([0, 0, 0]);
     expect(
       await context.executor.all({
         sql: 'SELECT subject FROM identity_block WHERE org_id = ?',
@@ -186,8 +205,22 @@ export const entries: readonly MutationEntry[] = [
           /"s"\."org_id" = \?/,
         ][index]!,
         neutral: index === 2 ? NOT_NULL : ALWAYS,
-        copies: 2,
+        copies: 3,
       })),
     ],
   },
 ];
+
+function unblockAudit() {
+  const id = ulid();
+  const result = auditEvent({
+    id,
+    now: new Date().toISOString(),
+    action: 'identity.unblock',
+    actor: { type: 'system', id: null },
+    context: { opId: id, requestId: id, sourceIp: null, tokenSelector: null },
+    target: { type: 'identity_block', id: null },
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}

@@ -207,6 +207,12 @@ test.describe('Node management UI', () => {
       archivedRow.getByRole('cell', { name: 'Status Archived', exact: true }),
     ).toBeVisible();
     await expect(archivedRow.getByRole('button', { name: 'Restore', exact: true })).toBeEnabled();
+    await expect(page.getByRole('alert')).toContainText('Project archived.');
+    await expect(page.getByRole('alert')).not.toContainText('Not found');
+    await expect(settings).toHaveCount(0);
+    await expect(page).toHaveURL(/#\/projects\?status=archived/);
+    await page.reload();
+    await expect(archivedRow.getByRole('button', { name: 'Restore', exact: true })).toBeEnabled();
     const restorePath = '/_pb/projects/browser-archive/restore';
     const refused = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === restorePath,

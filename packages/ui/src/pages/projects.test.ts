@@ -80,10 +80,11 @@ describe('projects', () => {
     );
     expect(parseProjectsHash(buildProjectsHash(parsed))).toEqual(parsed);
   });
-  it('loads both statuses when All statuses is selected, with independent pagination', async () => {
+  it('loads both statuses for an admin with independent pagination', async () => {
     const { controller, fetch } = fixture();
     fetch.mockImplementation(async (url: string) => {
-      if (url === '/_pb/me/permissions') return Response.json({ organization: [] });
+      if (url === '/_pb/me/permissions')
+        return Response.json({ organization: ['org:projects:archive', 'project:read'] });
       const params = new URL(url, 'https://broker.test').searchParams;
       const archived = params.get('status') === 'archived';
       const later = params.has('after');
@@ -110,8 +111,8 @@ describe('projects', () => {
       fetch.mock.calls.filter(([url]) => url.startsWith('/_pb/projects')).map(([url]) => url),
     ).toEqual(['/_pb/projects?status=active&after=active%2F%2B%3D&limit=50']);
   });
-  it('reports an error instead of a partial All statuses list when archived loading fails', async () => {
-    const f = fixture();
+  it('shows active projects for a member without requesting archived projects', async () => {
+    const f = fixture({ permissions: false });
     const original = f.fetch.getMockImplementation()!;
     f.fetch.mockImplementation(async (url, init) =>
       url.includes('status=archived')
@@ -119,9 +120,54 @@ describe('projects', () => {
         : original(url, init),
     );
     await f.controller.load({ project: null });
-    expect(f.controller.snapshot().listError).toBe(true);
+    expect(f.controller.snapshot().listError).toBe(false);
+    expect(markup(f.controller)).toContain('Website');
+    expect(f.fetch.mock.calls.filter(([url]) => url.startsWith('/_pb/projects'))).toEqual([
+      ['/_pb/projects?status=active&limit=50', expect.anything()],
+    ]);
+  });
+  it('keeps active projects when an admin archived request is refused', async () => {
+    const f = fixture();
+    const original = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (url, init) =>
+      url === '/_pb/me/permissions'
+        ? Response.json({ organization: ['org:projects:archive', 'project:read'] })
+        : url.includes('status=archived')
+          ? Response.json({ error: { code: 'forbidden' } }, { status: 403 })
+          : original(url, init),
+    );
+    await f.controller.load({ project: null });
+    expect(f.controller.snapshot().listError).toBe(false);
+    expect(f.controller.snapshot().items).toHaveLength(1);
+    expect(markup(f.controller)).toContain('Website');
+    expect(f.controller.snapshot().next).toBeNull();
+    expect(f.fetch.mock.calls.some(([url]) => url.includes('status=archived'))).toBe(true);
+  });
+  it('uses only the active cursor when a member follows a combined page link', async () => {
+    const f = fixture({ permissions: false });
+    await f.controller.load({ project: null, after: 'all:["active-next","archived-next"]' });
+    expect(f.fetch.mock.calls.filter(([url]) => url.startsWith('/_pb/projects'))).toEqual([
+      ['/_pb/projects?status=active&after=active-next&limit=50', expect.anything()],
+    ]);
+    f.fetch.mockClear();
+    await f.controller.load({ project: null, after: 'all:[null,"archived-next"]' });
     expect(f.controller.snapshot().items).toEqual([]);
     expect(f.controller.snapshot().next).toBeNull();
+    expect(f.fetch.mock.calls.some(([url]) => url.startsWith('/_pb/projects'))).toBe(false);
+  });
+  it('keeps unexpected archived failures visible to admins', async () => {
+    const f = fixture();
+    const original = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (url, init) =>
+      url === '/_pb/me/permissions'
+        ? Response.json({ organization: ['org:projects:archive', 'project:read'] })
+        : url.includes('status=archived')
+          ? Response.json({ error: { code: 'internal_error' } }, { status: 500 })
+          : original(url, init),
+    );
+    await f.controller.load({ project: null });
+    expect(f.controller.snapshot().listError).toBe(true);
+    expect(f.controller.snapshot().items).toEqual([]);
   });
   it.each(['active', 'archived'] as const)(
     'keeps the %s filter on a single API cursor',
@@ -337,7 +383,7 @@ describe('projects', () => {
       'Idempotency-Key',
     );
   });
-  it('keeps restore unavailable when the API refuses archived details', async () => {
+  it('keeps restore unavailable without a list ETag when archived details return 404', async () => {
     const fetch = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async (url) => {
       if (url === '/_pb/me/permissions')
         return Response.json({ organization: ['org:projects:archive'] });
@@ -351,9 +397,238 @@ describe('projects', () => {
       requireReauth: vi.fn(),
     });
     await controller.load({ project: 'web', status: 'archived' });
+    expect(controller.snapshot().query.project).toBeNull();
+    expect(markup(controller)).toContain('Project archived.');
     await controller.transition();
     expect(markup(controller)).not.toContain('>Restore<');
     expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
+  });
+  it.each(['settings', 'row', 'reload', 'replay'] as const)(
+    'recovers an archived selection with Restore available after %s',
+    async (action) => {
+      const f = fixture();
+      let archived = action === 'reload';
+      f.fetch.mockImplementation(async (url, init) => {
+        if (init.method === 'POST') {
+          archived = !url.endsWith('/restore');
+          return new Response(null, { status: 204 });
+        }
+        if (url === '/_pb/me/permissions')
+          return Response.json({ organization: ['org:projects:archive'] });
+        if (url.endsWith('/permissions')) return Response.json({ project: [] });
+        if (url === '/_pb/projects/web')
+          return archived
+            ? Response.json({ error: { code: 'not_found' } }, { status: 404 })
+            : Response.json(project, { headers: { ETag: '"r7"' } });
+        const params = new URL(url, 'https://broker.test').searchParams;
+        const status = params.get('status');
+        // The archived target is on a later page, outside the old active filter and cursor.
+        if (archived && status === 'archived' && !params.has('after'))
+          return Response.json({ items: [], next: 'archived-page-2' });
+        return Response.json({
+          items:
+            archived && status === 'active'
+              ? []
+              : [
+                  {
+                    ...project,
+                    status: archived ? 'archived' : 'active',
+                    etag: archived ? '"r8"' : '"r7"',
+                  },
+                ],
+          next: null,
+        });
+      });
+      await f.controller.load({ project: 'web', status: 'active', q: 'missing', after: 'old' });
+      if (action === 'settings') await f.controller.transition();
+      if (action === 'row') await f.controller.transitionItem(project.id);
+      if (action === 'replay') {
+        archived = true;
+        await f.controller.replayed({ path: '/_pb/projects/web/archive', ok: true, status: 204 });
+      }
+      expect(f.controller.snapshot().query).toEqual({
+        project: null,
+        status: 'archived',
+        after: 'archived-page-2',
+      });
+      expect(f.controller.snapshot().selected).toBeNull();
+      expect(markup(f.controller)).toContain('Project archived.');
+      expect(markup(f.controller)).not.toContain('Not found');
+      expect(markup(f.controller)).toContain('>Restore<');
+      await f.controller.transitionItem(project.id);
+      expect(f.fetch.mock.calls.find(([url]) => url.endsWith('/restore'))).toMatchObject([
+        '/_pb/projects/web/restore',
+        { headers: { 'If-Match': '"r8"' } },
+      ]);
+    },
+  );
+  it.each(['settings', 'row', 'replay'] as const)(
+    'preserves confirmed archive success when a non-admin cannot list archived projects: %s',
+    async (action) => {
+      const f = fixture();
+      let archived = false;
+      f.fetch.mockImplementation(async (url, init) => {
+        if (init.method === 'POST') {
+          archived = true;
+          return new Response(null, { status: 204 });
+        }
+        if (url === '/_pb/me/permissions')
+          return Response.json({ organization: ['org:projects:archive'] });
+        if (url.endsWith('/permissions')) return Response.json({ project: [] });
+        if (url === '/_pb/projects/web')
+          return archived
+            ? Response.json({ error: { code: 'not_found' } }, { status: 404 })
+            : Response.json(project, { headers: { ETag: '"r7"' } });
+        if (url.includes('status=archived'))
+          return Response.json({ error: { code: 'forbidden' } }, { status: 403 });
+        return Response.json({
+          items: archived ? [] : [{ ...project, etag: '"r7"' }],
+          next: null,
+        });
+      });
+      const activeQuery = { project: null, status: 'active', q: 'web' } as const;
+      await f.controller.load({
+        ...activeQuery,
+        project: action === 'settings' ? 'web' : null,
+      });
+      if (action === 'settings') await f.controller.transition();
+      if (action === 'row') await f.controller.transitionItem(project.id);
+      if (action === 'replay') {
+        archived = true;
+        await f.controller.replayed({ path: '/_pb/projects/web/archive', ok: true, status: 204 });
+      }
+      expect(f.fetch.mock.calls.some(([url]) => url.includes('status=archived'))).toBe(true);
+      expect(f.controller.snapshot()).toMatchObject({
+        query: activeQuery,
+        selected: null,
+        etag: null,
+        permissions: [],
+        items: [],
+        listError: false,
+        notice: 'Project archived.',
+      });
+      expect(buildProjectsHash(f.controller.snapshot().query)).toBe(
+        '#/projects?status=active&q=web',
+      );
+      expect(markup(f.controller)).not.toContain('Not found');
+      expect(markup(f.controller)).not.toContain('>Restore<');
+      await f.controller.load(f.controller.snapshot().query);
+      expect(markup(f.controller)).toContain('Project archived.');
+    },
+  );
+  it.each(['settings', 'replay'] as const)(
+    'recovers confirmed archive success from a failed All statuses list: %s',
+    async (action) => {
+      const f = fixture();
+      let archived = false;
+      const remaining = { ...project, id: 'remaining', slug: 'other', name: 'Other' };
+      f.fetch.mockImplementation(async (url, init) => {
+        if (init.method === 'POST') {
+          archived = true;
+          return new Response(null, { status: 204 });
+        }
+        if (url === '/_pb/me/permissions')
+          return Response.json({ organization: ['org:projects:archive'] });
+        if (url.endsWith('/permissions')) return Response.json({ project: [] });
+        if (url === '/_pb/projects/web')
+          return archived
+            ? Response.json({ error: { code: 'not_found' } }, { status: 404 })
+            : Response.json(project, { headers: { ETag: '"r7"' } });
+        if (url.includes('status=archived'))
+          return Response.json({ error: { code: 'forbidden' } }, { status: 403 });
+        return Response.json({ items: archived ? [remaining] : [project], next: null });
+      });
+      const original = f.fetch.getMockImplementation()!;
+      f.fetch.mockImplementation(async (url, init) =>
+        url.includes('status=active') && url.includes('after=old')
+          ? Response.json({ error: { code: 'invalid_request' } }, { status: 400 })
+          : original(url, init),
+      );
+      await f.controller.load({
+        project: 'web',
+        q: 'Other',
+        after: 'all:["old","archived-old"]',
+      });
+      expect(f.controller.snapshot().listError).toBe(true);
+      expect(f.controller.snapshot().selected).toMatchObject({ slug: 'web' });
+      f.fetch.mockClear();
+      if (action === 'settings') await f.controller.transition();
+      else {
+        archived = true;
+        await f.controller.replayed({ path: '/_pb/projects/web/archive', ok: true, status: 204 });
+      }
+      expect(f.controller.snapshot()).toMatchObject({
+        query: { project: null, status: 'active', q: 'Other' },
+        selected: null,
+        etag: null,
+        permissions: [],
+        items: [remaining],
+        next: null,
+        listError: false,
+        notice: 'Project archived.',
+      });
+      expect(buildProjectsHash(f.controller.snapshot().query)).toBe(
+        '#/projects?status=active&q=Other',
+      );
+      expect(
+        f.fetch.mock.calls.some(([url]) => url === '/_pb/projects?status=active&limit=50'),
+      ).toBe(true);
+      expect(markup(f.controller)).not.toContain('do not have permission');
+      expect(markup(f.controller)).not.toContain('Not found');
+      await f.controller.load(f.controller.snapshot().query);
+      expect(f.controller.snapshot().notice).toBe('Project archived.');
+    },
+  );
+  it.each([404, 403])('keeps a genuine detail failure visible: %s', async (status) => {
+    const f = fixture();
+    const original = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (url, init) =>
+      url === '/_pb/projects/web'
+        ? Response.json({ error: { code: status === 404 ? 'not_found' : 'forbidden' } }, { status })
+        : url.includes('status=archived')
+          ? Response.json({ items: [], next: null })
+          : original(url, init),
+    );
+    await f.controller.load(query);
+    expect(f.controller.snapshot().query).toEqual(query);
+    expect(markup(f.controller)).toContain(status === 404 ? 'Not found' : 'do not have permission');
+    expect(markup(f.controller)).not.toContain('Project archived.');
+  });
+  it('ignores archived recovery after the user selects another filter', async () => {
+    const f = fixture();
+    const original = f.fetch.getMockImplementation()!;
+    let finish!: (response: Response) => void;
+    f.fetch.mockImplementation(async (url, init) => {
+      if (url === '/_pb/projects/web')
+        return Response.json({ error: { code: 'not_found' } }, { status: 404 });
+      if (url.includes('status=archived'))
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      return original(url, init);
+    });
+    const loading = f.controller.load({ project: 'web', status: 'active' });
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await f.controller.load({ project: null, status: 'active' });
+    finish(
+      Response.json({ items: [{ ...project, status: 'archived', etag: '"r8"' }], next: null }),
+    );
+    await loading;
+    expect(f.controller.snapshot().query).toEqual({ project: null, status: 'active' });
+    expect(f.controller.snapshot().notice).toBeNull();
+  });
+  it('keeps an archived lookup failure from becoming a success notice', async () => {
+    const f = fixture();
+    const original = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (url, init) =>
+      url === '/_pb/projects/web' || url.includes('status=archived')
+        ? Response.json({ error: { code: 'not_found' } }, { status: 404 })
+        : original(url, init),
+    );
+    await f.controller.load({ project: 'web', status: 'active' });
+    expect(f.controller.snapshot().query.project).toBe('web');
+    expect(markup(f.controller)).toContain('Not found');
+    expect(markup(f.controller)).not.toContain('Project archived.');
   });
   it('ignores a late list from an earlier filter selection', async () => {
     let release!: (response: Response) => void;
@@ -461,13 +736,13 @@ describe('project row actions', () => {
     expect(markup(controller)).toContain('Changed elsewhere. Reload');
   });
   it.each([null, 'web'])(
-    'refreshes a list action replay and preserves filters and cursor; selected=%s',
+    'refreshes a restore replay and preserves filters and cursor; selected=%s',
     async (selected) => {
       const { controller, fetch } = fixture({ listEtag: true });
       const query = { project: selected, q: 'Web', after: 'cursor', status: 'active' as const };
       await controller.load(query);
       const before = fetch.mock.calls.length;
-      await controller.replayed({ path: '/_pb/projects/web/archive', ok: true, status: 204 });
+      await controller.replayed({ path: '/_pb/projects/web/restore', ok: true, status: 204 });
       expect(fetch.mock.calls.length).toBeGreaterThan(before);
       expect(controller.snapshot().query).toEqual(query);
       expect(markup(controller)).toContain('Project updated.');

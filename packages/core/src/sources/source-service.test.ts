@@ -219,6 +219,33 @@ describe('source visibility for mutation preflight', () => {
 });
 
 describe('source administration', () => {
+  it.each(['git', 'github'])(
+    'looks up existing credential kind only for merged GitHub config (%s)',
+    async (provider) => {
+      const { service, sources, credentialRepository } = setup();
+      sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        type: 'vcs',
+        url: null,
+        credentialId: 'existing',
+        configJson: JSON.stringify({
+          provider: 'git',
+          repository: 'https://github.com/owner/repo.git',
+        }),
+      } as SourceRecord);
+      credentialRepository.get.mockResolvedValue({ kind: 'bearer' });
+      const result = await service.update(ctx, org, fence, 'source', {
+        configJson: JSON.stringify({
+          provider,
+          repository: provider === 'github' ? 'owner/repo' : 'https://github.com/owner/repo.git',
+        }),
+      });
+      expect(result.ok).toBe(true);
+      expect(credentialRepository.get).toHaveBeenCalledTimes(provider === 'github' ? 1 : 0);
+    },
+  );
+
   it('links an existing credential id without preparing a credential', async () => {
     const { service, sources, credentials, credentialRepository } = setup();
     credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'bearer' });
@@ -255,7 +282,11 @@ describe('source administration', () => {
       ...input,
       type: 'vcs',
       url: null,
-      configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/name',
+        installationId: 123,
+      }),
       credentialId: 'existing',
     });
     expect(result.ok).toBe(allowed);
@@ -1617,4 +1648,177 @@ describe('accepting a refused removal', () => {
     });
     expect(f.sources.acceptRemoval).not.toHaveBeenCalled();
   });
+});
+
+describe('GitHub personal access tokens', () => {
+  const github = {
+    ...input,
+    type: 'vcs' as const,
+    url: null,
+    configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+    credential: {
+      kind: 'bearer' as const,
+      plaintext: JSON.stringify({ token: 'ghp_private-sentinel' }),
+    },
+  };
+  it('prepares a token using the existing per-source credential store', async () => {
+    const f = setup();
+    expect((await f.service.create(ctx, org, fence, github)).ok).toBe(true);
+    expect(f.credentials.prepare).toHaveBeenCalledWith(
+      ctx,
+      expect.objectContaining({ kind: 'bearer' }),
+    );
+  });
+  it('rejects installationId together with a token without leaking it', async () => {
+    const f = setup();
+    const result = await f.service.create(ctx, org, fence, {
+      ...github,
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/name',
+        installationId: 123,
+      }),
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'invalid_config',
+      problems: [
+        { field: 'installationId', message: 'cannot be combined with a personal access token' },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain('ghp_private-sentinel');
+    expect(f.credentials.prepare).not.toHaveBeenCalled();
+  });
+});
+
+describe('GitHub token updates', () => {
+  it.each(['credential', 'config'] as const)('rejects a conflicting %s update', async (change) => {
+    const f = setup();
+    const config = { provider: 'github', repository: 'owner/name', installationId: 123 };
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'vcs',
+      url: null,
+      credentialId: 'existing',
+      configJson: JSON.stringify(
+        change === 'credential' ? config : { ...config, installationId: undefined },
+      ),
+    } as SourceRecord);
+    f.credentialRepository.get.mockResolvedValue({
+      id: 'existing',
+      projectId: null,
+      kind: 'bearer',
+    });
+    const result = await f.service.update(
+      ctx,
+      org,
+      fence,
+      'source',
+      change === 'credential'
+        ? {
+            credential: {
+              kind: 'bearer',
+              plaintext: JSON.stringify({ token: 'ghp_private-sentinel' }),
+            },
+          }
+        : { configJson: JSON.stringify(config) },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'invalid_config',
+      problems: [{ field: 'installationId' }],
+    });
+    expect(f.credentials.prepare).not.toHaveBeenCalled();
+    expect(f.sources.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('GitHub App installation conflicts', () => {
+  const config = { provider: 'github', repository: 'owner/name' };
+  const app = {
+    kind: 'github_app' as const,
+    plaintext: JSON.stringify({
+      appId: '1',
+      privateKeyPem: '-----BEGIN PRIVATE KEY-----\nYWJjZGVmZ2g=\n-----END PRIVATE KEY-----',
+      webhookSecret: 'private-sentinel',
+    }),
+  };
+  it.each(['linked', 'new'] as const)(
+    'requires installationId on create with a %s App credential',
+    async (kind) => {
+      const f = setup();
+      f.credentialRepository.get.mockResolvedValue({
+        id: 'existing',
+        projectId: null,
+        kind: 'github_app',
+      });
+      const result = await f.service.create(ctx, org, fence, {
+        ...input,
+        type: 'vcs',
+        url: null,
+        configJson: JSON.stringify(config),
+        ...(kind === 'linked' ? { credentialId: 'existing' } : { credential: app }),
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'invalid_config',
+        problems: [{ field: 'installationId' }],
+      });
+      expect(f.sources.create).not.toHaveBeenCalled();
+      expect(f.credentials.prepare).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['existing', 'new'] as const)(
+    'rejects removing installationId with a %s App credential',
+    async (kind) => {
+      const f = setup();
+      f.sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        type: 'vcs',
+        url: null,
+        credentialId: 'existing',
+        configJson: JSON.stringify({ ...config, installationId: 123 }),
+      } as SourceRecord);
+      f.credentialRepository.get.mockResolvedValue({
+        id: 'existing',
+        projectId: null,
+        kind: 'github_app',
+      });
+      const result = await f.service.update(ctx, org, fence, 'source', {
+        configJson: JSON.stringify(config),
+        ...(kind === 'new' ? { credential: app } : {}),
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'invalid_config',
+        problems: [{ field: 'installationId' }],
+      });
+      expect(f.sources.update).not.toHaveBeenCalled();
+      expect(f.credentials.prepare).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it('rejects a URL query on update with a stored query credential without stripping it', async () => {
+  const f = setup();
+  f.sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    credentialId: 'existing',
+  } as SourceRecord);
+  f.credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'query' });
+  const url = 'https://packages.example.com/repository?channel=stable';
+  const patch = { url };
+  expect(await f.service.update(ctx, org, fence, 'source', patch)).toMatchObject({
+    ok: false,
+    error: 'invalid_config',
+    problems: [
+      { field: 'url', message: 'must be an allowed URL without userinfo, query or fragment' },
+    ],
+  });
+  expect(patch.url).toBe(url);
+  expect(f.sources.update).not.toHaveBeenCalled();
+  expect(f.credentialRepository.get).not.toHaveBeenCalled();
 });

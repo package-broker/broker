@@ -515,7 +515,7 @@ function buildCatalogue(
   });
 }
 
-function credentialOrigins(
+export function credentialOrigins(
   source: SourceRecord,
   policy: Parameters<typeof parseSourceConfig>[4]['policy'],
 ): readonly string[] | null {
@@ -528,7 +528,7 @@ function credentialOrigins(
     if (!parsed.ok || !('provider' in parsed.config)) return null;
     switch (parsed.config.provider) {
       case 'github':
-        return [GITHUB_API, GITHUB_CODELOAD];
+        return [GITHUB_API];
       case 'git':
         return [new URL(parsed.config.repository).origin];
       case 'ssh':

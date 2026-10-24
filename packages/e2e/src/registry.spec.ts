@@ -11,6 +11,7 @@ import { crc32, deflateSync } from 'node:zlib';
 import { startLocal, until, LocalUnavailable, fixtureDestination } from './local.js';
 import type { LocalBroker, Runtime } from './local.js';
 import type { ScenarioResult } from './runner.js';
+import { composerAvailable as checkComposer, redactComposerOutput } from './composer-output.js';
 
 const SECRET = 'step7-fixture-webhook-secret';
 const PRIVATE_KEY = generateKeyPairSync('rsa', {
@@ -811,7 +812,6 @@ export async function registryScenario(
       try {
         await until(
           async () => {
-            await local.tick();
             const response = await get(`/alpha/p2/${name}.json`);
             if (response.status !== 200) {
               observed = `HTTP:${response.status}`;
@@ -849,13 +849,12 @@ export async function registryScenario(
     ])
       assert(remote.count(path) > 0, 'GitHubProviderLegMissing');
     stage = 'github-token-composer';
+    await api(`/_pb/sources/${tokenSource}/sync`, undefined, 202);
+    await local.pollTick(orgId);
     await composer('acme/token', '1.0.0', 90_000, TOKEN_ZIP);
-    let composerAvailable = true;
-    try {
-      await promisify(execFile)('composer', ['--version'], { timeout: 10_000 });
-    } catch {
-      composerAvailable = false;
-    }
+    const composerAvailable = await checkComposer(() =>
+      promisify(execFile)('composer', ['--version'], { timeout: 10_000 }),
+    );
     if (composerAvailable) {
       const clientDirectory = await mkdtemp(join(tmpdir(), 'pb-github-token-'));
       try {
@@ -895,8 +894,13 @@ export async function registryScenario(
           );
         } catch (error) {
           const { stdout = '', stderr = '' } = error as { stdout?: string; stderr?: string };
-          composerFailure = `${stderr}${stdout}`.split(token).join('[token]').slice(-1500);
-          throw error;
+          composerFailure = redactComposerOutput(`${stderr}${stdout}`, [
+            token,
+            PERSONAL_TOKEN,
+            INSTALLATION_TOKEN,
+            PASSWORD,
+          ]).slice(-1500);
+          throw new Error('ComposerRequireFailed', { cause: error });
         }
         assert.equal(
           JSON.parse(

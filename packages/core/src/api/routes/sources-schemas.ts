@@ -75,6 +75,7 @@ const source = z.strictObject({
   lastPolledAt: z.string().nullable(),
   nextPollAt: z.string().nullable(),
   hasCredential: z.boolean(),
+  githubAuthentication: z.enum(['app', 'token']).optional(),
   lastRemovalRefusal: z
     .strictObject({
       at: z.string(),

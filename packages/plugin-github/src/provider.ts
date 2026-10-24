@@ -175,6 +175,7 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       gitCredential: credential(GIT, `Basic ${btoa(`x-access-token:${value}`)}`),
       apiCredential: tokenMode ? ctx.credential! : credential(API, `Bearer ${value}`),
       tokenMode,
+      resetAt: (epochSeconds: number | undefined) => resetAt(epochSeconds ?? now() + 60),
     };
   }
   return {
@@ -199,7 +200,7 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         cancel(response);
       }
       if (configuredName === undefined) {
-        const manifest = await tokenRest(s.fetch, s.apiCredential, s.repo).manifest();
+        const manifest = await tokenRest(s.fetch, s.apiCredential, s.repo, s.resetAt).manifest();
         if (!record(manifest) || typeof manifest.name !== 'string')
           throw new GithubProviderError('invalid_response');
         configuredName = manifest.name;
@@ -258,7 +259,7 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       ) {
         throw new GithubProviderError('skipped');
       }
-      const rest = s.tokenMode ? tokenRest(s.fetch, s.apiCredential, s.repo) : null;
+      const rest = s.tokenMode ? tokenRest(s.fetch, s.apiCredential, s.repo, s.resetAt) : null;
       const listing = s.tokenMode
         ? {
             refs: [
@@ -423,11 +424,17 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
 async function branches(rest: ReturnType<typeof tokenRest>, names: readonly string[]) {
   const results: Awaited<ReturnType<typeof rest.branch>>[] = new Array(names.length);
   let next = 0;
+  let stopped = false;
   await Promise.all(
     Array.from({ length: Math.min(4, names.length) }, async () => {
-      while (next < names.length) {
+      while (!stopped && next < names.length) {
         const index = next++;
-        results[index] = await rest.branch(names[index]!);
+        try {
+          results[index] = await rest.branch(names[index]!);
+        } catch (error) {
+          stopped = true;
+          throw error;
+        }
       }
     }),
   );

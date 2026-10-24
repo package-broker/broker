@@ -92,6 +92,7 @@ export type SourceDto = Pick<
   | 'nextPollAt'
 > & {
   readonly hasCredential: boolean;
+  readonly githubAuthentication?: 'app' | 'token';
   readonly lastRemovalRefusal: RemovalRefusal | null;
   readonly removalAcceptanceArmed: boolean;
 };
@@ -242,6 +243,13 @@ function sourceDto(source: SourceRecord): SourceDto {
     lastPolledAt: source.lastPolledAt,
     nextPollAt: source.nextPollAt,
     hasCredential: source.credentialId !== null,
+    ...(source.type === 'vcs' && isGithubConfig(source.configJson)
+      ? {
+          githubAuthentication: Object.hasOwn(JSON.parse(source.configJson), 'installationId')
+            ? ('app' as const)
+            : ('token' as const),
+        }
+      : {}),
     lastRemovalRefusal: source.removalRefusal,
     removalAcceptanceArmed: source.removalAccepted,
   };
@@ -771,11 +779,12 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       if (source === null) return fail('not_found');
       if (!Object.values(input).some((value) => value !== undefined))
         return invalid('changes', 'must name one or more updatable source fields');
+      const merged = { ...source, ...input };
       let existingKind: string | undefined;
       if (
         ((source.type === 'packagist_proxy' &&
           isPackagistTokenConfig(input.configJson ?? source.configJson)) ||
-          (source.type === 'vcs' && isGithubConfig(input.configJson ?? source.configJson))) &&
+          (merged.type === 'vcs' && isGithubConfig(merged.configJson))) &&
         input.credential === undefined &&
         source.credentialId !== null
       ) {
@@ -785,7 +794,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         existingKind = storedCredential?.kind;
       }
       const validated = validate(
-        { ...source, ...input },
+        merged,
         input.credential,
         input.credential === undefined ? source.credentialId !== null : input.credential !== null,
         undefined,

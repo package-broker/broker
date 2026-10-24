@@ -94,6 +94,7 @@ export interface LocalLoginSetupWriter {
     input: {
       readonly userId: string;
       readonly setupHash: string;
+      readonly audit: AuditEvent;
       readonly expectedCredentialId: string;
       readonly credentialRev: number;
       readonly passwordHash: string;

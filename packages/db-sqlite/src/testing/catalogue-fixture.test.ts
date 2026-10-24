@@ -24,10 +24,6 @@ import {
 } from './catalogue-fixture.js';
 import { openNodeSqliteExecutor } from './node-sqlite-executor.js';
 import { openMigratedDatabase } from './migrated-database.js';
-import { orgContext } from '@package-broker/core/db/port';
-import { createVersionReader } from '../repositories/catalogue-read.js';
-import { createProxyAdmission } from '../repositories/proxy-admission.js';
-import { rederiveStatements } from '../repositories/visibility-derive.js';
 
 type Row = Record<string, unknown>;
 
@@ -600,7 +596,7 @@ describe('catalogue fixture', () => {
     await expect(seedDerivedRows(executor as never, clash)).rejects.toThrow(derived!.packageId);
     expect(calls).toBe(0);
   });
-  it('18: a package seeded under a source of another ecosystem is invisible to the oracle and SQL alike', async () => {
+  it('18: a package under a source of another ecosystem is refused and excluded by the oracle', async () => {
     let cases = 0;
     for (let seed = 1; seed <= 40; seed += 1) {
       const base = randomCatalogueConfig(seed, 6);
@@ -633,40 +629,16 @@ describe('catalogue fixture', () => {
       expect(oracle.filter((r) => r.packageId === target.id)).toEqual([]);
       const database = await openMigratedDatabase();
       try {
-        await seedCatalogue(database.executor, config, { maxStatements: Infinity });
-        for (const project of config.projects) {
-          await database.executor.batch(
-            rederiveStatements(orgContext(project.orgId), {
-              kind: 'project',
-              projectId: project.id,
-            }),
-          );
-        }
-        const derived = await select(
-          database.executor,
-          "SELECT project_id AS projectId, package_id AS packageId, origin FROM project_package WHERE origin <> 'explicit'",
-        );
-        expect(derived.sort(byJson)).toEqual(
-          oracle.filter((r) => r.origin !== 'explicit').sort(byJson),
-        );
-        const reader = createVersionReader(database.executor);
-        const proxies = createProxyAdmission(database.executor);
-        for (const project of config.projects) {
-          const ctx = orgContext(project.orgId);
-          for (const ecosystem of ['composer', 'npm'] as const) {
-            const query = { projectId: project.id, ecosystem, key: target.key };
-            const winner = resolveWinner(inputs, project.id, ecosystem, target.key);
-            const read = await reader.resolveVersions(ctx, { ...query, limit: 1 });
-            const label = `${seed} ${project.id} ${ecosystem}`;
-            expect(winner?.packageId, label).not.toBe(target.id);
-            expect(read !== null && 'pkg' in read ? read.pkg.packageId : null, label).toBe(
-              winner?.packageId ?? null,
-            );
-            expect(await proxies.admitProxy(ctx, query), label).toEqual(
-              admitProxy(inputs, project.id, ecosystem, target.key),
-            );
-          }
-        }
+        await expect(
+          seedCatalogue(database.executor, config, { maxStatements: Infinity }),
+        ).rejects.toThrow('package ecosystem does not match source ecosystem');
+        expect(
+          await select(
+            database.executor,
+            `SELECT p.id FROM package p JOIN source s ON s.id = p.source_id
+          WHERE p.ecosystem IS NOT s.ecosystem`,
+          ),
+        ).toEqual([]);
       } finally {
         await database.close();
       }

@@ -5,6 +5,7 @@ import type {
   StatementResult,
 } from '@package-broker/core/db/port';
 import { scanSql } from '@package-broker/db-sqlite/sql/scan';
+import { splitStatements } from '@package-broker/db-sqlite/migrations/split';
 import { parseD1Response } from './d1-http-response.js';
 
 export interface D1HttpOptions {
@@ -75,6 +76,19 @@ function singleStatement(sql: string, label: string): string {
     throw new TypeError(`${label} cannot be scanned: ${(error as Error).message}`, {
       cause: error,
     });
+  }
+  const uncommented = segments
+    .map((segment) => (segment.kind === 'comment' ? ' ' : segment.text))
+    .join('');
+  if (/^\s*CREATE\s+TRIGGER\b/i.test(uncommented)) {
+    let statements: string[];
+    try {
+      statements = splitStatements(sql);
+    } catch (error) {
+      throw new TypeError(`${label} must be a single statement`, { cause: error });
+    }
+    if (statements.length !== 1) throw new TypeError(`${label} must be a single statement`);
+    return sql;
   }
   const semicolons: number[] = [];
   let hasContent = false;

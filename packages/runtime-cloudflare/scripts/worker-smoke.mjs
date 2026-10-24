@@ -1,4 +1,4 @@
-import { fork, spawn } from 'node:child_process';
+import { execFileSync, fork, spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
@@ -979,6 +979,16 @@ export default worker;
       });
       await disposeMiniflare();
     }
+
+    step = 'checking the hostile held batch';
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../../../scripts/held-batch-smoke.mjs', import.meta.url)),
+        'cloudflare',
+      ],
+      { stdio: 'inherit' },
+    );
 
     step = 'done';
   } finally {

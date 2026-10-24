@@ -1,4 +1,4 @@
-import { sql, type Compilable } from 'kysely';
+import { expressionBuilder, sql, type Compilable } from 'kysely';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type {
   OrgContext,
@@ -13,7 +13,7 @@ import type {
   SessionRepository,
 } from '@package-broker/core/db/sessions';
 import { auditPendingStatement } from './audit-pending.js';
-import { compile, db, type Guard } from '../kysely.js';
+import { compile, db, type Database, type Guard } from '../kysely.js';
 
 const MAX_USER_AGENT = 512;
 const MAX_IP = 64;
@@ -331,19 +331,33 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
       return rows.length > 0;
     },
 
-    async revokeBySecretHash(ctx: OrgContext, secretHash: string, now: string): Promise<boolean> {
+    async revokeBySecretHash(
+      ctx: OrgContext,
+      secretHash: string,
+      now: string,
+      audit?: AuditEvent,
+    ): Promise<boolean> {
       secretHashOf(secretHash);
       timestamp('now', now);
-      const rows = await run<IdRow>(
-        executor,
-        db
-          .updateTable('session')
-          .set({ revoked_at: now })
-          .where('org_id', '=', ctx.orgId)
-          .where('secret_hash', '=', secretHash)
-          .where('revoked_at', 'is', null)
-          .returning('id'),
-      );
+      const eb = expressionBuilder<Database, 'session'>();
+      const when = eb.and([
+        eb('session.org_id', '=', ctx.orgId),
+        eb('session.secret_hash', '=', secretHash),
+        eb('session.revoked_at', 'is', null),
+      ]);
+      const update = db.updateTable('session').set({ revoked_at: now }).where(when).returning('id');
+      if (audit !== undefined) {
+        const eligible = compile(db.selectFrom('session').select('id').where(when));
+        const results = await executor.batch([
+          auditPendingStatement(ctx, audit, {
+            sql: `EXISTS (${eligible.sql})`,
+            params: eligible.params,
+          }),
+          compile(update),
+        ]);
+        return (results[1]?.rows.length ?? 0) > 0;
+      }
+      const rows = await run<IdRow>(executor, update);
       return rows.length > 0;
     },
 

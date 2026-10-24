@@ -12,7 +12,7 @@ import {
   sessionMetaOf,
 } from './session.js';
 import type { AuthenticatedSession } from './session.js';
-import { isIpLiteral } from '../audit/actions.js';
+import { isIpLiteral, type AuditEvent } from '../audit/actions.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { fixedClock } from '../ids.js';
@@ -494,10 +494,46 @@ describe('logout', () => {
     const secret = randomToken(32);
     const h = harness();
     const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)), {
-      requestId: 'test-request-id',
+      requestId: '01K7R5V0000000000000000001',
+      ip: '203.0.113.7',
+    });
+    expect(h.findActive).toHaveBeenCalledWith(ctx, await sha256Hex(secret), {
+      now: NOW,
+      idleSince: isoAgo(SESSION_IDLE_MS),
+    });
+    expect(h.touch).not.toHaveBeenCalled();
+    expect(h.revokeBySecretHash).toHaveBeenCalledTimes(1);
+    expect(h.revokeBySecretHash).toHaveBeenCalledWith(
+      ctx,
+      await sha256Hex(secret),
+      NOW,
+      expect.objectContaining({
+        action: 'session.logout',
+        actor: { type: 'user', id: activeSession().userId },
+        target: { type: 'session', id: activeSession().id },
+        occurredAt: NOW,
+        sourceIp: '203.0.113.7',
+        tokenSelector: null,
+        projectId: null,
+      }),
+    );
+    const event = h.revokeBySecretHash.mock.calls[0]?.[3] as AuditEvent;
+    expect(JSON.parse(event.payloadJson)).toEqual({
+      op_id: expect.any(String),
+      request_id: '01K7R5V0000000000000000001',
+    });
+    expect(cookies).toEqual(h.service.clearCookies());
+  });
+
+  it('revokes without an event when the live-session read returns nothing', async () => {
+    const secret = randomToken(32);
+    const h = harness(null);
+    const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)), {
+      requestId: '01K7R5V0000000000000000001',
       ip: null,
     });
-    expect(h.revokeBySecretHash).toHaveBeenCalledTimes(1);
+    expect(h.findActive).toHaveBeenCalledTimes(1);
+    expect(h.touch).not.toHaveBeenCalled();
     expect(h.revokeBySecretHash).toHaveBeenCalledWith(ctx, await sha256Hex(secret), NOW);
     expect(cookies).toEqual(h.service.clearCookies());
   });
@@ -507,10 +543,34 @@ describe('logout', () => {
     h.revokeBySecretHash.mockRejectedValueOnce(new Error('db down'));
     await expect(
       h.service.logout(ctx, requestWith(sessionCookie(randomToken(32))), {
-        requestId: 'test-request-id',
+        requestId: '01K7R5V0000000000000000001',
         ip: null,
       }),
     ).rejects.toThrow('db down');
+  });
+
+  it('does not revoke when the live-session read fails', async () => {
+    const h = harness();
+    h.findActive.mockRejectedValueOnce(new Error('db down'));
+    await expect(
+      h.service.logout(ctx, requestWith(sessionCookie(randomToken(32))), {
+        requestId: '01K7R5V0000000000000000001',
+        ip: null,
+      }),
+    ).rejects.toThrow('db down');
+    expect(h.revokeBySecretHash).not.toHaveBeenCalled();
+    expect(h.touch).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with a static error when audit construction refuses', async () => {
+    const h = harness();
+    await expect(
+      h.service.logout(ctx, requestWith(sessionCookie(randomToken(32))), {
+        requestId: 'invalid-request-id',
+        ip: null,
+      }),
+    ).rejects.toThrow('Invalid session logout audit event');
+    expect(h.revokeBySecretHash).not.toHaveBeenCalled();
   });
 
   it('clears without a repository call when there is no cookie', async () => {

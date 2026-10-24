@@ -8,10 +8,10 @@ import {
 } from './cookies.js';
 import { assertCsrfToken, assertSameOrigin } from './csrf.js';
 import { randomToken, sha256Hex } from './primitives.js';
-import { isIpLiteral } from '../audit/actions.js';
+import { auditEvent, isIpLiteral } from '../audit/actions.js';
 import type { OrgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
-import type { Clock } from '../ids.js';
+import { ulid, type Clock } from '../ids.js';
 import type { Principal } from '../plugin.js';
 
 export const SESSION_ABSOLUTE_MS = 43_200_000;
@@ -188,10 +188,35 @@ export function createSessionService(deps: {
 
     clearCookies,
 
-    async logout(ctx, request) {
+    async logout(ctx, request, meta) {
       const secret = sessionSecretOf(request);
       if (secret !== null) {
-        await sessions.revokeBySecretHash(ctx, await sha256Hex(secret), clock.now().toISOString());
+        const secretHash = await sha256Hex(secret);
+        const now = clock.now();
+        const session = await sessions.findActive(ctx, secretHash, {
+          now: now.toISOString(),
+          idleSince: new Date(now.getTime() - SESSION_IDLE_MS).toISOString(),
+        });
+        if (session === null) {
+          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString());
+        } else {
+          const id = ulid(now.getTime());
+          const audit = auditEvent({
+            id,
+            now: now.toISOString(),
+            action: 'session.logout',
+            actor: { type: 'user', id: session.userId },
+            target: { type: 'session', id: session.id },
+            context: {
+              opId: id,
+              requestId: meta.requestId,
+              sourceIp: isIpLiteral(meta.ip) ? meta.ip : null,
+              tokenSelector: null,
+            },
+          });
+          if (!audit.ok) throw new TypeError('Invalid session logout audit event');
+          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString(), audit.event);
+        }
       }
       return clearCookies();
     },

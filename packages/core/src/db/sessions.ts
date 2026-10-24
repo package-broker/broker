@@ -80,7 +80,12 @@ export interface SessionRepository {
     },
   ): Promise<boolean>;
   revoke(ctx: OrgContext, id: string, now: string): Promise<boolean>;
-  revokeBySecretHash(ctx: OrgContext, secretHash: string, now: string): Promise<boolean>;
+  revokeBySecretHash(
+    ctx: OrgContext,
+    secretHash: string,
+    now: string,
+    audit?: AuditEvent,
+  ): Promise<boolean>;
   /** Deletes at most `limit` sessions with `expires_at < before`; RangeError unless `limit` is an integer from 1 to 500. */
   deleteExpired(ctx: OrgContext, before: string, limit: number): Promise<number>;
 }

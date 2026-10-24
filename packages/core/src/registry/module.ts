@@ -46,6 +46,7 @@ import { PlatformUnavailableError } from '../platform/errors.js';
 import type { JobGuard } from '../platform/job-repository.js';
 import type { JobDefinition } from '../platform/jobs.js';
 import type { PlatformPorts, Platform, RequestContext, RouteDefinition } from '../plugin.js';
+import { sourceCredentialRequired } from '../sources/credential-origins.js';
 import { parseSourceConfig } from '../sources/config.js';
 import type { CredentialEchoProbe } from '../sources/credentials.js';
 import type { Observability } from '../platform/observability.js';
@@ -244,8 +245,9 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     if (provider === null) return null;
     const source =
       draft.type === 'vcs' ? draft : ({ ...draft, providerId: provider.id } as ProviderSource);
-    const credential = record.credentialId === null ? null : await ingest.credential(ctx, record);
-    if (record.credentialId !== null && credential === null) return null;
+    const needsCredential = record.credentialId !== null && sourceCredentialRequired(source);
+    const credential = needsCredential ? await ingest.credential(ctx, record) : null;
+    if (needsCredential && credential === null) return null;
     const fetch = deps.policyFetch(userAgentOf(record), {
       sourceId: record.id,
       observability: requestObservability ?? observability,

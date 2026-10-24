@@ -1,6 +1,6 @@
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
-import { createSecretCipher } from '@package-broker/core/secrets/cipher';
+import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
 import { createHash, randomBytes } from 'node:crypto';
@@ -53,7 +53,7 @@ async function miniflareBinding(): Promise<D1DatabaseLike> {
       modules: true,
       script: 'export default { fetch() { return new Response("ok") } }',
       compatibilityDate: '2026-10-01',
-      d1Databases: Array.from({ length: 16 }, (_, i) => `SYNC${i}`),
+      d1Databases: Array.from({ length: 32 }, (_, i) => `SYNC${i}`),
     }),
   );
   return (await mf.getD1Database(`SYNC${next++}`)) as unknown as D1DatabaseLike;
@@ -518,6 +518,103 @@ describe.each([
   beforeEach(() => {
     open = binding;
   });
+
+  it.each([false, true])(
+    'opens the Packagist bearer credential only when githubToken is %s',
+    async (githubToken) => {
+      const h = await boot('composer');
+      const credentialId = await createCredentialStore({
+        repository: createCredentialRepository(h.executor),
+        cipher: createSecretCipher(
+          createKeyring([
+            parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
+          ]),
+          'credential-encryption',
+        ),
+        ids: { ulid },
+        clock: systemClock,
+      }).put(h.org, {
+        kind: 'bearer',
+        projectId: null,
+        plaintext: new TextEncoder().encode(JSON.stringify({ token: 'packagist-test-token' })),
+      });
+      await h.seed(
+        'UPDATE source SET credential_id = ?, config_json = ? WHERE org_id = ? AND id = ?',
+        [credentialId, JSON.stringify({ githubToken }), h.org.orgId, 'S1'],
+      );
+      const calls: Request[] = [];
+      const transport = async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        calls.push(request);
+        const url = new URL(request.url);
+        if (url.origin === 'https://api.github.com')
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://codeload.github.com/acme/widget/zip/abc123' },
+          });
+        if (url.origin === 'https://codeload.github.com') return new Response('archive');
+        expect(url.origin).toBe('https://repo.packagist.org');
+        return Response.json({
+          packages: {
+            'acme/widget': url.pathname.includes('~dev')
+              ? []
+              : [
+                  {
+                    name: 'acme/widget',
+                    version: '1.0.0',
+                    version_normalized: '1.0.0.0',
+                    type: 'library',
+                    dist: {
+                      type: 'zip',
+                      url: 'https://api.github.com/repos/acme/widget/zipball/abc123?archive=1',
+                      reference: 'abc123',
+                      shasum: '',
+                    },
+                  },
+                ],
+          },
+        });
+      };
+      const decrypt = vi.spyOn(crypto.subtle, 'decrypt');
+      try {
+        vi.mocked(globalThis.fetch).mockImplementation(transport);
+        const response = await h.get('acme/widget');
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          packages: Record<string, { dist: { url: string } }[]>;
+        };
+        const dist = await h.request(new Request(body.packages['acme/widget']![0]!.dist.url));
+        expect(dist.status).toBe(200);
+        expect(await dist.text()).toBe('archive');
+        const aad = credentialAad({ id: credentialId, orgId: h.org.orgId, kind: 'bearer' });
+        const opens = decrypt.mock.calls.filter(
+          ([algorithm]) =>
+            typeof algorithm === 'object' &&
+            'additionalData' in algorithm &&
+            algorithm.additionalData instanceof Uint8Array &&
+            new TextDecoder().decode(algorithm.additionalData) === aad,
+        );
+        if (githubToken) expect(opens.length).toBeGreaterThan(0);
+        else expect(opens).toHaveLength(0);
+        for (const origin of [
+          'https://repo.packagist.org',
+          'https://api.github.com',
+          'https://codeload.github.com',
+        ]) {
+          const requests = calls.filter((call) => new URL(call.url).origin === origin);
+          expect(requests.length).toBeGreaterThan(0);
+          for (const request of requests)
+            expect(request.headers.get('authorization')).toBe(
+              githubToken && origin !== 'https://repo.packagist.org'
+                ? 'Bearer packagist-test-token'
+                : null,
+            );
+        }
+      } finally {
+        decrypt.mockRestore();
+      }
+    },
+  );
 
   it.each(['v2', 'v1', 'inline'] as const)(
     'activates and syncs a %s Composer repository through the assembled Worker',

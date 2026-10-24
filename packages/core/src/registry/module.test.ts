@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { setAccessContext } from '../authz/access-context.js';
 import type { CatalogueReader, PackageVisibility, ResolvedPackage } from '../db/catalogue.js';
 import { orgContext } from '../db/port.js';
+import { createOnDemandFill } from '../ingest/on-demand.js';
 import { applyChunk, type ApplyDeps, type ApplyOutcome } from '../ingest/apply-description.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
 import { narrowPackageActor, setContextPackageActor } from '../internal/package-actor.js';
@@ -20,6 +21,10 @@ import type { RegistryJobsDeps } from './jobs.js';
 vi.mock('../catalogue/package-access.js', async (original) => {
   const actual = await original<typeof import('../catalogue/package-access.js')>();
   return { ...actual, createPackageAccess: vi.fn(actual.createPackageAccess) };
+});
+vi.mock('../ingest/on-demand.js', async (original) => {
+  const actual = await original<typeof import('../ingest/on-demand.js')>();
+  return { ...actual, createOnDemandFill: vi.fn(actual.createOnDemandFill) };
 });
 vi.mock('../ingest/apply-description.js', async (original) => ({
   ...(await original<typeof import('../ingest/apply-description.js')>()),
@@ -817,5 +822,60 @@ describe('stale refresh', () => {
     expect(h.jobs.enqueue).toHaveBeenCalledTimes(2);
     const second = h.jobs.enqueue.mock.calls[1]?.[3] as unknown as { idempotencyKey: string };
     expect(second.idempotencyKey).not.toBe(input.idempotencyKey);
+  });
+});
+
+describe('registry credential binding', () => {
+  it.each([
+    ['packagist_proxy', 'https://repo.packagist.org', '{"githubToken":true}'],
+    ['composer_repository', 'https://packages.example.com', '{}'],
+  ] as const)(
+    'fails closed when the stored %s credential cannot be loaded',
+    async (type, url, configJson) => {
+      const h = harness();
+      const record: SourceRecord = {
+        ...npmjsSource,
+        type,
+        ecosystem: 'composer',
+        url,
+        configJson,
+        credentialId: 'token',
+      };
+      vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+      h.module();
+      const { planFill } = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0];
+      expect(await planFill(org, record.id, 'acme/lib')).toBeNull();
+      expect(h.deps.ingest.credential).toHaveBeenCalledExactlyOnceWith(org, record);
+      expect(h.policyFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves Packagist with token mode disabled without loading its stored credential', async () => {
+    const h = harness();
+    const record: SourceRecord = {
+      ...npmjsSource,
+      type: 'packagist_proxy',
+      ecosystem: 'composer',
+      url: 'https://repo.packagist.org',
+      configJson: '{"githubToken":false}',
+      credentialId: 'token',
+    };
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+    h.policyFetch.mockImplementation(async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: new Response(
+        JSON.stringify({ packages: { 'acme/lib': [{ name: 'acme/lib', version: '1.0.0' }] } }),
+      ).body,
+    }));
+    h.module();
+    const { planFill } = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0];
+    const plan = await planFill(org, record.id, 'acme/lib');
+    expect(plan).not.toBeNull();
+    expect(await plan!.describe({}, new AbortController().signal)).toMatchObject({
+      kind: 'found',
+    });
+    expect(h.deps.ingest.credential).not.toHaveBeenCalled();
+    expect(h.policyFetch).toHaveBeenCalled();
   });
 });

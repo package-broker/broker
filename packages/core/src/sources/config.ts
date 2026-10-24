@@ -452,11 +452,8 @@ export function parseSourceConfig(
       if (parsed.githubToken !== undefined && typeof parsed.githubToken !== 'boolean') {
         c.add('githubToken', 'must be a boolean');
       }
-      if (options.hasCredential !== (parsed.githubToken === true)) {
-        c.add(
-          'credential',
-          'a credential requires githubToken and githubToken requires a credential',
-        );
+      if (parsed.githubToken === true && !options.hasCredential) {
+        c.add('credential', 'githubToken requires a credential');
       }
       return c.problems.length > 0
         ? fail()

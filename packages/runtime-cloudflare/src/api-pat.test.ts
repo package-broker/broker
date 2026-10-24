@@ -27,7 +27,7 @@ const mf = new Miniflare(
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
     compatibilityDate: '2026-10-01',
-    d1Databases: ['APDB0', 'APDB1', 'APDB2'],
+    d1Databases: ['APDB0', 'APDB1', 'APDB2', 'APDB3'],
   } as Parameters<typeof convertV4MiniflareOptions>[0]),
 );
 
@@ -139,10 +139,74 @@ async function boot(binding: string) {
   );
   expect(reauth.status).toBe(204);
 
-  return { call, executor, cookie, csrf };
+  return { call, executor, cookie, csrf, orgId };
 }
 
 describe('Workers management API personal access token lifecycle', () => {
+  it('stages a write-only Packagist bearer credential before enabling token mode', async () => {
+    const { call, executor, cookie, csrf, orgId } = await boot('APDB3');
+    const send = (route: string, method: string, body?: unknown) =>
+      call(
+        request(route, {
+          method,
+          body,
+          headers: { cookie, 'x-csrf-token': csrf },
+        }),
+      );
+
+    const created = await send('/_pb/sources', 'POST', {
+      name: 'Packagist',
+      ecosystem: 'composer',
+      type: 'packagist_proxy',
+      url: 'https://repo.packagist.org',
+      config: { githubToken: false },
+    });
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+    const target = `/_pb/sources/${id}`;
+    const storedConfig = async () => {
+      const rows = await executor.all<{ config_json: string }>({
+        sql: 'SELECT config_json FROM source WHERE org_id = ? AND id = ?',
+        params: [orgId, id],
+      });
+      return JSON.parse(rows[0]!.config_json) as unknown;
+    };
+    const enable = () => send(target, 'PATCH', { config: { githubToken: true } });
+    const missing = await enable();
+    expect(missing.status).toBe(400);
+    const secret = 'github-token-T972-sentinel';
+    const credential = (kind: string, material: unknown) =>
+      send(`${target}/credential`, 'PUT', { kind, material: JSON.stringify(material) });
+    const wrong = await credential('http_basic', { username: 'user', password: secret });
+    expect(wrong.status).toBe(400);
+    expect(await wrong.text()).not.toContain(secret);
+    const afterRejectedCredential = await send('/_pb/sources', 'GET');
+    expect(afterRejectedCredential.status).toBe(200);
+    const unchanged = (await afterRejectedCredential.json()) as {
+      items: { id: string; hasCredential: boolean }[];
+    };
+    expect(unchanged.items.find((item) => item.id === id)).toMatchObject({
+      hasCredential: false,
+    });
+    const saved = await credential('bearer', { token: secret });
+    expect(saved.status).toBe(204);
+    expect(await saved.text()).toBe('');
+    expect(await storedConfig()).toEqual({ githubToken: false });
+    expect((await enable()).status).toBe(204);
+    expect(await storedConfig()).toEqual({ githubToken: true });
+    expect((await credential('bearer', { token: `${secret}-rotated` })).status).toBe(204);
+    const listed = await send('/_pb/sources', 'GET');
+    expect(listed.status).toBe(200);
+    const text = await listed.text();
+    expect(text).not.toContain(secret);
+    const { items } = JSON.parse(text) as { items: { id: string; hasCredential: boolean }[] };
+    expect(items.find((item) => item.id === id)).toMatchObject({ hasCredential: true });
+    expect((await send(target, 'PATCH', { config: { githubToken: false } })).status).toBe(204);
+    expect(await storedConfig()).toEqual({ githubToken: false });
+    expect((await enable()).status).toBe(204);
+    expect(await storedConfig()).toEqual({ githubToken: true });
+  });
+
   it('issues a token, uses it on a management route, revokes it and then gets 401', async () => {
     const { call, executor, cookie, csrf } = await boot('APDB0');
     const issued = await call(

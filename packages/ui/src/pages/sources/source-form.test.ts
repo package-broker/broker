@@ -165,20 +165,29 @@ describe('source form request bodies', () => {
       });
     expect(validate({ githubToken: true }).ok).toBe(false);
     expect(validate(body.config).ok).toBe(true);
-    expect(validate(body.config, true).ok).toBe(false);
+    expect(validate(body.config, true).ok).toBe(true);
   });
 
-  it('preserves existing Packagist token configuration on edits', () => {
+  it('enables Packagist token mode on explicit config replacement', () => {
     const body = sourceSubmission(
       data({ replaceConfig: 'on', 'config/githubToken': 'on' }),
       'composer',
       'packagist_proxy',
       true,
     );
-    expect(body).not.toHaveProperty('config');
+    expect(body.config).toEqual({ githubToken: true });
   });
 
-  it('disables Packagist token setup and explains the API limitation', () => {
+  it('preserves Packagist config unless replaced and supports disabling token mode', () => {
+    expect(sourceSubmission(data(), 'composer', 'packagist_proxy', true)).not.toHaveProperty(
+      'config',
+    );
+    expect(
+      sourceSubmission(data({ replaceConfig: 'on' }), 'composer', 'packagist_proxy', true).config,
+    ).toEqual({ githubToken: false });
+  });
+
+  it('offers Packagist config replacement and explains the setup sequence', () => {
     const source: Source = {
       id: 'packagist',
       name: 'Packagist',
@@ -205,10 +214,9 @@ describe('source form request bodies', () => {
         onClose: vi.fn(),
       }),
     );
-    expect(html).toMatch(/<input[^>]+id="source-config\/githubToken"[^>]+disabled=""/);
-    expect(html).toContain('aria-describedby="packagist-token-help"');
-    expect(html).toContain('the API cannot save the configuration and');
-    expect(html).not.toContain('name="replaceConfig"');
+    expect(html).toContain('name="replaceConfig"');
+    expect(html).not.toContain('setup is unavailable');
+    expect(html).toContain('save a bearer credential with your GitHub token');
   });
 
   it('keeps unread config, network settings and defaults out of ordinary edits', () => {

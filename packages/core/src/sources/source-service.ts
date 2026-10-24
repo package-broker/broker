@@ -352,6 +352,20 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     }
     const kind = linkedKind ?? credential?.kind;
     const githubKind = kind ?? existingKind;
+    if (
+      input.type === 'packagist_proxy' &&
+      hasCredential &&
+      ((typeof config === 'object' &&
+        config !== null &&
+        'githubToken' in config &&
+        config.githubToken === true) ||
+        kind !== undefined) &&
+      githubKind !== 'bearer'
+    ) {
+      return linkedKind === undefined
+        ? invalid('credential', 'packagist_proxy requires bearer')
+        : fail('credential_scope_mismatch');
+    }
     const github =
       input.type === 'vcs' &&
       typeof config === 'object' &&
@@ -717,17 +731,25 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       if (source === null) return fail('not_found');
       if (!Object.values(input).some((value) => value !== undefined))
         return invalid('changes', 'must name one or more updatable source fields');
+      let existingKind: string | undefined;
+      if (
+        ((source.type === 'packagist_proxy' &&
+          isPackagistTokenConfig(input.configJson ?? source.configJson)) ||
+          (source.type === 'vcs' && isGithubConfig(input.configJson ?? source.configJson))) &&
+        input.credential === undefined &&
+        source.credentialId !== null
+      ) {
+        const storedCredential = await deps.credentialRepository.get(ctx, source.credentialId);
+        if (storedCredential === null && source.type === 'packagist_proxy')
+          return fail('credential_scope_mismatch');
+        existingKind = storedCredential?.kind;
+      }
       const validated = validate(
         { ...source, ...input },
         input.credential,
         input.credential === undefined ? source.credentialId !== null : input.credential !== null,
         undefined,
-        source.type === 'vcs' &&
-          isGithubConfig(input.configJson ?? source.configJson) &&
-          input.credential === undefined &&
-          source.credentialId !== null
-          ? (await deps.credentialRepository.get(ctx, source.credentialId))?.kind
-          : undefined,
+        existingKind,
       );
       if (!validated.ok) return validated;
       let preparedCredential: SourceUpdate['preparedCredential'];
@@ -845,6 +867,20 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
     },
   };
+}
+
+function isPackagistTokenConfig(configJson: string): boolean {
+  try {
+    const config: unknown = JSON.parse(configJson);
+    return (
+      typeof config === 'object' &&
+      config !== null &&
+      'githubToken' in config &&
+      config.githubToken === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isGithubConfig(configJson: string): boolean {

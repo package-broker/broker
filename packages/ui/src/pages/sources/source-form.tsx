@@ -128,7 +128,7 @@ export function sourceSubmission(
         changes.config = { scopes: list('config/scopes'), distHosts: list('config/distHosts') };
         break;
       case 'packagist_proxy':
-        if (!editing) changes.config = { githubToken: false };
+        changes.config = { githubToken: editing && checked('config/githubToken') };
         break;
       case 'npmjs_proxy':
         changes.config = {};
@@ -372,26 +372,14 @@ export function SourceForm({
                 {input('userAgent')}
               </div>
             ) : null}
-            {editing && type !== 'packagist_proxy'
+            {editing
               ? check('replaceConfig', 'Replace type-specific configuration', setReplaceConfig)
               : null}
             {type === 'packagist_proxy' ? (
-              <div className="grid gap-1">
-                <Label className="flex items-center gap-2" htmlFor="source-config/githubToken">
-                  <input
-                    type="checkbox"
-                    id="source-config/githubToken"
-                    disabled
-                    aria-describedby="packagist-token-help"
-                  />
-                  Use GitHub token
-                </Label>
-                <p id="packagist-token-help" className="text-sm text-neutral-600">
-                  GitHub token setup is unavailable: the API cannot save the configuration and
-                  credential together. New Packagist sources use no token; edits preserve the
-                  current token configuration.
-                </p>
-              </div>
+              <p className="text-sm text-neutral-600">
+                Create the source, save a bearer credential with your GitHub token, then edit the
+                source and replace its configuration to enable Use GitHub token.
+              </p>
             ) : null}
             {!editing || replaceConfig ? (
               <div className="grid gap-4" key={`config:${type}`}>
@@ -461,6 +449,7 @@ export function SourceForm({
                   ? input('config/distHosts', { multiline: true })
                   : null}
 
+                {type === 'packagist_proxy' && editing ? check('config/githubToken') : null}
                 {type === 'npmjs_proxy' ? (
                   <p className="text-sm text-neutral-600">
                     This type has no configuration fields and takes no credential.

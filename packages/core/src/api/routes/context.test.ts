@@ -144,6 +144,28 @@ describe('callContext', () => {
 });
 
 describe('auditCall', () => {
+  it.each([
+    ['1.2', null],
+    ['abc', null],
+    ['::::', null],
+    ['999.1.1.1', null],
+    ['a'.repeat(8192), null],
+    ['', null],
+    [null, null],
+    ['203.0.113.7', '203.0.113.7'],
+    ['2001:db8::1', '2001:db8::1'],
+    ['::1', '::1'],
+    ['2001:0DB8:0:0::1', '2001:0DB8:0:0::1'],
+    ['::ffff:192.0.2.7', '::ffff:192.0.2.7'],
+    ['fe80::1%eth0', null],
+    ['[::1]', null],
+    ['192.0.2.1:80', null],
+  ])('keeps only IP literals from the resolver for case %#', (value, expected) => {
+    const deps = dependencies();
+    deps.clientIp.mockReturnValue(value);
+    expect(auditCall(context(), deps).audit.sourceIp).toBe(expected);
+  });
+
   it('carries the authenticated token selector without idempotency', () => {
     const result = auditCall(context({}, tokenSnapshot), dependencies());
     expect(result.audit.tokenSelector).toBe('abcdefghijkl');

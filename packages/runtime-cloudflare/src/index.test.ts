@@ -354,14 +354,19 @@ describe('runtime-cloudflare platform assembly', () => {
       const { createWorker: createCapturedWorker } = await import('./index.js');
       await createCapturedWorker([], quiet).services(boundEnv());
       expect(resolve).toBeTypeOf('function');
-      for (const address of [':', 'a'.repeat(64)]) {
+      for (const [address, expected] of [
+        ['2001:db8::1', '2001:db8::1'],
+        ['203.0.113.7', '203.0.113.7'],
+        [':', null],
+        ['a'.repeat(64), null],
+      ] as const) {
         expect(
           resolve!(
             new Request('https://broker.test/_pb/me', {
               headers: { 'cf-connecting-ip': address },
             }),
           ),
-        ).toBe(address);
+        ).toBe(expected);
       }
     } finally {
       vi.doUnmock('@package-broker/core/api/module');

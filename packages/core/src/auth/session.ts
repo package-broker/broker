@@ -8,6 +8,7 @@ import {
 } from './cookies.js';
 import { assertCsrfToken, assertSameOrigin } from './csrf.js';
 import { randomToken, sha256Hex } from './primitives.js';
+import { isIpLiteral } from '../audit/actions.js';
 import type { OrgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import type { Clock } from '../ids.js';
@@ -56,7 +57,6 @@ const SESSION_FLAGS = { httpOnly: true, sameSite: 'Lax' } as const;
 const CSRF_FLAGS = { httpOnly: false, sameSite: 'Strict' } as const;
 const LOGIN_FLAGS = { httpOnly: true, sameSite: 'Lax' } as const;
 const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const IP_PATTERN = /^[0-9A-Fa-f:.]{1,64}$/;
 
 export async function newSessionSecrets(): Promise<SessionSecrets> {
   const secret = randomToken(32);
@@ -78,7 +78,7 @@ export function clientIpOf(request: Request): string | null {
   const candidate =
     nonEmpty(request.headers.get('cf-connecting-ip')) ??
     nonEmpty(request.headers.get('x-forwarded-for')?.split(',')[0] ?? null);
-  return candidate !== null && IP_PATTERN.test(candidate) ? candidate : null;
+  return candidate !== null && isIpLiteral(candidate) ? candidate : null;
 }
 
 export function authCallMetaOf(

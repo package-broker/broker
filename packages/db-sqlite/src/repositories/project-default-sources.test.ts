@@ -121,13 +121,21 @@ function source(id: string, orgId: string, projectId: string | null, type: strin
   );
 }
 
-function pkg(id: string, orgId: string, sourceId: string, name: string, flag: 0 | 1) {
+function pkg(
+  id: string,
+  orgId: string,
+  sourceId: string,
+  name: string,
+  flag: 0 | 1,
+  ecosystem = 'composer',
+) {
   return stmt(
     `INSERT INTO package (id, org_id, source_id, ecosystem, name, visible_to_new_projects, status)
-     VALUES (?, ?, ?, 'composer', ?, ?, 'active')`,
+     VALUES (?, ?, ?, ?, ?, ?, 'active')`,
     id,
     orgId,
     sourceId,
+    ecosystem,
     name,
     flag,
   );
@@ -358,10 +366,9 @@ describe('project creation attaches organization sources', () => {
       source(vcs, a.orgId, null, 'vcs', 'npm-vcs'),
       source(proxy, a.orgId, null, 'npmjs_proxy', 'npm-proxy'),
       stmt("UPDATE source SET ecosystem = 'npm' WHERE id IN (?, ?)", vcs, proxy),
-      pkg(uid('N1'), a.orgId, vcs, '@acme/shown', 1),
-      pkg(uid('N2'), a.orgId, vcs, '@acme/hidden', 0),
-      pkg(uid('N3'), a.orgId, proxy, '@acme/proxied', 1),
-      stmt("UPDATE package SET ecosystem = 'npm' WHERE source_id IN (?, ?)", vcs, proxy),
+      pkg(uid('N1'), a.orgId, vcs, '@acme/shown', 1, 'npm'),
+      pkg(uid('N2'), a.orgId, vcs, '@acme/hidden', 0, 'npm'),
+      pkg(uid('N3'), a.orgId, proxy, '@acme/proxied', 1, 'npm'),
     ]);
     expect(await create()).toBe('created');
     expect(await attachments(NEW_PROJECT)).toEqual({

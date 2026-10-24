@@ -142,7 +142,7 @@ describe('provider fields', () => {
     expect(p.displayName).toBe('Company SSO');
     expect(p.trustAnchor).toBe(`oidc:${ISSUER}`);
     expect(p.supportsReauth).toBe(true);
-    expect(p.policy).toEqual(POLICY);
+    expect(p.policy).toEqual({ ...POLICY, emailAuthoritativeDomains: [] });
   });
 
   it('defaults the display name to the id', () => {

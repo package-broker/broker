@@ -1,4 +1,6 @@
 import { expressionBuilder } from 'kysely';
+import type { AuditEvent } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { NewSession } from '@package-broker/core/db/sessions';
@@ -31,6 +33,27 @@ let database: MigratedDatabase;
 let a: OrgContext;
 let b: OrgContext;
 let executor: SqlExecutor;
+
+function reauthAudit(): AuditEvent {
+  return {
+    id: ulid(),
+    occurredAt: NOW,
+    action: 'session.reauth',
+    actor: { type: 'user', id: USER_A },
+    target: { type: 'session', id: 's1' },
+    tokenSelector: null,
+    sourceIp: '203.0.113.7',
+    projectId: null,
+    payloadJson: '{}',
+  };
+}
+
+async function pendingReauth(ctx: OrgContext = a) {
+  return executor.all({
+    sql: 'SELECT * FROM audit_pending WHERE org_id = ? AND action = ?',
+    params: [ctx.orgId, 'session.reauth'],
+  });
+}
 
 function hash(label: string): string {
   return Buffer.from(label).toString('hex').padEnd(64, '0');
@@ -496,12 +519,125 @@ describe('markReauthenticatedByIdentity', () => {
     ctx: OrgContext = a,
   ): Promise<boolean> {
     return createSessionRepository(executor).markReauthenticatedByIdentity(ctx, {
+      audit: reauthAudit(),
       sessionId,
       identityId,
       authTime,
       now: NOW,
     });
   }
+
+  it('stages the session audit and update in one batch', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    const counted = countCalls(executor);
+    expect(
+      await createSessionRepository(counted.executor).markReauthenticatedByIdentity(a, {
+        sessionId: 's1',
+        identityId: 'identity-1',
+        authTime: AUTH_TIME,
+        now: NOW,
+        audit: reauthAudit(),
+      }),
+    ).toBe(true);
+    expect(counted.counts()).toEqual({ all: 0, batch: 1 });
+    expect(await pendingReauth()).toEqual([
+      expect.objectContaining({
+        action: 'session.reauth',
+        target_type: 'session',
+        target_id: 's1',
+        actor_type: 'user',
+        actor_id: USER_A,
+        token_selector: null,
+      }),
+    ]);
+    expect((await row('s1'))?.reauth_at).toBe(AUTH_TIME);
+  });
+
+  it.each([
+    ['equal', AUTH_TIME],
+    ['older', RECENT],
+  ])('stages nothing for an %s authentication time', async (_label, authTime) => {
+    await seed({ id: 's1', identityId: 'identity-1', reauthAt: AUTH_TIME });
+    expect(await mark('s1', 'identity-1', authTime)).toBe(false);
+    expect(await pendingReauth()).toEqual([]);
+    expect((await row('s1'))?.reauth_at).toBe(AUTH_TIME);
+  });
+
+  it.each([
+    ['revoked', { revokedAt: PAST }],
+    ['expired', { expiresAt: NOW }],
+  ])('stages nothing for a %s session', async (_label, overrides) => {
+    await seed({ id: 's1', identityId: 'identity-1', ...overrides });
+    expect(await mark('s1', 'identity-1')).toBe(false);
+    expect(await pendingReauth()).toEqual([]);
+  });
+
+  it('stages nothing for a different identity', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    expect(await mark('s1', 'identity-2')).toBe(false);
+    expect(await pendingReauth()).toEqual([]);
+  });
+
+  it('stages nothing across organizations', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    expect(await mark('s1', 'identity-1', AUTH_TIME, b)).toBe(false);
+    expect(await pendingReauth(a)).toEqual([]);
+    expect(await pendingReauth(b)).toEqual([]);
+  });
+
+  it('does not move reauth_at when the audit insert fails', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    const audit = reauthAudit();
+    const repository = createSessionRepository(executor);
+    expect(
+      await repository.markReauthenticatedByIdentity(a, {
+        sessionId: 's1',
+        identityId: 'identity-1',
+        authTime: RECENT,
+        now: NOW,
+        audit,
+      }),
+    ).toBe(true);
+    await expect(
+      repository.markReauthenticatedByIdentity(a, {
+        sessionId: 's1',
+        identityId: 'identity-1',
+        authTime: AUTH_TIME,
+        now: NOW,
+        audit,
+      }),
+    ).rejects.toThrow();
+    expect((await row('s1'))?.reauth_at).toBe(RECENT);
+    expect(await pendingReauth()).toHaveLength(1);
+  });
+
+  it('rolls back the staged audit when the update fails', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    await executor.batch([
+      {
+        sql: `CREATE TRIGGER refuse_reauth BEFORE UPDATE OF reauth_at ON session
+        BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+        params: [],
+      },
+    ]);
+    await expect(mark('s1', 'identity-1')).rejects.toThrow();
+    expect(await pendingReauth()).toEqual([]);
+    expect((await row('s1'))?.reauth_at).toBeNull();
+  });
+
+  it('stages two rows for increasing authentication times', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    expect(await mark('s1', 'identity-1', RECENT)).toBe(true);
+    expect(await mark('s1', 'identity-1')).toBe(true);
+    expect(await pendingReauth()).toHaveLength(2);
+  });
+
+  it('stages only one row for a replayed authentication time', async () => {
+    await seed({ id: 's1', identityId: 'identity-1' });
+    expect(await mark('s1', 'identity-1')).toBe(true);
+    expect(await mark('s1', 'identity-1')).toBe(false);
+    expect(await pendingReauth()).toHaveLength(1);
+  });
 
   it('is true for the matching identity and stores the authentication time', async () => {
     await seed({ id: 's1', identityId: 'identity-1' });
@@ -585,13 +721,14 @@ describe('revoke and revokeBySecretHash', () => {
     await repository.revokeBySecretHash(a, hash('s1'), NOW);
     await repository.touch(a, 's1', NOW, NOW);
     await repository.markReauthenticatedByIdentity(a, {
+      audit: reauthAudit(),
       sessionId: 's1',
       identityId: null,
       authTime: NOW,
       now: NOW,
     });
     await repository.deleteExpired(a, NOW, 10);
-    expect(counted.counts()).toEqual({ all: 5, batch: 0 });
+    expect(counted.counts()).toEqual({ all: 4, batch: 1 });
   });
 });
 
@@ -748,6 +885,7 @@ describe('markReauthenticatedByIdentity authentication time', () => {
     await seed({ id: 's1', identityId: null });
     const repository = createSessionRepository(executor);
     const refused = await repository.markReauthenticatedByIdentity(a, {
+      audit: reauthAudit(),
       sessionId: 's1',
       identityId: null,
       authTime: '2026-10-15T12:00:00.001Z',
@@ -755,7 +893,9 @@ describe('markReauthenticatedByIdentity authentication time', () => {
     });
     expect(refused).toBe(false);
     expect((await row('s1'))?.reauth_at).toBeNull();
+    expect(await pendingReauth()).toEqual([]);
     const accepted = await repository.markReauthenticatedByIdentity(a, {
+      audit: reauthAudit(),
       sessionId: 's1',
       identityId: null,
       authTime: NOW,
@@ -807,6 +947,7 @@ describe('input validation', () => {
     await expect(repository.touch(a, 's1', NOW, bad)).rejects.toThrow(TypeError);
     await expect(
       repository.markReauthenticatedByIdentity(a, {
+        audit: reauthAudit(),
         sessionId: 's1',
         identityId: null,
         authTime: bad,
@@ -815,6 +956,7 @@ describe('input validation', () => {
     ).rejects.toThrow(TypeError);
     await expect(
       repository.markReauthenticatedByIdentity(a, {
+        audit: reauthAudit(),
         sessionId: 's1',
         identityId: null,
         authTime: NOW,
@@ -912,6 +1054,7 @@ describe('session writer epoch comparisons', () => {
       await seed({ id: 's1', expiresAt });
       expect(
         await createSessionRepository(executor).markReauthenticatedByIdentity(a, {
+          audit: reauthAudit(),
           sessionId: 's1',
           identityId: null,
           authTime: RECENT,

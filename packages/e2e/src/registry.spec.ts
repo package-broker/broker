@@ -933,6 +933,18 @@ export async function registryScenario(
     assert(JSON.stringify(await betaMetadata.json()).includes('acme/proxy'), 'BetaPackageMissing');
     const betaArchive = await status(await get(betaPath, true, betaToken), 200, 'beta-archive');
     assert.deepEqual(new Uint8Array(await betaArchive.arrayBuffer()), ZIP);
+    await until(
+      async () => {
+        await local.tick();
+        const pending = await rows(
+          // eslint-disable-next-line no-restricted-syntax -- Scoped infrastructure observation of unsettled jobs.
+          "SELECT id FROM job WHERE org_id = ? AND (state = 'running' OR (state = 'queued' AND run_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
+        );
+        return pending.length === 0;
+      },
+      'jobs-settled',
+      60_000,
+    );
     const deniedCalls = remote.calls.length;
     const beta = await envelope(betaPath, 404, 'not_found');
     await envelope('/beta/p2/acme/proxy.json', 404, 'not_found');

@@ -1,3 +1,4 @@
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LoginPlan } from '@package-broker/core/db/users';
 import type {
@@ -140,6 +141,17 @@ function plan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   const userId = overrides.userId ?? USER_NEW;
   const identityId = overrides.identityId ?? IDENTITY_NEW;
   return {
+    audit: {
+      id: ulid(),
+      occurredAt: NOW,
+      action: 'session.login',
+      actor: { type: 'user', id: userId },
+      target: { type: 'session', id: overrides.session?.id ?? SESSION_NEW },
+      tokenSelector: null,
+      sourceIp: null,
+      projectId: null,
+      payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+    },
     userId,
     createUser: true,
     autoJoin: true,

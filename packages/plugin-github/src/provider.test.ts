@@ -134,7 +134,9 @@ describe('GitHub provider', () => {
         status,
       });
       expect(lsRefs).not.toHaveBeenCalled();
-      expect(provider.listPackages).toBeUndefined();
+      await expect(provider.listPackages!(ctx, source, null)).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
     },
   );
   it.each([200, 403, 429])(
@@ -270,7 +272,7 @@ describe('GitHub provider review regressions', () => {
     expect(tokens.forRepositories).not.toHaveBeenCalled();
   });
   it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-    'refuses invalid installationId %s',
+    'rejects invalid installationId or a missing token credential (%s)',
     async (installationId) => {
       const { provider, ctx, tokens } = setup();
       await expect(
@@ -288,7 +290,11 @@ describe('GitHub provider review regressions', () => {
           'vendor/package',
           {},
         ),
-      ).rejects.toMatchObject({ code: 'invalid_request' });
+      ).rejects.toMatchObject(
+        installationId === undefined
+          ? { name: 'UpstreamError', code: 'http_status', status: 401 }
+          : { code: 'invalid_request' },
+      );
       expect(tokens.forRepositories).not.toHaveBeenCalled();
     },
   );

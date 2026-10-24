@@ -10,6 +10,7 @@ import {
   type Database,
   type Guard,
 } from '../kysely.js';
+import { auditPendingStatement } from './audit-pending.js';
 import { revokePreviousStatement, sessionInsertStatement } from './session.js';
 
 type SucceedInput = Parameters<LocalLoginSuccessWriter['succeed']>[1];
@@ -205,6 +206,27 @@ export function createLocalLoginSuccessWriter(executor: SqlExecutor): LocalLogin
       }
       const opId = newOpId();
       const guard = opGuard(ctx, 'local_login', { userId: snapshot.userId }, opId);
+      let effect = db
+        .selectFrom('session')
+        .select(sql.lit(1).as('one'))
+        .where('session.org_id', '=', ctx.orgId)
+        .where('session.user_id', '=', snapshot.userId);
+      if (session !== null) {
+        effect = effect
+          .where('session.id', '=', session.id)
+          .where('session.secret_hash', '=', session.secretHash);
+      } else {
+        effect = effect
+          .where('session.id', '=', reauthSessionId)
+          .where('session.reauth_at', '=', now);
+      }
+      const when = compile(
+        db.selectNoFrom(loginEb.and([guard, loginEb.exists(effect)]).as('allowed')),
+      );
+      const pending = auditPendingStatement(ctx, input.audit, {
+        sql: `(${when.sql}) = 1`,
+        params: when.params,
+      });
       const update = updateLocalLoginStatement(
         ctx,
         input,
@@ -223,6 +245,7 @@ export function createLocalLoginSuccessWriter(executor: SqlExecutor): LocalLogin
             revokePreviousStatement(ctx, previousSecretHash, session.id, now, [guard]),
           );
         }
+        statements.push(pending);
         const results = await executor.batch(statements);
         return (results[1]?.rows.length ?? 0) === 1;
       }
@@ -232,6 +255,7 @@ export function createLocalLoginSuccessWriter(executor: SqlExecutor): LocalLogin
       const results = await executor.batch([
         update,
         reauthStatement(ctx, input, reauthSessionId, guard),
+        pending,
       ]);
       return results[1]?.changes === 1;
     },

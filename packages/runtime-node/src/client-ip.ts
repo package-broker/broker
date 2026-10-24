@@ -1,8 +1,8 @@
-import { isIP } from 'node:net';
+import { isIpLiteral } from '@package-broker/core/audit/actions';
 
 function ipLiteral(value: string | null | undefined): string | null {
   const ip = value?.trim();
-  return ip !== undefined && /^[0-9a-f:.]+$/i.test(ip) && isIP(ip) !== 0 ? ip : null;
+  return ip !== undefined && isIpLiteral(ip) ? ip : null;
 }
 
 function forwardedParameters(value: string): string[] | null {
@@ -34,7 +34,7 @@ function forwardedIp(value: string | null): string | null {
   const bracketed = candidate?.match(/^\[([0-9a-f:.]+)\](?::[0-9]+)?$/i);
   if (bracketed !== undefined && bracketed !== null) {
     const ip = bracketed[1];
-    return ip !== undefined && isIP(ip) === 6 ? ip : null;
+    return ip !== undefined && ip.includes(':') && isIpLiteral(ip) ? ip : null;
   }
   return ipLiteral(candidate);
 }

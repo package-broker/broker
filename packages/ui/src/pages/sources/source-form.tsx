@@ -40,6 +40,7 @@ const FIELD_LABELS: Record<string, string> = {
   'config/provider': 'Provider',
   'config/repository': 'Repository',
   'config/installationId': 'Installation ID',
+  githubAuthentication: 'GitHub authentication',
   'config/packageName': 'Package name',
   'config/refs/branches': 'Branches (one per line)',
   'config/refs/tags': 'Include tags',
@@ -105,7 +106,7 @@ export function sourceSubmission(
         changes.config = {
           provider: value('config/provider') as 'github' | 'git' | 'ssh',
           repository: value('config/repository'),
-          ...(value('config/provider') === 'github' && value('config/installationId').trim()
+          ...(value('config/provider') === 'github' && value('githubAuthentication') !== 'token'
             ? { installationId: integer(value('config/installationId'), 1) }
             : {}),
           ...(value('config/packageName') ? { packageName: value('config/packageName') } : {}),
@@ -157,6 +158,7 @@ export function SourceForm({
   );
   const [type, setType] = useState<CreateSource['type']>(source?.type ?? 'composer_repository');
   const [provider, setProvider] = useState<'github' | 'git' | 'ssh'>('github');
+  const [githubAuthentication, setGithubAuthentication] = useState('app');
   const [replaceConfig, setReplaceConfig] = useState(false);
   const [replaceNetwork, setReplaceNetwork] = useState(false);
   const [replaceDefaults, setReplaceDefaults] = useState(false);
@@ -411,9 +413,34 @@ export function SourceForm({
                       </Select>,
                     )}
                     {input('config/repository', { required: true })}
-                    {provider === 'github'
-                      ? input('config/installationId', { number: true, minimum: 1 })
-                      : null}
+                    {provider === 'github' ? (
+                      <>
+                        {field(
+                          'githubAuthentication',
+                          <Select
+                            id="source-githubAuthentication"
+                            name="githubAuthentication"
+                            value={githubAuthentication}
+                            onChange={(event) => setGithubAuthentication(event.currentTarget.value)}
+                          >
+                            <option value="app">GitHub App</option>
+                            <option value="token">Personal access token</option>
+                          </Select>,
+                        )}
+                        {githubAuthentication === 'app' ? (
+                          input('config/installationId', {
+                            required: true,
+                            number: true,
+                            minimum: 1,
+                          })
+                        ) : (
+                          <p className="text-sm text-neutral-600">
+                            After creating the source, enter your personal access token as a bearer
+                            credential.
+                          </p>
+                        )}
+                      </>
+                    ) : null}
                     {input('config/packageName')}
                     {input('config/refs/branches', { multiline: true })}
                     {check('config/refs/tags', undefined, undefined, true)}

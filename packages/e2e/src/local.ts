@@ -99,8 +99,12 @@ export async function reserveLoopbackPort(): Promise<number> {
   }
 }
 
-export async function until(check: () => Promise<boolean>, label: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+export async function until(
+  check: () => Promise<boolean>,
+  label: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await check()) return;
     await delay(100);
@@ -136,6 +140,7 @@ export interface LocalBroker {
   loseBlob(orgId: string, sha256: string): Promise<void>;
   moduleEvidence(): Promise<void>;
   pollTick(orgId: string): Promise<void>;
+  tick(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -212,6 +217,7 @@ export async function startLocal(
             };
           }>;
           getR2Bucket(name: string): Promise<{ delete(key: string): Promise<void> }>;
+          getWorker(): Promise<{ scheduled(options: { cron: string }): Promise<unknown> }>;
           dispose(): Promise<void>;
         }
       | undefined;
@@ -462,6 +468,12 @@ syncBuiltinESMExports();
           assert.notEqual(job.state, 'dead', 'SourcePollJobFailed');
           return job.state === 'succeeded';
         }, 'source-poll');
+      },
+      async tick() {
+        if (worker)
+          await (
+            await worker.getWorker()
+          ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
       },
       async moduleEvidence() {
         assert(!logOverflow, 'IncompleteLogEvidence');

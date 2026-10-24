@@ -10,6 +10,7 @@ import {
   type Database,
   type Guard,
 } from '../kysely.js';
+import { auditPendingStatement } from './audit-pending.js';
 import { revokePreviousStatement, sessionInsertStatement } from './session.js';
 import {
   notifyProjectAccessLost,
@@ -475,6 +476,15 @@ export function createLoginWriter(
       }
       const sessionIndex = statements.length;
       statements.push(sessionInsertStatement(ctx, plan.session, guards) as ScalarStatement);
+      const auditGuard = compile(
+        db.selectNoFrom(eb.and([createdSessionGuard(ctx, plan, now)]).as('allowed')),
+      );
+      statements.push(
+        auditPendingStatement(ctx, plan.audit, {
+          sql: `(${auditGuard.sql}) = 1`,
+          params: auditGuard.params,
+        }) as ScalarStatement,
+      );
       if (previousSecretHash !== null) {
         statements.push(
           revokePreviousStatement(ctx, previousSecretHash, plan.session.id, now, [

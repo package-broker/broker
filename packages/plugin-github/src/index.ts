@@ -18,7 +18,8 @@ import {
   type InstallationTokens,
   type RateLimit,
 } from './installation-token.js';
-import { createGithubProvider, GithubProviderError } from './provider.js';
+import { createGithubProvider, GithubProviderError, RateLimited } from './provider.js';
+import { GithubRestError } from './token-rest.js';
 import { githubWebhookVerifier } from './webhook.js';
 import { discoverRepositories, DiscoveryError } from './discovery.js';
 
@@ -116,6 +117,19 @@ export default function github() {
           async listPackages(ctx, source, cursor) {
             if (cursor !== null || source.type !== 'vcs' || source.config.provider !== 'github')
               throw new DiscoveryError('invalid_request');
+            if (source.config.installationId === undefined) {
+              try {
+                return await provider(ctx).listPackages!(ctx, source, cursor);
+              } catch (error) {
+                if (error instanceof GithubRestError) throw new DiscoveryError('invalid_response');
+                if (error instanceof GithubProviderError)
+                  throw new DiscoveryError(
+                    error.code === 'invalid_request' ? 'invalid_request' : 'invalid_response',
+                  );
+                if (error instanceof RateLimited) throw new UpstreamError('http_status', 429);
+                throw error;
+              }
+            }
             const { repository, installationId } = source.config;
             if (
               !/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/.test(repository) ||

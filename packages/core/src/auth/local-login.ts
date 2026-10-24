@@ -1,3 +1,4 @@
+import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import { isReauthSessionActive } from './identity-reauth.js';
 import { hashPassword, verifyDummy, verifyPassword } from './password.js';
 import { SESSION_ABSOLUTE_MS, newSessionSecrets } from './session.js';
@@ -211,6 +212,26 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
     }
   }
 
+  function sessionAudit(
+    action: 'session.login' | 'session.reauth',
+    userId: string,
+    sessionId: string,
+    nowMs: number,
+    meta: AuthCallMeta,
+  ): AuditEvent {
+    const id = ids.ulid();
+    const result = auditEvent({
+      id,
+      now: isoTimestamp(new Date(nowMs)),
+      action,
+      actor: { type: 'user', id: userId },
+      target: { type: 'session', id: sessionId },
+      context: { opId: id, requestId: meta.requestId, sourceIp: meta.ip, tokenSelector: null },
+    });
+    if (!result.ok) throw new TypeError('Invalid local authentication audit event');
+    return result.event;
+  }
+
   return {
     async login(ctx, input, meta) {
       if (input === null || typeof input !== 'object') return REFUSED;
@@ -220,12 +241,14 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       const { snapshot, step, nowMs } = verified;
       const secrets = await newSessionSecrets();
       const expiresAt = isoTimestamp(new Date(nowMs + SESSION_ABSOLUTE_MS));
+      const sessionId = ids.ulid();
       const succeeded = await writer.succeed(ctx, {
+        audit: sessionAudit('session.login', snapshot.userId, sessionId, nowMs, meta),
         snapshot,
         step,
         rehash: null,
         session: {
-          id: ids.ulid(),
+          id: sessionId,
           userId: snapshot.userId,
           identityId: null,
           secretHash: secrets.secretHash,
@@ -248,7 +271,7 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       };
     },
 
-    async reauth(ctx, authenticated, input) {
+    async reauth(ctx, authenticated, input, meta) {
       if (!(await isReauthSessionActive(deps, ctx, authenticated.session.id))) {
         return { ok: false, reason: 'session_inactive' };
       }
@@ -271,6 +294,13 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
         return { ok: false, reason: 'session_inactive' };
       }
       const succeeded = await writer.succeed(ctx, {
+        audit: sessionAudit(
+          'session.reauth',
+          verified.snapshot.userId,
+          session.id,
+          verified.nowMs,
+          meta,
+        ),
         snapshot: verified.snapshot,
         step: verified.step,
         rehash: null,

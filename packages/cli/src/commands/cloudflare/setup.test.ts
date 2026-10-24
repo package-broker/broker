@@ -119,6 +119,26 @@ beforeEach(async () => {
     fetch: vi.fn(async (input) => {
       calls.push('read');
       const path = new URL(String(input)).pathname;
+      if (path.endsWith('/workers/subdomain'))
+        return new Response(JSON.stringify({ success: true, result: { subdomain: 'account' } }));
+      if (path.endsWith('/workers/domains'))
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: options.domain
+              ? [
+                  {
+                    id: 'domain-id',
+                    zone_id: 'b'.repeat(32),
+                    hostname: options.domain,
+                    service: identity.script_name,
+                    environment: 'production',
+                  },
+                ]
+              : [],
+            result_info: { total_pages: 1 },
+          }),
+        );
       const value = path.endsWith('/secrets')
         ? installed
           ? [{ name: 'PB_MASTER_KEY', type: 'secret_text' }]
@@ -535,6 +555,7 @@ it.each([undefined, null])(
   'reads installed secrets as a snapshot with metadata %s',
   async (result_info) => {
     options.dryRun = true;
+    options.publicUrl = 'https://broker.example.test';
     const reads: URL[] = [];
     options.fetch = vi.fn(async (input) => {
       const url = new URL(String(input));
@@ -885,7 +906,7 @@ it('an identical completed rerun retains selected non-master secrets without res
   expect(deployed).not.toHaveProperty('secrets');
 });
 
-it.each(['completed', 'upload_pending'])(
+it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
   'reuses the real deployment version on an identical %s rerun with selected secrets',
   async (checkpoint) => {
     const out = join(project, '.pb/cloudflare');
@@ -1055,15 +1076,28 @@ it.each(['completed', 'upload_pending'])(
       return result('smoke');
     });
     const first = await setup(options, ops);
-    expect(first.exitCode, JSON.stringify(first.output)).toBe(checkpoint === 'completed' ? 0 : 6);
+    expect(first.exitCode, JSON.stringify(first.output)).toBe(
+      checkpoint === 'upload_pending' ? 6 : 0,
+    );
     expect(uploads).toBe(1);
+    if (checkpoint === 'completed_deleted_files') {
+      delete options.masterKeyEnv;
+      options.keyFile = join(outside, 'deleted', 'master.key');
+      await rm(outside, { recursive: true });
+      vi.mocked(ops.admin).mockClear();
+    }
     const rerun = await setup(options, ops);
+    if (checkpoint === 'completed_deleted_files') {
+      expect(ops.admin).not.toHaveBeenCalled();
+      expect(vi.mocked(ops.deploy).mock.lastCall![0].env.PB_MASTER_KEY).toBeUndefined();
+      await expect(stat(outside)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
     expect(rerun.exitCode).toBe(0);
     expect(uploads).toBe(1);
     expect(rerun.output.version_id).toBe(versionId);
     expect(rerun.output.plan).toContainEqual({
       stage: 'deploy',
-      action: checkpoint === 'completed' ? 'unchanged' : 'reconcile',
+      action: checkpoint === 'upload_pending' ? 'reconcile' : 'unchanged',
     });
   },
 );
@@ -1720,3 +1754,117 @@ it('collects missing guided inputs through injected TTY prompts with identity de
     deploymentId: 'broker-production',
   });
 });
+
+async function expectPreflightRefusal(code: string, exitCode: number) {
+  const outcome = await setup(options, ops);
+  expect(outcome).toMatchObject({ exitCode, output: { error: { code } } });
+  expect(calls).not.toContain('provision');
+  for (const operation of [ops.migrate, ops.organization, ops.deploy, ops.admin])
+    expect(operation).not.toHaveBeenCalled();
+  expect(options.reveal).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+  await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(JSON.stringify(outcome)).not.toContain('PRIVATE_SENTINEL');
+}
+
+it('refuses partial rollout with an active version when the deploy contract has no preview', async () => {
+  exists = true;
+  options.rollout = 50;
+  options.reveal = vi.fn();
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/deployments')
+      ? new Response(
+          JSON.stringify({
+            success: true,
+            result: {
+              deployments: [
+                {
+                  id: 'active',
+                  versions: [
+                    { version_id: '22222222-2222-4222-8222-222222222222', percentage: 100 },
+                  ],
+                },
+              ],
+            },
+          }),
+        )
+      : fetch(input, init),
+  );
+  await expectPreflightRefusal('capability_unknown', 1);
+});
+
+it.each([undefined, '', 'a'.repeat(64), 'PRIVATE_SENTINEL', 'not.a.label'])(
+  'refuses unusable workers.dev registration before writes: %s',
+  async (subdomain) => {
+    options.reveal = vi.fn();
+    const fetch = options.fetch!;
+    options.fetch = vi.fn(async (input, init) =>
+      new URL(String(input)).pathname.endsWith('/workers/subdomain')
+        ? new Response(JSON.stringify({ success: true, result: { subdomain } }))
+        : fetch(input, init),
+    );
+    await expectPreflightRefusal('workers_dev_subdomain_missing', 2);
+  },
+);
+
+it('refuses custom domain creation when the deploy contract has no zone resolver', async () => {
+  options.domain = 'broker.example.test';
+  options.reveal = vi.fn();
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/workers/domains')
+      ? new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 1 } }))
+      : fetch(input, init),
+  );
+  await expectPreflightRefusal('capability_unknown', 1);
+});
+
+it('refuses an unregistered workers.dev account on a 404 before writes', async () => {
+  options.reveal = vi.fn();
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/workers/subdomain')
+      ? new Response(JSON.stringify({ success: false, errors: [] }), { status: 404 })
+      : fetch(input, init),
+  );
+  await expectPreflightRefusal('workers_dev_subdomain_missing', 2);
+});
+
+it('accepts the maximum workers.dev label length during preflight', async () => {
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/workers/subdomain')
+      ? new Response(JSON.stringify({ success: true, result: { subdomain: 'a'.repeat(63) } }))
+      : fetch(input, init),
+  );
+  expect((await setup(options, ops)).exitCode).toBe(0);
+});
+
+it.each(['foreign owner', 'invalid zone', 'duplicate attachment'])(
+  'refuses an unusable existing domain before writes: %s',
+  async (failure) => {
+    options.domain = 'broker.example.test';
+    options.reveal = vi.fn();
+    const domain = {
+      id: 'domain-id',
+      zone_id: failure === 'invalid zone' ? 'PRIVATE_SENTINEL' : 'b'.repeat(32),
+      hostname: options.domain,
+      service: failure === 'foreign owner' ? 'another-worker' : identity.script_name,
+      environment: 'production',
+    };
+    const fetch = options.fetch!;
+    options.fetch = vi.fn(async (input, init) =>
+      new URL(String(input)).pathname.endsWith('/workers/domains')
+        ? new Response(
+            JSON.stringify({
+              success: true,
+              result: failure === 'duplicate attachment' ? [domain, domain] : [domain],
+              result_info: { total_pages: 1 },
+            }),
+          )
+        : fetch(input, init),
+    );
+    await expectPreflightRefusal('configuration_conflict', 8);
+  },
+);

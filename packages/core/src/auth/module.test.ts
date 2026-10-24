@@ -105,7 +105,7 @@ function fixture(resolve?: HookMap['auth.resolveIdentity'], map?: HookMap['auth.
     repositories,
     keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
     clock,
-    ids: { ulid: () => 'id-1' },
+    ids: { ulid: () => '01K7R5V0000000000000000001' },
     publicOrigin: origin,
     providers: new Map([[provider.id, provider]]),
     hooks: {
@@ -294,15 +294,15 @@ describe('auth module request correlation', () => {
 
   it('uses request_id for route events after a successful login', async () => {
     const app = fixture();
-    expect((await app.send('request-success')).status).toBe(303);
+    expect((await app.send('01K7R5V0000000000000000002')).status).toBe(303);
     expect(app.records('auth.login.succeeded')).toEqual([
       {
         level: 'info',
         event: 'auth.login.succeeded',
         provider: 'oidc',
-        userId: 'id-1',
-        sessionId: 'id-1',
-        request_id: 'request-success',
+        userId: '01K7R5V0000000000000000001',
+        sessionId: '01K7R5V0000000000000000001',
+        request_id: '01K7R5V0000000000000000002',
       },
     ]);
   });

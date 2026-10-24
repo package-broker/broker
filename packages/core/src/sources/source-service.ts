@@ -349,6 +349,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     credential: SourceCredentialInput | null | undefined,
     hasCredential: boolean,
     linkedKind?: string,
+    existingKind?: string,
   ) {
     if (input.configJson.length > 65536)
       return invalid('config', 'is longer than 65536 characters');
@@ -377,6 +378,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       }
     }
     const kind = linkedKind ?? credential?.kind;
+    const githubKind = kind ?? existingKind;
     const github =
       input.type === 'vcs' &&
       typeof config === 'object' &&
@@ -392,6 +394,32 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return linkedKind === undefined
         ? invalid('credential', 'invalid')
         : fail('credential_scope_mismatch');
+    }
+    if (
+      github &&
+      githubKind === 'bearer' &&
+      typeof config === 'object' &&
+      config !== null &&
+      'installationId' in config
+    ) {
+      return invalid('installationId', 'cannot be combined with a personal access token');
+    }
+    if (
+      github &&
+      githubKind !== undefined &&
+      githubKind !== 'github_app' &&
+      githubKind !== 'bearer'
+    ) {
+      return invalid('credential', 'github requires github_app or bearer');
+    }
+    if (
+      github &&
+      githubKind === 'github_app' &&
+      typeof config === 'object' &&
+      config !== null &&
+      !('installationId' in config)
+    ) {
+      return invalid('installationId', 'is required with a GitHub App credential');
     }
     if (url !== null && input.type === 'composer_repository' && kind === 'query') {
       try {
@@ -733,6 +761,13 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         { ...source, ...input },
         input.credential,
         input.credential === undefined ? source.credentialId !== null : input.credential !== null,
+        undefined,
+        source.type === 'vcs' &&
+          isGithubConfig(input.configJson ?? source.configJson) &&
+          input.credential === undefined &&
+          source.credentialId !== null
+          ? (await deps.credentialRepository.get(ctx, source.credentialId))?.kind
+          : undefined,
       );
       if (!validated.ok) return validated;
       let preparedCredential: SourceUpdate['preparedCredential'];
@@ -850,4 +885,18 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
     },
   };
+}
+
+function isGithubConfig(configJson: string): boolean {
+  try {
+    const config: unknown = JSON.parse(configJson);
+    return (
+      typeof config === 'object' &&
+      config !== null &&
+      'provider' in config &&
+      config.provider === 'github'
+    );
+  } catch {
+    return false;
+  }
 }

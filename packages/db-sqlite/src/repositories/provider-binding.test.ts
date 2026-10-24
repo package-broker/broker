@@ -1,3 +1,4 @@
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LoginPlan } from '@package-broker/core/db/users';
 import type {
@@ -463,6 +464,17 @@ describe('rebindProvider', () => {
 
     function loginPlan(overrides: Partial<LoginPlan> = {}): LoginPlan {
       return {
+        audit: {
+          id: ulid(),
+          occurredAt: NOW,
+          action: 'session.login',
+          actor: { type: 'user', id: USER_X },
+          target: { type: 'session', id: overrides.session?.id ?? SESSION_RELINKED },
+          tokenSelector: null,
+          sourceIp: null,
+          projectId: null,
+          payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+        },
         userId: USER_X,
         createUser: false,
         email: 'x@example.test',

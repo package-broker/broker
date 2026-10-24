@@ -86,6 +86,37 @@ describe('source form request bodies', () => {
     },
   );
 
+  it('omits a stale installation ID in personal access token mode', () => {
+    const result = sourceSubmission(
+      data({
+        'config/provider': 'github',
+        'config/repository': 'owner/repo',
+        githubAuthentication: 'token',
+        'config/installationId': '42',
+        'config/refs/tags': 'on',
+      }),
+      'composer',
+      'vcs',
+      false,
+    );
+    expect(result.config).toEqual({
+      provider: 'github',
+      repository: 'owner/repo',
+      refs: { branches: [], tags: true },
+    });
+    expect(result).not.toHaveProperty('credential');
+  });
+  it('requires an installation ID for GitHub App mode', () => {
+    expect(() =>
+      sourceSubmission(
+        data({ 'config/provider': 'github', githubAuthentication: 'app' }),
+        'composer',
+        'vcs',
+        false,
+      ),
+    ).toThrow('Enter valid whole numbers');
+  });
+
   it('sends only npm registry config fields when stale composer fields exist', () => {
     const result = sourceSubmission(
       data({

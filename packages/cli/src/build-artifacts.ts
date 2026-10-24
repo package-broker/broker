@@ -13,6 +13,7 @@ export interface BuildInfo {
   readonly plugins: Readonly<Record<string, string>>;
   readonly lockfileSha256: string | null;
   readonly gitSha: string | null;
+  readonly dirty?: boolean | null;
 }
 
 export function renderBuildInfo(info: BuildInfo): string {

@@ -744,7 +744,7 @@ it.each(['pending', 'complete'] as const)(
 function providerReadback(
   h: ReturnType<typeof harness>,
   o: DeployOptions,
-  listing: 'worker_id' | 'name_only' = 'worker_id',
+  listing: 'worker_id' | 'name_only' = 'name_only',
 ) {
   const inner = o.fetch!;
   o.fetch = (async (input, init) => {
@@ -754,7 +754,7 @@ function providerReadback(
       const envelope = object(await response.json());
       envelope.result = (envelope.result as Record<string, unknown>[]).map((w) =>
         listing === 'name_only'
-          ? w
+          ? { ...providerFixtures.workerNameOnly.result[0], ...w }
           : { ...w, worker_id: providerFixtures.workerWithId.result[0]!.worker_id },
       );
       return Response.json(envelope);
@@ -956,7 +956,7 @@ it('R9 retries the retained first-install attachments with real settings without
 });
 it('resolves a distinct Worker ID for real settings and authoritative version evidence', async () => {
   const { h, o } = firstInstall();
-  providerReadback(h, o);
+  providerReadback(h, o, 'worker_id');
   const inner = o.fetch!;
   let loseCreate = true;
   o.fetch = (async (input, init) => {
@@ -3598,29 +3598,35 @@ it.each(['versions', 'plainValues'] as const)(
   },
 );
 
-it('looks up versions by Worker name when the scripts listing carries no worker_id', async () => {
-  const { h, o } = firstInstall();
-  providerReadback(h, o, 'name_only');
-  const inner = o.fetch!;
-  const fullPaths: string[] = [];
-  let loseCreate = true;
-  o.fetch = (async (input, init) => {
-    const path = new URL(String(input)).pathname;
-    if (path.includes('/workers/workers/')) fullPaths.push(path);
-    const response = await inner(input, init);
-    if (loseCreate && path.endsWith(base) && init?.method === 'PUT') {
-      loseCreate = false;
-      throw new Error('create acknowledgement lost');
-    }
-    return response;
-  }) as typeof fetch;
-  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
-  const result = await deploy(o);
-  expect(result.output.error).toBeNull();
-  expect(result.output.version_id).toBe(CREATED);
-  expect(fullPaths.length).toBeGreaterThan(0);
-  for (const path of fullPaths) expect(path).toContain(`/workers/workers/${script}/versions/`);
-});
+it.each(['default', 'worker_id'] as const)(
+  'looks up versions with the %s provider listing',
+  async (listing) => {
+    const { h, o } = firstInstall();
+    if (listing === 'default') providerReadback(h, o);
+    else providerReadback(h, o, listing);
+    const inner = o.fetch!;
+    const fullPaths: string[] = [];
+    let loseCreate = true;
+    o.fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.includes('/workers/workers/')) fullPaths.push(path);
+      const response = await inner(input, init);
+      if (loseCreate && path.endsWith(base) && init?.method === 'PUT') {
+        loseCreate = false;
+        throw new Error('create acknowledgement lost');
+      }
+      return response;
+    }) as typeof fetch;
+    expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+    const result = await deploy(o);
+    expect(result.output.error).toBeNull();
+    expect(result.output.version_id).toBe(CREATED);
+    expect(fullPaths.length).toBeGreaterThan(0);
+    const lookup =
+      listing === 'default' ? script : providerFixtures.workerWithId.result[0]!.worker_id;
+    for (const path of fullPaths) expect(path).toContain(`/workers/workers/${lookup}/versions/`);
+  },
+);
 
 it('refuses an unsafe Worker identity for version lookup', async () => {
   const { h, o } = firstInstall();
@@ -3647,3 +3653,32 @@ it('refuses an unsafe Worker identity for version lookup', async () => {
   expect(fullReads).toBe(0);
   expect(h.endpoints.enabled).toBe(false);
 });
+
+it.each([true, false, null, undefined])(
+  'preserves supported dirty provenance (%s) in deployment receipts',
+  async (dirty) => {
+    const file = join(out, 'build-info.json');
+    const info = JSON.parse(await readFile(file, 'utf8'));
+    info.dirty = dirty;
+    info.gitSha = 'd'.repeat(40);
+    await writeFile(file, JSON.stringify(info));
+    const h = harness();
+    expect((await deploy(options(h))).exitCode).toBe(0);
+    expect((await store.read())!.deployment!.attempt.build_info).toEqual(info);
+  },
+);
+
+it.each(['SENTINEL', 1, {}, []])(
+  'rejects invalid dirty provenance (%j) before provider requests',
+  async (dirty) => {
+    const file = join(out, 'build-info.json');
+    const info = JSON.parse(await readFile(file, 'utf8'));
+    info.dirty = dirty;
+    await writeFile(file, JSON.stringify(info));
+    const h = harness();
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('invalid_input');
+    expect(h.calls).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain('SENTINEL');
+  },
+);

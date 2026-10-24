@@ -821,6 +821,11 @@ export async function runCloudflareSmoke(o: SmokeOptions): Promise<number> {
   const result = await smoke(o);
   if (o.json) console.log(JSON.stringify(result.output));
   else {
+    const info = result.output.build_info;
+    if (info) {
+      console.log(`revision: ${info.gitSha ?? 'null'}; dirty: ${info.dirty ?? 'null'}`);
+      console.log(`artifact_sha256: ${result.output.artifact_sha256 ?? 'null'}`);
+    }
     for (const entry of result.output.plan) console.error(`${entry.action}: ${entry.name}`);
     for (const check of result.output.checks)
       console.error(

@@ -408,7 +408,7 @@ syncBuiltinESMExports();
             .bind(...params)
             .all()
         ).results as T[];
-      const db = new DatabaseSync(database, { readOnly: true });
+      const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
       try {
         return db.prepare(sql).all(...params) as T[];
       } finally {
@@ -447,7 +447,7 @@ syncBuiltinESMExports();
         if (worker) {
           await (await worker.getD1Database('DB')).prepare(sql).bind(id, orgId).all();
         } else {
-          const db = new DatabaseSync(database);
+          const db = new DatabaseSync(database, { timeout: 5000 });
           try {
             db.prepare(sql).run(id, orgId);
           } finally {

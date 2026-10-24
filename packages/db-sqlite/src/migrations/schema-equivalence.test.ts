@@ -6,14 +6,20 @@ import { splitStatements } from './split.js';
 
 describeSchemaEquivalenceContract('node:sqlite', async () => openNodeSqliteExecutor());
 
-it('the baseline contains only DDL and its initial lock row within D1 statement and batch limits', async () => {
+it('the baseline contains DDL, its initial lock row and the ecosystem preflight within D1 statement and batch limits', async () => {
   const [source] = await discoveredMigrations();
   if (source === undefined) throw new Error('baseline is missing');
   const statements = splitStatements(source.sql);
+  const preflight = `UPDATE package SET ecosystem = ecosystem
+WHERE ecosystem IS NOT (SELECT s.ecosystem FROM source AS s WHERE s.id = package.source_id)`;
+  expect(statements).toContain(preflight);
   expect(
     statements
-      .filter((statement) => statement !== 'INSERT INTO migration_lock (id) VALUES (1)')
-      .every((statement) => /^CREATE (?:UNIQUE )?(?:TABLE|INDEX)\b/.test(statement)),
+      .filter(
+        (statement) =>
+          statement !== 'INSERT INTO migration_lock (id) VALUES (1)' && statement !== preflight,
+      )
+      .every((statement) => /^CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER)\b/.test(statement)),
   ).toBe(true);
   // One extra statement records the migration; Workers Paid allows 1,000 queries per invocation.
   expect(statements.length + 1).toBeLessThanOrEqual(1_000);

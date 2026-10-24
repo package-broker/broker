@@ -17,7 +17,7 @@ import { createR2ByteStore, type R2BucketLike } from '../blob/r2.js';
 import { createD1Executor, type D1DatabaseLike } from '../db/d1-executor.js';
 import { createWorker, type Env } from '../index.js';
 import {
-  bindSnapshot,
+  restoreDatabase,
   exportDatabase,
   type SnapshotStatement,
 } from './sql-snapshot.test.support.js';
@@ -349,7 +349,7 @@ export async function restoreDeployment(
       objects.push({ entry, bytes });
     }
     const statements = JSON.parse(database.toString()) as SnapshotStatement[];
-    await target.executor.batch(bindSnapshot(statements));
+    await restoreDatabase(target.executor, statements);
     if (JSON.stringify(await inventory(target)) !== JSON.stringify(manifest.objects))
       throw new BackupIntegrityError();
     if (!options.skipKeys) {

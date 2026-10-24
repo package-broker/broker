@@ -323,7 +323,11 @@ describe('core migrations', () => {
       await migrateAll();
 
       expect(await rows('SELECT org_id FROM cache_epoch')).toEqual([]);
-      expect(await rows("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([]);
+      expect(
+        await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger'
+          AND name NOT IN ('package_ecosystem_matches_source_insert',
+            'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages')`),
+      ).toEqual([]);
     });
 
     it('19: a version is required and an unknown organization fails with kind foreign_key', async () => {

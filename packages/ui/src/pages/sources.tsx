@@ -16,6 +16,12 @@ import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
 import { DataTable } from '../components/ui/table.js';
 import { buildListFilterHash } from '../page-hash.js';
+import {
+  SourceForm,
+  sourceFieldErrors,
+  type CreateSource,
+  type SourceChanges,
+} from './sources/source-form.js';
 
 type ResponseBody<K extends keyof operations> = operations[K] extends {
   responses: { 200: { content: { 'application/json': infer T } } };
@@ -48,6 +54,13 @@ function canTogglePause(project: string | null, source: Source) {
 }
 
 interface SourcesState {
+  editor: 'create' | Source | null;
+  fieldErrors: Record<string, string>;
+  formError: string | null;
+  available: Source[];
+  availableNext: string | null;
+  availableLoading: boolean;
+  availableError: boolean;
   items: Source[];
   next: string | null;
   loading: boolean;
@@ -86,6 +99,13 @@ export function createSourcesModel(
 ) {
   const { client } = services;
   let state: SourcesState = {
+    editor: null,
+    fieldErrors: {},
+    formError: null,
+    available: [],
+    availableNext: null,
+    availableLoading: false,
+    availableError: false,
     items: [],
     next: null,
     loading: true,
@@ -107,6 +127,7 @@ export function createSourcesModel(
     for (const listener of listeners) listener();
   };
   let listVersion = 0;
+  let availableVersion = 0;
   let namesVersion = 0;
   let previewVersion = 0;
 
@@ -173,6 +194,46 @@ export function createSourcesModel(
     });
   }
 
+  async function loadAvailable(more = false) {
+    if (project === null || (more && (state.availableLoading || state.availableNext === null)))
+      return;
+    const version = ++availableVersion;
+    const after = more ? state.availableNext : null;
+    set({ availableLoading: true, availableError: false });
+    const result = await client.request('get', '/_pb/sources', {
+      query: { limit: '100', ...(after === null ? {} : { after }) },
+    });
+    if (version !== availableVersion) return;
+    if (!result.ok) {
+      set({ available: [], availableNext: null, availableLoading: false, availableError: true });
+      return;
+    }
+    const page = result.data.items.map((item) => ({
+      ...item,
+      attached: false as const,
+      url: displayUrl(item.url),
+    }));
+    set({
+      available: more ? [...state.available, ...page] : page,
+      availableNext: result.data.next,
+      availableLoading: false,
+    });
+  }
+
+  async function revealCreated(source: string) {
+    while (
+      !state.items.some((item) => item.id === source) &&
+      state.next !== null &&
+      !state.listError
+    ) {
+      await load(true);
+    }
+    const created = state.items.find((item) => item.id === source);
+    if (created && !['npmjs_proxy', 'packagist_proxy', 'hosted'].includes(created.type)) {
+      set({ credentialSource: source, credentialVersion: state.credentialVersion + 1 });
+    }
+  }
+
   async function names(source: string, more = false) {
     const previous = state.names;
     if (more && (previous?.source !== source || previous.next === null)) return;
@@ -213,14 +274,83 @@ export function createSourcesModel(
       };
     },
     load,
+    loadAvailable,
     names,
+    openEditor(source: Source | null = null) {
+      if (state.busy) return;
+      if (source && project !== null && source.projectId === null) return;
+      set({
+        editor: source ?? 'create',
+        fieldErrors: {},
+        formError: null,
+        error: null,
+        credentialSource: null,
+        savedCredential: null,
+      });
+    },
+    closeEditor() {
+      if (!state.busy) set({ editor: null, fieldErrors: {}, formError: null });
+    },
+    async saveSource(body: CreateSource | SourceChanges) {
+      if (state.busy || state.editor === null) return;
+      const editor = state.editor;
+      set({ busy: true, error: null, formError: null, fieldErrors: {} });
+      try {
+        const result =
+          editor === 'create'
+            ? project === null
+              ? await client.request('post', '/_pb/sources', { body: body as CreateSource })
+              : await client.request('post', '/_pb/projects/{project}/sources', {
+                  params: { project },
+                  body: body as CreateSource,
+                })
+            : project === null
+              ? await client.request('patch', '/_pb/sources/{source}', {
+                  params: { source: editor.id },
+                  body,
+                })
+              : await client.request('patch', '/_pb/projects/{project}/sources/{source}', {
+                  params: { project, source: editor.id },
+                  body,
+                });
+        if (!result.ok) {
+          failure(result);
+          set({ fieldErrors: sourceFieldErrors(result.details), formError: state.error });
+          return;
+        }
+        set({ editor: null, fieldErrors: {}, formError: null });
+        await load();
+        if (editor === 'create' && result.data && 'id' in result.data) {
+          await revealCreated(result.data.id);
+        }
+      } finally {
+        set({ busy: false });
+      }
+    },
+    attachment(source: string, attached: boolean) {
+      if (project === null) return Promise.resolve();
+      return mutate(
+        () =>
+          attached
+            ? client.request('put', '/_pb/projects/{project}/sources/{source}/attachment', {
+                params: { project, source },
+                body: {},
+              })
+            : client.request('delete', '/_pb/projects/{project}/sources/{source}/attachment', {
+                params: { project, source },
+              }),
+        () => load(),
+      );
+    },
     async replayed(result: ReplayResult) {
       const prefix =
         project === null ? '/_pb/sources' : `/_pb/projects/${encodeURIComponent(project)}/sources`;
       const namesChange = /^\/_pb\/sources\/[^/]+\/names(?:\/[^/]+)?$/.test(result.path);
       if (result.path !== prefix && !result.path.startsWith(`${prefix}/`) && !namesChange) return;
       const selectedNames = state.names?.source;
+      if (result.ok) set({ editor: null, fieldErrors: {}, formError: null });
       await load();
+      if (result.ok && result.createdSourceId) await revealCreated(result.createdSourceId);
       if (selectedNames !== undefined) await names(selectedNames);
     },
     moveSource(source: string, direction: -1 | 1) {
@@ -606,7 +736,14 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
   const [filters, setFilters] = useState<SourceFilters>({ q: '', type: '', scope: '' });
   const filtered = !!(filters.q || filters.type || filters.scope);
-  const items = filterSources(state.items, filters).sort((a, b) => {
+  const membershipKnown = !state.loading && !state.listError && state.next === null;
+  const combined = [
+    ...state.items,
+    ...(membershipKnown
+      ? state.available.filter((candidate) => !state.items.some((item) => item.id === candidate.id))
+      : []),
+  ];
+  const items = filterSources(combined, filters).sort((a, b) => {
     const position = (id: string) => {
       const index = state.order.indexOf(id);
       return index < 0 ? Infinity : index;
@@ -615,9 +752,27 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   });
   return (
     <section aria-labelledby="page-heading" className="grid gap-6">
-      <h1 id="page-heading" className="text-xl font-semibold">
-        Sources
-      </h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 id="page-heading" className="text-xl font-semibold">
+          Sources
+        </h1>
+        <Button type="button" disabled={state.busy} onClick={() => model.openEditor()}>
+          Add source
+        </Button>
+      </div>
+      {state.editor !== null ? (
+        <SourceForm
+          source={state.editor === 'create' ? null : state.editor}
+          busy={state.busy}
+          errors={state.fieldErrors}
+          alert={state.formError}
+          onSubmit={(body) => {
+            if (state.editor === 'create') setFilters({ q: '', type: '', scope: '' });
+            void model.saveSource(body);
+          }}
+          onClose={() => model.closeEditor()}
+        />
+      ) : null}
       <p className="text-neutral-600">
         Upstream registries and private repositories. Attached sources are tried in precedence
         order.
@@ -633,7 +788,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           {
             key: 'type',
             label: 'Type',
-            options: [...new Set(state.items.map((item) => item.type))].sort(),
+            options: [...new Set(combined.map((item) => item.type))].sort(),
           },
           { key: 'scope', label: 'Source scope', options: ['organization', 'project'] },
         ]}
@@ -646,10 +801,25 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         disabled={state.loading || state.busy}
         onClick={() => {
           void model.load();
+          void model.loadAvailable();
         }}
       >
         Refresh sources
       </Button>
+      {model.project !== null && !membershipKnown && state.available.length > 0 ? (
+        <p className="text-sm text-neutral-600">
+          Load all project sources before attaching organization sources.
+        </p>
+      ) : null}
+      {state.availableLoading ? (
+        <ListState kind="loading" title="Loading organization sources…" />
+      ) : null}
+      {state.availableError ? (
+        <ListState
+          kind="error"
+          title="Organization sources could not be loaded. Project sources are still shown."
+        />
+      ) : null}
       {state.loading ? (
         <ListState kind="loading" title="Loading sources…" />
       ) : !state.listError && items.length === 0 ? (
@@ -769,12 +939,47 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 value: () => '',
                 sortable: false,
                 render: (source) => (
-                  <details>
-                    <summary className="cursor-pointer underline">Edit source</summary>
-                    <div className="mt-3">
-                      <SourceCard source={source} model={model} busy={state.busy} />
-                    </div>
-                  </details>
+                  <div className="flex flex-wrap items-start gap-2">
+                    {model.project === null || source.projectId !== null ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={state.busy}
+                        onClick={() => model.openEditor(source)}
+                      >
+                        Edit
+                      </Button>
+                    ) : null}
+                    {model.project !== null && 'attached' in source ? (
+                      source.attached ? (
+                        <ConfirmAction
+                          action="Detach"
+                          target={`${source.name} (${source.id})`}
+                          scope={`Project: ${model.project}`}
+                          description="Detaching this source stops this project from resolving packages through it. You can attach it again later."
+                          disabled={state.busy}
+                          onConfirm={() => void model.attachment(source.id, false)}
+                        />
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={state.busy}
+                          onClick={() => void model.attachment(source.id, true)}
+                        >
+                          Attach
+                        </Button>
+                      )
+                    ) : null}
+                    <details>
+                      <summary className="cursor-pointer underline">Edit source</summary>
+                      <div className="mt-3">
+                        <SourceCard source={source} model={model} busy={state.busy} />
+                      </div>
+                    </details>
+                  </div>
                 ),
               },
             ]}
@@ -789,6 +994,14 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           }}
         >
           Load more sources
+        </Button>
+      ) : null}
+      {state.availableNext !== null ? (
+        <Button
+          disabled={state.availableLoading || state.busy}
+          onClick={() => void model.loadAvailable(true)}
+        >
+          Load more organization sources
         </Button>
       ) : null}
       {state.credentialSource !== null ? (
@@ -942,6 +1155,7 @@ export function SourcesPage() {
   const model = useMemo(() => createSourcesModel(services, project), [services, project]);
   useEffect(() => {
     void model.load();
+    void model.loadAvailable();
   }, [model]);
   useEffect(
     () =>

@@ -21,15 +21,12 @@ import {
   type InstallationTokens,
 } from './installation-token.js';
 
+import { tokenRest } from './token-rest.js';
+
 const MAX_RATE_LIMIT_WAIT_SECONDS = 3600;
 
-export class RateLimited extends Error {
-  readonly code = 'rate_limited';
-  constructor(readonly resetEpochSeconds: number) {
-    super('GitHub rate limit exhausted');
-    this.name = 'RateLimited';
-  }
-}
+import { RateLimited } from './rate-limited.js';
+export { RateLimited } from './rate-limited.js';
 
 export class GithubProviderError extends Error {
   constructor(
@@ -42,7 +39,7 @@ export class GithubProviderError extends Error {
 }
 
 export interface GithubProviderOptions {
-  /** Caller caches one service per credential; null rejects a missing or non-github_app credential. */
+  /** Resolves an installation token service for App sources; token sources do not call this. */
   readonly tokensFor: (
     source: ProviderSource,
   ) => InstallationTokens | null | Promise<InstallationTokens | null>;
@@ -66,8 +63,8 @@ function repository(source: ProviderSource) {
   if (
     !/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/.test(config.repository) ||
     ['.', '..'].includes(config.repository.split('/')[1]!) ||
-    !Number.isSafeInteger(config.installationId) ||
-    (config.installationId ?? 0) <= 0
+    (config.installationId !== undefined &&
+      (!Number.isSafeInteger(config.installationId) || config.installationId <= 0))
   ) {
     throw new GithubProviderError('invalid_request');
   }
@@ -102,14 +99,17 @@ function record(value: unknown): value is Record<string, unknown> {
 export function createGithubProvider(options: GithubProviderOptions): SourceProvider {
   async function session(ctx: ProviderContext, source: ProviderSource) {
     const repo = repository(source);
-    const tokens = await options.tokensFor(source);
-    if (tokens === null) throw new GithubProviderError('invalid_request');
+    const tokenMode = repo.config.installationId === undefined;
+    const tokens = tokenMode ? null : await options.tokensFor(source);
+    if (tokenMode && ctx.credential === null) throw new UpstreamError('http_status', 401);
+    if (!tokenMode && tokens === null) throw new GithubProviderError('invalid_request');
     const now = () => Math.floor(ctx.clock.now().getTime() / 1000);
     const resetAt = (epochSeconds: number) =>
       Math.min(Math.max(epochSeconds, now() + 1), now() + MAX_RATE_LIMIT_WAIT_SECONDS);
-    let value: string;
+    let value = '';
     try {
-      value = (await tokens.forRepositories(repo.installationId, [repo.name])).value;
+      if (tokens !== null)
+        value = (await tokens.forRepositories(repo.installationId, [repo.name])).value;
     } catch (error) {
       if (error instanceof InstallationTokenError) {
         if (error.code === 'not_found' || error.code === 'unprocessable') {
@@ -136,7 +136,7 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         signal:
           request.signal === undefined ? ctx.signal : AbortSignal.any([ctx.signal, request.signal]),
       });
-      tokens.observe(repo.installationId, response.headers);
+      tokens?.observe(repo.installationId, response.headers);
       const limit = parseRateLimit(response.headers);
       const retryAfter = response.headers.get('retry-after')?.trim();
       if (
@@ -173,13 +173,56 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       ...repo,
       fetch,
       gitCredential: credential(GIT, `Basic ${btoa(`x-access-token:${value}`)}`),
-      apiCredential: credential(API, `Bearer ${value}`),
+      apiCredential: tokenMode ? ctx.credential! : credential(API, `Bearer ${value}`),
+      tokenMode,
     };
   }
   return {
     id: 'github',
     sourceTypes: ['vcs'],
     ecosystems: ['composer'],
+    async listPackages(ctx: ProviderContext, source: ProviderSource, cursor: string | null) {
+      if (cursor !== null) throw new GithubProviderError('invalid_request');
+      const s = await session(ctx, source);
+      if (!s.tokenMode) throw new GithubProviderError('invalid_request');
+      let configuredName = s.config.packageName;
+      if (configuredName !== undefined) {
+        const response = await s.fetch({
+          url: `${API}/repos/${s.repo}`,
+          method: 'GET',
+          purpose: 'api',
+          credential: s.apiCredential,
+          destinations: [API],
+          maxBytes: 1024 * 1024,
+          timeoutMs: 30_000,
+        });
+        cancel(response);
+      }
+      if (configuredName === undefined) {
+        const manifest = await tokenRest(s.fetch, s.apiCredential, s.repo).manifest();
+        if (!record(manifest) || typeof manifest.name !== 'string')
+          throw new GithubProviderError('invalid_response');
+        configuredName = manifest.name;
+      }
+      let name: string;
+      try {
+        name = packageKey(configuredName, { ecosystem: 'composer' });
+      } catch {
+        throw new GithubProviderError('invalid_response');
+      }
+      const digest = await crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(JSON.stringify([s.repo, name])),
+      );
+      return {
+        names: [name],
+        next: null,
+        last: true,
+        snapshot: snapshotRef(
+          `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`,
+        ),
+      };
+    },
     async describe(ctx, source, name, describeOptions) {
       const s = await session(ctx, source);
       const response = await s.fetch({
@@ -215,7 +258,20 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       ) {
         throw new GithubProviderError('skipped');
       }
-      const listing = await lsRefs(s.fetch, s.gitUrl, s.gitCredential);
+      const rest = s.tokenMode ? tokenRest(s.fetch, s.apiCredential, s.repo) : null;
+      const listing = s.tokenMode
+        ? {
+            refs: [
+              ...(s.config.refs.tags ? await rest!.refs('tags') : []),
+              ...(
+                await branches(
+                  rest!,
+                  s.config.refs.branches.filter((name) => name !== '*'),
+                )
+              ).filter((ref) => ref !== null),
+            ],
+          }
+        : await lsRefs(s.fetch, s.gitUrl, s.gitCredential);
       const refs = listing.refs.filter(
         (ref) =>
           (s.config.refs.tags && ref.name.startsWith('refs/tags/')) ||
@@ -250,17 +306,19 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         ),
       );
       const winningRefs = refs.filter((ref) => winningNames.has(ref.name));
-      const files = await readFileAtRefs(
-        {
-          policyFetch: s.fetch,
-          codecs: ctx.codecs,
-          runtime: options.runtime,
-          credential: s.gitCredential,
-        },
-        s.gitUrl,
-        winningRefs,
-        'composer.json',
-      );
+      const files = s.tokenMode
+        ? await rest!.files(winningRefs)
+        : await readFileAtRefs(
+            {
+              policyFetch: s.fetch,
+              codecs: ctx.codecs,
+              runtime: options.runtime,
+              credential: s.gitCredential,
+            },
+            s.gitUrl,
+            winningRefs,
+            'composer.json',
+          );
       let complete =
         files.length === winningRefs.length &&
         files.every((file) => file.reason === undefined && file.text !== null);
@@ -360,4 +418,18 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       return { body: response.body, size: Number.isSafeInteger(size) ? size : null };
     },
   };
+}
+
+async function branches(rest: ReturnType<typeof tokenRest>, names: readonly string[]) {
+  const results: Awaited<ReturnType<typeof rest.branch>>[] = new Array(names.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(4, names.length) }, async () => {
+      while (next < names.length) {
+        const index = next++;
+        results[index] = await rest.branch(names[index]!);
+      }
+    }),
+  );
+  return results;
 }

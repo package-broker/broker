@@ -111,6 +111,7 @@ const ROLE_IDS: Readonly<Record<DefaultRoleKey, string>> = {
 interface World {
   readonly pair: OpenedAuthDatabase;
   readonly a: OrgContext;
+  readonly b: OrgContext;
 }
 
 function st(sql: string, ...params: Statement['params']): Statement {
@@ -166,9 +167,9 @@ async function withDatabase(
 async function withWorld(open: Open, body: (world: World) => Promise<void>): Promise<void> {
   await withDatabase(open, async (pair) => {
     await migrate(pair.executor, await loadSources(), { holder: 'auth-contract' });
-    const { a } = await seedTwoOrganizations(pair.executor);
+    const { a, b } = await seedTwoOrganizations(pair.executor);
     await pair.executor.batch(seedDefaultsStatements(a, { now: NOW, ids: ROLE_IDS }));
-    await body({ pair, a });
+    await body({ pair, a, b });
   });
 }
 
@@ -227,6 +228,7 @@ function gatedPair(first: SqlExecutor, second: SqlExecutor): [SqlExecutor, SqlEx
 async function clearWorld({ pair, a }: World): Promise<void> {
   await pair.executor.batch(
     [
+      'audit_pending',
       'session',
       'user_group',
       'identity',
@@ -432,6 +434,7 @@ function newSession(id: string, userId = ADMIN, now = NOW): NewSession {
 
 function successInput(snapshot: LocalLoginSnapshot, session: NewSession) {
   return {
+    audit: mutationAudit('session.login', session.id),
     snapshot,
     step: STEP,
     rehash: null,
@@ -646,9 +649,58 @@ const totpReplay: Case = async (open, wrap = (executor) => executor) => {
       expect(results.filter(Boolean)).toHaveLength(1);
       expect(await countOf(pair.executor, 'SELECT count(*) AS n FROM session')).toBe(1);
       expect(
+        await countOf(
+          pair.executor,
+          'SELECT count(*) AS n FROM audit_pending WHERE org_id = ?',
+          a.orgId,
+        ),
+      ).toBe(1);
+      expect(
         await rowsOf(pair.executor, 'SELECT totp_last_step, failed_count FROM local_login'),
       ).toEqual([{ totp_last_step: STEP, failed_count: 0 }]);
     }
+  });
+};
+
+const localReauthForeignSession: Case = async (open, wrap = (executor) => executor) => {
+  await withWorld(open, async (world) => {
+    const { pair, a, b } = world;
+    await pair.executor.batch([
+      ...adminAccount(a),
+      ...enabledLogin(a, ADMIN, LAST_STEP),
+      userRow(b, U2, 'foreign@example.test'),
+      sessionRow(b, OTHER_SESSION, U2),
+    ]);
+    const snapshot = await snapshotOf(pair.executor, a);
+    const input = {
+      ...successInput(snapshot, newSession(NEW_SESSION)),
+      audit: mutationAudit('session.reauth', OTHER_SESSION),
+      session: null,
+      reauthSessionId: OTHER_SESSION,
+    };
+    expect(await createLocalLoginSuccessWriter(wrap(pair.executor)).succeed(a, input)).toBe(false);
+    expect(
+      await countOf(
+        pair.executor,
+        'SELECT count(*) AS n FROM audit_pending WHERE org_id = ?',
+        a.orgId,
+      ),
+    ).toBe(0);
+    expect(
+      await rowsOf(
+        pair.executor,
+        'SELECT totp_last_step FROM local_login WHERE org_id = ?',
+        a.orgId,
+      ),
+    ).toEqual([{ totp_last_step: LAST_STEP }]);
+    expect(
+      await rowsOf(
+        pair.executor,
+        'SELECT reauth_at FROM session WHERE org_id = ? AND id = ?',
+        b.orgId,
+        OTHER_SESSION,
+      ),
+    ).toEqual([{ reauth_at: null }]);
   });
 };
 
@@ -1579,6 +1631,7 @@ export const authContractCases = {
   upgrade,
   resetCleanup,
   totpReplay,
+  localReauthForeignSession,
   resetRace,
   setupRestage,
   bootstrapPromotion,
@@ -1639,6 +1692,8 @@ export function describeAuthContract(name: string, open: Open): void {
       authContractCases.totpSetupRequired(open));
     it('11. access mutation guard: true lands, false and NULL fail with UNIQUE and leave no row', () =>
       authContractCases.accessMutationGuard(open));
+    it('12. local reauthentication refuses a foreign session without staging audit', () =>
+      authContractCases.localReauthForeignSession(open));
   });
 }
 

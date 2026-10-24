@@ -18,6 +18,7 @@ import { Select } from '../components/ui/select.js';
 import { DataTable } from '../components/ui/table.js';
 import { STATUS_LABELS, StatusBadge } from '../components/ui/status-badge.js';
 import { Time } from '../components/ui/time.js';
+import { VulnerabilityStatus } from '../components/vulnerability-status.js';
 import { IdText } from '../components/ui/id-text.js';
 import { ListState } from '../components/ui/list-state.js';
 import { FilterToolbar } from '../components/ui/toolbar.js';
@@ -424,6 +425,17 @@ export function PackageVersions(props: {
           label: 'Status',
           value: (version) => version.status,
           render: (version) => <StatusBadge status={version.status} />,
+        },
+        {
+          key: 'vulnerability',
+          label: 'Known vulnerabilities',
+          value: (version) => version.vulnerability.status,
+          render: (version) => (
+            <VulnerabilityStatus
+              assessment={version.vulnerability}
+              sourceType={props.item.source.type}
+            />
+          ),
         },
         {
           key: 'published',

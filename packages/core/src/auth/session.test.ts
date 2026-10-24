@@ -6,6 +6,7 @@ import {
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
+  authCallMetaOf,
   clientIpOf,
   createSessionService,
   newSessionSecrets,
@@ -178,6 +179,20 @@ describe('sessionMetaOf', () => {
       expect(
         (await sessionMetaOf(requestWith(null, { 'x-forwarded-for': ip }), 'test-request-id')).ip,
       ).toBeNull();
+    }
+  });
+
+  it('keeps only an IP literal from a custom client IP resolver', async () => {
+    const rejected: unknown[] = ['not-an-ip', '1.2.3.4:80', '', 42];
+    for (const value of rejected) {
+      const resolver = (): string | null => value as string | null;
+      expect(authCallMetaOf(requestWith(null), 'test-request-id', resolver).ip).toBeNull();
+      expect((await sessionMetaOf(requestWith(null), 'test-request-id', resolver)).ip).toBeNull();
+    }
+    for (const ip of ['203.0.113.7', '2001:db8::1']) {
+      const resolver = (): string | null => ip;
+      expect(authCallMetaOf(requestWith(null), 'test-request-id', resolver).ip).toBe(ip);
+      expect((await sessionMetaOf(requestWith(null), 'test-request-id', resolver)).ip).toBe(ip);
     }
   });
 

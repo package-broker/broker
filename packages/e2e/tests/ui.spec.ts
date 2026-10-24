@@ -387,6 +387,109 @@ test.describe('Node management UI', () => {
     await assertSecretAbsent(page, material);
   });
 
+  test('creates a Composer source, attaches it, sets a credential and detaches it', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'sources');
+    await page.locator('details.filter-toolbar > summary').click();
+    await page.getByLabel('Name (loaded sources)', { exact: true }).fill('No matching source');
+    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+    await expect(page.getByText('No sources match these filters.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await expect(create).toBeVisible();
+    await create.getByLabel('Ecosystem', { exact: true }).selectOption('npm');
+    await expect(create.getByLabel('Scopes (one per line)', { exact: true })).toBeVisible();
+    await expect(create.getByLabel('Packages (one per line)', { exact: true })).toHaveCount(0);
+    await expect(create.getByLabel('Type', { exact: true }).locator('option')).toHaveText([
+      'npm_registry',
+      'npmjs_proxy',
+    ]);
+    await create.getByLabel('Ecosystem', { exact: true }).selectOption('composer');
+    await expect(create.getByLabel('Scopes (one per line)', { exact: true })).toHaveCount(0);
+    await create.getByLabel('Name', { exact: true }).fill('Browser Composer repository');
+    await create
+      .getByLabel('Repository URL', { exact: true })
+      .fill('https://composer.example.test');
+    await create.getByLabel('Packages (one per line)', { exact: true }).fill('browser/package');
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    expect((await created).status()).toBe(201);
+    await expect(create).toHaveCount(0);
+    await expect(
+      page.getByRole('combobox', { name: 'Credential kind', exact: true }),
+    ).toBeVisible();
+    const sourceRow = () =>
+      page.getByRole('row').filter({ hasText: 'Browser Composer repository' });
+    await expect(sourceRow()).toBeVisible();
+
+    await sourceRow().getByRole('button', { name: 'Edit', exact: true }).click();
+    const edit = activeDialog(page, 'Edit source');
+    await edit.getByLabel('Poll interval (seconds)', { exact: true }).fill('600');
+    await edit.getByLabel('Replace type-specific configuration', { exact: true }).check();
+    await edit.getByLabel('Packages (one per line)', { exact: true }).fill('browser/updated');
+    const updated = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'PATCH' &&
+        /\/_pb\/sources\/[^/]+$/.test(new URL(r.url()).pathname),
+    );
+    await edit.getByRole('button', { name: 'Save source', exact: true }).click();
+    const updateResponse = await updated;
+    expect(updateResponse.status()).toBe(204);
+    expect(updateResponse.request().postDataJSON()).toMatchObject({
+      pollIntervalSeconds: 600,
+      config: { selection: { packages: ['browser/updated'] } },
+    });
+    await expect(edit).toHaveCount(0);
+
+    await go(page, 'sources', 'project=browser-fixture');
+    await expect(sourceRow()).toBeVisible();
+    const attached = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname.endsWith('/attachment'),
+    );
+    await sourceRow().getByRole('button', { name: 'Attach', exact: true }).click();
+    expect((await attached).status()).toBe(204);
+    await expect(sourceRow().getByRole('button', { name: 'Detach', exact: true })).toBeVisible();
+
+    await go(page, 'sources');
+    await sourceRow().locator('summary').click();
+    await sourceRow().getByRole('button', { name: 'Set credential', exact: true }).click();
+    const material = randomBytes(32).toString('base64url');
+    await page
+      .getByRole('combobox', { name: 'Credential kind', exact: true })
+      .selectOption('bearer');
+    await fillSecret(page.getByLabel('token', { exact: true }), material);
+    const saved = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname.endsWith('/credential'),
+    );
+    await page.getByRole('button', { name: 'Save credential', exact: true }).click();
+    expect((await saved).status()).toBe(204);
+    await expect(page.getByRole('status').filter({ hasText: 'credential set' })).toBeVisible();
+    await assertSecretAbsent(page, material);
+
+    await go(page, 'sources', 'project=browser-fixture');
+    await sourceRow().getByRole('button', { name: 'Detach', exact: true }).click();
+    const detach = activeDialog(page, 'Detach?');
+    await expect(detach).toContainText('Browser Composer repository');
+    await expect(detach).toContainText('Project: browser-fixture');
+    await detach.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(sourceRow().getByRole('button', { name: 'Detach', exact: true })).toBeVisible();
+    await sourceRow().getByRole('button', { name: 'Detach', exact: true }).click();
+    const detached = page.waitForResponse(
+      (r) => r.request().method() === 'DELETE' && new URL(r.url()).pathname.endsWith('/attachment'),
+    );
+    await activeDialog(page, 'Detach?')
+      .getByRole('button', { name: 'Confirm detach', exact: true })
+      .click();
+    expect((await detached).status()).toBe(204);
+    await expect(sourceRow().getByRole('button', { name: 'Attach', exact: true })).toBeVisible();
+    await assertSecretAbsent(page, material);
+  });
+
   for (const transport of ['no-cors fetch', 'HTML form'] as const) {
     test(`refuses a cross-origin POST from ${transport} with no auth state change`, async ({
       context,

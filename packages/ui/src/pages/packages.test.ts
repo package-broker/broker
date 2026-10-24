@@ -87,6 +87,7 @@ function fixture(
     message?: string;
     items?: PackageItem[];
     versionStatus?: VersionItem['status'];
+    vulnerability?: VersionItem['vulnerability'];
   } = {},
 ) {
   const fetch = vi.fn(async (url: string, init: RequestInit) => {
@@ -110,7 +111,13 @@ function fixture(
     if (url === '/_pb/projects/web') return Response.json({ id: projectId });
     if (url.includes('/versions'))
       return Response.json({
-        items: [{ ...version, status: options.versionStatus ?? 'active' }],
+        items: [
+          {
+            ...version,
+            status: options.versionStatus ?? 'active',
+            vulnerability: options.vulnerability ?? version.vulnerability,
+          },
+        ],
         next: null,
       });
     return Response.json({ items: options.items ?? [own, shared], next: 'npm:opaque:+/%?=' });
@@ -728,5 +735,60 @@ describe('detail return state', () => {
     });
     expect(f.controller.snapshot().items).toBe(items);
     expect(f.controller.snapshot().next).toBe(next);
+  });
+});
+
+describe('version advisory integration', () => {
+  it.each([null, 'web'])(
+    'shows cached assessments in scope %s without advisory network requests',
+    async (project) => {
+      const f = fixture({
+        vulnerability: {
+          ...version.vulnerability,
+          status: 'affected',
+          reason: null,
+          source: 'osv',
+          fetchedAt: '2026-10-20T12:00:00Z',
+          lastKnownStatus: 'affected',
+          advisoryCount: 2,
+        },
+      });
+      await f.controller.load({ project });
+      await f.controller.open(own.id);
+      const state = f.controller.snapshot();
+      const html = renderToString(
+        createElement(PackageVersions, {
+          item: state.selected!,
+          versions: state.versions,
+          access: manager,
+          busy: false,
+          onAction: vi.fn(),
+        }),
+      );
+      expect(html).toContain('Known vulnerabilities');
+      expect(html).toContain('Known advisories: 2');
+      expect(html).toContain('Advisory details pending');
+      expect(labels(html)).toEqual(['quarantine', 'tombstone']);
+      const expected = project === null ? '/_pb/packages' : '/_pb/projects/web/packages';
+      expect(f.fetch.mock.calls.map(([url]) => url)).toContain(`${expected}/${own.id}/versions`);
+      expect(
+        f.fetch.mock.calls.every(([url, init]) => url.startsWith('/_pb/') && init.method === 'GET'),
+      ).toBe(true);
+      expect(f.fetch).toHaveBeenCalledTimes(project === null ? 3 : 5);
+    },
+  );
+
+  it('keeps generic masks identical across proxy source metadata without inferring a cause', () => {
+    const html = [
+      { type: 'npmjs_proxy' as const, name: 'Public registry' },
+      { type: 'packagist_proxy' as const, name: 'Private holder' },
+      { type: 'npmjs_proxy' as const, name: 'Registration pattern' },
+      { type: 'packagist_proxy' as const, name: 'Evidence budget' },
+    ].map((source) => panel({ ...own, source: { ...own.source, ...source } }, reader));
+    expect(new Set(html).size).toBe(1);
+    expect(html[0]).toContain('Not checked');
+    expect(html[0]).toContain('Only verified public proxy packages are checked.');
+    expect(html[0]).not.toMatch(/private|holder|pattern|budget/i);
+    expect(panel(own, reader)).toContain('Not checked: private package');
   });
 });

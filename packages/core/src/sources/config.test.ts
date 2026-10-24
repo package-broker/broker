@@ -467,16 +467,25 @@ describe('round 2', () => {
       ),
     ).toEqual(['credential']);
     expect(
-      problems(
-        parse(
-          'packagist_proxy',
-          'composer',
-          UPSTREAM_DEFAULTS.packagist.url,
-          {},
-          { hasCredential: true },
-        ),
-      ),
-    ).toEqual(['credential']);
+      parse(
+        'packagist_proxy',
+        'composer',
+        UPSTREAM_DEFAULTS.packagist.url,
+        {},
+        {
+          hasCredential: true,
+        },
+      ).ok,
+    ).toBe(true);
+    expect(
+      parse(
+        'packagist_proxy',
+        'composer',
+        UPSTREAM_DEFAULTS.packagist.url,
+        { githubToken: false },
+        { hasCredential: true },
+      ).ok,
+    ).toBe(true);
     expect(
       parse(
         'packagist_proxy',

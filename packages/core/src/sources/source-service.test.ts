@@ -1822,3 +1822,141 @@ it('rejects a URL query on update with a stored query credential without strippi
   expect(f.sources.update).not.toHaveBeenCalled();
   expect(f.credentialRepository.get).not.toHaveBeenCalled();
 });
+
+describe('Packagist stored credentials', () => {
+  it.each([{ name: 'renamed' }, { pollIntervalSeconds: 300 }])(
+    'allows unrelated edits with a stored non-bearer credential: %j',
+    async (patch) => {
+      const f = setup();
+      f.sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        type: 'packagist_proxy',
+        url: 'https://repo.packagist.org',
+        configJson: JSON.stringify({ githubToken: false }),
+        credentialId: 'existing',
+      } as SourceRecord);
+      f.credentialRepository.get.mockResolvedValue({
+        id: 'existing',
+        projectId: null,
+        kind: 'http_basic',
+      });
+      expect(await f.service.update(ctx, org, fence, 'source', patch)).toMatchObject({
+        ok: true,
+      });
+      expect(f.sources.update).toHaveBeenCalledWith(
+        ctx,
+        fence,
+        expect.objectContaining({ changes: patch }),
+      );
+      expect(f.credentialRepository.get).not.toHaveBeenCalled();
+      f.sources.update.mockClear();
+      expect(
+        await f.service.update(ctx, org, fence, 'source', {
+          configJson: JSON.stringify({ githubToken: true }),
+        }),
+      ).toMatchObject({ ok: false, error: 'invalid_config' });
+      expect(f.credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
+      expect(f.sources.update).not.toHaveBeenCalled();
+      expect(f.credentials.prepare).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects enabling token mode when the stored credential is outside the organization scope', async () => {
+    const f = setup();
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'packagist_proxy',
+      url: 'https://repo.packagist.org',
+      configJson: JSON.stringify({ githubToken: false }),
+      credentialId: 'existing',
+    } as SourceRecord);
+    f.credentialRepository.get.mockResolvedValue(null);
+    expect(
+      await f.service.update(ctx, org, fence, 'source', {
+        configJson: JSON.stringify({ githubToken: true }),
+      }),
+    ).toEqual({ ok: false, error: 'credential_scope_mismatch' });
+    expect(f.credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
+    expect(f.sources.update).not.toHaveBeenCalled();
+    expect(f.credentials.prepare).not.toHaveBeenCalled();
+  });
+
+  it.each(['node', 'cloudflare'] as const)(
+    'stages a bearer without enabling token mode on %s',
+    async (runtime) => {
+      const f = setup(runtime);
+      f.sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        type: 'packagist_proxy',
+        url: 'https://repo.packagist.org',
+        configJson: JSON.stringify({ githubToken: false }),
+        credentialId: null,
+      } as SourceRecord);
+      const plaintext = JSON.stringify({ token: 'T972-private-token-sentinel' });
+      const result = await f.service.update(ctx, org, fence, 'source', {
+        credential: { kind: 'bearer', plaintext },
+      });
+      expect(result).toMatchObject({ ok: true });
+      expect(f.sources.update).toHaveBeenCalledWith(
+        ctx,
+        fence,
+        expect.objectContaining({
+          changes: { credentialId: 'credential' },
+        }),
+      );
+      expect(JSON.stringify([result, f.sources.update.mock.calls, f.log.mock.calls])).not.toContain(
+        'T972-private-token-sentinel',
+      );
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
+    'validates the stored kind and refuses removing an enabled token on %s',
+    async (runtime) => {
+      const f = setup(runtime);
+      f.sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        type: 'packagist_proxy',
+        url: 'https://repo.packagist.org',
+        configJson: JSON.stringify({ githubToken: false }),
+        credentialId: 'existing',
+      } as SourceRecord);
+      f.credentialRepository.get.mockResolvedValue({
+        id: 'existing',
+        projectId: null,
+        kind: 'http_basic',
+      });
+      const enable = { configJson: JSON.stringify({ githubToken: true }) };
+      expect(await f.service.update(ctx, org, fence, 'source', enable)).toMatchObject({
+        ok: false,
+        error: 'invalid_config',
+      });
+      expect(f.sources.update).not.toHaveBeenCalled();
+      f.credentialRepository.get.mockResolvedValue({
+        id: 'existing',
+        projectId: null,
+        kind: 'bearer',
+      });
+      expect(await f.service.update(ctx, org, fence, 'source', enable)).toMatchObject({ ok: true });
+      expect(f.credentialRepository.get).toHaveBeenLastCalledWith(ctx, 'existing');
+      f.sources.update.mockClear();
+      f.sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        type: 'packagist_proxy',
+        url: 'https://repo.packagist.org',
+        configJson: enable.configJson,
+        credentialId: 'existing',
+      } as SourceRecord);
+      expect(await f.service.update(ctx, org, fence, 'source', { credential: null })).toMatchObject(
+        { ok: false, error: 'invalid_config' },
+      );
+      expect(f.sources.update).not.toHaveBeenCalled();
+      expect(f.log).not.toHaveBeenCalled();
+    },
+  );
+});

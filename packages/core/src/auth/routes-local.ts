@@ -1,6 +1,6 @@
 import type { $ZodType, output } from 'zod/v4/core';
 import { CsrfError, assertSameOrigin } from './csrf.js';
-import { sessionMetaOf } from './session.js';
+import { authCallMetaOf, sessionMetaOf } from './session.js';
 import type { LocalLoginService } from './local-login.js';
 import type { LocalSetupService } from './local-setup.js';
 import type { SessionService } from './session.js';
@@ -169,7 +169,7 @@ export function createLocalRoutes(deps: {
         const result = await setup.finish(
           org,
           body,
-          await sessionMetaOf(ctx.request, deps.clientIp),
+          await sessionMetaOf(ctx.request, ctx.requestId, deps.clientIp),
         );
         if (result.ok) {
           log({
@@ -207,7 +207,7 @@ export function createLocalRoutes(deps: {
         const result = await local.login(
           org,
           body,
-          await sessionMetaOf(ctx.request, deps.clientIp),
+          await sessionMetaOf(ctx.request, ctx.requestId, deps.clientIp),
         );
         if (result.ok) {
           log({
@@ -237,7 +237,12 @@ export function createLocalRoutes(deps: {
         const authenticated = await sessions.authenticate(org, ctx.request);
         if (authenticated === null) return unauthorized(ctx);
         await sessions.assertCsrf(ctx.request, authenticated);
-        const result = await local.reauth(org, authenticated, body);
+        const result = await local.reauth(
+          org,
+          authenticated,
+          body,
+          authCallMetaOf(ctx.request, ctx.requestId, deps.clientIp),
+        );
         if (result.ok) {
           log({
             level: 'info',

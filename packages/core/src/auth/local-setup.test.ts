@@ -29,7 +29,12 @@ const OTHER_USER = '01J0USERB0000000000000000B';
 const EMAIL = 'admin@example.test';
 const PASSWORD = 'correct horse battery staple';
 const ORIGIN = 'https://broker.example.test';
-const META: SessionMeta = { ip: '203.0.113.7', userAgent: 'vitest', previousSecretHash: null };
+const META: SessionMeta = {
+  requestId: 'test-request-id',
+  ip: '203.0.113.7',
+  userAgent: 'vitest',
+  previousSecretHash: null,
+};
 
 const SIGN = 4;
 const keyring = createKeyring([

@@ -79,6 +79,7 @@ interface Harness {
 }
 
 interface Options {
+  readonly clientIp?: (request: Request) => string | null;
   readonly sink?: ObsRecordSink;
   readonly loginResult?: LocalResult;
   readonly reauthResult?: Awaited<ReturnType<LocalLoginService['reauth']>>;
@@ -146,6 +147,7 @@ async function harness(options: Options = {}): Promise<Harness> {
         setup: { start, finish } as unknown as LocalSetupService,
         sessions,
         publicOrigin: ORIGIN,
+        ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
         log,
       }),
     ),
@@ -200,6 +202,47 @@ async function errorOf(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe('createLocalRoutes', () => {
+  it.each([
+    [LOGIN, loginBody, 'login'],
+    [FINISH, { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code }, 'finish'],
+    [REAUTH, { password: SENTINEL.password, code: SENTINEL.code }, 'reauth'],
+  ] as const)('passes request metadata to %s', async (path, body, service) => {
+    const h = await harness();
+    const response = await h.fetch(
+      post(path, body, {
+        ...sessionHeaders,
+        'cf-connecting-ip': '203.0.113.7',
+      }),
+    );
+    expect(response.status).toBe(204);
+    const requestId = response.headers.get('x-request-id');
+    expect(requestId).toEqual(expect.any(String));
+    expect(h[service]).toHaveBeenCalledWith(
+      ORG,
+      ...(service === 'reauth' ? [expect.anything()] : []),
+      body,
+      service === 'reauth'
+        ? { requestId, ip: '203.0.113.7' }
+        : expect.objectContaining({ requestId, ip: '203.0.113.7' }),
+    );
+  });
+
+  it.each([LOGIN, FINISH, REAUTH])('preserves a null runtime IP for %s', async (path) => {
+    const clientIp = vi.fn(() => null);
+    const h = await harness({ clientIp });
+    const body =
+      path === FINISH
+        ? { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code }
+        : path === LOGIN
+          ? loginBody
+          : { password: SENTINEL.password, code: SENTINEL.code };
+    const request = post(path, body, { ...sessionHeaders, 'cf-connecting-ip': '203.0.113.7' });
+    expect((await h.fetch(request)).status).toBe(204);
+    expect(clientIp).toHaveBeenCalledExactlyOnceWith(request);
+    const spy = path === LOGIN ? h.login : path === FINISH ? h.finish : h.reauth;
+    expect(spy.mock.calls[0]?.at(-1)).toEqual(expect.objectContaining({ ip: null }));
+  });
+
   it('declares four public POST routes under /_pb/auth/local', () => {
     const routes = createLocalRoutes({
       local: {} as LocalLoginService,
@@ -594,7 +637,7 @@ describe('createLocalRoutes', () => {
       const h = await harness();
       const body = { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code };
 
-      await h.fetch(
+      const response = await h.fetch(
         post(FINISH, body, {
           cookie: `__Host-pb_session=${SESSION_SECRET}`,
           'user-agent': 'ua-finish',
@@ -603,6 +646,7 @@ describe('createLocalRoutes', () => {
 
       const calls = h.finish.mock.calls as unknown as [unknown, unknown, unknown][];
       expect(calls[0]?.[2]).toEqual({
+        requestId: response.headers.get('x-request-id'),
         ip: null,
         userAgent: 'ua-finish',
         previousSecretHash: await sha256Hex(SESSION_SECRET),

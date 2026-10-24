@@ -18,8 +18,12 @@ export const SESSION_IDLE_MS = 3_600_000;
 export const SESSION_TOUCH_MS = 300_000;
 export const REAUTH_WINDOW_MS = 600_000;
 
-export interface SessionMeta {
+export type AuthCallMeta = {
+  readonly requestId: string;
   readonly ip: string | null;
+};
+
+export interface SessionMeta extends AuthCallMeta {
   readonly userAgent: string | null;
   readonly previousSecretHash: string | null;
 }
@@ -44,7 +48,7 @@ export interface SessionService {
   setCookies(secrets: SessionSecrets, expiresAt: string): readonly string[];
   clearCookies(): readonly string[];
   /** Repository failures propagate; the route must still send `clearCookies()` when it catches one. */
-  logout(ctx: OrgContext, request: Request): Promise<readonly string[]>;
+  logout(ctx: OrgContext, request: Request, meta: AuthCallMeta): Promise<readonly string[]>;
 }
 
 const SESSION_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -70,11 +74,19 @@ function nonEmpty(value: string | null): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
-function clientIp(request: Request): string | null {
+export function clientIpOf(request: Request): string | null {
   const candidate =
     nonEmpty(request.headers.get('cf-connecting-ip')) ??
     nonEmpty(request.headers.get('x-forwarded-for')?.split(',')[0] ?? null);
   return candidate !== null && IP_PATTERN.test(candidate) ? candidate : null;
+}
+
+export function authCallMetaOf(
+  request: Request,
+  requestId: string,
+  resolveClientIp: (request: Request) => string | null = clientIpOf,
+): AuthCallMeta {
+  return { requestId, ip: resolveClientIp(request) };
 }
 
 function timestampMs(value: string): number {
@@ -87,11 +99,12 @@ function timestampMs(value: string): number {
 
 export async function sessionMetaOf(
   request: Request,
-  resolveClientIp: (request: Request) => string | null = clientIp,
+  requestId: string,
+  resolveClientIp: (request: Request) => string | null = clientIpOf,
 ): Promise<SessionMeta> {
   const secret = sessionSecretOf(request);
   return {
-    ip: resolveClientIp(request),
+    ...authCallMetaOf(request, requestId, resolveClientIp),
     userAgent: nonEmpty(request.headers.get('user-agent')),
     previousSecretHash: secret === null ? null : await sha256Hex(secret),
   };

@@ -535,6 +535,48 @@ async function liveResources(
       throw new CloudflareError('jurisdiction_conflict', 8);
   }
 }
+export async function deploymentDomain(
+  api: CloudflareApi,
+  script: string,
+  domain: string | undefined,
+): Promise<ManagedDomain | null> {
+  let foundDomain: ManagedDomain | null = null;
+  const domains = await api.snapshot('/workers/domains');
+  for (const d of domains) {
+    if (d.hostname === domain || d.service === script) {
+      if (
+        foundDomain ||
+        d.service !== script ||
+        d.hostname !== domain ||
+        d.environment !== 'production' ||
+        !safeId(d.id) ||
+        typeof d.zone_id !== 'string' ||
+        !/^[a-f0-9]{32}$/.test(d.zone_id)
+      )
+        return conflict('domain');
+      foundDomain = {
+        id: d.id,
+        zone_id: d.zone_id,
+        hostname: hostname(String(d.hostname)),
+        service: d.service,
+        environment: 'production',
+      };
+    }
+  }
+  return foundDomain;
+}
+
+export async function workersDevOrigin(api: CloudflareApi, script: string): Promise<string> {
+  const registration = await api.request('/workers/subdomain').catch((error: unknown) => {
+    if (error instanceof CloudflareError && error.status === 404) return { result: {} };
+    throw error;
+  });
+  const sub = object(registration.result).subdomain;
+  if (typeof sub !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(sub))
+    throw new CloudflareError('workers_dev_subdomain_missing', 2, false, 'deploy');
+  return `https://${script}.${sub}.workers.dev`;
+}
+
 async function readSettings(
   api: CloudflareApi,
   base: string,
@@ -611,29 +653,7 @@ async function readSettings(
       }
     }
   }
-  let foundDomain: ManagedDomain | null = null;
-  const domains = await api.snapshot('/workers/domains');
-  for (const d of domains) {
-    if (d.hostname === domain || d.service === j.identity.script_name) {
-      if (
-        foundDomain ||
-        d.service !== j.identity.script_name ||
-        d.hostname !== domain ||
-        d.environment !== 'production' ||
-        !safeId(d.id) ||
-        typeof d.zone_id !== 'string' ||
-        !/^[a-f0-9]{32}$/.test(d.zone_id)
-      )
-        return conflict('domain');
-      foundDomain = {
-        id: d.id,
-        zone_id: d.zone_id,
-        hostname: hostname(String(d.hostname)),
-        service: d.service,
-        environment: 'production',
-      };
-    }
-  }
+  const foundDomain = await deploymentDomain(api, j.identity.script_name, domain);
   return {
     endpoints: policy,
     schedules,
@@ -1386,16 +1406,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       if (annotations['pb-maintenance-shell'] === 'true')
         throw new CloudflareError('capability_unknown', 1, false, 'deploy');
     }
-    if (!url) {
-      const registration = await api.request('/workers/subdomain').catch((error: unknown) => {
-        if (error instanceof CloudflareError && error.status === 404) return { result: {} };
-        throw error;
-      });
-      const sub = object(registration.result).subdomain;
-      if (typeof sub !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(sub))
-        throw new CloudflareError('workers_dev_subdomain_missing', 2, false, 'deploy');
-      url = `https://${identity.script_name}.${sub}.workers.dev`;
-    }
+    if (!url) url = await workersDevOrigin(api, identity.script_name);
     if (!exists && !contract.versionsCreateScript && !contract.createScript)
       throw new CloudflareError('capability_unknown');
     if (!contract.assetHash) throw new CloudflareError('capability_unknown');

@@ -4,7 +4,11 @@ export const MAX_LIST_LENGTH = 32;
 export const OVER_CAP: unique symbol = Symbol('over cap');
 export const HIDDEN_KEYS_PROBLEM = 'keys must be own, enumerable string keys';
 
-const POLICY_KEYS: ReadonlySet<string> = new Set(['verifiedDomains', 'autoJoin']);
+const POLICY_KEYS: ReadonlySet<string> = new Set([
+  'verifiedDomains',
+  'emailAuthoritativeDomains',
+  'autoJoin',
+]);
 const NO_KEYS: ReadonlySet<string> = new Set();
 
 export function isPlainContainer(value: unknown): value is object {
@@ -72,15 +76,30 @@ export function checkPolicy(raw: unknown): PolicyCheck {
   }
   const snapshot = Object.freeze({
     verifiedDomains: copyList(copy['verifiedDomains']),
+    emailAuthoritativeDomains:
+      copy['emailAuthoritativeDomains'] === undefined
+        ? []
+        : copyList(copy['emailAuthoritativeDomains']),
     autoJoin: copy['autoJoin'],
   });
+  if (snapshot.emailAuthoritativeDomains === OVER_CAP) {
+    problems.push(`emailAuthoritativeDomains must list at most ${MAX_LIST_LENGTH} domains`);
+  }
   if (snapshot.verifiedDomains === OVER_CAP) {
     problems.push(`verifiedDomains must list at most ${MAX_LIST_LENGTH} domains`);
     if (typeof snapshot.autoJoin !== 'boolean') {
       problems.push('autoJoin must be a boolean');
     }
   } else {
-    problems.push(...domainPolicyProblems(snapshot as DomainPolicy));
+    problems.push(
+      ...domainPolicyProblems({
+        ...snapshot,
+        emailAuthoritativeDomains:
+          snapshot.emailAuthoritativeDomains === OVER_CAP
+            ? undefined
+            : snapshot.emailAuthoritativeDomains,
+      } as DomainPolicy),
+    );
   }
   return { snapshot, problems, groups };
 }

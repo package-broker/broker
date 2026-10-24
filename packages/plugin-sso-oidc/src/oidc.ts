@@ -642,6 +642,7 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
     trustAnchor: `oidc:${issuer}`,
     policy: Object.freeze({
       verifiedDomains: Object.freeze(policy.verifiedDomains.slice()),
+      emailAuthoritativeDomains: Object.freeze([...(policy.emailAuthoritativeDomains ?? [])]),
       autoJoin: policy.autoJoin,
     }),
     supportsReauth: true,

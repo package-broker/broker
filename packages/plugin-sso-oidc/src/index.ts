@@ -100,8 +100,10 @@ function snapshotConfig(raw: unknown): unknown {
   }
   if (isContainer(copy['policy'])) {
     const policy = copyFields(copy['policy']);
-    if (Object.hasOwn(policy, 'verifiedDomains')) {
-      policy['verifiedDomains'] = frozenList(policy['verifiedDomains']);
+    for (const key of ['verifiedDomains', 'emailAuthoritativeDomains']) {
+      if (Object.hasOwn(policy, key)) {
+        policy[key] = frozenList(policy[key]);
+      }
     }
     copy['policy'] = Object.freeze(policy);
   }

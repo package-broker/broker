@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { checkHeldBatch } from './held-batch-smoke.mjs';
 import {
   TRACED_ROUTE,
   buildTraceparentBundle,
@@ -803,6 +804,7 @@ async function run() {
   console.log('smoke:node SIGTERM exit code 0');
 
   await checkPackageRoute();
+  await checkHeldBatch('node');
   await checkTraceparent();
 
   console.log('smoke:node ok');

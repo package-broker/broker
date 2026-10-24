@@ -1,3 +1,4 @@
+import { auditEvent } from '../audit/actions.js';
 import { hashPassword, passwordProblems } from './password.js';
 import type { PasswordProblem } from './password.js';
 import { sha256Hex } from './primitives.js';
@@ -167,7 +168,24 @@ export function createLocalSetupService(deps: LocalSetupDeps): LocalSetupService
 
       const secrets = await newSessionSecrets();
       const expiresAt = isoTimestamp(new Date(now.getTime() + SESSION_ABSOLUTE_MS));
+      const eventId = ids.ulid();
+      const audit = auditEvent({
+        id: eventId,
+        now: nowIso,
+        action: 'setup.complete',
+        actor: { type: 'user', id: snapshot.userId },
+        target: { type: 'user', id: snapshot.userId },
+        projectId: null,
+        context: {
+          opId: eventId,
+          requestId: meta.requestId,
+          sourceIp: meta.ip,
+          tokenSelector: null,
+        },
+      });
+      if (!audit.ok) throw new TypeError('Invalid local setup audit event');
       const completed = await writer.completeSetup(ctx, {
+        audit: audit.event,
         userId: snapshot.userId,
         setupHash,
         expectedCredentialId: credentialId,

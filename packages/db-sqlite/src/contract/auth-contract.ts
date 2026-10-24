@@ -807,6 +807,7 @@ const setupRestage: Case = async (open, wrap = (executor) => executor) => {
         run,
         () =>
           completing.completeSetup(a, {
+            audit: mutationAudit('setup.complete', ADMIN),
             userId: ADMIN,
             setupHash: SETUP_HASH,
             expectedCredentialId: CREDENTIAL,

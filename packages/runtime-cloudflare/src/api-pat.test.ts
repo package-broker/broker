@@ -165,7 +165,12 @@ describe('Workers management API personal access token lifecycle', () => {
           params: [],
         })
       ).map((row) => row.action);
-    expect(await pending()).toEqual(['session.login', 'session.reauth', 'token.issue']);
+    expect(await pending()).toEqual([
+      'setup.complete',
+      'session.login',
+      'session.reauth',
+      'token.issue',
+    ]);
 
     const revoked = await call(
       request(`/_pb/me/tokens/${id}`, {
@@ -176,6 +181,7 @@ describe('Workers management API personal access token lifecycle', () => {
     expect(revoked.status).toBe(204);
     expect((await call(request('/_pb/projects', { headers: bearer }))).status).toBe(401);
     expect(await pending()).toEqual([
+      'setup.complete',
       'session.login',
       'session.reauth',
       'token.issue',

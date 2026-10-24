@@ -58,7 +58,10 @@ export function routesConflict(a: RouteKey, b: RouteKey): boolean {
   }
   return left.every((segment, i) => {
     const other = right[i] as string;
-    return segment === other || segment.startsWith(':') || other.startsWith(':');
+    return (
+      segment === other ||
+      (segment !== '' && other !== '' && (segment.startsWith(':') || other.startsWith(':')))
+    );
   });
 }
 
@@ -286,7 +289,7 @@ export function routeBoundaryProblems(
 
 const API_EXEMPT_PATHS: ReadonlySet<string> = new Set([
   '/_pb/ui',
-  '/_pb/ui/assets/:file',
+  '/_pb/ui/',
   '/_pb/ui/:file',
   '/_pb/ui/setup/document',
   '/_pb/ui/setup/assets/:file',

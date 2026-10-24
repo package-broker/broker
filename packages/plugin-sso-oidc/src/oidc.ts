@@ -220,11 +220,16 @@ function hasNonCanonicalEscape(path: string): boolean {
 
 function issuerFormProblems(issuer: string): string[] {
   const url = new URL(issuer);
+  const authority = issuer.slice(url.protocol.length + 2).split('/', 1)[0] as string;
+  const path = issuer.slice(url.protocol.length + 2 + authority.length);
+  if (authority !== authority.toLowerCase()) {
+    return [
+      `issuer host must be lowercase: ${issuer.slice(0, url.protocol.length + 2)}${authority.toLowerCase()}${path}`,
+    ];
+  }
   if (DEFAULT_PORT.test(issuer) && url.port === '') {
     return ['issuer must not name the default port'];
   }
-  const authority = issuer.slice(url.protocol.length + 2).split('/', 1)[0] as string;
-  const path = issuer.slice(url.protocol.length + 2 + authority.length);
   const serialised =
     url.href.endsWith('/') && url.pathname === '/' ? url.href.slice(0, -1) : url.href;
   const canonical =

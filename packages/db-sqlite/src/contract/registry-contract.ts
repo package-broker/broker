@@ -621,9 +621,11 @@ export const registryContractCases = {
         expect(await snapshot(w)).toEqual(digestBefore);
         await w.seed("UPDATE version SET metadata_json = '{}' WHERE id = 'version-a'");
         await w.seed(
-          "UPDATE source SET ecosystem = 'composer', type = 'composer_repository' WHERE id = 'source-a'",
+          "INSERT INTO source (id, org_id, name, ecosystem, type) SELECT 'source-composer', org_id, 'Composer', 'composer', 'composer_repository' FROM source WHERE id = 'source-a'",
         );
-        await w.seed("UPDATE package SET ecosystem = 'composer' WHERE id = 'package-a'");
+        await w.seed(
+          "UPDATE package SET source_id = 'source-composer', ecosystem = 'composer' WHERE id = 'package-a'",
+        );
         await w.seed("UPDATE version SET composer_shasum = 'published' WHERE id = 'version-a'");
         const composerBefore = await snapshot(w);
         await expect(w.executor.batch(plan().statements)).rejects.toThrow();

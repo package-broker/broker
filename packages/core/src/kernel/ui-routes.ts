@@ -129,6 +129,8 @@ function createRoutes(
     const headers = new Headers({
       etag,
       'content-type': contentType,
+      // Preserve the bytes used for the ETag and length through Workers compression negotiation.
+      'content-encoding': 'identity',
       'cache-control': cacheControl,
       'x-request-id': requestId,
     });
@@ -243,11 +245,32 @@ function createRoutes(
       path: UI_PATH,
       permission: null,
       needsOrg: false,
+      async handler(ctx: RequestContext) {
+        const response = await serve(ctx.request, ctx.requestId, null);
+        if (response.status !== 200) return response;
+        const url = new URL(ctx.request.url);
+        return secured(
+          new Response(null, {
+            status: 303,
+            headers: {
+              location: `${UI_PATH}/${url.search}`,
+              'cache-control': NO_STORE,
+              'x-request-id': ctx.requestId,
+            },
+          }),
+        );
+      },
+    }),
+    Object.freeze({
+      method: 'GET',
+      path: `${UI_PATH}/`,
+      permission: null,
+      needsOrg: false,
       handler: (ctx: RequestContext) => serve(ctx.request, ctx.requestId, null),
     }),
     Object.freeze({
       method: 'GET',
-      path: `${UI_PATH}/assets/:file`,
+      path: `${UI_PATH}/:file`,
       permission: null,
       needsOrg: false,
       handler: (ctx: RequestContext) => serve(ctx.request, ctx.requestId, ctx.params['file'] ?? ''),

@@ -255,7 +255,9 @@ describe('attachedSourceCondition', () => {
   it('refuses a source of another ecosystem than the package', async () => {
     await project('P1', ctx.orgId);
     await source('S-NPM', ctx.orgId, 'npm_registry', { ecosystem: 'npm' });
-    await pkg('K-MISMATCH', ctx.orgId, 'S-NPM', 'acme/a', { ecosystem: 'composer' });
+    await expect(
+      pkg('K-MISMATCH', ctx.orgId, 'S-NPM', 'acme/a', { ecosystem: 'composer' }),
+    ).rejects.toThrow('package ecosystem does not match source ecosystem');
     await attach(ctx.orgId, 'P1', 'S-NPM');
     expect(await ids(attached('P1'))).toEqual([]);
   });
@@ -576,17 +578,19 @@ describe('round 3 regressions', () => {
     expect(await ids(query)).toEqual([]);
   });
 
-  it('blocks a proxy row for a same-name package whose source ecosystem disagrees', async () => {
+  it('refuses a same-name package whose source ecosystem disagrees', async () => {
     await source('S-PROXY', ctx.orgId, 'packagist_proxy');
     await source('S-NPM', ctx.orgId, 'npm_registry', { ecosystem: 'npm' });
     await pkg('K-PROXY', ctx.orgId, 'S-PROXY', 'acme/a');
-    await pkg('K-ODD', ctx.orgId, 'S-NPM', 'acme/a', { ecosystem: 'composer' });
+    await expect(
+      pkg('K-ODD', ctx.orgId, 'S-NPM', 'acme/a', { ecosystem: 'composer' }),
+    ).rejects.toThrow('package ecosystem does not match source ecosystem');
     const query = db
       .selectFrom('package as pkg')
       .innerJoin('source as src', 'src.id', 'pkg.source_id')
       .select('pkg.id')
       .where(proxyEligibleCondition({ package: 'pkg', source: 'src' }));
-    expect(await ids(query)).toEqual(['K-ODD']);
+    expect(await ids(query)).toEqual(['K-PROXY']);
   });
 
   it('is not shadowed by caller aliases named like the internal ones', async () => {

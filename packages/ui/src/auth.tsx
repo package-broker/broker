@@ -185,6 +185,7 @@ export interface ReauthState {
 }
 
 export interface ReplayResult {
+  readonly createdSourceId?: string;
   readonly path: string;
   readonly ok: boolean;
   readonly status: number;
@@ -280,6 +281,17 @@ export function createReauthFlow(deps: {
           ok: result.ok,
           status: result.status,
           ...(!result.ok ? { code: result.code } : {}),
+          ...(result.ok &&
+          result.status === 201 &&
+          action.method === 'POST' &&
+          /^\/_pb\/(?:projects\/[^/]+\/)?sources$/.test(action.path) &&
+          result.data !== null &&
+          typeof result.data === 'object' &&
+          'id' in result.data &&
+          typeof result.data.id === 'string' &&
+          /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(result.data.id)
+            ? { createdSourceId: result.data.id }
+            : {}),
         };
         store.set({ dialog: 'closed', busy: false, outcome: result.ok ? 'replayed' : 'failed' });
       } catch {

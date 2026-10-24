@@ -41,6 +41,7 @@ const V1 = (): MasterKey => masterKey(1, 0x00);
 const V2 = (): MasterKey => masterKey(2, 0x20);
 
 const META: SessionMeta = {
+  requestId: 'test-request-id',
   ip: '203.0.113.7',
   userAgent: 'agent/1.0',
   previousSecretHash: 'b'.repeat(64),
@@ -582,7 +583,12 @@ describe('reauth', () => {
       const harness = await build();
       harness.findActiveById.mockResolvedValue(null);
       const { counts, value } = await counted(null, () =>
-        harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+        harness.service.reauth(
+          ORG,
+          activeSession(),
+          { password: PASSWORD, code: harness.code },
+          META,
+        ),
       );
       expect(value).toStrictEqual({ ok: false, reason: 'session_inactive' });
       expect(counts.pbkdf2).toBe(0);
@@ -598,10 +604,15 @@ describe('reauth', () => {
   it('refuses a session that becomes inactive during password work', async () => {
     const harness = await build();
     harness.findActiveById.mockResolvedValueOnce(activeSession().session).mockResolvedValue(null);
-    const result = await harness.service.reauth(ORG, activeSession(), {
-      password: PASSWORD,
-      code: harness.code,
-    });
+    const result = await harness.service.reauth(
+      ORG,
+      activeSession(),
+      {
+        password: PASSWORD,
+        code: harness.code,
+      },
+      META,
+    );
     expect(result).toStrictEqual({ ok: false, reason: 'session_inactive' });
     expect(harness.reader.reserveAttempt).toHaveBeenCalled();
     expect(harness.writer.succeed).not.toHaveBeenCalled();
@@ -611,10 +622,15 @@ describe('reauth', () => {
     const harness = await build();
     harness.findActiveById.mockRejectedValue(new Error('database down'));
     await expect(
-      harness.service.reauth(ORG, activeSession(), {
-        password: PASSWORD,
-        code: harness.code,
-      }),
+      harness.service.reauth(
+        ORG,
+        activeSession(),
+        {
+          password: PASSWORD,
+          code: harness.code,
+        },
+        META,
+      ),
     ).rejects.toThrow('database down');
     expect(harness.reader.findByEmail).not.toHaveBeenCalled();
     expect(harness.writer.succeed).not.toHaveBeenCalled();
@@ -622,10 +638,15 @@ describe('reauth', () => {
 
   it('accepts a local session and sets reauthSessionId with the reservation snapshot', async () => {
     const harness = await build();
-    const result = await harness.service.reauth(ORG, activeSession(), {
-      password: PASSWORD,
-      code: harness.code,
-    });
+    const result = await harness.service.reauth(
+      ORG,
+      activeSession(),
+      {
+        password: PASSWORD,
+        code: harness.code,
+      },
+      META,
+    );
     expect(result).toStrictEqual({ ok: true });
     const input = harness.writer.succeed.mock.calls[0]?.[1];
     expect(input?.snapshot).toBe(harness.reservedSnapshot);
@@ -640,10 +661,15 @@ describe('reauth', () => {
   it('refuses an SSO session with the uniform work and no reservation', async () => {
     const harness = await build();
     const { counts, value } = await counted(null, () =>
-      harness.service.reauth(ORG, activeSession({ identityId: '01J0IDENT0000000000000000I' }), {
-        password: PASSWORD,
-        code: harness.code,
-      }),
+      harness.service.reauth(
+        ORG,
+        activeSession({ identityId: '01J0IDENT0000000000000000I' }),
+        {
+          password: PASSWORD,
+          code: harness.code,
+        },
+        META,
+      ),
     );
     expect(value).toStrictEqual({ ok: false });
     expect(counts).toEqual(UNIFORM);
@@ -654,7 +680,12 @@ describe('reauth', () => {
   it('refuses a wrong code with the uniform work', async () => {
     const harness = await build();
     const { counts, value } = await counted(null, () =>
-      harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.wrongCode }),
+      harness.service.reauth(
+        ORG,
+        activeSession(),
+        { password: PASSWORD, code: harness.wrongCode },
+        META,
+      ),
     );
     expect(value).toStrictEqual({ ok: false });
     expect(counts).toEqual(UNIFORM);
@@ -663,10 +694,15 @@ describe('reauth', () => {
 
   it('refuses a wrong password', async () => {
     const harness = await build();
-    const result = await harness.service.reauth(ORG, activeSession(), {
-      password: 'another long password!',
-      code: harness.code,
-    });
+    const result = await harness.service.reauth(
+      ORG,
+      activeSession(),
+      {
+        password: 'another long password!',
+        code: harness.code,
+      },
+      META,
+    );
     expect(result).toStrictEqual({ ok: false });
     expect(harness.writer.succeed).not.toHaveBeenCalled();
   });
@@ -674,7 +710,12 @@ describe('reauth', () => {
   it('refuses when the e-mail now belongs to another user', async () => {
     const harness = await build({ snapshot: { userId: OTHER_USER_ID } });
     const { counts, value } = await counted(null, () =>
-      harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+      harness.service.reauth(
+        ORG,
+        activeSession(),
+        { password: PASSWORD, code: harness.code },
+        META,
+      ),
     );
     expect(value).toStrictEqual({ ok: false });
     expect(counts).toEqual(UNIFORM);
@@ -684,20 +725,35 @@ describe('reauth', () => {
   it('refuses a locked account and a refused succeed', async () => {
     const locked = await build({ reservation: { reserved: false, reason: 'locked' } });
     expect(
-      await locked.service.reauth(ORG, activeSession(), { password: PASSWORD, code: locked.code }),
+      await locked.service.reauth(
+        ORG,
+        activeSession(),
+        { password: PASSWORD, code: locked.code },
+        META,
+      ),
     ).toStrictEqual({ ok: false });
     const stale = await build({ succeed: false });
     expect(
-      await stale.service.reauth(ORG, activeSession(), { password: PASSWORD, code: stale.code }),
+      await stale.service.reauth(
+        ORG,
+        activeSession(),
+        { password: PASSWORD, code: stale.code },
+        META,
+      ),
     ).toStrictEqual({ ok: false });
   });
 
   it('uses the session organization context unchanged', async () => {
     const harness = await build();
-    await harness.service.reauth(OTHER_ORG, activeSession(), {
-      password: PASSWORD,
-      code: harness.code,
-    });
+    await harness.service.reauth(
+      OTHER_ORG,
+      activeSession(),
+      {
+        password: PASSWORD,
+        code: harness.code,
+      },
+      META,
+    );
     expect(harness.reader.findByEmail.mock.calls[0]?.[0]).toBe(OTHER_ORG);
   });
 });
@@ -731,6 +787,7 @@ describe('non-string body fields', () => {
           ORG,
           activeSession(),
           input as unknown as Parameters<LocalLoginService['reauth']>[2],
+          META,
         ),
       ).toStrictEqual({ ok: false });
       expect(harness.reader.findByEmail).not.toHaveBeenCalled();
@@ -767,6 +824,7 @@ describe('non-string body fields', () => {
       ORG,
       activeSession(),
       input as unknown as { password: string; code: string },
+      META,
     );
     expect(result).toStrictEqual({ ok: false });
     expect(harness.reader.reserveAttempt).not.toHaveBeenCalled();
@@ -817,7 +875,12 @@ describe('password rehash after success', () => {
   it('does one PBKDF2 when reauth succeed refuses an older hash', async () => {
     const harness = await build({ passwordHashKeys: [V1()], succeed: false });
     const { counts, value } = await counted(null, () =>
-      harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+      harness.service.reauth(
+        ORG,
+        activeSession(),
+        { password: PASSWORD, code: harness.code },
+        META,
+      ),
     );
     expect(value).toStrictEqual({ ok: false });
     expect(counts.pbkdf2).toBe(1);
@@ -827,7 +890,12 @@ describe('password rehash after success', () => {
   it('rehashes after successful reauth', async () => {
     const harness = await build({ passwordHashKeys: [V1()] });
     const { counts, value } = await counted(harness.events, () =>
-      harness.service.reauth(ORG, activeSession(), { password: PASSWORD, code: harness.code }),
+      harness.service.reauth(
+        ORG,
+        activeSession(),
+        { password: PASSWORD, code: harness.code },
+        META,
+      ),
     );
     expect(value).toStrictEqual({ ok: true });
     expect(counts.pbkdf2).toBe(2);

@@ -6,7 +6,7 @@ import { createKernel } from './kernel.js';
 import { createUiRoutes, UI_CSP } from './ui-routes.js';
 
 const ORIGIN = 'https://broker.test';
-const ASSET = '/_pb/ui/assets/app.012345abcdef.js';
+const ASSET = '/_pb/ui/app.012345abcdef.js';
 const BODY = 'console.log("π")';
 const tag = (body: string) => `"${createHash('sha256').update(body).digest('hex')}"`;
 
@@ -164,28 +164,28 @@ describe('UI asset ETags', () => {
 
   it('keeps the entry document no-cache on 200 and 304', async () => {
     const server = await app();
-    const full = await server.fetch('/_pb/ui');
+    const full = await server.fetch('/_pb/ui/');
     const validator = full.headers.get('etag');
     expect(validator).toBe(tag('<!doctype html><title>First</title>'));
     expect(full.headers.get('cache-control')).toBe('no-cache');
-    const response = await server.fetch('/_pb/ui', validator!);
+    const response = await server.fetch('/_pb/ui/', validator!);
     expect(response.status).toBe(304);
     expect(response.headers.get('cache-control')).toBe('no-cache');
   });
 
   it('never returns 304 for a stale entry validator after the entry changes', async () => {
     const server = await app();
-    const first = await server.fetch('/_pb/ui');
+    const first = await server.fetch('/_pb/ui/');
     expect(first.headers.get('etag')).toBe(tag('<!doctype html><title>First</title>'));
     server.setEntry('<!doctype html><title>New</title>');
-    const response = await server.fetch('/_pb/ui', first.headers.get('etag')!);
+    const response = await server.fetch('/_pb/ui/', first.headers.get('etag')!);
     expect(response.status).toBe(200);
     expect(response.headers.get('etag')).toBe(tag('<!doctype html><title>New</title>'));
     expect(response.headers.get('cache-control')).toBe('no-cache');
     expect(await response.text()).toBe('<!doctype html><title>New</title>');
   });
 
-  it.each(['/_pb/ui', ASSET])('uses the same ETag for HEAD and GET on %s', async (path) => {
+  it.each(['/_pb/ui/', ASSET])('uses the same ETag for HEAD and GET on %s', async (path) => {
     const server = await app();
     const full = await server.fetch(path);
     const validator = full.headers.get('etag');

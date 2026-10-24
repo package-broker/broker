@@ -119,6 +119,47 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
   };
 }
 
+describe('git runtime availability', () => {
+  it.each(['create', 'update'] as const)(
+    'refuses %s on cloudflare before storing credentials or writing audit rows',
+    async (operation) => {
+      const { service, sources, credentials, log } = setup('cloudflare');
+      const vcs = {
+        ...input,
+        type: 'vcs' as const,
+        url: null,
+        configJson: JSON.stringify({
+          provider: 'git',
+          repository: 'https://git.example.com/private-repo.git',
+        }),
+      };
+      sources.get.mockResolvedValue({ ...vcs, id: 'source', credentialId: null } as SourceRecord);
+      const credential = {
+        kind: 'bearer' as const,
+        plaintext: JSON.stringify({ token: 'private-bearer-token' }),
+      };
+      const result =
+        operation === 'create'
+          ? await service.create(ctx, org, fence, { ...vcs, credential })
+          : await service.update(ctx, org, fence, 'source', { credential });
+      expect(result).toEqual({
+        ok: false,
+        error: 'invalid_config',
+        problems: [
+          {
+            field: 'provider',
+            message: 'git is not available on cloudflare: archive building requires node',
+          },
+        ],
+      });
+      expect(credentials.prepare).not.toHaveBeenCalled();
+      expect(sources.create).not.toHaveBeenCalled();
+      expect(sources.update).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('source visibility for mutation preflight', () => {
   const writer = {
     ...project,

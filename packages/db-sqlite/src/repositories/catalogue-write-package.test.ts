@@ -295,28 +295,29 @@ describe('packageUpsertStatements', () => {
     expect(await packages()).toEqual([]);
   });
 
-  it('refuses to update a package held under a source of another ecosystem', async () => {
-    await database.executor.batch([
-      stmt(
-        "INSERT INTO package (id, org_id, source_id, ecosystem, name, description) VALUES ('01J0PKG0000000000000000K01', ?, ?, 'composer', ?, 'A widget')",
-        org.orgId,
-        NPM_SOURCE,
-        KEY,
-      ),
-    ]);
-    const before = await packages();
-    await expect(upsert(input({ sourceId: NPM_SOURCE, description: 'Changed' }))).rejects.toThrow();
-    expect(await packages()).toEqual(before);
+  it('refuses to insert a package held under a source of another ecosystem', async () => {
+    await expect(
+      database.executor.batch([
+        stmt(
+          "INSERT INTO package (id, org_id, source_id, ecosystem, name, description) VALUES ('01J0PKG0000000000000000K01', ?, ?, 'composer', ?, 'A widget')",
+          org.orgId,
+          NPM_SOURCE,
+          KEY,
+        ),
+      ]),
+    ).rejects.toThrow('package ecosystem does not match source ecosystem');
+    expect(await packages()).toEqual([]);
   });
 
-  it('refuses to update a package once its source moved to another ecosystem', async () => {
+  it('refuses to move an occupied source to another ecosystem', async () => {
     await upsert(input());
-    await database.executor.batch([
-      stmt("UPDATE source SET ecosystem = 'npm' WHERE id = ?", SOURCE),
-    ]);
     const before = await packages();
-    await expect(upsert(input({ description: 'Changed' }))).rejects.toThrow();
+    await expect(
+      database.executor.batch([stmt("UPDATE source SET ecosystem = 'npm' WHERE id = ?", SOURCE)]),
+    ).rejects.toThrow('source ecosystem cannot change while the source holds packages');
     expect(await packages()).toEqual(before);
+    await upsert(input({ description: 'Changed' }));
+    expect((await packages())[0]?.description).toBe('Changed');
   });
 
   it('a forged cross-organization attachment does not materialize the package', async () => {

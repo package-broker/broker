@@ -24,6 +24,7 @@ const EMAIL = 'ada@example.test';
 const HOOK_REASON_TEXT = 'ada@example.test is on a deny list';
 
 const meta: SessionMeta = {
+  requestId: 'test-request-id',
   ip: '203.0.113.7',
   userAgent: 'test-agent',
   previousSecretHash: 'c'.repeat(64),

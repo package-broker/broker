@@ -145,12 +145,21 @@ describe('plugin-sso-oidc', () => {
     );
   });
 
+  it.each(['https://IDP.example.com', 'https://IDP.example.com/dex'])(
+    'refuses an uppercase issuer host (%s)',
+    (issuer) => {
+      expect(() => ssoOidc({ providers: [{ ...oidc, issuer }] })).toThrow(
+        `issuer host must be lowercase: ${issuer.replace('IDP', 'idp')}`,
+      );
+    },
+  );
+
   it('reports duplicate trust anchors by canonical form', () => {
     const message = messageOf(() =>
       ssoOidc({
         providers: [
           oidc,
-          { ...oidc, id: 'copy', issuer: 'https://IDP.example.com' },
+          { ...oidc, id: 'copy', issuer: 'https://idp.example.com' },
           access,
           { ...access, id: 'access-copy', teamDomain: 'acme.cloudflareaccess.com' },
         ],

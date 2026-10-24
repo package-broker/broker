@@ -263,10 +263,6 @@ function seedStatements(a: string, b: string): Statement[] {
     versionRow(a, 'V-m04-100', 'K-m04', '1.0.0', 2),
     link(a, 'PA', 'K-m04'),
 
-    packageRow(a, 'K-m00', 'S-COMP', 'm00-eco-forged'),
-    versionRow(a, 'V-m00-100', 'K-m00', '1.0.0', 2),
-    link(a, 'PA', 'K-m00'),
-
     packageRow(a, 'K-m02', 'S-PB', 'm02-secret-b', { description: DESCRIPTION_B }),
     versionRow(a, 'V-m02-100', 'K-m02', '1.0.0', 2, { blob: 'B-B', meta: meta('dep-of-b') }),
     tagRow(a, 'K-m02', 'latest', 'V-m02-100'),
@@ -520,6 +516,9 @@ const forgedProjectSource: Case = (open, wrap) =>
 
 const forgedEcosystem: Case = (open, wrap) =>
   withWorld(open, wrap, async (world) => {
+    await expect(
+      write(world.executor, [packageRow(world.a.orgId, 'K-m00', 'S-COMP', 'm00-eco-forged')]),
+    ).rejects.toThrow('package ecosystem does not match source ecosystem');
     await expectUniformlyAbsent(world, world.a, 'PA', 'm00-eco-forged');
     const listed = await world.reader.listVisible(world.a, { ...scope('PA'), limit: 200 });
     expect(listed.items.map((item) => item.key)).not.toContain('m00-eco-forged');
@@ -1361,7 +1360,7 @@ export function describeCatalogueReadContract(
       TIMEOUT,
     );
     it(
-      '4. a package whose ecosystem differs from its source ecosystem is hidden',
+      '4. a package whose ecosystem differs from its source is refused and remains absent',
       () => c.forgedEcosystem(open, wrap),
       TIMEOUT,
     );

@@ -269,14 +269,22 @@ const unlink: ContractCase = {
     expect(
       await createUnlinkRepository(executing(context), {
         holderInput: () => ({ kind: 'fresh', now: new Date().toISOString(), providers: ANCHORS }),
-      }).unlinkIdentity(own, fenceOf(subject), {
-        identityId: 'I-ok',
-        userId: subject.userId,
-        provider: 'oidc',
-        subject: 'sub-ok',
-        anchor: ANCHORS[0]!.anchor,
-        now: new Date().toISOString(),
-      }),
+      }).unlinkIdentity(
+        own,
+        fenceOf(subject),
+        {
+          identityId: 'I-ok',
+          userId: subject.userId,
+          provider: 'oidc',
+          subject: 'sub-ok',
+          anchor: ANCHORS[0]!.anchor,
+          now: new Date().toISOString(),
+        },
+        {
+          unlink: mutationAudit('identity.unlink', null, null),
+          block: mutationAudit('identity.block', null, null),
+        },
+      ),
     ).toBe('unlinked');
     expect(await groups()).toEqual(before);
   },
@@ -428,7 +436,7 @@ export const entries: readonly MutationEntry[] = [
   ]),
 ];
 
-function mutationAudit(action: AuditAction, targetId: string, projectId: string) {
+function mutationAudit(action: AuditAction, targetId: string | null, projectId: string | null) {
   const id = ulid();
   const result = auditEvent({
     id,

@@ -186,6 +186,7 @@ describe('Node UI mount', () => {
         { method: 'GET', path: '/_pb/ui/setup/document', boundary: undefined, needsOrg: false },
         { method: 'GET', path: '/_pb/ui/setup/assets/:file', boundary: undefined, needsOrg: false },
         { method: 'GET', path: '/_pb/ui', boundary: undefined, needsOrg: false },
+        { method: 'GET', path: '/_pb/ui/', boundary: undefined, needsOrg: false },
         { method: 'GET', path: '/_pb/ui/:file', boundary: undefined, needsOrg: false },
       ]);
       expect(baseline.some((route) => route.path === '/_pb/session')).toBe(true);

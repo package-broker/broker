@@ -16,6 +16,7 @@ import { Badge } from '../components/ui/badge.js';
 import { LoadedListFilters } from '../components/ui/toolbar.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
+import { tokenClientConfig } from './tokens/client-config.js';
 
 type Token =
   operations['listMyTokens']['responses'][200]['content']['application/json']['items'][number];
@@ -54,6 +55,7 @@ interface State {
   lifetime: Lifetime | null;
   userId: string | null;
   secret: string | null;
+  secretProject: string | null;
   issuedId: string | null;
   oldPersonalId: string | null;
   pending: Issue | null;
@@ -65,6 +67,7 @@ interface State {
 }
 interface Deps {
   storage: PendingStorage;
+  origin: string;
   clipboard: (text: string) => Promise<void>;
   navigate: (hash: string) => void;
   newKey: () => string;
@@ -81,6 +84,7 @@ export function tokensReducer(state: State, action: { type: 'navigate' }): State
     return {
       ...state,
       secret: null,
+      secretProject: null,
       issuedId: null,
       oldPersonalId: null,
       pending: null,
@@ -174,6 +178,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     lifetime: null,
     userId: null,
     secret: null,
+    secretProject: null,
     issuedId: null,
     oldPersonalId: null,
     pending: null,
@@ -209,6 +214,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     set({
       busy: true,
       secret: null,
+      secretProject: null,
       issuedId: null,
       oldPersonalId: null,
       pending: null,
@@ -255,6 +261,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     if (result.ok) {
       set({
         secret: result.data.token,
+        secretProject: target === 'project' ? project : null,
         oldPersonalId: action.replace ?? null,
         issuedId: result.data.id,
         notice: 'Save this token now; it is shown once.',
@@ -365,15 +372,27 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       }
       set({ renewal: token, secret: null, issuedId: null, oldPersonalId: null, notice: null });
     },
-    async copy() {
+    registryOrigin: () => new URL(deps.origin).origin,
+    clientConfig() {
+      return state.secret === null || state.secretProject === null
+        ? null
+        : tokenClientConfig(deps.origin, state.secretProject, state.secret);
+    },
+    async copy(kind?: 'composer' | 'npm') {
       if (state.secret === null) return;
+      const text = kind === undefined ? state.secret : controller.clientConfig()?.[kind];
+      if (text === undefined) return;
+      const label = kind === undefined ? 'Token' : 'Configuration';
       const version = epoch;
       try {
-        await deps.clipboard(state.secret);
+        await deps.clipboard(text);
         if (version === epoch)
-          set({ ...(deps.clearAfterCopy ? { secret: null } : {}), notice: 'Token copied.' });
+          set({ ...(deps.clearAfterCopy ? { secret: null } : {}), notice: `${label} copied.` });
       } catch {
-        if (version === epoch) set({ notice: 'Unable to copy token.' });
+        if (version === epoch)
+          set({
+            notice: kind === undefined ? 'Unable to copy token.' : 'Unable to copy configuration.',
+          });
       }
     },
     async load(
@@ -732,6 +751,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
   const personal = s.renewal?.kind === 'pat' || s.target === 'personal';
   const policy = s.lifetime?.[personal ? 'personal' : 'service'];
   const renewal = s.renewal;
+  const clientConfig = c.clientConfig();
   const projectId =
     renewal?.kind === 'svc'
       ? renewal.projectId
@@ -848,6 +868,30 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           <Button variant="outline" onClick={() => c.closeSecret()}>
             Close secret panel
           </Button>
+          {clientConfig === null ? (
+            <p>
+              Choose a project this token can access to configure Composer or npm. Open that
+              project’s registry at {c.registryOrigin()}/&lt;project&gt; for Composer or{' '}
+              {c.registryOrigin()}/&lt;project&gt;/npm/ for npm.
+            </p>
+          ) : (
+            <>
+              <h3>Composer</h3>
+              <pre className="overflow-x-auto rounded-md border bg-neutral-50 p-3">
+                <code>{clientConfig.composer}</code>
+              </pre>
+              <Button variant="outline" onClick={() => void c.copy('composer')}>
+                Copy Composer configuration
+              </Button>
+              <h3>npm (.npmrc)</h3>
+              <pre className="overflow-x-auto rounded-md border bg-neutral-50 p-3">
+                <code>{clientConfig.npm}</code>
+              </pre>
+              <Button variant="outline" onClick={() => void c.copy('npm')}>
+                Copy npm configuration
+              </Button>
+            </>
+          )}
           {s.oldPersonalId !== null ? (
             <ConfirmAction
               action="Revoke old personal token"
@@ -1114,6 +1158,7 @@ export function TokensPage() {
           setItem: (key, value) => window.sessionStorage.setItem(key, value),
           removeItem: (key) => window.sessionStorage.removeItem(key),
         },
+        origin: window.location.origin,
         clipboard: (text) => navigator.clipboard.writeText(text),
         navigate: (hash) => {
           window.location.hash = hash;

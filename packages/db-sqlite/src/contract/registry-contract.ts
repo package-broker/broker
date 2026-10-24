@@ -232,9 +232,10 @@ export const registryContractCases = {
           },
         } as unknown as JobContext;
         await w.seed(
-          "UPDATE source SET ecosystem = 'composer', type = 'composer_repository', poll_interval_seconds = 86400, next_poll_at = ? WHERE org_id = ? AND id = 'source-a'",
-          OLD,
+          `INSERT INTO source (id, org_id, name, ecosystem, type, poll_interval_seconds, next_poll_at)
+          VALUES ('poll-source', ?, 'Poll source', 'composer', 'composer_repository', 86400, ?)`,
           w.a.orgId,
+          OLD,
         );
         await poll.handler({}, context);
         expect(await sources.listDue(w.a, 50)).toEqual([]);
@@ -249,13 +250,13 @@ export const registryContractCases = {
         // A new sync/enable request arrives after completion in the same minute.
         now = new Date('2000-01-01T00:00:10.000Z');
         await w.seed(
-          "UPDATE source SET next_poll_at = ? WHERE org_id = ? AND id = 'source-a'",
+          "UPDATE source SET next_poll_at = ? WHERE org_id = ? AND id = 'poll-source'",
           now.toISOString(),
           w.a.orgId,
         );
         await poll.handler({}, context);
         expect(await sources.listDue(w.a, 50)).toMatchObject([
-          { id: 'source-a', nextPollAt: now.toISOString() },
+          { id: 'poll-source', nextPollAt: now.toISOString() },
         ]);
         expect(
           await w.executor.all(st('SELECT id, state FROM job WHERE org_id = ?', w.a.orgId)),
@@ -271,8 +272,11 @@ export const registryContractCases = {
         });
         expect(second).not.toBeNull();
         expect(second!.id).not.toBe(first!.id);
-        expect(JSON.parse(second!.payloadJson)).toEqual({ sourceId: 'source-a', reason: 'poll' });
-        const source = (await sources.get(w.a, 'source-a'))!;
+        expect(JSON.parse(second!.payloadJson)).toEqual({
+          sourceId: 'poll-source',
+          reason: 'poll',
+        });
+        const source = (await sources.get(w.a, 'poll-source'))!;
         expect(source.pollIntervalSeconds).toBe(86400);
         expect(Date.parse(source.nextPollAt!)).toBeGreaterThan(Date.now() + 86_390_000);
         expect(await store.status(w.b, second!.id)).toBeNull();

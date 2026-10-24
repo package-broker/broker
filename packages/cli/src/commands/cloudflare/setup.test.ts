@@ -14,7 +14,7 @@ import {
 } from '@package-broker/core/secrets/master-key';
 import { stageAssets } from '../../build-assets.js';
 import { commandEnvelope, failCommand, CloudflareError } from './api.js';
-import { deploy, validateDeploymentArtifact } from './deploy.js';
+import { cloudflareDeployContract, deploy, validateDeploymentArtifact } from './deploy.js';
 import {
   emptyInventory,
   installIdentity,
@@ -230,6 +230,7 @@ afterEach(async () => {
 it('orders typed operations, durably delivers a T159 key and prints only a credential-free URL', async () => {
   const r = await setup(options, ops);
   expect(r.exitCode).toBe(0);
+  expect(vi.mocked(ops.deploy).mock.calls[0]![0].contract).toBe(cloudflareDeployContract);
   expect(calls.filter((c) => c !== 'read')).toEqual([
     'build',
     'artifact',
@@ -425,6 +426,144 @@ it('dry-run performs no generation, delivery, prompt, journal or mutable operati
   expect(await store.read()).toBeNull();
   await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
 });
+it('plans a first install with the real collection shapes and no KV permission', async () => {
+  const fixtures = JSON.parse(
+    await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+  ) as Record<string, unknown>;
+  const out = join(project, '.pb/cloudflare');
+  await mkdir(join(out, 'generated'), { recursive: true });
+  await writeFile(
+    join(out, 'generated/manifest.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      platform: 'cloudflare',
+      platformPorts: {
+        blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+        cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
+        jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
+        observability: {
+          adapter: 'workers',
+          analyticsBinding: 'ANALYTICS',
+          deploymentIdEnv: 'DEPLOYMENT_ID',
+        },
+      },
+      bindings: [],
+      plugins: [],
+    }),
+  );
+  await writeFile(
+    join(out, 'build-info.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      target: 'cloudflare',
+      core: '2.0.0',
+      plugins: {},
+      lockfileSha256: null,
+      gitSha: null,
+    }),
+  );
+  let time = Date.now();
+  options.now = () => time;
+  options.sleep = async (ms) => {
+    time += ms;
+  };
+  options.dryRun = true;
+  const reads: URL[] = [];
+  options.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    expect(url.pathname).toContain(`/accounts/${ACCOUNT}/`);
+    const path = url.pathname.split(ACCOUNT)[1]!;
+    reads.push(url);
+    if (path === `/workers/scripts/${identity.script_name}/settings`)
+      return new Response(JSON.stringify({ success: false, result: null, errors: [] }), {
+        status: 404,
+      });
+    const bodies: Record<string, unknown> = {
+      '/d1/database': fixtures.d1Empty,
+      '/r2/buckets': fixtures.r2Empty,
+      '/queues': fixtures.queuesEmpty,
+      '/subscriptions': fixtures.forbidden,
+      '/analytics_engine/sql': fixtures.analyticsTablesEmpty,
+      '/workers/scripts': fixtures.workersEmpty,
+      '/workers/subdomain': { success: true, result: { subdomain: 'example' } },
+      '/storage/kv/namespaces': fixtures.forbidden,
+    };
+    if (path === '/analytics_engine/sql') {
+      expect(init?.method).toBe('POST');
+      expect(init?.body).toBe('SHOW TABLES');
+    } else expect(init?.method ?? 'GET').toBe('GET');
+    expect(bodies).toHaveProperty(path);
+    return new Response(JSON.stringify(bodies[path]), {
+      status: ['/subscriptions', '/storage/kv/namespaces'].includes(path) ? 403 : 200,
+    });
+  });
+  ops.provision = vi.fn(provision);
+  expect(await setup(options, ops)).toMatchObject({
+    exitCode: 0,
+    output: {
+      status: 'planned',
+      error: null,
+      plan: expect.arrayContaining([
+        expect.objectContaining({ action: 'create', kind: 'd1' }),
+        expect.objectContaining({ action: 'create', kind: 'r2' }),
+        expect.objectContaining({
+          action: 'create',
+          kind: 'queue',
+          name: `${identity.script_name}-jobs`,
+        }),
+        expect.objectContaining({
+          action: 'create',
+          kind: 'queue',
+          name: `${identity.script_name}-jobs-dlq`,
+        }),
+        expect.objectContaining({ action: 'create', kind: 'worker' }),
+      ]),
+      checks: expect.arrayContaining([
+        { name: 'analytics_engine', status: 'supported', source: 'analytics_engine_sql' },
+      ]),
+    },
+  });
+  const scriptReads = reads.filter((url) => url.pathname.endsWith('/workers/scripts'));
+  expect(scriptReads).toHaveLength(1);
+  expect(scriptReads[0]!.search).toBe('');
+  expect(reads.some((url) => url.pathname.includes('/storage/kv/'))).toBe(false);
+  expect(await store.read()).toBeNull();
+  expect(ops.deploy).not.toHaveBeenCalled();
+});
+
+it.each([undefined, null])(
+  'reads installed secrets as a snapshot with metadata %s',
+  async (result_info) => {
+    options.dryRun = true;
+    const reads: URL[] = [];
+    options.fetch = vi.fn(async (input) => {
+      const url = new URL(String(input));
+      reads.push(url);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          result: url.pathname.endsWith('/secrets')
+            ? [{ name: 'PB_MASTER_KEY', type: 'secret_text' }]
+            : [
+                {
+                  id: identity.script_name,
+                  tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`],
+                },
+              ],
+          result_info,
+        }),
+      );
+    });
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(reads).toHaveLength(2);
+    expect(reads.every((url) => url.search === '')).toBe(true);
+    expect(reads[1]!.pathname).toBe(
+      `/client/v4/accounts/${ACCOUNT}/workers/scripts/${identity.script_name}/secrets`,
+    );
+    expect(await store.read()).toBeNull();
+  },
+);
+
 it('build failure stops before any network or secret side effect', async () => {
   ops.build = vi.fn(async () => {
     throw new CloudflareError('invalid_input', 2, false, 'build');
@@ -868,8 +1007,15 @@ it.each(['completed', 'upload_pending'])(
         ];
         candidate = {
           id: versionId,
-          metadata: { annotations: metadata.annotations },
-          resources: { bindings: candidateBindings, assets: { config: metadata.assets.config } },
+          annotations: metadata.annotations,
+          resources: {
+            bindings: candidateBindings,
+            assets: { config: metadata.assets.config },
+            script_runtime: {
+              compatibility_date: '2026-10-01',
+              compatibility_flags: ['nodejs_compat'],
+            },
+          },
         };
         if (loseUpload) {
           loseUpload = false;
@@ -885,7 +1031,7 @@ it.each(['completed', 'upload_pending'])(
           id: 'active-deployment',
           versions: [{ version_id: versionId, percentage: 100 }],
         };
-        return ok(method === 'GET' ? { active: active ? deployment : null } : deployment);
+        return ok(method === 'GET' ? { deployments: active ? [deployment] : [] } : deployment);
       }
       throw new Error(`Unexpected request ${method} ${path}`);
     });
@@ -1532,7 +1678,7 @@ it.each([false, true])(
     const fetch = options.fetch!;
     options.fetch = vi.fn(async (input, init) =>
       new URL(String(input)).pathname.endsWith('/deployments')
-        ? new Response(JSON.stringify({ success: true, result: { active: null } }))
+        ? new Response(JSON.stringify({ success: true, result: { deployments: [] } }))
         : fetch(input, init),
     );
     expect((await setup(options, ops)).exitCode).toBe(2);

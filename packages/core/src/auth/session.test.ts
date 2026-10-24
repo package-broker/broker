@@ -12,6 +12,7 @@ import {
   sessionMetaOf,
 } from './session.js';
 import type { AuthenticatedSession } from './session.js';
+import * as auditActions from '../audit/actions.js';
 import { isIpLiteral, type AuditEvent } from '../audit/actions.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
@@ -317,6 +318,16 @@ describe('authenticate', () => {
     await fresh.service.authenticate(ctx, requestWith(sessionCookie(randomToken(32))));
     expect(fresh.touch).not.toHaveBeenCalled();
   });
+  it('can authenticate for CSRF validation without touching an old live session', async () => {
+    const session = activeSession({ lastSeenAt: isoAgo(SESSION_TOUCH_MS + 1) });
+    const h = harness(session);
+    const result = await h.service.authenticate(ctx, requestWith(sessionCookie(randomToken(32))), {
+      touch: false,
+    });
+    expect(result).toEqual(authenticated(session));
+    expect(h.findActive).toHaveBeenCalledTimes(1);
+    expect(h.touch).not.toHaveBeenCalled();
+  });
 });
 
 describe('assertCsrf', () => {
@@ -562,16 +573,37 @@ describe('logout', () => {
     expect(h.touch).not.toHaveBeenCalled();
   });
 
-  it('fails closed with a static error when audit construction refuses', async () => {
-    const h = harness();
-    await expect(
-      h.service.logout(ctx, requestWith(sessionCookie(randomToken(32))), {
-        requestId: 'invalid-request-id',
-        ip: null,
-      }),
-    ).rejects.toThrow('Invalid session logout audit event');
-    expect(h.revokeBySecretHash).not.toHaveBeenCalled();
-  });
+  it.each(['refuses', 'throws'] as const)(
+    'revokes without an event and logs a fixed message when audit construction %s',
+    async (failure) => {
+      const h = harness();
+      const secret = randomToken(32);
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const audit = vi.spyOn(auditActions, 'auditEvent');
+      if (failure === 'throws')
+        audit.mockImplementationOnce(() => {
+          throw new Error('private request data');
+        });
+      try {
+        const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)), {
+          requestId: 'invalid-request-id',
+          ip: null,
+        });
+        expect(h.revokeBySecretHash).toHaveBeenCalledExactlyOnceWith(
+          ctx,
+          await sha256Hex(secret),
+          NOW,
+          undefined,
+        );
+        expect(h.touch).not.toHaveBeenCalled();
+        expect(cookies).toEqual(h.service.clearCookies());
+        expect(log).toHaveBeenCalledExactlyOnceWith('Session logout audit event unavailable');
+      } finally {
+        audit.mockRestore();
+        log.mockRestore();
+      }
+    },
+  );
 
   it('clears without a repository call when there is no cookie', async () => {
     const h = harness();

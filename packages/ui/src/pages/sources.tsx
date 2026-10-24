@@ -45,12 +45,12 @@ const CREDENTIAL_FIELDS = {
 } as const satisfies Record<CredentialKind, readonly string[]>;
 const CREDENTIAL_KINDS = Object.keys(CREDENTIAL_FIELDS) as CredentialKind[];
 
+function isProxy(source: Source) {
+  return ['packagist_proxy', 'npmjs_proxy'].includes(source.type);
+}
+
 function canTogglePause(project: string | null, source: Source) {
-  return (
-    project === null ||
-    source.status !== 'paused' ||
-    ['packagist_proxy', 'npmjs_proxy'].includes(source.type)
-  );
+  return project === null || source.status !== 'paused' || isProxy(source);
 }
 
 interface SourcesState {
@@ -68,6 +68,8 @@ interface SourcesState {
   settingsVersion: number;
   busy: boolean;
   error: string | null;
+  notice: string | null;
+  createdSource: string | null;
   credentialSource: string | null;
   credentialVersion: number;
   savedCredential: { source: string; at: string } | null;
@@ -113,6 +115,8 @@ export function createSourcesModel(
     settingsVersion: 0,
     busy: false,
     error: null,
+    notice: null,
+    createdSource: null,
     credentialSource: null,
     credentialVersion: 0,
     savedCredential: null,
@@ -220,7 +224,7 @@ export function createSourcesModel(
     });
   }
 
-  async function revealCreated(source: string) {
+  async function findLoadedSource(source: string) {
     while (
       !state.items.some((item) => item.id === source) &&
       state.next !== null &&
@@ -228,8 +232,13 @@ export function createSourcesModel(
     ) {
       await load(true);
     }
-    const created = state.items.find((item) => item.id === source);
-    if (created && !['npmjs_proxy', 'packagist_proxy', 'hosted'].includes(created.type)) {
+    return state.items.find((item) => item.id === source);
+  }
+
+  async function revealCreated(source: string) {
+    const created = await findLoadedSource(source);
+    if (created) set({ createdSource: source });
+    if (created && !isProxy(created) && created.type !== 'hosted') {
       set({ credentialSource: source, credentialVersion: state.credentialVersion + 1 });
     }
   }
@@ -255,7 +264,7 @@ export function createSourcesModel(
 
   async function mutate(request: () => Promise<ApiResult<unknown>>, after: () => Promise<void>) {
     if (state.busy) return;
-    set({ busy: true, error: null });
+    set({ busy: true, error: null, notice: null });
     try {
       const result = await request();
       if (!failure(result)) await after();
@@ -447,9 +456,28 @@ export function createSourcesModel(
         () => load(),
       );
     },
+    syncNow(source: Source) {
+      if (source.status === 'paused' || (project !== null && source.projectId === null))
+        return Promise.resolve();
+      return mutate(
+        () =>
+          project === null
+            ? client.request('post', '/_pb/sources/{source}/sync', {
+                params: { source: source.id },
+              })
+            : client.request('post', '/_pb/projects/{project}/sources/{source}/sync', {
+                params: { project, source: source.id },
+              }),
+        async () => {
+          await load();
+          await findLoadedSource(source.id);
+          set({ notice: 'Sync requested.' });
+        },
+      );
+    },
     togglePause(source: Source) {
       if (!canTogglePause(project, source)) return Promise.resolve();
-      if (source.status === 'paused' && !['packagist_proxy', 'npmjs_proxy'].includes(source.type)) {
+      if (source.status === 'paused' && !isProxy(source)) {
         return mutate(
           () =>
             client.request('post', '/_pb/sources/{source}/enable', {
@@ -601,6 +629,49 @@ function formValue(form: HTMLFormElement, name: string): string {
   return new FormData(form).get(name)?.toString() ?? '';
 }
 
+const SYNC_ERROR_LABELS: Record<string, string> = {
+  network: 'Network failure',
+  timeout: 'Sync timed out',
+  http_error: 'HTTP error',
+  unauthorized: 'Authorization failed',
+  rate_limited: 'Rate limited',
+  not_found: 'Not found',
+  invalid_response: 'Invalid response',
+  mass_absence: 'Mass package absence',
+  too_large: 'Response too large',
+  policy_denied: 'Policy denied',
+  credential_unavailable: 'Credential unavailable',
+  internal: 'Internal error',
+};
+
+function SyncStatus({ source }: { source: Source }) {
+  const errorLabel =
+    source.lastError !== null && Object.hasOwn(SYNC_ERROR_LABELS, source.lastError)
+      ? SYNC_ERROR_LABELS[source.lastError]
+      : null;
+  return (
+    <div className="grid gap-1 text-sm">
+      <p>
+        Last success: <Time value={source.lastSuccessAt} fallback="Never" />
+      </p>
+      <p>
+        Last error:{' '}
+        {source.lastError === null ? (
+          'None'
+        ) : (
+          <>
+            {errorLabel && `${errorLabel} · `}
+            <code>{source.lastError}</code>
+          </>
+        )}
+      </p>
+      <p>
+        Next poll: <Time value={source.nextPollAt} fallback="None" />
+      </p>
+    </div>
+  );
+}
+
 export function SourceCard({
   source,
   model,
@@ -624,6 +695,7 @@ export function SourceCard({
           </Badge>
           <StatusBadge status={source.status} />
         </div>
+        <SyncStatus source={source} />
         <p className="break-all">{displayUrl(source.url) ?? 'No displayable URL'}</p>
         <p>{source.hasCredential ? 'credential set · write-only' : 'No credential set'}</p>
         {model.project !== null && 'attached' in source ? (
@@ -695,6 +767,20 @@ export function SourceCard({
               <Button
                 type="button"
                 variant="outline"
+                disabled={busy || source.status === 'paused'}
+                aria-describedby={
+                  source.status === 'paused' ? `sync-paused-${source.id}` : undefined
+                }
+                onClick={() => void model.syncNow(source)}
+              >
+                Sync now
+              </Button>
+              {source.status === 'paused' ? (
+                <p id={`sync-paused-${source.id}`}>Enable before syncing.</p>
+              ) : null}
+              <Button
+                type="button"
+                variant="outline"
                 disabled={busy}
                 onClick={() => model.chooseCredential(source.id)}
               >
@@ -736,6 +822,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
   const [filters, setFilters] = useState<SourceFilters>({ q: '', type: '', scope: '' });
   const filtered = !!(filters.q || filters.type || filters.scope);
+  const created = state.items.find((item) => item.id === state.createdSource);
   const membershipKnown = !state.loading && !state.listError && state.next === null;
   const combined = [
     ...state.items,
@@ -794,6 +881,16 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         ]}
         onChange={setFilters}
       />
+      {state.notice ? <p role="status">{state.notice}</p> : null}
+      {created?.status === 'paused' && !isProxy(created) ? (
+        <p role="status">
+          Next steps for {created.name}:{' '}
+          {state.names?.source === created.id && state.names.items.length > 0
+            ? 'Enable the source.'
+            : 'Register names, then Enable the source.'}
+          {model.project !== null ? ' Ask an organization admin.' : ''}
+        </p>
+      ) : null}
       {state.error ? <ListState kind="error" title={state.error} /> : null}
       <Button
         type="button"
@@ -921,10 +1018,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               },
               {
                 key: 'sync',
-                label: 'Last successful sync',
+                label: 'Sync status',
                 value: (source) => source.lastSuccessAt ?? '',
-                priority: 2,
-                render: (source) => <Time value={source.lastSuccessAt} fallback="Never" />,
+                render: (source) => <SyncStatus source={source} />,
               },
               {
                 key: 'id',

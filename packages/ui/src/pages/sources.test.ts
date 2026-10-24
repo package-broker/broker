@@ -1321,3 +1321,148 @@ describe('source replay metadata', () => {
     expect(JSON.stringify(listener.mock.calls)).not.toContain(SECRET);
   });
 });
+
+describe('source sync', () => {
+  it.each([null, 'acme'])('requests a sync and refreshes status in scope %s', async (project) => {
+    const updated = { ...source, projectId: project, lastSuccessAt: NOW, nextPollAt: NOW };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [{ ...source, projectId: project }], next: null }))
+      .mockResolvedValueOnce(json({ requested: true }, 202))
+      .mockResolvedValueOnce(json({ items: [updated], next: null }));
+    const { model, html } = setup(fetch, project);
+    await model.load();
+    await model.syncNow(model.snapshot().items[0]!);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      project === null
+        ? `/_pb/sources/${SOURCE}/sync`
+        : `/_pb/projects/acme/sources/${SOURCE}/sync`,
+      { method: 'POST' },
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(model.snapshot().items[0]).toEqual(updated);
+    expect(html()).toContain('Sync requested.');
+    expect(html()).toContain(`dateTime="${NOW}"`);
+  });
+
+  it('disables paused sources with an accessible reason and blocks inherited source mutations', async () => {
+    const paused = { ...source, status: 'paused' as const };
+    const { model, fetch } = setup();
+    const markup = renderToString(
+      createElement(SourceCard, { model, source: paused, busy: false }),
+    );
+    expect(markup).toMatch(/disabled="" aria-describedby="sync-paused-/);
+    expect(markup).toContain('Enable before syncing.');
+    await model.syncNow(paused);
+    expect(fetch).not.toHaveBeenCalled();
+    const inherited = setup(vi.fn(), 'acme');
+    await inherited.model.syncNow(source);
+    expect(inherited.fetch).not.toHaveBeenCalled();
+    expect(
+      renderToString(createElement(SourceCard, { model: inherited.model, source, busy: false })),
+    ).not.toContain('Sync now');
+  });
+
+  it('prevents duplicate requests while a sync is pending', async () => {
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model } = setup(fetch);
+    const pending = model.syncNow(source);
+    await model.syncNow(source);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    finish(json({}, 202));
+    await pending;
+    expect(model.snapshot().busy).toBe(false);
+  });
+
+  it.each(['source_paused', 'forbidden', 'reauth_required'])(
+    'handles %s without displaying response text',
+    async (code) => {
+      const { model, fetch, html, requireReauth } = setup(
+        vi.fn().mockResolvedValueOnce(json({ error: { code, message: SECRET } }, 403)),
+      );
+      await model.syncNow(source);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(model.snapshot().notice).toBeNull();
+      expect(model.snapshot().error).not.toBeNull();
+      expect(html()).not.toContain(SECRET);
+      expect(requireReauth).toHaveBeenCalledTimes(code === 'reauth_required' ? 1 : 0);
+    },
+  );
+
+  it('refreshes a source beyond the first page', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({}, 202))
+      .mockResolvedValueOnce(json({ items: [{ ...source, id: 'earlier' }], next: 'earlier' }))
+      .mockResolvedValueOnce(json({ items: [{ ...source, lastSuccessAt: NOW }], next: null }));
+    const { model } = setup(fetch);
+    await model.syncNow(source);
+    expect(fetch.mock.calls[2]?.[0]).toContain('after=earlier');
+    expect(model.snapshot().items[1]?.lastSuccessAt).toBe(NOW);
+  });
+
+  it.each([
+    ['unauthorized', 'Authorization failed'],
+    ['future_error', 'future_error'],
+    ['<script>unknown</script>', '&lt;script&gt;unknown&lt;/script&gt;'],
+    ['toString', 'toString'],
+  ])('renders error code %s in rows and details', async (code, label) => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValueOnce(
+        json({
+          items: [{ ...source, lastError: code, lastSuccessAt: NOW, nextPollAt: NOW }],
+          next: null,
+        }),
+      ),
+    );
+    await model.load();
+    expect(html().split(label).length).toBeGreaterThanOrEqual(3);
+    expect(html()).toContain(`<code>${code.startsWith('<') ? label : code}</code>`);
+    expect(html()).toContain('Next poll:');
+    expect(html()).toContain('Last success:');
+  });
+
+  it('shows empty sync history explicitly', () => {
+    const { model } = setup();
+    const markup = renderToString(createElement(SourceCard, { model, source, busy: false }));
+    expect(markup).toContain('Never');
+    expect(markup).toContain('None');
+    expect(markup).toContain('Next poll:');
+  });
+
+  it('updates creation guidance after registering names and enabling', async () => {
+    const paused = { ...source, status: 'paused' };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+      .mockResolvedValueOnce(json({ items: [paused], next: null }))
+      .mockResolvedValueOnce(
+        json({ items: [{ id: 'name', sourceId: SOURCE, pattern: 'vendor/*' }], next: null }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model, html } = setup(fetch);
+    model.openEditor();
+    await model.saveSource({
+      name: source.name,
+      type: source.type,
+      ecosystem: source.ecosystem,
+      config: {},
+    });
+    expect(html()).toContain('Register names, then Enable the source.');
+    await model.names(SOURCE);
+    expect(html()).toContain('Enable the source.');
+    expect(html()).not.toContain('Register names, then');
+    await model.togglePause(model.snapshot().items[0]!);
+    expect(html()).not.toContain('Next steps for');
+  });
+});

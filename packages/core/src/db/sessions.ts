@@ -1,3 +1,4 @@
+import type { AuditEvent } from '../audit/actions.js';
 import type { OrgContext } from './port.js';
 
 export interface SessionRow {
@@ -63,13 +64,15 @@ export interface SessionRepository {
    */
   touch(ctx: OrgContext, id: string, now: string, staleBefore: string): Promise<void>;
   /**
-   * Moves `reauth_at` forward to `authTime`. True when a row changed; false for a revoked or expired
-   * session, another identity (`null` matches only a session without identity), an `authTime`
-   * later than `now` and an `authTime` that is not later than the stored `reauth_at`.
+   * Atomically stages the audit event and moves `reauth_at` forward to `authTime`. True when a row
+   * changed; false for a revoked or expired session, another identity (`null` matches only a session
+   * without identity), an `authTime` later than `now` and an `authTime` that is not later than the
+   * stored `reauth_at`.
    */
   markReauthenticatedByIdentity(
     ctx: OrgContext,
     input: {
+      readonly audit: AuditEvent;
       readonly sessionId: string;
       readonly identityId: string | null;
       readonly authTime: string;

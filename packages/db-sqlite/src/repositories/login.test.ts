@@ -2,11 +2,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { completeIdentityLogin } from '@package-broker/core/auth/identity-login';
+import { fixedClock, ulid } from '@package-broker/core/ids';
 import type { LoginPlan } from '@package-broker/core/db/users';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createLoginWriter } from './login.js';
+import { createUserRepository } from './user.js';
 
 const EVIDENCE = '2026-10-15T11:59:00.000Z';
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -114,6 +117,17 @@ function plan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   const userId = overrides.userId ?? USER_NEW;
   const identityId = overrides.identityId ?? IDENTITY_NEW;
   return {
+    audit: {
+      id: ulid(),
+      occurredAt: NOW,
+      action: 'session.login',
+      actor: { type: 'user', id: userId },
+      target: { type: 'session', id: overrides.session?.id ?? SESSION_NEW },
+      tokenSelector: null,
+      sourceIp: null,
+      projectId: null,
+      payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+    },
     userId,
     createUser: true,
     autoJoin: true,
@@ -173,6 +187,7 @@ async function snapshot(): Promise<Record<string, unknown[]>> {
     bindings: await rows('SELECT * FROM identity_provider_binding ORDER BY org_id, provider'),
     groups: await rows('SELECT * FROM user_group ORDER BY user_id, provider, group_name'),
     sessions: await rows('SELECT * FROM session ORDER BY id'),
+    audits: await rows('SELECT * FROM audit_pending ORDER BY id'),
   };
 }
 
@@ -1043,5 +1058,155 @@ describe('createLoginWriter', () => {
         { revoked_at: null },
       ]);
     });
+  });
+});
+
+describe('SSO login audit storage', () => {
+  async function login(
+    options: { existing?: boolean; policy?: boolean; link?: boolean; refused?: boolean } = {},
+  ) {
+    if (options.existing) await seedReturning();
+    if (options.link) await exec([user(a, USER_X, 'sentinel-email@example.test')]);
+    const writer = createLoginWriter(executor);
+    return completeIdentityLogin(
+      {
+        users: createUserRepository(executor),
+        writer: options.refused
+          ? { commit: (ctx, input) => writer.commit(ctx, { ...input, autoJoin: false }) }
+          : writer,
+        sessions: { setCookies: () => [] } as never,
+        hooks: { 'auth.resolveIdentity': [], 'auth.mapGroups': [] },
+        clock: fixedClock(NOW),
+        ids: { ulid },
+      },
+      a,
+      {
+        id: PROVIDER,
+        kind: 'oidc',
+        displayName: 'Test',
+        trustAnchor: ANCHOR,
+        policy: {
+          verifiedDomains: options.policy ? ['other.test'] : ['example.test'],
+          autoJoin: true,
+        },
+        supportsReauth: true,
+        start: () => Promise.reject(new Error('unused')),
+        finish: () => Promise.reject(new Error('unused')),
+      },
+      {
+        provider: PROVIDER,
+        subject: options.existing ? SUBJECT : 'sentinel-subject',
+        email: options.existing ? 'x@example.test' : 'sentinel-email@example.test',
+        emailVerified: true,
+        displayName: 'sentinel-name',
+        groups: ['sentinel-group'],
+        issuedAt: EVIDENCE,
+        authTime: null,
+      },
+      {
+        requestId: '00000000-0000-4000-8000-000000000002',
+        ip: '203.0.113.7',
+        userAgent: null,
+        previousSecretHash: null,
+      },
+    );
+  }
+
+  it.each([false, true])(
+    'stores exactly one safe session.login row for existing=%s',
+    async (existing) => {
+      const outcome = await login({ existing });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error('login failed');
+      const stored = await rows<{ id: string; payload_json: string }>(
+        'SELECT * FROM audit_pending WHERE org_id = ?',
+        a.orgId,
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({
+        org_id: a.orgId,
+        action: 'session.login',
+        actor_type: 'user',
+        actor_id: outcome.userId,
+        target_type: 'session',
+        target_id: outcome.sessionId,
+        token_selector: null,
+        source_ip: '203.0.113.7',
+        project_id: null,
+        created_at: NOW,
+      });
+      expect(JSON.parse(stored[0]!.payload_json)).toEqual({
+        op_id: stored[0]!.id,
+        request_id: '00000000-0000-4000-8000-000000000002',
+      });
+      const serialized = JSON.stringify(stored);
+      for (const sentinel of [
+        'sentinel-email',
+        'x@example.test',
+        'sentinel-subject',
+        SUBJECT,
+        'sentinel-group',
+        'sentinel-name',
+        ANCHOR,
+      ]) {
+        expect(serialized).not.toContain(sentinel);
+      }
+      expect(
+        await rows('SELECT id FROM session WHERE org_id = ? AND created_at = ?', a.orgId, NOW),
+      ).toEqual([{ id: outcome.sessionId }]);
+      expect(await rows('SELECT id FROM audit_pending WHERE org_id = ?', b.orgId)).toEqual([]);
+    },
+  );
+
+  it('leaves no session or audit when the commit is refused', async () => {
+    expect(await login({ refused: true })).toEqual({ ok: false, reason: 'conflict' });
+    expect(await rows('SELECT * FROM session')).toEqual([]);
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+
+  it('leaves no audit when provider policy refuses the login', async () => {
+    expect(await login({ policy: true })).toEqual({ ok: false, reason: 'domain_not_verified' });
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+
+  it('leaves no audit when linking requires an administrator', async () => {
+    expect(await login({ link: true })).toEqual({ ok: false, reason: 'link_requires_admin' });
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
+  });
+});
+
+describe('login audit batch failures', () => {
+  it('leaves no session or audit when an existing identity is blocked after planning', async () => {
+    await seedReturning();
+    const input = returningPlan();
+    await exec([
+      {
+        sql: 'INSERT INTO identity_block (org_id, provider, issuer, subject, blocked_at) VALUES (?, ?, ?, ?, ?)',
+        params: [a.orgId, PROVIDER, ANCHOR, SUBJECT, NOW],
+      },
+    ]);
+
+    expect(await createLoginWriter(executor).commit(a, input)).toBe('refused');
+    expect(
+      await rows('SELECT id FROM session WHERE org_id = ? AND id = ?', a.orgId, input.session.id),
+    ).toEqual([]);
+    expect(await rows('SELECT id FROM session WHERE org_id = ?', a.orgId)).toEqual([
+      { id: SESSION_OLD },
+    ]);
+    expect(await rows('SELECT id FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([]);
+  });
+
+  it('rolls back the session and user when the audit insert fails', async () => {
+    const input = plan();
+    await exec([
+      {
+        sql: "CREATE TRIGGER reject_login_audit BEFORE INSERT ON audit_pending BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+        params: [],
+      },
+    ]);
+    await expect(createLoginWriter(executor).commit(a, input)).rejects.toThrow();
+    expect(await rows('SELECT * FROM session')).toEqual([]);
+    expect(await rows('SELECT * FROM user_account')).toEqual([]);
+    expect(await rows('SELECT * FROM audit_pending')).toEqual([]);
   });
 });

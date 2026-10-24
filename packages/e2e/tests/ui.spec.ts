@@ -496,6 +496,43 @@ test.describe('Node management UI', () => {
     await assertSecretAbsent(page, material);
   });
 
+  test('creates a GitHub token source and saves its bearer credential', async ({ page, admin }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'sources');
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await create.getByLabel('Name', { exact: true }).fill('Browser GitHub token');
+    await create.getByLabel('Type', { exact: true }).selectOption('vcs');
+    await expect(
+      create.getByLabel('GitHub authentication', { exact: true }).locator('option'),
+    ).toHaveText(['GitHub App', 'Personal access token']);
+    await expect(create.getByLabel('Installation ID', { exact: true })).toBeVisible();
+    await create.getByLabel('GitHub authentication', { exact: true }).selectOption('token');
+    await expect(create.getByLabel('Installation ID', { exact: true })).toHaveCount(0);
+    await create.getByLabel('Repository', { exact: true }).fill('browser/token');
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    expect(response.request().postDataJSON().config).toEqual({
+      provider: 'github',
+      repository: 'browser/token',
+      refs: { tags: true, branches: [] },
+    });
+    await expect(page.getByLabel('Credential kind', { exact: true })).toHaveValue('bearer');
+    const material = randomBytes(32).toString('base64url');
+    await fillSecret(page.getByLabel('token', { exact: true }), material);
+    const saved = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname.endsWith('/credential'),
+    );
+    await page.getByRole('button', { name: 'Save credential', exact: true }).click();
+    expect((await saved).status()).toBe(204);
+    await expect(page.getByRole('status').filter({ hasText: 'credential set' })).toBeVisible();
+    await assertSecretAbsent(page, material);
+  });
+
   for (const transport of ['no-cors fetch', 'HTML form'] as const) {
     test(`refuses a cross-origin POST from ${transport} with no auth state change`, async ({
       context,

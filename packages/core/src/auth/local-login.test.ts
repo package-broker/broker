@@ -41,7 +41,7 @@ const V1 = (): MasterKey => masterKey(1, 0x00);
 const V2 = (): MasterKey => masterKey(2, 0x20);
 
 const META: SessionMeta = {
-  requestId: 'test-request-id',
+  requestId: '01J00000000000000000000001',
   ip: '203.0.113.7',
   userAgent: 'agent/1.0',
   previousSecretHash: 'b'.repeat(64),
@@ -518,6 +518,7 @@ describe('login refusals', () => {
     const harness = await build();
     await counted(harness.events, () => login(harness, { password: 'wrong password value' }));
     expect(harness.events).toEqual(['findByEmail', 'reserveAttempt', 'pbkdf2']);
+    expect(harness.writer.succeed).not.toHaveBeenCalled();
   });
 
   it('refuses a TOTP credential whose envelope names another user', async () => {
@@ -909,4 +910,64 @@ describe('password rehash after success', () => {
     ]);
     expect(harness.writer.succeed.mock.calls[0]?.[1].rehash).toBeNull();
   });
+});
+
+describe('local authentication audit', () => {
+  it.each(['login', 'reauth'] as const)(
+    'builds the %s event with only correlation payload fields',
+    async (flow) => {
+      const harness = await build();
+      const result =
+        flow === 'login'
+          ? await login(harness)
+          : await harness.service.reauth(
+              ORG,
+              activeSession(),
+              { password: PASSWORD, code: harness.code },
+              META,
+            );
+      expect(result.ok).toBe(true);
+      const input = harness.writer.succeed.mock.calls[0]?.[1];
+      expect(input?.audit).toEqual({
+        id: expect.stringMatching(/^[0-9A-Z]{26}$/),
+        occurredAt: NOW,
+        action: `session.${flow}`,
+        actor: { type: 'user', id: USER_ID },
+        target: { type: 'session', id: flow === 'login' ? input?.session?.id : SESSION_ID },
+        tokenSelector: null,
+        sourceIp: META.ip,
+        projectId: null,
+        payloadJson: expect.any(String),
+      });
+      expect(JSON.parse(input?.audit.payloadJson ?? '{}')).toEqual({
+        op_id: input?.audit.id,
+        request_id: META.requestId,
+      });
+      for (const secret of [EMAIL, PASSWORD, harness.code])
+        expect(JSON.stringify(input?.audit)).not.toContain(secret);
+    },
+  );
+
+  it.each(['login', 'reauth'] as const)(
+    'throws before the %s writer when audit construction refuses',
+    async (flow) => {
+      const harness = await build();
+      const meta = { ...META, requestId: 'invalid-request-id' };
+      const run =
+        flow === 'login'
+          ? harness.service.login(
+              ORG,
+              { email: EMAIL, password: PASSWORD, code: harness.code },
+              meta,
+            )
+          : harness.service.reauth(
+              ORG,
+              activeSession(),
+              { password: PASSWORD, code: harness.code },
+              meta,
+            );
+      await expect(run).rejects.toThrow('Invalid local authentication audit event');
+      expect(harness.writer.succeed).not.toHaveBeenCalled();
+    },
+  );
 });

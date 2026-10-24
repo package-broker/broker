@@ -21,6 +21,7 @@ import { createLocalLoginReader } from '../repositories/local-login.js';
 import { createLocalLoginSetupWriter } from '../repositories/local-login-setup.js';
 import { createLocalLoginSuccessWriter } from '../repositories/local-login-success.js';
 import { createLoginWriter } from '../repositories/login.js';
+import { createSessionRepository } from '../repositories/session.js';
 import { seedDefaultsStatements } from '../repositories/role.js';
 import { assertGuard, newOpId } from '../kysely.js';
 import { seedTwoOrganizations } from './two-organizations.js';
@@ -110,6 +111,7 @@ const ROLE_IDS: Readonly<Record<DefaultRoleKey, string>> = {
 interface World {
   readonly pair: OpenedAuthDatabase;
   readonly a: OrgContext;
+  readonly b: OrgContext;
 }
 
 function st(sql: string, ...params: Statement['params']): Statement {
@@ -165,9 +167,9 @@ async function withDatabase(
 async function withWorld(open: Open, body: (world: World) => Promise<void>): Promise<void> {
   await withDatabase(open, async (pair) => {
     await migrate(pair.executor, await loadSources(), { holder: 'auth-contract' });
-    const { a } = await seedTwoOrganizations(pair.executor);
+    const { a, b } = await seedTwoOrganizations(pair.executor);
     await pair.executor.batch(seedDefaultsStatements(a, { now: NOW, ids: ROLE_IDS }));
-    await body({ pair, a });
+    await body({ pair, a, b });
   });
 }
 
@@ -226,6 +228,7 @@ function gatedPair(first: SqlExecutor, second: SqlExecutor): [SqlExecutor, SqlEx
 async function clearWorld({ pair, a }: World): Promise<void> {
   await pair.executor.batch(
     [
+      'audit_pending',
       'session',
       'user_group',
       'identity',
@@ -431,6 +434,7 @@ function newSession(id: string, userId = ADMIN, now = NOW): NewSession {
 
 function successInput(snapshot: LocalLoginSnapshot, session: NewSession) {
   return {
+    audit: mutationAudit('session.login', session.id),
     snapshot,
     step: STEP,
     rehash: null,
@@ -645,9 +649,58 @@ const totpReplay: Case = async (open, wrap = (executor) => executor) => {
       expect(results.filter(Boolean)).toHaveLength(1);
       expect(await countOf(pair.executor, 'SELECT count(*) AS n FROM session')).toBe(1);
       expect(
+        await countOf(
+          pair.executor,
+          'SELECT count(*) AS n FROM audit_pending WHERE org_id = ?',
+          a.orgId,
+        ),
+      ).toBe(1);
+      expect(
         await rowsOf(pair.executor, 'SELECT totp_last_step, failed_count FROM local_login'),
       ).toEqual([{ totp_last_step: STEP, failed_count: 0 }]);
     }
+  });
+};
+
+const localReauthForeignSession: Case = async (open, wrap = (executor) => executor) => {
+  await withWorld(open, async (world) => {
+    const { pair, a, b } = world;
+    await pair.executor.batch([
+      ...adminAccount(a),
+      ...enabledLogin(a, ADMIN, LAST_STEP),
+      userRow(b, U2, 'foreign@example.test'),
+      sessionRow(b, OTHER_SESSION, U2),
+    ]);
+    const snapshot = await snapshotOf(pair.executor, a);
+    const input = {
+      ...successInput(snapshot, newSession(NEW_SESSION)),
+      audit: mutationAudit('session.reauth', OTHER_SESSION),
+      session: null,
+      reauthSessionId: OTHER_SESSION,
+    };
+    expect(await createLocalLoginSuccessWriter(wrap(pair.executor)).succeed(a, input)).toBe(false);
+    expect(
+      await countOf(
+        pair.executor,
+        'SELECT count(*) AS n FROM audit_pending WHERE org_id = ?',
+        a.orgId,
+      ),
+    ).toBe(0);
+    expect(
+      await rowsOf(
+        pair.executor,
+        'SELECT totp_last_step FROM local_login WHERE org_id = ?',
+        a.orgId,
+      ),
+    ).toEqual([{ totp_last_step: LAST_STEP }]);
+    expect(
+      await rowsOf(
+        pair.executor,
+        'SELECT reauth_at FROM session WHERE org_id = ? AND id = ?',
+        b.orgId,
+        OTHER_SESSION,
+      ),
+    ).toEqual([{ reauth_at: null }]);
   });
 };
 
@@ -1201,6 +1254,17 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
     ): LoginPlan => {
       const identityId = overrides.identityId ?? IDENTITY_Y;
       return {
+        audit: {
+          id: ulid(),
+          occurredAt: NOW,
+          action: 'session.login',
+          actor: { type: 'user', id: U1 },
+          target: { type: 'session', id: overrides.sessionId ?? NEW_SESSION },
+          tokenSelector: null,
+          sourceIp: null,
+          projectId: null,
+          payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+        },
         userId: U1,
         createUser: false,
         email: 'u1@example.test',
@@ -1239,6 +1303,11 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         'SELECT id, user_id, revoked_at FROM session ORDER BY id',
       ),
       identities: await rowsOf(pair.executor, 'SELECT id, user_id FROM identity ORDER BY id'),
+      audits: await rowsOf(
+        pair.executor,
+        'SELECT action, actor_id, target_id FROM audit_pending WHERE org_id = ?',
+        a.orgId,
+      ),
     });
     const existingGroup = { user_id: U1, provider: PROVIDER, group_name: 'old-group' };
     const liveOldSession = { id: OLD_SESSION, user_id: U1, revoked_at: null };
@@ -1263,6 +1332,7 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
       await seed(foreignIdentity);
       const before = await state();
       expect(before.groups).toEqual([existingGroup]);
+      expect(before.audits).toEqual([]);
 
       const result = await createLoginWriter(wrap(pair.executor)).commit(a, plan());
 
@@ -1292,6 +1362,9 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
       const after = await state();
       if (result === 'created') {
         expect(claimed).toBe('conflict');
+        expect(after.audits).toEqual([
+          { action: 'session.login', actor_id: U1, target_id: NEW_SESSION },
+        ]);
         expect(after.identities).toEqual([{ id: IDENTITY_Y, user_id: U1 }]);
         expect(after.groups).toEqual([
           { user_id: U1, provider: PROVIDER, group_name: 'admins' },
@@ -1301,6 +1374,7 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         expect(after.sessions).toContainEqual({ id: OLD_SESSION, user_id: U1, revoked_at: NOW });
       } else {
         expect(claimed).toBe('claimed');
+        expect(after.audits).toEqual([]);
         expect(after.identities).toEqual([{ id: IDENTITY_X, user_id: USER_X }]);
         expect(after.groups).toEqual([existingGroup]);
         expect(after.sessions).toEqual([liveOldSession]);
@@ -1356,6 +1430,9 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         { id: winner.session, user_id: U1, revoked_at: null },
       ]);
       expect(after.groups).toHaveLength(2);
+      expect(after.audits).toEqual([
+        { action: 'session.login', actor_id: U1, target_id: winner.session },
+      ]);
     }
   });
 };
@@ -1506,10 +1583,79 @@ const accessMutationGuard: Case = async (open) => {
   });
 };
 
+const sessionReauth: Case = async (open, wrap = (executor) => executor) => {
+  await withWorld(open, async ({ pair, a }) => {
+    await pair.executor.batch([
+      userRow(a, ADMIN, EMAIL),
+      st(
+        'INSERT INTO identity (id, org_id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?, ?)',
+        IDENTITY_X,
+        a.orgId,
+        ADMIN,
+        PROVIDER,
+        SUBJECT,
+        EMAIL,
+      ),
+      sessionRow(a, OLD_SESSION, ADMIN),
+      st(
+        'UPDATE session SET identity_id = ?, reauth_at = ? WHERE org_id = ? AND id = ?',
+        IDENTITY_X,
+        PAST,
+        a.orgId,
+        OLD_SESSION,
+      ),
+    ]);
+    const repository = createSessionRepository(wrap(pair.executor));
+    const reauthAt = () =>
+      rowsOf(
+        pair.executor,
+        'SELECT reauth_at FROM session WHERE org_id = ? AND id = ?',
+        a.orgId,
+        OLD_SESSION,
+      );
+    const pending = () =>
+      rowsOf(
+        pair.executor,
+        'SELECT id, action, target_type, target_id FROM audit_pending WHERE org_id = ? AND action = ?',
+        a.orgId,
+        'session.reauth',
+      );
+    const audit = mutationAudit('session.reauth', OLD_SESSION);
+    expect(
+      await repository.markReauthenticatedByIdentity(a, {
+        audit,
+        sessionId: OLD_SESSION,
+        identityId: IDENTITY_X,
+        authTime: NOW,
+        now: NOW,
+      }),
+    ).toBe(true);
+    expect(await reauthAt()).toEqual([{ reauth_at: NOW }]);
+    const staged = [
+      { id: audit.id, action: 'session.reauth', target_type: 'session', target_id: OLD_SESSION },
+    ];
+    expect(await pending()).toEqual(staged);
+
+    expect(
+      await repository.markReauthenticatedByIdentity(a, {
+        audit: mutationAudit('session.reauth', OLD_SESSION),
+        sessionId: OLD_SESSION,
+        identityId: IDENTITY_X,
+        authTime: NOW,
+        now: NOW,
+      }),
+    ).toBe(false);
+    expect(await reauthAt()).toEqual([{ reauth_at: NOW }]);
+    expect(await pending()).toEqual(staged);
+  });
+};
+
 export const authContractCases = {
+  sessionReauth,
   upgrade,
   resetCleanup,
   totpReplay,
+  localReauthForeignSession,
   resetRace,
   setupRestage,
   bootstrapPromotion,
@@ -1522,6 +1668,8 @@ export const authContractCases = {
 
 export function describeAuthContract(name: string, open: Open): void {
   describe(`auth contract: ${name}`, () => {
+    it('SSO reauth stages one audit with the timestamp update and stages nothing on replay', () =>
+      authContractCases.sessionReauth(open));
     it(
       '1. baseline rerun keeps populated rows, adds no authority and gives 55 tables',
       () => authContractCases.upgrade(open),
@@ -1568,6 +1716,8 @@ export function describeAuthContract(name: string, open: Open): void {
       authContractCases.totpSetupRequired(open));
     it('11. access mutation guard: true lands, false and NULL fail with UNIQUE and leave no row', () =>
       authContractCases.accessMutationGuard(open));
+    it('12. local reauthentication refuses a foreign session without staging audit', () =>
+      authContractCases.localReauthForeignSession(open));
   });
 }
 

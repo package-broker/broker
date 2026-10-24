@@ -72,7 +72,7 @@ const githubSource = {
   ...input,
   type: 'vcs' as const,
   url: null,
-  configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+  configJson: JSON.stringify({ provider: 'github', repository: 'owner/name', installationId: 123 }),
 };
 const credential = (token: string) => ({
   kind: 'bearer' as const,

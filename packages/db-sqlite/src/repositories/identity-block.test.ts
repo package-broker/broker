@@ -440,6 +440,17 @@ function loginPlan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   const userId = overrides.userId ?? RETURNING_USER;
   const identityId = overrides.identityId ?? RETURNING_IDENTITY;
   return {
+    audit: {
+      id: ulid(),
+      occurredAt: NOW,
+      action: 'session.login',
+      actor: { type: 'user', id: userId },
+      target: { type: 'session', id: overrides.session?.id ?? RETURNING_SESSION },
+      tokenSelector: null,
+      sourceIp: null,
+      projectId: null,
+      payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+    },
     userId,
     createUser: true,
     autoJoin: true,

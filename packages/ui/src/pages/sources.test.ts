@@ -918,6 +918,27 @@ describe('source creation and configuration editing', () => {
     },
   );
 
+  it('opens a bearer token editor after GitHub token source creation', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, type: 'vcs', ecosystem: 'composer' }], next: null }),
+      );
+    const { model, html } = setup(fetch);
+    model.openEditor();
+    await model.saveSource({
+      name: 'GitHub token',
+      ecosystem: 'composer',
+      type: 'vcs',
+      config: { provider: 'github', repository: 'owner/repo', refs: { tags: true, branches: [] } },
+    });
+    expect(model.snapshot().credentialSource).toBe(SOURCE);
+    expect(html()).toContain('<option value="bearer" selected="">');
+    expect(html()).toContain('id="credential-token"');
+    expect(html()).not.toContain('Installation ID');
+  });
+
   it('finds a newly created source beyond the first page', async () => {
     const fetch = vi
       .fn()

@@ -2420,12 +2420,10 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/session.ts:builder variable: let update = db\n    .updateTable('session')\n    .set({ revoked_at: now })\n    .where('session.org_id', '=', ctx.orgId)\n    .where('session.user_id', '=', userId)\n    .where('session.revoked_at', 'is', null); #1",
         'db-sqlite/src/repositories/session.ts:builder variable: update = update.where(guard); #2',
         'db-sqlite/src/repositories/session.ts:builder variable: return compile(update); #1',
-        "db-sqlite/src/repositories/session.ts:builder variable: const rows = await run<IdRow>(\n        executor,\n        db\n          .updateTable('session')\n          .set({ reauth_at: input.authTime })\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', input.sessionId)\n          .where('revoked_at', 'is', null)\n          .where(sql<boolean>`unixepoch(expires_at, 'subsec') > unixepoch(${input.now}, 'subsec')`)\n          .where('identity_id', 'is', input.identityId)\n          .where((eb) =>\n            eb.or([\n              eb('reauth_at', 'is', null),\n              sql<boolean>`unixepoch(reauth_at, 'subsec') < unixepoch(${input.authTime}, 'subsec')`,\n            ]),\n          )\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/session.ts:builder variable: return rows.length > 0; #1',
         "db-sqlite/src/repositories/session.ts:builder variable: const rows = await run<IdRow>(\n        executor,\n        db\n          .updateTable('session')\n          .set({ revoked_at: now })\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .where('revoked_at', 'is', null)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/session.ts:builder variable: return rows.length > 0; #2',
         "db-sqlite/src/repositories/session.ts:builder variable: const rows = await run<IdRow>(\n        executor,\n        db\n          .updateTable('session')\n          .set({ revoked_at: now })\n          .where('org_id', '=', ctx.orgId)\n          .where('secret_hash', '=', secretHash)\n          .where('revoked_at', 'is', null)\n          .returning('id'),\n      ); #1",
-        'db-sqlite/src/repositories/session.ts:builder variable: return rows.length > 0; #3',
         "db-sqlite/src/repositories/session.ts:builder variable: const rows = await run<IdRow>(\n        executor,\n        db\n          .deleteFrom('session')\n          .where('org_id', '=', ctx.orgId)\n          .where('id', 'in', (eb) =>\n            eb\n              .selectFrom('session as expired')\n              .select('expired.id')\n              .where('expired.org_id', '=', ctx.orgId)\n              .where('expired.expires_at', '<', before)\n              .orderBy('expired.expires_at')\n              .limit(limit),\n          )\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/session.ts:builder variable: return rows.length; #1',
       ],
@@ -2434,6 +2432,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'SQL in session; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
+        "db-sqlite/src/repositories/session.ts:SQL template: sql<boolean>`session.org_id = ${ctx.orgId}\n        AND session.id = ${input.sessionId}\n        AND session.revoked_at IS NULL\n        AND unixepoch(session.expires_at, 'subsec') > unixepoch(${input.now}, 'subsec')\n        AND session.identity_id IS ${input.identityId}\n        AND (session.reauth_at IS NULL\n          OR unixepoch(session.reauth_at, 'subsec') < unixepoch(${input.authTime}, 'subsec'))` #1",
+        "db-sqlite/src/repositories/session.ts:builder variable: const results = await executor.batch([\n        auditPendingStatement(ctx, input.audit, {\n          sql: `EXISTS (${eligible.sql})`,\n          params: eligible.params,\n        }),\n        compile(\n          db.updateTable('session').set({ reauth_at: input.authTime }).where(when).returning('id'),\n        ),\n      ]); #1",
+        'db-sqlite/src/repositories/session.ts:builder variable: return (results[1]?.rows.length ?? 0) > 0; #1',
         "db-sqlite/src/repositories/session.ts:SQL template: sql<boolean>`unixepoch(session.expires_at, 'subsec') > unixepoch(${cutoffs.now}, 'subsec')` #1",
         "db-sqlite/src/repositories/session.ts:SQL template: sql<boolean>`unixepoch(coalesce(session.last_seen_at, session.created_at), 'subsec') > unixepoch(${cutoffs.idleSince}, 'subsec')` #1",
         "db-sqlite/src/repositories/session.ts:SQL template: sql<boolean>`unixepoch(session.created_at, 'subsec') > unixepoch(${cutoffs.now}, 'subsec') - 43200` #1",
@@ -3351,6 +3352,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Native SQLite executor boundary; raw changes adaptation and callers have separate count reviews.',
       sites: [
         "db-sqlite/src/testing/node-sqlite-executor.ts:opaque dependency: import { DatabaseSync, type StatementSync } from 'node:sqlite'; #1",
+      ],
+    },
+    {
+      reason:
+        'Audit condition embeds only the compiled organization-scoped operation marker and session effect guards with bound parameters; no D1 changes() read.',
+      sites: [
+        'db-sqlite/src/repositories/local-login-success.ts:SQL input: sql: `(${when.sql}) = 1` #1',
       ],
     },
   ].flatMap(({ reason, sites }) => sites.map((site) => [site, reason])),

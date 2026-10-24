@@ -12,6 +12,7 @@ import {
   sessionMetaOf,
 } from './session.js';
 import type { AuthenticatedSession } from './session.js';
+import { isIpLiteral } from '../audit/actions.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { fixedClock } from '../ids.js';
@@ -154,14 +155,21 @@ describe('sessionMetaOf', () => {
     ).toBeNull();
   });
 
-  it('keeps only addresses of at most 64 characters from [0-9A-Fa-f:.]', async () => {
-    const accepted = ['203.0.113.7', '2001:db8::1', '::ffff:192.0.2.1', 'a'.repeat(64)];
+  it('keeps only IP literals', async () => {
+    const accepted = ['203.0.113.7', '2001:db8::1', '::ffff:192.0.2.1'];
     for (const ip of accepted) {
       expect(
         (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }), 'test-request-id')).ip,
       ).toBe(ip);
     }
-    const rejected = ['a'.repeat(65), 'unknown', '1.2.3.4<script>', '203.0.113.7:80x', '1.2.3.4 5'];
+    const rejected = [
+      'a'.repeat(64),
+      'a'.repeat(65),
+      'unknown',
+      '1.2.3.4<script>',
+      '203.0.113.7:80x',
+      '1.2.3.4 5',
+    ];
     for (const ip of rejected) {
       expect(
         (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }), 'test-request-id')).ip,
@@ -564,6 +572,32 @@ describe('createSessionService', () => {
 });
 
 describe('clientIpOf', () => {
+  const cases = [
+    ['1.2', null],
+    ['abc', null],
+    ['::::', null],
+    ['999.1.1.1', null],
+    ['a'.repeat(8192), null],
+    ['', null],
+    ['203.0.113.7', '203.0.113.7'],
+    ['2001:db8::1', '2001:db8::1'],
+    ['::1', '::1'],
+    ['2001:0DB8:0:0::1', '2001:0DB8:0:0::1'],
+    ['::ffff:192.0.2.7', '::ffff:192.0.2.7'],
+    ['fe80::1%eth0', null],
+    ['[::1]', null],
+    ['192.0.2.1:80', null],
+    ['01.2.3.4', null],
+  ] as const;
+
+  it.each(cases)('returns only audit-compatible literals for case %#', (value, expected) => {
+    for (const header of ['cf-connecting-ip', 'x-forwarded-for']) {
+      const result = clientIpOf(requestWith(null, { [header]: value }));
+      expect(result).toBe(expected);
+      if (result !== null) expect(isIpLiteral(result)).toBe(true);
+    }
+  });
+
   it.each([
     [{ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }, '203.0.113.7'],
     [{ 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9' }, '198.51.100.1'],

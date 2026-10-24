@@ -21,6 +21,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { checkHeldBatch } from './held-batch-smoke.mjs';
+import {
+  TRACED_ROUTE,
+  buildTraceparentBundle,
+  checkTraceparentCases,
+} from '../packages/runtime-cloudflare/scripts/traceparent-smoke.mjs';
 
 import { checkUiBundle } from '../packages/runtime-cloudflare/scripts/ui-bundle-regression.mjs';
 
@@ -387,7 +392,7 @@ async function startBundle(source) {
     console.log('smoke:node installed production dependencies');
   }
 
-  if (BREAK) {
+  if (BREAK && !process.argv.includes('traceparent')) {
     step = 'breaking the driver resolution';
     await rename(
       join(copy, 'node_modules', 'better-sqlite3'),
@@ -434,6 +439,33 @@ async function startBundle(source) {
   await Promise.race([waitReady(base), failure]);
   console.log('smoke:node GET /health/ready 200');
   return { base, env };
+}
+
+async function checkTraceparent() {
+  for (const trusted of [true, false]) {
+    step = `building the traceparent bundle (trusted=${trusted})`;
+    const out = await buildTraceparentBundle(REPO_ROOT, 'node', trusted);
+    const { base } = await startBundle(out);
+    step = `checking traceparent (trusted=${trusted})`;
+    await checkTraceparentCases({
+      trusted,
+      records: () =>
+        childStdout.split('\n').flatMap((line) => {
+          try {
+            return [JSON.parse(line)];
+          } catch {
+            return [];
+          }
+        }),
+      request: (headers) =>
+        fetch(`${base}${TRACED_ROUTE}`, {
+          headers,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        }),
+    });
+    child.kill('SIGTERM');
+    assert.equal(await waitExit(child, EXIT_TIMEOUT_MS), 0, 'traceparent server shutdown');
+  }
 }
 
 function seedPackageCatalogue(database) {
@@ -773,6 +805,7 @@ async function run() {
 
   await checkPackageRoute();
   await checkHeldBatch('node');
+  await checkTraceparent();
 
   console.log('smoke:node ok');
 }

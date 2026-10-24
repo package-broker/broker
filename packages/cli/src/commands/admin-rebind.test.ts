@@ -104,6 +104,17 @@ async function seedLogins(database: MigratedDatabase | null, file: string | null
     for (const [index, [userId, email, subject, provider, anchor]] of logins.entries()) {
       const identityId = `01J0IDENT${String(index)}00000000000000X`;
       const plan: LoginPlan = {
+        audit: {
+          id: ulid(),
+          occurredAt: NOW,
+          action: 'session.login',
+          actor: { type: 'user', id: userId },
+          target: { type: 'session', id: `01J0SESS${String(index)}000000000000000XX` },
+          tokenSelector: null,
+          sourceIp: null,
+          projectId: null,
+          payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+        },
         userId,
         createUser: true,
         autoJoin: true,

@@ -1,3 +1,4 @@
+import { isIpLiteral } from '@package-broker/core/audit/actions';
 import { describe, expect, it } from 'vitest';
 import { nodeClientIp } from './client-ip.js';
 
@@ -5,6 +6,31 @@ const request = (headers: Record<string, string> = {}) =>
   new Request('http://broker.test', { headers });
 
 describe('Node client IP trust boundary', () => {
+  it.each(['203.0.113.7', '2001:db8::1', '::1', '2001:0DB8:0:0::1', '::ffff:192.0.2.7'])(
+    'preserves audit-compatible literal %s across address sources',
+    (value) => {
+      const results = [
+        nodeClientIp(request(), value),
+        nodeClientIp(request(), value, true),
+        nodeClientIp(request({ 'cf-connecting-ip': value }), null, true),
+        nodeClientIp(request({ 'x-forwarded-for': value }), null, true),
+        nodeClientIp(request({ forwarded: `for="${value}"` }), null, true),
+      ];
+      for (const result of results) {
+        expect(result).toBe(value);
+        expect(isIpLiteral(result)).toBe(true);
+      }
+    },
+  );
+
+  it.each(['1.2', 'abc', '::::', '999.1.1.1', 'a'.repeat(8192), ''])(
+    'rejects invalid socket address for case %#',
+    (value) => {
+      expect(nodeClientIp(request(), value)).toBeNull();
+      expect(nodeClientIp(request(), value, true)).toBeNull();
+    },
+  );
+
   it.each(['127.0.0.1', '::1', '::ffff:127.0.0.1'])('defaults to socket address %s', (peer) => {
     expect(
       nodeClientIp(
@@ -92,6 +118,9 @@ describe('Node client IP trust boundary', () => {
     'a'.repeat(8192),
     'unknown',
     '999.1.1.1',
+    '1.2',
+    'abc',
+    '::::',
     '1.2.3',
     ':::',
     'a:b',

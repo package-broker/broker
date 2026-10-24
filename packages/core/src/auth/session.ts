@@ -90,7 +90,8 @@ export function authCallMetaOf(
   requestId: string,
   resolveClientIp: (request: Request) => string | null = clientIpOf,
 ): AuthCallMeta {
-  return { requestId, ip: resolveClientIp(request) };
+  const ip: unknown = resolveClientIp(request);
+  return { requestId, ip: isIpLiteral(ip) ? (ip as string) : null };
 }
 
 function timestampMs(value: string): number {

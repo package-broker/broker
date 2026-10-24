@@ -399,6 +399,22 @@ describe('finish', () => {
     }
   });
 
+  it('stages setup.complete with a null source IP when the request has no client IP', async () => {
+    const h = await harness();
+    const { secret } = await started(h);
+    expect(
+      (
+        await h.service.finish(
+          ctx,
+          { token: h.token, password: PASSWORD, code: await codeFor(secret) },
+          { ...META, ip: null },
+        )
+      ).ok,
+    ).toBe(true);
+    expect(h.completions).toHaveLength(1);
+    expect(h.completions[0]!.audit.sourceIp).toBeNull();
+  });
+
   it('throws a fixed error before the writer if auditEvent refuses the envelope', async () => {
     const h = await harness();
     const { secret } = await started(h);

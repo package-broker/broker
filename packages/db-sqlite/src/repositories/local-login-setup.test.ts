@@ -660,6 +660,34 @@ describe('completeSetup', () => {
     expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
   });
 
+  it('stages no audit row when the session insert is suppressed while the guard passes', async () => {
+    await seedPending();
+    let suppressed = false;
+    const suppressing: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: (statements) => {
+        const index = statements.findIndex((statement) =>
+          statement.sql.includes('insert into "session"'),
+        );
+        if (index < 0) throw new Error('Missing session statement');
+        suppressed = true;
+        return executor.batch([
+          ...statements.slice(0, index),
+          insert('SELECT 1 WHERE 0'),
+          ...statements.slice(index + 1),
+        ]);
+      },
+    };
+    expect(await createLocalLoginSetupWriter(suppressing).completeSetup(a, completeInput())).toBe(
+      false,
+    );
+    expect(suppressed).toBe(true);
+    expect((await loginRow()).totp_enabled_at).toBe(LATER);
+    expect(await auditRows()).toEqual([]);
+    expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
+  });
+
   async function staged(): Promise<void> {
     await seedPending();
   }

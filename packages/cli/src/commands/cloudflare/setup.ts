@@ -20,10 +20,15 @@ import {
   cloudflareCredentials,
   commandEnvelope,
   failCommand,
-  object,
   type CommandResult,
 } from './api.js';
-import { deploy, validateDeploymentArtifact, type DeployOptions } from './deploy.js';
+import {
+  active,
+  cloudflareDeployContract,
+  deploy,
+  validateDeploymentArtifact,
+  type DeployOptions,
+} from './deploy.js';
 import {
   InventoryStore,
   InventoryTransaction,
@@ -570,7 +575,7 @@ export async function setup(
       ...(o.now ? { now: o.now } : {}),
       ...(o.sleep ? { sleep: o.sleep } : {}),
     });
-    const workers = await api.list('/workers/scripts');
+    const workers = await api.snapshot('/workers/scripts');
     const matches = workers.filter((w) => w.id === identity.script_name);
     if (matches.length > 1) throw new CloudflareError('ownership_conflict', 8, false, stage);
     const worker = matches[0];
@@ -590,7 +595,7 @@ export async function setup(
         name: identity.script_name,
       });
     const installedNames = worker
-      ? (await api.list(`/workers/scripts/${identity.script_name}/secrets`)).map((s) => {
+      ? (await api.snapshot(`/workers/scripts/${identity.script_name}/secrets`)).map((s) => {
           if (
             s.type !== 'secret_text' ||
             typeof s.name !== 'string' ||
@@ -619,12 +624,8 @@ export async function setup(
     validateBindingCollisions(generatedNames, [...retainedNames], endpointEnv);
     if ((o.rollout ?? 100) < 100) {
       if (!worker) invalid();
-      const deployment = object(
-        (await api.request(`/workers/scripts/${identity.script_name}/deployments`)).result,
-      ).active;
-      if (deployment === null) invalid();
-      const active = object(deployment);
-      if (!Array.isArray(active.versions) || !active.versions.length) invalid();
+      const current = await active(api, `/workers/scripts/${identity.script_name}`);
+      if (!current.versions.length) invalid();
     }
     for (const name of [...selectedSecrets, ...(headersEnv ? [headersEnv] : [])]) {
       if (name !== 'PB_MASTER_KEY' && !retainedNames.has(name)) {
@@ -769,6 +770,7 @@ export async function setup(
     }
     if (endpointEnv) deployEnv[endpointEnv] = o.env[endpointEnv];
     const deployOptions: DeployOptions = {
+      contract: cloudflareDeployContract,
       ...deployCommon,
       env: deployEnv,
       secret: selectedSecrets

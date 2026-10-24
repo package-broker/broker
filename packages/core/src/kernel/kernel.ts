@@ -284,8 +284,11 @@ function validateCoreRoutes(
       );
       placeable = false;
     } else {
+      // The canonical UI document is the sole core route with a trailing slash.
       const pathProblem = routePathProblem(
-        ecosystem ? route.path : `/${route.path.slice(CORE_PREFIX.length)}`,
+        ecosystem
+          ? route.path
+          : `/${(route.path === '/_pb/ui/' ? '/_pb/ui' : route.path).slice(CORE_PREFIX.length)}`,
       );
       if (pathProblem !== null) {
         problems.push(`${label}: path ${JSON.stringify(route.path)}: ${pathProblem}`);

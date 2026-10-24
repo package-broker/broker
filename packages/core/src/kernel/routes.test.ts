@@ -63,6 +63,8 @@ describe('routesConflict', () => {
     ['GET', '/items/:id', 'GET', '/items/:id/x'],
     ['GET', '/items/a', 'GET', '/items/b'],
     ['GET', '/', 'GET', '/items'],
+    ['GET', '/_pb/ui/', 'GET', '/_pb/ui/:file'],
+    ['GET', '/_pb/ui/:file', 'GET', '/_pb/ui/'],
   ])('%s %s does not conflict with %s %s', (ma, pa, mb, pb) => {
     expect(routesConflict({ method: ma, path: pa }, { method: mb, path: pb })).toBe(false);
   });
@@ -83,7 +85,7 @@ describe('routeApiProblems', () => {
     ]);
   });
 
-  it.each(['/_pb/ui', '/_pb/ui/assets/:file', '/_pb/mcp', '/_pb/openapi.json'])(
+  it.each(['/_pb/ui', '/_pb/ui/:file', '/_pb/mcp', '/_pb/openapi.json'])(
     'accepts an exemption on %s',
     (path) => {
       expect(

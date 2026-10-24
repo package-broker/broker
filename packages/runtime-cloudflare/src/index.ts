@@ -2142,7 +2142,7 @@ export function createWorker(
       });
       return (assets = pending);
     };
-    const ui = createUiRoutes(
+    const uiRoutes = createUiRoutes(
       {
         manifest: async () => (await uiAssets())?.manifest() ?? null,
         read: async (name) => (await uiAssets())?.read(name) ?? null,
@@ -2156,10 +2156,6 @@ export function createWorker(
       },
       { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
     );
-    const uiRoutes = ui.map((route) => ({
-      ...route,
-      path: route.path.replace('/assets/:file', '/:file'),
-    }));
     try {
       const coreRoutes = [
         ...(auth?.coreRoutes ?? []),
@@ -2361,19 +2357,7 @@ export function createWorker(
         try {
           const setup = rewriteSetupRequest(request);
           if (setup !== null) return await application.kernel.fetch(setup, ctx);
-          const url = new URL(request.url);
-          if (url.pathname === '/_pb/ui') {
-            const response = await application.kernel.fetch(request, ctx);
-            if (response.status !== 200) return response;
-            url.pathname = '/_pb/ui/';
-            return new Response(null, {
-              status: 303,
-              headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-            });
-          }
-          if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request, ctx);
-          url.pathname = '/_pb/ui';
-          return await application.kernel.fetch(new Request(url, request), ctx);
+          return await application.kernel.fetch(request, ctx);
         } catch (error) {
           return withoutBodyForHead(request, errorResponse(error, requestId, log));
         }

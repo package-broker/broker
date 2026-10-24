@@ -216,6 +216,13 @@ describe('Worker setup mount', () => {
         },
         {
           method: 'GET',
+          path: '/_pb/ui/',
+          permission: null,
+          boundary: undefined,
+          needsOrg: false,
+        },
+        {
+          method: 'GET',
           path: '/_pb/ui/:file',
           permission: null,
           boundary: undefined,

@@ -1254,6 +1254,17 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
     ): LoginPlan => {
       const identityId = overrides.identityId ?? IDENTITY_Y;
       return {
+        audit: {
+          id: ulid(),
+          occurredAt: NOW,
+          action: 'session.login',
+          actor: { type: 'user', id: U1 },
+          target: { type: 'session', id: overrides.sessionId ?? NEW_SESSION },
+          tokenSelector: null,
+          sourceIp: null,
+          projectId: null,
+          payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+        },
         userId: U1,
         createUser: false,
         email: 'u1@example.test',
@@ -1292,6 +1303,11 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         'SELECT id, user_id, revoked_at FROM session ORDER BY id',
       ),
       identities: await rowsOf(pair.executor, 'SELECT id, user_id FROM identity ORDER BY id'),
+      audits: await rowsOf(
+        pair.executor,
+        'SELECT action, actor_id, target_id FROM audit_pending WHERE org_id = ?',
+        a.orgId,
+      ),
     });
     const existingGroup = { user_id: U1, provider: PROVIDER, group_name: 'old-group' };
     const liveOldSession = { id: OLD_SESSION, user_id: U1, revoked_at: null };
@@ -1316,6 +1332,7 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
       await seed(foreignIdentity);
       const before = await state();
       expect(before.groups).toEqual([existingGroup]);
+      expect(before.audits).toEqual([]);
 
       const result = await createLoginWriter(wrap(pair.executor)).commit(a, plan());
 
@@ -1345,6 +1362,9 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
       const after = await state();
       if (result === 'created') {
         expect(claimed).toBe('conflict');
+        expect(after.audits).toEqual([
+          { action: 'session.login', actor_id: U1, target_id: NEW_SESSION },
+        ]);
         expect(after.identities).toEqual([{ id: IDENTITY_Y, user_id: U1 }]);
         expect(after.groups).toEqual([
           { user_id: U1, provider: PROVIDER, group_name: 'admins' },
@@ -1354,6 +1374,7 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         expect(after.sessions).toContainEqual({ id: OLD_SESSION, user_id: U1, revoked_at: NOW });
       } else {
         expect(claimed).toBe('claimed');
+        expect(after.audits).toEqual([]);
         expect(after.identities).toEqual([{ id: IDENTITY_X, user_id: USER_X }]);
         expect(after.groups).toEqual([existingGroup]);
         expect(after.sessions).toEqual([liveOldSession]);
@@ -1409,6 +1430,9 @@ const loginBatchRace: Case = async (open, wrap = (executor) => executor) => {
         { id: winner.session, user_id: U1, revoked_at: null },
       ]);
       expect(after.groups).toHaveLength(2);
+      expect(after.audits).toEqual([
+        { action: 'session.login', actor_id: U1, target_id: winner.session },
+      ]);
     }
   });
 };

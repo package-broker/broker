@@ -1,3 +1,4 @@
+import { ulid } from '@package-broker/core/ids';
 import { expect } from 'vitest';
 import { createLoginWriter } from '../../repositories/login.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
@@ -26,6 +27,17 @@ const foreignGroup: ContractCase = {
     const now = new Date().toISOString();
     expect(
       await createLoginWriter(executing(context)).commit(own, {
+        audit: {
+          id: ulid(),
+          occurredAt: now,
+          action: 'session.login',
+          actor: { type: 'user', id: 'U' },
+          target: { type: 'session', id: 'NEW' },
+          tokenSelector: null,
+          sourceIp: null,
+          projectId: null,
+          payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+        },
         userId: 'U',
         createUser: false,
         email: 'u@example.test',
@@ -70,9 +82,9 @@ export const entries: readonly MutationEntry[] = [
     },
     {
       locate:
-        /"(?:identity|identity_block|identity_provider_binding|user_account|session|guard_\w+)"\."org_id" = /,
+        /"(?:identity|identity_block|identity_provider_binding|user_account|session|created|guard_\w+)"\."org_id" = /,
       reason:
-        'The user, identity, binding and new session are own controls; shared ownsIdentity, anchorMatches and sessionInsertStatement predicates have independent registrations.',
+        'The user, identity, binding and new session are own controls; shared ownsIdentity, anchorMatches and sessionInsertStatement predicates have independent registrations. The created-session guard scopes the audit to the session just inserted.',
     },
   ]),
 ];

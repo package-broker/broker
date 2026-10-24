@@ -140,7 +140,7 @@ for (const config of configs) {
         sessions: { setCookies } as unknown as SessionService,
         hooks: { 'auth.resolveIdentity': [], 'auth.mapGroups': [] },
         clock: ctx.clock,
-        ids: { ulid: () => `generated-${++sequence}` },
+        ids: { ulid: () => `01HZ${String(++sequence).padStart(22, '0')}` },
       };
       const org = orgContext('test-org');
       const outcome = await completeIdentityLogin(
@@ -157,7 +157,12 @@ for (const config of configs) {
           issuedAt: NOW,
           authTime: null,
         },
-        { requestId: 'test', ip: null, userAgent: null, previousSecretHash: null },
+        {
+          requestId: '00000000-0000-4000-8000-000000000001',
+          ip: null,
+          userAgent: null,
+          previousSecretHash: null,
+        },
       );
       expect(lookupForLogin).toHaveBeenCalledWith(
         org,

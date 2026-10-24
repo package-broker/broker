@@ -24,7 +24,7 @@ const rows = (table: string) =>
 const pkg = async () =>
   (await database.executor.all(statement("SELECT * FROM package WHERE id = 'P'")))[0]!;
 
-beforeEach(async () => {
+async function setup(ecosystem = 'npm') {
   database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
   ctx = database.orgs!.a;
   batches = [];
@@ -56,14 +56,18 @@ beforeEach(async () => {
       ctx.orgId,
     ),
     statement(
-      "INSERT INTO source (id, org_id, name, ecosystem, type, removal_policy) VALUES ('S', ?, 'source', 'npm', 'npm_registry', 'exclude')",
+      "INSERT INTO source (id, org_id, name, ecosystem, type, removal_policy) VALUES ('S', ?, 'source', ?, ?, 'exclude')",
       ctx.orgId,
+      ecosystem,
+      ecosystem === 'composer' ? 'composer_repository' : 'npm_registry',
     ),
     statement(
-      "INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at) VALUES ('P', ?, 'S', 'npm', 'widget', ?), ('Q', ?, 'S', 'npm', 'other', ?)",
+      "INSERT INTO package (id, org_id, source_id, ecosystem, name, updated_at) VALUES ('P', ?, 'S', ?, 'widget', ?), ('Q', ?, 'S', ?, 'other', ?)",
       ctx.orgId,
+      ecosystem,
       OLD,
       ctx.orgId,
+      ecosystem,
       OLD,
     ),
     ...['1.0.0', '2.0.0', '3.0.0'].map((v) =>
@@ -79,7 +83,8 @@ beforeEach(async () => {
     ),
   );
   guard = createCatalogueWriteGuard(ctx, { id: 'J', owner: 'worker', fence: 1 });
-});
+}
+beforeEach(() => setup());
 afterEach(async () => {
   await database.close();
 });
@@ -280,11 +285,9 @@ it.each(['source', 'package'] as const)(
 );
 
 it('source removal cascades once, preserves protected versions, and only the source revives a Composer package', async () => {
+  await database.close();
+  await setup('composer');
   await run(
-    statement(
-      "UPDATE source SET ecosystem = 'composer', type = 'composer_repository' WHERE id = 'S'",
-    ),
-    statement("UPDATE package SET ecosystem = 'composer'"),
     statement("UPDATE version SET status = 'quarantined' WHERE id = '3.0.0'"),
     statement('CREATE TABLE epoch_bumps (value TEXT)'),
     statement(

@@ -1,7 +1,10 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { run } from '../../cli.js';
 import {
   emptyInventory,
@@ -28,7 +31,7 @@ const TOKEN = 'token_SENTINEL';
 const DB = '11111111-1111-4111-8111-111111111111';
 const QUEUE = 'b'.repeat(32);
 const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: TOKEN };
-const project = resolve(import.meta.dirname, '../../../../..');
+let project: string;
 let directory: string;
 let inventory: string;
 let journal: Inventory;
@@ -98,7 +101,17 @@ function attachmentTrace() {
     .map((entry) => ({ ...entry, path: entry.path.replace(/\?page=1&per_page=100$/, '') }));
 }
 
+beforeAll(async () => {
+  project = await realpath(await mkdtemp(join(tmpdir(), 'pb-teardown-')));
+  await promisify(execFile)('git', ['init', '--quiet'], { cwd: project });
+  await writeFile(join(project, '.gitignore'), '.pb/\n');
+});
+afterAll(async () => {
+  await rm(project, { recursive: true, force: true });
+});
+
 beforeEach(async () => {
+  vi.spyOn(process, 'cwd').mockReturnValue(project);
   directory = join(project, '.pb/state/cloudflare', `t852-${randomUUID()}`);
   inventory = join(directory, 'inventory.test.json');
   await mkdir(directory, { recursive: true });
@@ -197,6 +210,32 @@ it('deletes only recorded IDs after partial creation and repeated teardown repor
   expect(again.exitCode).toBe(0);
   expect(again.output.checks).toContainEqual({ name: 'd1', status: 'already_gone' });
   expect(JSON.parse(await readFile(inventory, 'utf8'))).toEqual(journal);
+});
+
+it('ignores a stale lock in another project during a temporary project dry run', async () => {
+  const oldProject = await realpath(await mkdtemp(join(tmpdir(), 'pb-teardown-old-root-')));
+  try {
+    await promisify(execFile)('git', ['init', '--quiet'], { cwd: oldProject });
+    await writeFile(join(oldProject, '.gitignore'), '.pb/\n');
+    const stateRoot = join(oldProject, '.pb/state/cloudflare');
+    const oldInventory = join(stateRoot, 'inventory.test.json');
+    const lock = join(stateRoot, `lock.${journal.identity.worker_name}.production.json`);
+    const marker = JSON.stringify({ pid: 123, started_at: '2026-10-18T00:00:00.000Z' });
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(oldInventory, JSON.stringify(journal));
+    await writeFile(lock, marker);
+    expect(
+      (await teardown({ ...options, project: oldProject, inventory: oldInventory })).exitCode,
+    ).toBe(4);
+    await save();
+    const result = await teardown({ ...options, dryRun: true });
+    expect(result.exitCode).toBe(0);
+    expect(result.output.status).toBe('planned');
+    expect(trace).toEqual([]);
+    expect(await readFile(lock, 'utf8')).toBe(marker);
+  } finally {
+    await rm(oldProject, { recursive: true, force: true });
+  }
 });
 
 it('does not discover or delete a prefix-matching resource without an inventoried ID', async () => {

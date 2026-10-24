@@ -1,6 +1,8 @@
 import { expressionBuilder } from 'kysely';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
-import { ulid } from '@package-broker/core/ids';
+import { createSessionService } from '@package-broker/core/auth/session';
+import { randomToken, sha256Hex } from '@package-broker/core/auth/primitives';
+import { fixedClock, ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { NewSession } from '@package-broker/core/db/sessions';
@@ -683,6 +685,150 @@ describe('markReauthenticatedByIdentity', () => {
     expect(await mark('s1', 'identity-1', AUTH_TIME, b)).toBe(false);
     expect((await row('revoked'))?.reauth_at).toBeNull();
     expect((await row('s1'))?.reauth_at).toBeNull();
+  });
+});
+
+describe('logout audit', () => {
+  function logoutAudit(): AuditEvent {
+    return { ...reauthAudit(), action: 'session.logout' };
+  }
+
+  async function pending(ctx: OrgContext = a) {
+    return executor.all({
+      sql: 'SELECT * FROM audit_pending WHERE org_id = ? AND action = ?',
+      params: [ctx.orgId, 'session.logout'],
+    });
+  }
+
+  async function logoutFixture(overrides: Partial<Seed> = {}) {
+    const secret = randomToken(32);
+    await seed({ id: 's1', lastSeenAt: RECENT, ...overrides });
+    await executor.batch([
+      {
+        sql: 'UPDATE session SET secret_hash = ? WHERE org_id = ? AND id = ?',
+        params: [await sha256Hex(secret), a.orgId, 's1'],
+      },
+    ]);
+    const counted = countCalls(executor);
+    const service = createSessionService({
+      sessions: createSessionRepository(counted.executor),
+      clock: fixedClock(NOW),
+      publicOrigin: 'https://broker.example.test',
+    });
+    const logout = (cookie = `__Host-pb_session=${secret}`) =>
+      service.logout(
+        a,
+        new Request('https://broker.example.test/_pb/auth/logout', { headers: { cookie } }),
+        { requestId: ulid(), ip: '203.0.113.7' },
+      );
+    return { logout, service, counted };
+  }
+
+  it('stages one row and revokes a live session without touching it', async () => {
+    const h = await logoutFixture();
+    expect(await h.logout()).toEqual(h.service.clearCookies());
+    expect(h.counted.counts()).toEqual({ all: 1, batch: 1 });
+    expect(await pending()).toEqual([
+      expect.objectContaining({
+        action: 'session.logout',
+        actor_id: USER_A,
+        target_id: 's1',
+        token_selector: null,
+      }),
+    ]);
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+    expect((await row('s1'))?.last_seen_at).toBe(RECENT);
+  });
+
+  it('does not stage a second row for an already revoked session', async () => {
+    const h = await logoutFixture();
+    await h.logout();
+    expect(await h.logout()).toEqual(h.service.clearCookies());
+    expect(await pending()).toHaveLength(1);
+  });
+
+  it('stages nothing for an expired session', async () => {
+    const h = await logoutFixture({ expiresAt: NOW });
+    expect(await h.logout()).toEqual(h.service.clearCookies());
+    expect(await pending()).toEqual([]);
+  });
+
+  it('stages nothing for an idle session', async () => {
+    const h = await logoutFixture({ lastSeenAt: IDLE_SINCE });
+    expect(await h.logout()).toEqual(h.service.clearCookies());
+    expect(await pending()).toEqual([]);
+  });
+
+  it('stages nothing and clears cookies for an unknown cookie', async () => {
+    const h = await logoutFixture();
+    expect(await h.logout(`__Host-pb_session=${randomToken(32)}`)).toEqual(
+      h.service.clearCookies(),
+    );
+    expect(await pending()).toEqual([]);
+    expect((await row('s1'))?.revoked_at).toBeNull();
+  });
+
+  it('stages nothing and clears cookies for a malformed cookie', async () => {
+    const h = await logoutFixture();
+    expect(await h.logout('__Host-pb_session=short')).toEqual(h.service.clearCookies());
+    expect(await pending()).toEqual([]);
+    expect(h.counted.counts()).toEqual({ all: 0, batch: 0 });
+  });
+
+  it('runs both racing revoke batches but stages exactly one row', async () => {
+    await seed({ id: 's1', lastSeenAt: RECENT });
+    const counted = countCalls(executor);
+    const repository = createSessionRepository(counted.executor);
+    const results = await Promise.all([
+      repository.revokeBySecretHash(a, hash('s1'), NOW, logoutAudit()),
+      repository.revokeBySecretHash(a, hash('s1'), NOW, logoutAudit()),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(counted.counts()).toEqual({ all: 0, batch: 2 });
+    expect(await pending()).toHaveLength(1);
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+  });
+
+  it('stages nothing across organizations', async () => {
+    await seed({ id: 's1' });
+    expect(
+      await createSessionRepository(executor).revokeBySecretHash(b, hash('s1'), NOW, logoutAudit()),
+    ).toBe(false);
+    expect(await pending(a)).toEqual([]);
+    expect(await pending(b)).toEqual([]);
+    expect((await row('s1'))?.revoked_at).toBeNull();
+  });
+
+  it('does not revoke when the audit insert fails', async () => {
+    await seed({ id: 's1' });
+    await executor.batch([
+      {
+        sql: `CREATE TRIGGER refuse_logout_audit BEFORE INSERT ON audit_pending
+        BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+        params: [],
+      },
+    ]);
+    await expect(
+      createSessionRepository(executor).revokeBySecretHash(a, hash('s1'), NOW, logoutAudit()),
+    ).rejects.toThrow();
+    expect(await pending()).toEqual([]);
+    expect((await row('s1'))?.revoked_at).toBeNull();
+  });
+
+  it('rolls back the audit if the revoke update fails', async () => {
+    await seed({ id: 's1' });
+    await executor.batch([
+      {
+        sql: `CREATE TRIGGER refuse_logout BEFORE UPDATE OF revoked_at ON session
+        BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+        params: [],
+      },
+    ]);
+    await expect(
+      createSessionRepository(executor).revokeBySecretHash(a, hash('s1'), NOW, logoutAudit()),
+    ).rejects.toThrow();
+    expect(await pending()).toEqual([]);
+    expect((await row('s1'))?.revoked_at).toBeNull();
   });
 });
 

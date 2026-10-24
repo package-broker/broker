@@ -8,6 +8,7 @@ import { loadPending } from '../pending.js';
 import {
   createSourcesModel,
   filterSources,
+  sourceCredentialKind,
   SourceCard,
   CredentialFields,
   SourcesView,
@@ -1015,6 +1016,7 @@ describe('source creation and configuration editing', () => {
               message: SECRET,
               details: [
                 { path: '/body/url', code: 'invalid' },
+                { path: '/body/pollIntervalSeconds', code: 'invalid' },
                 { path: '/body/config/selection/packages/0', code: 'invalid' },
                 { path: SECRET, code: 'invalid' },
               ],
@@ -1028,8 +1030,10 @@ describe('source creation and configuration editing', () => {
     await model.saveSource(body);
     expect(model.snapshot().editor).toBe('create');
     expect(model.snapshot().fieldErrors).toEqual({
-      url: 'Check this field.',
-      'config/selection/packages': 'Check this field.',
+      url: 'Enter a valid HTTP or HTTPS URL without credentials, a query, or a fragment.',
+      pollIntervalSeconds: 'Enter a whole number of seconds greater than 0.',
+      'config/selection/packages':
+        'Enter valid Composer package names, one per line, without duplicates.',
     });
     expect(html()).toContain('aria-invalid="true"');
     expect(html()).toContain('role="alert"');
@@ -1465,4 +1469,21 @@ describe('source sync', () => {
     await model.togglePause(model.snapshot().items[0]!);
     expect(html()).not.toContain('Next steps for');
   });
+});
+
+it.each([
+  ['composer_repository', {}, 'http_basic'],
+  ['npm_registry', {}, 'npm_token'],
+  ['vcs', { provider: 'github', repository: 'acme/payments', installationId: 42 }, 'github_app'],
+  ['vcs', { provider: 'github', repository: 'acme/payments' }, 'bearer'],
+  ['vcs', { provider: 'ssh', repository: 'git@example.com:acme/payments.git' }, 'ssh_key'],
+] as const)('preselects %s credentials for %j', (type, config, kind) => {
+  expect(
+    sourceCredentialKind({
+      name: 'Upstream',
+      ecosystem: type === 'npm_registry' ? 'npm' : 'composer',
+      type,
+      config,
+    }),
+  ).toBe(kind);
 });

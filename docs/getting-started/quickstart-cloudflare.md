@@ -9,10 +9,10 @@ Deploy a broker, create an administrator and a project, then install `composer/s
 ## Prerequisites
 
 - Node 24 and pnpm. Enable pnpm with `corepack enable`; the repository pins its version in `package.json`. <!-- source: README.md:9 -->
-- A Cloudflare account on the **Workers Paid plan**. The Worker needs `nodejs_compat`; the deployment command supplies it. See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/). <!-- source: README.md:10 --> <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:42 --> <!-- verify: Confirm current Workers Paid pricing and account capabilities against Cloudflare before the hosted run. -->
-- R2 enabled, Queues and Analytics Engine available, and a registered `workers.dev` subdomain. Load `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` into your operator environment. The token must be able to provision and inspect these resources, query D1, and upload and deploy Workers. <!-- source: packages/cli/src/commands/cloudflare/provision.ts:100 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:204 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:66 --> <!-- verify: Confirm the exact Cloudflare dashboard permission names and least required token grants for this command sequence on the Mac. -->
+- A Cloudflare account on the **Workers Paid plan**. The Worker needs `nodejs_compat`; the deployment command supplies it. See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/). <!-- source: README.md:10 --> <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:42 --> <!-- verify: owner (Cloudflare): Confirm current Workers Paid pricing and account capabilities against Cloudflare before the hosted run. -->
+- R2 enabled, Queues and Analytics Engine available, and a registered `workers.dev` subdomain. Load `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` into your operator environment. The token must be able to provision and inspect these resources, query D1, and upload and deploy Workers. <!-- source: packages/cli/src/commands/cloudflare/provision.ts:100 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:204 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:66 --> <!-- verify: owner (Cloudflare): Confirm the exact Cloudflare dashboard permission names and least required token grants for this command sequence on the Mac. -->
 - A checkout of this repository, a POSIX shell, a browser, and an authenticator app. Use a private terminal with shell tracing disabled for credential setup. <!-- source: packages/ui/src/setup.tsx:406 -->
-- Composer 2 and PHP on the machine where you will install the test package. <!-- source: scripts/docker-smoke.mjs:811 --> <!-- verify: Record Composer/PHP versions and required PHP extensions during the fresh-machine run; validate composer/semver 3.4.3 against live Packagist. -->
+- Composer 2 and PHP on the machine where you will install the test package. <!-- source: scripts/docker-smoke.mjs:811 --> <!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:6 — Docker 29.9.2, Composer 2.10.3, PHP 8.5.12; composer/semver 3.4.3 installed without extra PHP extensions. -->
 
 Review [what you operate](#what-you-operate) before creating resources. Run the following commands from the repository root, in the same shell. Replace quoted angle-bracket placeholders with your values; never put credential values into command history or a run log.
 
@@ -99,19 +99,32 @@ The lines above are summaries, not literal CLI lines. The migration response als
 
 ## 4. Create the master key and deploy
 
-Create a private directory outside the checkout. Generate the master key once and retain it for recovery. The subshell refuses to overwrite an existing key file. Back up this file privately before continuing.
+Create a private directory outside the checkout. Generate the master key once and retain it for recovery. Generate into a temporary file, then move it into place only on success. The recipe refuses to overwrite an existing key file; if one exists, retain it and skip key generation. Back up this file privately before continuing.
 
 <!-- source: packages/cli/src/cli.ts:39 -->
 <!-- source: packages/cli/src/commands/admin.ts:68 -->
-<!-- verify: Run the POSIX shell key-file creation and environment-loading recipe on the Mac; confirm no key reaches recorded output. -->
+<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:17 — Original private key-file recipe passed; revised temporary-file recipe checked offline in Round 1. Deployment environment loading remains in the owner Cloudflare check below. -->
 
 ```sh
 set +x
 umask 077
-private_dir="$HOME/.package-broker-quickstart"
+private_dir="$HOME/.package-broker-quickstart-cloudflare"
 mkdir -p "$private_dir"
 chmod 700 "$private_dir"
-(set -C; pnpm --silent pb secrets generate-master-key > "$private_dir/master.key")
+(
+  set -e
+  test ! -e "$private_dir/master.key"
+  key_tmp=$(mktemp "$private_dir/master.key.XXXXXX")
+  trap 'rm -f "$key_tmp"' 0
+  pnpm --silent pb secrets generate-master-key > "$key_tmp"
+  test -s "$key_tmp"
+  mv -n "$key_tmp" "$private_dir/master.key"
+)
+```
+
+Expected result: a nonempty private key file and no key in terminal output. The command prints `store this key in a secret manager and set PB_MASTER_KEY; it is not shown again` to stderr. Continue only after key generation succeeds or you have retained the existing key.
+
+```sh
 export PB_MASTER_KEY="$(cat "$private_dir/master.key")"
 pnpm pb cloudflare deploy --worker-name pb-tutorial --secret PB_MASTER_KEY --json
 unset PB_MASTER_KEY
@@ -146,7 +159,7 @@ pnpm pb admin bootstrap --cloudflare --database-id '<database-id>' \
   --email '<administrator-email>' --token-file "$private_dir/admin-setup.token"
 ```
 
-Expected output, selected fields only; no token is printed:
+Expected output, selected fields only; no token is printed. A notice on stderr says the command does not check for existing administrators:
 
 <!-- source: packages/cli/src/commands/admin.ts:360 -->
 
@@ -164,6 +177,14 @@ Expected browser result:
 Setup complete
 Your administrator account is ready and you are signed in.
 ```
+
+After successful enrollment, remove the delivery file. This command produces no output on success.
+
+```sh
+rm "$private_dir/admin-setup.token"
+```
+
+If enrollment has not completed and the token expires, remove the delivery file before repeating step 5 to issue a replacement. <!-- source: packages/cli/src/commands/admin.ts:145 -->
 
 For setup recovery or a terminal-only enrollment, see [Set up the first administrator](../workers-install.md).
 
@@ -215,7 +236,7 @@ Expected output, selected fields:
 
 Without a smoke token this checks readiness and rejection of unauthenticated Composer and npm requests. The install below verifies authenticated Composer access. On a first-deployment smoke failure there is no earlier version to restore; retain the resources and inspect the named checks. <!-- source: packages/cli/src/commands/cloudflare/smoke.ts:408 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:74 -->
 
-<!-- verify: Complete provision, migrate, deploy, smoke and browser setup against hosted Cloudflare; record a fresh-machine run log with date, OS, tool versions and wall-clock time. -->
+<!-- verify: owner (Cloudflare): Complete provision, migrate, deploy, smoke, browser setup and the project/source/token form clicks against hosted Cloudflare; record a fresh-machine run log with date, OS, tool versions and wall-clock time. -->
 
 ## 9. Install the test package
 
@@ -247,7 +268,7 @@ Run in the install directory:
 
 <!-- source: packages/e2e/src/registry.spec.ts:930 -->
 <!-- source: scripts/docker-smoke.mjs:837 -->
-<!-- verify: Validate the Composer bearer-auth recipe, live package download and output excerpt on the Mac with the new Workers project. -->
+<!-- verify: owner (Cloudflare): Validate the Composer bearer-auth recipe, live package download and output excerpt on the Mac with the new Workers project. -->
 
 ```sh
 chmod 600 auth.json
@@ -257,7 +278,7 @@ composer install
 Expected success excerpt; progress formatting varies by Composer version:
 
 ```text
-Installing composer/semver (3.4.3)
+Installing composer/semver (3.4.3): Extracting archive
 Generating autoload files
 ```
 

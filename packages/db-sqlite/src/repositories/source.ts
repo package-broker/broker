@@ -617,6 +617,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
             : []),
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
           insert,
+          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),
         ],
         probes,
       );
@@ -706,6 +707,9 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
           statusBefore,
           update,
+          ...input.audit.map((event) =>
+            auditPendingStatement(ctx, event, { sql: 'changes() > 0', params: [] }),
+          ),
         ],
         {
           authority: probe(authority(ctx, fence, current.projectId, input.providerAnchors), true),
@@ -715,7 +719,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         },
       );
       if (outcome.ok) {
-        const before = outcome.results[outcome.results.length - 2]?.rows[0];
+        const before = outcome.results[outcome.results.length - 2 - input.audit.length]?.rows[0];
         return touchesCoverage && before?.status !== 'paused'
           ? 'paused_for_reactivation'
           : 'updated';
@@ -750,7 +754,14 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         ctx,
         fence,
         assertGuard(allowed, ctx),
-        [update],
+        [
+          auditPendingStatement(ctx, input.audit, {
+            sql: `EXISTS (SELECT 1 FROM source WHERE org_id = ? AND id = ? AND status <> 'active'
+              AND type IN (${PROXY_TYPES.map(() => '?').join(', ')}))`,
+            params: [ctx.orgId, input.id, ...PROXY_TYPES],
+          }),
+          update,
+        ],
         {
           authority: probe(held, true),
         },

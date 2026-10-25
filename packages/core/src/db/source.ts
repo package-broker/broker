@@ -96,6 +96,7 @@ export interface NewSource {
       }
     | null;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
+  readonly audit: AuditEvent;
 }
 
 export interface SourceChanges {
@@ -136,6 +137,8 @@ export interface SourceUpdate extends SourceTarget {
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
   readonly preparedCredential?: { readonly id: string; readonly statement: Statement };
+  /** Staged in order with the update: `source.update`, `source.credential_set`, or both. */
+  readonly audit: readonly [AuditEvent, ...AuditEvent[]];
 }
 
 interface PollValidators {
@@ -231,7 +234,7 @@ export interface SourceRepository {
   resume(
     ctx: OrgContext,
     fence: MutationFence,
-    input: SourceTarget,
+    input: SourceTarget & { readonly audit: AuditEvent },
   ): Promise<
     | 'resumed'
     | 'activation_requires_registered_names'

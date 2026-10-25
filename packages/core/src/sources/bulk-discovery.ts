@@ -151,21 +151,27 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
       };
     }
     const who = { kind: 'org', actor } as const;
-    const created = await deps.sources.create(ctx, who, fence, {
-      projectId: null,
-      credentialId: credential.credentialId,
-      name: entry.packageName,
-      ecosystem: 'composer',
-      type: 'vcs',
-      url: null,
-      configJson: JSON.stringify({
-        provider: 'github',
-        repository,
-        installationId: credential.installationId,
-        packageName: entry.packageName,
-        refs: { tags: true, branches: [] },
-      }),
-    });
+    const created = await deps.sources.create(
+      ctx,
+      who,
+      fence,
+      {
+        projectId: null,
+        credentialId: credential.credentialId,
+        name: entry.packageName,
+        ecosystem: 'composer',
+        type: 'vcs',
+        url: null,
+        configJson: JSON.stringify({
+          provider: 'github',
+          repository,
+          installationId: credential.installationId,
+          packageName: entry.packageName,
+          refs: { tags: true, branches: [] },
+        }),
+      },
+      call,
+    );
     if (!created.ok) {
       if (
         created.error === 'duplicate' &&

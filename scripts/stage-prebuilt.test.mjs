@@ -1,29 +1,32 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { prebuiltProblems } from './check-pack.mjs';
+import { prebuiltProblems, releaseAnchorProblems, stagingState } from './check-pack.mjs';
 import {
   checkConsistency,
+  currentCommit,
+  deriveWrangler,
+  payloadFiles,
   checkReproducible,
   listFiles,
   sha256,
   stagePrebuilt,
 } from './stage-prebuilt.mjs';
 
-const ROOT = new URL('../.pb/', import.meta.url);
-mkdirSync(ROOT, { recursive: true });
+const ROOT = tmpdir();
 const write = (root, path, content) => {
   const destination = join(root, path);
   mkdirSync(join(destination, '..'), { recursive: true });
   writeFileSync(destination, typeof content === 'object' ? JSON.stringify(content) : content);
 };
 function fixture(t) {
-  const root = mkdtempSync(new URL('stage-test-', ROOT));
+  const root = mkdtempSync(join(ROOT, 'stage-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const info = {
     dirty: false,
-    gitSha: 'a'.repeat(40),
+    gitSha: currentCommit(),
     lockfileSha256: 'b'.repeat(64),
     plugins: { example: '1.0.0' },
   };
@@ -83,7 +86,10 @@ for (const change of ['different bytes', 'missing migration', 'extra migration']
         change === 'extra migration' ? '.pb/cloudflare/migrations/core/0002_extra.sql' : path,
         'different',
       );
-    assert.throws(() => checkConsistency(f.node, f.cloudflare), /Migration bytes differ/);
+    assert.throws(
+      () => checkConsistency(f.node, f.cloudflare),
+      change === 'missing migration' ? /stale build: run pnpm bundle/ : /Migration bytes differ/,
+    );
   });
 
 test('rejects differing asset digests', (t) => {
@@ -129,16 +135,7 @@ for (const change of ['changed', 'added', 'removed'])
 
 test('stages only payload, clears stale files, derives template and anchors exact JSON bytes', async (t) => {
   const f = fixture(t);
-  for (const path of [
-    'server.js.map',
-    'metafile.json',
-    'generated/manifest.ts',
-    'package.json',
-    'nested/package.json',
-    'nested/a.test.js',
-    'test/a.js',
-    'state/secret',
-  ])
+  for (const path of ['server.js.map', 'metafile.json', 'generated/manifest.ts', 'package.json'])
     write(f.root, `.pb/node/${path}`, 'excluded');
   write(f.root, 'packages/prebuilt/node/stale.js', 'stale');
   let calls = 0;
@@ -148,7 +145,7 @@ test('stages only payload, clears stale files, derives template and anchors exac
     esbuildVersion: '0.28.2',
     validateArtifact: async (path) => {
       calls++;
-      assert.equal(path, join(f.root, 'packages/prebuilt-cloudflare/cloudflare'));
+      assert.equal(path.endsWith('/cloudflare'), true);
       assert.equal(readFileSync(join(path, 'worker.js'), 'utf8'), 'bundle bytes');
       return { artifactHash: 'd'.repeat(64) };
     },
@@ -213,10 +210,9 @@ test('pack validator refuses invalid schema and unsafe file paths', (t) => {
     schemaVersion: 2,
     files: { '../escape': 'sha256:x' },
   });
-  assert.deepEqual(prebuiltProblems(dir, listFiles(dir), 'node'), [
-    'prebuilt.json schemaVersion must be 1',
-    'prebuilt.json contains an invalid payload path',
-  ]);
+  const problems = prebuiltProblems(dir, listFiles(dir), 'node');
+  assert.ok(problems.includes('prebuilt.json schemaVersion must be 1'));
+  assert.ok(problems.includes('prebuilt.json contains an invalid payload path'));
 });
 
 for (const dirty of [true, null])
@@ -249,4 +245,196 @@ test('staging reproducibility option invokes the builder and refuses differences
     /Reproducibility digests differ:\ncloudflare\/worker.js/,
   );
   assert.equal(calls, 1);
+});
+
+for (const change of [
+  'different commits',
+  'stale commits',
+  'plugins',
+  'empty migrations',
+  'empty assets',
+])
+  test(`consistency rejects ${change} with rebuild instruction`, (t) => {
+    const f = fixture(t);
+    if (change === 'different commits')
+      write(f.root, '.pb/node/build-info.json', { ...f.info, gitSha: '1'.repeat(40) });
+    if (change === 'stale commits')
+      for (const target of ['node', 'cloudflare'])
+        write(f.root, `.pb/${target}/build-info.json`, { ...f.info, gitSha: '2'.repeat(40) });
+    if (change === 'plugins')
+      write(f.root, '.pb/node/build-info.json', { ...f.info, plugins: { other: '2.0.0' } });
+    if (change === 'empty migrations')
+      for (const target of [f.node, f.cloudflare])
+        rmSync(join(target, 'migrations'), { recursive: true });
+    if (change === 'empty assets')
+      for (const target of ['node', 'cloudflare'])
+        write(f.root, `.pb/${target}/assets.json`, { digest: '' });
+    assert.throws(() => checkConsistency(f.node, f.cloudflare), /stale build: run pnpm bundle/);
+  });
+
+test('current commit honors GITHUB_SHA', (t) => {
+  const previous = process.env.GITHUB_SHA;
+  t.after(() => {
+    if (previous === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previous;
+  });
+  process.env.GITHUB_SHA = '3'.repeat(40);
+  const f = fixture(t);
+  assert.equal(currentCommit(), '3'.repeat(40));
+  checkConsistency(f.node, f.cloudflare);
+});
+
+test('payload filtering preserves nested state, test and package metadata', (t) => {
+  const f = fixture(t);
+  const kept = [
+    'nested/state/data',
+    'nested/test/a.js',
+    'test/a.js',
+    'nested/a.test.js',
+    'nested/package.json',
+    'nested/metafile.json',
+  ];
+  for (const name of [
+    ...kept,
+    'package.json',
+    'metafile.json',
+    'generated/manifest.ts',
+    'nested/a.js.map',
+  ])
+    write(f.node, name, 'bytes');
+  const files = payloadFiles(f.node);
+  for (const name of kept) assert.ok(files.includes(name), name);
+  for (const name of ['package.json', 'metafile.json', 'generated/manifest.ts', 'nested/a.js.map'])
+    assert.ok(!files.includes(name), name);
+});
+
+test('Wrangler derivation matches the real LF and CRLF template and requires every replacement', () => {
+  const template = readFileSync(
+    new URL('../packages/runtime-cloudflare/wrangler.toml', import.meta.url),
+    'utf8',
+  );
+  for (const input of [template, template.replace(/\n/g, '\r\n')]) {
+    const result = deriveWrangler(input);
+    assert.match(result, /^main = "worker.js"$/m);
+    assert.match(result, /^\[assets\]$/m);
+    assert.match(result, /^directory = ".\/assets"$/m);
+    assert.match(result, /^# binding = "ASSETS"$/m);
+  }
+  for (const line of [/^main.*\n/m, /^# \[assets\].*\n/m, /^# directory.*\n/m])
+    assert.throws(() => deriveWrangler(template.replace(line, '')), /replacement did not match/);
+});
+
+for (const artifactHash of [undefined, null, '', 'sha256:bad', 'z'.repeat(64), 123])
+  test(`staging rejects invalid artifact digest ${artifactHash} and removes old outputs`, async (t) => {
+    const f = fixture(t);
+    for (const [pkg, target] of [
+      ['prebuilt', 'node'],
+      ['prebuilt-cloudflare', 'cloudflare'],
+    ]) {
+      write(f.root, `packages/${pkg}/prebuilt.json`, {});
+      write(f.root, `packages/${pkg}/${target}/old.js`, 'old');
+    }
+    await assert.rejects(
+      stagePrebuilt({
+        root: f.root,
+        esbuildVersion: '0.28.2',
+        validateArtifact: () => ({ artifactHash }),
+      }),
+      /artifactSha256/,
+    );
+    for (const pkg of ['prebuilt', 'prebuilt-cloudflare'])
+      assert.deepEqual(listFiles(join(f.root, 'packages', pkg)), ['package.json']);
+  });
+
+test('staging clears old outputs on consistency failure', async (t) => {
+  const f = fixture(t);
+  write(f.root, 'packages/prebuilt/prebuilt.json', {});
+  write(f.root, 'packages/prebuilt/node/old.js', 'old');
+  write(f.root, '.pb/node/build-info.json', { ...f.info, dirty: true });
+  await assert.rejects(stagePrebuilt({ root: f.root }), /dirty/);
+  assert.deepEqual(listFiles(join(f.root, 'packages/prebuilt')), ['package.json']);
+});
+
+test('pack staging state only skips when both manifest and payload are absent', (t) => {
+  const f = fixture(t);
+  const dir = join(f.root, 'packages/prebuilt');
+  assert.equal(stagingState(dir, 'node'), false);
+  write(dir, 'prebuilt.json', {});
+  assert.throws(() => stagingState(dir, 'node'), /both be staged/);
+  write(dir, 'node/a.js', 'bytes');
+  assert.equal(stagingState(dir, 'node'), true);
+  rmSync(join(dir, 'prebuilt.json'));
+  assert.throws(() => stagingState(dir, 'node'), /both be staged/);
+});
+
+async function staged(t) {
+  const f = fixture(t);
+  await stagePrebuilt({
+    root: f.root,
+    esbuildVersion: '0.28.2',
+    writeCliExpected: true,
+    validateArtifact: () => ({ artifactHash: 'd'.repeat(64) }),
+  });
+  return f;
+}
+
+test('release anchor checks packed manifest bytes, artifact and version', async (t) => {
+  const f = await staged(t);
+  const bytes = readFileSync(join(f.root, 'packages/prebuilt-cloudflare/prebuilt.json'));
+  const anchor = JSON.parse(readFileSync(join(f.root, 'packages/cli/dist/prebuilt-expected.json')));
+  assert.deepEqual(releaseAnchorProblems(JSON.stringify(anchor), bytes), []);
+  for (const key of ['prebuiltJsonSha256', 'artifactSha256', 'version'])
+    assert.ok(releaseAnchorProblems(JSON.stringify({ ...anchor, [key]: 'stale' }), bytes).length);
+  assert.ok(
+    releaseAnchorProblems(JSON.stringify(anchor), Buffer.concat([bytes, Buffer.from(' ')])).length,
+  );
+  assert.ok(releaseAnchorProblems(undefined, bytes).length);
+});
+
+for (const [field, value] of [
+  ['package', 'wrong'],
+  ['version', 'wrong'],
+  ['target', 'node'],
+  ['payload', 'node'],
+  ['gitSha', 'bad'],
+  ['lockfileSha256', 'bad'],
+  ['toolchain', {}],
+  ['plugins', []],
+  ['plugins', { example: '' }],
+  ['artifactSha256', 'bad'],
+  ['files', {}],
+  ['files', { 'worker.js': 'bad' }],
+])
+  test(`pack validates schema field ${field}: ${JSON.stringify(value)}`, async (t) => {
+    const f = await staged(t);
+    const dir = join(f.root, 'packages/prebuilt-cloudflare');
+    const record = JSON.parse(readFileSync(join(dir, 'prebuilt.json')));
+    write(dir, 'prebuilt.json', { ...record, [field]: value });
+    assert.ok(prebuiltProblems(dir, listFiles(dir), 'cloudflare').length);
+  });
+
+test('fixtures live under os.tmpdir()', (t) => {
+  const f = fixture(t);
+  assert.equal(join(f.root, '..'), tmpdir());
+});
+
+test('validation sees only temporary payloads and a thrown error leaves both packages unstaged', async (t) => {
+  const f = fixture(t);
+  await assert.rejects(
+    stagePrebuilt({
+      root: f.root,
+      esbuildVersion: '0.28.2',
+      validateArtifact: () => {
+        for (const [pkg, target] of [
+          ['prebuilt', 'node'],
+          ['prebuilt-cloudflare', 'cloudflare'],
+        ])
+          assert.equal(stagingState(join(f.root, 'packages', pkg), target), false);
+        throw new Error('validation failed');
+      },
+    }),
+    /validation failed/,
+  );
+  for (const pkg of ['prebuilt', 'prebuilt-cloudflare'])
+    assert.deepEqual(listFiles(join(f.root, 'packages', pkg)), ['package.json']);
 });

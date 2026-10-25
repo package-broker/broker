@@ -484,8 +484,39 @@ export function prebuiltProblems(dir, files, payload) {
     return ['prebuilt.json is missing or invalid'];
   }
   if (record?.schemaVersion !== 1) problems.push('prebuilt.json schemaVersion must be 1');
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const nonempty = (value) => typeof value === 'string' && value.trim().length > 0;
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  for (const key of ['package', 'version'])
+    if (!nonempty(record?.[key]) || record[key] !== pkg[key === 'package' ? 'name' : key])
+      problems.push(`prebuilt.json ${key} must match package.json`);
+  for (const key of ['target', 'payload'])
+    if (record?.[key] !== payload) problems.push(`prebuilt.json ${key} must be ${payload}`);
+  for (const [key, pattern] of [
+    ['gitSha', /^[a-f0-9]{40}$/i],
+    ['lockfileSha256', /^[a-f0-9]{64}$/i],
+  ])
+    if (typeof record?.[key] !== 'string' || !pattern.test(record[key]))
+      problems.push(`prebuilt.json ${key} is invalid`);
+  if (
+    !object(record?.toolchain) ||
+    !['node', 'esbuild', 'os', 'arch'].every((key) => nonempty(record.toolchain[key]))
+  )
+    problems.push('prebuilt.json toolchain is invalid');
+  if (
+    !object(record?.plugins) ||
+    !Object.entries(record.plugins).every(([key, value]) => nonempty(key) && nonempty(value))
+  )
+    problems.push('prebuilt.json plugins is invalid');
+  if (
+    payload === 'cloudflare'
+      ? typeof record?.artifactSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(record.artifactSha256)
+      : record?.artifactSha256 !== null
+  )
+    problems.push('prebuilt.json artifactSha256 is invalid');
   if (!record?.files || typeof record.files !== 'object' || Array.isArray(record.files))
     return [...problems, 'prebuilt.json files must be a map'];
+  if (!Object.keys(record.files).length) problems.push('prebuilt.json files must not be empty');
   const present = new Set(files);
   for (const [name, digest] of Object.entries(record.files)) {
     if (
@@ -497,6 +528,8 @@ export function prebuiltProblems(dir, files, payload) {
       problems.push('prebuilt.json contains an invalid payload path');
       continue;
     }
+    if (typeof digest !== 'string' || !/^sha256:[a-f0-9]{64}$/i.test(digest))
+      problems.push(`prebuilt.json invalid digest: ${name}`);
     const path = `${payload}/${name}`;
     if (!present.has(path)) problems.push(`prebuilt.json listed file missing: ${path}`);
     else if (digest !== `sha256:${sha256(readFileSync(join(dir, path)))}`)
@@ -506,6 +539,33 @@ export function prebuiltProblems(dir, files, payload) {
     if (!Object.hasOwn(record.files, path.slice(payload.length + 1)))
       problems.push(`prebuilt.json unlisted payload file: ${path}`);
   return problems;
+}
+
+export function stagingState(dir, payload) {
+  const manifest = existsSync(join(dir, 'prebuilt.json'));
+  const directory = existsSync(join(dir, payload));
+  if (manifest !== directory) throw new Error('prebuilt.json and payload must both be staged');
+  return manifest;
+}
+
+export function releaseAnchorProblems(expected, prebuiltBytes) {
+  try {
+    const anchor = JSON.parse(expected);
+    const record = JSON.parse(prebuiltBytes);
+    if (
+      anchor.schemaVersion !== 1 ||
+      anchor.prebuiltJsonSha256 !== sha256(prebuiltBytes) ||
+      anchor.artifactSha256 !== record.artifactSha256 ||
+      anchor.version !== record.version ||
+      anchor.package !== record.package
+    )
+      return ['release prebuilt anchor does not match packed dist-cloudflare prebuilt.json'];
+    return [];
+  } catch {
+    return [
+      'release prebuilt anchor or packed dist-cloudflare prebuilt.json is missing or invalid',
+    ];
+  }
 }
 
 const PREBUILT = { prebuilt: 'node', 'prebuilt-cloudflare': 'cloudflare' };
@@ -573,7 +633,18 @@ function inspect(pkg) {
     const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     const result = checkPackedPackage(pkg, pkgJson, files, dir);
     if (pkg === 'core') result.problems.push(...checkCorePackageContext(dir, pkgJson, files));
-    return { ...result, pkgJson };
+    return {
+      ...result,
+      pkgJson,
+      expectedBytes:
+        pkg === 'cli' && files.includes('dist/prebuilt-expected.json')
+          ? readFileSync(join(dir, 'dist/prebuilt-expected.json'))
+          : undefined,
+      prebuiltBytes:
+        pkg === 'prebuilt-cloudflare' && files.includes('prebuilt.json')
+          ? readFileSync(join(dir, 'prebuilt.json'))
+          : undefined,
+    };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -587,7 +658,7 @@ function main() {
     let result;
     try {
       if (rejected.has(pkg)) throw new Error(rejected.get(pkg));
-      if (PREBUILT[pkg] && !existsSync(join(ROOT, 'packages', pkg, PREBUILT[pkg]))) {
+      if (PREBUILT[pkg] && !stagingState(join(ROOT, 'packages', pkg), PREBUILT[pkg])) {
         const { json } = readPackageJson(pkg);
         const validRepository =
           typeof json?.repository?.url === 'string' &&
@@ -611,6 +682,16 @@ function main() {
       };
     }
     outcomes.push({ pkg, result });
+  }
+
+  if (process.env.CHECK_PACK_RELEASE === '1') {
+    const cli = outcomes.find(({ pkg }) => pkg === 'cli');
+    cli.result.problems.push(
+      ...releaseAnchorProblems(
+        cli.result.expectedBytes,
+        outcomes.find(({ pkg }) => pkg === 'prebuilt-cloudflare')?.result.prebuiltBytes,
+      ),
+    );
   }
 
   const packedCoreVersion =

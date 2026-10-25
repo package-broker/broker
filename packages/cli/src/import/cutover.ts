@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -47,6 +47,7 @@ export interface CutoverResult {
   readonly message: string;
   readonly counts: { readonly old: number; readonly new: number };
   readonly differences: readonly string[];
+  readonly distOnly: readonly string[];
   readonly oldHostPackages: readonly string[];
   readonly historic: readonly {
     readonly index: number;
@@ -145,6 +146,8 @@ function rewriteRepository(text: string, oldUrl: string, newUrl: string): string
 interface LockedPackage {
   readonly name: string;
   readonly tuple: string;
+  readonly sourceReference: string | null;
+  readonly distReference: string | null;
   readonly distUrl: string | undefined;
 }
 function packages(text: string): LockedPackage[] {
@@ -171,9 +174,13 @@ function packages(text: string): LockedPackage[] {
       if (pkg.dist !== undefined && pkg.dist !== null && !object(pkg.dist)) throw new Error();
       const distUrl = object(pkg.dist) ? pkg.dist.url : undefined;
       if (distUrl !== undefined && typeof distUrl !== 'string') throw new Error();
+      const sourceReference = reference(pkg.source);
+      const distReference = reference(pkg.dist);
       result.push({
         name: pkg.name,
-        tuple: JSON.stringify([pkg.name, pkg.version, reference(pkg.source), reference(pkg.dist)]),
+        tuple: JSON.stringify([pkg.name, pkg.version, sourceReference ?? distReference]),
+        sourceReference,
+        distReference,
         distUrl,
       });
     }
@@ -212,12 +219,46 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
     message: MESSAGES.local_failed,
     counts: { old: 0, new: 0 },
     differences: [],
+    distOnly: [],
     oldHostPackages: [],
     historic: [],
   };
   const outcome = (code: Code, exitCode: 0 | 1 | 2) => {
     result = { ...result, code, message: MESSAGES[code], exitCode };
   };
+  let interrupted = false;
+  let preparation: Promise<Parameters<ComposerRunner>[1]> | undefined;
+  let cleanup: Promise<void> | undefined;
+  let signalCleanup: Promise<void> | undefined;
+  const ensureRunning = () => {
+    if (interrupted) throw new CutoverError('local_failed');
+  };
+  const removeDirectories = () =>
+    (cleanup ??= (async () => {
+      for (const directory of directories) {
+        try {
+          await rm(directory, { recursive: true, force: true });
+        } catch {
+          outcome('local_failed', 2);
+        }
+      }
+    })());
+  const signals = ['SIGINT', 'SIGTERM'] as const;
+  const removeHandlers = () => {
+    for (const signal of signals) process.off(signal, onSignal);
+  };
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (interrupted) return;
+    interrupted = true;
+    signalCleanup = (async () => {
+      // A pending mkdtemp must finish registering its directory before cleanup.
+      await preparation?.catch(() => undefined);
+      await removeDirectories();
+      removeHandlers();
+      process.kill(process.pid, signal);
+    })();
+  };
+  for (const signal of signals) process.on(signal, onSignal);
   try {
     let oldHost: string;
     let oldAuth: string;
@@ -251,29 +292,33 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
       throw error instanceof CutoverError ? error : new CutoverError('input_unreadable');
     }
     const composer = options.composer ?? defaultComposer;
-    const prepare = async (json: string, bytes: Buffer, credentials: string) => {
-      const cwd = await mkdtemp(join(tmpdir(), 'pb-cutover-'));
-      directories.push(cwd);
-      const home = join(cwd, '.composer-home');
-      await mkdir(home);
-      await writeFile(join(cwd, 'composer.json'), json);
-      await writeFile(join(cwd, 'composer.lock'), bytes);
-      const env: NodeJS.ProcessEnv = {};
-      for (const key of ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP']) {
-        if (process.env[key] !== undefined) env[key] = process.env[key];
-      }
-      Object.assign(env, {
-        HOME: cwd,
-        USERPROFILE: cwd,
-        COMPOSER_HOME: home,
-        COMPOSER_CACHE_DIR: join(cwd, '.composer-cache'),
-        COMPOSER_VENDOR_DIR: join(cwd, 'vendor'),
-        COMPOSER_BIN_DIR: join(cwd, 'vendor', 'bin'),
-        COMPOSER_AUTH: credentials,
-        COMPOSER_NO_INTERACTION: '1',
-      });
-      return { cwd, env, shell: false as const };
-    };
+    const prepare = (json: string, bytes: Buffer, credentials: string) =>
+      (preparation = (async () => {
+        ensureRunning();
+        const cwd = await mkdtemp(join(tmpdir(), 'pb-cutover-'));
+        directories.push(cwd);
+        if (((await stat(cwd)).mode & 0o777) !== 0o700) throw new CutoverError('local_failed');
+        const home = join(cwd, '.composer-home');
+        await mkdir(home);
+        await writeFile(join(cwd, 'composer.json'), json);
+        await writeFile(join(cwd, 'composer.lock'), bytes);
+        const env: NodeJS.ProcessEnv = {};
+        for (const key of ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP']) {
+          if (process.env[key] !== undefined) env[key] = process.env[key];
+        }
+        Object.assign(env, {
+          HOME: cwd,
+          USERPROFILE: cwd,
+          COMPOSER_HOME: home,
+          COMPOSER_CACHE_DIR: join(cwd, '.composer-cache'),
+          COMPOSER_VENDOR_DIR: join(cwd, 'vendor'),
+          COMPOSER_BIN_DIR: join(cwd, 'vendor', 'bin'),
+          COMPOSER_AUTH: credentials,
+          COMPOSER_NO_INTERACTION: '1',
+        });
+        ensureRunning();
+        return { cwd, env, shell: false as const };
+      })());
     const oldCopy = await prepare(original, lock, oldAuth);
     const newCopy = await prepare(rewritten, lock, newAuth);
     try {
@@ -284,6 +329,7 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
       throw new CutoverError('composer_v2_required');
     }
     const execute = async (copy: typeof oldCopy, args: readonly string[]) => {
+      ensureRunning();
       try {
         return await composer(args, copy);
       } catch {
@@ -304,11 +350,25 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
       ...oldPackages.filter((pkg) => !newSet.has(pkg.tuple)),
       ...newPackages.filter((pkg) => !oldSet.has(pkg.tuple)),
     ]);
+    const newSources = new Map(
+      newPackages
+        .filter((pkg) => pkg.sourceReference !== null)
+        .map((pkg) => [pkg.tuple, pkg.distReference]),
+    );
+    const distOnly = names(
+      oldPackages.filter(
+        (pkg) =>
+          pkg.sourceReference !== null &&
+          newSources.has(pkg.tuple) &&
+          newSources.get(pkg.tuple) !== pkg.distReference,
+      ),
+    );
     const oldHosts = oldHostPackages(newPackages, oldHost);
     result = {
       ...result,
       counts: { old: oldSet.size, new: newSet.size },
       differences,
+      distOnly,
       oldHostPackages: oldHosts,
     };
     const checks: CutoverResult['historic'][number][] = [];
@@ -342,13 +402,10 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
     const code = error instanceof CutoverError ? error.code : 'local_failed';
     outcome(code, code === 'update_failed' || code === 'install_failed' ? 1 : 2);
   } finally {
-    for (const directory of directories) {
-      try {
-        await rm(directory, { recursive: true, force: true });
-      } catch {
-        outcome('local_failed', 2);
-      }
-    }
+    await removeDirectories();
+    await signalCleanup;
+    removeHandlers();
+    if (interrupted) outcome('local_failed', 2);
   }
   return result;
 }

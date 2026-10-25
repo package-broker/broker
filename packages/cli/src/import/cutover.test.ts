@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -7,7 +8,7 @@ import { runCutoverCheck, type ComposerRunner, type CutoverOptions } from './cut
 
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>();
-  return { ...actual, mkdtemp: vi.fn(actual.mkdtemp) };
+  return { ...actual, mkdtemp: vi.fn(actual.mkdtemp), writeFile: vi.fn(actual.writeFile) };
 });
 
 const OLD = 'https://old.example.test/repository/';
@@ -33,8 +34,12 @@ let projectDir: string;
 let options: CutoverOptions;
 let calls: { args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv; shell: false }[];
 let composer: ComposerRunner;
+let signalListeners: Map<'SIGINT' | 'SIGTERM', NodeJS.SignalsListener[]>;
 
 beforeEach(async () => {
+  signalListeners = new Map(
+    (['SIGINT', 'SIGTERM'] as const).map((signal) => [signal, process.listeners(signal)]),
+  );
   vi.mocked(mkdtemp).mockClear();
   projectDir = await mkdtemp(join(tmpdir(), 'pb-cutover-project-'));
   await writeFile(join(projectDir, 'composer.json'), manifest);
@@ -61,6 +66,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const [signal, listeners] of signalListeners) {
+    const remaining = process.listeners(signal);
+    for (const listener of remaining) {
+      if (!listeners.includes(listener)) process.off(signal, listener);
+    }
+    expect(remaining).toEqual(listeners);
+  }
   for (const entry of vi.mocked(mkdtemp).mock.results) {
     if (entry.type !== 'return') continue;
     const directory = await entry.value;
@@ -85,6 +97,139 @@ async function projectHash() {
   }
   return hash.digest('hex');
 }
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+it('uses mode 0700 for both repository copies and every historic copy', async () => {
+  const historic = join(projectDir, 'historic.lock');
+  await writeFile(historic, lock());
+  const base = composer;
+  composer = async (args, context) => {
+    expect((await stat(context.cwd)).mode & 0o777).toBe(0o700);
+    return base(args, context);
+  };
+  expect((await runCutoverCheck({ ...options, historicLocks: [historic] })).exitCode).toBe(0);
+  expect(new Set(calls.map((call) => call.cwd)).size).toBe(3);
+});
+
+it('refuses an unsafe temporary-directory mode before writing project files or running Composer', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(mkdtemp).mockImplementationOnce(async (prefix) => {
+    const cwd = await actual.mkdtemp(prefix);
+    await chmod(cwd, 0o755);
+    return cwd;
+  });
+  vi.mocked(writeFile).mockClear();
+  expect(await runCutoverCheck(options)).toMatchObject({ exitCode: 2, code: 'local_failed' });
+  expect(writeFile).not.toHaveBeenCalled();
+  expect(calls).toEqual([]);
+});
+
+it.each(
+  (['SIGINT', 'SIGTERM'] as const).flatMap((signal) =>
+    (['creation', 'version', 'historic'] as const).map((stage) => ({ signal, stage })),
+  ),
+)('removes every copy before re-raising $signal during $stage', async ({ signal, stage }) => {
+  const historic = join(projectDir, 'historic.lock');
+  await writeFile(historic, lock([pkg('acme/historic')]));
+  const created: string[] = [];
+  const reraised: { pid: number; signal: unknown; remaining: boolean[]; listeners: unknown[] }[] =
+    [];
+  vi.spyOn(process, 'kill').mockImplementation((pid, value) => {
+    reraised.push({
+      pid,
+      signal: value,
+      remaining: created.map((cwd) => existsSync(cwd)),
+      listeners: [...signalListeners.keys()].map((name) => process.listeners(name)),
+    });
+    return true;
+  });
+  let signaled = false;
+  const interrupt = () => {
+    const added = process
+      .listeners(signal)
+      .filter((fn) => !signalListeners.get(signal)!.includes(fn));
+    if (added.length === 1) {
+      signaled = true;
+      added[0]!(signal);
+      added[0]!(signal);
+    }
+  };
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(mkdtemp).mockImplementation(async (prefix) => {
+    const cwd = await actual.mkdtemp(prefix);
+    created.push(cwd);
+    if (stage === 'creation' && created.length === 1) interrupt();
+    return cwd;
+  });
+  const base = composer;
+  composer = async (args, context) => {
+    const result = await base(args, context);
+    if (
+      (stage === 'version' && args[0] === '--version') ||
+      (stage === 'historic' &&
+        args[0] === 'install' &&
+        (await readFile(join(context.cwd, 'composer.lock'), 'utf8')).includes('acme/historic'))
+    )
+      interrupt();
+    return result;
+  };
+  try {
+    const result = await runCutoverCheck({ ...options, historicLocks: [historic] });
+    expect(signaled).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+    expect(created).toHaveLength(stage === 'creation' ? 1 : stage === 'version' ? 2 : 3);
+    expect(reraised).toEqual([
+      {
+        pid: process.pid,
+        signal,
+        remaining: created.map(() => false),
+        listeners: [...signalListeners.values()],
+      },
+    ]);
+  } finally {
+    vi.mocked(mkdtemp).mockImplementation(actual.mkdtemp);
+  }
+});
+
+it.each(['SIGINT', 'SIGTERM'] as const)(
+  'cleans up and re-raises %s without waiting for a pending Composer call',
+  async (signal) => {
+    const entered = deferred();
+    const release = deferred();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const base = composer;
+    composer = async (args, context) => {
+      const result = await base(args, context);
+      if (args[0] === '--version') {
+        entered.resolve();
+        await release.promise;
+      }
+      return result;
+    };
+    const check = runCutoverCheck(options);
+    try {
+      await entered.promise;
+      const added = process
+        .listeners(signal)
+        .filter((fn) => !signalListeners.get(signal)!.includes(fn));
+      expect(added).toHaveLength(1);
+      added[0]!(signal);
+      await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(process.pid, signal));
+      await expectRemoved();
+      expect(calls).toHaveLength(1);
+    } finally {
+      release.resolve();
+      await check;
+    }
+  },
+);
 
 it('passes identical resolutions, preserves JSON bytes, isolates auth and leaves the project unchanged', async () => {
   vi.stubEnv('COMPOSER_AUTH', 'ambient-secret');
@@ -129,7 +274,7 @@ it('passes identical resolutions, preserves JSON bytes, isolates auth and leaves
   await expectRemoved();
 });
 
-it.each(['version', 'source', 'dist', 'added', 'removed', 'dev'])(
+it.each(['version', 'source', 'added', 'removed', 'dev'])(
   'fails and names the package for a %s resolution difference',
   async (kind) => {
     const base = composer;
@@ -138,7 +283,6 @@ it.each(['version', 'source', 'dist', 'added', 'removed', 'dev'])(
         const changed = pkg();
         if (kind === 'version') changed.version = '2.0.0';
         if (kind === 'source') changed.source.reference = 'other-source';
-        if (kind === 'dist') changed.dist.reference = 'other-dist';
         await writeFile(
           join(context.cwd, 'composer.lock'),
           kind === 'added'
@@ -160,6 +304,71 @@ it.each(['version', 'source', 'dist', 'added', 'removed', 'dev'])(
     await expectRemoved();
   },
 );
+
+it.each(['source absent', 'source null', 'source empty', 'source equal', 'source changed'])(
+  'uses source references when present and otherwise dist references (%s)',
+  async (kind) => {
+    const original = pkg();
+    const changed = pkg();
+    const packages = (value: ReturnType<typeof pkg>) =>
+      JSON.stringify({
+        packages: [
+          {
+            ...value,
+            source:
+              kind === 'source absent'
+                ? undefined
+                : kind === 'source null'
+                  ? { reference: null }
+                  : value.source,
+          },
+        ],
+      });
+    if (kind === 'source empty') original.source.reference = changed.source.reference = '';
+    if (kind === 'source changed') changed.source.reference = 'other-source';
+    changed.dist.reference = SENTINEL;
+    await writeFile(join(projectDir, 'composer.lock'), packages(original));
+    const base = composer;
+    composer = async (args, context) => {
+      if (args[0] === 'update' && context.env.COMPOSER_AUTH === newAuth)
+        await writeFile(join(context.cwd, 'composer.lock'), packages(changed));
+      return base(args, context);
+    };
+    const informational = kind === 'source equal' || kind === 'source empty';
+    const result = await runCutoverCheck(options);
+    expect(result).toMatchObject({
+      exitCode: informational ? 0 : 1,
+      code: informational ? 'passed' : 'resolution_difference',
+      differences: informational ? [] : ['acme/library'],
+      distOnly: informational ? ['acme/library'] : [],
+    });
+    expect(JSON.stringify(result)).not.toContain(SENTINEL);
+  },
+);
+
+it('reports sorted dist-only names independently from failing version and source differences', async () => {
+  const originals = [pkg('acme/z'), pkg('acme/a'), pkg('acme/source'), pkg('acme/version')];
+  await writeFile(join(projectDir, 'composer.lock'), lock([], originals));
+  const base = composer;
+  composer = async (args, context) => {
+    if (args[0] === 'update' && context.env.COMPOSER_AUTH === newAuth) {
+      const changed = originals.map((value) => ({
+        ...value,
+        source: { reference: value.name === 'acme/source' ? 'changed' : 'source-ref' },
+        version: value.name === 'acme/version' ? '2.0.0' : value.version,
+        dist: { ...value.dist, reference: 'repacked' },
+      }));
+      await writeFile(join(context.cwd, 'composer.lock'), lock([], changed));
+    }
+    return base(args, context);
+  };
+  expect(await runCutoverCheck(options)).toMatchObject({
+    exitCode: 1,
+    differences: ['acme/source', 'acme/version'],
+    distOnly: ['acme/a', 'acme/z'],
+    counts: { old: 4, new: 4 },
+  });
+});
 
 it('compares sets independently of lock package order', async () => {
   const packages = [pkg(), pkg('acme/other')];

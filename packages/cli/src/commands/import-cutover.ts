@@ -9,6 +9,8 @@ export async function runImportCutover(
     console.log(result.message);
     console.log(`Packages: old=${result.counts.old} new=${result.counts.new}`);
     for (const name of result.differences) console.log(`Resolution differs: ${name}`);
+    for (const name of result.distOnly)
+      console.log(`Dist reference differs (information): ${name}`);
     for (const name of result.oldHostPackages) console.log(`Old download host: ${name}`);
     for (const check of result.historic) {
       console.log(`Historic lock ${check.index}: ${check.ok ? 'passed' : 'failed'}`);

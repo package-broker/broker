@@ -106,6 +106,36 @@ it('prints differing package names without versions or references', async () => 
   expect(output).toHaveBeenCalledWith('Resolution differs: acme/library');
 });
 
+it.each([false, true])('reports dist-only changes as information (json=%s)', async (json) => {
+  const original = {
+    name: 'acme/library',
+    version: '1.0.0',
+    source: { reference: 'same-source' },
+    dist: { reference: 'old-dist' },
+  };
+  await writeFile(join(projectDir, 'composer.lock'), JSON.stringify({ packages: [original] }));
+  const base = composer;
+  composer = async (args, context) => {
+    if (
+      args[0] === 'update' &&
+      (await readFile(join(context.cwd, 'composer.json'), 'utf8')).includes(NEW)
+    )
+      await writeFile(
+        join(context.cwd, 'composer.lock'),
+        JSON.stringify({ packages: [{ ...original, dist: { reference: SENTINEL } }] }),
+      );
+    return base(args, context);
+  };
+  expect(await runImportCutover({ ...options, json })).toBe(0);
+  if (json)
+    expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
+      code: 'passed',
+      differences: [],
+      distOnly: ['acme/library'],
+    });
+  else expect(output).toHaveBeenCalledWith('Dist reference differs (information): acme/library');
+});
+
 it('maps thrown runner errors to fixed messages without exposing them', async () => {
   composer = async () => {
     throw new Error(SENTINEL);
@@ -128,6 +158,14 @@ const flags = () => [
   '--new-auth-env',
   'NEW_CUTOVER_AUTH',
 ];
+
+it('requires the old repository URL even when all other flags are supplied', async () => {
+  const checker = vi.spyOn(cutover, 'runCutoverCheck');
+  const args = flags();
+  args.splice(args.indexOf('--old-repository'), 2);
+  expect(await run(['import', 'cutover-check', ...args])).toBe(2);
+  expect(checker).not.toHaveBeenCalled();
+});
 
 it('routes the CLI flags, repeated historic locks and JSON output to the checker', async () => {
   const real = cutover.runCutoverCheck;

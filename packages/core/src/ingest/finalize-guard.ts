@@ -14,6 +14,7 @@ export const INGEST_EVENTS: ReadonlySet<string> = new Set([
   'ingest.version_skipped',
   'ingest.snapshot_corrupt',
   'ingest.budget_exhausted',
+  'dist.quarantined',
 ]);
 export const INGEST_REASON_CODES: ReadonlySet<string> = new Set([
   ...UPSTREAM_REFUSAL_REASON_CODES,
@@ -23,6 +24,8 @@ export const INGEST_REASON_CODES: ReadonlySet<string> = new Set([
   'member_too_large',
   'snapshot_corrupt',
   'budget_exhausted',
+  'digest_mismatch',
+  'archive_too_large',
 ]);
 
 export interface FinalizeGuardOptions {

@@ -8,7 +8,6 @@ import {
   type DistFetchDeps,
   type DistFetchTarget,
 } from '../ingest/dist-fetch.js';
-import { TwoPassLimitError } from '../ingest/two-pass-put.js';
 import {
   CodecCorruptError,
   CodecLimitError,
@@ -533,24 +532,16 @@ describe('dist body cap contract', () => {
     },
   };
 
-  it('refuses a body above the cap that declares its length', async () => {
+  it('quarantines a body above the cap that declares its length and stores nothing', async () => {
     const r = rig(4 * CAP, false);
-    const rejection = await fetchAndVerifyDist(r.deps, ctx, guard, target).then(
-      () => undefined,
-      (e: unknown) => e,
-    );
-    expect(rejection).toBeInstanceOf(TwoPassLimitError);
-    expect(r.events).toEqual([]);
+    expect(await fetchAndVerifyDist(r.deps, ctx, guard, target)).toBe('quarantined');
+    expect(r.events).toEqual(['quarantine']);
   });
 
-  it('refuses a body above the cap without a declared length and stops reading', async () => {
+  it('quarantines a body above the cap without a declared length and stops reading', async () => {
     const r = rig(null, true);
-    const rejection = await fetchAndVerifyDist(r.deps, ctx, guard, target).then(
-      () => undefined,
-      (e: unknown) => e,
-    );
-    expect(rejection).toBeInstanceOf(TwoPassLimitError);
-    expect(r.events).toEqual([]);
+    expect(await fetchAndVerifyDist(r.deps, ctx, guard, target)).toBe('quarantined');
+    expect(r.events).toEqual(['quarantine']);
     expect(r.pulls()).toBeLessThan(16);
   });
 });

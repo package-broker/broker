@@ -25,6 +25,7 @@ export interface RegistryConfigInput {
   readonly caps?:
     | { readonly metadataBytes?: number | undefined; readonly archiveBytes?: number | undefined }
     | undefined;
+  readonly npmAudit?: { readonly enabled?: boolean | undefined } | undefined;
 }
 
 export interface RegistryConfig {
@@ -40,6 +41,7 @@ export interface RegistryConfig {
     readonly waitBudgetMs: number;
   };
   readonly caps: { readonly metadataBytes: number; readonly archiveBytes: number };
+  readonly npmAudit: { readonly enabled: boolean };
 }
 
 export type RegistryDefaults = Omit<RegistryConfig, 'outbound'>;
@@ -49,6 +51,7 @@ export const REGISTRY_DEFAULTS: RegistryDefaults = Object.freeze({
   upstreamContact: 'https://github.com/package-broker/broker',
   timers: Object.freeze({ metadataTtlSeconds: 300, negativeTtlSeconds: 30, waitBudgetMs: 8000 }),
   caps: Object.freeze({ metadataBytes: MAX_METADATA_BYTES, archiveBytes: MAX_ARCHIVE_BYTES }),
+  npmAudit: Object.freeze({ enabled: true }),
 });
 
 export class RegistryConfigError extends Error {
@@ -62,12 +65,13 @@ export class RegistryConfigError extends Error {
 }
 
 const PLATFORMS: readonly Platform[] = ['cloudflare', 'node'];
-const ROOT_KEYS = ['outbound', 'userAgent', 'upstreamContact', 'timers', 'caps'];
+const ROOT_KEYS = ['outbound', 'userAgent', 'upstreamContact', 'timers', 'caps', 'npmAudit'];
 const SECTION_KEYS = {
   outbound: ['allowPrivateHosts', 'extraSelfOrigins'],
   userAgent: ['default', 'composerStyle'],
   timers: ['metadataTtlSeconds', 'negativeTtlSeconds', 'waitBudgetMs'],
   caps: ['metadataBytes', 'archiveBytes'],
+  npmAudit: ['enabled'],
 } as const;
 const MAX_STRING_LENGTH = 200;
 const MAX_KEY_LENGTH = 64;
@@ -313,6 +317,12 @@ export function validateRegistryConfig(input: unknown, target: Platform): readon
     }
   }
 
+  const npmAudit = section('npmAudit');
+  const auditEnabled = npmAudit ? own(npmAudit, 'enabled') : undefined;
+  if (auditEnabled !== undefined && typeof auditEnabled !== 'boolean') {
+    problems.push('registry.npmAudit.enabled: must be a boolean');
+  }
+
   return problems;
 }
 
@@ -370,6 +380,7 @@ export function resolveRegistryConfig(
   const ua = sub('userAgent');
   const t = sub('timers');
   const c = sub('caps');
+  const audit = sub('npmAudit');
   const num = (o: Obj, k: string, fallback: number): number =>
     (own(o, k) as number | undefined) ?? fallback;
   const str = (o: Obj, k: string, fallback: string): string =>
@@ -393,6 +404,9 @@ export function resolveRegistryConfig(
         target === 'cloudflare' ? 8 * 1024 * 1024 : d.caps.metadataBytes,
       ),
       archiveBytes: num(c, 'archiveBytes', d.caps.archiveBytes),
+    },
+    npmAudit: {
+      enabled: (own(audit, 'enabled') as boolean | undefined) ?? d.npmAudit.enabled,
     },
   };
 }

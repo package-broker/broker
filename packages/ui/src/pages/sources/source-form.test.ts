@@ -230,6 +230,7 @@ describe('source form request bodies', () => {
       lastRemovalRefusal: null,
       removalAcceptanceArmed: false,
       attachedProjectCount: 0,
+      projectName: null,
     };
     const html = renderToString(
       createElement(SourceForm, {

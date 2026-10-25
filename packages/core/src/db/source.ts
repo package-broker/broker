@@ -115,7 +115,11 @@ export interface SourceTarget {
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
+export type SourceOwnership = 'organization' | 'project' | 'all';
+
 export interface SourceListQuery {
+  readonly ownership?: SourceOwnership;
+  readonly projectVisibility?: Omit<SourceAttachmentCountQuery, 'sourceIds'>;
   readonly projectId: string | null;
   readonly after: string | null;
   readonly limit: number;
@@ -180,10 +184,14 @@ export interface SourceRepository {
     ctx: OrgContext,
     input: { readonly projectId: string; readonly sourceId: string },
   ): Promise<SourceRecord | null>;
-  /** Organization sources, or project-owned and attached organization sources of an active project.
+  /** Organization list defaults to organization ownership; ownership can include project sources.
+   * A project list includes owned and attached organization sources of an active project.
    * Returns up to limit + 1 rows in id order; limit is an integer from 1 to 100.
    */
-  list(ctx: OrgContext, input: SourceListQuery): Promise<SourceRecord[]>;
+  list(
+    ctx: OrgContext,
+    input: SourceListQuery,
+  ): Promise<(SourceRecord & { readonly projectName?: string | null })[]>;
   /** One grouped read for the supplied page of organization sources; absent entries mean zero.
    * allProjects requires organization project:read or admin authority; only admins include archives.
    */

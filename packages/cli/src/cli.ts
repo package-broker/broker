@@ -433,7 +433,8 @@ export async function run(argv: readonly string[]): Promise<number> {
       !values['old-repository'] ||
       !values['new-repository'] ||
       !values['old-auth-env'] ||
-      !values['new-auth-env']
+      !values['new-auth-env'] ||
+      (values['timeout-seconds'] !== undefined && !/^\d+$/.test(values['timeout-seconds']))
     )
       return usageError();
     return runImportCutover({

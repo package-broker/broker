@@ -367,6 +367,16 @@ it.each(['0', '-1', '7201', '1.5', 'NaN', 'Infinity', ''])(
   },
 );
 
+it.each(['1e3', '0x10', ' 10', '10 ', '\t10', '10\n', '+10'])(
+  'rejects non-digit timeout syntax before calling the checker (%j)',
+  async (value) => {
+    const checker = vi.spyOn(cutover, 'runCutoverCheck');
+    expect(await run(['import', 'cutover-check', ...flags(), '--timeout-seconds', value])).toBe(2);
+    expect(checker).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  },
+);
+
 it.each([undefined, 1, 7200])(
   'kills the Composer process group on timeout (%s)',
   async (timeoutSeconds) => {

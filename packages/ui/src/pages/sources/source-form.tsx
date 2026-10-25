@@ -13,7 +13,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../../components/ui/dialog.js';
-import type { Source } from '../sources.js';
+import { displayUrl, type Source } from '../sources.js';
+import { IdText } from '../../components/ui/id-text.js';
 
 export type CreateSource =
   operations['createOrganizationSource']['requestBody']['content']['application/json'];
@@ -494,6 +495,26 @@ export function SourceForm({
               <p role="alert" className="mb-4 text-sm text-red-700">
                 {Object.keys(errors).length ? 'Review the highlighted fields.' : alert}
               </p>
+            ) : null}
+            {source ? (
+              <dl className="detail-list mb-4" aria-label="Source identity">
+                <dt>Source ID</dt>
+                <dd>
+                  <IdText value={source.id} label="source ID" />
+                </dd>
+                <dt>Source URL</dt>
+                <dd className="break-all">{displayUrl(source.url) ?? 'No displayable URL'}</dd>
+                <dt>Credential</dt>
+                <dd>
+                  {source.hasCredential ? 'credential set · write-only' : 'No credential set'}
+                </dd>
+                {'attached' in source ? (
+                  <>
+                    <dt>Attached to this project</dt>
+                    <dd>{source.attached ? 'Yes' : 'No'}</dd>
+                  </>
+                ) : null}
+              </dl>
             ) : null}
             <fieldset disabled={busy} className="grid min-w-0 gap-4">
               {!editing ? (

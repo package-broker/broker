@@ -4,11 +4,13 @@ import type { CatalogueWriteGuard, DistType } from '../db/catalogue.js';
 import { orgContext } from '../db/port.js';
 import {
   BlobDigestMismatchError,
+  BlobTooLargeError,
   parseSha256,
   type BlobInfo,
   type BlobStore,
 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
+import { UpstreamError } from '../sources/policy-fetch.js';
 import type { ProviderContext, ProviderSource } from '../sources/provider.js';
 import {
   fetchAndVerifyDist,
@@ -16,7 +18,7 @@ import {
   type DistFetchTarget,
   type ReplaceBlobRequest,
 } from './dist-fetch.js';
-import { TwoPassLimitError, UpstreamUnstableError } from './two-pass-put.js';
+import { UpstreamUnstableError } from './two-pass-put.js';
 
 const ctx = orgContext('01J0ACME000000000000000000');
 const guard = [] as unknown as CatalogueWriteGuard;
@@ -251,16 +253,25 @@ describe('fetchAndVerifyDist', () => {
     expect(r.opens[0]?.distType).toBeNull();
   });
 
-  it.each([
-    ['TwoPassLimitError', TwoPassLimitError],
-    ['UpstreamUnstableError', UpstreamUnstableError],
-  ] as const)('propagates %s without a catalogue write', async (name, errorClass) => {
-    const r = rig(
-      zip,
-      name === 'UpstreamUnstableError' ? { secondBytes: enc.encode('changed') } : {},
+  it('quarantines a TwoPassLimitError body instead of propagating it', async () => {
+    const r = rig(zip);
+    const deps = { ...r.deps, maxBytes: zip.length - 1 };
+    expect(await fetchAndVerifyDist(deps, ctx, guard, target())).toBe('quarantined');
+    expect(r.attaches).toEqual([]);
+    expect(r.replaces).toEqual([]);
+    expect(r.quarantines).toEqual([{ versionId: 'v1', reason: 'digest_mismatch' }]);
+    expect(r.events).toEqual(['quarantine']);
+    expect(r.logs).toEqual([
+      expect.objectContaining({ event: 'dist.quarantined', reason_code: 'archive_too_large' }),
+    ]);
+    expect(r.stored.size).toBe(0);
+  });
+
+  it('propagates UpstreamUnstableError without a catalogue write', async () => {
+    const r = rig(zip, { secondBytes: enc.encode('changed') });
+    await expect(fetchAndVerifyDist(r.deps, ctx, guard, target())).rejects.toBeInstanceOf(
+      UpstreamUnstableError,
     );
-    const deps = name === 'TwoPassLimitError' ? { ...r.deps, maxBytes: zip.length - 1 } : r.deps;
-    await expect(fetchAndVerifyDist(deps, ctx, guard, target())).rejects.toBeInstanceOf(errorClass);
     expect(r.attaches).toEqual([]);
     expect(r.replaces).toEqual([]);
     expect(r.quarantines).toEqual([]);
@@ -485,5 +496,171 @@ describe('fetchAndVerifyDist', () => {
       fetchAndVerifyDist(r.deps, ctx, guard, withFetch({ upstreamDistUrl: null, sourceRef: null })),
     ).rejects.toThrow(/no upstream/);
     expect(r.opens).toEqual([]);
+  });
+});
+
+describe('fetchAndVerifyDist over the size cap', () => {
+  function erroring(error: unknown): ReadableStream<Uint8Array> {
+    let sent = false;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) controller.error(error);
+        else {
+          sent = true;
+          controller.enqueue(zip);
+        }
+      },
+    });
+  }
+
+  function expectSizeQuarantine(r: Rig): void {
+    expect(r.quarantines).toEqual([{ versionId: 'v1', reason: 'digest_mismatch' }]);
+    expect(r.logs).toEqual([
+      expect.objectContaining({ event: 'dist.quarantined', reason_code: 'archive_too_large' }),
+    ]);
+    expect(r.attaches).toEqual([]);
+    expect(r.replaces).toEqual([]);
+    expect(r.stored.size).toBe(0);
+  }
+
+  it('refuses a declared size over maxBytes before reading the body', async () => {
+    const r = rig(zip);
+    let pulls = 0;
+    let cancelled = false;
+    let opens = 0;
+    const deps: DistFetchDeps = {
+      ...r.deps,
+      maxBytes: 4,
+      provider: {
+        async openDist() {
+          opens += 1;
+          return {
+            size: 5,
+            body: new ReadableStream<Uint8Array>(
+              {
+                pull(controller) {
+                  pulls += 1;
+                  controller.enqueue(zip);
+                },
+                cancel() {
+                  cancelled = true;
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+          };
+        },
+      },
+    };
+    expect(await fetchAndVerifyDist(deps, ctx, guard, target())).toBe('quarantined');
+    expectSizeQuarantine(r);
+    expect(opens).toBe(1);
+    expect(pulls).toBe(0);
+    expect(cancelled).toBe(true);
+  });
+
+  it('logs the source id and package key with the quarantine', async () => {
+    const r = rig(zip);
+    const deps = { ...r.deps, maxBytes: zip.length - 1 };
+    await fetchAndVerifyDist(deps, ctx, guard, target({ packageKey: 'acme/pkg' }));
+    expect(r.logs).toEqual([
+      {
+        level: 'warn',
+        event: 'dist.quarantined',
+        reason_code: 'archive_too_large',
+        source_id: 'src',
+        package_key: 'acme/pkg',
+      },
+    ]);
+  });
+
+  it('quarantines when the upstream body passes the policy fetch cap mid-stream', async () => {
+    const r = rig(zip);
+    const deps: DistFetchDeps = {
+      ...r.deps,
+      provider: {
+        async openDist() {
+          return { body: erroring(new UpstreamError('too_large')), size: null };
+        },
+      },
+    };
+    expect(await fetchAndVerifyDist(deps, ctx, guard, target())).toBe('quarantined');
+    expectSizeQuarantine(r);
+    expect(r.events).toEqual(['quarantine']);
+  });
+
+  it('quarantines when upstream declares a length over the policy fetch cap', async () => {
+    const r = rig(zip);
+    const deps: DistFetchDeps = {
+      ...r.deps,
+      provider: {
+        async openDist() {
+          throw new UpstreamError('too_large');
+        },
+      },
+    };
+    expect(await fetchAndVerifyDist(deps, ctx, guard, target())).toBe('quarantined');
+    expectSizeQuarantine(r);
+  });
+
+  it('quarantines when the blob store refuses the size before writing anything', async () => {
+    const r = rig(zip);
+    const deps: DistFetchDeps = {
+      ...r.deps,
+      store: {
+        ...r.deps.store,
+        put: async (_ctx, _key, body) => {
+          await body.cancel();
+          throw new BlobTooLargeError();
+        },
+      },
+    };
+    expect(await fetchAndVerifyDist(deps, ctx, guard, target())).toBe('quarantined');
+    expectSizeQuarantine(r);
+  });
+
+  it('returns stale without a log when the size quarantine changes nothing', async () => {
+    const r = rig(zip, { unchanged: 'quarantine' });
+    const deps = { ...r.deps, maxBytes: zip.length - 1 };
+    expect(await fetchAndVerifyDist(deps, ctx, guard, target())).toBe('stale');
+    expect(r.quarantines).toHaveLength(1);
+    expect(r.logs).toEqual([]);
+  });
+
+  it.each(['timeout', 'network', 'refused', 'http_status'] as const)(
+    'propagates an upstream %s error without a catalogue write',
+    async (code) => {
+      const r = rig(zip);
+      const deps: DistFetchDeps = {
+        ...r.deps,
+        provider: {
+          async openDist() {
+            throw new UpstreamError(code);
+          },
+        },
+      };
+      await expect(fetchAndVerifyDist(deps, ctx, guard, target())).rejects.toMatchObject({ code });
+      expect(r.quarantines).toEqual([]);
+      expect(r.logs).toEqual([]);
+    },
+  );
+
+  it('propagates an over-cap error after the caller aborted, without a catalogue write', async () => {
+    const r = rig(zip);
+    const controller = new AbortController();
+    const deps: DistFetchDeps = {
+      ...r.deps,
+      providerContext: { ...r.deps.providerContext, signal: controller.signal },
+      provider: {
+        async openDist() {
+          controller.abort();
+          throw new UpstreamError('too_large');
+        },
+      },
+    };
+    await expect(fetchAndVerifyDist(deps, ctx, guard, target())).rejects.toBeInstanceOf(
+      UpstreamError,
+    );
+    expect(r.quarantines).toEqual([]);
   });
 });

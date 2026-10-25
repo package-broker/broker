@@ -16,7 +16,6 @@ import {
   startSecurityScenario,
 } from './security.spec.js';
 import type { SecurityScenario } from './security.spec.js';
-import { buildBundles } from './local.js';
 import {
   assertNoSecrets,
   canary,
@@ -185,8 +184,6 @@ afterAll(() => {
 });
 
 describe('security oracles on built bundles', () => {
-  beforeAll(() => buildBundles(), 600_000);
-
   it('can patch the emitted Node bundle without touching the original', async () => {
     const built = await readFile(new URL('../../../.pb/node/server.js', import.meta.url), 'utf8');
     expect(disablePolicyFetch(built)).not.toBe(built);

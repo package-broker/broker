@@ -102,6 +102,7 @@ const RULES: Readonly<Record<string, Rule>> = {
     testOnly: ['vitest', '@package-broker/core'],
     testsAndScripts: ['node', 'esbuild', 'openapi-typescript', 'prettier'],
     onlySpecifiersIn: {
+      '@package-broker/core/sources/source-error-codes': ['packages/ui/src/pages/sources.tsx'],
       '@package-broker/core/platform/ui-manifest': [
         'packages/ui/src/manifest.ts',
         'packages/ui/scripts/build.mjs',

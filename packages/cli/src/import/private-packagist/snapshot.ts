@@ -89,7 +89,9 @@ const repositoryUrl: Schema = (value) => {
       (parsed.username && !(ssh && /^[a-zA-Z0-9_-]+$/.test(parsed.username))) ||
       // Retain public routing queries; credential-bearing query parameters are never persisted.
       [...parsed.searchParams.keys()].some((key) =>
-        /token|key|secret|password|passwd|auth|signature|credential/i.test(key),
+        /^(?:(?:access|refresh|id|auth)[_-]?token|(?:api|private|public)[_-]?key|(?:client[_-])?secret|token|key|password|passwd|auth|authorization|signature|credentials?|x-amz-(?:credential|signature|security-token))$/i.test(
+          key,
+        ),
       )
     )
       throw new RepositoryUrlError();
@@ -99,8 +101,17 @@ const repositoryUrl: Schema = (value) => {
   }
 };
 const reference: Schema = (value) => (value === '' || value === null ? value : id(value));
-const permission = safeName;
-const behavior = safeName;
+class EnumValueError extends Error {}
+const safeEnum: Schema = (value) => {
+  if (typeof value !== 'string' || !/^[\x20-\x7e]{0,64}$/.test(value)) throw new EnumValueError();
+  try {
+    return safeName(value);
+  } catch {
+    throw new EnumValueError();
+  }
+};
+const permission = safeEnum;
+const behavior = safeEnum;
 const version = shape(
   { version: string, versionNormalized: string },
   {
@@ -113,17 +124,17 @@ const packageSchema = shape(
   {
     id,
     name: safeName,
-    origin: safeName,
+    origin: safeEnum,
     config: shape(
       {},
       {
-        type: safeName,
+        type: safeEnum,
         url: nullable(repositoryUrl),
         customJson: nullable(string),
         credentialsId: reference,
         mirroredRepositoryId: reference,
         artifactIds: array(id),
-        defaultSuborganizationAccess: safeName,
+        defaultSuborganizationAccess: safeEnum,
       },
     ),
   },
@@ -158,7 +169,7 @@ const token = shape(
   { id },
   {
     description: safeName,
-    access: safeName,
+    access: safeEnum,
     expiresAt: nullable(string),
     url,
     lastUsed: nullable(string),
@@ -179,7 +190,7 @@ const suborganization = shape(
 const credential = shape(
   {
     id,
-    type: safeName,
+    type: safeEnum,
   },
   {
     description: safeName,
@@ -191,7 +202,7 @@ const synchronization = shape(
   {
     name: safeName,
     isPrimary: boolean,
-    integration: shape({ target: safeName }, { url }),
+    integration: shape({ target: safeEnum }, { url }),
   },
   { id },
 );
@@ -242,7 +253,7 @@ export async function fetchSnapshot(
     suborganizationTokens: [],
   };
   let verified = false;
-  const notices = new Set<string>();
+  const dropped = new Map<string, number>();
   const evidence = (value: Json): void => {
     if (typeof value !== 'string' || !value) return;
     let parsed: URL;
@@ -279,8 +290,14 @@ export async function fetchSnapshot(
       try {
         rows.push(schema(input) as Row);
       } catch (error) {
-        if (!(error instanceof RepositoryUrlError)) throw error;
-        notices.add('repository_url_refused');
+        const reason =
+          error instanceof RepositoryUrlError
+            ? 'repository_url_refused'
+            : error instanceof EnumValueError
+              ? 'enum_value_refused'
+              : undefined;
+        if (!reason) throw error;
+        dropped.set(reason, (dropped.get(reason) ?? 0) + 1);
       }
     }
     for (const row of rows) {
@@ -403,20 +420,22 @@ export async function fetchSnapshot(
     objects,
   };
   api.assertNoCredentials(snapshot);
-  if (!verified) notices.add('org_unverified');
-  return { snapshot, notices: [...notices].sort() };
+  const notices = [...dropped].map(([reason, count]) => `${reason}: ${count}`);
+  if (!verified) notices.push('org_unverified');
+  return { snapshot, notices: notices.sort() };
 }
 
 export async function writeSnapshot(path: string, snapshot: PackagistSnapshot): Promise<void> {
   const temporary = join(dirname(path), `.pb-packagist-${randomUUID()}.tmp`);
   let created = false;
-  const interrupt = (signal: NodeJS.Signals): never => {
+  const interrupt = (signal: NodeJS.Signals): void => {
     try {
       unlinkSync(temporary);
     } catch {
       // The temporary file may not have been created yet.
     }
-    return process.exit(signal === 'SIGINT' ? 130 : 143);
+    process.removeListener(signal, interrupt);
+    process.kill(process.pid, signal);
   };
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);

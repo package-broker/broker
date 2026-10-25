@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { open, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -446,7 +447,7 @@ it.each([
   const { snapshot, notices } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
   expect(snapshot.objects.packages).toHaveLength(4);
   expect(snapshot.objects.mirroredRepositories).toHaveLength(2);
-  expect(notices).toContain('repository_url_refused');
+  expect(notices).toContain('repository_url_refused: 2');
   expect(canonical(snapshot)).not.toContain(url);
 });
 
@@ -461,7 +462,14 @@ it.each(['SIGINT', 'SIGTERM'] as const)(
     await probe.close();
     const listeners = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
     const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('test exit');
+      throw new Error('unexpected process.exit');
+    });
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, reraised) => {
+      expect(pid).toBe(process.pid);
+      expect(reraised).toBe(signal);
+      expect(readdirSync(dir)).toEqual(['probe']);
+      expect(process.listenerCount(signal)).toBe(listeners[signal === 'SIGINT' ? 0 : 1]);
+      throw new Error('test signal termination');
     });
     const sync = vi.spyOn(prototype, 'sync').mockImplementation(async () => {
       expect((await readdir(dir)).some((name) => name.startsWith('.pb-packagist-'))).toBe(true);
@@ -472,14 +480,113 @@ it.each(['SIGINT', 'SIGTERM'] as const)(
       await expect(writeSnapshot(path, snapshot)).rejects.toMatchObject({
         code: 'output_unwritable',
       });
-      expect(exit).toHaveBeenCalledWith(signal === 'SIGINT' ? 130 : 143);
+      expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, signal);
+      expect(exit).not.toHaveBeenCalled();
       expect(await readdir(dir)).toEqual(['probe']);
       expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(
         listeners,
       );
     } finally {
       sync.mockRestore();
+      kill.mockRestore();
       exit.mockRestore();
     }
   },
 );
+
+it.each([
+  'bad\0value',
+  'bad\tvalue',
+  'bad\nvalue',
+  'bad\rvalue',
+  'bad\x1fvalue',
+  'bad\x7fvalue',
+  'café',
+  'acme@example.test',
+  'x'.repeat(65),
+])('drops unsafe enum rows while keeping valid neighbors: %j', async (permission) => {
+  const pages = await fixture();
+  pages['/api/teams/'] = [
+    { id: 80, name: 'Acme unsafe', permission },
+    { id: 81, name: 'Acme valid', permission: 'x'.repeat(64) },
+    { id: 82, name: 'Acme future', permission: 'Future permission !~' },
+    { id: 83, name: 'Acme empty', permission: '' },
+  ];
+  const { snapshot, notices } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.teams?.map((entry) => entry.data.id)).toEqual([81, 82, 83]);
+  expect(notices).toEqual(['enum_value_refused: 1', 'org_unverified']);
+});
+
+it('bounds every open enum and counts dropped rows per reason across inventories', async () => {
+  const pages = await fixture();
+  const unsafe = 'x'.repeat(65);
+  pages['/api/packages/'] = [
+    { id: 80, name: 'Acme', origin: unsafe, config: {} },
+    { id: 81, name: 'Acme', origin: 'private', config: { type: unsafe } },
+    { id: 82, name: 'Acme', origin: 'private', config: { defaultSuborganizationAccess: unsafe } },
+    { id: 83, name: 'Acme', origin: 'private', config: { url: 'file:///private/repo' } },
+  ];
+  pages['/api/teams/'] = [{ id: 84, name: 'Acme', permission: unsafe }];
+  pages['/api/tokens/'] = [{ id: 85, access: unsafe }];
+  pages['/api/credentials/'] = [{ id: 86, type: unsafe }];
+  pages['/api/synchronizations/'] = [
+    { name: 'Acme', isPrimary: true, integration: { target: unsafe } },
+  ];
+  pages['/api/mirrored-repositories/'] = [
+    { id: 87, name: 'Acme', url: 'https://mirror.example.test/', mirroringBehavior: unsafe },
+    { id: 88, name: 'Acme', url: 'file:///private/mirror' },
+  ];
+  pages['/api/suborganizations/acme/mirrored-repositories/'] = [
+    {
+      mirroringBehavior: unsafe,
+      mirroredRepository: { id: 89, name: 'Acme', url: 'https://mirror.example.test/' },
+    },
+    {
+      mirroringBehavior: 'manual',
+      mirroredRepository: { id: 90, name: 'Acme', url: 'file:///private/wrapped' },
+    },
+  ];
+  const first = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  const second = await fetchSnapshot(client(pages, true).api, { org: 'acme', now });
+  expect(first.notices).toEqual([
+    'enum_value_refused: 9',
+    'org_unverified',
+    'repository_url_refused: 3',
+  ]);
+  expect(second.notices).toEqual(first.notices);
+  expect(first.snapshot.objects.packages).toEqual([]);
+  expect(first.snapshot.objects.teams).toEqual([]);
+  expect(first.snapshot.objects.mirroredRepositories).toEqual([]);
+});
+
+it.each(['keyword', 'monkey', 'authority'])(
+  'retains public repository query key %s',
+  async (queryKey) => {
+    const pages = await fixture();
+    const url = `https://git.example.test/repo?${queryKey}=public`;
+    pages['/api/mirrored-repositories/'] = [{ id: 80, name: 'Acme', url }];
+    const { snapshot, notices } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+    expect(snapshot.objects.mirroredRepositories?.[0]?.data.url).toBe(url);
+    expect(notices).toEqual(['org_unverified']);
+  },
+);
+
+it.each([
+  'token',
+  'api_key',
+  'access_token',
+  'client_secret',
+  'password',
+  'authorization',
+  'signature',
+  'credential',
+  'X-Amz-Signature',
+])('refuses credential repository query key %s', async (queryKey) => {
+  const pages = await fixture();
+  pages['/api/mirrored-repositories/'] = [
+    { id: 80, name: 'Acme', url: `https://git.example.test/repo?${queryKey}=private` },
+  ];
+  const { snapshot, notices } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.mirroredRepositories).toEqual([]);
+  expect(notices).toEqual(['org_unverified', 'repository_url_refused: 1']);
+});

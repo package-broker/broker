@@ -243,3 +243,16 @@ it.each(['key', 'secret'])(
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('credential_file'));
   },
 );
+
+it('refuses credential files on platforms without POSIX uid support', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'getuid')!;
+  Object.defineProperty(process, 'getuid', { ...descriptor, value: undefined });
+  try {
+    expect(await runImportPrivatePackagistFetch(options)).toBe(2);
+    expect(options.fetch).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('credential_file'));
+    expect(await readdir(dir)).not.toContain('snapshot.json');
+  } finally {
+    Object.defineProperty(process, 'getuid', descriptor);
+  }
+});

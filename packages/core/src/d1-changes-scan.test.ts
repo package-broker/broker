@@ -682,14 +682,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
-        'Contract fixtures replace snapshot evidence arrays or reported row counts to test fail-closed authorization; these assignments do not read or depend on executor change counts.',
-      sites: [
-        'db-sqlite/src/contract/vulnerability-contract.ts:unresolved computed access: evidence[field] #1',
-        'db-sqlite/src/contract/vulnerability-contract.ts:unresolved computed access: evidence[field] #2',
-      ],
-    },
-    {
-      reason:
         'Sync request checks status and updates only scheduling timestamps under the owner fence; source keys are unchanged.',
       sites: [
         "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source\n        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')` #1",

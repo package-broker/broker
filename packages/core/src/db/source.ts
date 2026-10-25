@@ -272,6 +272,13 @@ export interface SourceRepository {
    * it still equals `expectedNextPollAt`, so a finished sync that already wrote the real value wins.
    */
   deferPoll(ctx: OrgContext, id: string, expectedNextPollAt: string): Promise<boolean>;
+  /**
+   * Sets `last_error = 'credential_unavailable'` on one organization source only while it holds
+   * null or a transient code (`CREDENTIAL_UNAVAILABLE_REPLACES`), so repeated callers change the row
+   * at most once per state change and specific codes are kept. Leaves status, failure counters and
+   * poll timers alone.
+   */
+  markCredentialUnavailable(ctx: OrgContext, id: string): Promise<void>;
   /** `stale` when the job guard no longer holds; nothing is written then. */
   pollState(
     ctx: OrgContext,

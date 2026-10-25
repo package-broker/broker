@@ -52,6 +52,13 @@ export const SOURCE_ERROR_CODES = [
   'internal',
 ] as const;
 
+const CREDENTIAL_REPLACEABLE_ERRORS = [
+  'network',
+  'timeout',
+  'http_error',
+  'rate_limited',
+] as const satisfies readonly SourceErrorCode[];
+
 const CHANGE_KEYS: ReadonlySet<string> = new Set([
   'url',
   'configJson',
@@ -812,6 +819,25 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     async deferPoll(ctx, id, expectedNextPollAt) {
       const [result] = await executor.batch([deferPollStatement(ctx, id, expectedNextPollAt)]);
       return result?.changes === 1;
+    },
+
+    async markCredentialUnavailable(ctx, id) {
+      const code: SourceErrorCode = 'credential_unavailable';
+      await executor.batch([
+        compile(
+          db
+            .updateTable('source')
+            .set({ last_error: code })
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', id)
+            .where((eb) =>
+              eb.or([
+                eb('last_error', 'is', null),
+                eb('last_error', 'in', [...CREDENTIAL_REPLACEABLE_ERRORS]),
+              ]),
+            ),
+        ),
+      ]);
     },
 
     async pollState(ctx, guard, input) {

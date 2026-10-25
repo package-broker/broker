@@ -22,11 +22,45 @@ export class GithubRestError extends Error {
   }
 }
 
+/** Per-describe ceiling on manifest text bytes read and on GitHub API requests sent. */
+export interface TokenRestBudget {
+  readonly textBytes: number;
+  readonly requests: number;
+}
+
+/** Counts every request of one describe against `requests`; the request over it is not sent. */
+export function meteredFetch(policyFetch: PolicyFetch, requests: number) {
+  let sent = 0;
+  const fetch: PolicyFetch = async (request) => {
+    if (sent >= requests) throw new UpstreamError('too_large', undefined, 'request_count');
+    sent += 1;
+    return policyFetch(request);
+  };
+  return { fetch, remaining: () => requests - sent };
+}
+
+export interface TextLimits {
+  readonly textBytes: number;
+  /** Requests the metered fetch still allows. */
+  readonly remaining: () => number;
+}
+
+const UNBOUNDED: TextLimits = { textBytes: Infinity, remaining: () => Infinity };
+
+export interface ManifestFile {
+  readonly ref: string;
+  readonly commit: string;
+  readonly committedAt: null;
+  readonly text: string | null;
+  readonly reason: undefined;
+}
+
 export function tokenRest(
   fetch: PolicyFetch,
   credential: UpstreamCredential,
   repo: string,
   resetAt: (epochSeconds: number | undefined) => number,
+  limits: TextLimits = UNBOUNDED,
 ) {
   const authorization = credential.apply(new Headers(), new URL(API)).headers.get('authorization');
   if (authorization === null || !authorization.startsWith('Bearer '))
@@ -125,9 +159,8 @@ export function tokenRest(
       throw new GithubRestError();
     return { name: `refs/heads/${name}`, oid: entry.commit.sha };
   }
-  async function files(refs: readonly { name: string; oid: string }[]) {
+  async function stage(refs: readonly { name: string; oid: string }[]) {
     type Ref = (typeof refs)[number];
-    const texts = new Map<Ref, string>();
     const aliases = new Map(refs.map((ref, index) => [ref, `a${index}`]));
     const [owner, name] = repo.split('/');
     async function batch(chunk: readonly Ref[], text: boolean) {
@@ -209,53 +242,85 @@ export function tokenRest(
         return blob;
       });
     }
+    const batches: Ref[][] = [];
+    let textBytes = 0;
     for (let offset = 0; offset < refs.length; offset += 100) {
       const chunk = refs.slice(offset, offset + 100);
       const sizes = await batch(chunk, false);
       let pending: Ref[] = [];
-      let budget = 0;
-      async function readPending() {
-        if (pending.length === 0) return;
-        const blobs = await batch(pending, true);
-        for (const [index, blob] of blobs.entries()) {
-          if (blob === null || (blob.byteSize as number) > MAX_FILE_BYTES || blob.text === null)
-            continue;
-          if (
-            typeof blob.text !== 'string' ||
-            new TextEncoder().encode(blob.text).byteLength > MAX_FILE_BYTES
-          )
-            throw new GithubRestError();
-          // Keep malformed JSON local to its ref in the provider.
-          try {
-            const manifest: unknown = JSON.parse(blob.text);
-            if (record(manifest)) safeName(manifest.name);
-          } catch (error) {
-            if (!(error instanceof SyntaxError)) throw error;
-          }
-          texts.set(pending[index]!, blob.text);
-        }
-        pending = [];
-        budget = 0;
-      }
+      let cost = 0;
       for (const [index, blob] of sizes.entries()) {
         if (blob === null || (blob.byteSize as number) > MAX_FILE_BYTES) continue;
+        textBytes += blob.byteSize as number;
         // JSON can escape each byte as six ASCII bytes; reserve room for the envelope.
-        const cost = (blob.byteSize as number) * 6 + 1024;
-        if (budget + cost > MAX_BATCH_BYTES - 1024) await readPending();
+        const escaped = (blob.byteSize as number) * 6 + 1024;
+        if (pending.length > 0 && cost + escaped > MAX_BATCH_BYTES - 1024) {
+          batches.push(pending);
+          pending = [];
+          cost = 0;
+        }
         pending.push(chunk[index]!);
-        budget += cost;
+        cost += escaped;
       }
-      await readPending();
+      if (pending.length > 0) batches.push(pending);
     }
-    return refs.map((ref) => ({
-      ref: ref.name,
-      commit: ref.oid,
-      committedAt: null,
-      text: texts.get(ref) ?? null,
-      reason: undefined,
-    }));
+    if (textBytes > limits.textBytes)
+      throw new UpstreamError('too_large', undefined, 'manifest_bytes');
+    if (batches.length > limits.remaining())
+      throw new UpstreamError('too_large', undefined, 'request_count');
+    async function read(chunk: readonly Ref[]) {
+      const texts = new Map<Ref, string>();
+      const blobs = await batch(chunk, true);
+      for (const [index, blob] of blobs.entries()) {
+        if (blob === null || (blob.byteSize as number) > MAX_FILE_BYTES || blob.text === null)
+          continue;
+        if (
+          typeof blob.text !== 'string' ||
+          new TextEncoder().encode(blob.text).byteLength > MAX_FILE_BYTES
+        )
+          throw new GithubRestError();
+        // Keep malformed JSON local to its ref in the provider.
+        try {
+          const manifest: unknown = JSON.parse(blob.text);
+          if (record(manifest)) safeName(manifest.name);
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+        }
+        texts.set(chunk[index]!, blob.text);
+      }
+      return texts;
+    }
+    const owners = new Map<Ref, number>();
+    for (const [index, chunk] of batches.entries()) for (const ref of chunk) owners.set(ref, index);
+    return {
+      /** Yields one file per ref in order, holding the texts of one batch at a time. */
+      async *files(): AsyncGenerator<ManifestFile> {
+        let loaded = -1;
+        let texts = new Map<Ref, string>();
+        for (const ref of refs) {
+          const owner = owners.get(ref);
+          if (owner !== undefined && owner !== loaded) {
+            texts.clear();
+            texts = await read(batches[owner]!);
+            loaded = owner;
+          }
+          yield {
+            ref: ref.name,
+            commit: ref.oid,
+            committedAt: null,
+            text: owner === undefined ? null : (texts.get(ref) ?? null),
+            reason: undefined,
+          };
+        }
+      },
+    };
   }
-  return { refs, branch, manifest, files };
+  async function files(refs: readonly { name: string; oid: string }[]) {
+    const result: ManifestFile[] = [];
+    for await (const file of (await stage(refs)).files()) result.push(file);
+    return result;
+  }
+  return { refs, branch, manifest, stage, files };
 }
 
 function record(value: unknown): value is Record<string, unknown> {

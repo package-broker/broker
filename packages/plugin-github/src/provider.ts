@@ -21,9 +21,17 @@ import {
   type InstallationTokens,
 } from './installation-token.js';
 
-import { tokenRest } from './token-rest.js';
+import { meteredFetch, tokenRest, type ManifestFile, type TokenRestBudget } from './token-rest.js';
 
 const MAX_RATE_LIMIT_WAIT_SECONDS = 3600;
+const MIB = 1024 * 1024;
+
+/** Ceilings for one token-mode describe; exceeding one fails it with the stable too_large code. */
+export const TOKEN_DESCRIBE_BUDGET: Readonly<Record<'docker' | 'cloudflare', TokenRestBudget>> =
+  Object.freeze({
+    cloudflare: Object.freeze({ textBytes: 64 * MIB, requests: 1000 }),
+    docker: Object.freeze({ textBytes: 256 * MIB, requests: 5000 }),
+  });
 
 import { RateLimited } from './rate-limited.js';
 export { RateLimited } from './rate-limited.js';
@@ -44,6 +52,8 @@ export interface GithubProviderOptions {
     source: ProviderSource,
   ) => InstallationTokens | null | Promise<InstallationTokens | null>;
   readonly runtime: 'docker' | 'cloudflare';
+  /** Test-only override of TOKEN_DESCRIBE_BUDGET; production wiring never sets it. */
+  readonly budget?: TokenRestBudget;
 }
 
 const API = 'https://api.github.com';
@@ -226,7 +236,9 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
     },
     async describe(ctx, source, name, describeOptions) {
       const s = await session(ctx, source);
-      const response = await s.fetch({
+      const budget = options.budget ?? TOKEN_DESCRIBE_BUDGET[options.runtime];
+      const metered = s.tokenMode ? meteredFetch(s.fetch, budget.requests) : null;
+      const response = await (metered?.fetch ?? s.fetch)({
         url: `${API}/repos/${s.repo}`,
         method: 'GET',
         purpose: 'api',
@@ -259,7 +271,12 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       ) {
         throw new GithubProviderError('skipped');
       }
-      const rest = s.tokenMode ? tokenRest(s.fetch, s.apiCredential, s.repo, s.resetAt) : null;
+      const rest = s.tokenMode
+        ? tokenRest(metered!.fetch, s.apiCredential, s.repo, s.resetAt, {
+            textBytes: budget.textBytes,
+            remaining: metered!.remaining,
+          })
+        : null;
       const listing = s.tokenMode
         ? {
             refs: [
@@ -307,80 +324,112 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         ),
       );
       const winningRefs = refs.filter((ref) => winningNames.has(ref.name));
-      const files = s.tokenMode
-        ? await rest!.files(winningRefs)
-        : await readFileAtRefs(
-            {
-              policyFetch: s.fetch,
-              codecs: ctx.codecs,
-              runtime: options.runtime,
-              credential: s.gitCredential,
-            },
-            s.gitUrl,
-            winningRefs,
-            'composer.json',
-          );
-      let complete =
-        files.length === winningRefs.length &&
-        files.every((file) => file.reason === undefined && file.text !== null);
-      const candidates: VersionCandidate[] = [];
-      for (const version of versions.versions) {
-        const refName = `refs/${version.kind === 'tag' ? 'tags' : 'heads'}/${version.ref}`;
-        const file = files.find((entry) => entry.ref === refName);
-        if (file === undefined || file.reason !== undefined || file.text === null) {
-          complete = false;
-          continue;
-        }
-        let manifest: unknown;
-        try {
-          manifest = JSON.parse(file.text);
-        } catch {
-          complete = false;
-          continue;
-        }
-        if (!record(manifest) || typeof manifest.name !== 'string' || !SHA.test(file.commit)) {
-          complete = false;
-          continue;
-        }
-        try {
-          const key = packageKey(manifest.name, { ecosystem: 'composer' });
-          if (
-            key !== packageKey(name, { ecosystem: 'composer' }) ||
-            (s.config.packageName !== undefined &&
-              key !== packageKey(s.config.packageName, { ecosystem: 'composer' }))
-          ) {
+      const refName = (version: (typeof versions.versions)[number]) =>
+        `refs/${version.kind === 'tag' ? 'tags' : 'heads'}/${version.ref}`;
+      let complete: boolean;
+      type FileAtRef = Awaited<ReturnType<typeof readFileAtRefs>>[number];
+      let files: AsyncIterable<ManifestFile | FileAtRef>;
+      if (s.tokenMode) {
+        const byName = new Map<string, (typeof winningRefs)[number]>();
+        for (const ref of winningRefs) if (!byName.has(ref.name)) byName.set(ref.name, ref);
+        const ordered = versions.versions.flatMap((version) => {
+          const ref = byName.get(refName(version));
+          return ref === undefined ? [] : [ref];
+        });
+        complete = ordered.length === versions.versions.length;
+        files = (await rest!.stage(ordered)).files();
+      } else {
+        const read = await readFileAtRefs(
+          {
+            policyFetch: s.fetch,
+            codecs: ctx.codecs,
+            runtime: options.runtime,
+            credential: s.gitCredential,
+          },
+          s.gitUrl,
+          winningRefs,
+          'composer.json',
+        );
+        complete =
+          read.length === winningRefs.length &&
+          read.every((file) => file.reason === undefined && file.text !== null);
+        const byName = new Map<string, FileAtRef>();
+        for (const file of read) if (!byName.has(file.ref)) byName.set(file.ref, file);
+        files = (async function* () {
+          for (const version of versions.versions) {
+            const file = byName.get(refName(version));
+            if (file !== undefined) yield file;
+          }
+        })();
+      }
+      const metadataArchived = metadata.archived;
+      async function* members(): AsyncGenerator<VersionCandidate> {
+        let ordinal = 0;
+        const pending = files[Symbol.asyncIterator]();
+        let next: IteratorResult<ManifestFile | FileAtRef> | undefined;
+        for (const version of versions.versions) {
+          next ??= await pending.next();
+          if (next.done === true || next.value.ref !== refName(version)) {
             complete = false;
             continue;
           }
-        } catch {
-          complete = false;
-          continue;
+          const file = next.value;
+          next = undefined;
+          if (file.reason !== undefined || file.text === null) {
+            complete = false;
+            continue;
+          }
+          let manifest: unknown;
+          try {
+            manifest = JSON.parse(file.text);
+          } catch {
+            complete = false;
+            continue;
+          }
+          if (!record(manifest) || typeof manifest.name !== 'string' || !SHA.test(file.commit)) {
+            complete = false;
+            continue;
+          }
+          try {
+            const key = packageKey(manifest.name, { ecosystem: 'composer' });
+            if (
+              key !== packageKey(name, { ecosystem: 'composer' }) ||
+              (s.config.packageName !== undefined &&
+                key !== packageKey(s.config.packageName, { ecosystem: 'composer' }))
+            ) {
+              complete = false;
+              continue;
+            }
+          } catch {
+            complete = false;
+            continue;
+          }
+          const raw: Record<string, unknown> = {
+            ...manifest,
+            version: version.version,
+            version_normalized: version.versionNormalized,
+            ...(metadataArchived ? { abandoned: true } : {}),
+            ...(file.committedAt === null ? {} : { time: file.committedAt }),
+            source: { type: 'git', url: s.gitUrl, reference: file.commit },
+            dist: {
+              type: 'zip',
+              url: `${API}/repos/${s.repo}/zipball/${file.commit}`,
+              reference: file.commit,
+              shasum: '',
+            },
+          };
+          delete raw['notification-url'];
+          delete raw.support;
+          if (!metadataArchived) delete raw.abandoned;
+          if (file.committedAt === null) delete raw.time;
+          yield {
+            ordinal: ordinal++,
+            ...(file.committedAt === null ? {} : { upstreamTime: file.committedAt }),
+            version: version.version,
+            form: version.kind === 'tag' ? 'composer-p2' : 'composer-p2-dev',
+            raw: JSON.stringify(raw),
+          };
         }
-        const raw: Record<string, unknown> = {
-          ...manifest,
-          version: version.version,
-          version_normalized: version.versionNormalized,
-          ...(metadata.archived ? { abandoned: true } : {}),
-          ...(file.committedAt === null ? {} : { time: file.committedAt }),
-          source: { type: 'git', url: s.gitUrl, reference: file.commit },
-          dist: {
-            type: 'zip',
-            url: `${API}/repos/${s.repo}/zipball/${file.commit}`,
-            reference: file.commit,
-            shasum: '',
-          },
-        };
-        delete raw['notification-url'];
-        delete raw.support;
-        if (!metadata.archived) delete raw.abandoned;
-        if (file.committedAt === null) delete raw.time;
-        candidates.push({
-          ordinal: candidates.length,
-          ...(file.committedAt === null ? {} : { upstreamTime: file.committedAt }),
-          version: version.version,
-          form: version.kind === 'tag' ? 'composer-p2' : 'composer-p2-dev',
-          raw: JSON.stringify(raw),
-        });
       }
       return {
         kind: 'found',
@@ -388,10 +437,8 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
           name,
           snapshot,
           validators: {},
-          documentsComplete: complete,
-          members: (async function* () {
-            yield* candidates;
-          })(),
+          documentsComplete: () => complete,
+          members: members(),
         }),
       };
     },

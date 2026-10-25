@@ -17,6 +17,7 @@ import { createMcpRoutes, McpError, McpHttpError, type McpHandler } from './tran
 import { createMcpLimiter } from './limit.js';
 
 const ORIGIN = 'https://broker.test';
+const allowAll = { check: async () => true };
 const token = (kind: 'pat' | 'svc' | 'cst' = 'pat') =>
   formatToken(kind, 'abcdefghij23', new Uint8Array(32));
 const ping = { jsonrpc: '2.0', id: 1, method: 'ping' };
@@ -95,6 +96,7 @@ function fixture(handlers: Record<string, McpHandler> = {}, timeoutMs?: number) 
   const routes = createMcpRoutes({
     handlers,
     publicOrigin: ORIGIN,
+    limiter: allowAll,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
   return {
@@ -162,7 +164,11 @@ async function mounted(
     health: async () => true,
     log: () => {},
     authorization,
-    coreRoutes: createMcpRoutes({ handlers: { 'tools/list': handler }, publicOrigin: ORIGIN }),
+    coreRoutes: createMcpRoutes({
+      handlers: { 'tools/list': handler },
+      publicOrigin: ORIGIN,
+      limiter: allowAll,
+    }),
   });
   return { kernel, handler, lookupToken };
 }
@@ -773,6 +779,34 @@ describe('MCP transport rate limiting', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it.each<[string, (() => number) | undefined, string]>([
+    ['the limiter value', () => 17, '17'],
+    ['60 without a limiter value', undefined, '60'],
+    ['60 for a fractional value', () => 1.5, '60'],
+    ['60 for a zero value', () => 0, '60'],
+    [
+      '60 when the limiter throws',
+      () => {
+        throw new Error('broken');
+      },
+      '60',
+    ],
+  ])('sets Retry-After to %s', async (_name, retryAfterSeconds, header) => {
+    const routes = createMcpRoutes({
+      handlers: {},
+      publicOrigin: ORIGIN,
+      limiter: {
+        check: async () => false,
+        ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+      },
+    });
+    const response = await Promise.resolve(
+      routes.find((r) => r.method === 'POST')!.handler(context(toolCall)),
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe(header);
+  });
+
   it('limits malformed JSON before parsing it', async () => {
     const ctx = context('{');
     const response = await limitedPost(async () => false)(ctx);
@@ -837,5 +871,20 @@ describe('MCP transport rate limiting', () => {
     expect(check).not.toHaveBeenCalled();
     expect(handler).not.toHaveBeenCalled();
     expect(ctx.request.bodyUsed).toBe(false);
+  });
+});
+
+describe('MCP transport limiter requirement', () => {
+  it.each([
+    ['absent', undefined],
+    ['without check', {}],
+  ])('refuses to build routes with a limiter %s', (_name, limiter) => {
+    expect(() =>
+      createMcpRoutes({
+        handlers: {},
+        publicOrigin: ORIGIN,
+        limiter: limiter as never,
+      }),
+    ).toThrow(new TypeError('limiter is required'));
   });
 });

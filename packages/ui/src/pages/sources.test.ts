@@ -38,6 +38,7 @@ const source: Source = {
   lastRemovalRefusal: null,
   removalAcceptanceArmed: false,
   attachedProjectCount: 3,
+  projectName: null,
 };
 const json = (data: unknown, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), { status, headers });
@@ -47,11 +48,12 @@ function setup(
   project: string | null = null,
   organizationPermissions = ['org:sources:write'],
 ) {
+  const permissionsFetch = vi.fn(() =>
+    Promise.resolve(json({ organization: organizationPermissions })),
+  );
   const client = createApiClient<paths>({
     fetch: (input, init) =>
-      input === '/_pb/me/permissions'
-        ? Promise.resolve(json({ organization: organizationPermissions }))
-        : fetch(input, init),
+      input === '/_pb/me/permissions' ? permissionsFetch() : fetch(input, init),
     readCookie: () => undefined,
   });
   const entries = new Map<string, string>();
@@ -71,7 +73,7 @@ function setup(
   );
   const model = createSourcesModel({ client, requireReauth }, project, () => NOW);
   const html = () => renderToString(createElement(SourcesView, { model }));
-  return { model, fetch, entries, storage, flow, requireReauth, navigate, html };
+  return { model, fetch, permissionsFetch, entries, storage, flow, requireReauth, navigate, html };
 }
 
 function credentialForm() {
@@ -1859,5 +1861,179 @@ describe('source action dialog identity and switching', () => {
     await pending;
     expect(model.snapshot().names).toBeNull();
     expect(model.snapshot().credentialSource).toBe(SOURCE);
+  });
+});
+
+describe('organization ownership filter', () => {
+  it.each(['project', 'all'] as const)(
+    'loads permissions in parallel once per %s page and keeps Enable after an empty page',
+    async (ownership) => {
+      let finish!: (response: Response) => void;
+      const selected = { ...source, projectId: 'project-id', status: 'paused' as const };
+      const fetch = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              finish = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(json({ items: [], next: null }));
+      const { model, html, permissionsFetch } = setup(fetch);
+      const pending = model.setOwnership(ownership);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(permissionsFetch).toHaveBeenCalledOnce();
+      finish(json({ items: [selected], next: SOURCE }));
+      await pending;
+      expect(permissionsFetch).toHaveBeenCalledTimes(1);
+      expect(html()).toContain('>Enable<');
+      expect(html()).not.toContain('Source scope');
+      await model.load(true);
+      expect(permissionsFetch).toHaveBeenCalledTimes(2);
+      expect(model.snapshot().items).toHaveLength(1);
+      expect(html()).toContain('>Enable<');
+      expect(model.enableNeedsAdmin(selected)).toBe(false);
+    },
+  );
+
+  it('reveals the new organization source and next steps when created with Project-owned selected', async () => {
+    const created = { ...source, type: 'hosted' as const, status: 'paused' as const };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [], next: null }))
+      .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+      .mockResolvedValueOnce(json({ items: [created], next: null }));
+    const { model, html } = setup(fetch);
+    await model.setOwnership('project');
+    model.openEditor();
+    await model.saveSource({ name: source.name, type: 'hosted', ecosystem: 'npm' });
+    expect(model.snapshot().ownership).toBe('organization');
+    expect(fetch.mock.calls[2]?.[0]).toBe('/_pb/sources?limit=100');
+    expect(model.snapshot().createdSource).toBe(SOURCE);
+    expect(html().replace(/<!--.*?-->/g, '')).toContain(`Next steps for ${source.name}`);
+  });
+
+  it('reveals a successful create replay from the Project-owned filter', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [], next: null }))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, type: 'hosted', status: 'paused' }], next: null }),
+      );
+    const { model, html } = setup(fetch);
+    await model.setOwnership('project');
+    await model.replayed({ path: '/_pb/sources', ok: true, status: 201, createdSourceId: SOURCE });
+    expect(model.snapshot().ownership).toBe('organization');
+    expect(model.snapshot().createdSource).toBe(SOURCE);
+    expect(html().replace(/<!--.*?-->/g, '')).toContain(`Next steps for ${source.name}`);
+  });
+
+  it('does not cache an Enable denial for an organization-owned row on replay', async () => {
+    const { model } = setup(
+      vi.fn().mockResolvedValue(json({ items: [{ ...source, status: 'paused' }], next: null })),
+    );
+    await model.replayed({
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 403,
+      code: 'forbidden',
+    });
+    expect(model.snapshot().enableDenied).toEqual([]);
+  });
+
+  it('loads project-owned rows and resets pagination on ownership changes', async () => {
+    const projectSource = {
+      ...source,
+      projectId: 'project-id',
+      projectName: 'Payments',
+      status: 'paused',
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [source], next: SOURCE }))
+      .mockResolvedValueOnce(json({ items: [projectSource], next: SOURCE }))
+      .mockResolvedValueOnce(json({ items: [], next: null }))
+      .mockResolvedValueOnce(json({ items: [source, projectSource], next: null }));
+    const { model, html } = setup(fetch);
+    await model.load();
+    expect(html()).toContain('Ownership');
+    await model.setOwnership('project');
+    expect(fetch.mock.calls[1]?.[0]).toBe('/_pb/sources?limit=100&ownership=project');
+    expect(model.snapshot().items).toHaveLength(1);
+    expect(html()).toContain('Project: Payments');
+    expect(html()).toContain('>Enable<');
+    expect(html()).not.toContain('>Edit<');
+    expect(html()).not.toContain('Set credential');
+    await model.load(true);
+    expect(fetch.mock.calls[2]?.[0]).toContain(`after=${SOURCE}`);
+    expect(fetch.mock.calls[2]?.[0]).toContain('ownership=project');
+    await model.setOwnership('all');
+    expect(fetch.mock.calls[3]?.[0]).toBe('/_pb/sources?limit=100&ownership=all');
+    expect(model.snapshot().items).toHaveLength(2);
+  });
+  it('enables a project source from the organization list and refreshes the selected mode', async () => {
+    const selected = {
+      ...source,
+      projectId: 'project-id',
+      projectName: 'Payments',
+      status: 'paused',
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [selected], next: null }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [{ ...selected, status: 'active' }], next: null }));
+    const { model } = setup(fetch);
+    await model.setOwnership('project');
+    await model.togglePause(model.snapshot().items[0]!);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      `/_pb/sources/${SOURCE}/enable`,
+      { method: 'POST' },
+    ]);
+    expect(fetch.mock.calls[2]?.[0]).toBe('/_pb/sources?limit=100&ownership=project');
+    expect(model.snapshot().items[0]?.status).toBe('active');
+  });
+  it('ignores an earlier page when the ownership filter changes during loading', async () => {
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          items: [{ ...source, projectId: 'project-id', projectName: 'Payments' }],
+          next: null,
+        }),
+      );
+    const { model } = setup(fetch);
+    const previous = model.load();
+    await model.setOwnership('project');
+    finish(json({ items: [source], next: SOURCE }));
+    await previous;
+    expect(model.snapshot().items[0]?.projectId).toBe('project-id');
+    expect(model.snapshot().next).toBeNull();
+  });
+  it('requires organization source write permission to enable a project-owned row', async () => {
+    const { model, html, fetch } = setup(
+      vi.fn().mockResolvedValue(
+        json({
+          items: [
+            { ...source, projectId: 'project-id', projectName: 'Payments', status: 'paused' },
+          ],
+          next: null,
+        }),
+      ),
+      null,
+      [],
+    );
+    await model.setOwnership('project');
+    expect(html()).toContain('An organization admin must enable this source.');
+    expect(html()).not.toContain('>Enable<');
+    await model.togglePause(model.snapshot().items[0]!);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

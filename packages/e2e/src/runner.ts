@@ -149,19 +149,51 @@ export async function runScenarios(
   return { results, hostnameExceptions, exitCode: failed ? 1 : 0 };
 }
 
+const compiled = (module: string) =>
+  new URL(import.meta.url.endsWith('.ts') ? `../dist/${module}` : `./${module}`, import.meta.url)
+    .href;
+
+export async function onBothRuntimes(
+  run: (runtime: 'node' | 'cloudflare') => Promise<ScenarioResult>,
+): Promise<ScenarioResult> {
+  const node = await run('node');
+  const worker = await run('cloudflare');
+  const reason = `${node.reason} ${worker.reason}`;
+  if (node.status === 'FAIL' || worker.status === 'FAIL') return { status: 'FAIL', reason };
+  if (node.status === 'NOT RUN' || worker.status === 'NOT RUN')
+    return { status: 'NOT RUN', reason };
+  return { status: 'PASS', reason };
+}
+
 export const releaseScenarios: readonly Scenario[] = [
   {
     id: 'mirror-proxy-assembly',
     layer: 'L',
     async run() {
-      const url = new URL(
-        import.meta.url.endsWith('.ts') ? '../dist/registry.spec.js' : './registry.spec.js',
-        import.meta.url,
-      );
       const { runRegistryAssembly } = (await import(
-        url.href
+        compiled('registry.spec.js')
       )) as typeof import('./registry.spec.js');
       return runRegistryAssembly();
+    },
+  },
+  {
+    id: 'authz-project-isolation',
+    layer: 'L',
+    async run() {
+      const { isolationScenario } = (await import(
+        compiled('isolation.spec.js')
+      )) as typeof import('./isolation.spec.js');
+      return onBothRuntimes(isolationScenario);
+    },
+  },
+  {
+    id: 'audit-integrity',
+    layer: 'L',
+    async run() {
+      const { auditScenario } = (await import(
+        compiled('audit.spec.js')
+      )) as typeof import('./audit.spec.js');
+      return onBothRuntimes(auditScenario);
     },
   },
 ];

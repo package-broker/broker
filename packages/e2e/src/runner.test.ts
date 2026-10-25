@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { capabilities, requiredScenarioIds } from './capabilities.js';
 import {
   layers,
+  onBothRuntimes,
   releaseCatalogue,
   releaseScenarios,
   releaseRequirements,
@@ -197,10 +198,23 @@ describe('release runner', () => {
     expect(child.stdout).toContain('NOT RUN [R]: No scenarios registered');
   });
 
-  it('registers the assembly scenario for layer L and no other layer', () => {
+  it('registers the bundle scenarios for layer L and no other layer', () => {
     expect(releaseScenarios.map(({ id, layer }) => [id, layer])).toEqual([
       ['mirror-proxy-assembly', 'L'],
+      ['authz-project-isolation', 'L'],
+      ['audit-integrity', 'L'],
     ]);
+  });
+
+  it('combines both runtimes: any FAIL fails, any NOT RUN is not a pass', async () => {
+    const result = (node: ScenarioResult['status'], cloudflare: ScenarioResult['status']) =>
+      onBothRuntimes(async (runtime) => ({
+        status: runtime === 'node' ? node : cloudflare,
+        reason: runtime,
+      }));
+    expect(await result('PASS', 'PASS')).toEqual({ status: 'PASS', reason: 'node cloudflare' });
+    expect((await result('PASS', 'NOT RUN')).status).toBe('NOT RUN');
+    expect((await result('NOT RUN', 'FAIL')).status).toBe('FAIL');
   });
 
   it('recognizes a relative entry path without relying on import.meta.main', () => {

@@ -70,6 +70,13 @@ export class PackBudget {
     this.retained += bytes;
   }
 
+  release(bytes: number): void {
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.retained) {
+      throw new RangeError('release must be a size within the retained bytes');
+    }
+    this.retained -= bytes;
+  }
+
   chargeObject(declaredSize: number): void {
     if (declaredSize > this.limits.maxObjectBytes) throw new PackBudgetError('object_bytes');
     this.charge(declaredSize);

@@ -114,6 +114,41 @@ for (const config of configs) {
     });
 
     it.each([
+      ['uppercase domain', ['ACME.example'], 'must be a valid lowercase domain'],
+      ['not a string', [42], 'must be a string'],
+      ['duplicate domain', ['acme.example', 'acme.example'], 'duplicates'],
+    ])(
+      'details invalid authority (%s) when verifiedDomains is over the cap',
+      (_name, domains, detail) => {
+        const policy = {
+          verifiedDomains: Array.from({ length: 33 }, (_v, index) => `d${index}.example`),
+          emailAuthoritativeDomains: domains,
+          autoJoin: false,
+        } as DomainPolicy;
+        const found = problems(policy);
+        expect(found).toContain('policy: verifiedDomains must list at most 32 domains');
+        expect(
+          found.some(
+            (problem) =>
+              problem.startsWith('policy: emailAuthoritativeDomains[') && problem.includes(detail),
+          ),
+        ).toBe(true);
+        expect(found.join(' ')).not.toContain('must appear in verifiedDomains');
+        expect(() => direct(policy)).toThrow(RangeError);
+        expect(() => built(policy)).toThrow(TypeError);
+      },
+    );
+
+    it('adds no authority detail for a valid list when verifiedDomains is over the cap', () => {
+      const policy = {
+        verifiedDomains: Array.from({ length: 33 }, (_v, index) => `d${index}.example`),
+        emailAuthoritativeDomains: ['d0.example'],
+        autoJoin: false,
+      };
+      expect(problems(policy)).toEqual(['policy: verifiedDomains must list at most 32 domains']);
+    });
+
+    it.each([
       ['inside the authority set', ['acme.example'], true],
       ['outside the authority set', ['other.example'], false],
       ['empty authority set', [], false],

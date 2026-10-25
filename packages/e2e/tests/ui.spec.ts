@@ -670,6 +670,41 @@ test.describe('Node management UI', () => {
     await expect(nextPoll()).toHaveAttribute('datetime', /\d{4}-\d{2}-\d{2}T/);
     await expect(nextPoll()).not.toHaveAttribute('datetime', previousPoll!);
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
+    if (!(await sourceRow().getByRole('button', { name: 'Pause', exact: true }).isVisible())) {
+      await sourceRow().getByText('More', { exact: true }).click();
+    }
+    await sourceRow().getByRole('button', { name: 'Pause', exact: true }).click();
+    const paused = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === `/_pb/projects/browser-fixture/sources/${id}/pause`,
+    );
+    await activeDialog(page, 'Pause?')
+      .getByRole('button', { name: 'Confirm pause', exact: true })
+      .click();
+    expect((await paused).status()).toBe(204);
+    await expect(sourceRow().getByText('Paused', { exact: true }).first()).toBeVisible();
+    await go(page, 'sources');
+    await page.getByRole('combobox', { name: 'Ownership', exact: true }).selectOption('project');
+    await expect(sourceRow()).toBeVisible();
+    await expect(sourceRow().getByText(/^Project:/)).toBeVisible();
+    await expect(sourceRow().getByText('Paused', { exact: true }).first()).toBeVisible();
+    await sourceRow().getByText('More', { exact: true }).click();
+    const enabledFromOrganization = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === `/_pb/sources/${id}/enable`,
+    );
+    await sourceRow().getByRole('button', { name: 'Enable', exact: true }).click();
+    expect((await enabledFromOrganization).status()).toBe(204);
+    await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
+    await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
+    await page
+      .getByRole('combobox', { name: 'Ownership', exact: true })
+      .selectOption('organization');
+    await expect(sourceRow()).toHaveCount(0);
+    await page.getByRole('combobox', { name: 'Ownership', exact: true }).selectOption('all');
+    await expect(sourceRow()).toBeVisible();
   });
 
   test('creates a GitHub token source and saves its bearer credential', async ({ page, admin }) => {

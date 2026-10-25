@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -8,7 +6,6 @@ import {
   assertWorkerBundle,
   fixtureDestination,
   injectSourcePollClock,
-  repository,
   removeWebhookRegistration,
   upstreamOrigins,
 } from './local.js';
@@ -236,13 +233,8 @@ describe('T448 fixture transport', () => {
   });
 });
 
-const run = promisify(execFile);
-
 describe('production bundle HTTP scenario', () => {
-  beforeAll(async () => {
-    for (const script of ['build', 'bundle'])
-      await run('pnpm', [script], { cwd: repository, maxBuffer: 64 * 1024 * 1024 });
-  }, 600_000);
+  beforeAll(() => local.buildBundles(), 600_000);
 
   it.each(['node', 'cloudflare'])(
     'can inject the poll clock into the %s bundle',

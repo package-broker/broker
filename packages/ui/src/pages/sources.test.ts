@@ -1,3 +1,6 @@
+import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
+import { SYNC_ERROR_LABELS } from './sources.js';
+import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { createElement, isValidElement, type ReactNode, type ReactElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
@@ -835,7 +838,7 @@ describe('round 2 regressions', () => {
     const { model, html } = setup(fetch, 'acme', ['project:sources:write']);
     await model.load();
     expect(html()).not.toMatch(/>Enable</);
-    expect(html()).toContain('<p role="status">An organization admin must enable this source.</p>');
+    expect(html()).toContain('<p>An organization admin must enable this source.</p>');
     fetch.mockClear();
     await model.togglePause(paused);
     expect(fetch).not.toHaveBeenCalled();
@@ -883,9 +886,7 @@ describe('round 2 regressions', () => {
     );
     await model.load();
     await model.togglePause(paused);
-    expect(html()).toContain(
-      '<p role="status">Register package names, then enable the source.</p>',
-    );
+    expect(html()).toContain('<p>Register package names, then enable the source.</p>');
     expect(html()).toMatch(/>Enable</);
     expect(html()).not.toContain(SECRET);
     expect(model.snapshot().error).toBeNull();
@@ -909,9 +910,7 @@ describe('round 2 regressions', () => {
       status: 409,
       code: 'conflict',
     });
-    expect(html()).toContain(
-      '<p role="status">Register package names, then enable the source.</p>',
-    );
+    expect(html()).toContain('<p>Register package names, then enable the source.</p>');
     expect(html()).toMatch(/>Enable</);
     expect(model.snapshot().error).toBeNull();
   });
@@ -1073,7 +1072,7 @@ describe('round 2 regressions', () => {
       code: 'forbidden',
     });
     expect(html()).not.toMatch(/>Enable</);
-    expect(html()).toContain('<p role="status">An organization admin must enable this source.</p>');
+    expect(html()).toContain('<p>An organization admin must enable this source.</p>');
   });
 });
 
@@ -1669,7 +1668,7 @@ describe('source sync', () => {
     expect(html().split(label)).toHaveLength(2);
     expect(html()).toContain(`<code>${code.startsWith('<') ? label : code}</code>`);
     expect(html()).toContain('Next poll:');
-    expect(html()).toContain('Last success:');
+    expect(html()).toContain('Last listing:');
   });
 
   it('shows empty sync history explicitly', async () => {
@@ -1909,7 +1908,7 @@ describe('organization ownership filter', () => {
       expect(html()).toContain('>Enable<');
       expect(html()).not.toContain('Source scope');
       await model.load(true);
-      expect(permissionsFetch).toHaveBeenCalledTimes(2);
+      expect(permissionsFetch).toHaveBeenCalledTimes(1);
       expect(model.snapshot().items).toHaveLength(1);
       expect(html()).toContain('>Enable<');
       expect(model.enableNeedsAdmin(selected)).toBe(false);
@@ -2056,4 +2055,368 @@ describe('organization ownership filter', () => {
     await model.togglePause(model.snapshot().items[0]!);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('sync status contract', () => {
+  it('labels every exported error code', () => {
+    for (const code of SOURCE_ERROR_CODES) {
+      expect(SYNC_ERROR_LABELS[code], code).toEqual(expect.any(String));
+      expect(SYNC_ERROR_LABELS[code].length).toBeGreaterThan(0);
+    }
+  });
+
+  it.each(['npmjs_proxy', 'packagist_proxy'] as const)(
+    'explains demand fill for %s',
+    async (type) => {
+      const { model, html } = setup(
+        vi.fn().mockResolvedValue(json({ items: [{ ...source, type }], next: null })),
+      );
+      await model.load();
+      expect(html()).toContain(PROXY_DEMAND_MESSAGE);
+      expect(html()).toContain('Last listing:');
+      expect(html()).toContain('Last listing error:');
+    },
+  );
+
+  it('keeps one initially empty live region across source loads', async () => {
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValue(
+          json({ items: [{ ...source, projectId: 'project', status: 'paused' }], next: null }),
+        ),
+      'acme',
+      [],
+    );
+    expect(html()).toContain('<p role="status" aria-live="polite"></p>');
+    await model.load();
+    expect(html().match(/<p role="status"/g)).toHaveLength(1);
+    expect(html()).toContain('<p role="status" aria-live="polite"></p>');
+  });
+
+  it.each([403, 500])(
+    'shows the admin message when permissions return %s and retries on full load',
+    async (status) => {
+      const fetch = vi.fn((input: string) =>
+        Promise.resolve(
+          input === '/_pb/me/permissions'
+            ? json({ error: { code: 'forbidden', message: SECRET } }, status)
+            : json({ items: [{ ...source, projectId: 'project', status: 'paused' }], next: null }),
+        ),
+      );
+      const model = createSourcesModel(
+        {
+          client: createApiClient<paths>({ fetch, readCookie: () => undefined }),
+          requireReauth: vi.fn(),
+        },
+        'acme',
+      );
+      await model.load();
+      await model.load();
+      const html = renderToString(createElement(SourcesView, { model }));
+      expect(html).toContain('An organization admin must enable this source.');
+      expect(html).not.toContain(SECRET);
+      expect(fetch.mock.calls.filter(([input]) => input === '/_pb/me/permissions')).toHaveLength(2);
+    },
+  );
+
+  it('routes permissions reauthentication through the failure handler', async () => {
+    const requireReauth = vi.fn();
+    const fetch = vi.fn((input: string) =>
+      Promise.resolve(
+        input === '/_pb/me/permissions'
+          ? json({ error: { code: 'reauth_required', message: SECRET } }, 403)
+          : json({ items: [], next: null }),
+      ),
+    );
+    const model = createSourcesModel(
+      { client: createApiClient<paths>({ fetch, readCookie: () => undefined }), requireReauth },
+      'acme',
+    );
+    await model.load();
+    expect(requireReauth).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/_pb/me/permissions' }),
+      { credential: false, secretFields: [] },
+    );
+    expect(model.snapshot().error).toBe('Reauthentication is required.');
+  });
+
+  it('does not tell users to register names for an idempotency collision', async () => {
+    const paused = { ...source, status: 'paused' as const };
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValue(json({ error: { code: 'idempotency_mismatch', message: SECRET } }, 409)),
+    );
+    await model.togglePause(paused);
+    expect(model.snapshot().error).toBeTruthy();
+    expect(html()).not.toContain('Register package names, then enable the source.');
+    expect(html()).not.toContain(SECRET);
+  });
+
+  it('polls after Sync now until listing state changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(json({ requested: true }, 202))
+        .mockResolvedValueOnce(json({ items: [source], next: null }))
+        .mockResolvedValue(json({ items: [{ ...source, lastPolledAt: NOW }], next: null }));
+      const { model } = setup(fetch);
+      await model.syncNow(source);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(model.snapshot().items[0]?.lastPolledAt).toBe(NOW);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      model.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('Round 2 source model regressions', () => {
+  it('keeps the table, errors, and page two during an in-flight quiet poll', async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (response: Response) => void;
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [source], next: SOURCE }))
+        .mockResolvedValueOnce(json({ items: [{ ...source, id: 'second' }], next: null }))
+        .mockResolvedValueOnce(json({ requested: true }, 202))
+        .mockResolvedValueOnce(json({ items: [source], next: SOURCE }))
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              finish = resolve;
+            }),
+        );
+      const { model, html } = setup(fetch);
+      await model.load();
+      await model.load(true);
+      await model.syncNow(source);
+      await model.edit(SOURCE, 0, 'flag');
+      const error = model.snapshot().error;
+      const second = model.snapshot().items[1];
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(model.snapshot().loading).toBe(false);
+      expect(html()).toContain('<table');
+      expect(html()).not.toContain('Loading sources');
+      expect(model.snapshot().error).toBe(error);
+      expect(model.snapshot().items[1]).toBe(second);
+      finish(json({ items: [{ ...source, lastPolledAt: NOW }], next: SOURCE }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(model.snapshot().items[0]?.lastPolledAt).toBe(NOW);
+      expect(model.snapshot().items[1]).toBe(second);
+      expect(model.snapshot().error).toBe(error);
+      model.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries failed permissions on full load, caches success, and never retries from polling', async () => {
+    vi.useFakeTimers();
+    try {
+      const owned = { ...source, projectId: 'project' };
+      const fetch = vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(json({ items: [owned], next: null })));
+      const { model, permissionsFetch, requireReauth } = setup(fetch, 'acme');
+      permissionsFetch.mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403));
+      await model.load();
+      expect(model.snapshot().canEnableProjectSource).toBe(false);
+      fetch.mockResolvedValueOnce(json({ requested: true }, 202));
+      await model.syncNow(owned);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(permissionsFetch).toHaveBeenCalledTimes(1);
+      expect(requireReauth).toHaveBeenCalledTimes(1);
+      await model.load();
+      expect(permissionsFetch).toHaveBeenCalledTimes(2);
+      expect(model.snapshot().canEnableProjectSource).toBe(true);
+      await model.load();
+      expect(permissionsFetch).toHaveBeenCalledTimes(2);
+      model.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('routes simultaneous list and permissions reauthentication once', async () => {
+    const { model, permissionsFetch, requireReauth } = setup(
+      vi.fn().mockResolvedValue(json({ error: { code: 'reauth_required' } }, 403)),
+      'acme',
+    );
+    permissionsFetch.mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403));
+    await model.load();
+    expect(requireReauth).toHaveBeenCalledTimes(1);
+    expect(model.snapshot().listError).toBe(true);
+  });
+
+  it('does not fetch permissions for the organization Sources page', async () => {
+    const { model, permissionsFetch } = setup(
+      vi.fn().mockResolvedValue(json({ items: [], next: null })),
+    );
+    await model.load();
+    await model.load();
+    expect(permissionsFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([403, 500])('makes the permissions %s banner policy explicit', async (status) => {
+    const { model, permissionsFetch, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValue(
+          json({ items: [{ ...source, projectId: 'project', status: 'paused' }], next: null }),
+        ),
+      'acme',
+    );
+    permissionsFetch.mockResolvedValueOnce(json({ error: { code: 'forbidden' } }, status));
+    await model.load();
+    expect(html()).toContain('An organization admin must enable this source.');
+    if (status === 403) {
+      expect(model.snapshot().error).toBeNull();
+      expect(html()).not.toContain('The request could not be saved or loaded.');
+    } else {
+      expect(model.snapshot().error).toBe(
+        'The request could not be saved or loaded. Refresh and try again.',
+      );
+    }
+  });
+
+  it('announces next steps after creating a source', async () => {
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+        .mockResolvedValueOnce(
+          json({ items: [{ ...source, type: 'hosted', status: 'paused' }], next: null }),
+        ),
+    );
+    model.openEditor();
+    await model.saveSource({ name: source.name, type: 'hosted', ecosystem: 'npm' });
+    expect(model.snapshot().notice).toBe(`Next steps for ${source.name}`);
+    expect(html()).toContain(
+      `<p role="status" aria-live="polite">Next steps for ${source.name}</p>`,
+    );
+  });
+
+  it('clears only this source conflict before an Enable retry finishes', async () => {
+    let finish!: (response: Response) => void;
+    const { model } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ error: { code: 'conflict' } }, 409))
+        .mockResolvedValueOnce(json({ error: { code: 'conflict' } }, 409))
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              finish = resolve;
+            }),
+        ),
+    );
+    const paused = { ...source, status: 'paused' as const };
+    await model.togglePause(paused);
+    await model.togglePause({ ...paused, id: 'second' });
+    const pending = model.togglePause(paused);
+    expect(model.snapshot().enableConflicts).toEqual(['second']);
+    finish(json({ error: { code: 'internal' } }, 500));
+    await pending;
+    expect(model.snapshot().enableConflicts).toEqual(['second']);
+  });
+
+  it.each(['conflict', 'forbidden'])('clears the %s announcement on full load', async (code) => {
+    const { model } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [], next: null }))
+        .mockResolvedValueOnce(json({ error: { code } }, code === 'conflict' ? 409 : 403))
+        .mockResolvedValueOnce(json({ items: [], next: null })),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause({ ...source, projectId: 'project', status: 'paused' });
+    expect(model.snapshot().notice).toBeTruthy();
+    await model.load();
+    expect(model.snapshot().notice).toBeNull();
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(model.snapshot().enableConflicts).toEqual([]);
+  });
+
+  it('caps polling through the model after fifteen timer refreshes', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(json({ requested: true }, 202))
+        .mockImplementation(() => Promise.resolve(json({ items: [source], next: null })));
+      const { model } = setup(fetch);
+      await model.syncNow(source);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fetch).toHaveBeenCalledTimes(17);
+      expect(vi.getTimerCount()).toBe(0);
+      model.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    'disposes model polling with an in-flight refresh: %s',
+    async (inFlight) => {
+      vi.useFakeTimers();
+      try {
+        let finish!: (response: Response) => void;
+        const fetch = vi
+          .fn()
+          .mockResolvedValueOnce(json({ requested: true }, 202))
+          .mockResolvedValueOnce(json({ items: [source], next: null }))
+          .mockImplementationOnce(
+            () =>
+              new Promise<Response>((resolve) => {
+                finish = resolve;
+              }),
+          );
+        const { model } = setup(fetch);
+        await model.syncNow(source);
+        if (inFlight) await vi.advanceTimersByTimeAsync(2_000);
+        const before = model.snapshot();
+        model.dispose();
+        if (inFlight) finish(json({ items: [{ ...source, lastPolledAt: NOW }], next: null }));
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(fetch).toHaveBeenCalledTimes(inFlight ? 3 : 2);
+        expect(model.snapshot()).toBe(before);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
+it('does not start polling when the sync response arrives after model disposal', async () => {
+  vi.useFakeTimers();
+  try {
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockImplementation(() => Promise.resolve(json({ items: [source], next: null })));
+    const { model } = setup(fetch);
+    const pending = model.syncNow(source);
+    model.dispose();
+    finish(json({ requested: true }, 202));
+    await pending;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });

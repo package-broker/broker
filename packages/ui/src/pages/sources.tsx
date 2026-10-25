@@ -1,3 +1,6 @@
+import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
+import { pollSync, syncStatusChanged } from './sources/sync-poll.js';
+import type { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { responseHeader, type ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
@@ -169,6 +172,10 @@ export function createSourcesModel(
     state = { ...state, ...patch };
     for (const listener of listeners) listener();
   };
+  let permissionsRequest:
+    ReturnType<typeof client.request<'get', '/_pb/me/permissions'>> | undefined;
+  let stopSyncPolling = () => {};
+  let syncGeneration = 0;
   let listVersion = 0;
   let availableVersion = 0;
   let namesVersion = 0;
@@ -208,12 +215,15 @@ export function createSourcesModel(
       order: [],
       enableDenied: [],
       enableConflicts: [],
-      canEnableProjectSource: false,
+      notice: null,
     });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
     const [permissions, result] = await Promise.all([
       project !== null || state.ownership !== 'organization'
-        ? client.request('get', '/_pb/me/permissions')
+        ? (permissionsRequest ??= client.request('get', '/_pb/me/permissions').then((result) => {
+            if (!result.ok) permissionsRequest = undefined;
+            return result;
+          }))
         : null,
       project === null
         ? client.request('get', '/_pb/sources', {
@@ -228,6 +238,14 @@ export function createSourcesModel(
           }),
     ]);
     if (version !== listVersion) return;
+    const listNeedsReauth = !result.ok && result.code === 'reauth_required';
+    if (
+      permissions &&
+      !permissions.ok &&
+      !listNeedsReauth &&
+      (permissions.status !== 403 || permissions.code === 'reauth_required')
+    )
+      failure(permissions);
     if (failure(result) || !result.ok) {
       set({ loading: false, listError: true });
       return;
@@ -301,7 +319,7 @@ export function createSourcesModel(
 
   async function revealCreated(source: string, body?: CreateSource) {
     const created = await findLoadedSource(source);
-    if (created) set({ createdSource: source });
+    if (created) set({ createdSource: source, notice: `Next steps for ${created.name}` });
     if (created && !isProxy(created) && created.type !== 'hosted') {
       set({
         credentialSource: source,
@@ -339,12 +357,16 @@ export function createSourcesModel(
     });
   }
 
-  async function mutate(request: () => Promise<ApiResult<unknown>>, after: () => Promise<void>) {
+  async function mutate(
+    request: () => Promise<ApiResult<unknown>>,
+    after: () => Promise<void>,
+    handled: (result: ApiResult<unknown>) => boolean = () => false,
+  ) {
     if (state.busy) return;
     set({ busy: true, error: null, notice: null });
     try {
       const result = await request();
-      if (!failure(result)) await after();
+      if (!handled(result) && !failure(result)) await after();
     } finally {
       set({ busy: false });
     }
@@ -352,6 +374,10 @@ export function createSourcesModel(
 
   return {
     project,
+    dispose() {
+      ++syncGeneration;
+      stopSyncPolling();
+    },
     snapshot: () => state,
     enableNeedsAdmin(source: Source) {
       return (
@@ -477,9 +503,9 @@ export function createSourcesModel(
           result.code === 'forbidden' &&
           state.items.some((source) => source.id === enableChange[1] && source.projectId !== null)
         ) {
-          set({ enableDenied: [enableChange[1]!] });
+          set({ enableDenied: [enableChange[1]!], notice: ENABLE_ADMIN_MESSAGE });
         } else if (result.status === 409 && result.code === 'conflict') {
-          set({ enableConflicts: [enableChange[1]!] });
+          set({ enableConflicts: [enableChange[1]!], notice: ENABLE_CONFLICT_MESSAGE });
         } else {
           set({ error: 'The request could not be saved or loaded. Refresh and try again.' });
         }
@@ -568,6 +594,7 @@ export function createSourcesModel(
         if (!failure(result, true)) {
           set({
             savedCredential: { source, at: now() },
+            notice: 'Credential set.',
             items: state.items.map((item) =>
               item.id === source ? { ...item, hasCredential: true } : item,
             ),
@@ -595,8 +622,14 @@ export function createSourcesModel(
       );
     },
     syncNow(source: Source) {
-      if (source.status === 'paused' || (project !== null && source.projectId === null))
+      if (
+        state.busy ||
+        source.status === 'paused' ||
+        (project !== null && source.projectId === null)
+      )
         return Promise.resolve();
+      stopSyncPolling();
+      const generation = ++syncGeneration;
       return mutate(
         () =>
           project === null
@@ -607,9 +640,51 @@ export function createSourcesModel(
                 params: { project, source: source.id },
               }),
         async () => {
-          await load();
-          await findLoadedSource(source.id);
+          if (generation !== syncGeneration) return;
+          const refresh = async () => {
+            const version = listVersion;
+            const ownership = state.ownership;
+            let after: string | null = null;
+            do {
+              const query: { limit: string; after?: string } = {
+                limit: '100',
+                ...(after === null ? {} : { after }),
+              };
+              const result =
+                project === null
+                  ? await client.request('get', '/_pb/sources', {
+                      query: { ...query, ...(ownership === 'organization' ? {} : { ownership }) },
+                    })
+                  : await client.request('get', '/_pb/projects/{project}/sources', {
+                      params: { project },
+                      query,
+                    });
+              if (generation !== syncGeneration || version !== listVersion || !result.ok)
+                return true;
+              const current = result.data.items.find((item) => item.id === source.id);
+              if (current) {
+                set({
+                  items: state.items.map((item) =>
+                    item.id === source.id ? { ...current, url: displayUrl(current.url) } : item,
+                  ),
+                });
+                return syncStatusChanged(source, current);
+              }
+              after = result.data.next;
+            } while (after !== null);
+            return true;
+          };
+          let complete: boolean;
+          if (state.loading && state.items.length === 0) {
+            await load();
+            const current = await findLoadedSource(source.id);
+            complete = state.listError || !current || syncStatusChanged(source, current);
+          } else {
+            complete = await refresh();
+          }
+          if (generation !== syncGeneration) return;
           set({ notice: 'Sync requested.' });
+          if (!complete && generation === syncGeneration) stopSyncPolling = pollSync(refresh);
         },
       );
     },
@@ -622,31 +697,36 @@ export function createSourcesModel(
             (!state.canEnableProjectSource || state.enableDenied.includes(source.id)))
         )
           return;
-        set({
-          busy: true,
-          error: null,
-          notice: null,
-          enableConflicts: state.enableConflicts.filter((id) => id !== source.id),
-        });
-        try {
-          const result = await client.request('post', '/_pb/sources/{source}/enable', {
-            params: { source: source.id },
-          });
-          if (
-            source.projectId !== null &&
-            !result.ok &&
-            result.status === 403 &&
-            result.code === 'forbidden'
-          ) {
-            set({ enableDenied: [...new Set([...state.enableDenied, source.id])] });
-          } else if (!result.ok && result.status === 409 && result.code === 'conflict') {
-            set({ enableConflicts: [...new Set([...state.enableConflicts, source.id])] });
-          } else if (!failure(result)) {
-            await load();
-          }
-        } finally {
-          set({ busy: false });
-        }
+        set({ enableConflicts: state.enableConflicts.filter((id) => id !== source.id) });
+        await mutate(
+          () =>
+            client.request('post', '/_pb/sources/{source}/enable', {
+              params: { source: source.id },
+            }),
+          () => load(),
+          (result) => {
+            if (
+              source.projectId !== null &&
+              !result.ok &&
+              result.status === 403 &&
+              result.code === 'forbidden'
+            ) {
+              set({
+                enableDenied: [...new Set([...state.enableDenied, source.id])],
+                notice: ENABLE_ADMIN_MESSAGE,
+              });
+              return true;
+            }
+            if (!result.ok && result.status === 409 && result.code === 'conflict') {
+              set({
+                enableConflicts: [...new Set([...state.enableConflicts, source.id])],
+                notice: ENABLE_CONFLICT_MESSAGE,
+              });
+              return true;
+            }
+            return false;
+          },
+        );
         return;
       }
       const action = source.status === 'paused' ? 'resume' : 'pause';
@@ -797,7 +877,7 @@ function formValue(form: HTMLFormElement, name: string): string {
   return new FormData(form).get(name)?.toString() ?? '';
 }
 
-const SYNC_ERROR_LABELS: Record<string, string> = {
+export const SYNC_ERROR_LABELS: Record<(typeof SOURCE_ERROR_CODES)[number], string> = {
   network: 'Network failure',
   timeout: 'Sync timed out',
   http_error: 'HTTP error',
@@ -815,15 +895,15 @@ const SYNC_ERROR_LABELS: Record<string, string> = {
 function SyncStatus({ source }: { source: Source }) {
   const errorLabel =
     source.lastError !== null && Object.hasOwn(SYNC_ERROR_LABELS, source.lastError)
-      ? SYNC_ERROR_LABELS[source.lastError]
+      ? SYNC_ERROR_LABELS[source.lastError as keyof typeof SYNC_ERROR_LABELS]
       : null;
   return (
     <div className="grid gap-1 text-sm">
       <p>
-        Last success: <Time value={source.lastSuccessAt} fallback="Never" />
+        Last listing: <Time value={source.lastSuccessAt} fallback="Never" />
       </p>
       <p>
-        Last error:{' '}
+        Last listing error:{' '}
         {source.lastError === null ? (
           'None'
         ) : (
@@ -833,6 +913,7 @@ function SyncStatus({ source }: { source: Source }) {
           </>
         )}
       </p>
+      {isProxy(source) ? <p>{PROXY_DEMAND_MESSAGE}</p> : null}
       <p>
         Next poll: <Time value={source.nextPollAt} fallback="None" />
       </p>
@@ -899,10 +980,10 @@ export function SourceActions({
                   />
                 )
               ) : (
-                <p role="status">{ENABLE_ADMIN_MESSAGE}</p>
+                <p>{ENABLE_ADMIN_MESSAGE}</p>
               )}
               {model.snapshot().enableConflicts.includes(source.id) ? (
-                <p role="status">{ENABLE_CONFLICT_MESSAGE}</p>
+                <p>{ENABLE_CONFLICT_MESSAGE}</p>
               ) : null}
 
               {owned ? (
@@ -1026,9 +1107,11 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           })
         }
       />
-      {state.notice ? <p role="status">{state.notice}</p> : null}
+      <p role="status" aria-live="polite">
+        {state.notice}
+      </p>
       {created?.status === 'paused' && !isProxy(created) ? (
-        <p role="status">
+        <p>
           Next steps for {created.name}:{' '}
           {model.enableNeedsAdmin(created)
             ? ENABLE_ADMIN_MESSAGE
@@ -1281,7 +1364,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               />
               {state.error ? <p role="alert">{state.error}</p> : null}
               {state.savedCredential?.source === state.credentialSource ? (
-                <p role="status">
+                <p>
                   credential set · <Time value={state.savedCredential.at} />
                 </p>
               ) : null}
@@ -1290,7 +1373,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         </Dialog>
       ) : null}
       {state.savedCredential && state.credentialSource === null ? (
-        <p role="status">
+        <p>
           credential set · {state.savedCredential.source} ·{' '}
           <Time value={state.savedCredential.at} />
         </p>
@@ -1449,6 +1532,7 @@ export function SourcesPage() {
   useEffect(() => {
     void model.load();
     void model.loadAvailable();
+    return () => model.dispose();
   }, [model]);
   useEffect(
     () =>

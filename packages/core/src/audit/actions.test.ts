@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatToken } from '../secrets/token-format.js';
+import { redactValue } from './redact.js';
 import { FAKE, githubWithSentinel } from '../test-support/credential-fixtures.js';
 import {
   AUDIT_ACTIONS,
@@ -102,6 +103,100 @@ describe('token rotation audit registration', () => {
     const result = build('token.revoke');
     expect(result.ok).toBe(true);
     expect(JSON.parse(payloadOf(result))).not.toHaveProperty('changes');
+  });
+});
+
+describe('identity audit fields', () => {
+  const IDENTITY_ACTIONS = ['identity.unlink', 'identity.block', 'identity.unblock'] as const;
+  const userTarget = { target: { type: 'user', id: '01J0USER000000000000000009' } };
+
+  it.each(IDENTITY_ACTIONS)('%s allows only the provider field', (action) => {
+    expect(AUDIT_FIELDS[action]).toEqual(['provider']);
+  });
+
+  it.each(IDENTITY_ACTIONS)('%s records the provider id', (action) => {
+    const result = build(action, { provider: { new: 'oidc' } }, userTarget);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result)).changes).toEqual({ provider: { new: 'oidc' } });
+  });
+
+  it.each(
+    IDENTITY_ACTIONS.flatMap((action) =>
+      ['issuer', 'subject', 'email', 'display_name'].map((field) => [action, field] as const),
+    ),
+  )('%s refuses an extra %s field', (action, field) => {
+    const result = build(
+      action,
+      { provider: { new: 'oidc' }, [field]: { new: SENTINEL } },
+      userTarget,
+    );
+    expect(result).toEqual({ ok: false, reason: 'unknown_field' });
+    expect(JSON.stringify(result)).not.toContain(SENTINEL);
+  });
+
+  const RANDOM_PROVIDERS = ['k8s3jd9fh2kd8sj3hd8sk2jd9fk3ls8d', '01j0user000000000000000009'];
+
+  it.each(
+    IDENTITY_ACTIONS.flatMap((action) => RANDOM_PROVIDERS.map((id) => [action, id] as const)),
+  )('%s records the random-looking provider id %s', (action, provider) => {
+    const result = build(action, { provider: { new: provider } }, userTarget);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result)).changes).toEqual({ provider: { new: provider } });
+  });
+
+  it.each(
+    IDENTITY_ACTIONS.flatMap((action) =>
+      ['glpat-abcdefghijklmnop1234', 'xoxb-1234-abcdefgh'].map((id) => [action, id] as const),
+    ),
+  )('%s records the token-prefix-shaped provider id %s', (action, provider) => {
+    const result = build(action, { provider: { new: provider } }, userTarget);
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(payloadOf(result)).changes).toEqual({ provider: { new: provider } });
+  });
+
+  it.each(
+    IDENTITY_ACTIONS.flatMap((action) =>
+      [
+        'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+        'Okta',
+        '-oidc',
+        'oidc-',
+        'a'.repeat(65),
+        'user@example.test',
+        'https://idp.example.test',
+        '',
+      ].map((id) => [action, id] as const),
+    ),
+  )('%s refuses the provider %j outside the provider-id grammar', (action, provider) => {
+    expect(build(action, { provider: { new: provider } }, userTarget)).toEqual({
+      ok: false,
+      reason: 'bad_value',
+    });
+  });
+
+  it('keeps the credential heuristic for the same value under another field', () => {
+    expect(build('role.rename', { name: { new: RANDOM_PROVIDERS[0] } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+  });
+
+  it('keeps the credential heuristic for a provider field outside the identity actions', () => {
+    expect(redactValue(RANDOM_PROVIDERS[0]!, 200, 'provider')).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+    expect(redactValue('glpat-abcdefghijklmnop1234', 200, 'provider')).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+  });
+
+  it('refuses a provider field on an action outside the identity actions', () => {
+    expect(build('user.suspend', { provider: { new: 'oidc' } }, userTarget)).toEqual({
+      ok: false,
+      reason: 'unknown_field',
+    });
   });
 });
 

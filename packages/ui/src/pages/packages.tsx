@@ -1,3 +1,4 @@
+import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { operations } from '../api-types.js';
 import { safePageHash, useServices, type ShellServices, type ReplayResult } from '../auth.js';
@@ -604,7 +605,7 @@ export function PackagesView(props: {
           >
             {filtered
               ? 'Change or clear the filters to see more packages.'
-              : 'Attach a source and run a sync; packages appear here as the broker resolves them.'}
+              : `Attach a source to resolve packages. ${PROXY_DEMAND_MESSAGE}`}
           </ListState>
         )
       ) : (

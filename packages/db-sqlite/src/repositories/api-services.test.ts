@@ -1,4 +1,3 @@
-import { clientIpOf } from '@package-broker/core/auth/session';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@package-broker/core/api/module';
 import * as importCredentials from '@package-broker/core/import/credentials';
@@ -60,10 +59,11 @@ describe('shared API assembly', () => {
     },
   );
 
-  it('uses the explicitly supplied Worker IP resolver', () => {
+  it('uses the explicitly supplied client IP resolver', () => {
     const assemble = vi.spyOn(api, 'createApiModule');
-    createApiRoutes({ ...options, clientIp: clientIpOf });
-    expect(assemble.mock.calls[0]![0].organization.clientIp).toBe(clientIpOf);
+    const explicitClientIp = (): string | null => '203.0.113.11';
+    createApiRoutes({ ...options, clientIp: explicitClientIp });
+    expect(assemble.mock.calls[0]![0].organization.clientIp).toBe(explicitClientIp);
     expect(
       assemble.mock.calls[0]![0].organization.clientIp(
         new Request('https://broker.test', {

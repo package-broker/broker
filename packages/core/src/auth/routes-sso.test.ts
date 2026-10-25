@@ -211,7 +211,7 @@ async function build(options: Options = {}) {
   );
   const findActiveById = vi.fn(repository.findActiveById);
   const deps: SsoRouteDeps = {
-    ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
+    clientIp: options.clientIp ?? (() => null),
     reauthSessions: { findActiveById },
     providers,
     sessions,
@@ -2095,7 +2095,7 @@ describe('auth call metadata', () => {
   it.each(['login', 'reauth', 'logout'] as const)(
     'passes request metadata to SSO %s',
     async (action) => {
-      const app = await build();
+      const app = await build({ clientIp: () => '203.0.113.7' });
       const logout = vi.spyOn(app.deps.sessions, 'logout');
       const { cookie, csrf } = await app.seed();
       let request: Request;

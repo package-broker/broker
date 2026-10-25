@@ -172,6 +172,7 @@ async function harness(mode: FailureMode, extra: readonly RouteDefinition[] = []
     clock,
     ids: { ulid: () => '01JA0000000000000000000000' },
     publicOrigin: ORIGIN,
+    clientIp: () => null,
     providers: new Map([[provider.id, provider]]),
     hooks: registration.hooks,
     log: (entry) => logs.push(entry),

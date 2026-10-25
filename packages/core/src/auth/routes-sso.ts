@@ -57,7 +57,7 @@ export interface SsoRouteDeps {
   readonly stateCipher: SecretCipher;
   readonly clock: Clock;
   readonly publicOrigin: string;
-  readonly clientIp?: (request: Request) => string | null;
+  readonly clientIp: (request: Request) => string | null;
   readonly localLoginAvailable: boolean;
   readonly log: KernelLog;
 }

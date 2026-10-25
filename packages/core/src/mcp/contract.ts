@@ -567,6 +567,34 @@ export function runMcpContract(factory: McpContractFactory, harness: McpTestHarn
             await bare.close();
           }
         });
+
+        it('refuses calls above the in-process bucket with 429 and a retry hint', async () => {
+          const bare = await factory.create({});
+          try {
+            const call = () =>
+              bare.mcp(
+                new Request(`${bare.origin}/_pb/mcp`, {
+                  method: 'POST',
+                  headers: {
+                    'content-type': 'application/json',
+                    authorization: `Bearer ${bare.tokens.read}`,
+                  },
+                  body: rpc('ping'),
+                }),
+              );
+            const statuses: number[] = [];
+            for (let index = 0; index < 60; index += 1) {
+              statuses.push((await call()).status);
+            }
+            expect(statuses.every((status) => status === 200)).toBe(true);
+            const refused = await call();
+            expect(refused.status).toBe(429);
+            expect(refused.headers.get('retry-after')).toBe('60');
+            expect(limitKeys).toHaveLength(0);
+          } finally {
+            await bare.close();
+          }
+        });
       }
     });
   });

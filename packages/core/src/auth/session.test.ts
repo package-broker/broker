@@ -336,12 +336,49 @@ describe('authenticate', () => {
   it('can authenticate for CSRF validation without touching an old live session', async () => {
     const session = activeSession({ lastSeenAt: isoAgo(SESSION_TOUCH_MS + 1) });
     const h = harness(session);
-    const result = await h.service.authenticate(ctx, requestWith(sessionCookie(randomToken(32))), {
-      touch: false,
-    });
+    const result = await h.service.authenticateWithoutTouch(
+      ctx,
+      requestWith(sessionCookie(randomToken(32))),
+    );
     expect(result).toEqual(authenticated(session));
     expect(h.findActive).toHaveBeenCalledTimes(1);
     expect(h.touch).not.toHaveBeenCalled();
+  });
+});
+
+describe('authenticate and authenticateWithoutTouch', () => {
+  it('authenticate touches an old live session', async () => {
+    const session = activeSession({ lastSeenAt: isoAgo(SESSION_TOUCH_MS + 1) });
+    const h = harness(session);
+    const result = await h.service.authenticate(ctx, requestWith(sessionCookie(randomToken(32))));
+    expect(result).toEqual(authenticated(session));
+    expect(h.touch).toHaveBeenCalledExactlyOnceWith(ctx, session.id, NOW, isoAgo(SESSION_TOUCH_MS));
+  });
+
+  it('authenticateWithoutTouch ignores an extra touch argument and never touches', async () => {
+    const session = activeSession({ lastSeenAt: isoAgo(SESSION_TOUCH_MS + 1) });
+    const h = harness(session);
+    const call = h.service.authenticateWithoutTouch as (...args: unknown[]) => Promise<unknown>;
+    const result = await call(ctx, requestWith(sessionCookie(randomToken(32))), { touch: true });
+    expect(result).toEqual(authenticated(session));
+    expect(h.touch).not.toHaveBeenCalled();
+  });
+
+  it('authenticateWithoutTouch applies the same idle cutoff and cookie checks', async () => {
+    const secret = randomToken(32);
+    const h = harness(null);
+    expect(
+      await h.service.authenticateWithoutTouch(ctx, requestWith(sessionCookie(secret))),
+    ).toBeNull();
+    expect(h.findActive).toHaveBeenCalledExactlyOnceWith(ctx, await sha256Hex(secret), {
+      now: NOW,
+      idleSince: isoAgo(SESSION_IDLE_MS),
+    });
+    const malformed = harness();
+    expect(
+      await malformed.service.authenticateWithoutTouch(ctx, requestWith(sessionCookie('short'))),
+    ).toBeNull();
+    expect(malformed.repositoryCalls()).toBe(0);
   });
 });
 

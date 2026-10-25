@@ -334,7 +334,7 @@ it.each(['source absent', 'source null', 'source empty', 'source equal', 'source
         await writeFile(join(context.cwd, 'composer.lock'), packages(changed));
       return base(args, context);
     };
-    const informational = kind === 'source equal' || kind === 'source empty';
+    const informational = kind === 'source equal';
     const result = await runCutoverCheck(options);
     expect(result).toMatchObject({
       exitCode: informational ? 0 : 1,
@@ -639,4 +639,201 @@ it('does not report a package missing when a failed dist download falls back to 
     exitCode: 0,
     historic: [{ index: 1, ok: true, missingPackages: [] }],
   });
+});
+
+it.each(['../local/library', '/artifacts/library.zip', null])(
+  'accepts path/artifact and null dist URLs (%s)',
+  async (url) => {
+    await writeFile(
+      join(projectDir, 'composer.lock'),
+      JSON.stringify({
+        packages: [
+          {
+            ...pkg(),
+            dist: { type: url?.startsWith('../') ? 'path' : 'zip', reference: 'dist-ref', url },
+          },
+        ],
+      }),
+    );
+    expect(await runCutoverCheck(options)).toMatchObject({ exitCode: 0, code: 'passed' });
+  },
+);
+
+it('reports a historic update failure without scanning the unchanged old-host lock', async () => {
+  const path = join(projectDir, 'historic.lock');
+  const historic = pkg('acme/historic');
+  historic.dist.url = `${OLD}archive.zip`;
+  await writeFile(path, lock([historic]));
+  const base = composer;
+  composer = async (args, context) => {
+    const result = await base(args, context);
+    if ((await readFile(join(context.cwd, 'composer.lock'), 'utf8')).includes('acme/historic')) {
+      expect(args[0]).toBe('update');
+      return {
+        exitCode: 2,
+        stdout: SENTINEL,
+        stderr: 'acme/historic does not match the constraint',
+      };
+    }
+    return result;
+  };
+  expect(await runCutoverCheck({ ...options, historicLocks: [path] })).toMatchObject({
+    exitCode: 1,
+    code: 'historic_failed',
+    oldHostPackages: [],
+    historic: [{ ok: false, missingPackages: ['acme/historic'] }],
+  });
+});
+
+it('reports old-host downloads and resolution differences before a broker install can fail', async () => {
+  const base = composer;
+  composer = async (args, context) => {
+    const result = await base(args, context);
+    if (context.env.COMPOSER_AUTH === newAuth) {
+      if (args[0] === 'update') {
+        const changed = pkg('acme/library', '2.0.0');
+        changed.dist.url = `${OLD}archive.zip`;
+        await writeFile(join(context.cwd, 'composer.lock'), lock([changed]));
+      }
+      if (args[0] === 'install') return { exitCode: 7, stdout: '', stderr: SENTINEL };
+    }
+    return result;
+  };
+  expect(await runCutoverCheck(options)).toMatchObject({
+    exitCode: 1,
+    code: 'old_dist_host',
+    oldHostPackages: ['acme/library'],
+    differences: ['acme/library'],
+  });
+});
+
+it('distinguishes a source reference from an equal dist fallback reference', async () => {
+  const original = pkg();
+  original.dist.reference = original.source.reference;
+  await writeFile(join(projectDir, 'composer.lock'), lock([original]));
+  const base = composer;
+  composer = async (args, context) => {
+    if (args[0] === 'update' && context.env.COMPOSER_AUTH === newAuth)
+      await writeFile(
+        join(context.cwd, 'composer.lock'),
+        JSON.stringify({ packages: [{ ...original, source: null }] }),
+      );
+    return base(args, context);
+  };
+  expect(await runCutoverCheck(options)).toMatchObject({
+    exitCode: 1,
+    code: 'resolution_difference',
+    differences: ['acme/library'],
+  });
+});
+
+it.each([
+  'acme/missing does not match the constraint',
+  'Package acme/missing. could not be found',
+  'HTTP 404 https://broker.example.test/acme/missing/archive.zip',
+])('recognizes missing packages in constraints, punctuation and URLs: %s', async (stderr) => {
+  const path = join(projectDir, 'historic.lock');
+  await writeFile(path, lock([pkg('acme/missing')]));
+  const base = composer;
+  composer = async (args, context) => {
+    const result = await base(args, context);
+    if (
+      args[0] === 'update' &&
+      (await readFile(join(context.cwd, 'composer.lock'), 'utf8')).includes('acme/missing')
+    )
+      return { exitCode: 2, stdout: SENTINEL, stderr };
+    return result;
+  };
+  expect(await runCutoverCheck({ ...options, historicLocks: [path] })).toMatchObject({
+    code: 'historic_failed',
+    historic: [{ missingPackages: ['acme/missing'] }],
+  });
+});
+
+it('excludes successful source fallbacks when another historic package fails', async () => {
+  const path = join(projectDir, 'historic.lock');
+  await writeFile(
+    path,
+    lock([pkg('acme/fallback'), pkg('acme/missing'), pkg('acme/missing-extra')]),
+  );
+  const base = composer;
+  composer = async (args, context) => {
+    const result = await base(args, context);
+    if (
+      args[0] === 'install' &&
+      (await readFile(join(context.cwd, 'composer.lock'), 'utf8')).includes('acme/fallback')
+    )
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: `Failed to download acme/fallback from dist: HTTP 404
+Now trying to download from source
+  - Installing acme/fallback (1.0.0): Cloning source-ref
+Failed to download acme/missing from dist: HTTP 404`,
+      };
+    return result;
+  };
+  expect(await runCutoverCheck({ ...options, historicLocks: [path] })).toMatchObject({
+    code: 'historic_failed',
+    historic: [{ missingPackages: ['acme/missing'] }],
+  });
+});
+
+it.each(['old-org', 'new-org', 'old-org-extra'])(
+  'scopes same-host cutover downloads to the old organization (%s)',
+  async (organization) => {
+    const oldRepository = 'https://repo.packagist.com/old-org/';
+    const newRepository = 'https://repo.packagist.com/new-org/';
+    await writeFile(join(projectDir, 'composer.json'), manifest.replaceAll(OLD, oldRepository));
+    const base = composer;
+    composer = async (args, context) => {
+      if (args[0] === 'update' && context.env.COMPOSER_AUTH === newAuth) {
+        const changed = pkg();
+        changed.dist.url = `https://REPO.packagist.com:8443/${organization}/dists/acme/library.zip`;
+        await writeFile(join(context.cwd, 'composer.lock'), lock([changed]));
+      }
+      return base(args, context);
+    };
+    expect(await runCutoverCheck({ ...options, oldRepository, newRepository })).toMatchObject({
+      exitCode: organization === 'old-org' ? 1 : 0,
+      oldHostPackages: organization === 'old-org' ? ['acme/library'] : [],
+    });
+  },
+);
+
+it('preserves a UTF-8 BOM and surrounding manifest bytes in both copies', async () => {
+  const input = '\uFEFF' + manifest;
+  await writeFile(join(projectDir, 'composer.json'), input);
+  const before = await projectHash();
+  const base = composer;
+  composer = async (args, context) => {
+    expect(await readFile(join(context.cwd, 'composer.json'), 'utf8')).toBe(
+      context.env.COMPOSER_AUTH === newAuth ? input.replace(`"${OLD}"`, `"${NEW}"`) : input,
+    );
+    return base(args, context);
+  };
+  expect(await runCutoverCheck(options)).toMatchObject({ code: 'passed', exitCode: 0 });
+  expect(await projectHash()).toBe(before);
+});
+
+it.each([17, 'ENOENT'])('retains safe diagnostics from thrown runner errors (%s)', async (code) => {
+  const base = composer;
+  composer = async (args, context) => {
+    const result = await base(args, context);
+    if (args[0] === 'update') throw Object.assign(new Error(SENTINEL), { code });
+    return result;
+  };
+  const result = await runCutoverCheck(options);
+  expect(result).toMatchObject({
+    exitCode: 1,
+    code: 'update_failed',
+    diagnostics: [
+      {
+        step: 'update',
+        exitCode: typeof code === 'number' ? code : null,
+        ...(typeof code === 'string' ? { errorCode: code } : {}),
+      },
+    ],
+  });
+  expect(JSON.stringify(result)).not.toContain(SENTINEL);
 });

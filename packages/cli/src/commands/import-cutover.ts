@@ -7,6 +7,10 @@ export async function runImportCutover(
   if (options.json) console.log(JSON.stringify(result));
   else {
     console.log(result.message);
+    for (const diagnostic of result.diagnostics)
+      console.log(
+        `Composer ${diagnostic.step}: exit=${diagnostic.exitCode ?? 'none'}${diagnostic.errorCode ? ` error=${diagnostic.errorCode}` : ''}${diagnostic.signal ? ` signal=${diagnostic.signal}` : ''}`,
+      );
     console.log(`Packages: old=${result.counts.old} new=${result.counts.new}`);
     for (const name of result.differences) console.log(`Resolution differs: ${name}`);
     for (const name of result.distOnly)

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -261,3 +262,106 @@ it.each([false, true])(
     execFileMock.mockReset();
   },
 );
+
+it.each(['update', 'install'])(
+  'bounds Composer output/time and maps a %s timeout without leaking child text',
+  async (step) => {
+    execFileMock.mockImplementation((_: string, args: string[], context, callback) => {
+      directories.add(context.cwd);
+      expect(context.maxBuffer).toBe(64 * 1024 * 1024);
+      expect(context.timeout).toBe(300_000);
+      callback(
+        args[0] === step
+          ? Object.assign(new Error(SENTINEL), { killed: true, signal: 'SIGTERM', code: null })
+          : null,
+        args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL,
+        SENTINEL,
+      );
+    });
+    const { composer: _, ...input } = options;
+    expect(_).toBeDefined();
+    expect(await runImportCutover({ ...input, json: true })).toBe(1);
+    expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
+      code: `${step}_failed`,
+      diagnostics: [{ step, exitCode: null, errorCode: 'ETIMEDOUT', signal: 'SIGTERM' }],
+    });
+    execFileMock.mockReset();
+  },
+);
+
+it.each([17, 'ENOENT', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'unsafe-secret-code'])(
+  'retains only safe process diagnostics (%s)',
+  async (code) => {
+    execFileMock.mockImplementation((_: string, args: string[], context, callback) => {
+      directories.add(context.cwd);
+      callback(
+        args[0] === 'install' ? Object.assign(new Error(SENTINEL), { code }) : null,
+        args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL,
+        SENTINEL,
+      );
+    });
+    const { composer: _, ...input } = options;
+    expect(_).toBeDefined();
+    expect(await runImportCutover({ ...input, json: true })).toBe(1);
+    const result = JSON.parse(String(output.mock.calls[0]?.[0]));
+    expect(result).toMatchObject({
+      code: 'install_failed',
+      diagnostics: [{ step: 'install', exitCode: typeof code === 'number' ? code : null }],
+    });
+    if (code === 'ENOENT' || code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+      expect(result.diagnostics[0].errorCode).toBe(code);
+    expect(JSON.stringify(result)).not.toContain('unsafe-secret-code');
+    execFileMock.mockReset();
+  },
+);
+
+it.each(['SIGINT', 'SIGTERM'] as const)(
+  'terminates the active Composer child before deleting copies on %s',
+  async (signal) => {
+    let callback!: (error: unknown, stdout: string, stderr: string) => void;
+    let context!: { cwd: string };
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const child = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) });
+    const listeners = process.listeners(signal);
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    execFileMock.mockImplementation((_: string, __: string[], input, done) => {
+      context = input;
+      callback = done;
+      directories.add(context.cwd);
+      enter();
+      return child;
+    });
+    const { composer: _, ...input } = options;
+    expect(_).toBeDefined();
+    const check = runImportCutover(input);
+    try {
+      await entered;
+      const handler = process.listeners(signal).find((fn) => !listeners.includes(fn))!;
+      handler(signal);
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      await stat(context.cwd);
+      expect(kill).not.toHaveBeenCalled();
+      callback(Object.assign(new Error(SENTINEL), { code: 'ABORT_ERR' }), '', '');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await stat(context.cwd);
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      callback(Object.assign(new Error(SENTINEL), { code: 'ABORT_ERR' }), '', '');
+      child.emit('close', null, 'SIGKILL');
+      await check;
+      execFileMock.mockReset();
+    }
+    expect(kill).toHaveBeenCalledWith(process.pid, signal);
+  },
+);
+
+it('prints a fixed missing-binary diagnostic alongside the Composer v2 requirement', async () => {
+  composer = async () => {
+    throw Object.assign(new Error(SENTINEL), { code: 'ENOENT' });
+  };
+  expect(await runImportCutover(options)).toBe(2);
+  expect(output).toHaveBeenCalledWith('Composer version: exit=none error=ENOENT');
+});

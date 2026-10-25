@@ -4,14 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export interface ComposerResult {
-  readonly exitCode: number;
+  readonly exitCode: number | null;
+  readonly errorCode?: string;
+  readonly signal?: string;
   readonly stdout: string;
   readonly stderr: string;
 }
 
 export type ComposerRunner = (
   args: readonly string[],
-  options: { readonly cwd: string; readonly env: NodeJS.ProcessEnv; readonly shell: false },
+  options: {
+    readonly cwd: string;
+    readonly env: NodeJS.ProcessEnv;
+    readonly shell: false;
+    readonly signal?: AbortSignal;
+  },
 ) => Promise<ComposerResult>;
 
 export interface CutoverOptions {
@@ -49,6 +56,12 @@ export interface CutoverResult {
   readonly differences: readonly string[];
   readonly distOnly: readonly string[];
   readonly oldHostPackages: readonly string[];
+  readonly diagnostics: readonly {
+    readonly step: 'version' | 'update' | 'install';
+    readonly exitCode: number | null;
+    readonly errorCode?: string;
+    readonly signal?: string;
+  }[];
   readonly historic: readonly {
     readonly index: number;
     readonly ok: boolean;
@@ -64,8 +77,38 @@ class CutoverError extends Error {
 
 const defaultComposer: ComposerRunner = (args, options) =>
   new Promise((resolve) => {
-    execFile('composer', [...args], options, (error, stdout, stderr) => {
-      resolve({ exitCode: error ? 1 : 0, stdout, stderr });
+    const { signal, ...executionOptions } = options;
+    let closed = false;
+    let abortedResult: ComposerResult | undefined;
+    const child = execFile(
+      'composer',
+      [...args],
+      { ...executionOptions, maxBuffer: 64 * 1024 * 1024, timeout: 300_000, killSignal: 'SIGKILL' },
+      (error, stdout, stderr) => {
+        const result: ComposerResult = {
+          exitCode: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+          ...(typeof error?.code === 'string' ? { errorCode: error.code } : {}),
+          ...(error?.killed && !signal?.aborted && error.code == null
+            ? { errorCode: 'ETIMEDOUT' }
+            : {}),
+          ...(error?.signal ? { signal: error.signal } : {}),
+          stdout,
+          stderr,
+        };
+        // Abort callbacks can precede child exit; cleanup must wait for close.
+        if (signal?.aborted && !closed) abortedResult = result;
+        else resolve(result);
+      },
+    );
+    const terminate = () => {
+      child?.kill('SIGKILL');
+    };
+    signal?.addEventListener('abort', terminate, { once: true });
+    if (signal?.aborted) terminate();
+    child?.once('close', () => {
+      signal?.removeEventListener('abort', terminate);
+      closed = true;
+      if (abortedResult) resolve(abortedResult);
     });
   });
 
@@ -88,7 +131,7 @@ function auth(name: string): string {
 
 // Walk validated JSON tokens to replace only the matching URL's original byte span.
 function rewriteRepository(text: string, oldUrl: string, newUrl: string): string {
-  const json: unknown = JSON.parse(text);
+  const json: unknown = JSON.parse(text.replace(/^\uFEFF/, ''));
   if (!object(json)) throw new CutoverError('input_unreadable');
   let cursor = 0;
   const matches: { start: number; end: number }[] = [];
@@ -169,16 +212,21 @@ function packages(text: string): LockedPackage[] {
         if (!object(value)) throw new Error();
         const ref = value.reference ?? null;
         if (ref !== null && typeof ref !== 'string') throw new Error();
-        return ref;
+        return ref || null;
       };
       if (pkg.dist !== undefined && pkg.dist !== null && !object(pkg.dist)) throw new Error();
-      const distUrl = object(pkg.dist) ? pkg.dist.url : undefined;
+      const distUrl = object(pkg.dist) ? (pkg.dist.url ?? undefined) : undefined;
       if (distUrl !== undefined && typeof distUrl !== 'string') throw new Error();
       const sourceReference = reference(pkg.source);
       const distReference = reference(pkg.dist);
       result.push({
         name: pkg.name,
-        tuple: JSON.stringify([pkg.name, pkg.version, sourceReference ?? distReference]),
+        tuple: JSON.stringify([
+          pkg.name,
+          pkg.version,
+          sourceReference,
+          sourceReference ?? distReference,
+        ]),
         sourceReference,
         distReference,
         distUrl,
@@ -189,26 +237,53 @@ function packages(text: string): LockedPackage[] {
 }
 
 const names = (values: readonly LockedPackage[]) => [...new Set(values.map((p) => p.name))].sort();
-function oldHostPackages(values: readonly LockedPackage[], host: string): string[] {
+function oldHostPackages(
+  values: readonly LockedPackage[],
+  repository: URL,
+  sameHost: boolean,
+): string[] {
   return names(
     values.filter((pkg) => {
       if (pkg.distUrl === undefined) return false;
-      return new URL(pkg.distUrl).hostname === host;
+      try {
+        const url = new URL(pkg.distUrl);
+        return (
+          url.hostname === repository.hostname &&
+          (!sameHost || url.pathname.split('/')[1] === repository.pathname.split('/')[1])
+        );
+      } catch {
+        return false;
+      }
     }),
   );
 }
 
 function missingPackages(output: ComposerResult, locked: readonly LockedPackage[]): string[] {
   const lines = `${output.stdout}\n${output.stderr}`.split(/\r?\n/);
-  return names(locked).filter((name) =>
-    lines.some(
-      (line) =>
-        line.split(/[^a-z0-9_./-]+/i).includes(name) &&
-        /could not be found|cannot be found|not (?:found|available)|\b(?:404|410)\b|no matching package|could not find a matching version/i.test(
+  return names(locked).filter((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const mentions = new RegExp(
+      `(?:^|[^a-z0-9_.-])${escaped}(?=$|[^a-z0-9_.-]|[.](?:$|[^a-z0-9_.-]))`,
+      'i',
+    );
+    let missing = false;
+    for (const line of lines) {
+      if (!mentions.test(line)) continue;
+      if (
+        /could not be found|cannot be found|not (?:found|available)|\b(?:404|410)\b|no matching package|could not find a matching version|does not match the constraint/i.test(
           line,
-        ),
-    ),
-  );
+        )
+      )
+        missing = true;
+      else if (
+        /\b(?:Installing|Updating)\b.*(?:Cloning|Checking out|Extracting archive)|\bInstalled\b/i.test(
+          line,
+        )
+      )
+        missing = false;
+    }
+    return missing;
+  });
 }
 
 export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverResult> {
@@ -222,10 +297,13 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
     distOnly: [],
     oldHostPackages: [],
     historic: [],
+    diagnostics: [],
   };
   const outcome = (code: Code, exitCode: 0 | 1 | 2) => {
     result = { ...result, code, message: MESSAGES[code], exitCode };
   };
+  const controller = new AbortController();
+  let activeChild: Promise<ComposerResult> | undefined;
   let interrupted = false;
   let preparation: Promise<Parameters<ComposerRunner>[1]> | undefined;
   let cleanup: Promise<void> | undefined;
@@ -250,9 +328,11 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
   const onSignal = (signal: NodeJS.Signals) => {
     if (interrupted) return;
     interrupted = true;
+    controller.abort();
     signalCleanup = (async () => {
       // A pending mkdtemp must finish registering its directory before cleanup.
       await preparation?.catch(() => undefined);
+      await activeChild?.catch(() => undefined);
       await removeDirectories();
       removeHandlers();
       process.kill(process.pid, signal);
@@ -260,13 +340,15 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
   };
   for (const signal of signals) process.on(signal, onSignal);
   try {
-    let oldHost: string;
+    let oldRepository: URL;
+    let sameHost: boolean;
     let oldAuth: string;
     let newAuth: string;
     try {
       if (!options.projectDir || options.oldRepository === options.newRepository) throw new Error();
-      oldHost = repositoryHost(options.oldRepository);
-      repositoryHost(options.newRepository);
+      const oldHost = repositoryHost(options.oldRepository);
+      sameHost = oldHost === repositoryHost(options.newRepository);
+      oldRepository = new URL(options.oldRepository);
       oldAuth = auth(options.oldAuthEnv);
       newAuth = auth(options.newAuthEnv);
     } catch {
@@ -317,31 +399,75 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
           COMPOSER_NO_INTERACTION: '1',
         });
         ensureRunning();
-        return { cwd, env, shell: false as const };
+        return { cwd, env, shell: false as const, signal: controller.signal };
       })());
     const oldCopy = await prepare(original, lock, oldAuth);
     const newCopy = await prepare(rewritten, lock, newAuth);
-    try {
-      const version = await composer(['--version'], oldCopy);
-      if (version.exitCode !== 0 || !/^Composer(?: version)? 2\./m.test(version.stdout))
-        throw new Error();
-    } catch {
-      throw new CutoverError('composer_v2_required');
-    }
-    const execute = async (copy: typeof oldCopy, args: readonly string[]) => {
+    const execute = async (
+      copy: typeof oldCopy,
+      args: readonly string[],
+    ): Promise<ComposerResult> => {
       ensureRunning();
+      let execution: ComposerResult;
       try {
-        return await composer(args, copy);
-      } catch {
-        return { exitCode: 1, stdout: '', stderr: '' };
+        const pending = composer(args, copy);
+        if (!options.composer) activeChild = pending;
+        execution = await pending;
+      } catch (error) {
+        execution = {
+          exitCode: object(error) && typeof error.code === 'number' ? error.code : null,
+          stdout: '',
+          stderr: '',
+          ...(object(error) && typeof error.code === 'string' ? { errorCode: error.code } : {}),
+        };
+      } finally {
+        activeChild = undefined;
       }
+      if (execution.exitCode !== 0) {
+        const errorCode = [
+          'ENOENT',
+          'EACCES',
+          'ETIMEDOUT',
+          'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+          'ABORT_ERR',
+        ].includes(execution.errorCode ?? '')
+          ? execution.errorCode
+          : undefined;
+        const signal = [
+          'SIGINT',
+          'SIGTERM',
+          'SIGKILL',
+          'SIGABRT',
+          'SIGSEGV',
+          'SIGHUP',
+          'SIGQUIT',
+        ].includes(execution.signal ?? '')
+          ? execution.signal
+          : undefined;
+        result = {
+          ...result,
+          diagnostics: [
+            ...result.diagnostics,
+            {
+              step: args[0] === '--version' ? 'version' : (args[0] as 'update' | 'install'),
+              exitCode: Number.isInteger(execution.exitCode) ? execution.exitCode : null,
+              ...(errorCode ? { errorCode } : {}),
+              ...(signal ? { signal } : {}),
+            },
+          ],
+        };
+      }
+      ensureRunning();
+      return execution;
     };
+    const version = await execute(oldCopy, ['--version']);
+    if (version.exitCode !== 0 || !/^Composer(?: version)? 2\./m.test(version.stdout))
+      throw new CutoverError('composer_v2_required');
     const update = ['update', '--lock', '--no-scripts', '--no-plugins'];
     const install = ['install', '--no-scripts', '--no-plugins', '--no-autoloader'];
-    for (const copy of [oldCopy, newCopy]) {
-      if ((await execute(copy, update)).exitCode !== 0) throw new CutoverError('update_failed');
-      if ((await execute(copy, install)).exitCode !== 0) throw new CutoverError('install_failed');
-    }
+    if ((await execute(oldCopy, update)).exitCode !== 0) throw new CutoverError('update_failed');
+    if ((await execute(oldCopy, install)).exitCode !== 0) throw new CutoverError('install_failed');
+    if ((await execute(newCopy, update)).exitCode !== 0) throw new CutoverError('update_failed');
     const oldPackages = packages(await readFile(join(oldCopy.cwd, 'composer.lock'), 'utf8'));
     const newPackages = packages(await readFile(join(newCopy.cwd, 'composer.lock'), 'utf8'));
     const oldSet = new Set(oldPackages.map((pkg) => pkg.tuple));
@@ -363,7 +489,7 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
           newSources.get(pkg.tuple) !== pkg.distReference,
       ),
     );
-    const oldHosts = oldHostPackages(newPackages, oldHost);
+    const oldHosts = oldHostPackages(newPackages, oldRepository, sameHost);
     result = {
       ...result,
       counts: { old: oldSet.size, new: newSet.size },
@@ -371,15 +497,25 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
       distOnly,
       oldHostPackages: oldHosts,
     };
+    const installed = await execute(newCopy, install);
+    if (installed.exitCode !== 0) {
+      if (oldHosts.length > 0) throw new CutoverError('old_dist_host');
+      if (differences.length > 0) throw new CutoverError('resolution_difference');
+      throw new CutoverError('install_failed');
+    }
     const checks: CutoverResult['historic'][number][] = [];
     for (const [index, bytes] of historic.entries()) {
       const copy = await prepare(rewritten, bytes, newAuth);
       let execution = await execute(copy, update);
+      const oldHosts =
+        execution.exitCode === 0
+          ? oldHostPackages(
+              packages(await readFile(join(copy.cwd, 'composer.lock'), 'utf8')),
+              oldRepository,
+              sameHost,
+            )
+          : [];
       if (execution.exitCode === 0) execution = await execute(copy, install);
-      const oldHosts = oldHostPackages(
-        packages(await readFile(join(copy.cwd, 'composer.lock'), 'utf8')),
-        oldHost,
-      );
       checks.push({
         index: index + 1,
         ok: execution.exitCode === 0 && oldHosts.length === 0,
@@ -400,10 +536,15 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
     else outcome('passed', 0);
   } catch (error) {
     const code = error instanceof CutoverError ? error.code : 'local_failed';
-    outcome(code, code === 'update_failed' || code === 'install_failed' ? 1 : 2);
+    outcome(
+      code,
+      ['update_failed', 'install_failed', 'old_dist_host', 'resolution_difference'].includes(code)
+        ? 1
+        : 2,
+    );
   } finally {
-    await removeDirectories();
     await signalCleanup;
+    await removeDirectories();
     removeHandlers();
     if (interrupted) outcome('local_failed', 2);
   }

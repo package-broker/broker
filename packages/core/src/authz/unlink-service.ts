@@ -1,5 +1,10 @@
 import type { ApiCall } from '../api/idempotency.js';
-import { auditEvent, type AuditEvent, type AuditAction } from '../audit/actions.js';
+import {
+  auditEvent,
+  type AuditAction,
+  type AuditEvent,
+  type AuditEventInput,
+} from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
@@ -181,6 +186,7 @@ export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
       if (anchor === undefined) return fail('conflict');
 
       const now = isoTimestamp(clock.now());
+      const affected: AuditTarget = { type: 'user', id: input.userId };
       const outcome = await unlinks.unlinkIdentity(
         ctx,
         fence,
@@ -190,8 +196,8 @@ export function createUnlinkService(deps: UnlinkServiceDeps): UnlinkService {
           now,
         },
         {
-          unlink: identityAudit('identity.unlink', fence, call, now),
-          block: identityAudit('identity.block', fence, call, now),
+          unlink: identityAudit('identity.unlink', fence, call, now, affected, input.provider),
+          block: identityAudit('identity.block', fence, call, now, affected, input.provider),
         },
       );
       switch (outcome) {
@@ -318,7 +324,14 @@ export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
         ctx,
         fence,
         input,
-        identityAudit('identity.unblock', fence, call, isoTimestamp(clock.now())),
+        identityAudit(
+          'identity.unblock',
+          fence,
+          call,
+          isoTimestamp(clock.now()),
+          BLOCK_TARGET,
+          input.provider,
+        ),
       );
       switch (outcome) {
         case 'unblocked':
@@ -344,20 +357,31 @@ export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
   };
 }
 
+type AuditTarget = AuditEventInput['target'];
+
+/**
+ * A block is keyed by provider, issuer and subject, so it has no broker id the row could name
+ * without carrying the IdP issuer or subject.
+ */
+const BLOCK_TARGET: AuditTarget = Object.freeze({ type: 'identity_block', id: null });
+
 function identityAudit(
   action: AuditAction,
   fence: MutationFence,
   call: ApiCall,
   now: string,
+  target: AuditTarget,
+  provider: string,
 ): AuditEvent {
   const result = auditEvent({
     id: ulid(),
     now,
     action,
     actor: { type: 'user', id: fence.userId },
-    target: { type: 'identity_block', id: null },
+    target: { type: target.type, id: target.id },
     projectId: null,
     context: call.audit,
+    changes: { provider: { new: provider } },
   });
   if (!result.ok) throw new TypeError('identity audit event is invalid');
   return result.event;

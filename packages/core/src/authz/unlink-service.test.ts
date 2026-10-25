@@ -933,7 +933,23 @@ describe('unblockIdentity refusals', () => {
 });
 
 describe('identity audit events', () => {
-  it('passes an anonymous unblock target and request context to the store', async () => {
+  const ADMIN_EMAIL = 'admin@example.test';
+
+  function expectNoIdpDetail(event: AuditEvent | undefined): void {
+    expect(event).toBeDefined();
+    for (const text of [serialized(event), event!.payloadJson]) {
+      expect(text).not.toContain(SUBJECT);
+      expect(text).not.toContain(ANCHOR);
+      expect(text).not.toContain(ADMIN_EMAIL);
+      expect(text).not.toContain('@');
+    }
+  }
+
+  function payload(event: AuditEvent | undefined): unknown {
+    return JSON.parse(event!.payloadJson);
+  }
+
+  it('names the block, not the IdP subject, as the unblock target and carries the provider', async () => {
     const { service, calls } = setupUnblock();
     await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call);
     expect(calls[0]?.audit).toMatchObject({
@@ -942,28 +958,82 @@ describe('identity audit events', () => {
       target: { type: 'identity_block', id: null },
       projectId: null,
     });
-    expect(JSON.parse(calls[0]!.audit.payloadJson)).toEqual({
+    expect(payload(calls[0]?.audit)).toEqual({
       op_id: call.audit.opId,
       request_id: call.audit.requestId,
+      changes: { provider: { new: UNBLOCK.provider } },
     });
-    expectNoLeak(calls[0]?.audit);
+    expectNoIdpDetail(calls[0]?.audit);
   });
-  it('passes distinct unlink and block events without identity details', async () => {
+
+  it('targets the affected broker user on the unlink and block rows and carries the provider', async () => {
     const { service, calls } = setup();
     await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST, call);
-    expect(calls[0]?.audit.unlink).toMatchObject({
-      action: 'identity.unlink',
-      actor: { type: 'user', id: 'admin-1' },
-      target: { type: 'identity_block', id: null },
-      projectId: null,
-    });
-    expect(calls[0]?.audit.block).toMatchObject({
-      action: 'identity.block',
-      actor: { type: 'user', id: 'admin-1' },
-      target: { type: 'identity_block', id: null },
-      projectId: null,
-    });
-    expect(calls[0]?.audit.unlink.id).not.toBe(calls[0]?.audit.block.id);
-    expectNoLeak(calls[0]?.audit);
+    const audit = calls[0]?.audit;
+    for (const [event, action] of [
+      [audit?.unlink, 'identity.unlink'],
+      [audit?.block, 'identity.block'],
+    ] as const) {
+      expect(event).toMatchObject({
+        action,
+        actor: { type: 'user', id: 'admin-1' },
+        target: { type: 'user', id: REQUEST.userId },
+        projectId: null,
+      });
+      expect(payload(event)).toEqual({
+        op_id: call.audit.opId,
+        request_id: call.audit.requestId,
+        changes: { provider: { new: PROVIDER } },
+      });
+      expectNoIdpDetail(event);
+    }
+    expect(audit?.unlink.id).not.toBe(audit?.block.id);
+  });
+
+  it('names the user whose identity is unlinked, not the acting admin', async () => {
+    const { service, calls } = setup();
+    const request = { ...REQUEST, userId: 'user-77' };
+    await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), request, call);
+    expect(calls[0]?.audit.unlink.target).toEqual({ type: 'user', id: 'user-77' });
+    expect(calls[0]?.audit.block.target).toEqual({ type: 'user', id: 'user-77' });
+  });
+
+  it.each([
+    'k8s3jd9fh2kd8sj3hd8sk2jd9fk3ls8d',
+    '01j0user000000000000000009',
+    'glpat-abcdefghijklmnop1234',
+    'xoxb-1234-abcdefgh',
+  ])('writes the unlink, block and unblock rows for the provider id %s', async (provider) => {
+    const anchors = [{ provider, anchor: ANCHOR, emailAuthoritative: true }];
+    const unlink = setup({ anchors });
+    expect(
+      await unlink.service.unlinkIdentity(
+        ctx,
+        authenticated(),
+        snapshot(),
+        fence(),
+        { ...REQUEST, provider },
+        call,
+      ),
+    ).toEqual({ ok: true });
+    const unblock = setupUnblock();
+    expect(
+      await unblock.service.unblockIdentity(
+        ctx,
+        authenticated(),
+        snapshot(),
+        fence(),
+        { ...UNBLOCK, provider },
+        call,
+      ),
+    ).toEqual({ ok: true });
+    for (const event of [
+      unlink.calls[0]?.audit.unlink,
+      unlink.calls[0]?.audit.block,
+      unblock.calls[0]?.audit,
+    ]) {
+      expect(payload(event)).toMatchObject({ changes: { provider: { new: provider } } });
+      expectNoIdpDetail(event);
+    }
   });
 });

@@ -23,7 +23,9 @@
     "client-matrix": "node scripts/client-matrix.mjs",
     "smoke:cloudflare": "pnpm --filter @package-broker/runtime-cloudflare exec node scripts/worker-smoke.mjs",
     "smoke:node": "node scripts/node-bundle-smoke.mjs",
-    "smoke:docker": "node scripts/docker-smoke.mjs"
+    "smoke:docker": "node scripts/docker-smoke.mjs",
+    "stage:prebuilt": "node scripts/stage-prebuilt.mjs",
+    "test:scripts": "node --test scripts/stage-prebuilt.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

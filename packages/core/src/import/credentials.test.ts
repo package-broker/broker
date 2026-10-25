@@ -354,6 +354,13 @@ describe('import credential window', () => {
             : reason;
     expect(await h.call()).toEqual({ ok: false, error });
   });
+  it('answers unavailable when the stored manifest blob is missing', async () => {
+    const h = setup();
+    h.store.inspect.mockRejectedValue(new Error('import manifest unavailable'));
+    expect(await h.call()).toEqual({ ok: false, error: 'unavailable' });
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.store.setCredential).not.toHaveBeenCalled();
+  });
   it('contains a sealing failure without logging its message', async () => {
     const h = setup();
     h.prepare.mockRejectedValue(new Error(sentinel));

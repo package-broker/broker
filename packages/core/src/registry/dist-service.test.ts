@@ -21,6 +21,7 @@ import {
   type ProviderContext,
   type ProviderSource,
 } from '../sources/provider.js';
+import { SourceUnavailableError } from '../sources/source-unavailable.js';
 import { createDistService, type DistService, type DistServeResult } from './dist-service.js';
 
 const ORG = 'org_1' as OrgId;
@@ -100,6 +101,7 @@ interface Options {
   refetchable?: boolean;
   upstream?: boolean;
   busyProvider?: boolean;
+  plan?: 'unavailable' | 'none';
 }
 
 function rig(options: Options = {}) {
@@ -317,6 +319,9 @@ function rig(options: Options = {}) {
       },
       planFetch: async (_ctx, target) => {
         state.planned.push(target);
+        if (options.plan === 'unavailable')
+          throw new SourceUnavailableError('credential_unavailable');
+        if (options.plan === 'none') return null;
         return { deps: deps as never, packageName: 'acme/pkg', version: '1.0.0' };
       },
       recorder: { record: (_c, id) => void state.recorded.push(id) },
@@ -371,6 +376,22 @@ const text = async (result: DistServeResult): Promise<string> => {
 const owner = actor('project_a');
 
 describe('createDistService', () => {
+  it('answers a missing dist of an unbindable source as busy for a minute without fetching', async () => {
+    const r = rig({ initial: null, plan: 'unavailable' });
+    expect(await r.service.serve(owner, request(1))).toEqual({
+      kind: 'busy',
+      retryAfterSeconds: 60,
+    });
+    expect(r.state.planned).toHaveLength(1);
+    expect(r.state.opens).toBe(0);
+  });
+
+  it('keeps 404 when the source has no plan, as for a paused source', async () => {
+    const r = rig({ initial: null, plan: 'none' });
+    expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'not_found' });
+    expect(r.state.opens).toBe(0);
+  });
+
   it('aborts the upstream fetch when the caller signal aborts and rejects the request', async () => {
     const r = rig({ initial: null });
     const open = r.hold();

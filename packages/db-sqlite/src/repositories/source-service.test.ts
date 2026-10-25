@@ -25,7 +25,7 @@ const call: ApiCall = {
 const USER = 'source-admin';
 const SESSION = 'source-session';
 const SOURCE = 'source';
-const ids = { ulid: vi.fn(() => SOURCE) };
+const ids = { ulid: vi.fn((): string => SOURCE) };
 const NOW = '2026-10-18T12:00:00.000Z';
 const ANCHORS = [
   {
@@ -93,7 +93,12 @@ function statement(sql: string, ...params: Statement['params']): Statement {
 }
 
 beforeEach(async () => {
-  ids.ulid.mockReset().mockReturnValue(SOURCE);
+  let generated = 0;
+  ids.ulid
+    .mockReset()
+    .mockImplementation(() =>
+      generated++ === 0 ? SOURCE : `01ARZ3NDEKTSV4RRFG${String(generated).padStart(8, '0')}`,
+    );
   database = await openMigratedDatabase({ twoOrganizations: true });
   if (database.orgs === null) throw new Error('organizations were not seeded');
   ctx = database.orgs.a;
@@ -182,12 +187,13 @@ afterEach(async () => {
 
 async function seedActiveSource() {
   expect(
-    await service.create(ctx, actor, fence, { ...input, credential: credential('initial') }),
+    await service.create(ctx, actor, fence, { ...input, credential: credential('initial') }, call),
   ).toMatchObject({ ok: true });
   expectCredentialBatch();
   await database.executor.all(
     statement("UPDATE source SET status = 'active' WHERE org_id = ? AND id = ?", ctx.orgId, SOURCE),
   );
+  await database.executor.all(statement('DELETE FROM audit_pending WHERE org_id = ?', ctx.orgId));
   batches = [];
 }
 
@@ -287,7 +293,14 @@ describe('source service with the SQLite repositories and credential store', () 
       credential('initial').plaintext,
     );
     expect(
-      await service.update(ctx, actor, fence, SOURCE, { credential: credential('replacement') }),
+      await service.update(
+        ctx,
+        actor,
+        fence,
+        SOURCE,
+        { credential: credential('replacement') },
+        call,
+      ),
     ).toMatchObject({ ok: true });
     expectCredentialBatch();
     expect(await sources.get(ctx, SOURCE)).toMatchObject({
@@ -313,8 +326,21 @@ describe('source service with the SQLite repositories and credential store', () 
       };
       const result =
         operation === 'create'
-          ? await service.create(ctx, actor, fence, { ...input, credential: credential('new') })
-          : await service.update(ctx, actor, fence, SOURCE, { credential: credential('new') });
+          ? await service.create(
+              ctx,
+              actor,
+              fence,
+              { ...input, credential: credential('new') },
+              call,
+            )
+          : await service.update(
+              ctx,
+              actor,
+              fence,
+              SOURCE,
+              { credential: credential('new') },
+              call,
+            );
       expect(result).toEqual({ ok: false, error: 'forbidden' });
       expectCredentialBatch();
       expect(
@@ -328,7 +354,7 @@ describe('source service with the SQLite repositories and credential store', () 
     await seedActiveSource();
     const before = await persistedState();
     expect(
-      await service.create(ctx, actor, fence, { ...input, credential: credential('new') }),
+      await service.create(ctx, actor, fence, { ...input, credential: credential('new') }, call),
     ).toEqual({ ok: false, error: 'duplicate' });
     expectCredentialBatch();
     expect(await credentialRows.get(ctx, 'credential-2')).toBeNull();
@@ -361,9 +387,16 @@ describe('source service with the SQLite repositories and credential store', () 
           );
         };
       }
-      const result = await service.update(ctx, actor, revisionFence, SOURCE, {
-        credential: credential('replacement'),
-      });
+      const result = await service.update(
+        ctx,
+        actor,
+        revisionFence,
+        SOURCE,
+        {
+          credential: credential('replacement'),
+        },
+        call,
+      );
       expectCredentialBatch();
       if (stale) {
         expect(result).toEqual({ ok: false, error: 'conflict' });
@@ -380,7 +413,7 @@ describe('source service with the SQLite repositories and credential store', () 
   it('returns an empty-patch validation failure without issuing a mutation batch', async () => {
     await seedActiveSource();
     const before = await persistedState();
-    expect(await service.update(ctx, actor, fence, SOURCE, {})).toMatchObject({
+    expect(await service.update(ctx, actor, fence, SOURCE, {}, call)).toMatchObject({
       ok: false,
       error: 'invalid_config',
       problems: [{ field: 'changes' }],
@@ -392,7 +425,9 @@ describe('source service with the SQLite repositories and credential store', () 
   it('preserves active status on polling and credential-detachment patches', async () => {
     await seedActiveSource();
     for (const patch of [{ pollIntervalSeconds: 600 }, { credential: null }]) {
-      expect(await service.update(ctx, actor, fence, SOURCE, patch)).toMatchObject({ ok: true });
+      expect(await service.update(ctx, actor, fence, SOURCE, patch, call)).toMatchObject({
+        ok: true,
+      });
       expect(await sources.get(ctx, SOURCE)).toMatchObject({ status: 'active' });
     }
     expect(await sources.get(ctx, SOURCE)).toMatchObject({
@@ -441,10 +476,12 @@ describe('source service with the SQLite repositories and credential store', () 
     it('stores the id of an organization credential without inserting a credential row', async () => {
       const id = await put(ctx, 'bearer', null, { token: 'shared-token' });
       const before = await countRows('credential');
-      expect(await service.create(ctx, actor, fence, { ...input, credentialId: id })).toEqual({
-        ok: true,
-        value: { id: SOURCE },
-      });
+      expect(await service.create(ctx, actor, fence, { ...input, credentialId: id }, call)).toEqual(
+        {
+          ok: true,
+          value: { id: SOURCE },
+        },
+      );
       expect((await sources.get(ctx, SOURCE))?.credentialId).toBe(id);
       expect(await countRows('credential')).toEqual(before);
     });
@@ -453,11 +490,17 @@ describe('source service with the SQLite repositories and credential store', () 
       const id = await put(ctx, 'bearer', null, { token: 'shared-token' });
       batches = [];
       expect(
-        await service.create(ctx, actor, fence, {
-          ...input,
-          credential: credential('both'),
-          credentialId: id,
-        }),
+        await service.create(
+          ctx,
+          actor,
+          fence,
+          {
+            ...input,
+            credential: credential('both'),
+            credentialId: id,
+          },
+          call,
+        ),
       ).toMatchObject({ ok: false, error: 'invalid_config', problems: [{ field: 'credential' }] });
       expect(batches).toHaveLength(0);
       expect(await sources.get(ctx, SOURCE)).toBeNull();
@@ -476,6 +519,7 @@ describe('source service with the SQLite repositories and credential store', () 
           actorProject === null ? actor : projectActor(ctx.orgId, actorProject),
           fence,
           { ...input, projectId: sourceProject, credentialId: id },
+          call,
         );
         expect(result).toEqual({ ok: false, error: 'credential_scope_mismatch' });
         expect(await sources.get(ctx, SOURCE)).toBeNull();
@@ -485,6 +529,7 @@ describe('source service with the SQLite repositories and credential store', () 
             actorProject === null ? actor : projectActor(ctx.orgId, actorProject),
             fence,
             { ...input, projectId: sourceProject },
+            call,
           ),
         ).toMatchObject({ ok: true });
       },
@@ -497,14 +542,26 @@ describe('source service with the SQLite repositories and credential store', () 
         const material = kind === 'github_app' ? githubApp : { token: 'foreign-token' };
         const foreign = await put(database.orgs.b, kind, null, material);
         const base = kind === 'github_app' ? githubSource : input;
-        const refusedForeign = await service.create(ctx, actor, fence, {
-          ...base,
-          credentialId: foreign,
-        });
-        const refusedMissing = await service.create(ctx, actor, fence, {
-          ...base,
-          credentialId: 'does-not-exist',
-        });
+        const refusedForeign = await service.create(
+          ctx,
+          actor,
+          fence,
+          {
+            ...base,
+            credentialId: foreign,
+          },
+          call,
+        );
+        const refusedMissing = await service.create(
+          ctx,
+          actor,
+          fence,
+          {
+            ...base,
+            credentialId: 'does-not-exist',
+          },
+          call,
+        );
         expect(refusedForeign).toEqual({ ok: false, error: 'credential_scope_mismatch' });
         expect(refusedMissing).toEqual({ ok: false, error: 'credential_scope_mismatch' });
         expect(refusedForeign).toEqual(refusedMissing);
@@ -515,19 +572,317 @@ describe('source service with the SQLite repositories and credential store', () 
     it('accepts a github_app credential and refuses another kind for a GitHub App source', async () => {
       const app = await put(ctx, 'github_app', null, githubApp);
       const token = await put(ctx, 'bearer', null, { token: 'shared-token' });
-      const refused = await service.create(ctx, actor, fence, {
-        ...githubSource,
-        credentialId: token,
-      });
+      const refused = await service.create(
+        ctx,
+        actor,
+        fence,
+        {
+          ...githubSource,
+          credentialId: token,
+        },
+        call,
+      );
       expect(refused).toMatchObject({ ok: false });
       expect(refused).toEqual(
-        await service.create(ctx, actor, fence, { ...githubSource, credentialId: 'missing' }),
+        await service.create(ctx, actor, fence, { ...githubSource, credentialId: 'missing' }, call),
       );
       expect(await sources.get(ctx, SOURCE)).toBeNull();
       expect(
-        await service.create(ctx, actor, fence, { ...githubSource, credentialId: app }),
+        await service.create(ctx, actor, fence, { ...githubSource, credentialId: app }, call),
       ).toMatchObject({ ok: true });
       expect((await sources.get(ctx, SOURCE))?.credentialId).toBe(app);
     });
+  });
+});
+
+describe('source mutation audit rows', () => {
+  const SENTINEL = 'SENTINEL-T1005-c8f1';
+  const proxy = {
+    projectId: null,
+    name: 'proxy',
+    type: 'packagist_proxy' as const,
+    ecosystem: 'composer' as const,
+    url: 'https://repo.packagist.org',
+    configJson: '{}',
+  };
+
+  async function auditRows() {
+    return database.executor.all<Record<string, unknown>>(
+      statement('SELECT * FROM audit_pending WHERE org_id = ? ORDER BY id', ctx.orgId),
+    );
+  }
+
+  function payload(row: Record<string, unknown> | undefined): unknown {
+    return JSON.parse(String(row?.payload_json));
+  }
+
+  async function seedPausedProxy() {
+    expect(await service.create(ctx, actor, fence, proxy, call)).toEqual({
+      ok: true,
+      value: { id: SOURCE },
+    });
+    await database.executor.all(
+      statement(
+        "UPDATE source SET status = 'paused' WHERE org_id = ? AND id = ?",
+        ctx.orgId,
+        SOURCE,
+      ),
+    );
+    await database.executor.all(statement('DELETE FROM audit_pending WHERE org_id = ?', ctx.orgId));
+  }
+
+  it('stages one source.create row with the actor, target and sanitized fields', async () => {
+    expect(await service.create(ctx, actor, fence, input, call)).toEqual({
+      ok: true,
+      value: { id: SOURCE },
+    });
+    const rows = await auditRows();
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: 'source.create',
+        actor_type: 'user',
+        actor_id: USER,
+        target_type: 'source',
+        target_id: SOURCE,
+        project_id: null,
+        source_ip: '192.0.2.1',
+      }),
+    ]);
+    expect(payload(rows[0])).toEqual({
+      op_id: call.audit.opId,
+      request_id: call.audit.requestId,
+      changes: {
+        name: { new: 'private' },
+        type: { new: 'composer_repository' },
+        ecosystem: { new: 'composer' },
+        project_id: { new: null },
+      },
+    });
+  });
+
+  it('stages one source.update row carrying only non-sensitive changed values', async () => {
+    await seedActiveSource();
+    expect(
+      await service.update(
+        ctx,
+        actor,
+        fence,
+        SOURCE,
+        { pollIntervalSeconds: 7200, userAgent: `agent-${SENTINEL}` },
+        call,
+      ),
+    ).toMatchObject({ ok: true });
+    const rows = await auditRows();
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: 'source.update',
+        actor_id: USER,
+        target_type: 'source',
+        target_id: SOURCE,
+      }),
+    ]);
+    expect(payload(rows[0])).toMatchObject({
+      changes: { poll_interval_seconds: { new: 7200 } },
+    });
+    expect((payload(rows[0]) as { changes: unknown }).changes).toEqual({
+      poll_interval_seconds: { new: 7200 },
+    });
+    expect(JSON.stringify(rows)).not.toContain(SENTINEL);
+  });
+
+  it.each([
+    ['over 200 characters', `vendor-${'a'.repeat(194)}`],
+    ['e-mail-like', 'owner@example.test'],
+    ['token-like', `ghp_${'A1b2'.repeat(9)}`],
+  ])('creates a source whose %s name the audit row omits', async (_label, name) => {
+    expect(await service.create(ctx, actor, fence, { ...input, name }, call)).toEqual({
+      ok: true,
+      value: { id: SOURCE },
+    });
+    const rows = await auditRows();
+    expect(rows).toEqual([expect.objectContaining({ action: 'source.create', target_id: SOURCE })]);
+    expect((payload(rows[0]) as { changes: unknown }).changes).toEqual({
+      type: { new: 'composer_repository' },
+      ecosystem: { new: 'composer' },
+      project_id: { new: null },
+    });
+    expect(JSON.stringify(rows)).not.toContain(name);
+  });
+
+  it('stages one source.credential_set row for a credential replacement', async () => {
+    await seedActiveSource();
+    expect(
+      await service.update(ctx, actor, fence, SOURCE, { credential: credential(SENTINEL) }, call),
+    ).toMatchObject({ ok: true });
+    const rows = await auditRows();
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: 'source.credential_set',
+        actor_id: USER,
+        target_type: 'source',
+        target_id: SOURCE,
+      }),
+    ]);
+    expect(payload(rows[0])).toMatchObject({ changes: { credential_kind: { new: 'bearer' } } });
+  });
+
+  it('stages source.update then source.credential_set for a combined request', async () => {
+    await seedActiveSource();
+    expect(
+      await service.update(
+        ctx,
+        actor,
+        fence,
+        SOURCE,
+        { removalPolicy: 'exclude', credential: credential('combined') },
+        call,
+      ),
+    ).toMatchObject({ ok: true });
+    expect((await auditRows()).map((row) => row.action)).toEqual([
+      'source.update',
+      'source.credential_set',
+    ]);
+  });
+
+  it('stages one source.resume row and none when the proxy is already active', async () => {
+    await seedPausedProxy();
+    expect(await service.resume(ctx, actor, fence, SOURCE, call)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({
+        action: 'source.resume',
+        actor_id: USER,
+        target_type: 'source',
+        target_id: SOURCE,
+        project_id: null,
+      }),
+    ]);
+    expect(await service.resume(ctx, actor, fence, SOURCE, call)).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(await auditRows()).toHaveLength(1);
+  });
+
+  it('writes no row for refused attempts', async () => {
+    await seedActiveSource();
+    const outsider = projectActor(ctx.orgId, 'other-project');
+    expect(
+      await service.update(ctx, outsider, fence, SOURCE, { pollIntervalSeconds: 7200 }, call),
+    ).toMatchObject({ ok: false });
+    expect(await service.resume(ctx, actor, fence, SOURCE, call)).toEqual({
+      ok: false,
+      error: 'activation_requires_registered_names',
+    });
+    expect(await service.create(ctx, actor, fence, input, call)).toMatchObject({
+      ok: false,
+      error: 'duplicate',
+    });
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it.each(['create', 'update', 'resume'] as const)(
+    'leaves no audit row when the %s batch rolls back',
+    async (operation) => {
+      if (operation === 'update') await seedActiveSource();
+      if (operation === 'resume') await seedPausedProxy();
+      beforeBatch = async () => {
+        await database.executor.all(
+          statement('DELETE FROM session WHERE org_id = ? AND id = ?', ctx.orgId, SESSION),
+        );
+      };
+      const result =
+        operation === 'create'
+          ? await service.create(ctx, actor, fence, input, call)
+          : operation === 'update'
+            ? await service.update(
+                ctx,
+                actor,
+                fence,
+                SOURCE,
+                { credential: credential('rollback') },
+                call,
+              )
+            : await service.resume(ctx, actor, fence, SOURCE, call);
+      expect(result).toEqual({ ok: false, error: 'forbidden' });
+      expect(await auditRows()).toEqual([]);
+    },
+  );
+
+  it('keeps credential material, hashes and userinfo out of every audit row', async () => {
+    const material = credential(SENTINEL);
+    expect(
+      await service.create(
+        ctx,
+        actor,
+        fence,
+        { ...input, name: 'sentinel', credential: material },
+        call,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(
+      await service.update(
+        ctx,
+        actor,
+        fence,
+        SOURCE,
+        { url: `https://user:${SENTINEL}@packages.example.test`, credential: credential(SENTINEL) },
+        call,
+      ),
+    ).toMatchObject({ ok: false, error: 'invalid_config' });
+    expect(
+      await service.update(
+        ctx,
+        actor,
+        fence,
+        SOURCE,
+        { url: 'https://mirror-t1005.example.test/repo', configJson: '{}' },
+        call,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(
+      await service.update(
+        ctx,
+        actor,
+        fence,
+        SOURCE,
+        {
+          credential: {
+            kind: 'http_basic',
+            plaintext: JSON.stringify({ username: 'u', password: SENTINEL }),
+          },
+        },
+        call,
+      ),
+    ).toMatchObject({ ok: true });
+    const rows = await auditRows();
+    expect(rows.map((row) => row.action)).toEqual([
+      'source.create',
+      'source.update',
+      'source.credential_set',
+    ]);
+    const stored = await database.executor.all<Record<string, unknown>>(
+      statement('SELECT * FROM credential WHERE org_id = ?', ctx.orgId),
+    );
+    const secrets = stored
+      .flatMap((row) => Object.entries(row))
+      .filter(([column]) => !['id', 'org_id', 'project_id', 'kind', 'created_at'].includes(column))
+      .map(([, value]) => value)
+      .filter(
+        (value): value is string | Uint8Array =>
+          typeof value === 'string' || value instanceof Uint8Array,
+      )
+      .map((value) => (typeof value === 'string' ? value : Buffer.from(value).toString('base64')))
+      .filter((value) => value.length >= 16);
+    const text = JSON.stringify(rows);
+    expect(text).not.toContain(SENTINEL);
+    expect(text).not.toContain('user:');
+    expect(text).not.toContain('@');
+    expect(text).not.toContain('packages.example.test');
+    expect(text).not.toContain('mirror-t1005');
+    expect(text).not.toContain('https:');
+    for (const secret of secrets) expect(text).not.toContain(secret);
   });
 });

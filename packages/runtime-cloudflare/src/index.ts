@@ -694,6 +694,7 @@ function buildRegistryModule(input: {
   const writer = createCatalogueWriter(executor);
   const sessions = createIngestSessions(executor);
   const registryReads = createRegistryReads(executor);
+  const registrySources = createSourceRepository(executor);
   const blobAccess = createBlobAccessRepository(executor);
   const recorder = createAccessRecorder({
     touch: (ctx, ids) => blobAccess.touch(ctx, ids),
@@ -774,7 +775,7 @@ function buildRegistryModule(input: {
       epoch: createCacheEpochRepository(executor),
       representationClock: createRepresentationClock(executor),
       upstreamState: createUpstreamStateRepository(executor),
-      sources: createSourceRepository(executor),
+      sources: registrySources,
       covers: registryReads.covers,
       versionById: registryReads.versionById,
     },
@@ -789,6 +790,7 @@ function buildRegistryModule(input: {
       },
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential,
+      credentialUnavailable: (ctx, id) => registrySources.markCredentialUnavailable(ctx, id),
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,

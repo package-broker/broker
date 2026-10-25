@@ -823,6 +823,7 @@ function assembleRegistry(input: {
       },
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential: credentials.forSource,
+      credentialUnavailable: (ctx, id) => sources.markCredentialUnavailable(ctx, id),
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,
